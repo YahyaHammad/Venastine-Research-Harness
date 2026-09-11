@@ -302,67 +302,149 @@ class TestNewAgentsStockBehavior:
 # ---- A13: delegation must not narrow the child ----------------------------
 # ===========================================================================
 
-class TestPlanCanDelegateWithoutNarrowingTheChild:
+def _can_spawn(agent) -> bool:
+    """Whether this definition can reach `spawn_subagent` at all.
 
-    def test_plan_holds_a_superset_of_every_spawnable_leaf(self, roster):
+    `allowed_tools` unset counts. None means the layer expresses NO
+    opinion, not "no tools", so an agent that declares nothing runs under
+    global policy and `spawn_subagent` is in it -- `grill-me` is the
+    shipped case. A predicate that only looked for the name in a list
+    would call that agent a non-spawner and skip every check below for
+    the one definition whose spawning nothing else constrains either.
+    """
+    return (agent.allowed_tools is None
+            or "spawn_subagent" in agent.allowed_tools)
+
+
+def _may_spawn(agent, roster) -> set:
+    """The agents this one may actually spawn: `spawn_targets` where it
+    declares them, every spawnable agent where it does not."""
+    spawnable = {name for name, a in roster.items() if a.spawnable}
+    if agent.spawn_targets is None:
+        return spawnable
+    return spawnable & set(agent.spawn_targets)
+
+
+class TestDelegationDoesNotNarrowTheChild:
+    """A13, swept rather than named.
+
+    This class used to hardcode `plan` and `general` in four tests, and
+    that is exactly how batch 51's expansion broke it: `build` arrived
+    declaring `write`/`edit`, `plan` did not hold them, and the invariant
+    was restated in a comment above `plan`'s frontmatter while the
+    whitelist under it stayed as it was. The comment was the only thing
+    that changed, so the file CLAIMED the superset it did not have.
+
+    The sweep below asks the roster instead of the author. A twelfth
+    agent that can spawn is covered the day it lands, which is the
+    property the named version did not have.
+    """
+
+    def test_every_spawner_holds_a_superset_of_what_it_may_spawn(
+            self, roster):
         """C6 intersects a child's `allowed_tools` with its parent's, so
         a parent missing a tool the child declares REMOVES it from the
-        child. `plan` is a shipped agent that can spawn, so its
-        whitelist has to cover every spawnable leaf it can spawn or
-        delegation silently degrades them -- `build`'s `write`/`edit`
-        is the case that matters, since no batch-51 leaf declared them.
+        child. Every agent that can spawn therefore has to cover every
+        agent it may spawn, or delegation silently degrades them.
+
+        Scoped by `spawn_targets` since this batch, and that is the half
+        worth reading twice: `plan` satisfies this by NOT being able to
+        reach `build` rather than by holding `write`/`edit`. Widening it
+        would have satisfied the assertion and reversed the decision the
+        agent exists for -- the plan is the deliverable, and a person
+        reads it before anything is built.
         """
-        plan = set(roster["plan"].allowed_tools)
-        children = set()
-        for name in SPAWNABLE_LEAVES:
-            children |= set(roster[name].allowed_tools)
+        assert roster, "no agents discovered, so this cannot discriminate"
 
-        assert not children - plan, (
-            f"plan cannot delegate without narrowing: {sorted(children - plan)} "
-            f"would be removed from a child that declares them")
+        offenders = []
+        for name, agent in sorted(roster.items()):
+            if not _can_spawn(agent) or agent.allowed_tools is None:
+                continue
+            held = set(agent.allowed_tools)
+            for child_name in sorted(_may_spawn(agent, roster)):
+                lost = set(roster[child_name].allowed_tools or ()) - held
+                if lost:
+                    offenders.append((name, child_name, sorted(lost)))
 
-    def test_general_holds_a_superset_of_every_spawnable_leaf(self, roster):
-        """The same invariant for the other branch. `general` is the only
-        spawnable agent that can spawn, so its whitelist has to cover
-        every leaf -- including `write`/`edit` it rarely calls itself,
-        which are declared for PASS-THROUGH rather than for its own use.
-        """
-        general = set(roster["general"].allowed_tools)
-        children = set()
-        for name in SPAWNABLE_LEAVES:
-            children |= set(roster[name].allowed_tools)
+        assert not offenders, (
+            "an agent cannot delegate without narrowing its child:\n"
+            + "".join(f"  {parent} -> {child}: {lost} would be removed\n"
+                      for parent, child, lost in offenders)
+            + "Either widen the parent's whitelist or take the child out "
+              "of its spawn_targets. Widening is not automatically the "
+              "right answer -- see plan.md, where the narrowing was the "
+              "symptom of a delegation that should not happen at all.")
 
-        assert not children - general, (
-            f"general cannot delegate without narrowing: "
-            f"{sorted(children - general)} "
-            f"would be removed from a child that declares them")
-
-    @pytest.mark.parametrize("child_name", SPAWNABLE_LEAVES)
-    def test_a_spawn_under_plan_loses_nothing(self, roster, child_name):
-        """The invariant above, driven through the composition rather
+    def test_a_spawn_loses_nothing_through_the_composition(self, roster):
+        """The invariant above, driven through `child_context()` rather
         than through the declaration -- so it fails on what a spawn
-        actually receives, which is the thing that matters."""
-        parent = manager.active_context(roster["plan"])
-        child = manager.child_context(roster[child_name], parent)
+        actually receives, which is the thing that matters.
 
-        declared = set(roster[child_name].allowed_tools)
+        The declaration version above cannot see a composition bug, and
+        this one cannot see a whitelist that is wrong in a way the
+        composition happens to mask. Both, for that reason.
+        """
+        offenders = []
+        for name, agent in sorted(roster.items()):
+            if not _can_spawn(agent):
+                continue
+            parent = manager.active_context(agent)
+            for child_name in sorted(_may_spawn(agent, roster)):
+                child = manager.child_context(roster[child_name], parent)
+                declared = set(roster[child_name].allowed_tools or ())
+                lost = declared - (child.allowed_tools or set())
+                if lost:
+                    offenders.append((name, child_name, sorted(lost)))
 
-        assert child.allowed_tools == declared, (
-            f"spawning {child_name} from plan removes "
-            f"{sorted(declared - (child.allowed_tools or set()))}")
+        assert not offenders, (
+            "".join(f"spawning {child} from {parent} removes {lost}\n"
+                    for parent, child, lost in offenders))
 
-    @pytest.mark.parametrize("child_name", SPAWNABLE_LEAVES)
-    def test_a_spawn_under_general_loses_nothing(self, roster, child_name):
-        """The same, through the branch that actually does the spawning
-        at depth 1."""
-        parent = manager.active_context(roster["general"])
-        child = manager.child_context(roster[child_name], parent)
+    def test_every_declared_spawn_target_is_a_spawnable_agent(self, roster):
+        """The whitelist-typo class, one field over.
 
-        declared = set(roster[child_name].allowed_tools)
+        `spawn_targets` narrows by NAME, so a misspelled entry does not
+        warn and does not grant -- it silently removes an agent the
+        author meant to allow, and the parent discovers it as a refusal
+        mid-run. A name that exists but is not spawnable is the same
+        defect with an extra step: `spawn_subagent` could not have fed it
+        anyway, so listing it reads as permission and grants nothing.
+        """
+        spawnable = {name for name, a in roster.items() if a.spawnable}
 
-        assert child.allowed_tools == declared, (
-            f"spawning {child_name} from general removes "
-            f"{sorted(declared - (child.allowed_tools or set()))}")
+        offenders = {}
+        for name, agent in sorted(roster.items()):
+            if agent.spawn_targets is None:
+                continue
+            bad = [t for t in agent.spawn_targets if t not in spawnable]
+            if bad:
+                offenders[name] = bad
+
+        assert not offenders, (
+            f"shipped agents name spawn_targets that are not spawnable "
+            f"agents, which silently removes them from what the agent may "
+            f"delegate to: {offenders}")
+
+    def test_plan_cannot_reach_either_agent_that_writes(self, roster):
+        """The decision itself, pinned where reversing it fails.
+
+        Both halves matter and only together. `build` is the agent that
+        writes; `general` is the one that can spawn `build`, so leaving it
+        in would have made the restriction one hop deep and no more. The
+        superset sweep above passes for a `plan` that holds `write`/`edit`
+        and may spawn anything, which is the other way to make it green
+        and the one this forbids.
+        """
+        targets = _may_spawn(roster["plan"], roster)
+
+        assert "build" not in targets and "general" not in targets, (
+            f"plan may spawn {sorted(targets)}. The plan is the "
+            f"deliverable and a person reads it before anything is built; "
+            f"an agent that can hand the work to build has skipped the "
+            f"step it exists to create")
+        assert targets, (
+            "plan may spawn nothing at all, which is a different decision "
+            "from this one -- it still fans out investigation")
 
     def test_a_restricted_parent_still_narrows_it(self, roster):
         """The control, and C6 itself. The superset above is a property

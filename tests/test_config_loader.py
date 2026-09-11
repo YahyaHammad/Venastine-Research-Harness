@@ -314,6 +314,49 @@ def test_agent_fields_parsed(_redirect_roots):
     assert agent.max_steps == 7
     assert agent.use_memory is True  # default on, opt-out per field
     assert agent.use_project_context is False
+    assert agent.spawn_targets is None  # undeclared is "no opinion"
+
+
+def test_spawn_targets_parsed(_redirect_roots):
+    _write_agent(_redirect_roots["user"], "picky",
+                 ("spawn_targets: [explore, review]",))
+
+    config_loader.initialize(str(_redirect_roots["project"]))
+
+    assert config_loader.get_agents()["picky"].spawn_targets == [
+        "explore", "review"]
+
+
+def test_non_list_spawn_targets_skips_the_file(_redirect_roots):
+    _write_agent(_redirect_roots["user"], "bad", ("spawn_targets: explore",))
+
+    config_loader.initialize(str(_redirect_roots["project"]))
+
+    assert "bad" not in config_loader.get_agents()
+
+
+def test_non_string_spawn_targets_skips_the_file(_redirect_roots):
+    """The element-type check, and the lesson `additional_tools` already
+    paid for one field over. The consumer is a set membership test against
+    an agent NAME, so a non-string element parses clean here and then
+    never matches -- the agent would simply be unable to spawn, with no
+    warning and nothing to grep for."""
+    _write_agent(_redirect_roots["user"], "bad", ("spawn_targets: [123]",))
+
+    config_loader.initialize(str(_redirect_roots["project"]))
+
+    assert "bad" not in config_loader.get_agents()
+
+
+def test_an_empty_spawn_targets_list_is_not_no_opinion(_redirect_roots):
+    """`[]` says "this agent delegates to nobody" and must not collapse
+    into None, which says the opposite. A truthiness test in the parser
+    is how a deliberate lockdown becomes a permission."""
+    _write_agent(_redirect_roots["user"], "lonely", ("spawn_targets: []",))
+
+    config_loader.initialize(str(_redirect_roots["project"]))
+
+    assert config_loader.get_agents()["lonely"].spawn_targets == []
 
 
 # ---------------------------------------------------------------------------

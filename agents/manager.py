@@ -47,10 +47,15 @@ class AgentManager:
             set(agent.allowed_tools)
             if agent.allowed_tools is not None else None
         )
+        targets = (
+            set(agent.spawn_targets)
+            if agent.spawn_targets is not None else None
+        )
         return ToolContext(
             allowed_tools=allowed,
             approval_overrides=dict(agent.approval_overrides),
             subagent_depth=0,
+            spawn_targets=targets,
         )
 
     @staticmethod
@@ -91,10 +96,30 @@ class AgentManager:
             )
         overrides = {k: v for k, v in parent.approval_overrides.items() if v}
         overrides.update(agent.approval_overrides)
+        # SPAWN TARGETS COMPOSE THE SAME WAY, for C6's own reason one
+        # field further out. The refusal that reads this field is checked
+        # against the context a run holds, so a field that applied only at
+        # depth 0 would be escapable by nesting: an agent forbidden to
+        # reach `build` could spawn something that was not, and have that
+        # one spawn it. Intersection makes the restriction survive the
+        # hop, and an agent declaring none inherits its parent's roster
+        # unchanged rather than widening back to everything.
+        if agent.spawn_targets is not None:
+            own_targets = set(agent.spawn_targets)
+            child_targets = own_targets & (
+                parent.spawn_targets if parent.spawn_targets is not None
+                else own_targets
+            )
+        else:
+            child_targets = (
+                set(parent.spawn_targets)
+                if parent.spawn_targets is not None else None
+            )
         return ToolContext(
             allowed_tools=child_allowed,
             approval_overrides=overrides,
             subagent_depth=parent.subagent_depth + 1,
+            spawn_targets=child_targets,
         )
 
     @staticmethod

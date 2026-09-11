@@ -519,6 +519,78 @@ def test_s2_child_own_overrides_still_apply(_roots):
     assert child.approval_overrides.get("get_time") is True
 
 
+# ---------------------------------------------------------------------------
+# ---- C6 on the third axis: spawn_targets ----------------------------------
+# ---------------------------------------------------------------------------
+#
+# The field that says WHICH agents a definition may spawn narrows the same
+# way `allowed_tools` does, and it has to, or it is escapable by nesting:
+# an agent forbidden to reach `build` could otherwise spawn something that
+# was not forbidden, and have that one spawn it.
+
+
+def test_spawn_targets_intersect_with_the_parents(_roots):
+    _write_harness_agent(_roots, "wide",
+                         ["spawn_targets: [alpha, beta]"])
+    config_loader.initialize(str(_roots["project"]))
+    agent = manager.get("wide")
+
+    parent = ToolContext(spawn_targets={"beta", "gamma"})
+    child = manager.child_context(agent, parent)
+
+    assert child.spawn_targets == {"beta"}
+
+
+def test_a_child_cannot_widen_the_parents_spawn_targets(_roots):
+    """The escape C6 exists to close, on this axis. A child declaring a
+    roster its parent does not hold must not acquire it by being spawned
+    -- otherwise one hop launders the restriction."""
+    _write_harness_agent(_roots, "greedy",
+                         ["spawn_targets: [alpha, beta, gamma]"])
+    config_loader.initialize(str(_roots["project"]))
+    agent = manager.get("greedy")
+
+    child = manager.child_context(agent, ToolContext(spawn_targets={"alpha"}))
+
+    assert child.spawn_targets == {"alpha"}
+
+
+def test_declaring_none_inherits_the_parents_roster(_roots):
+    """An agent with no opinion gets its parent's, unchanged. Widening
+    back to "everything" here is the same laundering as above, reached by
+    saying nothing instead of by saying too much."""
+    _write_harness_agent(_roots, "silent")
+    config_loader.initialize(str(_roots["project"]))
+    agent = manager.get("silent")
+
+    child = manager.child_context(agent, ToolContext(spawn_targets={"alpha"}))
+
+    assert child.spawn_targets == {"alpha"}
+
+
+def test_no_opinion_anywhere_stays_no_opinion(_roots):
+    """The control, and the compatibility claim. None means "every
+    spawnable agent", which is what every definition written before this
+    field meant and has to go on meaning."""
+    _write_harness_agent(_roots, "silent")
+    config_loader.initialize(str(_roots["project"]))
+    agent = manager.get("silent")
+
+    assert manager.child_context(agent, ToolContext()).spawn_targets is None
+    assert manager.active_context(agent).spawn_targets is None
+
+
+def test_an_active_agent_carries_its_own_roster(_roots):
+    """Depth 0, the `/agent plan` route. There is no parent to intersect
+    with, and the restriction still has to apply -- it is the route the
+    shipped case actually uses."""
+    _write_harness_agent(_roots, "picky", ["spawn_targets: [alpha]"])
+    config_loader.initialize(str(_roots["project"]))
+
+    assert manager.active_context(manager.get("picky")).spawn_targets == {
+        "alpha"}
+
+
 def test_candidate_approvals_is_the_list_the_prompt_shows(_roots, _mcp_tool):
     """One helper, two callers. If the notice and the grant computed the
     list separately they could drift, and the drift IS the defect: the

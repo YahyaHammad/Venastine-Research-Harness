@@ -21,13 +21,29 @@ max_steps: 20
 # sentence it was given. `/agent plan` supplies the conversation by
 # being in one, which is grill-me's shape and for grill-me's reason.
 spawnable: false
-# §32 A13. This whitelist is a strict SUPERSET of every spawnable leaf's,
-# and that is load-bearing rather than tidy: C6 intersects a child's tools
-# with its parent's, so a plan turn that spawns explore without `web_search`
-# — or build without `write`/`edit` — would silently hand it a degraded
-# agent with the parent unable to tell. `general` holds the same superset
-# for the spawns it makes; the two branches never compete for one route
-# because plan is not spawnable and general is.
+# THE PLAN IS THE DELIVERABLE, AND THAT IS A PERMISSION AS WELL AS AN
+# INSTRUCTION. The body below says "the implementation is not yours to do
+# here"; this is the same decision written where it cannot be talked out
+# of. The point of planning as a separate turn is that a person reads the
+# plan and iterates on it BEFORE anything is built, so an agent that
+# could hand the work straight to `build` would have skipped the one step
+# it exists to create.
+#
+# Refused, not narrowed, and the distinction is the whole reason the
+# field exists. C6 intersects a child's tools with its parent's, so
+# omitting `write`/`edit` here does not stop a `build` spawn — it returns
+# a `build` that cannot write, degraded the way §32 A4 describes and
+# invisible from both ends. `general` is out for the same reason at one
+# remove: it holds `write`/`edit` and can spawn `build` itself.
+#
+# What is left is investigation, which is what planning actually needs.
+# §32 A13 still binds, now scoped to this list: `allowed_tools` above is
+# a strict SUPERSET of all four, so a spawn from here loses nothing.
+spawn_targets:
+  - explore
+  - review
+  - writer
+  - test
 ---
 
 You are planning a piece of work before any of it is written. The plan is

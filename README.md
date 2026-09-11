@@ -520,6 +520,8 @@ Eleven ship. Five are not spawnable, each because a real caller supplies somethi
 
 `build`, `test`, `writer`, `explore` and `review` are leaves: they take a task string as their entire input and cannot spawn further. `general` is the one spawnable branch — the spawning discipline lives there and nowhere else, so users who want a less constricted experience change one file or add their own. `plan` keeps its own spawning ability for interactive `/agent` use but is not itself spawnable.
 
+An agent can also name **which** agents it may spawn, with `spawn_targets`. `plan` is the shipped case: it may spawn `explore`, `review`, `writer` and `test`, and asking it for `build` or `general` is refused with a reason rather than quietly obeyed. That is the point of planning as its own turn — you read the plan and change your mind before anything is written. Say nothing and an agent may spawn anything spawnable, which is the default every definition had before the field existed; a list only ever narrows, and narrows again for anything it spawns in turn.
+
 `explore`, `review`, `build`, `test` and `writer` are **read-only or write-only by omission**: none of them lists `spawn_subagent`, `remember` or `write_project_doc`, so no configuration makes one reachable. `build` is the exception that proves the shape — it declares `write`/`edit` because implementing means writing, while the other four simply absent them. They all list tools (`read`, `shell`) which are [denied by default](#what-needs-approval-by-default) and cannot be enabled at runtime — so on a stock install `explore` works from `read_project_doc` and the three network tools, and all become code agents only where you have enabled file access in `config.py`. Approving a spawn of a leaf grants nothing standing: `shell` carries a per-call gate, so it is excluded from every grant path by name and each non-inert command still asks.
 
 Fourteen skills ship, under `security/`, `crypto/`, `math/`, `research/` and `software/` — methodologies for reviewing code, debugging, designing tests, designing experiments, statistical inference, reproducibility, evaluating sources, technical writing, numerical methods, formal specification, literature review, proof writing, cryptography verification and cybersecurity research.
@@ -876,7 +878,7 @@ classifier is described under *Security model* above. If you have a fork or a lo
 note that `ToolApprovals.shell` now ships `False` and `SHELL_APPROVAL_MODE` is the gate — see
 `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 4264 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+Run the test suite with `pytest` — 4308 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
 ## Documentation
 

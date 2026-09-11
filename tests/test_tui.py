@@ -5434,15 +5434,33 @@ class TestShiftEnterIsStillNotTheKey:
         claim about a dependency's INTERNALS that three documents make, so
         the choice is a fragile test or prose nobody re-reads. The suite
         already reaches into textual's privates for `FooterKey`.
+
+        RESOLVED, NOT IMPORTED. `windows_driver` imports `msvcrt`, which
+        exists only on Windows, so importing it to read it failed on
+        every Linux runner -- and the file is sitting there on disk on
+        all of them, which is the only thing this test needs. `find_spec`
+        locates the module without executing it.
+
+        A platform skip was the other option and is the wrong one HERE,
+        specifically: compat.yml's windows-subset job runs test_shell.py
+        and test_posture.py, so skipping off Windows would leave this
+        check running on no CI job at all. A test whose whole subject is
+        a claim that expired silently for twenty months must not be one
+        nothing runs.
         """
-        import inspect
+        import importlib.util
+        import pathlib
 
-        from textual.drivers import windows_driver
+        spec = importlib.util.find_spec("textual.drivers.windows_driver")
+        assert spec and spec.origin, (
+            "textual.drivers.windows_driver no longer resolves to a file; "
+            "if the driver moved, point this at the new one rather than "
+            "deleting the check")
 
-        # A RAW string: getsource hands back the driver file as TEXT,
-        # where that sequence is spelled with a literal backslash. An
-        # ESC byte here would never match and the test would be a lie.
-        source = inspect.getsource(windows_driver)
+        # A RAW string: the driver is read as TEXT, where that sequence
+        # is spelled with a literal backslash. An ESC byte here would
+        # never match and the test would be a lie.
+        source = pathlib.Path(spec.origin).read_text(encoding="utf-8")
         assert r"\x1b[>1u" in source, (
             "the Windows driver no longer enables the kitty keyboard "
             "protocol. PromptInput's docstring, AGENTS.md and "

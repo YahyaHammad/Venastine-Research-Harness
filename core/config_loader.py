@@ -256,6 +256,26 @@ class AgentDef:
     # not harmless: the model keeps choosing it") applied to the
     # catalog's entries rather than to the tool itself.
     spawnable: Optional[bool] = None
+    # WHICH agents this one may spawn. `spawnable` above is the other
+    # half of the same question -- that one is about being spawned, this
+    # one about spawning -- and they are separate fields because an agent
+    # can be either, both or neither.
+    #
+    # None means NO OPINION: every spawnable agent, which is what every
+    # definition written before this field got and therefore what it has
+    # to keep meaning. A list restricts, and only ever restricts: it
+    # composes by intersection on ToolContext exactly as allowed_tools
+    # does, so it cannot be widened by nesting.
+    #
+    # It is a REFUSAL, unlike `spawnable`'s advertisement. C6 already
+    # narrows a child's tools to the parent's, which is the wrong answer
+    # when the parent should not be delegating that work at all: `plan`
+    # spawning `build` produced a build stripped of `write` and `edit`,
+    # degraded exactly the way A4 describes and invisible from both ends.
+    # Read by agents.subagent_tool.refusal_reason (the refusal) and by
+    # prompts.system_prompts.agent_catalog_text (D24: an agent that will
+    # be refused is not advertised in the first place).
+    spawn_targets: Optional[list] = None
 
 
 def _user_config_dir() -> str:
@@ -388,6 +408,24 @@ def _parse_md_file(path: str, kind: str, tier: str, category: str = ""):
     if allowed is not None and not isinstance(allowed, list):
         logger.warning("Skipping agent file %s: allowed_tools is not a list", path)
         return None
+    # ELEMENT TYPES TOO, not just the container. This is the lesson the
+    # skills branch above already paid for with `additional_tools`: a
+    # non-string element parses cleanly here and fails at first
+    # consumption, layers away from the file that caused it. The consumer
+    # here is a set membership test against an agent NAME, so a nested
+    # list or a mapping would silently never match and the agent would
+    # simply be unable to spawn anything -- the whitelist-typo class, one
+    # field over, and just as quiet.
+    targets = fm.get("spawn_targets")
+    if targets is not None and not isinstance(targets, list):
+        logger.warning(
+            "Skipping agent file %s: spawn_targets is not a list", path)
+        return None
+    if targets is not None and not all(isinstance(t, str) for t in targets):
+        logger.warning(
+            "Skipping agent file %s: spawn_targets is not a list of strings",
+            path)
+        return None
     overrides = fm.get("approval_overrides") or {}
     if not isinstance(overrides, dict):
         logger.warning("Skipping agent file %s: approval_overrides is not a mapping", path)
@@ -449,6 +487,7 @@ def _parse_md_file(path: str, kind: str, tier: str, category: str = ""):
         use_project_context=flags["use_project_context"],
         use_memory=flags["use_memory"],
         spawnable=spawnable,
+        spawn_targets=targets,
         max_steps=max_steps,
         body=body,
         tier=tier,

@@ -185,6 +185,62 @@ class TestTheCatalogListsOnlyWhatCanBeSpawned:
         assert system_prompts.agent_catalog_text() == ""
         assert "## Available agents" not in system_prompts.with_catalogs("BASE")
 
+    def test_the_roster_the_caller_holds_filters_the_list(self, roots):
+        """The same rule read from the caller's side.
+
+        `spawnable` is the callee's answer to "could a task string feed
+        me"; `spawn_targets` is this run's answer to "may I spawn you".
+        Both end in the same place for the same D24 reason -- listing an
+        agent the pre-flight will refuse makes the model choose it and
+        burn a turn, and here the prose around the list is an instruction
+        to go and spawn one of them.
+        """
+        _harness(roots, "allowed", ["spawnable: true"])
+        _harness(roots, "forbidden", ["spawnable: true"])
+        config_loader.initialize(str(roots["project"]))
+
+        catalog = system_prompts.agent_catalog_text({"allowed"})
+
+        assert "- allowed:" in catalog
+        assert "forbidden" not in catalog
+
+    def test_no_roster_still_lists_everything_spawnable(self, roots):
+        """The control, and the compatibility claim: None is no opinion,
+        not an empty roster."""
+        _harness(roots, "allowed", ["spawnable: true"])
+        _harness(roots, "forbidden", ["spawnable: true"])
+        config_loader.initialize(str(roots["project"]))
+
+        catalog = system_prompts.agent_catalog_text(None)
+
+        assert "- allowed:" in catalog and "- forbidden:" in catalog
+
+    def test_a_roster_that_empties_the_list_drops_the_section(self, roots):
+        """Filtered down to nothing is the no-spawnable-agents case
+        again, and gets the same answer -- a heading over an empty list
+        invites a call that cannot succeed."""
+        _harness(roots, "delegate", ["spawnable: true"])
+        config_loader.initialize(str(roots["project"]))
+
+        assert system_prompts.agent_catalog_text(set()) == ""
+
+    def test_the_running_context_is_what_supplies_the_roster(self, roots):
+        """Through `with_catalogs`, because that is what a run actually
+        calls. The filter reaching `agent_catalog_text` and not the
+        assembly point would be a fact known in one place and applied in
+        neither."""
+        from tools.context import ToolContext
+
+        _harness(roots, "allowed", ["spawnable: true"])
+        _harness(roots, "forbidden", ["spawnable: true"])
+        config_loader.initialize(str(roots["project"]))
+
+        prompt = system_prompts.with_catalogs(
+            "BASE", context=ToolContext(spawn_targets={"allowed"}))
+
+        assert "- allowed:" in prompt
+        assert "forbidden" not in prompt
+
     def test_a_non_spawnable_agent_is_still_reachable_by_hand(self, roots):
         """/agent lists manager.names(), not this catalog. A human
         selecting grill-me supplies the thread it needs BY BEING IN ONE,

@@ -90,6 +90,21 @@ def refusal_reason(params: dict, context=None):
     if manager.get(name) is None:
         return (f"Unknown agent: {name!r} is not "
                 f"in the available agents catalog.")
+    # LAST, because the checks above are the live contract this
+    # docstring describes and an unknown name must still report that it
+    # is unknown rather than that it is not permitted.
+    #
+    # A REFUSAL RATHER THAN A NARROWING, which is the whole point of the
+    # field. C6 caps the child's tools at the parent's, so without this
+    # a parent that should not be delegating the work at all gets a
+    # child that runs anyway with pieces missing -- `plan` spawning
+    # `build` came back unable to `write` or `edit`, and neither side
+    # could tell. Refusing says so in a sentence the model can act on,
+    # and A7 means it says so BEFORE a human is asked to sign anything.
+    if parent.spawn_targets is not None and name not in parent.spawn_targets:
+        return (f"{name!r} is not an agent this one may spawn. "
+                f"Available here: "
+                f"{', '.join(sorted(parent.spawn_targets)) or 'none'}.")
     return None
 
 

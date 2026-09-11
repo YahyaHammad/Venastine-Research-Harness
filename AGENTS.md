@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 4264 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 4308 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -886,7 +886,7 @@ Three rules follow, and the first two are the ones a reasonable person gets wron
 
 An agent is a `.md` file with YAML frontmatter: a system prompt body plus a tool policy. `/agent
 <name>` makes one active for the rest of the session, `spawn_subagent` delegates one task to one,
-and `agents/manager.py` composes the scope for both. Four things a definition may say are
+and `agents/manager.py` composes the scope for both. Five things a definition may say are
 load-bearing, and only one of them can widen anything.
 
 - **`spawnable` is mandatory at the harness tier** (§32 A3). `assert_spawnable_declared` raises at
@@ -899,6 +899,15 @@ load-bearing, and only one of them can widen anything.
   opens "read the thread so far" cannot be fed that way, and spawning it does not fail — it returns
   a confident answer about the task description, and the parent has no way to tell. Degraded rather
   than broken is what makes it worth suppressing.
+- **`spawn_targets` names WHICH agents a definition may spawn**, and it is a REFUSAL rather than a
+  narrowing — which is the entire reason it exists, because C6 below already narrows and that is
+  the wrong answer here. A parent that should not be delegating a kind of work at all gets, under
+  C6 alone, a child that runs anyway with pieces missing: `plan` spawning `build` returned a
+  `build` that could not `write` or `edit`, degraded the way A4 describes and invisible from both
+  ends. Undeclared means no opinion (every spawnable agent), `[]` means none, and a declared list
+  composes by intersection like everything else here, so it cannot be widened by nesting. Read in
+  two places for one reason: `refusal_reason` refuses the spawn, and `agent_catalog_text()` leaves
+  the agent off the list in the first place, since advertising what will be refused is D24's defect.
 - **A child's tools are its own ∩ the parent's, never a union** (C6), and `approval_overrides` union
   the same way (decision S2). §18's spec sketch built the child's overrides from the agent definition
   alone, which drops the parent's and reopens the escalation C6 exists to prevent, one field over.
@@ -938,7 +947,7 @@ way: `spawn_subagent` is unreachable headless (R16), so `with_catalogs` suppress
 in all ten. The SKILL catalog is the opposite and deliberately so — `load_skill` is callable
 headless, so all fourteen skills ride every pass.
 
-**Leaves, one branch, and the two whitelists that must stay supersets.** `build`, `test`, `writer`, `explore` and `review` are C6 leaves with no `spawn_subagent` — the spawning discipline lives in `general`, the only spawnable branch, so it is taught once rather than repeated in every leaf. `plan` keeps its own `spawn_subagent` for interactive `/agent` use; it is not spawnable, so the two branches never compete for one route. Both `plan`'s and `general`'s whitelists are strict SUPERSETS of every leaf's (A13), because C6 intersects a child's tools with its parent's and a `plan` or `general` turn spawning `build` without `write`/`edit` would otherwise silently hand it a degraded agent with the parent unable to tell. And the new leaves name `read`/`write`/`edit`/`shell` although
+**Leaves, one branch, and the superset that is now scoped rather than total.** `build`, `test`, `writer`, `explore` and `review` are C6 leaves with no `spawn_subagent` — the spawning discipline lives in `general`, the only spawnable branch, so it is taught once rather than repeated in every leaf. `plan` keeps its own `spawn_subagent` for interactive `/agent` use; it is not spawnable, so the two branches never compete for one route. A13 still holds — an agent's whitelist must be a strict SUPERSET of every agent it may spawn, because C6 intersects a child's tools with its parent's and a spawn of `build` without `write`/`edit` hands back a degraded agent with neither side able to tell — but **`plan` satisfies it by not being able to reach `build` at all**, not by holding the two tools. That is the decision and not a technicality: the plan is the deliverable, a person reads it and iterates before anything is built, and an agent that could pass the work straight to `build` has skipped the step it exists to create. So `plan` declares `spawn_targets: [explore, review, writer, test]` — investigation, which is what planning needs — and `general`, which holds `write`/`edit` for PASS-THROUGH rather than its own use, is off that list too, or the restriction would have been one hop deep. `general` itself declares no targets and is the superset of every leaf. The invariant is swept over the whole roster rather than asserted of two agents by name, which is how it broke: batch 51's expansion added `build`, and `plan`'s comment was updated to claim a superset the whitelist under it never gained. And the leaves name `read`/`write`/`edit`/`shell` although
 `config.ToolPermissions` denies all four to everything (A15) — on a stock install they work from `read_project_doc` (plus the network tools where declared) and become code agents only where the operator has enabled file access. That is deliberate: `registry.schemas(context)` filters by the same
 predicate, so nothing uncallable is advertised, while an agent that omitted them would stay
 crippled on an install where the operator had enabled them.

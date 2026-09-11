@@ -32,11 +32,27 @@ class ToolContext:
         requirement but can never remove one. See requires_approval().
     subagent_depth: incremented by §18's spawn_subagent each time it
         builds a child context; the nesting limit is checked against it.
+    spawn_targets: None means this layer expresses NO opinion about WHICH
+        agents may be spawned -- not "none of them", exactly as for
+        allowed_tools above. A set restricts spawn_subagent to those
+        agent names, and composes the same way: intersection, so a layer
+        can only ever narrow the roster it inherited.
+
+        SEPARATE FROM allowed_tools because they answer different
+        questions. `allowed_tools` decides whether this run may spawn AT
+        ALL; this decides who it may spawn, and the two failure modes are
+        not the same one. C6 caps a child's tools by intersecting them
+        with the parent's, which turns "a parent that should not delegate
+        this work" into "a child that quietly cannot do it" -- `plan`
+        spawning `build` returned a build with no `write` or `edit` and
+        no way for either side to tell. An agent that must not delegate
+        a kind of work should be refused, not narrowed.
     """
 
     allowed_tools: Optional[set[str]] = None
     approval_overrides: dict[str, bool] = field(default_factory=dict)
     subagent_depth: int = 0
+    spawn_targets: Optional[set[str]] = None
 
 
 @dataclass

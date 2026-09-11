@@ -2965,7 +2965,7 @@ Count 2786 -> 2815.
 | `explore` and `review` are SPAWNABLE | A test asserting that no shipped agent is | That was the assertion §32 wrote to fail on this day; see the first row |
 | A new shipped agent must declare `spawnable` | Adding `agents/builtin/x.md` without it | `assert_spawnable_declared` raises at discovery naming every offender. This has always been true; the roster is the first time it applies to more than four files |
 | Every tool a shipped agent or skill names must be REGISTERED | A typo in `allowed_tools` / `additional_tools` | `test_shipped_roster.py` fails naming the file and the token. Before this, a whitelist typo silently removed the tool the author meant to include |
-| `plan`'s whitelist must remain a superset of every spawnable agent's | Adding a tool to `explore` or `review` without adding it to `plan` | `test_a_spawn_under_plan_loses_nothing` fails. C6 intersects, so the child would silently lose it (A13) |
+| `plan`'s whitelist must remain a superset of every spawnable agent's | Adding a tool to `explore` or `review` without adding it to `plan` | `test_a_spawn_under_plan_loses_nothing` fails. C6 intersects, so the child would silently lose it (A13). That test is now `test_a_spawn_loses_nothing_through_the_composition`, swept over the whole roster, and the rule is scoped by `spawn_targets` — see the `spawn_targets` batch below, which is where the named version's failure is recorded |
 | `explore`/`review` declare `read` and `shell`, which global config DENIES | A test assuming a spawned explore can read a file | On a stock install it cannot: `config.ToolPermissions` ships `read`/`write`/`edit`/`shell` as False and D14's global check is unconditional. `STOCK_TOOLS` in `test_shipped_roster.py` is what a default install can actually call |
 | Asserting read-only through `is_tool_allowed` for `write`/`edit` is VACUOUS | A "stricter" test that adds them back to the policy-layer check | It answers False whatever the whitelist says. Assert those against the declaration; the policy layer for `write_project_doc`, `remember`, `spawn_subagent` |
 | All three new agents set `use_project_context: true` | Setting one back to the default `false` | `test_each_one_receives_the_projects_own_agents_md` fails naming the agent. It was a mutation SURVIVOR before that test existed: the agent goes on answering, without the project's conventions, and nothing reports it |
@@ -4258,3 +4258,22 @@ markup and raises on an unbalanced tag -- measured on 1.0.0 AND 8.2.8, so this
 was never safe. The single-select branch of the question modal was handing it
 `ask_user`'s options, one line below a multi-select branch that had wrapped its
 own since batch 42. `Button` is in the AST guard's `WIDGETS` now.
+
+
+## `spawn_targets` — an agent says who it may spawn
+
+Three CI jobs went red on the roster expansion, from three unrelated causes. Two
+were repairs (stale documented counts; a test that imported textual's Windows
+driver and therefore `msvcrt`, which no Linux runner has). This is the third,
+and it is the only one that changed behaviour.
+
+| Change | What breaks | Symptom / fix |
+|---|---|---|
+| `spawn_subagent` can now be refused for WHO is being spawned | A test spawning agent `b` from a context whose `spawn_targets` excludes it | The refusal is `refusal_reason`'s last check, after depth, params and unknown-name — that order is the live contract the model already sees. An unknown name still reports "Unknown agent" rather than "not permitted" |
+| `plan` may spawn `explore`, `review`, `writer` and `test` — and nothing else | Anything expecting a `plan` turn to delegate to `build` or `general` | Intended, and it is the decision `plan` exists for: the plan is the deliverable and a person iterates on it before anything is built. `general` is excluded too, or the restriction would have been one hop deep — it holds `write`/`edit` and can spawn `build` itself |
+| A spawn that used to run DEGRADED now returns an error | Code reading a degraded child's output | This is the fix, not a side effect. C6 intersects a child's tools with its parent's, so `plan` spawning `build` returned a `build` with no `write` and no `edit`, and neither side could tell — A4's failure on the permission axis, which A13 exists to prevent |
+| `agent_catalog_text()` takes an optional roster and filters by it | A test calling it positionally with something else | `with_catalogs` passes `context.spawn_targets`. Advertising an agent the pre-flight will refuse is D24's defect, and worse here than for a tool, because the prose around the list instructs the model to spawn one |
+| `ToolContext` has a fourth field, and `child_context` composes it | A hand-built `ToolContext` compared by equality | `spawn_targets=None` is the default and means NO OPINION — every spawnable agent — which is what every definition written before the field meant. `[]` means none, and is deliberately not collapsed to `None` by the loader |
+| A bad `spawn_targets` SKIPS the agent file | `spawn_targets: explore` (a string, not a list), or a list with a non-string in it | Warn-and-skip, the contract every other typed field in `_parse_md_file` has. The element check is `additional_tools`' lesson one field over: the consumer is a membership test against an agent name, so a non-string parses clean and then never matches |
+| A13's superset is asserted by a SWEEP, not for two named agents | Adding a spawning agent whose whitelist misses a tool one of its targets declares | `test_every_spawner_holds_a_superset_of_what_it_may_spawn` fails naming the pair and the tools. The named version is what broke: `build` arrived declaring `write`/`edit`, and `plan`'s frontmatter comment was updated to claim a superset the whitelist under it never gained. The comment was the only thing that changed |
+| Widening a parent is no longer the automatic fix for that failure | Adding `write`/`edit` to `plan` to make the sweep green | `test_plan_cannot_reach_either_agent_that_writes` fails. Both ways satisfy the superset rule and only one keeps the agent's reason for existing |

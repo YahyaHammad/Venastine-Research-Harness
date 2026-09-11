@@ -95,6 +95,98 @@ class TestWhatIsRefusedBeforeItIsAsked:
         assert registry.refusal_reason("no-such-tool", {}) is None
 
 
+class TestAnAgentOffTheRosterIsRefusedNotNarrowed:
+    """`spawn_targets`, and the reason it is a refusal.
+
+    C6 caps a child's tools at its parent's, which answers the wrong
+    question when the parent should not be delegating the work at all: it
+    returns a child that RUNS, with pieces missing, and neither side can
+    tell. `plan` spawning `build` came back unable to write or edit, and
+    the roster file above it claimed a superset it did not have.
+
+    Refusing belongs here rather than in `run()` for A7's reason -- the
+    loop consults this same function before deciding whether to put a
+    human to the sign-off question, so a spawn that cannot proceed never
+    raises a modal at all.
+    """
+
+    def test_an_agent_outside_the_roster_is_refused(self, roots):
+        restricted = ToolContext(spawn_targets={"other"})
+
+        reason = registry.refusal_reason(
+            "spawn_subagent", {"agent_name": "worker", "task": "t"},
+            restricted)
+
+        assert reason is not None
+        assert "worker" in reason
+
+    def test_the_refusal_names_what_is_available_instead(self, roots):
+        """A refusal the model cannot act on costs the same turn twice.
+        It is told which agents it may spawn, so its next call can be a
+        different one rather than the same one again."""
+        restricted = ToolContext(spawn_targets={"other", "another"})
+
+        reason = registry.refusal_reason(
+            "spawn_subagent", {"agent_name": "worker", "task": "t"},
+            restricted)
+
+        assert "another, other" in reason
+
+    def test_an_agent_on_the_roster_still_proceeds(self, roots):
+        """The control. A check that refused whenever the field was set
+        would satisfy both tests above."""
+        allowed = ToolContext(spawn_targets={"worker"})
+
+        assert registry.refusal_reason(
+            "spawn_subagent", {"agent_name": "worker", "task": "t"},
+            allowed) is None
+
+    def test_no_declared_roster_still_means_no_opinion(self, roots):
+        """None is NOT "no agents". Every definition written before this
+        field has it, so the day it landed had to change nothing for
+        them."""
+        assert registry.refusal_reason(
+            "spawn_subagent", {"agent_name": "worker", "task": "t"},
+            ToolContext()) is None
+
+    def test_an_unknown_name_still_reports_that_it_is_unknown(self, roots):
+        """THE ORDER IS A LIVE CONTRACT, as this module's subject function
+        says in its own docstring. A name that does not exist is not
+        "not permitted" -- the model would go looking for a permission to
+        change instead of a spelling."""
+        restricted = ToolContext(spawn_targets={"worker"})
+
+        reason = registry.refusal_reason(
+            "spawn_subagent", {"agent_name": "nope", "task": "t"},
+            restricted)
+
+        assert "Unknown agent" in reason
+
+    def test_the_depth_limit_still_wins_over_the_roster(self, roots):
+        """Same ordering point at the other end. A spawn that is too deep
+        is refused for being too deep, whatever the roster says."""
+        deep = ToolContext(subagent_depth=config.SUBAGENT_MAX_DEPTH,
+                           spawn_targets={"other"})
+
+        reason = registry.refusal_reason(
+            "spawn_subagent", {"agent_name": "worker", "task": "t"}, deep)
+
+        assert str(config.SUBAGENT_MAX_DEPTH) in reason
+
+    def test_the_handler_returns_exactly_what_the_pre_flight_reported(
+            self, roots):
+        """A7's property for the new refusal, driven the way the class
+        above drives the original three."""
+        restricted = ToolContext(spawn_targets={"other"})
+        params = {"agent_name": "worker", "task": "t"}
+
+        reason = registry.refusal_reason("spawn_subagent", params, restricted)
+        result = subagent_tool.run(params, parent_context=restricted)
+
+        assert reason is not None
+        assert result == {"error": reason}
+
+
 class TestOneFunctionDecidesForBothCallers:
 
     @pytest.mark.parametrize("params,context", [
