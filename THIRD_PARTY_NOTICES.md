@@ -22,11 +22,12 @@ The dependencies listed below are **not** part of the project's own source but a
 | pydantic | `==2.13.4` | MIT | Yes | https://pypi.org/project/pydantic/ |
 | sympy | `==1.13.3` | BSD-3-Clause | Yes | https://pypi.org/project/sympy/ |
 | sqlmodel | `==0.0.39` | MIT | Yes | https://pypi.org/project/sqlmodel/ |
-| python-dotenv | `==1.0.1` | BSD-3-Clause | Yes | https://pypi.org/project/python-dotenv/ |
+| python-dotenv | `==1.2.2` | BSD-3-Clause | Yes | https://pypi.org/project/python-dotenv/ |
 | matplotlib | `==3.10.3` | PSF / BSD-Compatible | Yes | https://pypi.org/project/matplotlib/ |
 | pyyaml | `==6.0.3` | MIT | Yes | https://pypi.org/project/PyYAML/ |
-| textual | `>=1.0,<2.0` | MIT | Yes | https://pypi.org/project/textual/ |
-| rich | `>=13,<16` | MIT | Yes | https://pypi.org/project/rich/ |
+| ruamel.yaml | `==0.19.1` | MIT | Yes | https://pypi.org/project/ruamel.yaml/ |
+| textual | `==8.2.8` | MIT | Yes | https://pypi.org/project/textual/ |
+| rich | `>=14.2,<16` | MIT | Yes | https://pypi.org/project/rich/ |
 | mcp | `==2.0.0` | MIT | Yes | https://pypi.org/project/mcp/ |
 
 ## Test dependencies (not used by end users during runtime, only for CI and developer testing)

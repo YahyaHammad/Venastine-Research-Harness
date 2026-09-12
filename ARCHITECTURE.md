@@ -19,7 +19,7 @@ Both modes share the same underlying call-and-tool-dispatch loop (`core/loop.py`
 
 These recur throughout the codebase. When you're unsure which file something belongs in, check against these first:
 
-- **Mechanism vs. policy.** `config.py` holds values; `security/permissions.py` holds the logic that decides things based on those values. `tools/registry.py` holds dispatch mechanics; it never defines policy itself.
+- **Mechanism vs. policy.** `config.yaml` holds values and `config.py` publishes them; `security/permissions.py` holds the logic that decides things based on those values. `tools/registry.py` holds dispatch mechanics; it never defines policy itself.
 - **One file, one clearly-named job.** If a file's job needs "and" to describe it, it's probably two files.
 - **Deterministic code over LLM calls, wherever a check is actually mechanical.** Pass 5 (confidence scoring) makes zero LLM calls. Thresholds, retry counts, and dedup logic are Python, never prompts.
 - **Translate at the boundary, once.** Provider-specific formats (Anthropic vs. OpenAI message/tool shapes) are translated in exactly one place — `core/client.py` — never scattered across callers.
@@ -31,7 +31,10 @@ These recur throughout the codebase. When you're unsure which file something bel
 ```
 Venastine Research Harness/
 ├── main.py                        # interactive CLI entry point (ROADMAP §1) -- chat + research modes, argparse, logging wiring
-├── config.py                      # ALL tunable settings + permission/approval dataclasses
+├── config.yaml                     # ALL tunable settings -- the values themselves, with a short note on what each DOES. Harness tier, ONE location, no env override (that absence is a security property -- see CONFIG_ARCHITECTURE.md)
+├── config_schema.py                # the pydantic schema for config.yaml, the env-override table, the loader, and HARNESS_AUTHORITY_KEYS. Imports the stdlib, ruamel.yaml and pydantic and NOTHING first-party, so config.py stays one hop from a leaf and cannot cycle through core/config_loader.py
+├── config.py                       # the same values as module attributes, for the 31 modules that read them. A shim: reads config.yaml once at import, binds plain mutable globals, rebuilds the ToolPermissions/ToolApprovals dataclasses
+├── CONFIG_ARCHITECTURE.md          # why every value is what it is -- config.py's 788 lines of rationale, carried over verbatim and keyed by config.yaml's names
 ├── credentials.py                 # LLM PROVIDER keys (providers.json) -- NOT misc tool keys
 ├── env_secrets.py                 # misc TOOL keys (.env) -- NOT LLM provider keys
 ├── database.py                    # the DB engine + table creation -- owns the CONNECTION only
@@ -57,7 +60,7 @@ Venastine Research Harness/
 ├── scripts/
 │   └── prepublish-check.mjs        # batch 35: package.json's `prepublishOnly` gate, so a non-zero exit aborts the publish. Checks the two things that fail SILENTLY and cannot be undone once a version is on the registry -- the two version numbers agreeing, and no secret in the tarball while LICENSE/NOTICE are in it
 │
-├── tests/                          # 4308 tests, all offline, ~5-15 min depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 4318 tests, all offline, ~5-15 min depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 98 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow + §29 N1-N8 the one stdin reader, N2's channel deadline, every request kind rendered, and the startup block main(argv) made reachable + #102's four declining defaults + §47's asker line on the three kinds a run can raise, which this shell dropped while the TUI drew it (batch 76)
@@ -69,7 +72,7 @@ Venastine Research Harness/
 │   ├── test_source_corpus.py       # 36 tests -- ROADMAP_v2 §45 SQ2: URL identity (every arXiv spelling, the pre-2007 slashed id), ingest from the three network tools' REAL result shapes, longest-text-wins, the bound and its drop counter, redaction on entry, and the _translate wiring that can silently not exist
 │   ├── test_source_scoring.py      # 87 tests -- ROADMAP_v2 §45 SQ4: domain classification at its BOUNDARIES (evilgov.com is not a government, example.ac is not a university, gov.uk is derived not listed), markup stripping, the bounded authority nudge and its required reason, quote verification's three answers, every malformed-source path staying non-fatal, and SQ2's similarity half -- window packing and overlap, cosine on normalised vectors, per-model calibration, max-over-windows beating the page average, one embedding per text per run, and the retry-then-fall-back-and-say-so path
 │   ├── test_scholar.py             # 39 tests -- ROADMAP_v2 §45 SQ5/SQ9: OpenAlex, against fixtures transcribed from real responses (the preprint whose fwci is null is the measurement the whole design rests on). Peer review needs three fields to agree, a missing signal is renormalised away rather than scored zero, a thin cohort widens before it gives up, a retraction floors everything, and the lookup is off by default and makes no request when disabled
-│   ├── test_pipeline_models.py     # 32 tests -- ROADMAP_v2 §45 SQ7: the user-tier store for the critic and embedder roles, the store-outranks-config.py precedence and why it inverts model_windows, RM4's two-records-one-file rule, the half-record refusal, and both commands driven through the TUI
+│   ├── test_pipeline_models.py     # 32 tests -- ROADMAP_v2 §45 SQ7: the user-tier store for the critic and embedder roles, the store-outranks-config.yaml precedence and why it inverts model_windows, RM4's two-records-one-file rule, the half-record refusal, and both commands driven through the TUI
 │   ├── test_embeddings.py          # 16 tests -- ROADMAP_v2 §45 SQ2/SQ10: core.client.embed_texts. The three ways a SUCCESSFUL response is still unusable (a permuted batch, a ragged batch, all-zero vectors), provider dispatch incl. Anthropic's by-name refusal, and asymmetric-embedder prefixes
 │   ├── test_confidence_scoring.py  # 88 tests (3 ROADMAP verbatim regressions) -- plus §45 SQ3: the formula is byte-identical when nothing scored sources, source quality scales the grounding component, the tier still discriminates across the whole domain table, and SQ6's knobs -- warn-and-fall-back per key where compaction raises, an unknown key still raising, and the resolved weights actually reaching the formula
 │   ├── test_client_translation.py  # 45 tests -- all three provider translation branches + batching + Google request/response parsing + §33's W7 guard that importing core.client pulls in no provider SDK
@@ -77,7 +80,7 @@ Venastine Research Harness/
 │   ├── test_loop_stop_conditions.py# 4 tests -- ROADMAP verbatim stop conditions + #45's belt (a non-positive max_steps raises a named ValueError)
 │   ├── test_streaming_loop.py      # 18 tests -- ROADMAP §13 generator event ordering, exception propagation, D20 persistence, permission_channel, and #158's actionable headless denial (name-gated vs argument-gated)
 │   ├── test_workspace_trust.py     # 26 tests -- ROADMAP_v2 §14 AC1/AC2 + hash-control properties (path-in-hash, determinism)
-│   ├── test_config_loader.py       # 75 tests -- ROADMAP_v2 §14 frontmatter AC4, tier precedence D8/D18, settings merge, CONTEXT opt-in AC5, catalog, #45's repair-not-reject max_steps
+│   ├── test_config_loader.py       # 81 tests -- ROADMAP_v2 §14 frontmatter AC4, tier precedence D8/D18, settings merge, CONTEXT opt-in AC5, catalog, #45's repair-not-reject max_steps; batch 82 the config.yaml coupling -- every compaction default names a real schema field, the shipped file covers the whole schema, and the two permission tables declare the same tools
 │   ├── test_load_skill.py          # 8 tests -- load_skill view-only retrieval, D24 permission declaration, catalog prompt injection
 │   ├── test_orchestrator.py        # 37 tests -- full pipeline mocked + JSON-retry + §5 failure/success/acceptance
 │   ├── test_registry_permissions.py# 11 tests -- allow/deny/approval
@@ -91,7 +94,7 @@ Venastine Research Harness/
 │   ├── test_pipeline_storage.py    # 12 tests -- ROADMAP §5 create/update/load_pipeline_run + inner-failure caplog
 │   ├── test_file_ops.py            # 59 tests -- ROADMAP §6 path resolution, approval, read/write/edit, registry
 │   ├── test_shell.py               # 208 tests -- ROADMAP §7 sandbox routing, inert/network classification, approval, backend internals; §28 the capability classifier, the three modes, the .venastine mount; batch 37 the quoting bypass and the protected-path workspace guard; batch 39 the escaping bypass, the generative tokeniser-agreement corpus and the compound-command network flag; §46 INERT routed into the container and HOST_READ left on the host, the approval answer proven unchanged across both containments, `ran_on`/`tier` on every backend, and the container label
-│   ├── test_posture.py             # 29 tests -- batch 40 (UN1-UN6): the posture is frozen, config/env mutation cannot move it, apply_cli's ordering guard, and every route a session has (settings.json, env, slash command, writing config.py) proved not to reach it
+│   ├── test_posture.py             # 33 tests -- batch 40 (UN1-UN6): the posture is frozen, config/env mutation cannot move it, apply_cli's ordering guard, and every route a session has (settings.json, env, slash command, writing config.yaml) proved not to reach it; batch 82 adds the three that keep that true after the values moved into YAML -- writing config.yaml still needs a human, the file resolves to one place with no env override, and HARNESS_AUTHORITY_KEYS names every unreachable value
 │   ├── test_policy_enforcement.py  # 101 tests -- ROADMAP §8 secret redaction, domain blocking (#48 normalisation + suffix match), is_url_permitted's address guard (#54), output policy, registry integration
 │   ├── test_critic_routing.py      # 2 tests -- ROADMAP §11 critic-model routing (3a/3b/6c to critic, rest to main)
 │   ├── test_permission_context.py  # 21 tests -- ROADMAP_v2 §15 AC1-AC7 (stricter wins, mcp default, redaction survives, D24, unregister) + schemas filtering
@@ -318,11 +321,96 @@ Venastine Research Harness/
 
 This section exists specifically because earlier drafts of this project put persistence logic, memory logic, and credential logic in the wrong files relative to each other. Read this before touching any of the files below.
 
-### 4.1 `config.py` — settings ONLY, never logic
+### 4.1 The config layer — `config.yaml`, `config_schema.py`, `config.py`
 
-**Belongs here:** plain values. `MODEL_NAME`, `MAX_TOKENS`, `MAX_ITERATIONS`, `MAX_PIPELINE_RETRIES`, `DB_PATH` (`max_token_budget` is a settings.json key now, not a constant — see the batch-27 note in TECHNICAL_DEBT item 9), `OUTPUT_DIR`, `WORKSPACE_DIR`, `MAX_FILE_SIZE_BYTES`, `MAX_READ_LINES`, `MAX_READ_CHARS`, `SHELL_BINARY`, `ALLOW_INSECURE_SANDBOX_FALLBACK`, `AUTO_APPROVE_SANDBOX_FALLBACK`, `SANDBOX_DOCKER_IMAGE`, `SANDBOX_TIMEOUT_SECONDS`, `SANDBOX_MEMORY_MB`, `SANDBOX_CPU_SECONDS`, `SANDBOX_MAX_PIDS`, `NETWORK_ALLOWED_COMMANDS`, `INERT_COMMANDS`, `CRITIC_MODEL` (optional dict for §11 critic-model routing — `None` means no special routing), and the `ToolPermissions` / `ToolApprovals` dataclasses (which are still just typed bags of values — booleans per tool name, nothing more). `APICredentials` was here and is deleted (audit #23): nothing constructed it, and its comment told the reader to store the *name* of an environment variable as their API key, which is not what `credentials.save_credentials` does with the value.
+Three files, one job. The values live in **`config.yaml`**; **`config_schema.py`** is
+the only thing that reads it; **`config.py`** publishes the result as module
+attributes for the 31 production modules that consume them. The full argument for
+each value, and for the three rules below, is **`CONFIG_ARCHITECTURE.md`**.
 
-**Does NOT belong here:** any function that reads these values and makes a decision. `config.py` never imports `security/permissions.py`, never contains an `if`/`else` that changes behavior, never touches the filesystem or network. If you're about to write a function in this file, stop — it belongs in whichever file consumes the setting.
+**`config.yaml` — the values.** Every tunable setting, keyed by the lower-cased form
+of the constant the code uses (`max_tokens` is `config.MAX_TOKENS`), plus the two
+nested tables `tool_permissions` and `tool_approvals`. Comments say what a value
+*does*; the history is in `CONFIG_ARCHITECTURE.md` so this file stays readable.
+
+**Belongs here:** plain values. **Does NOT belong here:** anything derived. Two
+values deliberately have no key at all — `OUTPUT_DIR`, which is composed from
+`AGENT_OUTPUT_DIR` / `AGENT_WORKSPACE` in one expression with no branch, and
+`WORKSPACE_DIR_EXPLICIT`, which is the *presence* of `AGENT_WORKSPACE` and cannot be
+expressed in YAML at all.
+
+**Three rules about the file are load-bearing.**
+
+- **ONE LOCATION, RESOLVED FROM `__file__`, WITH NO ENVIRONMENT OVERRIDE.** There is
+  no user tier, no project tier and no `AGENT_CONFIG_FILE`. That absence is the
+  security argument, not an oversight: `settings.json` refuses
+  `shell_approval_mode`, `ensemble_models`, `critic_model` and `embedder_model` **by
+  name** (R12, E2, G7, SQ7) because a project's `settings.json` beats the user's and
+  arrives with a directory you cloned. A file that ships inside the harness, in
+  exactly one place, carries none of that risk — and an override variable would hand
+  it straight back. It would also read as the obvious sibling of `AGENT_ENV_FILE` and
+  `APP_DB_PATH`; it is not, because those redirect *state* and this is a shipped
+  asset. `test_config_yaml_resolves_to_exactly_one_place` pins it.
+- **READ ONCE, AT IMPORT, WITH THE ENVIRONMENT FOLDED IN THERE.** `security/posture.py`
+  depends on it: `config` binding at import is what makes `os.environ[...] = ...`
+  unable to move the security posture, where anything reading `os.environ` at *call*
+  time would follow the mutation (UN1, and batch 37's asymmetry).
+  `tools/builtin/shell.py` validates the approval mode at its own import, so the
+  values must be final before it runs. Nothing re-reads the file; an edit takes
+  effect at the next launch.
+- **EVERY FIELD IS REQUIRED, AND UNKNOWN KEYS ARE REFUSED.** No schema field has a
+  default. A missing key, an unknown key, a duplicated key or a wrong type is a
+  startup error naming the key. That is the D24 defect made impossible rather than
+  merely fixed: `fetch_url` was registered and documented as working while having no
+  `ToolPermissions` field, so `getattr(..., False)` denied every call to it for as
+  long as the tool existed.
+
+**`config_schema.py` — the schema and the reader.** The pydantic models, `CONFIG_PATH`,
+the `ENV_OVERRIDES` table, the two derived values, `HARNESS_AUTHORITY_KEYS`, and the
+factories that rebuild the two dataclasses.
+
+**Belongs here:** the stdlib, `ruamel.yaml` and `pydantic`. **Does NOT belong here:**
+any first-party import. `core/config_loader.py` imports `config_schema`, and `config.py`
+imports it too — reaching back into `core/` from here is a cycle by a longer route,
+and it would also cost `config.py` the leaf-adjacency that makes it safe for
+`security/` to depend on.
+
+The permission tables are the one place the split is subtle: the **field names** are
+declared in Python, here, while the **booleans** come from the YAML. That is what keeps
+D24's "every registered tool has a field in both tables" a build-time check rather
+than a runtime surprise caused by an omission in a data file.
+
+**`config.py` — the module attributes.** Reads the schema once and binds the values as
+plain globals.
+
+**Belongs here:** the `config_schema.load()` call, the `globals().update()`, and the two
+dataclass bindings. **Does NOT belong here, and this is §4.1's original rule
+unchanged:** any function that reads these values and makes a decision, any `if`/`else`
+that changes behaviour, any `os.environ` read. The environment handling moved to
+`config_schema.py` rather than arriving here. If you are about to write a function in
+this file, stop — it belongs in whichever file consumes the setting.
+
+The globals are **plain and mutable, and bound eagerly rather than through a module
+`__getattr__`.** Four access patterns depend on that and a lazy proxy breaks at least
+one of each: `monkeypatch.setattr(config, ...)`, a bare `config.X = v` (an autouse
+fixture in `tests/conftest.py` does this for every test in the suite),
+`mocker.patch.dict(config.__dict__, {...})`, and `getattr(config, "<NAME>", default)`,
+which must raise `AttributeError` rather than `KeyError` for a name that does not exist.
+
+`ToolPermissions` / `ToolApprovals` stay **real dataclasses**, rebuilt from the schema
+with the YAML's booleans as field defaults — not the pydantic models themselves,
+because `security/permissions.py` calls `config.ToolPermissions()` with no arguments on
+every check, ~25 test sites mutate an instance and then swap this module's attribute for
+a factory returning it, and `tests/test_docs_consistency.py` enumerates `vars(instance)`
+to check README's approval table names every registered tool. A frozen pydantic model
+satisfies none of those.
+
+**Two YAML parsers in the tree is deliberate.** `pyyaml` parses agent/skill frontmatter
+in `core/config_loader.py`, where nothing is written back and ~70 tests pin the
+behaviour; `ruamel.yaml` is here for the half `pyyaml` cannot do, which is preserving a
+hand-authored file's comments across a *write*. The import path uses `typ="safe"` — which
+also refuses `!!python/...` tags in a file that decides the tool permissions — and the
+round-trip parser is what a future config editor needs. Do not unify them.
 
 ### 4.2 `credentials.py` — LLM provider keys ONLY
 
@@ -588,7 +676,7 @@ Three things about it are load-bearing:
 
 **§19 K6 — active skill bodies are appended OUTSIDE `with_catalogs()`.** That function feeds `pass_prompt()`, so anything added inside it lands in all ten research passes; a skill activated in a TUI chat session has no business governing a pipeline run started separately. `with_catalogs(base, active_skills)` passes the active list only as far as the catalog, where it MARKS entries. The bodies themselves are pinned by the shell, beside its `with_goal()` call, via `skills.manager.prompt_fragment()` — and by `run_one_shot()` too (2026-08-04 owner decision: K1's "every subsequent turn" includes /grill-me turns). This is the one cross-shell leak the design can have, and `test_skills.py` drives the real turn-prompt assembly to assert the pinning site holds.
 
-**Load-bearing invariants:** untrusted project content is ABSENT, not loaded-but-disabled (no partial trust); the trust store path and user config dir resolve at call time, not import time (tests redirect them via env/monkeypatch); provider/model resolution is CLI > settings.json > `config.py` in `main.resolve_runtime_defaults()`, which is only possible because the argparse defaults are `None` — an argparse-filled default would be indistinguishable from an explicit choice and would silently always beat settings.json.
+**Load-bearing invariants:** untrusted project content is ABSENT, not loaded-but-disabled (no partial trust); the trust store path and user config dir resolve at call time, not import time (tests redirect them via env/monkeypatch); provider/model resolution is CLI > settings.json > `config.yaml` in `main.resolve_runtime_defaults()`, which is only possible because the argparse defaults are `None` — an argparse-filled default would be indistinguishable from an explicit choice and would silently always beat settings.json.
 
 ### 4.16 `tui/` — the Textual shell (ROADMAP_v2 §16)
 
@@ -1354,7 +1442,7 @@ the scholarly lookup come to disagree about one source in one artifact.
 per-model calibration; the `EmbeddingScorer`'s batching, caching and give-up
 flag; quote verification; and the per-source coercions with their trace lines.
 *Does NOT belong here:* the model call itself (`core/client.embed_texts`), the
-confidence formula (`confidence_scoring`), or any table of values (`config.py`).
+confidence formula (`confidence_scoring`), or any table of values (`config.yaml`).
 *Why this matters:* **nothing here raises.** Every input is a value a model
 produced; a source that cannot be scored is dropped, an out-of-range number is
 clamped, and each is reported to `run.trace` aggregated by kind — sixty lines in
@@ -1379,13 +1467,13 @@ is off by default.
 **`core/pipeline_models.py` — the critic and embedder roles.**
 
 *Belongs here:* the user-tier store for the two `(provider, model)` pairs that
-are not the session model, and the precedence between it and `config.py`.
+are not the session model, and the precedence between it and `config.yaml`.
 *Does NOT belong here:* deciding whether a model is a usable embedder — that is
 `/embedder`'s probe, the same split `model_windows` has with `/window`.
 *Why this matters:* it lives in `core/` because the pipeline reads it and D12
 forbids core importing the shell (WS6's argument). Precedence **inverts**
 `model_windows`: there a configured value could be confidently wrong about a
-deployment, so the person won; here `config.py` is the harness default and the
+deployment, so the person won; here `config.yaml` is the harness default and the
 store is a choice made at a command prompt.
 
 **`core/client.embed_texts` — the embedding call.**

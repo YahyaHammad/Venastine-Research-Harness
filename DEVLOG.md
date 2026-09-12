@@ -12615,3 +12615,195 @@ by-hand press comes first and the docs after, in that order.
 - `tests/test_tui.py` -- `TestShiftEnterIsStillNotTheKey`, three tests.
 - `README.md`, `AGENTS.md`, `ARCHITECTURE.md` -- 4261 to 4264, test_tui.py
   385 to 388.
+
+## Batch 82 -- the values moved out, and the one route that must not follow (2026-09-12)
+
+`config.py` was 1,210 lines of which **788 were comment and 91 were statements**.
+The values moved to `config.yaml`; the 788 lines moved to `CONFIG_ARCHITECTURE.md`;
+`config.py` is a 75-line shim that publishes the result as module attributes.
+
+**This migration is in no locked design record.** No D, E, R, G, SQ or UN number
+covers a YAML config -- the only structured config the design sanctioned was
+`settings.json` (three tiers), `mcp.json` and `providers.json`. It was an explicit
+user decision, taken with the security cost named in advance, and the
+`ruamel.yaml` dependency was chosen over the already-pinned `pyyaml` for a config
+editor that does not exist yet. Recorded here rather than by rewriting
+`ROADMAP_v2.md`, because the four rejections below still say exactly what they
+always said; only the filename in their remediation text changed.
+
+### What the migration could not change, and why
+
+The values in that file include the frozen security posture
+(`shell_approval_mode`, both sandbox-fallback flags, `redact_tool_outputs`), the
+three Authority rosters (`ensemble_models`, `critic_model`, `embedder_model`) and
+the global tool floor (`tool_permissions`, `tool_approvals`). R12, E2, G7 and SQ7
+each reject a key from `settings.json` **by name**, and all four argue from the
+same fact: *a project's `settings.json` beats the user's and arrives with a
+directory you cloned.* Moving those values into a data file is safe only if the
+data file cannot be that kind of file.
+
+So three rules are load-bearing, and each is pinned rather than remembered:
+
+- **ONE LOCATION, FROM `__file__`, WITH NO OVERRIDE VARIABLE.** No user tier, no
+  project tier, no `AGENT_CONFIG_FILE`. `test_config_yaml_resolves_to_exactly_one_place`
+  asserts the path AND walks `config_schema.py`'s AST for every `os.environ.get`,
+  failing on any variable not in `HARNESS_ENV_VARS`. The variable is the trap: it
+  reads as the obvious sibling of `AGENT_ENV_FILE` and `APP_DB_PATH`, and those
+  redirect *state* where this is a shipped asset.
+- **READ ONCE, AT IMPORT, ENVIRONMENT FOLDED IN THERE.** Not tidiness: `config`
+  binding at import is what makes `os.environ[...] = ...` unable to move the
+  posture (UN1, batch 37's asymmetry), and `tools/builtin/shell.py` validates the
+  approval mode at its *own* import.
+- **WRITING THE FILE STILL NEEDS A HUMAN.**
+  `test_writing_config_yaml_still_needs_a_human` is the sibling of
+  `test_writing_config_py_still_needs_a_human` and is the whole answer to "is this
+  a weakening?". The file is outside the workspace, so `_file_approval_check`
+  hard-returns True, and `write`/`edit` are globally denied on top of that.
+
+### The one guard that went quiet, and was caught by looking
+
+`scripts/prepublish-check.mjs` refuses to publish an unsafe-mode build with **two
+independent detectors**, because either alone is one rename from silence -- its own
+comment says so. One of them reads `config.py`'s TEXT for
+`^\s*UNSAFE_NO_(APPROVAL|SANDBOX)\s*=`. After the migration an unsafe build
+declares `unsafe_no_approval: true` in the YAML, which that regex cannot see, and
+**the check stayed green through the entire migration**. It now has a third
+detector over `config.yaml`, verified by adding the key and watching the publish
+refuse. `[\r\n]` rather than `^` with `/m`: these files are CRLF in the worktree,
+which has already produced one false GREEN in this repo.
+
+### Four things that are decisions rather than defaults
+
+- **`config_schema.py` is at the ROOT and imports nothing first-party.**
+  `core/config_loader.py` does `import config`, so a shim reaching into `core/` for
+  the values would be a cycle -- and `config.py` was a LEAF module, which is the
+  property that made it safe for `security/` to depend on. Measured before the
+  design was chosen: `config_loader` touches no `config` attribute at import, so
+  the cycle would have *worked by accident* today and broken on the first
+  module-level read. `json_store.py` sets the root-placement precedent.
+- **The globals are plain, mutable and EAGER, not a module `__getattr__`.** Four
+  access patterns depend on it, and a lazy proxy breaks at least one of each:
+  `monkeypatch.setattr`, a bare `config.X = v` (an autouse fixture in
+  `tests/conftest.py` does this for *every test in the suite*),
+  `mocker.patch.dict(config.__dict__, ...)` (3 sites), and
+  `getattr(config, "<NAME>", default)`, which must raise `AttributeError` and not
+  `KeyError`. 134 `setattr(config, ...)` sites across 32 files were the blast
+  radius, and all of them were left untouched.
+- **The permission tables' FIELD NAMES stay in Python; only the booleans moved.**
+  D24's check that every registered tool has a field in both tables runs at import
+  off `hasattr`, and the names in a data file would turn it into a runtime
+  surprise. Every schema field is **required with no default**, so a `config.yaml`
+  missing `shell` cannot start the harness -- which is the D24 `fetch_url` defect
+  (registered, documented as working, denied on every call) made impossible rather
+  than merely fixed. `ToolPermissions` / `ToolApprovals` are rebuilt as real
+  dataclasses, because `security/permissions.py` calls them with no arguments per
+  check and `tests/test_docs_consistency.py` enumerates `vars(instance)`.
+- **Two values deliberately have NO key.** `OUTPUT_DIR` stays the single composed
+  expression (`AGENT_OUTPUT_DIR`, else `<AGENT_WORKSPACE or ".">/output`) -- note
+  the `"."` against `workspace_dir`'s `"./workspace"`, so an unset variable still
+  means `./output`; a key would have to be ignored whenever `AGENT_WORKSPACE` is
+  named, which is the branch that form exists to avoid. `WORKSPACE_DIR_EXPLICIT` is
+  the **presence** of `AGENT_WORKSPACE`, which YAML cannot express at all.
+
+### The divergence the first draft would have shipped
+
+The environment overrides were applied AFTER validation, in the function that
+builds `config.py`'s namespace. Every value was correct and every parity check
+was green, because the five overridable keys are read only through `config.py`
+-- and `core/config_loader.py` reads five OTHER values off
+`config_schema.current()`, none of which has a variable.
+
+So `current()` returned a model with no environment in it while
+`config.<NAME>` had one, and nothing could see the difference. The sixth
+override, added to a key the loader happens to read, would have been a silent
+disagreement between two things that are supposed to be one document. The
+overlay happens before validation now -- one model, environment already in it,
+and an override goes through the same type check the file's value does --
+pinned by `test_the_environment_reaches_the_model_and_not_only_the_globals`,
+which also asserts the other half: setting the variable after import moves
+nothing in the live process (UN1).
+
+### The cache that defeated a fixture, found by one red test
+
+`config_schema` caches the validated model so `core/config_loader.py` can read
+the shipped defaults without re-parsing. That cache outlived a RE-IMPORT of
+`config`, and re-importing `config` under a changed environment turns out to be
+a real technique here rather than a hypothetical: `test_storage_e2e`'s
+`real_storage` fixture pops `sqlmodel`, `config`, `database` and `storage` out
+of `sys.modules`, points `APP_DB_PATH` at a throwaway file and imports them
+again, which is how it gets real SQLite instead of the root conftest's fake.
+`config_schema` is not in that list and cannot be -- the fixture predates it.
+
+So the fresh `config` got the PREVIOUS environment's `db_path` and
+`database.engine` pointed at the developer's own `app.db`. It surfaced as
+`test_a_migrated_column_matches_the_fresh_schema_exactly` -- a test that
+compares a migrated column against a fresh one -- reading a database that had
+accumulated migrations, and it took a worktree at HEAD to establish that the
+old code passed against the same file and the new code did not. Two earlier
+full runs were green, because the ambient `app.db` had not yet been through
+the migration path.
+
+`config.py` passes `force=True` now, which states the rule the right way
+round: IMPORTING `config` is what "bind the configuration now" means, so that
+module decides when the file is read, and a re-import replaces the cache
+rather than being bypassed by it.
+`test_re_importing_config_re_reads_the_file` pins it in a subprocess, because
+the thing under test is module-table surgery and doing it in-process would
+hand every later test a `config` the test imported.
+
+### Constraint 6: the stringly-typed default map is gone
+
+`shipped_defaults()` reached its seven compaction defaults with
+`getattr(config, "COMPACTION_TRIGGER_TOKENS")` and friends -- no default argument,
+so renaming any one of them turned it into an `AttributeError` surfacing through
+`initialize()` at startup, and nothing but that dictionary tied the two names
+together. `_COMPACTION_DEFAULTS` now maps settings keys to **schema field names**,
+and `config_loader` imports `config_schema` instead of `config`: both lazy
+`import config` statements and all fifteen `config.X` reads are gone, so the module
+that `config.py` could have cycled through no longer imports it at all.
+`core/pipeline_models.py` and `core/reasoning/output_writer.py` keep their own
+`getattr(config, ...)` -- three tests patch `config.__dict__` through that path,
+and neither is a defaults lookup.
+
+### How it was verified rather than reasoned about
+
+- **Value parity against `git show HEAD:config.py`**, in one process, comparing all
+  89 public names by value AND by runtime type, both dataclasses' field order and
+  defaults, and the four access patterns. Run across **10 environment cases** --
+  every variable unset, each of the six set alone, `AGENT_WORKSPACE` as an empty
+  string, both path variables together, all six at once. 0 differences in all ten.
+- **Prose fidelity, mechanically.** Every comment line in the original with words
+  in it -- 721 of them -- must appear text-identical in `CONFIG_ARCHITECTURE.md` or
+  `config.yaml`. The first run reported 96 missing and **two of those were the
+  checker's fault**: `subprocess(text=True)` decodes with the Windows locale
+  codepage and mangles every line carrying a section sign, and a line-for-line
+  comparison calls the fifteen deliberately re-flowed group labels lost. The
+  remaining 30 were real: 22 lines of `MODEL_CONTEXT_WINDOWS` history and 9 trailing
+  notes, all of which live INSIDE a statement rather than above it, so nothing was
+  carrying them. Final: 721 found, 0 missing, with the 21 banners becoming headings
+  and 4 rule lines dropped as decoration.
+- **The failure modes by hand**: a missing file, a missing `tool_permissions` field,
+  `shell_approval_mode: nonsense`, and a duplicated key. Each is a startup error
+  naming the file and the key. `ruamel`'s `typ="safe"` raises `DuplicateKeyError`
+  and refuses `!!python/...` tags, both checked in hand rather than read from docs
+  (D22's rule).
+
+### Files
+
+- `config.yaml`, `config_schema.py`, `CONFIG_ARCHITECTURE.md` -- new.
+- `config.py` -- 1,210 lines to 75.
+- `core/config_loader.py` -- `import config` gone; `_COMPACTION_DEFAULTS` holds
+  schema field names; four Authority rejection messages name `config.yaml`.
+- `core/reasoning/orchestrator.py` -- the four roster messages.
+- `scripts/prepublish-check.mjs` -- the third detector.
+- `security/permissions.py` -- D24's remediation text; `security/posture.py` -- the
+  tool-call bullet and the import-budget sentence.
+- `package.json` -- `config.yaml` and `config_schema.py` added to `files`; without
+  the first, an npm install ships a shim with no data and nothing starts.
+- `requirements.txt`, `THIRD_PARTY_NOTICES.md` -- `ruamel.yaml==0.19.1`, MIT, no
+  transitive dependencies.
+- `ARCHITECTURE.md` -- §4.1 rewritten (its "never touches the filesystem" clause was
+  the one sentence the migration made false), tree entries, `AGENTS.md` boundary
+  table and documentation map, `README.md`'s 24 configuration references.
+- `tests/test_posture.py` -- three new tests; `tests/test_ensemble_guard.py`,
+  `tests/test_shell.py` -- the message assertions that named a file.

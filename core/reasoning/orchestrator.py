@@ -366,10 +366,10 @@ def _ensemble_roster(ensemble_mode: bool) -> list[dict]:
     roster = config.ENSEMBLE_MODELS
     if not roster:
         raise ValueError(
-            "Ensemble mode is on but config.ENSEMBLE_MODELS is empty. "
+            "Ensemble mode is on but ensemble_models in config.yaml is empty. "
             "Diversity comes from different models now, not from a raised "
             "temperature (ROADMAP §10 revisit), so the roster is required. "
-            "Set it in config.py to a list of at least two distinct "
+            "Set it in config.yaml to a list of at least two distinct "
             '{"provider_name": ..., "model": ...} entries, or disable '
             "ensemble_mode. There is deliberately no settings.json key for "
             "the roster -- see E2."
@@ -378,7 +378,7 @@ def _ensemble_roster(ensemble_mode: bool) -> list[dict]:
     for entry in roster:
         if not isinstance(entry, dict) or not entry.get("provider_name") or not entry.get("model"):
             raise ValueError(
-                f"Malformed config.ENSEMBLE_MODELS entry {entry!r}: every "
+                f"Malformed ensemble_models entry in config.yaml {entry!r}: every "
                 f'entry needs both "provider_name" and "model".'
             )
 
@@ -392,7 +392,7 @@ def _ensemble_roster(ensemble_mode: bool) -> list[dict]:
     if len(distinct) < 2:
         raise ValueError(
             f"Ensemble mode needs at least two DISTINCT models; "
-            f"config.ENSEMBLE_MODELS resolves to {len(distinct)} "
+            f"ensemble_models in config.yaml resolves to {len(distinct)} "
             f"({sorted(distinct)}). One model cannot disagree with itself, so "
             f"every claim would score maximal consistency and Pass 5 would "
             f"read that as confidence."
@@ -1011,8 +1011,8 @@ def stream_deep_research_pipeline(
     if ensemble_n is not None:
         logger.warning(
             "Ignoring ensemble_n=%s: the number of candidates is "
-            "len(config.ENSEMBLE_MODELS) now (ROADMAP §10 revisit, E3). "
-            "Change the roster in config.py to change N.",
+            "len(ensemble_models) now (ROADMAP §10 revisit, E3). "
+            "Change the roster in config.yaml to change N.",
             ensemble_n,
         )
 

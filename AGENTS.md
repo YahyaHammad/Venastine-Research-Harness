@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 4308 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 4318 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -157,6 +157,7 @@ fails on one that does not.
 so nothing can force the distinction mechanically — write `gate D1` when you mean
 the gate. A seventh use of `C1`–`C10` is the research pipeline's **claim ids**,
 which are run data rather than references; see the C table in `ROADMAP_v2.md`.
+- **CONFIG_ARCHITECTURE.md** — why every value in `config.yaml` is what it is. `config.py`'s 788 lines of rationale, carried over verbatim when the values moved into YAML, keyed by the YAML's own names. Read the entry for a key before changing it; several of these numbers have already been "corrected" back to a value they were deliberately moved away from.
 - **DEVLOG.md** — per-section implementation notes: what was followed verbatim, what was deviated from (every deviation was an explicit user decision — do not silently override).
 - **tests/BREAKING_CHANGES.md** — what breaks each test when production code changes, the symptom, and the fix.
 - **CLAUDE.md / QWEN.md** — pointers to this file, nothing more. They exist so a harness that looks for one filename finds it without searching; the content has one copy.
@@ -173,7 +174,9 @@ That qualifier is load-bearing, not pedantry (audit #128). This file used to say
 
 | File | Owns | Does NOT own |
 |---|---|---|
-| `config.py` | Plain values only | Any logic, any `if`/`else`, any decision-making function |
+| `config.yaml` | Plain values only, harness tier, ONE location | Anything derived; a user or project tier; an override variable |
+| `config_schema.py` | The schema, the env-override table, the loader, `HARNESS_AUTHORITY_KEYS` | Any first-party import — that is a cycle back through `core/config_loader.py` |
+| `config.py` | Publishing those values as plain mutable module globals | Any logic, any `if`/`else`, any `os.environ` read, any decision-making function |
 | `credentials.py` / `env_secrets.py` | LLM provider keys / misc tool keys | Each other's domain |
 | `database.py` | The engine/connection only | Table classes, CRUD, awareness of what data exists |
 | `storage.py` | Schema (table classes) + CRUD | Active conversation state, provider-specific shapes |
@@ -809,7 +812,7 @@ directions, because `get()` prefers real names: the alias would otherwise just s
 silently.
 
 **Thinking has two forms and one closing path** (§38, O6/O8). `tui.show_thinking` (default
-`True`, defaulted in `tui/app.py` beside `animations` rather than in `config.py`) renders
+`True`, defaulted in `tui/app.py` beside `animations` rather than in `config.yaml`) renders
 reasoning inline as a bar-prefixed block; off, it collapses to `ThinkingIndicator`, a `Static`
 under the transcript with an animated ellipsis — an ellipsis cannot animate inside a `RichLog`.
 Both end through `VenastineApp._end_thinking()`, which every non-thinking event calls, so a
@@ -1256,7 +1259,7 @@ Current Anthropic models reject `temperature`/`top_p`/`top_k` (`config.MODELS_RE
 **Diversity comes from different MODELS, not different sampling** (E1). `config.ENSEMBLE_MODELS` is a roster of `{provider_name, model}`; Pass 1 runs once per entry, each on its own provider/model. §11's stated reason is the argument — "a model checking its own output for errors shares that model's blind spots" is the identical objection to self-consistency, since N samples of one model agree most confidently on that model's systematic errors. §10's own revisit note proposed *prompt-framing* variation; that was rejected, because framings partition what each candidate looks for, so an omission becomes a systematic bias rather than noise.
 
 - **No new plumbing was needed.** `_run()` calls `api_initialization(provider_name)` itself and `effort_for` validates against the receiving model, so a heterogeneous roster is correct by construction — the same way §11 already routes 3a/3b/6c to `critic_provider`/`critic_model`.
-- **`config.py` only** (E2), following `CRITIC_MODEL`. `ensemble_models` is rejected from `settings.json` **by name**, R12's rule applied to a second kind of authority: turning the mode on can only spend more of the provider the user already chose, but a *roster* chooses providers, and a project's `settings.json` beats the user's.
+- **`config.yaml` only** (E2), following `critic_model`. `ensemble_models` is rejected from `settings.json` **by name**, R12's rule applied to a second kind of authority: turning the mode on can only spend more of the provider the user already chose, but a *roster* chooses providers, and a project's `settings.json` beats the user's.
 - **N is `len(ENSEMBLE_MODELS)`** (E3). `ensemble_n` survives as a vestigial parameter and settings key with a WARNING — removing the key would make every existing `settings.json` that sets it raise.
 - **Fewer than two DISTINCT `(provider, model)` pairs is refused** (E5). Repeating one entry N times recreates the original defect through the new config: no sampling variation remains to make the candidates differ, so they arrive near-identical and every claim scores maximal consistency. Counting entries instead of distinct pairs is a pinned mutation.
 - **A failed candidate is named, traced and skipped** (E7) — §20's containment rule. One survivor **degrades to the single-candidate path** (`ensemble_n=0`), which is the correct formula when there is nothing to compare against, not a degraded one; scoring one candidate as an ensemble of one would report unanimous corroboration from a single source.
@@ -1547,8 +1550,10 @@ parsed since §14 with no consumer at all — this is its first.
   `is_tool_allowed` reads `config.ToolPermissions()` directly and returns before any
   context or approval logic, D14 forbids widening, and `settings.json` has no
   `permissions` section. Its whole approval apparatus is unreachable by
-  construction, and so is `security/sandbox.py` plus `config.py`'s sandbox block,
-  until someone edits `config.py`.
+  construction, and so is `security/sandbox.py` plus `config.yaml`'s sandbox block,
+  until someone edits `config.yaml` — which is the harness's own file, has exactly
+  one location and no override variable, and is outside the workspace, so writing
+  it needs a human exactly as editing `config.py` did.
 
 ### §29 — the CLI shell (N1–N8)
 
@@ -1645,7 +1650,7 @@ And the four from §28 itself:
   host read of an arbitrary file. **Removing a character from that class re-opens it**,
   and `TestTheTwoTokenisersCannotDisagree` is what says so.
 - **The security posture is bound ONCE, at import, and frozen** (UN1). `security/posture.py`
-  reads `config` and the environment exactly once; `config.py` is where a human writes
+  reads `config` and the environment exactly once; `config.yaml` is where a human writes
   the value and is no longer what is read when a decision is made. Before §40 every
   flag was read live, and `tools/builtin/shell.py` said so -- "a test or a runtime edit
   can change it after this line has run" -- which describes a test seam and an attack
@@ -2059,9 +2064,10 @@ them without a second copy of one meaning under a second filename. `CONTEXT.md`
 is gone outright, not kept as a fallback. `doc_path()` is one join now.
 
 - **`write` and `read` are globally denied and cannot be re-enabled at runtime.**
-  Not a default: `is_tool_allowed()` reads `config.ToolPermissions()` directly,
-  `settings.json` has no `permissions` section (and `_KNOWN_SETTINGS` *raises* on
-  an unknown key), and D14 forbids a `ToolContext` widening anything — the global
+  Not a default: `is_tool_allowed()` reads `config.ToolPermissions()` directly —
+  whose field defaults are `config.yaml`'s `tool_permissions` booleans, read once at
+  import — `settings.json` has no `permissions` section (and `_KNOWN_SETTINGS`
+  *raises* on an unknown key), and D14 forbids a `ToolContext` widening anything — the global
   check runs first and unconditionally. `dispatch("write", …)` therefore raises
   `ToolCallDenied` **before** the `approval_callback` is consulted. §24's spec
   preferred routing through `write`; that was not available.
@@ -2166,7 +2172,7 @@ is gone outright, not kept as a fallback. `doc_path()` is one join now.
 
 **What a grant covers is `content_files()`, and that is now the root `AGENTS.md` plus everything under `.venastine/`** (WS9). The hub reaching a system prompt from outside the boundary would be D17's own stated threat arriving through the door WS8 opened, so the listing carries it — with PROJECT-relative paths, because `AGENTS.md` and `.venastine/AGENTS.md` are different files. `is_trusted()` asks that listing whether there is anything to trust rather than asking whether the directory exists, so a cloned repo shipping an `AGENTS.md` and no `.venastine/` now prompts, and a project with neither is silent as before. Every grant made before §44 re-prompts exactly once, because the set being consented to genuinely changed. `_content_hash()` iterates `content_files()` instead of walking a second time — the deeper fix this file used to list as still open, since two traversals that must agree by construction is how #18 drifted.
 
-Load-bearing: untrusted project content is **absent**, not loaded-and-disabled. Trust-store and user-config paths resolve at call time, not import time (tests redirect them). Provider/model precedence is CLI > `settings.json` > `config.py`, which only works because argparse defaults are `None` (`main.resolve_runtime_defaults`). Since §43 the TUI adds one tier of its own between the first two — a remembered `/model` pair, applied only when no flag spoke and only while `default_provider`/`default_model` still say what they said when it was chosen. The CLI is unchanged and does not read that store.
+Load-bearing: untrusted project content is **absent**, not loaded-and-disabled. Trust-store and user-config paths resolve at call time, not import time (tests redirect them). Provider/model precedence is CLI > `settings.json` > `config.yaml`, which only works because argparse defaults are `None` (`main.resolve_runtime_defaults`). Since §43 the TUI adds one tier of its own between the first two — a remembered `/model` pair, applied only when no flag spoke and only while `default_provider`/`default_model` still say what they said when it was chosen. The CLI is unchanged and does not read that store.
 
 **A symlinked PROJECT tier root is treated as absent (#18).** `os.walk` follows the path handed to it as `top` but not symlinked subdirectories, and the two sides of the trust boundary start from different places: `workspace_trust` walks from `.venastine`, so `skills/` is a subdirectory it will not descend, while `_md_files` walks from `.venastine/skills`, so it *is* the top and gets followed. Directory names never enter the hash either, so the link contributed nothing — not even its own name. Behind it, definitions loaded as project tier while being absent from the trust prompt's listing **and** from the hash, so their bodies could be rewritten freely after one grant with `is_trusted()` still returning `True`. The payload is instructions, not data: a project-tier body becomes system-prompt content. Git stores symlinks natively, so this arrives on clone — D17's own stated threat. The guard is scoped to the **project** tier deliberately; nothing hashes the harness or user directories, and symlinking `~/.config/venastine/` into a dotfiles repo is legitimate. The invariant to keep however this is later refined: **the loader must read no file the trust listing omits** (`test_workspace_trust.py`). The deeper fix that used to be recorded here — making `content_files()` and `_content_hash()` one traversal rather than two that must agree — was done by WS9 and is described four paragraphs above; the sentence claiming it was still open outlived it by a batch.
 

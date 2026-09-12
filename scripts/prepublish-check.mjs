@@ -92,9 +92,9 @@ const FORBIDDEN = [
  * from there. A published npm version can never be replaced, only
  * deprecated, so the reverse accident is the unrecoverable one.
  *
- * Two independent detectors, because either alone is one rename away from
+ * Three independent detectors, because any one alone is one rename away from
  * silence: a marker file the branch carries, and the config constants
- * themselves. The FORBIDDEN entry above catches the marker if it is ever
+ * themselves, in `config.py` and in `config.yaml`. The FORBIDDEN entry above catches the marker if it is ever
  * packed; this catches it in the working tree whether packed or not.
  */
 function unsafeBranchProblems() {
@@ -109,6 +109,20 @@ function unsafeBranchProblems() {
     }
   } catch {
     found.push('config.py could not be read to check for unsafe-mode flags');
+  }
+  // The values moved to config.yaml, so an unsafe-mode build declares them
+  // there now. All three detectors are kept: config.py is still where a human
+  // could add a constant back, and dropping any one is the rename away
+  // from silence this function's own comment warns about. `[\r\n]` rather
+  // than `^` with /m alone because these files are stored CRLF in the
+  // worktree, which has already produced one false GREEN in this repo.
+  try {
+    const yml = fs.readFileSync(path.join(ROOT, 'config.yaml'), 'utf8');
+    if (/(^|[\r\n])\s*unsafe_no_(approval|sandbox)\s*:/i.test(yml)) {
+      found.push('config.yaml declares unsafe_no_approval / unsafe_no_sandbox');
+    }
+  } catch {
+    found.push('config.yaml could not be read to check for unsafe-mode flags');
   }
   return found.map(
     (why) =>

@@ -1213,7 +1213,9 @@ class TestShellApprovalModeIsRejectedBySettingsJson:
             self._validate({"shell_approval_mode": "never"})
         message = str(exc.value)
         assert "deliberately not supported" in message
-        assert "SHELL_APPROVAL_MODE" in message
+        # Where the gate DOES live -- name and file together, so the message
+        # cannot keep pointing at a file the value has left.
+        assert "shell_approval_mode in config.yaml" in message
         assert "unknown key" not in message
 
     def test_every_value_is_rejected_the_same_way(self):

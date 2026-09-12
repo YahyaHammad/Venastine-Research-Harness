@@ -23,6 +23,21 @@ sqlmodel==0.0.39
 python-dotenv==1.2.2
 matplotlib==3.10.3
 pyyaml==6.0.3
+# config.yaml, via config_schema.py. TWO YAML PARSERS IN ONE TREE IS
+# DELIBERATE -- do not "unify" them. pyyaml above parses agent/skill
+# frontmatter, where nothing is ever written back and ~70 tests pin the
+# behaviour; ruamel is here for the half pyyaml cannot do, which is
+# preserving a hand-authored file's comments across a WRITE. Nothing writes
+# config.yaml yet (the import path uses typ="safe"), so this pin is bought
+# for the config editor that will.
+#
+# EXACT, for the reason `mcp` and `textual` are exact: an upper bound lets a
+# MINOR change behaviour underneath CI and makes CI's result depend on when
+# it ran. Two facts to re-measure when this pin moves: 0.18 REMOVED the
+# module-level `load()` / `safe_load()` functions, so the `YAML()` object API
+# is the only one, and `typ="safe"` is what refuses `!!python/...` tags in a
+# file that decides the tool permissions.
+ruamel.yaml==0.19.1
 # ROADMAP_v2 §16 TUI. EXACT, and this comment is textual's OWN record
 # rather than a line borrowed from D22's, which is about `mcp`. The
 # `>=1.0,<2.0` it replaces was written BEFORE 2.0 existed -- 1.0.0 shipped

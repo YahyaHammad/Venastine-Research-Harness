@@ -186,6 +186,9 @@ def assert_permissions_declared(tool_names: Iterable[str]) -> None:
         raise RuntimeError(
             "Tools are registered with no declared permission/approval "
             f"field, so they would be silently denied forever: {sorted(missing)}. "
-            "Add a bool field for each to BOTH config.ToolPermissions and "
-            "config.ToolApprovals (ROADMAP_v2 §15, D24)."
+            "Add a bool field for each to BOTH ToolPermissionsModel and "
+            "ToolApprovalsModel in config_schema.py, and a key for each to "
+            "BOTH tool_permissions and tool_approvals in config.yaml "
+            "(ROADMAP_v2 §15, D24). The field names live in Python so this "
+            "check stays a build-time one; the values live in the YAML."
         )

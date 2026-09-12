@@ -18,6 +18,7 @@ draw the line where the line actually is, and do not pretend to more.
 import ast
 import dataclasses
 import os
+import re
 
 import pytest
 
@@ -276,6 +277,156 @@ class TestNothingReachableChangesIt:
         assert _file_approval_check("write", {"path": target}) is True
         assert _file_approval_check("edit", {"path": target}) is True
 
+    def test_writing_config_yaml_still_needs_a_human(self):
+        """The sibling of the test above, and the reason it exists.
+
+        The posture VALUES live in config.yaml now; config.py reads them.
+        So the route a rogue agent would take is to write the YAML, and the
+        guarantee has to be the same one -- which it is, for the same
+        reason: the file is outside the workspace, so
+        `_file_approval_check` hard-returns True, and `write`/`edit` are
+        globally denied on top of that.
+
+        This test is the whole answer to "is moving the posture into a data
+        file a weakening?". If it ever goes red, it is."""
+        from tools.builtin.file_ops import _file_approval_check
+        target = os.path.join(ROOT, "config.yaml")
+        assert os.path.isfile(target), (
+            "config.yaml is gone, so the values this file is about have "
+            "moved again and this guard is pointed at nothing")
+        assert _file_approval_check("write", {"path": target}) is True
+        assert _file_approval_check("edit", {"path": target}) is True
+
+    def test_config_yaml_resolves_to_exactly_one_place(self):
+        """No tier, no override variable -- which is what keeps the by-name
+        settings.json rejections honest.
+
+        Those rejections (R12, E2, G7, SQ7) all argue from the same fact: a
+        project's settings.json beats the user's and arrives with a
+        directory you cloned. A config file with one location inside the
+        harness carries none of that. An `AGENT_CONFIG_FILE` would hand it
+        straight back, and it would read as the obvious sibling of
+        AGENT_ENV_FILE and APP_DB_PATH -- so the absence is pinned here
+        rather than left as a thing everyone remembers."""
+        import config_schema
+
+        assert config_schema.CONFIG_PATH == os.path.join(
+            ROOT, "config.yaml")
+        # The path must not move with the environment. Every variable the
+        # config layer knows about is set to a decoy at once; the resolved
+        # path may not change.
+        source = open(os.path.join(ROOT, "config_schema.py"),
+                      encoding="utf-8").read()
+        tree = ast.parse(source)
+        reads = set()
+
+        def _is_environ(node):
+            return (
+                isinstance(node, ast.Attribute)
+                and node.attr == "environ"
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "os"
+            )
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                func = node.func
+                name = getattr(func, "attr", None)
+                if name in ("get", "getenv") and node.args:
+                    first = node.args[0]
+                    if isinstance(first, ast.Constant) and isinstance(
+                            first.value, str):
+                        reads.add(first.value)
+                continue
+            if isinstance(node, ast.Compare):
+                if not any(isinstance(op, (ast.In, ast.NotIn))
+                           for op in node.ops):
+                    continue
+                parts = [node.left] + list(node.comparators)
+                if not any(_is_environ(part) for part in parts):
+                    continue
+                for part in parts:
+                    if isinstance(part, ast.Constant) and isinstance(
+                            part.value, str):
+                        reads.add(part.value)
+                continue
+            if isinstance(node, ast.Subscript):
+                if not _is_environ(node.value):
+                    continue
+                sl = node.slice
+                if isinstance(sl, ast.Constant) and isinstance(sl.value, str):
+                    reads.add(sl.value)
+        unexpected = reads - set(config_schema.HARNESS_ENV_VARS)
+        assert not unexpected, (
+            "config_schema reads environment variables that are not in "
+            f"HARNESS_ENV_VARS: {sorted(unexpected)}. If one of them "
+            "redirects CONFIG_PATH, the posture just became settable by "
+            "the environment.")
+
+    def test_the_authority_keys_name_every_unreachable_value(self):
+        """`HARNESS_AUTHORITY_KEYS` is the list a future config editor will
+        refuse to write, so it has to cover both families it claims to:
+        every field of the frozen posture, and every key settings.json
+        rejects by name.
+
+        The positive half is below it -- without one, an over-broad set
+        would satisfy this and mean nothing."""
+        import config_schema
+
+        keys = config_schema.HARNESS_AUTHORITY_KEYS
+        posture_fields = {"shell_approval_mode",
+                          "allow_insecure_sandbox_fallback",
+                          "auto_approve_sandbox_fallback",
+                          "redact_tool_outputs"}
+        by_name = {"ensemble_models", "critic_model", "embedder_model"}
+        assert posture_fields <= keys
+        assert by_name <= keys
+        assert {"tool_permissions", "tool_approvals"} <= keys
+        # Every name in the set is a real config.yaml key, so the list
+        # cannot protect something that does not exist.
+        fields = set(config_schema.HarnessConfig.model_fields)
+        assert keys <= fields, sorted(keys - fields)
+        # And it is not simply everything: ensemble_mode is a MODE, is
+        # persistable in settings.json today, and the worst it can do is
+        # spend more of a provider the user already chose.
+        assert "ensemble_mode" not in keys
+        assert "max_tokens" not in keys
+
+    def test_config_yaml_marks_every_authority_key_and_no_others(self):
+        """The comment a human reads and the set the code reads are two
+        copies of one list, so they are held against each other.
+
+        `config.yaml` marks these keys `AUTHORITY --` in the comment above
+        them, and that marker is the only warning anyone editing the file
+        by hand actually sees. `HARNESS_AUTHORITY_KEYS` is what a config
+        editor would refuse to write. Drift between them is silent in both
+        directions: an unmarked key reads as ordinary to a person, and an
+        unlisted one reads as ordinary to code."""
+        import config_schema
+
+        text = open(config_schema.CONFIG_PATH, encoding="utf-8").read()
+        lines = text.split("\n")
+        marked = set()
+        for index, line in enumerate(lines):
+            if not line.startswith("# AUTHORITY --"):
+                continue
+            # The key is the first top-level mapping key under the block.
+            for candidate in lines[index:]:
+                match = re.match(r"^([a-z_]+):", candidate)
+                if match:
+                    marked.add(match.group(1))
+                    break
+
+        assert marked, (
+            "no `AUTHORITY --` markers found in config.yaml, so this check "
+            "is asserting against nothing -- if the wording moved, point it "
+            "at the new one rather than deleting it")
+        assert marked == set(config_schema.HARNESS_AUTHORITY_KEYS), (
+            f"marked in config.yaml but not in HARNESS_AUTHORITY_KEYS: "
+            f"{sorted(marked - config_schema.HARNESS_AUTHORITY_KEYS)}; "
+            f"in the set but unmarked in the file: "
+            f"{sorted(config_schema.HARNESS_AUTHORITY_KEYS - marked)}")
+
     def test_the_publish_guard_is_wired_into_the_prepublish_check(self):
         """UN5. `scripts/prepublish-check.mjs` refuses to publish an
         unsafe-mode build, and it lives on `main` so it travels into the
@@ -303,9 +454,15 @@ class TestNothingReachableChangesIt:
         assert any("problems.push(...unsafeBranchProblems());" in line
                    for line in live), \
             "the guard is defined but never called, so it refuses nothing"
-        # Both detectors, because either alone is one rename from silence.
+        # Every detector, because any one alone is a rename from silence.
         assert "UNSAFE_BRANCH" in src
         assert "UNSAFE_NO_" in src
+        # The posture values live in config.yaml now, so an unsafe-mode
+        # build declares them there. The config.py detector above cannot
+        # see that file and stayed green through the whole migration.
+        assert "unsafe_no_" in src, \
+            "the guard does not look at config.yaml, where the posture is"
+        assert "config.yaml" in src
 
     def test_the_test_seams_are_not_called_by_production_code(self):
         """`override_for_tests` is a mutation seam inside a module whose

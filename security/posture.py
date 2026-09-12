@@ -28,9 +28,11 @@ WHAT THE GUARANTEE IS, AND IS NOT
 Stated precisely, because a half-understood control is worse than none
 (UN4). The posture CANNOT be changed by:
 
-  * any tool call -- nothing writes `config.py` without an approval
-    prompt, since it is outside the workspace and `_file_approval_check`
-    hard-returns True there;
+  * any tool call -- nothing writes `config.yaml`, where the values
+    live, or `config.py`, which reads them, without an approval prompt:
+    both are outside the workspace and `_file_approval_check`
+    hard-returns True there. `write` and `edit` are globally denied on
+    top of that;
   * `settings.json` at either tier -- the keys are rejected BY NAME, the
     way G7 rejects `shell_approval_mode`, because a project's settings
     beat the user's and arrive with a directory you cloned;
@@ -68,7 +70,10 @@ Never calling `apply_cli()` at all -- a library import, a bare test --
 leaves the config-derived default, which is the safe posture.
 
 This module imports `config` and the stdlib and nothing else, per
-ARCHITECTURE's rule for `security/`.
+ARCHITECTURE's rule for `security/`. Note that `config` is now a shim over
+`config.yaml` and so pulls in `ruamel.yaml` and `pydantic` transitively --
+the rule this sentence states is about what `security/` may NAME, and that
+is unchanged: `config` and the stdlib.
 """
 
 from __future__ import annotations

@@ -168,7 +168,7 @@ answers: `true`, `false` — meaning the run fetched this page and the quoted wo
 which is a fabricated citation — and `null`, meaning there was nothing to check against, which is
 not the same thing.
 
-**Cited papers can be scored on their own standing.** With `SCHOLAR_LOOKUP = True` in `config.py`,
+**Cited papers can be scored on their own standing.** With `scholar_lookup: true` in `config.yaml`,
 an arXiv or DOI URL is resolved against OpenAlex and scored on venue (peer-reviewed or preprint),
 citation standing, and author h-index. Citation standing is a percentile *within the paper's own
 field-and-year cohort*, measured by two counting queries rather than modelled — OpenAlex's own
@@ -207,7 +207,7 @@ than refusing to start the run — unlike the compaction knobs above, where an i
 model calls on every turn. An *unknown* key still raises, as everywhere else in `settings.json`.
 `critic_model` and `embedder_model` are rejected there by name: both name a provider this harness
 sends research content to, and a project's `settings.json` outranks your own — use `/critic` and
-`/embedder`, or `config.py`.
+`/embedder`, or `config.yaml`.
 
 ### A pass that answers the wrong shape is corrected, then it stops the run
 
@@ -236,7 +236,7 @@ where *nothing* matched is treated as a failure. Every number in `04_confidence.
 
 Set `CRITIC_MODEL` and passes 3a, 3b and 6c run on a *different* provider and model from the one that wrote the answer. A model checking its own output brings its own blind spots to the inspection.
 
-**Ensemble mode** extends the same idea to the answer itself. List `{provider_name, model}` pairs in `ENSEMBLE_MODELS` in `config.py` (a settings.json key is deliberately absent — choosing providers multiplies spend, so it stays in code you own) and Pass 1 runs once per entry, each candidate on its own provider and model. Fewer than two *distinct* pairs is refused: N copies of one model agree most confidently on that model's systematic errors, which is exactly where agreement has to mean something. Claims extracted from all candidates are pooled, and factual claims take a disagreement penalty of `0.15 × (1 − consistency)` before tiering — unanimity costs nothing, dissent demotes. A candidate that fails mid-run is named and skipped; if only one survives, the run degrades to the ordinary single-response path rather than scoring an "ensemble of one". Artifacts come out as `01_candidate_1.md`, `01_candidate_2.md`, … numbered to match each claim's `asserted_by_candidates` tags.
+**Ensemble mode** extends the same idea to the answer itself. List `{provider_name, model}` pairs under `ensemble_models` in `config.yaml` (a settings.json key is deliberately absent — choosing providers multiplies spend, so it stays in the harness's own file) and Pass 1 runs once per entry, each candidate on its own provider and model. Fewer than two *distinct* pairs is refused: N copies of one model agree most confidently on that model's systematic errors, which is exactly where agreement has to mean something. Claims extracted from all candidates are pooled, and factual claims take a disagreement penalty of `0.15 × (1 − consistency)` before tiering — unanimity costs nothing, dissent demotes. A candidate that fails mid-run is named and skipped; if only one survives, the run degrades to the ordinary single-response path rather than scoring an "ensemble of one". Artifacts come out as `01_candidate_1.md`, `01_candidate_2.md`, … numbered to match each claim's `asserted_by_candidates` tags.
 
 ### What you get out
 
@@ -251,7 +251,7 @@ Every run writes `output/<run_id>/`:
 03_completeness.json  pass_threads.json
 ```
 
-`sources/` holds what each cited page actually served: `index.json` lists every URL the run retrieved text from — with the tool, the timestamp, a content hash and the length — and one `<sha256>.txt` per document holds the text itself, redacted. That is what makes a similarity score checkable after the fact rather than a number you have to take on trust; set `PERSIST_SOURCE_TEXT = False` in `config.py` to keep the index and drop the text.
+`sources/` holds what each cited page actually served: `index.json` lists every URL the run retrieved text from — with the tool, the timestamp, a content hash and the length — and one `<sha256>.txt` per document holds the text itself, redacted. That is what makes a similarity score checkable after the fact rather than a number you have to take on trust; set `persist_source_text: false` in `config.yaml` to keep the index and drop the text.
 
 In ensemble mode the Pass-1 slot is `01_candidate_1.md`, `01_candidate_2.md`, … — one file per surviving candidate, numbered to match the trace and each claim's `asserted_by_candidates` tags, since no single candidate is "the" response the claims came from.
 
@@ -343,7 +343,7 @@ Every registered tool appears in that table, and a test asserts it (audit #125):
 
 ### `shell` is classified, not just approved
 
-`shell` ships **disabled** (`ToolPermissions.shell = False`) and cannot be enabled at runtime, so none of this applies to a default install. If you do enable it, the gate is `config.SHELL_APPROVAL_MODE`:
+`shell` ships **disabled** (`tool_permissions.shell: false` in `config.yaml`) and cannot be enabled at runtime, so none of this applies to a default install. If you do enable it, the gate is `shell_approval_mode` in the same file:
 
 | mode | behaviour |
 |---|---|
@@ -351,7 +351,7 @@ Every registered tool appears in that table, and a test asserts it (audit #125):
 | `tiered` | **shipped.** The classifier decides — see below |
 | `never` | nothing is ever asked about |
 
-`ToolApprovals.shell` is **not** the gate; it is the ratchet. It ships `False`, and setting it `True` forces `always` regardless of the mode. An agent's `approval_overrides` reaches the same place with the same one-way power: these can tighten and never loosen. An unknown mode string raises at startup rather than falling back to a default — one direction of that default asks about everything and the other about nothing, and a typo cannot pick.
+`tool_approvals.shell` is **not** the gate; it is the ratchet. It ships `false`, and setting it `true` forces `always` regardless of the mode. An agent's `approval_overrides` reaches the same place with the same one-way power: these can tighten and never loosen. An unknown mode string raises at startup rather than falling back to a default — one direction of that default asks about everything and the other about nothing, and a typo cannot pick.
 
 Under `tiered`, each command is classified **once** into what it can do, and the same answer is read by the approval check and by the sandbox that runs it:
 
@@ -387,13 +387,13 @@ is set to something weaker than the shipped default, the harness says so at laun
 
 **`never` is the old unbounded behaviour, kept on purpose.** In that mode `cat ~/.aws/credentials` runs on the host, unprompted, and its output goes into the model's context. It is reachable by writing the word `never` — which is the fix for [#157](https://github.com/YahyaHammad/Venastine-Research-Harness/issues/157): previously you reached it by switching off a field that read like "stop nagging me".
 
-`shell_approval_mode` is **rejected** in `.venastine/settings.json`, by name and with a reason. A project's settings beat your own, and a cloned repository must not be able to set this. Set it in `config.py`.
+`shell_approval_mode` is **rejected** in `.venastine/settings.json`, by name and with a reason. A project's settings beat your own, and a cloned repository must not be able to set this. Set it in `config.yaml`.
 
 If your workspace contains a `.venastine/` directory, it is bind-mounted **read-only** inside the container, so a sandboxed command cannot rewrite the context and MCP definitions that feed later prompts. This covers writes on the Docker path only — not reads, and not the subprocess fallback.
 
 **The workspace may not be the harness.** The container mounts your workspace read-write, and a sandboxed command with no network is auto-approved inside it — so a workspace pointing at the harness's own directory would be unattended write access to the code about to run next. `AGENT_WORKSPACE` is refused at startup, and by the sandbox, when it *is* or sits *inside* the harness install tree or `~/.config/venastine/`. The two artifact directories `workspace/` and `output/` stay usable, which is the shipped layout; everything else in the install tree is refused, including a module added in a later release — it is an allowlist, so it fails closed. When one of those trees is *nested inside* your workspace instead — a workspace set to your home directory, say — there is nothing to refuse, so it is bind-mounted read-only, along with `providers.json`, the conversation database and the log directory. The guard names the harness that is *running*, so pointing a globally-installed `venastine` at a development clone of its own source still works.
 
-**From approval to execution, one answer throughout.** The classification is computed once per call and the same profile is handed to both the approval check and the sandbox, so what was approved is what runs. Inert commands never touch Docker — they are plain subprocesses on the host. Anything else probes Docker once per call and shares the result between gate and runner: if Docker was up when the call was approved but down when it executes, and the only route left is the fallback, the call returns an error telling the model to retry rather than silently downgrading onto the host. With Docker unavailable and `ALLOW_INSECURE_SANDBOX_FALLBACK = True` in `config.py`, non-inert commands fall back to a weakly-isolated host subprocess — prompted per run unless `AUTO_APPROVE_SANDBOX_FALLBACK = True` opts that prompt away. Inside the container the workspace is mounted at `/workspace` and output comes back truncated at 50,000 characters (`MAX_READ_CHARS`); the container runs under a 60-second wall clock, 1024 MB of memory, a single CPU core and a 200-process cap, while the weak fallback enforces its own rlimits instead — 30 CPU-seconds and the same memory ceiling. Two environment knobs affect the mechanics: `AGENT_SHELL` overrides the detected host shell (bash on Linux/macOS, PowerShell on Windows), and `AGENT_SANDBOX_IMAGE` swaps the default `python:3.13-slim` image.
+**From approval to execution, one answer throughout.** The classification is computed once per call and the same profile is handed to both the approval check and the sandbox, so what was approved is what runs. Inert commands never touch Docker — they are plain subprocesses on the host. Anything else probes Docker once per call and shares the result between gate and runner: if Docker was up when the call was approved but down when it executes, and the only route left is the fallback, the call returns an error telling the model to retry rather than silently downgrading onto the host. With Docker unavailable and `allow_insecure_sandbox_fallback: true` in `config.yaml`, non-inert commands fall back to a weakly-isolated host subprocess — prompted per run unless `auto_approve_sandbox_fallback: true` opts that prompt away. Inside the container the workspace is mounted at `/workspace` and output comes back truncated at 50,000 characters (`max_read_chars`); the container runs under a 60-second wall clock, 1024 MB of memory, a single CPU core and a 200-process cap, while the weak fallback enforces its own rlimits instead — 30 CPU-seconds and the same memory ceiling. Two environment knobs affect the mechanics: `AGENT_SHELL` overrides the detected host shell (bash on Linux/macOS, PowerShell on Windows), and `AGENT_SANDBOX_IMAGE` swaps the default `python:3.13-slim` image.
 
 ### "Headless" means *unable to ask*, not "not a GUI"
 
@@ -471,7 +471,7 @@ Whichever you configure (`compaction.strategy` in settings.json), a span too lar
 
 `pin` keeps recent turns out of any summary (capped at half the compaction trigger per call — a pin is a permanent floor, so refusing beats trimming); `unpin` releases it again when pinned detail goes stale. `/compact` in the TUI triggers a compaction by hand. **When compaction runs depends on what the thread is**: a chat thread folds at a share of the model's context window (85% by default, so 850k on a 1M model and 170k on a 200k one); research passes and subagents compact only at a hard backstop just under that window, wherever they are resumed — spending a model call on a judgement nobody is watching is not worth it mid-run. The chat trigger used to be a flat 40k regardless of model, which meant a 1M-window thread was condensed at 4% of its window.
 
-The knobs, all under `compaction` in `settings.json`, each overriding a default in `config.py`:
+The knobs, all under `compaction` in `settings.json`, each overriding a default in `config.yaml`:
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -522,7 +522,7 @@ Eleven ship. Five are not spawnable, each because a real caller supplies somethi
 
 An agent can also name **which** agents it may spawn, with `spawn_targets`. `plan` is the shipped case: it may spawn `explore`, `review`, `writer` and `test`, and asking it for `build` or `general` is refused with a reason rather than quietly obeyed. That is the point of planning as its own turn — you read the plan and change your mind before anything is written. Say nothing and an agent may spawn anything spawnable, which is the default every definition had before the field existed; a list only ever narrows, and narrows again for anything it spawns in turn.
 
-`explore`, `review`, `build`, `test` and `writer` are **read-only or write-only by omission**: none of them lists `spawn_subagent`, `remember` or `write_project_doc`, so no configuration makes one reachable. `build` is the exception that proves the shape — it declares `write`/`edit` because implementing means writing, while the other four simply absent them. They all list tools (`read`, `shell`) which are [denied by default](#what-needs-approval-by-default) and cannot be enabled at runtime — so on a stock install `explore` works from `read_project_doc` and the three network tools, and all become code agents only where you have enabled file access in `config.py`. Approving a spawn of a leaf grants nothing standing: `shell` carries a per-call gate, so it is excluded from every grant path by name and each non-inert command still asks.
+`explore`, `review`, `build`, `test` and `writer` are **read-only or write-only by omission**: none of them lists `spawn_subagent`, `remember` or `write_project_doc`, so no configuration makes one reachable. `build` is the exception that proves the shape — it declares `write`/`edit` because implementing means writing, while the other four simply absent them. They all list tools (`read`, `shell`) which are [denied by default](#what-needs-approval-by-default) and cannot be enabled at runtime — so on a stock install `explore` works from `read_project_doc` and the three network tools, and all become code agents only where you have enabled file access in `config.yaml`. Approving a spawn of a leaf grants nothing standing: `shell` carries a per-call gate, so it is excluded from every grant path by name and each non-inert command still asks.
 
 Fourteen skills ship, under `security/`, `crypto/`, `math/`, `research/` and `software/` — methodologies for reviewing code, debugging, designing tests, designing experiments, statistical inference, reproducibility, evaluating sources, technical writing, numerical methods, formal specification, literature review, proof writing, cryptography verification and cybersecurity research.
 
@@ -625,7 +625,7 @@ Only `AGENTS.md` is written for you in full; the rest arrive as skeletons with r
 
 `/init --config` is the other half, and it is independent of the two above: it writes `.venastine/settings.json` and `.venastine/mcp.json`, and creates `.venastine/agents/` and `.venastine/skills/`. On its own it makes **no model call** and costs nothing — no document set, no question about which kind of project this is; combined (`/init --software --config`) it does both under one confirmation. An existing `settings.json` or `mcp.json` is never touched, per file, so a project with one and not the other gets the other. From the CLI it is `--init --project-config`.
 
-The settings file it writes is **every key with a shipped default, at that default** — because the file cannot explain itself. An unknown key raises at startup, so there is no comment syntax, no `$schema` line and no way to leave a key in the file but switched off; the scaffold is the schema. Six keys are deliberately left out, because something reads them by *presence* rather than by value, so writing their own default would decide rather than restate: `default_provider` and `default_model` (adding either discards a model you picked with `/model` in that project), `effort` (makes every launch probe the provider's effort table), `compaction.trigger_tokens` (disables the window-derived trigger, invisibly), `ensemble_mode` and `research.subagent_review` (both defer to `config.py` only while absent). Set any of those by hand and they work normally. Everything the scaffold does write changes nothing until you edit it — and because a project's `settings.json` beats yours by *presence*, the command tells you which of your own keys the new file has taken over before it asks to write it.
+The settings file it writes is **every key with a shipped default, at that default** — because the file cannot explain itself. An unknown key raises at startup, so there is no comment syntax, no `$schema` line and no way to leave a key in the file but switched off; the scaffold is the schema. Six keys are deliberately left out, because something reads them by *presence* rather than by value, so writing their own default would decide rather than restate: `default_provider` and `default_model` (adding either discards a model you picked with `/model` in that project), `effort` (makes every launch probe the provider's effort table), `compaction.trigger_tokens` (disables the window-derived trigger, invisibly), `ensemble_mode` and `research.subagent_review` (both defer to `config.yaml` only while absent). Set any of those by hand and they work normally. Everything the scaffold does write changes nothing until you edit it — and because a project's `settings.json` beats yours by *presence*, the command tells you which of your own keys the new file has taken over before it asks to write it.
 
 `/summary` distils this conversation and shows it — it does **not** shorten what the model sees; that is `/compact`. `/ref` picks another conversation, summarises it, and attaches that summary to this one as standing context: you choose what crosses between threads, so nothing read or argued in one conversation can steer another without your say-so. `/ref --list` and `/ref --clear` are the way back out, and the summaries are labelled so the model knows they are not part of this conversation. From the CLI the same two are launch flags: `--summary <thread>` and a repeatable `--ref <thread>`.
 
@@ -761,7 +761,7 @@ In the TUI stderr is detached before the screen is taken (anything written there
 | `trusted_projects.json` | workspace-trust store | user-level (`~/.config/venastine/`); written by the trust prompt or `--trust-project`, keyed to resolved path + content hash |
 | `AGENTS.md` | project context for the model | project root; covered by workspace trust |
 
-Precedence for provider and model is CLI flag > `settings.json` > `config.py`. Two different merge orders, deliberately:
+Precedence for provider and model is CLI flag > `settings.json` > `config.yaml`. Two different merge orders, deliberately:
 
 - **Inside `settings.json`, project beats user** — this is the one file where "more specific wins" holds, which is exactly why the two authority-bearing keys below are rejected there by name. Nested objects merge key-by-key across tiers.
 - **MCP servers, agents and skills run harness > user > project**, inverted from the usual rule, because there "more specific" means "arrived with a repository you cloned".
@@ -776,7 +776,7 @@ An unknown key raises at startup, naming the file and the key — a typo must ne
 | `default_model` | string | `claude-sonnet-5` | Used unless `--model` overrides |
 | `effort` | string | `"high"` | Reasoning effort for chat and research; `"auto"` clears even this. See [Reasoning effort](#reasoning-effort) |
 | `max_token_budget` | int \| null | null — uncapped | Per-run billed-spend ceiling. See [Budgets and stop conditions](#budgets-and-stop-conditions) |
-| `ensemble_mode` | bool | `false` | Master switch for ensemble Pass 1; the roster lives in `config.py` |
+| `ensemble_mode` | bool | `false` | Master switch for ensemble Pass 1; the roster lives in `config.yaml` |
 | `ensemble_n` | int | — | Accepted with a warning; vestigial — the count now derives from the roster |
 | `compaction` | object | — | Seven keys tabulated in [the compaction section](#long-conversations-condense-themselves) above |
 | `tui.theme` | string | — | One of the fourteen theme names; validated at use and falls back rather than blocking startup. Outranked by a theme you picked with `/theme` — until you change this value, which re-asserts it |
@@ -791,25 +791,25 @@ Two keys are rejected **by name** — well-formed shapes that will never load, b
 
 | Rejected key | Why |
 |---|---|
-| `shell_approval_mode` | Decides whether shell commands are asked about at all; set `SHELL_APPROVAL_MODE` in `config.py` instead |
+| `shell_approval_mode` | Decides whether shell commands are asked about at all; set `shell_approval_mode` in `config.yaml` instead |
 | `research.granted_tools` | A persisted grant list could only ever *remove* prompts — standing authorisation carried by any repo you clone. Grants are per-run flags precisely so they cannot be |
 
-#### `config.py`-only settings
+#### `config.yaml`-only settings
 
-Deliberately not settings.json keys: editing these means editing the file in your checkout, so nothing a cloned repository carries can reach them.
+Deliberately not settings.json keys: editing these means editing the harness's own file, which has exactly one location and no override variable, so nothing a cloned repository carries can reach them. `CONFIG_ARCHITECTURE.md` carries the argument for each.
 
-| Constant | Default | Controls |
+| Key | Default | Controls |
 |---|---|---|
-| `CRITIC_MODEL` | `None` | Routes passes 3a/3b/6c to a different `{provider_name, model}` |
-| `ENSEMBLE_MODELS` (with `ENSEMBLE_MODE`) | `None` (off) | Pass-1 roster; fewer than two distinct pairs is refused |
-| `DEFAULT_EFFORT` | `"high"` | Effort when neither flag nor settings speaks |
-| `MODEL_EFFORT_LEVELS` | see file | Per-model level lists for non-Anthropic providers; an entry mapped to an *empty* list means "takes no effort parameter" and drops the level cleanly |
-| `GOOGLE_THINKING_BUDGETS` | low→2,048 … max→dynamic | Google level→thinking-token map |
-| `MODELS_REJECTING_SAMPLING_PARAMS` | current Anthropic models | These 400 on temperature/top_p/top_k; such parameters are dropped with a WARNING rather than sent |
-| `MODEL_CONTEXT_WINDOWS` / `DEFAULT_CONTEXT_WINDOW` | 200k fallback | The **fallback** for the window, not the only source: Anthropic and Google report it on their model endpoints, and the OpenAI-compatible providers that carry it (Groq, Mistral, Together, OpenRouter) are read through one alias sniff. This table answers for the ones that report nothing (OpenAI, DeepSeek, Perplexity). Feeds the research-pass compaction backstop **and** the summarizer's one-call input budget; an unknown model warns once and assumes the default. Keys are stored normalized — no date suffix, no `vendor/` prefix |
-| `SHELL_APPROVAL_MODE` | `"tiered"` | The shell gate: `always` / `tiered` / `never`; a bad value raises at import. Rejected in settings.json by name, see above |
-| `NETWORK_ALLOWED_COMMANDS` | pip, curl, git, npm, … | Binaries granted network access inside the sandbox. Matched against **every** word of a command that needs a sandbox, so `cd x && pip install .` is recognised and asked about — and against the **first word only** of an inert one, which cannot chain, so `grep pip notes.txt` still runs unprompted |
-| `INERT_COMMANDS` | ls, cat, grep, wc, … | Read-only commands that run as plain host subprocesses, skipping Docker entirely |
+| `critic_model` | `null` | Routes passes 3a/3b/6c to a different `{provider_name, model}` |
+| `ensemble_models` (with `ensemble_mode`) | `null` (off) | Pass-1 roster; fewer than two distinct pairs is refused |
+| `default_effort` | `high` | Effort when neither flag nor settings speaks |
+| `model_effort_levels` | see file | Per-model level lists for non-Anthropic providers; an entry mapped to an *empty* list means "takes no effort parameter" and drops the level cleanly |
+| `google_thinking_budgets` | low→2,048 … max→dynamic | Google level→thinking-token map |
+| `models_rejecting_sampling_params` | current Anthropic models | These 400 on temperature/top_p/top_k; such parameters are dropped with a WARNING rather than sent |
+| `model_context_windows` / `default_context_window` | 256k fallback | The **fallback** for the window, not the only source: Anthropic and Google report it on their model endpoints, and the OpenAI-compatible providers that carry it (Groq, Mistral, Together, OpenRouter) are read through one alias sniff. This table answers for the ones that report nothing (OpenAI, DeepSeek, Perplexity). Feeds the research-pass compaction backstop **and** the summarizer's one-call input budget; an unknown model warns once and assumes the default. Keys are stored normalized — no date suffix, no `vendor/` prefix |
+| `shell_approval_mode` | `tiered` | The shell gate: `always` / `tiered` / `never`; a bad value raises at import. Rejected in settings.json by name, see above |
+| `network_allowed_commands` | pip, curl, git, npm, … | Binaries granted network access inside the sandbox. Matched against **every** word of a command that needs a sandbox, so `cd x && pip install .` is recognised and asked about — and against the **first word only** of an inert one, which cannot chain, so `grep pip notes.txt` still runs unprompted |
+| `inert_commands` | ls, cat, grep, wc, … | Read-only commands that run as plain host subprocesses, skipping Docker entirely |
 | Sandbox bounds | image `python:3.13-slim`; 60 s, 1024 MB, 30 CPU-s, 200 pids | `SANDBOX_DOCKER_IMAGE`, `SANDBOX_TIMEOUT_SECONDS`, `SANDBOX_MEMORY_MB`, `SANDBOX_CPU_SECONDS`, `SANDBOX_MAX_PIDS` |
 | `ALLOW_INSECURE_SANDBOX_FALLBACK` / `AUTO_APPROVE_SANDBOX_FALLBACK` | `False` / `False` | Enable, then de-prompt, the weak host-subprocess fallback |
 | `REDACT_TOOL_OUTPUTS` | `True` | Master switch for output redaction. Never affects input refusals, the depth-cap bound, or the log formatter's own guard |
@@ -874,11 +874,11 @@ worked in numbered fix batches — 32 so far, each recorded in `DEVLOG.md` and
 `tests/BREAKING_CHANGES.md` with what was measured and what would break the fix.
 
 **#157 — `shell`'s unbounded auto-approval — is closed** by batch 8 and ROADMAP_v2 §28; the
-classifier is described under *Security model* above. If you have a fork or a local `config.py`,
-note that `ToolApprovals.shell` now ships `False` and `SHELL_APPROVAL_MODE` is the gate — see
+classifier is described under *Security model* above. If you have a fork or a local config,
+note that `tool_approvals.shell` now ships `false` and `shell_approval_mode` is the gate — see
 `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 4308 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+Run the test suite with `pytest` — 4318 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
 ## Documentation
 

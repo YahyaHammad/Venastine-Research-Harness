@@ -32,7 +32,7 @@ from typing import Optional
 
 import yaml
 
-import config
+import config_schema
 from core import workspace_trust
 
 logger = logging.getLogger(__name__)
@@ -139,8 +139,8 @@ _KNOWN_TUI = {
     "todo_position": str,  # §23 slice 2: one of TODO_POSITIONS below
     # §38 (O6): render a turn's reasoning inline, or collapse it to an
     # animated one-line indicator. Defaults to True in tui/app.py rather
-    # than to a config.py constant, following `animations` above -- config.py
-    # holds no TUI values and is plain-values-only.
+    # than to a config.yaml key, following `animations` above -- config.yaml
+    # holds no TUI values.
     "show_thinking": bool,
 }
 
@@ -319,10 +319,11 @@ def _catalog_text(value) -> str:
     least visible -- so the shipped files are held to it too, and
     tests/test_catalog_text.py asserts they already comply.
     """
+    cap = config_schema.current().max_catalog_text_chars
     text = " ".join(str(value).split())
-    if len(text) <= config.MAX_CATALOG_TEXT_CHARS:
+    if len(text) <= cap:
         return text
-    return text[:config.MAX_CATALOG_TEXT_CHARS - 1].rstrip() + "\u2026"
+    return text[:cap - 1].rstrip() + "\u2026"
 
 
 def _parse_frontmatter(text: str) -> tuple[dict, str]:
@@ -457,7 +458,7 @@ def _parse_md_file(path: str, kind: str, tier: str, category: str = ""):
             logger.warning(
                 "Agent file %s: max_steps must be a positive integer, got "
                 "%r; defaulting to %s (config.MAX_ITERATIONS).",
-                path, max_steps, config.MAX_ITERATIONS)
+                path, max_steps, config_schema.current().max_iterations)
             max_steps = None
     # Booleans are VALIDATED, not coerced. bool("false") is True, so
     # `use_memory: "false"` would invert a deliberate opt-out with no
@@ -681,8 +682,8 @@ def _validate_settings(data, source: str) -> None:
                 f"settings.json at {source}: ensemble_models is deliberately "
                 f"not supported -- a roster chooses which providers N research "
                 f"passes call, and a project's settings.json beats the "
-                f"user's. Set config.ENSEMBLE_MODELS in config.py instead "
-                f"(same posture as CRITIC_MODEL).")
+                f"user's. Set ensemble_models in config.yaml instead "
+                f"(same posture as critic_model).")
         if key == "shell_approval_mode":
             # ROADMAP_v2 §28 (G7), and the third application of R12's rule.
             # Rejected BY NAME for the reason the other two are: the
@@ -703,7 +704,7 @@ def _validate_settings(data, source: str) -> None:
                 f"deliberately not supported -- it decides whether shell "
                 f"commands are approved at all, and a project's "
                 f"settings.json beats the user's. Set "
-                f"config.SHELL_APPROVAL_MODE in config.py instead (same "
+                f"shell_approval_mode in config.yaml instead (same "
                 f"posture as ensemble_models and research.granted_tools).")
         if key in ("critic_model", "embedder_model"):
             # ROADMAP_v2 §45 (SQ7), and the fourth application of R12's
@@ -724,7 +725,7 @@ def _validate_settings(data, source: str) -> None:
                 f"supported -- it names a provider this harness sends "
                 f"research content to, and a project's settings.json beats "
                 f"the user's. Use /critic or /embedder, or set "
-                f"config.CRITIC_MODEL / config.EMBEDDER_MODEL in config.py "
+                f"critic_model / embedder_model in config.yaml "
                 f"(same posture as ensemble_models).")
         if key not in _KNOWN_SETTINGS:
             raise ValueError(f"settings.json at {source}: unknown key {key!r}")
@@ -787,21 +788,33 @@ def _validate_settings(data, source: str) -> None:
 # bad value is a startup error, and called again per compaction so a
 # per-invocation `/compact --strength 4` composes with the same rules.
 
+# settings.json key -> the `config.yaml` field it defaults from.
+#
+# THESE ARE SCHEMA FIELD NAMES, NOT STRINGS LOOKED UP ON A MODULE. This map
+# used to hold `"COMPACTION_TRIGGER_TOKENS"` and friends and reach them with
+# `getattr(config, attr)` -- no default, so renaming or dropping any one of
+# the seven turned `shipped_defaults()` into an AttributeError that surfaced
+# through `initialize()` at startup, and nothing but this dictionary tied the
+# two names together. `config_schema.HarnessConfig` is the source of truth
+# now, so a missing field is a validation error naming the key and a renamed
+# one is an AttributeError here at the same moment either way -- but the names
+# below are checked against the model by
+# `tests/test_config_loader.py::test_every_compaction_default_names_a_schema_field`.
 _COMPACTION_DEFAULTS = {
-    "trigger_tokens": "COMPACTION_TRIGGER_TOKENS",
-    "warning_margin_tokens": "COMPACTION_WARNING_MARGIN_TOKENS",
-    "keep_recent_tokens": "COMPACTION_KEEP_RECENT_TOKENS",
-    "keep_recent_turns": "COMPACTION_KEEP_RECENT_TURNS",
-    "strength": "COMPACTION_STRENGTH",
-    "max_retries": "COMPACTION_MAX_RETRIES",
-    "strategy": "COMPACTION_STRATEGY",
+    "trigger_tokens": "compaction_trigger_tokens",
+    "warning_margin_tokens": "compaction_warning_margin_tokens",
+    "keep_recent_tokens": "compaction_keep_recent_tokens",
+    "keep_recent_turns": "compaction_keep_recent_turns",
+    "strength": "compaction_strength",
+    "max_retries": "compaction_max_retries",
+    "strategy": "compaction_strategy",
 }
 
 
 def shipped_defaults() -> dict:
     """Every nested knob at the value it takes when no settings.json
     speaks. `{section: {key: default}}`, sections only -- the top-level
-    scalars are plain `config.py` constants and need no accessor.
+    scalars are plain `config.yaml` keys and need no accessor.
 
     EXISTS SO A TEMPLATE CANNOT QUOTE A STALE DEFAULT (§24 I15).
     `/init --config` writes a settings.json of defaults, and a settings
@@ -814,9 +827,10 @@ def shipped_defaults() -> dict:
     resolved at call time, which is why this can sit beside the compaction
     map it also reads.
     """
+    cfg = config_schema.current()
     return {
-        "compaction": {key: getattr(config, attr)
-                       for key, attr in _COMPACTION_DEFAULTS.items()},
+        "compaction": {key: getattr(cfg, field)
+                       for key, field in _COMPACTION_DEFAULTS.items()},
         "confidence": _confidence_defaults(),
         "source_scoring": _source_scoring_defaults(),
     }
@@ -832,7 +846,7 @@ def effective_compaction(overrides: Optional[dict] = None,
     for provenance AND somewhere to show it. This sentence used to
     promise both (audit #91).
 
-    config.py default -> user settings.json -> trusted project
+    config.yaml default -> user settings.json -> trusted project
     settings.json -> `overrides` (a per-invocation `/compact --strength 4`,
     which applies to that one run and persists nothing). Nearest wins,
     which is the precedence the rest of the config system already uses.
@@ -851,21 +865,21 @@ def effective_compaction(overrides: Optional[dict] = None,
     compaction constantly, and every compaction is a real model call the
     user pays for.
     """
-    import config
+    cfg = config_schema.current()
 
     values = shipped_defaults()["compaction"]
     values.update(get_settings().get("compaction") or {})
     values.update({k: v for k, v in (overrides or {}).items() if v is not None})
 
     strength = values["strength"]
-    if strength not in config.COMPACTION_TARGET_RATIOS:
+    if strength not in cfg.compaction_target_ratios:
         raise ValueError(
             f"compaction.strength must be one of "
-            f"{sorted(config.COMPACTION_TARGET_RATIOS)}, got {strength!r}")
-    if values["strategy"] not in config.COMPACTION_STRATEGIES:
+            f"{sorted(cfg.compaction_target_ratios)}, got {strength!r}")
+    if values["strategy"] not in cfg.compaction_strategies:
         raise ValueError(
             f"compaction.strategy must be one of "
-            f"{', '.join(config.COMPACTION_STRATEGIES)}, "
+            f"{', '.join(cfg.compaction_strategies)}, "
             f"got {values['strategy']!r}")
     if values["trigger_tokens"] < 1:
         raise ValueError(
@@ -950,7 +964,7 @@ def user_settings() -> dict:
 
 def _load_merged_settings(project_path: str, trusted: bool) -> dict:
     """Resolution order: project (trusted) > user. Anything absent falls
-    through to config.py defaults at the consumer.
+    through to config.yaml defaults at the consumer.
 
     Nested sections (`_NESTED_SETTINGS`) merge one level deeper than the
     rest. Every other setting is a scalar, so whole-value replacement IS
@@ -1100,7 +1114,7 @@ def get_skills() -> dict:
 
 def get_settings() -> dict:
     if _state is None:
-        return {}  # pre-init consumers fall through to config.py defaults
+        return {}  # pre-init consumers fall through to config.yaml defaults
     return dict(_state["settings"])
 
 
@@ -1364,11 +1378,11 @@ def describe_project_content(project_path: str) -> str:
 
 # key -> (module attribute it defaults from, validator)
 #
-# The defaults live BESIDE THE FORMULA rather than in config.py: the
+# The defaults live BESIDE THE FORMULA rather than in config.yaml: the
 # tunable-weights block at the top of confidence_scoring.py documents what
 # each number does and why it is that number, and a second copy here is a
 # second thing to keep in step. Imported lazily inside the resolver, the
-# same shape effective_compaction uses for `config`.
+# same shape effective_compaction uses for `config_schema`.
 _UNIT = ("a number between 0 and 1", lambda v: isinstance(v, NUMBER_TYPES)
          and not isinstance(v, bool) and 0.0 <= v <= 1.0)
 _POSITIVE_INT = ("a positive whole number",
@@ -1420,23 +1434,23 @@ def _confidence_defaults() -> dict:
 
 
 def _source_scoring_defaults() -> dict:
-    import config
     from core.reasoning import source_scoring as ss
 
+    cfg = config_schema.current()
     return {
         "similarity_floor": None,     # None means "use the per-model table"
         "similarity_ceiling": None,
-        "authority_adjustment_cap": config.AUTHORITY_ADJUSTMENT_CAP,
+        "authority_adjustment_cap": cfg.authority_adjustment_cap,
         "window_chars": ss.WINDOW_CHARS,
         "max_windows": ss.MAX_WINDOWS,
         "claim_min_chars": ss.CLAIM_MIN_CHARS,
         "top_k": ss.TOP_K,
-        "venue_weight": config.SCHOLAR_VENUE_WEIGHT,
-        "citation_weight": config.SCHOLAR_CITATION_WEIGHT,
-        "author_weight": config.SCHOLAR_AUTHOR_WEIGHT,
-        "h_saturation": config.SCHOLAR_H_SATURATION,
-        "min_cohort_size": config.SCHOLAR_MIN_COHORT_SIZE,
-        "min_citation_age_days": config.SCHOLAR_MIN_CITATION_AGE_DAYS,
+        "venue_weight": cfg.scholar_venue_weight,
+        "citation_weight": cfg.scholar_citation_weight,
+        "author_weight": cfg.scholar_author_weight,
+        "h_saturation": cfg.scholar_h_saturation,
+        "min_cohort_size": cfg.scholar_min_cohort_size,
+        "min_citation_age_days": cfg.scholar_min_citation_age_days,
         "domain_overrides": {},
     }
 

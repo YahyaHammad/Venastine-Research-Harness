@@ -1078,3 +1078,191 @@ def test_settings_top_level_effort_wrong_type_raises(_redirect_roots):
     _write_settings(_redirect_roots["user"], {"effort": 3})
     with pytest.raises(ValueError, match="must be str"):
         config_loader.initialize(str(_redirect_roots["project"]))
+
+
+# ---------------------------------------------------------------------------
+# ---- The config.yaml coupling (batch 82) ----------------------------------
+# ---------------------------------------------------------------------------
+#
+# `shipped_defaults()` used to reach its seven compaction defaults with
+# `getattr(config, "COMPACTION_TRIGGER_TOKENS")` -- no default argument, so a
+# rename turned it into an AttributeError surfacing through `initialize()` at
+# startup, and nothing but that one dictionary tied the two names together.
+# The map holds SCHEMA FIELD NAMES now, which is checkable, so it is checked.
+
+
+def test_every_compaction_default_names_a_schema_field():
+    """The map is still stringly-typed; it is just typed against something
+    that can answer. Without this, a renamed field is a startup crash for
+    whoever launches next rather than a red test now."""
+    import config_schema
+
+    fields = set(config_schema.HarnessConfig.model_fields)
+    unknown = {key: field
+               for key, field in config_loader._COMPACTION_DEFAULTS.items()
+               if field not in fields}
+    assert not unknown, (
+        f"_COMPACTION_DEFAULTS names config.yaml fields that do not exist: "
+        f"{unknown}. shipped_defaults() raises AttributeError on each, which "
+        f"reaches the user as a failed startup.")
+
+
+def test_the_shipped_compaction_defaults_come_from_the_yaml():
+    """The positive half. Without it the check above passes on an empty map,
+    and `shipped_defaults()` could be returning anything."""
+    import config_schema
+
+    cfg = config_schema.current()
+    shipped = config_loader.shipped_defaults()["compaction"]
+    assert set(shipped) == set(config_loader._COMPACTION_DEFAULTS)
+    for key, field in config_loader._COMPACTION_DEFAULTS.items():
+        assert shipped[key] == getattr(cfg, field)
+
+
+def test_the_shipped_config_yaml_covers_the_whole_schema():
+    """Every schema field has a key in the shipped file, and the file has no
+    key the schema does not know.
+
+    Both directions are already enforced at import -- fields are required and
+    unknown keys are forbidden -- so this looks redundant and is not: it names
+    the two failures separately and reports EVERY missing key at once, where
+    an import error is one traceback at whatever moment someone next starts
+    the harness."""
+    import config_schema
+
+    document = config_schema.read_document()
+    fields = set(config_schema.HarnessConfig.model_fields)
+    keys = set(document)
+    assert not fields - keys, (
+        f"config.yaml is missing keys the schema requires: "
+        f"{sorted(fields - keys)}")
+    assert not keys - fields, (
+        f"config.yaml carries keys the schema does not know: "
+        f"{sorted(keys - fields)}")
+    # The two derived values must NOT be in the file -- they are computed from
+    # the environment and a key would change what they mean.
+    assert not keys & {"output_dir", "workspace_dir_explicit"}
+    for name in config_schema.DERIVED_VALUES:
+        assert name.lower() not in keys
+
+
+def test_the_two_permission_tables_declare_the_same_tools():
+    """D24's invariant, checked against the SHIPPED file rather than against
+    the registry, so a key added to one table and forgotten in the other is
+    caught without importing the tool layer."""
+    import config_schema
+
+    document = config_schema.read_document()
+    permissions = set(document["tool_permissions"])
+    approvals = set(document["tool_approvals"])
+    assert permissions == approvals, (
+        f"only in tool_permissions: {sorted(permissions - approvals)}; "
+        f"only in tool_approvals: {sorted(approvals - permissions)}")
+    assert permissions == set(config_schema.ToolPermissionsModel.model_fields)
+
+
+def test_the_environment_reaches_the_model_and_not_only_the_globals(monkeypatch):
+    """`config_schema.current()` and `config.<NAME>` must agree.
+
+    The environment is folded into the raw document BEFORE validation, so
+    there is one model with the overrides already in it. Applied afterwards
+    instead, an override would live only in the namespace `config.py`
+    publishes -- and `core/config_loader.py` reads five values off
+    `current()`, so the first override added to a key it happens to read
+    would diverge silently.
+
+    Written against a REBUILT model rather than the imported one, because
+    `config.py` bound its globals at import and nothing re-reads the file in
+    a live process (UN1). That is the property under test on the other side:
+    `posture` relies on it.
+    """
+    import config
+    import config_schema
+
+    monkeypatch.setenv("AGENT_MODEL", "a-model-nothing-ships")
+    monkeypatch.setenv("APP_DB_PATH", "somewhere-else.db")
+    rebuilt = config_schema.load(force=True)
+    try:
+        assert rebuilt.model_name == "a-model-nothing-ships"
+        assert rebuilt.db_path == "somewhere-else.db"
+        namespace = config_schema.as_module_namespace(rebuilt)
+        for name in config_schema.ENV_OVERRIDES:
+            assert namespace[name] == getattr(rebuilt, name.lower()), name
+        # And the live module is UNMOVED, which is the half that matters:
+        # setting the variable after import changes nothing in this process.
+        assert config.MODEL_NAME != "a-model-nothing-ships"
+    finally:
+        monkeypatch.undo()
+        config_schema.load(force=True)
+
+
+def test_re_importing_config_re_reads_the_file(tmp_path):
+    """Popping `config` out of `sys.modules` under a changed environment
+    must produce a `config` that sees the change.
+
+    NOT a hypothetical. `tests/test_storage_e2e.py`'s `real_storage` fixture
+    pops `sqlmodel`, `config`, `database` and `storage`, sets `APP_DB_PATH`
+    to a throwaway file, and imports them again to get real SQLite instead of
+    the root conftest's fake. `config_schema` is not in that list -- the
+    fixture predates it -- so a cached model that outlived the re-import
+    handed the fresh `config` the PREVIOUS `db_path` and pointed the engine
+    at the developer's own `app.db`. It showed up as
+    `test_a_migrated_column_matches_the_fresh_schema_exactly` comparing a
+    migrated column against a database full of migrations.
+
+    `config.py` passes `force=True` for this reason. Run in a SUBPROCESS
+    because the thing under test is module-table surgery, and doing it in
+    this process would hand every later test a `config` this one imported.
+    """
+    import os
+    import subprocess
+    import sys
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    target = tmp_path / "re-imported.db"
+    program = (
+        "import os, sys\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "import config\n"
+        "first = config.DB_PATH\n"
+        "for name in ('sqlmodel', 'config', 'database', 'storage'):\n"
+        "    sys.modules.pop(name, None)\n"
+        "os.environ['APP_DB_PATH'] = sys.argv[2]\n"
+        "import config as fresh\n"
+        "import config_schema\n"
+        "print(first)\n"
+        "print(fresh.DB_PATH)\n"
+        "print(config_schema.current().db_path)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", program, root, str(target)],
+        capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr[-2000:]
+    first, reimported, from_schema = result.stdout.split()[:3]
+
+    assert first != str(target), (
+        "the first import already saw the redirected path, so this test "
+        "cannot tell a re-read from a cache hit")
+    assert reimported == str(target), (
+        f"a re-imported config kept the old db_path ({reimported!r}); "
+        f"config_schema's cache outlived the re-import")
+    assert from_schema == str(target), (
+        f"config_schema.current() says {from_schema!r} while the config "
+        f"module says {reimported!r} -- the loader and the module disagree")
+
+
+def test_a_duplicated_key_in_config_yaml_is_a_startup_error(tmp_path):
+    """A second `model_name` must not silently win.
+
+    `ruamel.yaml` with `typ=\"safe\"` raises `DuplicateKeyError`, which
+    `config_schema.read_document()` wraps as `ValueError` naming the file.
+    Without that, YAML's last-one-wins would let a duplicated
+    `shell_approval_mode` decide the posture by position. Checked by hand
+    in batch 82; pinned here so a parser change cannot go quiet.
+    """
+    import config_schema
+
+    dup = tmp_path / "dup.yaml"
+    dup.write_text("model_name: a\nmodel_name: b\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="could not be read"):
+        config_schema.read_document(str(dup))
