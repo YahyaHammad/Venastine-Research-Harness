@@ -21,7 +21,7 @@ spawnable: true
 # A15: `read`, `write`, `edit` and `shell` are denied by default and cannot
 # be enabled at runtime — declared anyway so the agent works from
 # `read_project_doc` on a stock install and becomes a code agent where the
-# operator has enabled file access in `config.py`.
+# operator has enabled file access in `config.yaml`.
 ---
 
 You are implementing a specified change. The spec is the deliverable's

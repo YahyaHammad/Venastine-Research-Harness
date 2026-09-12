@@ -58,6 +58,7 @@ from pydantic import (
     StrictBool,
     StrictInt,
     ValidationError,
+    model_validator,
 )
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
@@ -357,13 +358,42 @@ class HarnessConfig(_Model):
     tool_permissions: ToolPermissionsModel
     tool_approvals: ToolApprovalsModel
 
+    @model_validator(mode="after")
+    def _check_cross_field_defaults(self) -> "HarnessConfig":
+        """Fail fast on a harness default that can never work.
+
+        `compaction_strength` must be a key of `compaction_target_ratios`,
+        and `default_effort` must be `None` or a member of
+        `default_effort_levels` -- both from the SAME file, so a custom
+        level and its roster move together. Without this a typo boots and
+        fails late: strength only in `effective_compaction()`, effort only
+        at the first `effort_for()` call.
+
+        Runtime customisation is unaffected: `/effort` and
+        `/compact --strength` go through `effort_for()` /
+        `effective_compaction()`, not the schema, so per-model and
+        per-invocation levels keep working.
+        """
+        if self.compaction_strength not in self.compaction_target_ratios:
+            raise ValueError(
+                f"compaction_strength {self.compaction_strength!r} must be "
+                f"one of {sorted(self.compaction_target_ratios)} "
+                f"(keys of compaction_target_ratios)")
+        if (self.default_effort is not None
+                and self.default_effort not in self.default_effort_levels):
+            raise ValueError(
+                f"default_effort {self.default_effort!r} must be null or one "
+                f"of {self.default_effort_levels} "
+                f"(members of default_effort_levels)")
+        return self
+
 
 # ---------------------------------------------------------------------------
 # ---- Environment overrides ------------------------------------------------
 # ---------------------------------------------------------------------------
 #
 # `config.yaml` holds the static default; the variable wins when it is set.
-# Applied AFTER validation, once, inside `load()` -- never at call time, for
+# Applied BEFORE validation, once, inside `load()` -- never at call time, for
 # the reason rule 2 in this module's docstring gives.
 #
 # A declared table rather than five hand-written expressions so the set is
@@ -577,17 +607,20 @@ def load(path: Optional[str] = None, force: bool = False) -> HarnessConfig:
     `config` module always see the same document.
 
     `path` validates a candidate file WITHOUT touching the cache -- that is
-    for a future config editor. Nothing in a live process re-reads on its
-    own, because a value that could change mid-process is the mutation
-    surface `security/posture.py` exists to close.
+    the seam a future restart-required config editor uses: validate the
+    edited document first, then require a restart to apply it. Nothing in a
+    live process re-reads on its own, because a value that could change
+    mid-process is the mutation surface `security/posture.py` exists to
+    close (UN1/UN2). `force` only re-reads the live document; it never
+    promotes a candidate into the cache.
     """
     global _cached
-    if _cached is None or force or path is not None:
-        cfg = validate(_overlay_env(read_document(path)),
-                       source=path or CONFIG_PATH)
-        if path is not None and not force:
-            return cfg
-        _cached = cfg
+    if path is not None:
+        return validate(_overlay_env(read_document(path)),
+                        source=path)
+    if _cached is None or force:
+        _cached = validate(_overlay_env(read_document(None)),
+                           source=CONFIG_PATH)
     return _cached
 
 

@@ -810,24 +810,24 @@ Deliberately not settings.json keys: editing these means editing the harness's o
 | `shell_approval_mode` | `tiered` | The shell gate: `always` / `tiered` / `never`; a bad value raises at import. Rejected in settings.json by name, see above |
 | `network_allowed_commands` | pip, curl, git, npm, … | Binaries granted network access inside the sandbox. Matched against **every** word of a command that needs a sandbox, so `cd x && pip install .` is recognised and asked about — and against the **first word only** of an inert one, which cannot chain, so `grep pip notes.txt` still runs unprompted |
 | `inert_commands` | ls, cat, grep, wc, … | Read-only commands that run as plain host subprocesses, skipping Docker entirely |
-| Sandbox bounds | image `python:3.13-slim`; 60 s, 1024 MB, 30 CPU-s, 200 pids | `SANDBOX_DOCKER_IMAGE`, `SANDBOX_TIMEOUT_SECONDS`, `SANDBOX_MEMORY_MB`, `SANDBOX_CPU_SECONDS`, `SANDBOX_MAX_PIDS` |
-| `ALLOW_INSECURE_SANDBOX_FALLBACK` / `AUTO_APPROVE_SANDBOX_FALLBACK` | `False` / `False` | Enable, then de-prompt, the weak host-subprocess fallback |
-| `REDACT_TOOL_OUTPUTS` | `True` | Master switch for output redaction. Never affects input refusals, the depth-cap bound, or the log formatter's own guard |
-| `TOOL_COMPUTE_TIMEOUT_S` | 15 | Wall clock per maths-tool subprocess |
-| `MAX_GRANTED_TOOL_CALLS` | 150 | Pre-granted calls per research run before it must ask again |
-| `ATTENDED_APPROVAL_TIMEOUT_S` | 600 | Attended prompt deadline; expiry denies that call while the run continues |
-| `SUBAGENT_REVIEW` | `False` | Shipped default for the post-pipeline review |
-| `MAX_REVIEW_FINDINGS` / `MAX_REVIEW_REFINEMENTS` | 25 / 3 | Consent-fatigue caps on the review stage |
-| `MAX_PIPELINE_RETRIES` / `MAX_JSON_RETRIES` | 2 / 2 | Revise/re-validate rounds per claim; corrective attempts per malformed pass payload |
-| `MAX_ITERATIONS` | 50 | Step ceiling for a turn or pass absent an agent's own `max_steps` |
-| `SUBAGENT_MAX_DEPTH` | 2 | `spawn_subagent` nesting limit |
-| `SUBAGENT_MAX_PARALLEL` | 3 | How many subagents of one model response run at once; 1 makes them sequential again |
-| `PIN_MAX_TRIGGER_FRACTION` | 0.5 | Largest share of the trigger one pin may protect |
-| `MAX_INJECTED_MEMORIES` / `MAX_INJECTED_REFS` / `MAX_TODO_ITEMS` | 50 / 3 / 50 | Prompt-injection caps; refs and todos refuse past the cap rather than trimming silently |
-| `SUMMARY_TARGET_CHARS` | 2000 | Size cap on whole-thread summaries injected via `/ref` |
-| `MAX_CATALOG_TEXT_CHARS` | 300 | Cap on an agent/skill `name` + `description` entering system prompts |
-| `INIT_READ_CHARS` / `INIT_MAX_STEPS` | 20,000 / 12 | `/init` per-read volume; step-ceiling fallback (the initializer agent's own frontmatter sets 12, which wins) |
-| `TEARDOWN_BUDGET_S` | 10 | Shared wall clock for MCP shutdown; stragglers are named in a WARNING |
+| Sandbox bounds | image `python:3.13-slim`; 60 s, 1024 MB, 30 CPU-s, 200 pids | `sandbox_docker_image`, `sandbox_timeout_seconds`, `sandbox_memory_mb`, `sandbox_cpu_seconds`, `sandbox_max_pids` |
+| `allow_insecure_sandbox_fallback` / `auto_approve_sandbox_fallback` | `false` / `false` | Enable, then de-prompt, the weak host-subprocess fallback |
+| `redact_tool_outputs` | `true` | Master switch for output redaction. Never affects input refusals, the depth-cap bound, or the log formatter's own guard |
+| `tool_compute_timeout_s` | 20 | Wall clock per maths-tool subprocess |
+| `max_granted_tool_calls` | 150 | Pre-granted calls per research run before it must ask again |
+| `attended_approval_timeout_s` | 600 | Attended prompt deadline; expiry denies that call while the run continues |
+| `subagent_review` | `false` | Shipped default for the post-pipeline review |
+| `max_review_findings` / `max_review_refinements` | 25 / 3 | Consent-fatigue caps on the review stage |
+| `max_pipeline_retries` / `max_json_retries` | 2 / 2 | Revise/re-validate rounds per claim; corrective attempts per malformed pass payload |
+| `max_iterations` | 50 | Step ceiling for a turn or pass absent an agent's own `max_steps` |
+| `subagent_max_depth` | 2 | `spawn_subagent` nesting limit |
+| `subagent_max_parallel` | 3 | How many subagents of one model response run at once; 1 makes them sequential again |
+| `pin_max_trigger_fraction` | 0.5 | Largest share of the trigger one pin may protect |
+| `max_injected_memories` / `max_injected_refs` / `max_todo_items` | 50 / 3 / 50 | Prompt-injection caps; refs and todos refuse past the cap rather than trimming silently |
+| `summary_target_chars` | 2000 | Size cap on whole-thread summaries injected via `/ref` |
+| `max_catalog_text_chars` | 300 | Cap on an agent/skill `name` + `description` entering system prompts |
+| `init_read_chars` / `init_max_steps` | 20,000 / 12 | `/init` per-read volume; step-ceiling fallback (the initializer agent's own frontmatter sets 12, which wins) |
+| `teardown_budget_s` | 10 | Shared wall clock for MCP shutdown; stragglers are named in a WARNING |
 
 #### Environment variables
 

@@ -18,7 +18,7 @@ spawnable: true
 # spawning discipline is taught once rather than repeated in every leaf.
 # A15: `read` and `shell` are denied by default — declared anyway so the
 # agent works from `read_project_doc` on a stock install and runs commands
-# where the operator has enabled them in `config.py`. No `write`/`edit` by
+# where the operator has enabled them in `config.yaml`. No `write`/`edit` by
 # omission: this agent verifies, it never fixes — the separation `review`
 # keeps from the work it judges.
 ---

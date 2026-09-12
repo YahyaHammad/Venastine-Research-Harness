@@ -646,3 +646,28 @@ ROADMAP row and `tests/BREAKING_CHANGES.md`'s "FOURTH instance" move
 together, or the next fix creates the next finding). The tier pin in
 `tests/test_docs_consistency.py` waits on the answer, which is an owner
 call about what a tier is, not a measurement.
+
+## 20. Restart-required config editor (open, deferred 2026-09-12)
+
+`config_schema.load(path)` now never touches the live cache -- `path`
+validates a candidate, `force` only re-reads the live document -- which is
+the seam a future TUI `/config` editor uses. Not built: editing YAML in the
+TUI, validating via the candidate path, then requiring a restart to apply
+(UN1/UN2: posture is frozen at import, so live reload would need a re-freeze
+protocol for `HARNESS_AUTHORITY_KEYS`, in-flight pipeline/pass handling, and
+cache clears for `effort_levels`/`context_window`). Owner chose restart-
+required over immediate-apply; the command itself is future work.
+
+## 21. L4 broad docs sweep remainder (open, deferred 2026-09-12)
+
+Remediation-only done: agent frontmatter (`build.md`/`test.md`), `SECURITY.md`
+path example, `README.md` config.yaml-only table keys to lowercase (plus
+`tool_compute_timeout_s` 15 -> 20 to match `config.yaml`), and the
+`BREAKING_CHANGES.md` flip row to `config.yaml`. Left untouched by design:
+runtime `config.UPPER` references in code context (`agent.max_steps or
+config.MAX_ITERATIONS`, `config.ToolPermissions()`, `config.MODEL_CONTEXT_
+WINDOWS.get()`, etc.) which remain correct via the shim, and historical
+`ROADMAP.md`/`ROADMAP_v2.md`/`DEVLOG.md` prose recording what was true then.
+A literal every-occurrence rewrite would make correct docs incorrect and
+rewrite locked history (D-numbers stable, ARCH §4.1 locked, `test_every_
+decision_id_cited_in_production_code_resolves`, README approval-table check).
