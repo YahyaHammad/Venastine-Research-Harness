@@ -740,14 +740,16 @@ def _make_dataclass(name: str, model: BaseModel) -> type:
     """
     fields = [(field, bool, dataclasses.field(default=getattr(model, field)))
               for field in type(model).model_fields]
-    # `module=__name__` plus the binding below is what makes these PICKLABLE.
-    # `make_dataclass` sets `__module__` from the calling frame either way, so
-    # pickle looks the name up in this module -- and found nothing, because
-    # the class was only ever bound on `config`. The original
-    # `@dataclass class ToolPermissions` in config.py pickled fine, so this
-    # was a silent shape regression that nothing would notice until one of
-    # these crossed a process boundary.
-    return dataclasses.make_dataclass(name, fields, module=__name__)
+    # The binding below (`ToolPermissions` / `ToolApprovals` globals plus the
+    # idempotent factories) is what makes these PICKLABLE: `make_dataclass`
+    # sets `__module__` from the calling frame, which is this module either
+    # way, so pickle looks the name up here -- and used to find nothing,
+    # because the class was only ever bound on `config`. No `module=`
+    # argument: that kwarg needs Python 3.12+ and the floor is 3.11. The
+    # original `@dataclass class ToolPermissions` in config.py pickled fine,
+    # so this was a silent shape regression that nothing would notice until
+    # one of these crossed a process boundary.
+    return dataclasses.make_dataclass(name, fields)
 
 
 _cached: Optional[HarnessConfig] = None
