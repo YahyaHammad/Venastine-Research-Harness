@@ -49,6 +49,7 @@ from tui.app import (
     LoopEventMessage,
     VenastineApp,
     _cmd_config,
+    _config_rows,
 )
 from tui.commands import registry as commands
 from tui.screens import (
@@ -7751,6 +7752,53 @@ class TestTheConfigCommandReports:
         app = _bare_app()
         _cmd_config(app, "zzz")
         assert "browse" in " ".join(app._transcript.errors)
+
+
+class TestWhatIsPendingIsVisible:
+    """Batch 85. A write moves the file and leaves the session running the
+    old value until a restart, so `/config` has to be able to say which of
+    the two it is showing."""
+
+    def _row(self, **kwargs):
+        defaults = dict(name="max_tokens", kind="scalar",
+                        values="whole number, above 0",
+                        in_file=18000, in_session=16000, authority=False)
+        defaults.update(kwargs)
+        return config_edit.KeyRow(**defaults)
+
+    def test_a_bare_config_lists_the_pending_changes(self, mocker):
+        mocker.patch("config_edit.pending_changes", return_value=[
+            self._row(),
+            self._row(name="tool_approvals.read", values="true | false",
+                      in_file=True, in_session=False, authority=True)])
+        app = _bare_app()
+        _cmd_config(app, "")
+        written = app._transcript.systems
+        assert any("2 change(s) written" in line for line in written)
+        assert "  max_tokens: 16000 → 18000" in written
+        assert "  tool_approvals.read: false → true" in written
+
+    def test_a_bare_config_is_silent_when_nothing_is_pending(self, mocker):
+        mocker.patch("config_edit.pending_changes", return_value=[])
+        app = _bare_app()
+        _cmd_config(app, "")
+        assert not any("pending" in line or "waiting" in line
+                       for line in app._transcript.systems)
+
+    def test_the_value_stage_offers_what_the_file_says(self, mocker):
+        """Not what the session is running. Offering `replaces 16000` over a
+        file that already says 18000 is the drift this batch is about."""
+        mocker.patch("config_edit.find", return_value=self._row())
+        rows = _config_rows("max_tokens ")
+        assert [row.name for row in rows] == ["config max_tokens 18000"]
+        assert rows[0].summary == "what the file says"
+
+    def test_a_pending_row_says_so_in_the_panel(self, mocker):
+        """One word, because the panel gives an entry two rendered rows and
+        drops the rest. The sentence is `explain()`'s job."""
+        row = self._row()
+        assert "now 18000" in row.summary
+        assert "pending restart" in row.summary
 
 
 class TestWritingThroughTheCommand:

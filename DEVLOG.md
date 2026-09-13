@@ -13133,3 +13133,82 @@ over it without moving a line.
 - `config.yaml`, `config_schema.py`, `CONFIG_ARCHITECTURE.md`,
   `ARCHITECTURE.md`, `AGENTS.md`, `README.md`, `TECHNICAL_DEBT.md`,
   `package.json`, `tests/BREAKING_CHANGES.md`.
+
+
+---
+
+## Batch 85 -- `/config` was reporting the value it started with (2026-09-13)
+
+One question about batch 84 -- whether several values can be changed in a row
+without restarting between them -- turned up a defect in exactly that flow.
+
+The answer to the question is yes: `propose()` re-reads `config.yaml` every
+time, so change five sits on top of one through four and the validation runs
+against the accumulated document. Measured end to end: three commands, two
+keys, two changed lines, every comment intact, and the result still validates
+as a whole.
+
+**What was wrong was everything printed alongside it.** `catalogue()` read
+`config_schema.current()`, the model bound at import, and never re-read the
+file. So after the first write to a key in a session the panel still said
+`now 16000` over a file that said 18000, the confirmation line on the second
+change reported `(was 16000)`, the authority modal's `now:` line was the
+launch value, and the value offered for a free-form key was the launch value
+too. `Proposal.before` came from the snapshot while `Proposal.text` was built
+from the file, which is how the two got out of step -- and it read as correct
+for as long as nobody changed two values in one sitting.
+
+### Two values, not one
+
+`KeyRow.current` became `in_file` and `in_session`. The file's value is what
+`/config` shows everywhere, because the panel is an editor and the file is
+what it edits; `pending` is the one word that fits in a two-row entry, and
+`explain()` gets the sentence naming what the session is still running.
+
+**`pending` excludes an environment override exactly, and needs no startup
+snapshot.** The first draft of this was going to capture the file at launch
+and diff against it. It does not have to: for the five keys with a variable
+the file and the session legitimately differ from launch with nothing pending,
+and `outranked_by` already names the variable, so asking whether it is SET is
+the whole test. For every other key the two were equal at launch by
+construction, so a difference is a change made since. A snapshot would know
+nothing this does not.
+
+A container is never pending either, and that one was found by running it: the
+raw document hands back the list YAML spells where the model holds the
+frozenset or tuple its consumers rely on, so all seventeen differed by
+construction and every one of them read `pending restart` from launch.
+
+### The document is cached, and the write clears it
+
+`catalogue()` runs on every keystroke the suggestion panel sees, and parsing
+845 lines costs ~70ms against the ~0.7ms everything else in that path costs.
+The parse is cached on `(path, mtime_ns, size)`; measured after, twenty
+catalogue builds cost 6.4ms in total.
+
+`write()` clears the cache outright rather than trusting the stamp, and that
+is not belt-and-braces: `max_tokens: 16000` and `max_tokens: 18000` are the
+SAME SIZE, so mtime would be carrying the whole comparison and two writes
+inside one filesystem timestamp tick would be invisible. The stamp stays for
+the case `write()` cannot see -- someone editing the file in another window
+while the harness is up -- and the test for that sets mtime explicitly rather
+than depending on clock resolution.
+
+### What did not change
+
+The restart still asks on every write. The owner's call, and the reason is the
+right one: the logic stays simple, and changing many values in quick
+succession is not the common case. Bare `/config` now lists what is pending,
+old to new, which is where someone checks their work before applying it.
+
+### Files
+
+- `config_edit.py` -- the two fields, `pending`, the document cache,
+  `forget_document()`, `pending_changes()`, and `explain()` leading with the
+  file.
+- `tui/app.py` -- the pending listing under bare `/config`, and the value
+  stage offering the file's value.
+- `tests/test_config_edit.py` -- ten new, including the second-edit case that
+  states the defect.
+- `tests/test_tui.py` -- four new.
+- `ARCHITECTURE.md`, `README.md`, `tests/BREAKING_CHANGES.md`.

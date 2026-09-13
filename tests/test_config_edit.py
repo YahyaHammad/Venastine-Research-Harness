@@ -329,6 +329,153 @@ class TestAChangeIsValidatedBeforeItIsWritten:
         assert config_edit.propose("max_tokens", 16000).lines == []
 
 
+class TestTheFileAndTheSessionAreTwoThings:
+    """Batch 85. `/config` wrote against the file and reported against the
+    model bound at import, so the second change to a key in one session
+    named the value it had at LAUNCH as the one being replaced.
+
+    Nothing written was ever wrong. Only the reporting drifted, and only
+    once someone did the thing `/config` exists for.
+    """
+
+    def test_a_write_is_visible_to_the_next_catalogue(self, tmp_path,
+                                                      monkeypatch):
+        _copy_config(tmp_path, monkeypatch)
+        config_edit.forget_document()
+        proposal = config_edit.propose("max_tokens", 18000)
+        config_edit.write(proposal.text, proposal.newline)
+
+        row = config_edit.find("max_tokens")
+        assert row.in_file == 18000
+        assert row.in_session == 16000
+        assert row.pending
+        assert "now 18000" in row.summary
+        assert "pending restart" in row.summary
+
+    def test_the_second_edit_reports_the_first_as_its_before(self, tmp_path,
+                                                             monkeypatch):
+        """The defect, stated as a test. Two changes to one key in one
+        session: the second is replacing the first, not the launch value."""
+        _copy_config(tmp_path, monkeypatch)
+        config_edit.forget_document()
+        first = config_edit.propose("max_tokens", 18000)
+        assert first.before == 16000
+        config_edit.write(first.text, first.newline)
+
+        second = config_edit.propose("max_tokens", 20000)
+        assert second.before == 18000, (
+            "the second write reported the launch value as the one it was "
+            "replacing, which is what batch 85 fixed")
+        assert second.after == 20000
+
+    def test_changes_accumulate_across_keys(self, tmp_path, monkeypatch):
+        """The flow this round came from: several values, one restart."""
+        _copy_config(tmp_path, monkeypatch)
+        config_edit.forget_document()
+        for name, value in (("max_tokens", 18000), ("max_iterations", 60),
+                            ("tool_approvals.read", True)):
+            proposal = config_edit.propose(name, value)
+            config_edit.write(proposal.text, proposal.newline)
+
+        pending = {row.name: (row.in_session, row.in_file)
+                   for row in config_edit.pending_changes()}
+        assert pending == {
+            "max_tokens": (16000, 18000),
+            "max_iterations": (50, 60),
+            "tool_approvals.read": (False, True)}
+        # And the document still validates as a whole, which is what makes
+        # one restart at the end safe rather than hopeful.
+        config_schema.load(path=str(tmp_path / "config.yaml"))
+
+    def test_a_container_is_never_pending(self):
+        """The raw document hands back the list YAML spells where the model
+        holds a tuple or a frozenset, so all sixteen differ by construction
+        -- and none of them can be written from here anyway. Without this
+        every container row read `pending restart` from launch."""
+        containers = [row for row in config_edit.catalogue()
+                      if row.kind == "container"]
+        assert len(containers) == 17
+        assert not [row.name for row in containers if row.pending]
+
+    def test_an_environment_override_is_not_pending(self, monkeypatch):
+        """A difference explained by a variable is not a change waiting on a
+        restart: the variable won when the file was read and will win again
+        next time. Built directly rather than through the catalogue, because
+        the alternative is re-loading the schema's global cache under a
+        changed environment and leaving it there."""
+        row = config_edit.KeyRow(
+            name="model_name", kind="scalar", values="text",
+            in_file="from-the-file", in_session="from-the-variable",
+            authority=False, outranked_by="$AGENT_MODEL")
+
+        monkeypatch.setenv("AGENT_MODEL", "from-the-variable")
+        assert not row.pending
+
+        monkeypatch.delenv("AGENT_MODEL")
+        assert row.pending, (
+            "with the variable unset the two were equal at launch, so a "
+            "difference now is a write waiting on a restart")
+
+    def test_pending_lists_nothing_on_an_untouched_file(self):
+        assert config_edit.pending_changes() == []
+
+
+class TestTheDocumentIsCached:
+    """`catalogue()` reads the file on every keystroke the panel sees, and
+    parsing 845 lines costs ~70ms against the 0.7ms everything else in that
+    path costs."""
+
+    def _count_reads(self, monkeypatch):
+        real = config_edit.read_text
+        calls = []
+
+        def counting():
+            calls.append(1)
+            return real()
+
+        monkeypatch.setattr(config_edit, "read_text", counting)
+        return calls
+
+    def test_it_is_parsed_once_for_many_lookups(self, tmp_path, monkeypatch):
+        _copy_config(tmp_path, monkeypatch)
+        config_edit.forget_document()
+        calls = self._count_reads(monkeypatch)
+        for _ in range(6):
+            config_edit.catalogue()
+        assert len(calls) == 1, (
+            f"the document was read {len(calls)} times for six catalogue "
+            f"builds; the panel builds one per keystroke")
+
+    def test_a_write_invalidates_it(self, tmp_path, monkeypatch):
+        """Not left to the stamp: `max_tokens: 16000` and `18000` are the
+        same SIZE, so mtime would be carrying the whole comparison and two
+        writes inside one filesystem tick would be invisible."""
+        _copy_config(tmp_path, monkeypatch)
+        config_edit.forget_document()
+        assert config_edit.find("max_tokens").in_file == 16000
+        proposal = config_edit.propose("max_tokens", 18000)
+        config_edit.write(proposal.text, proposal.newline)
+        assert config_edit.find("max_tokens").in_file == 18000
+
+    def test_an_edit_from_outside_is_picked_up(self, tmp_path, monkeypatch):
+        """The case `write()` cannot see: another window, while the harness
+        is up. The replacement is the same length as the original, so this
+        is the mtime half of the stamp on its own -- and mtime is set
+        explicitly so the assertion does not depend on clock resolution."""
+        target = _copy_config(tmp_path, monkeypatch)
+        config_edit.forget_document()
+        assert config_edit.find("max_tokens").in_file == 16000
+
+        text = _read(target).replace("max_tokens: 16000", "max_tokens: 12345")
+        assert len(text) == len(_read(target))
+        with open(target, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+        stamp = os.stat(target).st_mtime_ns + 1_000_000_000
+        os.utime(target, ns=(stamp, stamp))
+
+        assert config_edit.find("max_tokens").in_file == 12345
+
+
 class TestExplainSaysWhatTheValueIsSubjectTo:
     def test_an_authority_key_says_what_it_permits(self):
         lines = " ".join(config_edit.explain("shell_approval_mode"))
@@ -449,15 +596,9 @@ def test_the_shipped_file_is_untouched():
     makes the two disagree whatever the value was, and no expectation in
     this file goes stale the day a default legitimately changes.
     """
-    environment = {key.lower() for key in config_schema.ENV_OVERRIDES}
-    tree = config_edit.document()
+    config_edit.forget_document()
     for row in config_edit.catalogue():
-        # Scalars only. A container comes back from the raw document as the
-        # list or dict YAML spells, where the model holds the frozenset or
-        # tuple its consumers rely on, so the two differ by construction --
-        # and a container is not writable from here in any case.
-        if row.kind != "scalar" or row.name in environment:
-            continue
-        assert config_edit.file_value(row.name, tree) == row.current, (
+        assert not row.pending, (
             f"config.yaml's {row.name} no longer matches the model this "
-            f"process loaded, so something in this run wrote the real file")
+            f"process loaded, so something in this run wrote the real "
+            f"file: it says {row.in_file!r} against {row.in_session!r}")

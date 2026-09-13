@@ -150,12 +150,27 @@ class KeyRow:
     the 46 leaves of the two permission tables. Those 23 tool names appear in
     BOTH tables, so the prefix is not decoration -- it is the only thing that
     tells `tool_permissions.shell` from `tool_approvals.shell`.
+
+    TWO VALUES, NOT ONE, and keeping them apart is batch 85's whole subject.
+    `in_file` is what `config.yaml` says: the thing `/config` edits and the
+    thing the next launch will read. `in_session` is what THIS process is
+    running, bound at import and never re-read. They start equal for every
+    key without an environment variable, and a write here moves the first
+    without moving the second.
+
+    One field for both was the defect. `/config` reported the SESSION's
+    value everywhere -- the panel's `now`, the `(was ...)` on a write, the
+    authority modal -- while writing against the FILE, so a second change to
+    the same key in one session reported the value it had at launch as the
+    one being replaced. The file was always right; only the reporting drifted,
+    and only once someone did what `/config` is for.
     """
 
     name: str
     kind: str          # "scalar" | "pair" | "container"
     values: str        # the possible values, as a person reads them
-    current: Any       # the value in the file right now
+    in_file: Any       # what config.yaml says right now
+    in_session: Any    # what this process is running
     authority: bool
     outranked_by: Optional[str] = None
 
@@ -164,20 +179,55 @@ class KeyRow:
         return self.kind in ("scalar", "pair")
 
     @property
+    def pending(self) -> bool:
+        """Written, and waiting for a restart to take effect.
+
+        NOT simply "the two differ". For the five keys with an environment
+        variable the two differ from launch with nothing pending at all --
+        the variable won when the file was read and will win again next
+        time -- so a difference there says nothing about whether anyone
+        changed anything. `outranked_by` already names the variable; this
+        asks whether it is actually set.
+
+        Every other key had the two equal at launch by construction, so a
+        difference IS a change made since. That is why no snapshot of the
+        file is taken at startup: there is nothing a snapshot would know
+        that this does not.
+
+        A CONTAINER IS NEVER PENDING. The document hands back the list or
+        dict YAML spells where the model holds the frozenset or tuple its
+        consumers rely on, so the two differ for every one of the sixteen,
+        always -- and nothing can write one from here anyway, so there is
+        nothing for such a row to be pending about. Without this line every
+        container row read `pending restart` from launch.
+        """
+        if not self.settable:
+            return False
+        if self.in_file == self.in_session:
+            return False
+        if self.outranked_by and self.outranked_by.startswith("$"):
+            return os.environ.get(self.outranked_by[1:]) is None
+        return True
+
+    @property
     def summary(self) -> str:
         """The one-line description the suggestion panel draws.
 
         Values first, current second: the panel gives an entry two rendered
         rows and DROPS the rest, so the order is what survives a narrow
         terminal. What someone browsing needs is what they are allowed to
-        type; the value in force is the useful second half.
+        type; the value in the file is the useful second half.
 
-        The last two parts are deliberately terse -- the name of the thing
-        that can outrank this key, and the word `authority` -- because the
-        sentence explaining either belongs in `explain()`, which has a
-        whole transcript to write into instead of half a row.
+        THE FILE'S VALUE, because this panel is an editor and the file is
+        what it edits. `pending` is how the running process gets its say in
+        the one word that fits; the sentence naming what is still in force
+        belongs in `explain()`, which has a whole transcript to write into
+        instead of half a row. The last two parts are terse for the same
+        reason.
         """
-        parts = [self.values, f"now {shown(self.current)}"]
+        parts = [self.values, f"now {shown(self.in_file)}"]
+        if self.pending:
+            parts.append("pending restart")
         if self.outranked_by:
             parts.append(self.outranked_by)
         if self.authority:
@@ -241,10 +291,54 @@ def read_text() -> tuple[str, str]:
     return raw.replace("\r\n", "\n"), newline
 
 
-def document():
-    """The live `config.yaml` as a round-trip tree, comments attached."""
+#: `((path, mtime_ns, size), tree)` for the last document parsed, or None.
+_document_cache = None
+
+
+def document(fresh: bool = False):
+    """The live `config.yaml` as a round-trip tree, comments attached.
+
+    CACHED ON THE FILE'S OWN STAMP, because `catalogue()` reads this on
+    every keystroke the suggestion panel sees and parsing 845 lines costs
+    about 70ms against the 0.7ms everything else in that path costs. A
+    `stat` is microseconds, and the document changes about as often as a
+    person types a `/config` command.
+
+    `write()` clears the cache outright rather than trusting the stamp, and
+    that is not belt-and-braces: `max_tokens: 16000` and `max_tokens: 18000`
+    are the SAME SIZE, so mtime would be carrying the whole comparison, and
+    two writes inside one filesystem timestamp tick would be invisible. The
+    stamp stays for the case `write()` cannot see -- someone editing the
+    file in another window while the harness is up.
+
+    `fresh=True` skips it entirely, for a caller that is about to write.
+    """
+    global _document_cache
+    path = config_schema.CONFIG_PATH
+    stamp = None
+    if not fresh:
+        try:
+            status = os.stat(path)
+            stamp = (path, status.st_mtime_ns, status.st_size)
+        except OSError:
+            # Unreadable is `read_text`'s error to raise, with its message.
+            stamp = None
+        if stamp is not None and _document_cache is not None:
+            cached_stamp, tree = _document_cache
+            if cached_stamp == stamp:
+                return tree
+
     text, _ = read_text()
-    return _round_trip().load(io.StringIO(text))
+    tree = _round_trip().load(io.StringIO(text))
+    if stamp is not None:
+        _document_cache = (stamp, tree)
+    return tree
+
+
+def forget_document() -> None:
+    """Drop the cached parse. Called by `write()`, and by tests."""
+    global _document_cache
+    _document_cache = None
 
 
 def _dump(tree) -> str:
@@ -270,6 +364,9 @@ def write(text: str, newline: str = "\n") -> None:
     with open(tmp, "w", encoding="utf-8", newline="") as handle:
         handle.write(text.replace("\n", newline))
     os.replace(tmp, path)
+    # See `document()`: a one-value change can leave the size identical, so
+    # the stamp alone would not always notice our own write.
+    forget_document()
 
 
 # ---------------------------------------------------------------------------
@@ -369,8 +466,13 @@ def catalogue() -> list[KeyRow]:
     The two tables are expanded rather than listed, because a row that says
     `tool_permissions · 23 entries` is not something anyone can act on, and
     the 46 leaves are exactly the rows a person comes here for.
+
+    BOTH VALUES COME FROM HERE: the file's, parsed through the cached
+    document, and the session's, off the model bound at import. See
+    `KeyRow` for why one of them was not enough.
     """
     config = config_schema.current()
+    tree = document()
     authority = config_schema.HARNESS_AUTHORITY_KEYS
     overrides = settings_overrides()
     environment = {key.lower(): variable
@@ -385,7 +487,8 @@ def catalogue() -> list[KeyRow]:
                     name=f"{name}.{tool}",
                     kind="scalar",
                     values="true | false",
-                    current=getattr(table, tool),
+                    in_file=tree[name][tool],
+                    in_session=getattr(table, tool),
                     authority=True))
             continue
         kind, values = describe(name, field.annotation, field.metadata)
@@ -398,10 +501,26 @@ def catalogue() -> list[KeyRow]:
             name=name,
             kind=kind,
             values=values,
-            current=getattr(config, name),
+            # The raw document's own types for a container -- a list where
+            # the model holds a frozenset or a tuple. Never compared for a
+            # container, because `pending` is about the settable rows and a
+            # container cannot be written from here.
+            in_file=tree[name],
+            in_session=getattr(config, name),
             authority=name in authority,
             outranked_by=outranked))
     return rows
+
+
+def pending_changes() -> list:
+    """The rows written this session and waiting on a restart.
+
+    Settable rows only: a container's file value is a list where the model
+    holds a frozenset or a tuple, so the two differ by construction and
+    would report as pending forever. Nothing can write one from here in any
+    case, so there is nothing for such a row to be pending about.
+    """
+    return [row for row in catalogue() if row.settable and row.pending]
 
 
 def find(name: str) -> Optional[KeyRow]:
@@ -424,17 +543,11 @@ def matching(prefix: str) -> list[KeyRow]:
 
 
 def file_value(name: str, tree=None) -> Any:
-    """What `config.yaml` itself says for `name`, environment excluded.
+    """What `config.yaml` itself says for `name`. `KeyRow.in_file`'s source.
 
-    Distinct from `KeyRow.current`, which is the value IN FORCE and has the
-    five environment overrides already folded into it. For the five keys
-    that have a variable the two can disagree, and a `/config` that showed
-    only one of them would either misreport what the harness is running on
-    or misreport what a write is about to change.
-
-    `tree` is for a caller asking about many names at once: parsing the
-    document costs ~70ms, which is nothing for one lookup and eight
-    seconds across the whole catalogue.
+    Kept as its own function for the callers that want one name without
+    building 133 rows to get it. `tree` is for a caller asking about many
+    at once, and matters less than it did now that `document()` caches.
     """
     if tree is None:
         tree = document()
@@ -456,21 +569,27 @@ def explain(name: str) -> list[str]:
     if row is None:
         return [f"{name} is not a key in config.yaml."]
 
-    lines = [f"{row.name}: {shown(row.current)}"]
+    lines = [f"{row.name}: {shown(row.in_file)}"]
+    lines.append(f"Takes {row.values}.")
     if row.kind == "container":
-        lines.append(f"Takes {row.values}.")
-        lines.extend(_entries(row.current))
-    else:
-        lines.append(f"Takes {row.values}.")
+        # The session's copy, not the document's: `todo_statuses` is a tuple
+        # here and a list there, and the tuple is what the code sees.
+        lines.extend(_entries(row.in_session))
 
-    on_disk = file_value(name)
+    if row.pending:
+        lines.append(
+            f"Written this session. This one is still running "
+            f"{shown(row.in_session)} and will pick the new value up at the "
+            f"next launch.")
+
     if row.outranked_by and row.outranked_by.startswith("$"):
         variable = row.outranked_by[1:]
         if os.environ.get(variable) is not None:
             lines.append(
-                f"{variable} is set, so it is what this session is using. "
-                f"config.yaml says {shown(on_disk)}, and a write here "
-                f"changes that rather than what is in force.")
+                f"{variable} is set to {shown(row.in_session)}, so that is "
+                f"what this session is using and what the next launch will "
+                f"use too. config.yaml says {shown(row.in_file)}, and a "
+                f"write here changes that rather than what is in force.")
         else:
             lines.append(
                 f"{variable} would override this if it were set.")
@@ -662,7 +781,7 @@ def propose(name: str, value: Any) -> Proposal:
         raise ValueError(f"{name} is not a key in config.yaml.")
     if not row.settable:
         raise ValueError(
-            f"{name} holds {shown(row.current)} and is edited in "
+            f"{name} holds {shown(row.in_session)} and is edited in "
             f"config.yaml directly, not from here.")
 
     text, newline = read_text()
@@ -679,7 +798,11 @@ def propose(name: str, value: Any) -> Proposal:
     new = candidate.split("\n")
     changed = [(index + 1, a, b)
                for index, (a, b) in enumerate(zip(old, new)) if a != b]
-    return Proposal(name=name, before=row.current, after=value,
+    # `in_file`, not `in_session`: "was" is about the value this write is
+    # REPLACING, which is the document's. The two are the same until the
+    # first write of a session, which is why taking the wrong one read as
+    # correct for as long as nobody changed two values in one sitting.
+    return Proposal(name=name, before=row.in_file, after=value,
                     text=candidate, newline=newline, lines=changed)
 
 

@@ -5010,7 +5010,7 @@ def _config_value_choices(row, typed: str) -> list:
     if row.kind == "pair":
         # `off` is the only single token this kind takes; a pair is two.
         return ["off"]
-    return [config_edit.shown(row.current)]
+    return [config_edit.shown(row.in_file)]
 
 
 def _config_rows(argument: str) -> list:
@@ -5024,11 +5024,15 @@ def _config_rows(argument: str) -> list:
     row = config_edit.find(key)
     if row is None or not row.settable:
         return []
-    in_force = config_edit.shown(row.current)
+    # The FILE's value, because that is what a write replaces. Once a value
+    # has been written this session the two diverge, and offering "replaces
+    # 16000" over a file that already says 18000 is the drift batch 85 is
+    # about.
+    in_file = config_edit.shown(row.in_file)
     rows = []
     for choice in _config_value_choices(row, value_text):
-        note = ("the value in force" if choice == in_force
-                else f"replaces {in_force}")
+        note = ("what the file says" if choice == in_file
+                else f"replaces {in_file}")
         rows.append(SlashCommand(f"config {key} {choice}", note, _cmd_config))
     return rows
 
@@ -5096,6 +5100,19 @@ def _config_orientation(app: VenastineApp) -> None:
     app._transcript.write_system(
         f"The file is {config_schema.CONFIG_PATH}. CONFIG_ARCHITECTURE.md "
         f"says why each value is what it is.")
+
+    # WHAT IS PENDING, last and only when there is any. This is the place a
+    # person checks their work before applying it, and after four writes
+    # the alternative is scrolling 133 rows looking for the marker.
+    pending = config_edit.pending_changes()
+    if not pending:
+        return
+    app._transcript.write_system(
+        f"{len(pending)} change(s) written and waiting for a restart:")
+    for row in pending:
+        app._transcript.write_system(
+            f"  {row.name}: {config_edit.shown(row.in_session)} → "
+            f"{config_edit.shown(row.in_file)}")
 
 
 def _config_set(app: VenastineApp, row, value_text: str) -> None:
