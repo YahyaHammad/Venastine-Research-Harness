@@ -741,15 +741,20 @@ def _make_dataclass(name: str, model: BaseModel) -> type:
     fields = [(field, bool, dataclasses.field(default=getattr(model, field)))
               for field in type(model).model_fields]
     # The binding below (`ToolPermissions` / `ToolApprovals` globals plus the
-    # idempotent factories) is what makes these PICKLABLE: `make_dataclass`
-    # sets `__module__` from the calling frame, which is this module either
-    # way, so pickle looks the name up here -- and used to find nothing,
-    # because the class was only ever bound on `config`. No `module=`
-    # argument: that kwarg needs Python 3.12+ and the floor is 3.11. The
-    # original `@dataclass class ToolPermissions` in config.py pickled fine,
-    # so this was a silent shape regression that nothing would notice until
-    # one of these crossed a process boundary.
-    return dataclasses.make_dataclass(name, fields)
+    # idempotent factories) is only half of what makes these PICKLABLE: pickle
+    # looks the class up by (`__module__`, `__qualname__`), so the module must
+    # also be right. `make_dataclass` sets `__module__` from the calling frame
+    # only on 3.12+ (via its `module=` kwarg, which the 3.11 floor cannot
+    # take); on 3.11 the class is built through `types.new_class`, and
+    # `type.__new__` backfills a missing `__module__` from the frame doing
+    # the calling -- inside `types.py`, so pickle looked for
+    # `types.ToolPermissions` and failed. Assigned explicitly, which works on
+    # every version. The original `@dataclass class ToolPermissions` in
+    # config.py pickled fine, so this was a silent shape regression that
+    # nothing would notice until one of these crossed a process boundary.
+    cls = dataclasses.make_dataclass(name, fields)
+    cls.__module__ = __name__
+    return cls
 
 
 _cached: Optional[HarnessConfig] = None
