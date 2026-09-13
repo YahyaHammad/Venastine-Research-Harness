@@ -450,6 +450,63 @@ class TestAChangeIsValidatedBeforeItIsWritten:
         assert config_edit.propose("max_tokens", 16000).lines == []
 
 
+class TestTheGrammarReadsTypesNotPhrasing:
+    """Batch 88. `parse_value` recovered two facts by reading the DISPLAY
+    string back -- `values.startswith("text")` and `"null" in values` -- so
+    a rendering detail decided how a field was parsed."""
+
+    def test_the_facts_come_off_the_annotation(self):
+        text_field = config_edit.find("sandbox_docker_image")
+        assert text_field.takes_text and not text_field.nullable
+        plain_text = config_edit.find("scholar_mailto")
+        assert plain_text.takes_text and not plain_text.nullable
+        nullable_text = config_edit.find("default_effort")
+        assert nullable_text.takes_text and nullable_text.nullable
+        number = config_edit.find("max_tokens")
+        assert not number.takes_text and not number.nullable
+
+    def test_a_display_string_starting_with_text_does_not_make_it_text(self):
+        """The trap the old branch was one schema change away from: a field
+        whose rendered `values` happens to begin with `text` matched
+        `values.startswith("text")` and silently stopped being parsed as
+        YAML, while the panel went on offering it a closed vocabulary.
+
+        The input has to be something the two branches DISAGREE about, or
+        the test passes under both: `5` is the string "5" taken verbatim and
+        the integer 5 parsed."""
+        row = config_edit.KeyRow(
+            name="retries", kind="scalar", values="text | 5",
+            in_file=5, in_session=5, authority=False)
+        assert config_edit.parse_value(row, "5") == 5
+
+    def test_a_display_string_mentioning_null_does_not_make_it_nullable(self):
+        row = config_edit.KeyRow(
+            name="mode", kind="scalar", values="text, or null-ish",
+            in_file="a", in_session="a", authority=False)
+        assert config_edit.parse_value(row, "off") == "off"
+
+    def test_a_null_word_clears_only_a_nullable_field(self):
+        assert config_edit.parse_value(
+            config_edit.find("default_effort"), "off") is None
+        image = config_edit.find("sandbox_docker_image")
+        assert config_edit.parse_value(image, "off") == "off"
+
+
+class TestAKeyIsFoundHoweverItIsTyped:
+    """Batch 88. `config.py` publishes these names as `MAX_TOKENS` and the
+    docs quote both spellings; two rows differing only in case cannot exist,
+    because the schema's field names are the source of them."""
+
+    def test_an_uppercase_name_resolves(self):
+        assert config_edit.find("MAX_TOKENS").name == "max_tokens"
+        assert config_edit.find("Tool_Permissions.Shell").name == (
+            "tool_permissions.shell")
+
+    def test_the_panel_completes_the_same_rows(self):
+        assert ([row.name for row in config_edit.matching("MAX_")]
+                == [row.name for row in config_edit.matching("max_")])
+
+
 class TestAnUnwritableInstallIsAnOrdinaryInstall:
     """A global npm prefix owned by root. `/config` used to take the app
     down there rather than say the file could not be written."""

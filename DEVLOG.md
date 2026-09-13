@@ -13439,3 +13439,59 @@ racing one torn cache entry, and case-sensitive key lookup.
 - `bin/venastine.mjs`, `main.py`, `tui/app.py`, `tests/conftest.py`.
 - `requirements.txt`, `CONFIG_ARCHITECTURE.md`, `AGENTS.md`,
   `ARCHITECTURE.md`, `tests/BREAKING_CHANGES.md`.
+
+
+---
+
+## Batch 88 -- the four the review deferred (2026-09-13)
+
+Batch 87 took the findings that lost data or crashed. These four are the
+rest: none of them is a live defect, and three are one schema change away
+from becoming one.
+
+**A rendering detail was load-bearing for parsing.** `parse_value` recovered
+two facts about a field by reading its DISPLAY string back --
+`row.values.startswith("text")` decided whether typed text was taken
+verbatim, and `"null" in row.values` decided whether a word like `off`
+cleared the key. Both are properties of the annotation, which `describe()`
+has in its hand. The day a `Literal` gains an option whose first word is
+`text`, that field silently stops being parsed as YAML while
+`_config_value_choices` -- reading the same string, for its own purpose --
+goes on offering it a closed vocabulary. Two functions disagreeing about one
+field's type, with nothing raising. `describe()` returns the two facts now
+and `KeyRow` carries them.
+
+Worth recording how the regression test was arrived at: the first version
+passed under the mutation. A synthetic row whose `values` began with `text`
+returned the same answer down both branches, because for a string option
+"verbatim" and "parsed as YAML" agree. The input has to be one they
+disagree about -- `5` is the string `"5"` taken verbatim and the integer `5`
+parsed -- and only then does the test measure anything.
+
+**`.capitalize()` in the AUTHORITY modal lowercases the rest of the
+sentence.** `Docker` became `docker`, the deliberate `WITHOUT` in "may run
+WITHOUT the container" became `without`, and a decision id would have gone
+the same way. That is a modal whose entire job is to say precisely what a key
+permits, so only the first character should move.
+
+**`document()` could cache one torn read.** The stamp was taken BEFORE the
+file was read, so an external save landing between the two stored the new
+tree under the old file's stamp -- and the next keystroke's stat matched it
+and served a parse of a file that no longer existed in that form. It
+self-healed on the save after, which is precisely what makes it the kind of
+thing nobody reports. Re-stat after the read.
+
+**`/config MAX_TOKENS` said the key did not exist.** `config.py` publishes
+every one of these names in upper case and the documentation quotes both
+spellings. Two rows differing only in case cannot exist, because the schema's
+field names are the source of them, so there is no ambiguity to protect.
+`find()` and `matching()` fold case together, so what the panel completes and
+what the command resolves stay one rule.
+
+### Files
+
+- `config_edit.py` -- `describe()` returns four values, `KeyRow.takes_text`
+  and `.nullable`, the re-stat in `document()`, case folding in `find()` and
+  `matching()`.
+- `tui/app.py` -- the modal's first character.
+- `tests/test_config_edit.py` -- six new.

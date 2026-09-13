@@ -199,6 +199,12 @@ class KeyRow:
     environment_variable: Optional[str] = None
     #: The `settings.json` path that beats this key, if any.
     settings_key: Optional[str] = None
+    #: True when the field is a string, so typed text is taken VERBATIM
+    #: rather than parsed as YAML. Read off the annotation by `describe`,
+    #: not recovered from `values` -- see that function.
+    takes_text: bool = False
+    #: True when the field accepts None, so a word in `NULL_WORDS` clears it.
+    nullable: bool = False
 
     @property
     def outranked_by(self) -> Optional[str]:
@@ -367,6 +373,18 @@ def document(fresh: bool = False):
     text, _ = read_text()
     tree = _round_trip().load(io.StringIO(text))
     if stamp is not None:
+        # RE-STAT AFTER THE READ. The stamp above was taken BEFORE it, so an
+        # external save landing between the two stored the new tree under
+        # the old file's stamp -- and the next keystroke's stat then matched
+        # it and served a parse of a file that no longer existed in that
+        # form. Cheap to close, and a cache that can be one save stale is
+        # worse than one that simply misses.
+        try:
+            after = os.stat(path)
+            stamp = (path, after.st_mtime_ns, after.st_size)
+        except OSError:
+            stamp = None
+    if stamp is not None:
         _document_cache = (stamp, tree)
     return tree
 
@@ -531,38 +549,46 @@ def _number_phrase(noun: str, bounds: dict) -> str:
     return noun
 
 
-def describe(name: str, annotation, metadata) -> tuple[str, str]:
-    """`(kind, possible values)` for one field.
+def describe(name: str, annotation, metadata) -> tuple:
+    """`(kind, possible values, takes_text, nullable)` for one field.
 
     The phrasing is generated from the schema rather than written down per
     key, and that is the point: `config.yaml` already carries a comment
     saying what every value DOES, and a second hand-written copy of what it
-    may BE is the copy that goes stale. 89 keys, one function.
+    may BE is the copy that goes stale. One function for all of them.
+
+    THE LAST TWO ARE FACTS, NOT PHRASING, and they are returned rather than
+    re-derived because `parse_value` used to recover them by reading the
+    PHRASING back -- `row.values.startswith("text")` and `"null" in
+    row.values`. That made a display string load-bearing for parsing: the
+    day a `Literal` gains an option whose first word is `text`, that field
+    silently stops being parsed as YAML while the panel still offers it a
+    closed vocabulary, with nothing raising. The annotation is right here.
     """
     origin = typing.get_origin(annotation)
     args = typing.get_args(annotation)
     bounds = _bounds(metadata)
 
     if origin is typing.Literal:
-        return "scalar", " | ".join(str(a) for a in args)
+        return "scalar", " | ".join(str(a) for a in args), False, False
     if annotation is bool:
-        return "scalar", "true | false"
+        return "scalar", "true | false", False, False
     if annotation is int:
-        return "scalar", _number_phrase("whole number", bounds)
+        return "scalar", _number_phrase("whole number", bounds), False, False
     if annotation is float:
-        return "scalar", _number_phrase("number", bounds)
+        return "scalar", _number_phrase("number", bounds), False, False
     if annotation is str:
-        return "scalar", "text"
+        return "scalar", "text", True, False
     if origin is typing.Union or origin is types.UnionType:
         inner = [a for a in args if a is not type(None)]
         if inner == [str]:
-            return "scalar", "text, or null"
+            return "scalar", "text, or null", True, True
         if inner and typing.get_origin(inner[0]) is dict:
-            return "pair", "<name>, or <PROVIDER> <name>, or off"
-        return "container", "a list, or null"
+            return "pair", "<name>, or <PROVIDER> <name>, or off", False, True
+        return "container", "a list, or null", False, True
     if origin is dict:
-        return "container", "a table"
-    return "container", "a list"
+        return "container", "a table", False, False
+    return "container", "a list", False, False
 
 
 # ---------------------------------------------------------------------------
@@ -621,7 +647,8 @@ def catalogue() -> list[KeyRow]:
                     in_session=getattr(table, tool),
                     authority=True))
             continue
-        kind, values = describe(name, field.annotation, field.metadata)
+        kind, values, takes_text, nullable = describe(
+            name, field.annotation, field.metadata)
         # EVERY SOURCE, not the first one found. An `if/elif` reported
         # `model_name` as outranked by `$AGENT_MODEL` and never mentioned
         # `settings.json default_model` -- the tier that arrives with a
@@ -640,7 +667,9 @@ def catalogue() -> list[KeyRow]:
             in_session=getattr(config, name),
             authority=name in authority,
             environment_variable=variable,
-            settings_key=settings_key))
+            settings_key=settings_key,
+            takes_text=takes_text,
+            nullable=nullable))
     return rows
 
 
@@ -656,9 +685,19 @@ def pending_changes() -> list:
 
 
 def find(name: str) -> Optional[KeyRow]:
-    """The row called `name`, or None. Exact match, never a prefix."""
+    """The row called `name`, or None. Exact match, never a prefix.
+
+    CASE-INSENSITIVE, because every key in this file is lowercase and the
+    names people arrive with are not: `config.py` publishes them as
+    `MAX_TOKENS` and the documentation quotes both spellings. There is no
+    ambiguity to protect -- two rows differing only in case cannot exist,
+    since the schema's field names are the source of them. Prefix matching
+    in `matching()` is folded the same way, so what the panel completes and
+    what `find` resolves stay one rule.
+    """
+    wanted = name.lower()
     for row in catalogue():
-        if row.name == name:
+        if row.name.lower() == wanted:
             return row
     return None
 
@@ -670,8 +709,13 @@ def matching(prefix: str) -> list[KeyRow]:
     completes what it draws into the prompt, and a match in the MIDDLE of a
     name completes to something that does not contain what was typed, which
     reads as the harness ignoring the keystrokes.
+
+    Case-folded, for `find`'s reason: typing `MAX_` should offer the same
+    rows `max_` does, or the completion and the lookup disagree about what
+    the user meant.
     """
-    return [row for row in catalogue() if row.name.startswith(prefix)]
+    wanted = prefix.lower()
+    return [row for row in catalogue() if row.name.lower().startswith(wanted)]
 
 
 def file_value(name: str, tree=None) -> Any:
@@ -835,11 +879,11 @@ def parse_value(row: KeyRow, text: str) -> Any:
     text = text.strip()
     if not text:
         raise ValueError(f"{row.name} needs a value. It takes {row.values}.")
-    if row.values.startswith("text"):
-        if "null" in row.values and text.lower() in _NULL_WORDS:
+    if row.takes_text:
+        if row.nullable and text.lower() in NULL_WORDS:
             return None
         return _unquoted(text)
-    if text.lower() in _NULL_WORDS and "null" in row.values:
+    if row.nullable and text.lower() in NULL_WORDS:
         return None
     try:
         return YAML(typ="safe").load(io.StringIO(text))

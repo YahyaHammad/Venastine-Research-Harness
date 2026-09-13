@@ -5186,7 +5186,12 @@ def _config_set(app: VenastineApp, row, value_text: str) -> None:
     # command reach these at all (batch 84): what makes it defensible is
     # that the person is told what the key permits, so the body is the
     # sentence for THIS key rather than a generic "are you sure".
-    body = (f"{config_edit.AUTHORITY_EFFECT[key].capitalize()}\n\n"
+    # `.capitalize()` LOWERCASES THE REST, and these sentences carry
+    # `Docker`, `WITHOUT` and `D14` -- a product name, an emphasis and a
+    # decision id, in a modal whose whole job is to say precisely what a
+    # key permits. Only the first character is meant to move.
+    effect = config_edit.AUTHORITY_EFFECT[key]
+    body = (f"{effect[:1].upper() + effect[1:]}\n\n"
             f"{row.name}\n"
             f"  now:  {config_edit.shown(proposal.before)}\n"
             f"  after: {config_edit.shown(proposal.after)}\n\n"
