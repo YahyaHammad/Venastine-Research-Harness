@@ -1512,3 +1512,132 @@ def test_the_revisit_note_covers_the_ensemble_family():
     assert _word_number(hit.group(1)) >= highest, (
         f"ROADMAP.md's revisit note runs E1-E{hit.group(1)} while the "
         f"record defines through E{highest}.")
+
+
+# ---------------------------------------------------------------------------
+# ---- Documented ceilings against the live config (batch 83) ---------------
+# ---------------------------------------------------------------------------
+#
+# Two clusters of documented numbers had been wrong for months, and nothing
+# anywhere compared a number in prose to the value that binds:
+#
+#   * the maths-tool wall clock ships 20 and README said 15 in three places,
+#     including a sample of output the harness cannot emit, while README's own
+#     settings table said 20;
+#   * the sandbox ships 120 s and 2048 MB and README said 60 s and 1024 MB in
+#     three places, its settings table among them.
+#
+# That earns a check, by this file's own rule: a claim earns one by having
+# ALREADY drifted, and only if the truth is something the suite can compute.
+#
+# EXPLICIT TRIPLES, NOT A REGEX OVER PROSE. A scraped version was tried first
+# and rejected: it reported 25 candidate passages that were almost all section,
+# issue and batch numbers, and it MISSED the real bug, because `15s` is glued
+# to a letter and the pattern wanted a word boundary. A detector that quiet
+# would be read as a clean bill of health, which is worse than no detector.
+#
+# Each row asserts BOTH halves. The substring must be present -- otherwise a
+# reword silently retires the check -- and the number inside it must equal the
+# live value. `{}` is where the number goes.
+DOCUMENTED_CEILINGS = [
+    ("README.md", "tool_compute_timeout_s",
+     "stopped — {} seconds by default"),
+    ("README.md", "tool_compute_timeout_s",
+     "symbolic_math exceeded its {}s limit"),
+    ("README.md", "tool_compute_timeout_s",
+     "killable subprocesses under a {}-second wall clock"),
+    ("README.md", "tool_compute_timeout_s",
+     "| `tool_compute_timeout_s` | {} |"),
+    ("README.md", "sandbox_timeout_seconds",
+     "200 processes, {} seconds, no network"),
+    ("README.md", "sandbox_timeout_seconds",
+     "the container runs under a {}-second wall clock"),
+    ("README.md", "sandbox_timeout_seconds",
+     "`python:3.13-slim`; {} s,"),
+    ("README.md", "sandbox_memory_mb", "wall clock, {} MB of memory"),
+    ("README.md", "sandbox_memory_mb", "s, {} MB, 30 CPU-s"),
+    ("README.md", "sandbox_max_pids", "{} processes, 120 seconds"),
+    ("README.md", "sandbox_cpu_seconds", "MB, {} CPU-s, 200 pids"),
+    ("README.md", "max_read_chars", "truncated at {:,} characters"),
+    ("README.md", "default_context_window", "| {}k fallback |"),
+    ("CONFIG_ARCHITECTURE.md", "tool_compute_timeout_s",
+     "{}s is chosen against measurement"),
+]
+
+
+def _ceiling_shown(template: str, value) -> str:
+    """Render the number the way the document writes it."""
+    if "{:,}" in template:
+        return template.format(value)
+    if "{}k" in template:
+        return template.format(value // 1000)
+    return template.format(value)
+
+
+def test_every_documented_ceiling_matches_the_live_config():
+    """A number in prose must be the number that binds.
+
+    The failure names the document, the claim and the live value, because the
+    thing that went wrong twice was someone updating a table row and not the
+    sentence three pages up that said something else.
+    """
+    import config_schema
+
+    cfg = config_schema.current()
+    wrong, missing = [], []
+    texts = {}
+    for filename, key, template in DOCUMENTED_CEILINGS:
+        if filename not in texts:
+            with open(os.path.join(ROOT, filename), encoding="utf-8") as f:
+                texts[filename] = f.read()
+        live = getattr(cfg, key)
+        expected = _ceiling_shown(template, live)
+        if expected in texts[filename]:
+            continue
+        # Present but with some other number in it? Then it is drift. Absent
+        # entirely? Then the claim was reworded and this row needs pointing
+        # at the new wording -- a different problem with a different fix.
+        head, _, tail = template.partition("{}")
+        head = head.rstrip()
+        if head and head in texts[filename]:
+            index = texts[filename].index(head)
+            wrong.append(
+                f"{filename}: expected {expected!r} for {key}={live!r}; the "
+                f"document says "
+                f"{texts[filename][index:index + len(expected) + 12]!r}")
+        else:
+            missing.append(f"{filename}: {template!r} (for {key}) is gone")
+
+    assert not wrong, (
+        "documented ceilings disagree with config.yaml:\n  "
+        + "\n  ".join(wrong)
+        + "\nThe value is what binds. Either the prose is stale or the value "
+          "moved without the prose; fix whichever is wrong and say which in "
+          "the commit.")
+    assert not missing, (
+        "these documented claims no longer appear, so nothing is being "
+        "checked:\n  " + "\n  ".join(missing)
+        + "\nIf the wording moved, point DOCUMENTED_CEILINGS at the new "
+          "wording rather than deleting the row -- the claim is the thing "
+          "being kept honest.")
+
+
+def test_the_ceiling_check_can_actually_fail():
+    """The guard on the guard.
+
+    Every row above could be absent from its document and the test would
+    still pass its first assertion, so the renderer is exercised directly
+    against a value the document does NOT carry.
+    """
+    import config_schema
+
+    cfg = config_schema.current()
+    with open(os.path.join(ROOT, "README.md"), encoding="utf-8") as f:
+        readme = f.read()
+
+    template = "killable subprocesses under a {}-second wall clock"
+    assert _ceiling_shown(template, cfg.tool_compute_timeout_s) in readme
+    assert _ceiling_shown(template, cfg.tool_compute_timeout_s + 1) \
+        not in readme, (
+        "README carries the wall clock at two different numbers, which is "
+        "the exact defect this pair of tests exists to catch")

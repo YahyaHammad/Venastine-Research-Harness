@@ -11,10 +11,22 @@ it.** More than one of these has been "corrected" back to a value it was
 deliberately moved away from.
 
 The prose here was `config.py`'s, from the years when the values and their
-history lived in one 1,210-line module of which 788 lines were comment. It is
+history lived in one 1,210-line module of which 788 lines were comment. It was
 carried over verbatim. Section headings are `config.py`'s own; the entry for
 each key is named by its **`config.yaml` key**, so a key you are editing leads
 straight here.
+
+**Two things about that port, both worth knowing before you trust a
+sentence here.** First, it is no longer verbatim in five places, each
+marked and dated: the `tool_compute_timeout_s` arithmetic described a
+value the code has not had for some time, three entries told the reader to
+set something in `config.py` where an edit is now silently overwritten at
+import, and one described a `settings.json` key that does not exist. The
+rest is unchanged, so a diff against `config.py` before the migration is
+still the way to check it. Second, **this file is hand-maintained from
+here.** It was produced once by a migration script that was not kept;
+nothing regenerates it, so a value's rationale moves when someone moves
+it.
 
 ## How configuration is laid out
 
@@ -73,7 +85,8 @@ sends your content to. Nothing reachable from a running session can change
 them -- not a tool call, not a settings file, not an environment variable, not
 a slash command. `config_schema.HARNESS_AUTHORITY_KEYS` is the machine-readable
 list, and a test holds it against `security/posture.Posture`'s fields and the
-four by-name `settings.json` rejections.
+five by-name `settings.json` rejections. (Four ROADMAP markers, five
+keys: `critic_model` and `embedder_model` share SQ7.)
 
 `ensemble_mode` is deliberately *not* one of them. It is a mode, persistable in
 `settings.json`, and the worst it can do is spend more of a provider you
@@ -254,8 +267,8 @@ N is len(ENSEMBLE_MODELS) -- derived, never configured separately (E3). The
 denominator of a confidence score must not be able to disagree with the
 roster that produced it.
 
-config.py ONLY, deliberately -- there is no settings.json key for this,
-following CRITIC_MODEL (E2). Trusting a cloned repo already lets it pick
+`config.yaml` ONLY, deliberately -- there is no settings.json key for
+this, following `critic_model` (E2). Trusting a cloned repo already lets it pick
 the provider and multiply pipeline cost; a project-tier list of N providers
 is that same grant multiplied by N.
 
@@ -267,14 +280,15 @@ recreate it through this config.
 
 ### `ensemble_models`
 
-Example:
-ENSEMBLE_MODELS = [
-```text
-    {"provider_name": "ANTHROPIC", "model": "claude-opus-5"},
-    {"provider_name": "OPENAI", "model": "gpt-5.1"},
-    {"provider_name": "GOOGLE", "model": "gemini-2.5-pro"},
+Example, as it is written in `config.yaml` -- a sequence of mappings,
+not the Python assignment this example used to show:
+
+```yaml
+ensemble_models:
+  - {provider_name: ANTHROPIC, model: claude-opus-5}
+  - {provider_name: OPENAI, model: gpt-5.1}
+  - {provider_name: GOOGLE, model: gemini-2.5-pro}
 ```
-]
 
 ## Sampling-parameter support (ROADMAP_v2 §16 prerequisite)
 
@@ -311,8 +325,8 @@ default -- means the pipeline warns once at launch and falls back to the
 grounding model's own number, under source_grounding.md's anchored
 rubric.
 
-`config.py` ONLY, with no settings.json key, following CRITIC_MODEL and
-ENSEMBLE_MODELS (E2): choosing a provider is a grant, and this one sends
+`config.yaml` ONLY, with no settings.json key, following `critic_model`
+and `ensemble_models` (E2): choosing a provider is a grant, and this one sends
 claim text and fetched page text to whoever is named. `/embedder` writes
 to the user-tier store in core/pipeline_models.py, which OUTRANKS this.
 Example: {"provider_name": "OPENAI", "model": "text-embedding-3-small"}
@@ -572,8 +586,12 @@ The presence of the variable, never its value: the default "./workspace"
 is a subdirectory of wherever you launched, so a value test would make
 `./workspace` the project for everyone who never set anything -- which
 is the whole population this must not disturb. main() reads this to
-decide the project path; the decision is there, because config.py holds
-plain values and this is one.
+decide the project path; the decision is there, because the config layer
+holds plain values and this is one.
+
+Note that this value has NO `config.yaml` key at all -- it is computed in
+`config_schema.derived_values()`, because YAML cannot ask whether a
+variable was named. There is nothing here to edit.
 
 ### `max_file_size_bytes`
 
@@ -709,11 +727,16 @@ the six math tools, which are pure functions of their params and have
 nothing bounding them from the inside. dispatch runs them in a
 killable subprocess under this budget (tools/isolation.py).
 
-15s is chosen against measurement, not taste. The slowest LEGITIMATE
+20s is chosen against measurement, not taste. The slowest LEGITIMATE
 call found is `symbolic_math series order=1000` at 3.44s, so this is
-roughly 4x headroom; the runaways it exists for do not return at all.
-Ten passes each burning a full budget is 150s rather than forever,
+roughly 6x headroom; the runaways it exists for do not return at all.
+Ten passes each burning a full budget is 200s rather than forever,
 which is the trade being made.
+
+*(Corrected in batch 83. This paragraph was carried over saying 15s,
+roughly 4x and 150s -- all three consistent with a 15 the value has not
+been for some time. `README.md` said 15 in three more places against its
+own table's 20. The value is unchanged; the arithmetic now describes it.)*
 
 ONE number, not one per tool: there is no evidence any two math tools
 want different answers, and a per-tool budget makes each a judgement
@@ -784,12 +807,22 @@ same point, which is when the honest answer is to reject it.
 ### `compaction_trigger_fraction`
 
 D27: these are DEFAULTS, not settings. Every value is a starting point
-chosen to be reasonable and explicitly not claimed to be right, and every
-one is overridable through the existing settings mechanism -- config.py
-default -> user ~/.config/venastine/settings.json -> trusted project
+chosen to be reasonable and explicitly not claimed to be right, and the
+compaction block as a whole is overridable through the existing settings
+mechanism -- `config.yaml` default -> user
+~/.config/venastine/settings.json -> trusted project
 .venastine/settings.json -> a per-invocation `/compact --strength N`.
 The architecture is what's locked; the numbers are expected to move once
 there are real long threads to look at.
+
+**THIS KEY IS NOT ONE OF THE OVERRIDABLE ONES.** The paragraph above is
+D27's about the compaction SECTION, and the seven keys a `settings.json`
+`compaction` block actually accepts are `strength`, `keep_recent_tokens`,
+`trigger_tokens`, `warning_margin_tokens`, `keep_recent_turns`,
+`strategy` and `max_retries` -- `core/config_loader._KNOWN_COMPACTION`.
+`trigger_fraction` is not among them and unknown nested keys RAISE, so
+writing `compaction: {trigger_fraction: 0.9}` is a startup error rather
+than an override. `README.md`'s compaction table lists the seven.
 
 How much of the model's context window a thread may fill before
 compaction folds it. thresholds() multiplies this by context_limit(),

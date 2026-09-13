@@ -12620,7 +12620,7 @@ by-hand press comes first and the docs after, in that order.
 
 `config.py` was 1,210 lines of which **788 were comment and 91 were statements**.
 The values moved to `config.yaml`; the 788 lines moved to `CONFIG_ARCHITECTURE.md`;
-`config.py` is a 75-line shim that publishes the result as module attributes.
+`config.py` is a 95-line shim that publishes the result as module attributes.
 
 **This migration is in no locked design record.** No D, E, R, G, SQ or UN number
 covers a YAML config -- the only structured config the design sanctioned was
@@ -12791,7 +12791,7 @@ and neither is a defaults lookup.
 ### Files
 
 - `config.yaml`, `config_schema.py`, `CONFIG_ARCHITECTURE.md` -- new.
-- `config.py` -- 1,210 lines to 75.
+- `config.py` -- 1,210 lines to 95.
 - `core/config_loader.py` -- `import config` gone; `_COMPACTION_DEFAULTS` holds
   schema field names; four Authority rejection messages name `config.yaml`.
 - `core/reasoning/orchestrator.py` -- the four roster messages.
@@ -12805,5 +12805,176 @@ and neither is a defaults lookup.
 - `ARCHITECTURE.md` -- §4.1 rewritten (its "never touches the filesystem" clause was
   the one sentence the migration made false), tree entries, `AGENTS.md` boundary
   table and documentation map, `README.md`'s 24 configuration references.
-- `tests/test_posture.py` -- three new tests; `tests/test_ensemble_guard.py`,
+- `tests/test_posture.py` -- four new tests; `tests/test_ensemble_guard.py`,
   `tests/test_shell.py` -- the message assertions that named a file.
+
+## Batch 83 -- the review round that left two jobs red (2026-09-12)
+
+A reviewer's list of thirteen items (M1-M4, L1-L6, N1-N2) was applied in
+`62612d3`. Eleven were genuinely fixed. This batch is what checking the other
+two, and then the code the list did not reach, turned up.
+
+**Two CI jobs were red on arrival**, and both would have been caught by
+running what CI runs:
+
+- `ruff check .` reported `UP037` on the M4 validator's own quoted return
+  annotation, redundant under this module's `from __future__ import
+  annotations`. `UP` is in `select`; the local ruff is CI's exact pin.
+- The count assertions: `test_config_loader.py` stated 81 against 82
+  collected, and the suite total 4318 against 4319. The first fix commit added
+  a test and bumped by one less than it should have. Every other one of the 92
+  stated per-file counts was right.
+
+### N1 and N2, the two nobody had looked at, were clean
+
+Measured rather than argued. The plain scalars that could have been mis-parsed
+-- the colon-bearing `python:3.13-slim`, the `https://` URL, the `book series`
+key with a space in it, and two empty strings -- all parse to values identical
+to the pre-migration module, type included. Loading emits zero warnings on
+pydantic 2.13.4 and ruamel 0.19.1, and tuple, frozenset and integer-keyed dict
+all keep their original runtime types. Full parity was re-run on the committed
+state: 89 names, 10 environment permutations, dict key order included, zero
+differences.
+
+### What the list did not reach: a hand-edited config could boot and fail later
+
+M4 closed two cross-field gaps of exactly this shape. Six more were open, each
+verified ACCEPTED before this batch:
+
+| Edit | Failed |
+|---|---|
+| `compaction_strategies` gaining a third name | `settings.json` `strategy: hybrid` then passed the membership test and `core/compaction.py` treated anything not exactly `chain` as `rederive` -- silently, recording `rederive` in the checkpoint |
+| `scholar_venue_credit` without `unknown` or `repository` | `KeyError` in `scholar.py`, mid research run |
+| `domain_authority_classes` without `restricted_registry` | `KeyError` in `source_scoring.py` |
+| a suffix naming a class that does not exist | `KeyError` in `source_scoring.py`; a one-character typo in ~140 entries |
+| a calibration band missing an edge | `KeyError` in `source_scoring.py` |
+| `max_tokens: -5`, `max_iterations: 0`, a fraction above 1 | impossible values, right types |
+| `compaction_trigger_fraction: .nan` | **nothing, ever.** NaN makes every `<` and `>` comparison False, so compaction never fired and no error was raised |
+
+All of them now fail at startup naming the key, through the validator M4 added
+rather than a second mechanism. The three range shapes are mirrored from
+`core/config_loader.py`'s `_UNIT` / `_POSITIVE_INT` / `_NON_NEGATIVE_INT`
+rather than imported, because importing from `core/` is the cycle
+`config_schema` exists to avoid -- the same deliberate duplicate
+`security/protected_paths.py` carries. `allow_inf_nan=False` sits on the
+`Number` annotation, so NaN is refused once rather than per field.
+
+**One claim from the audit did not survive checking, and it is worth
+recording.** A strategy absent from its own roster was reported as failing on
+the hot path every turn. It does not: `initialize()` calls
+`effective_compaction()`, which already refuses that pair at startup. The
+check was added anyway -- it names the `config.yaml` key rather than the
+`settings.json` one, and a process that never calls `initialize()` would
+otherwise carry the incoherent pair to the first fold -- but as defence in
+depth, which is what the comment beside it now says.
+
+### The seam M3 created was wrong in a new way
+
+M3 stopped `load(path=...)` polluting the cache, which was right. But the
+candidate path still folded the ambient environment in, so it certified files
+that would not boot. Measured with `APP_DB_PATH` and `AGENT_MODEL` set: a
+draft with `db_path` and `model_name` DELETED was ACCEPTED, and the same file
+in a shell without those variables was REFUSED at startup. The seam's whole
+purpose is to answer "will this file start the harness", and the environment
+it will be read under at the next launch is not knowable now. A candidate is
+judged on the raw document now; the live path keeps the overlay. `force=` with
+`path=` asks for two different things and is refused rather than dropped in
+silence.
+
+### Three holes in the error contract, and a pickling regression
+
+- A non-string key escaped as `TypeError: keywords must be strings` from
+  `HarnessConfig(**data)`, before pydantic, so `except ValidationError` never
+  saw it. The way in is ordinary: de-indent a nested block and `1: 0.4` lands
+  at column 0, which parses to a mapping with an int key and passes the
+  mapping guard. This was the one input class where the file-and-key message
+  the module promises was unreachable.
+- `UnicodeDecodeError` is a `ValueError` and NOT an `OSError`, so
+  `except (OSError, YAMLError)` missed it and the message named neither the
+  file nor the remedy. On Windows that is an editor's ANSI or UTF-16 save.
+- Error strings hardcoded `config.yaml` for a caller-supplied path, so a
+  complaint about someone's draft told them the package was incomplete and to
+  restore the file from git.
+- `dataclasses.make_dataclass` sets `__module__` from the calling frame, so
+  pickle looked `ToolPermissions` up in `config_schema`, where it was never
+  bound: `PicklingError`, where the original `@dataclass` in `config.py`
+  pickled fine. Bound now, with `module=__name__`, and the two factories are
+  idempotent -- each call used to build a fresh class whose instances compared
+  UNEQUAL to the harness's own, because dataclass `__eq__` compares
+  `other.__class__ is self.__class__`.
+
+### Two clusters of documented numbers had been wrong for months
+
+Neither was caused by the migration; both were confirmed against the
+pre-migration tree. The migration made one of them worse by half-fixing it.
+
+- **The maths-tool clock ships 20.** `README.md` said 15 in three places --
+  the tier table, the ceilings sentence, and a sample of output the harness
+  cannot emit, since `tools/isolation.py` formats that string from the live
+  value. The fix commit corrected the settings table to 20 and left the other
+  three, so README contradicted itself. The rationale carried into
+  `CONFIG_ARCHITECTURE.md` said 15 with two figures derived from it, "roughly
+  4x headroom" and "150s across ten passes", both arithmetic on a value the
+  code has not had.
+- **The sandbox ships 120 s and 2048 MB.** README said 60 s and 1024 MB in
+  three places, its own settings table among them.
+
+Owner decision on both: the values are right, the prose was stale.
+
+**Nothing compared a documented number to the config, which is why they
+lasted.** `test_every_documented_ceiling_matches_the_live_config` does now, on
+fourteen explicit `(document, key, wording)` triples. Explicit rather than
+scraped, and that was measured too: a scraped version reported 25 candidate
+passages that were almost all section, issue and batch numbers, and it MISSED
+the real bug, because `15s` is glued to a letter. A detector that quiet reads
+as a clean bill of health. Each row asserts both halves -- the wording is
+present, and the number in it equals the live value -- so a reword cannot
+retire the check in silence, and a sibling test proves the renderer can fail.
+
+### The rest of the documentation, all verified false before being touched
+
+Four passages carried into `CONFIG_ARCHITECTURE.md` told the reader, in the
+present tense and under the key heading they would navigate to, to set a value
+in `config.py` -- where `globals().update(...)` overwrites the edit at import,
+so it appears to work and does nothing. One documented
+`compaction_trigger_fraction` as overridable through `settings.json`, which is
+a startup error: the seven keys a `compaction` block accepts do not include
+it, and unknown nested keys raise. The preamble listed five by-name rejections
+and then said four, because four is the count of ROADMAP markers and
+`critic_model` and `embedder_model` share SQ7. README's rejected-key table had
+two of the five. `config_schema.py`'s own docstring rested on
+"`core/config_loader.py` imports it", which this migration made false -- and
+that clause is the premise of the module's reason for existing, so it was
+re-tensed rather than deleted: the cycle argument still holds, and now nothing
+in the import graph would stop someone putting it back.
+
+Smaller and each measured: 31 modules import `config` where 30 do, in four
+places; "three new tests" where four were added; a 75-line shim that is 95
+lines; `THIRD_PARTY_NOTICES.md` citing `textual>=1.0,<2.0` as its example of a
+range after that pin went exact, pointing at `requirements.txt:47` for a note
+now fifteen lines lower, and claiming 166 tracked Python files against 200
+while enumerating five of the thirty-four non-`.py`/`.md` files and ending
+"no bundled images" with a screenshot tracked. That last claim was restated
+from a measurement rather than half-fixed, because correcting only the missing
+`config.yaml` would have left it false six other ways and looking freshly
+checked. `CONTRIBUTING.md`'s which-doc-to-update table had no row for the new
+1,300-line document.
+
+**The verbatim port now has named exceptions.** Five entries in
+`CONFIG_ARCHITECTURE.md` differ from the pre-migration `config.py`, each
+marked and dated in place, and the preamble says so -- otherwise the next
+reader diffing the two finds an unexplained difference, which is worse than
+the error being fixed. The same preamble now records that the file is
+hand-maintained: it was produced once by a migration script that was not kept.
+
+### Files
+
+- `config_schema.py` -- the ruff fix, the range shapes, the closed vocabulary
+  on `compaction_strategies`, six new invariants in the existing validator,
+  the candidate seam, three error paths, the bound dataclasses, the re-tensed
+  docstring.
+- `tests/test_config_loader.py` -- 16 parametrised incoherent-config cases,
+  the shipped-file positive, and seven contract tests.
+- `tests/test_docs_consistency.py` -- the ceiling check and its guard.
+- `README.md`, `CONFIG_ARCHITECTURE.md`, `ARCHITECTURE.md`, `config.py`,
+  `THIRD_PARTY_NOTICES.md`, `CONTRIBUTING.md`, `TECHNICAL_DEBT.md`.

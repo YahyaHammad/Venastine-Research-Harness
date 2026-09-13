@@ -6,9 +6,9 @@ The dependencies listed below are **not** part of the project's own source but a
 
 > **Scope.** Two things are covered here: the project's **declared direct** dependencies — the pins in `requirements.txt` and the extras in `pyproject.toml` — and, under *Non-code third-party material* below, the third-party **text** the repository reproduces.
 >
-> The transitive dependency closure is *not* enumerated: `matplotlib` alone pulls numpy, pillow, kiwisolver and fonttools, and `mcp==2.0.0` brings `httpx2` (see the note at `requirements.txt:47`). For the full closure, run `pip-licenses` against a resolved environment — see *How to regenerate* below.
+> The transitive dependency closure is *not* enumerated: `matplotlib` alone pulls numpy, pillow, kiwisolver and fonttools, and `mcp==2.0.0` brings `httpx2` (see the note beside the `mcp` pin in `requirements.txt`). For the full closure, run `pip-licenses` against a resolved environment — see *How to regenerate* below.
 
-> Versions shown are the pins from `requirements.txt` / `pyproject.toml` at the time this file was created. Where a range is used (e.g. `textual>=1.0,<2.0`) the exact resolved version will vary.
+> Versions shown are the pins from `requirements.txt` / `pyproject.toml` at the time this file was created. Where a range is used (e.g. `rich>=14.2,<16`) the exact resolved version will vary.
 
 ## Runtime / core dependencies
 
@@ -51,13 +51,20 @@ The dependencies listed below are **not** part of the project's own source but a
 
 ## Non-code third-party material
 
-**No third-party source code is included in this repository.** Measured, not assumed: 166 tracked
+**No third-party source code is included in this repository.** Measured, not assumed: all 200 tracked
 Python files carry no foreign copyright header and no `SPDX-License-Identifier`; a sweep for
 copied or adapted code ("adapted from", "copied from", "taken from", "vendored", "borrowed from")
-returns only this project's own design prose; and the only tracked files that are neither `.py`
-nor `.md` are `LICENSE`, `prompts/universal_system_prompt`, `prompts/untrusted_content`,
-`research-mode-birds-eye.mermaid` and `tui/app.tcss` — all first-party. There are no bundled
-fonts, images or data files.
+returns only this project's own design prose; and the 34 tracked files that are neither `.py`
+nor `.md` are first-party without exception — the licence texts, configuration and packaging
+(`config.yaml`, `pyproject.toml`, `requirements.txt`, `package.json`, `pytest.ini`, the `.github/`
+workflows and issue templates, the dotfiles), the two prompt texts, `bin/venastine.mjs` and
+`scripts/prepublish-check.mjs`, `research-mode-birds-eye.mermaid`, `tui/app.tcss`, the two
+`.example` templates, and one screenshot of this project's own interface. **No third-party
+fonts, images or data files are bundled.**
+
+*(Counts restated in batch 83. The figure had been 166 against 200, the enumeration named
+five of the thirty-four, and the closing sentence said there were no images at all while the
+screenshot was tracked. The claim itself held throughout; only its arithmetic had drifted.)*
 
 What the repository *does* reproduce is third-party **text**:
 

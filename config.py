@@ -3,7 +3,7 @@
 THE VALUES LIVE IN `config.yaml` NOW. This module is the compatibility layer
 that publishes them: it reads the file once, through `config_schema.py`, and
 binds each value as a plain module global, so `config.MAX_TOKENS` means what
-it always meant to the 31 production modules and ~60 test files that read it.
+it always meant to the 30 production modules and ~60 test files that read it.
 
 WHERE TO LOOK FOR WHAT:
 

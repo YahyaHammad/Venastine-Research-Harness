@@ -294,7 +294,7 @@ startup rather than at its first call:
 
 | | |
 |---|---|
-| **compute** | The six maths tools. Pure functions of their arguments with nothing to interrupt them from the inside, so they run in a separate process that can be stopped — 15 seconds by default, plus CPU and memory ceilings on Linux |
+| **compute** | The six maths tools. Pure functions of their arguments with nothing to interrupt them from the inside, so they run in a separate process that can be stopped — 20 seconds by default, plus CPU and memory ceilings on Linux |
 | **io** | Anything that reads a file, fetches a page or talks to an MCP server. Each already carries its own limit: a request timeout, a size check before opening, a sandbox |
 | **human** | `ask_user` and `spawn_subagent`, which wait on a person or on a separately metered sub-run. A ten-minute pause here is the feature |
 
@@ -314,7 +314,7 @@ When a compute tool does hit its limit, the model is told which tool and which l
 for something smaller instead of retrying the same call:
 
 ```
-symbolic_math exceeded its 15s limit and was stopped. The inputs given are too
+symbolic_math exceeded its 20s limit and was stopped. The inputs given are too
 large for this operation -- try smaller values.
 ```
 
@@ -363,7 +363,7 @@ Under `tiered`, each command is classified **once** into what it can do, and the
 | `SANDBOXED_NET` | **any** word is on the network allowlist (`curl`, `pip`, `git`, …) — first word only for an INERT command, which cannot chain | container, with network | **yes** |
 | `UNKNOWN` | could not be characterised at all | — | **yes** |
 
-The auto-approved set is narrower than the `read` tool's, which is already unprompted inside the workspace. A `SANDBOXED` command can do what `write` and `edit` can already do without asking — corrupt the workspace — bounded to 1 CPU, 1 GB, 200 processes, 60 seconds, no network and no host filesystem.
+The auto-approved set is narrower than the `read` tool's, which is already unprompted inside the workspace. A `SANDBOXED` command can do what `write` and `edit` can already do without asking — corrupt the workspace — bounded to 1 CPU, 2 GB, 200 processes, 120 seconds, no network and no host filesystem.
 
 **The argument rule does not parse, deliberately.** Every token after the first is read as a path and required to stay inside the workspace; a flag like `-la` passes only because it is *relative*, not because anything recognised it as a flag. Refusing to interpret shell syntax is what makes the check trustworthy — a classifier that parses is a shell parser, and a parser that is wrong auto-approves something dangerous. The cost is occasional false positives: `grep /etc/passwd notes.txt` searches for a string that looks like a path, and costs one prompt.
 
@@ -393,7 +393,7 @@ If your workspace contains a `.venastine/` directory, it is bind-mounted **read-
 
 **The workspace may not be the harness.** The container mounts your workspace read-write, and a sandboxed command with no network is auto-approved inside it — so a workspace pointing at the harness's own directory would be unattended write access to the code about to run next. `AGENT_WORKSPACE` is refused at startup, and by the sandbox, when it *is* or sits *inside* the harness install tree or `~/.config/venastine/`. The two artifact directories `workspace/` and `output/` stay usable, which is the shipped layout; everything else in the install tree is refused, including a module added in a later release — it is an allowlist, so it fails closed. When one of those trees is *nested inside* your workspace instead — a workspace set to your home directory, say — there is nothing to refuse, so it is bind-mounted read-only, along with `providers.json`, the conversation database and the log directory. The guard names the harness that is *running*, so pointing a globally-installed `venastine` at a development clone of its own source still works.
 
-**From approval to execution, one answer throughout.** The classification is computed once per call and the same profile is handed to both the approval check and the sandbox, so what was approved is what runs. Inert commands never touch Docker — they are plain subprocesses on the host. Anything else probes Docker once per call and shares the result between gate and runner: if Docker was up when the call was approved but down when it executes, and the only route left is the fallback, the call returns an error telling the model to retry rather than silently downgrading onto the host. With Docker unavailable and `allow_insecure_sandbox_fallback: true` in `config.yaml`, non-inert commands fall back to a weakly-isolated host subprocess — prompted per run unless `auto_approve_sandbox_fallback: true` opts that prompt away. Inside the container the workspace is mounted at `/workspace` and output comes back truncated at 50,000 characters (`max_read_chars`); the container runs under a 60-second wall clock, 1024 MB of memory, a single CPU core and a 200-process cap, while the weak fallback enforces its own rlimits instead — 30 CPU-seconds and the same memory ceiling. Two environment knobs affect the mechanics: `AGENT_SHELL` overrides the detected host shell (bash on Linux/macOS, PowerShell on Windows), and `AGENT_SANDBOX_IMAGE` swaps the default `python:3.13-slim` image.
+**From approval to execution, one answer throughout.** The classification is computed once per call and the same profile is handed to both the approval check and the sandbox, so what was approved is what runs. Inert commands never touch Docker — they are plain subprocesses on the host. Anything else probes Docker once per call and shares the result between gate and runner: if Docker was up when the call was approved but down when it executes, and the only route left is the fallback, the call returns an error telling the model to retry rather than silently downgrading onto the host. With Docker unavailable and `allow_insecure_sandbox_fallback: true` in `config.yaml`, non-inert commands fall back to a weakly-isolated host subprocess — prompted per run unless `auto_approve_sandbox_fallback: true` opts that prompt away. Inside the container the workspace is mounted at `/workspace` and output comes back truncated at 50,000 characters (`max_read_chars`); the container runs under a 120-second wall clock, 2048 MB of memory, a single CPU core and a 200-process cap, while the weak fallback enforces its own rlimits instead — 30 CPU-seconds and the same memory ceiling. Two environment knobs affect the mechanics: `AGENT_SHELL` overrides the detected host shell (bash on Linux/macOS, PowerShell on Windows), and `AGENT_SANDBOX_IMAGE` swaps the default `python:3.13-slim` image.
 
 ### "Headless" means *unable to ask*, not "not a GUI"
 
@@ -740,7 +740,7 @@ Three things can end a turn or pass early:
 
 The CLI names the figures behind an early stop — billed this turn, and the thread's measured context size — rather than a bare reason, because "budget exceeded" invites exactly the misreading that there is a size problem.
 
-Other ceilings worth knowing: the six maths tools run in killable subprocesses under a 15-second wall clock (`TOOL_COMPUTE_TIMEOUT_S`) and are told which tool and which limit stopped them; pre-granted tool calls cap at 150 per research run (`MAX_GRANTED_TOOL_CALLS`), degrading to asking when exhausted; subagent nesting stops at depth 2 (`SUBAGENT_MAX_DEPTH`) and at most three subagents of one turn run at once (`SUBAGENT_MAX_PARALLEL`), with anything beyond that running in waves; attended prompts expire after 600 seconds (`ATTENDED_APPROVAL_TIMEOUT_S`), denying that one call while the run continues.
+Other ceilings worth knowing: the six maths tools run in killable subprocesses under a 20-second wall clock (`tool_compute_timeout_s`) and are told which tool and which limit stopped them; pre-granted tool calls cap at 150 per research run (`MAX_GRANTED_TOOL_CALLS`), degrading to asking when exhausted; subagent nesting stops at depth 2 (`SUBAGENT_MAX_DEPTH`) and at most three subagents of one turn run at once (`SUBAGENT_MAX_PARALLEL`), with anything beyond that running in waves; attended prompts expire after 600 seconds (`ATTENDED_APPROVAL_TIMEOUT_S`), denying that one call while the run continues.
 
 Subagents spawned in one model response run **concurrently**, up to `SUBAGENT_MAX_PARALLEL`. Their answers come back to the model in the order it asked for them however they finish, one approval question reaches you at a time, and the sidebar draws them as a tree rather than a chain. The database runs in SQLite's WAL mode to keep their writes from contending, which means `app.db` is accompanied by `app.db-wal` and `app.db-shm` while the harness is open — both are gitignored, and excluded from `git archive`, because a WAL file holds recently written messages.
 
@@ -763,7 +763,7 @@ In the TUI stderr is detached before the screen is taken (anything written there
 
 Precedence for provider and model is CLI flag > `settings.json` > `config.yaml`. Two different merge orders, deliberately:
 
-- **Inside `settings.json`, project beats user** — this is the one file where "more specific wins" holds, which is exactly why the two authority-bearing keys below are rejected there by name. Nested objects merge key-by-key across tiers.
+- **Inside `settings.json`, project beats user** — this is the one file where "more specific wins" holds, which is exactly why the five authority-bearing keys below are rejected there by name. Nested objects merge key-by-key across tiers.
 - **MCP servers, agents and skills run harness > user > project**, inverted from the usual rule, because there "more specific" means "arrived with a repository you cloned".
 
 #### Every `settings.json` key
@@ -787,11 +787,14 @@ An unknown key raises at startup, naming the file and the key — a typo must ne
 | `research.approval_mode` | string | `"none"` | `"attended"` makes research runs ask about every gated call, as if launched with `--attended` |
 | `research.subagent_review` | bool | `false` | Review on by default, as if launched with `--review`; escaped per run with `--no-review` |
 
-Two keys are rejected **by name** — well-formed shapes that will never load, because a project tier that could set them would decide what runs without being asked:
+Five keys are rejected **by name** — well-formed shapes that will never load, because a project tier that could set them would decide what runs without being asked:
 
 | Rejected key | Why |
 |---|---|
 | `shell_approval_mode` | Decides whether shell commands are asked about at all; set `shell_approval_mode` in `config.yaml` instead |
+| `ensemble_models` | A roster chooses which providers N research passes call, so a cloned repository could point them at endpoints you never configured and multiply the run's cost by the length of its list; set `ensemble_models` in `config.yaml` instead |
+| `critic_model` | Names a provider every claim is sent to; use `/critic`, which writes a user-tier store, or set `critic_model` in `config.yaml` |
+| `embedder_model` | Names a provider sent claim text and the text of every page a run fetched; use `/embedder`, or set `embedder_model` in `config.yaml` |
 | `research.granted_tools` | A persisted grant list could only ever *remove* prompts — standing authorisation carried by any repo you clone. Grants are per-run flags precisely so they cannot be |
 
 #### `config.yaml`-only settings
@@ -810,7 +813,7 @@ Deliberately not settings.json keys: editing these means editing the harness's o
 | `shell_approval_mode` | `tiered` | The shell gate: `always` / `tiered` / `never`; a bad value raises at import. Rejected in settings.json by name, see above |
 | `network_allowed_commands` | pip, curl, git, npm, … | Binaries granted network access inside the sandbox. Matched against **every** word of a command that needs a sandbox, so `cd x && pip install .` is recognised and asked about — and against the **first word only** of an inert one, which cannot chain, so `grep pip notes.txt` still runs unprompted |
 | `inert_commands` | ls, cat, grep, wc, … | Read-only commands that run as plain host subprocesses, skipping Docker entirely |
-| Sandbox bounds | image `python:3.13-slim`; 60 s, 1024 MB, 30 CPU-s, 200 pids | `sandbox_docker_image`, `sandbox_timeout_seconds`, `sandbox_memory_mb`, `sandbox_cpu_seconds`, `sandbox_max_pids` |
+| Sandbox bounds | image `python:3.13-slim`; 120 s, 2048 MB, 30 CPU-s, 200 pids | `sandbox_docker_image`, `sandbox_timeout_seconds`, `sandbox_memory_mb`, `sandbox_cpu_seconds`, `sandbox_max_pids` |
 | `allow_insecure_sandbox_fallback` / `auto_approve_sandbox_fallback` | `false` / `false` | Enable, then de-prompt, the weak host-subprocess fallback |
 | `redact_tool_outputs` | `true` | Master switch for output redaction. Never affects input refusals, the depth-cap bound, or the log formatter's own guard |
 | `tool_compute_timeout_s` | 20 | Wall clock per maths-tool subprocess |
@@ -878,7 +881,7 @@ classifier is described under *Security model* above. If you have a fork or a lo
 note that `tool_approvals.shell` now ships `false` and `shell_approval_mode` is the gate — see
 `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 4318 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+Run the test suite with `pytest` — 4345 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
 ## Documentation
 

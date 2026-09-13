@@ -671,3 +671,35 @@ WINDOWS.get()`, etc.) which remain correct via the shim, and historical
 A literal every-occurrence rewrite would make correct docs incorrect and
 rewrite locked history (D-numbers stable, ARCH §4.1 locked, `test_every_
 decision_id_cited_in_production_code_resolves`, README approval-table check).
+
+**RESOLVED in part (batch 83).** The one genuine remediation leftover this
+item did not name -- `README.md`'s ceilings sentence, which pointed at
+`TOOL_COMPUTE_TIMEOUT_S` rather than the `config.yaml` key -- is fixed, along
+with four `CONFIG_ARCHITECTURE.md` entries that told the reader to set a
+value in `config.py` in the present tense. What stays deferred is unchanged
+and is the larger half: runtime `config.UPPER` references in code context,
+which remain correct through the shim, and historical `ROADMAP.md` /
+`ROADMAP_v2.md` / `DEVLOG.md` prose recording what was true when written.
+
+## 22. The bandit baseline has drifted (open, 2026-09-12)
+
+`bandit` with the CI job's exact flags and its exact pin exits **1**, and has
+since before the `config.yaml` migration. The unmatched findings are
+overwhelmingly in files that migration never touched -- 59 in
+`security/sandbox.py`, 32 in `tests/test_credentials.py`, 9 in `tui/app.py`,
+across 17 untouched files. `.github/bandit-baseline.json` was generated on
+2026-09-10 against 80,761 lines; the tree is now past 82,500.
+
+Batch 83 contributes exactly two findings, both in
+`tests/test_config_loader.py`: B404 for `import subprocess` and B603 for the
+`subprocess.run` in `test_re_importing_config_re_reads_the_file`. A subprocess
+is the right design there -- the test's subject is module-table surgery that
+would contaminate the session if done in-process -- so the answer is a
+baseline refresh, not a code change.
+
+**Deliberately not done in batch 83** (owner decision). Regenerating a
+security baseline is its own change with its own review, and folding it into a
+documentation and validation round would sweep in ~250 unrelated findings and
+hide both. Whoever takes it should first establish whether the baseline is
+merely stale or was generated under a different bandit, since a version
+mismatch unmatches findings wholesale and looks identical.

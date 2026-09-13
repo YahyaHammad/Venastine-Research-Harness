@@ -1266,3 +1266,228 @@ def test_a_duplicated_key_in_config_yaml_is_a_startup_error(tmp_path):
     dup.write_text("model_name: a\nmodel_name: b\n", encoding="utf-8")
     with pytest.raises(ValueError, match="could not be read"):
         config_schema.read_document(str(dup))
+
+
+# ---------------------------------------------------------------------------
+# ---- The cross-field invariants (batch 83) --------------------------------
+# ---------------------------------------------------------------------------
+#
+# Every case below was ACCEPTED before `_check_cross_field_defaults` grew, and
+# each failed somewhere later: a KeyError inside a research run, a ValueError
+# on the compaction path, or -- for NaN -- nothing at all, ever.
+#
+# Parametrised on (edit, the key the message must name). The message matters
+# as much as the refusal: a startup error that does not say which key is wrong
+# leaves the reader diffing an 845-line file.
+
+def _edited_document(**edits):
+    """The shipped document with `edits` applied, as a plain dict."""
+    import copy
+
+    import config_schema
+
+    data = copy.deepcopy(config_schema.read_document())
+    data.update(edits)
+    return data
+
+
+#: (label, edit callable, the key the error message must name)
+_INCOHERENT = [
+    ("strategy absent from its own roster",
+     lambda d: d.update(compaction_strategies=["chain"],
+                        compaction_strategy="rederive"),
+     "compaction_strategy"),
+    ("a strategy nobody implements",
+     lambda d: d.update(compaction_strategies=["rederive", "chain", "hybrid"]),
+     "compaction_strategies"),
+    ("an empty strategy roster",
+     lambda d: d.update(compaction_strategies=[]),
+     "compaction_strategies"),
+    ("an empty checklist vocabulary",
+     lambda d: d.update(todo_statuses=[]),
+     "todo_statuses"),
+    ("venue credit without its unknown fallback",
+     lambda d: d["scholar_venue_credit"].pop("unknown"),
+     "scholar_venue_credit"),
+    ("venue credit without repository",
+     lambda d: d["scholar_venue_credit"].pop("repository"),
+     "scholar_venue_credit"),
+    ("authority classes without restricted_registry",
+     lambda d: d["domain_authority_classes"].pop("restricted_registry"),
+     "domain_authority_classes"),
+    ("a host suffix naming a class that does not exist",
+     lambda d: d["domain_authority_suffixes"].update(gov="no_such_class"),
+     "domain_authority_suffixes"),
+    ("a calibration band with no ceiling",
+     lambda d: d.update(default_similarity_calibration={"floor": 0.1}),
+     "default_similarity_calibration"),
+    ("a calibration band inverted",
+     lambda d: d.update(
+         default_similarity_calibration={"floor": 0.9, "ceiling": 0.2}),
+     "default_similarity_calibration"),
+    ("a negative output ceiling", lambda d: d.update(max_tokens=-5),
+     "max_tokens"),
+    ("a step ceiling of zero", lambda d: d.update(max_iterations=0),
+     "max_iterations"),
+    ("a fraction above one",
+     lambda d: d.update(compaction_trigger_fraction=5.0),
+     "compaction_trigger_fraction"),
+    ("a fraction of NaN",
+     lambda d: d.update(compaction_trigger_fraction=float("nan")),
+     "compaction_trigger_fraction"),
+    ("a weight above one", lambda d: d.update(scholar_venue_weight=1.5),
+     "scholar_venue_weight"),
+    ("a context window of zero",
+     lambda d: d.update(default_context_window=0), "default_context_window"),
+]
+
+
+@pytest.mark.parametrize("label,edit,key", _INCOHERENT,
+                         ids=[case[0] for case in _INCOHERENT])
+def test_an_incoherent_config_yaml_is_refused_by_name(label, edit, key):
+    """Each of these booted before, and failed a long way from the edit.
+
+    The NaN case is the one worth reading twice: NaN makes every `<` and `>`
+    comparison False, so compaction simply never fired and no error was
+    ever raised.
+    """
+    import config_schema
+
+    data = _edited_document()
+    edit(data)
+    with pytest.raises(ValueError) as exc:
+        config_schema.validate(data, source="test-config.yaml")
+    assert key in str(exc.value), (
+        f"{label} was refused, but the message does not name {key!r}, so the "
+        f"reader is left diffing the whole file:\n{exc.value}")
+
+
+def test_the_shipped_config_yaml_satisfies_every_invariant():
+    """The positive half, and the check that catches an over-tight bound.
+
+    Without it the parametrisation above would pass on a schema that refuses
+    everything, including what the harness ships.
+    """
+    import config_schema
+
+    cfg = config_schema.validate(config_schema.read_document(),
+                                 source="shipped")
+    assert cfg.compaction_strategy in cfg.compaction_strategies
+    assert cfg.compaction_strength in cfg.compaction_target_ratios
+    assert cfg.default_effort in cfg.default_effort_levels
+
+
+# ---------------------------------------------------------------------------
+# ---- The loader's own contract --------------------------------------------
+# ---------------------------------------------------------------------------
+
+def test_a_candidate_file_is_judged_without_the_environment(tmp_path,
+                                                            monkeypatch):
+    """`load(path=...)` must not let the editing shell's environment vouch
+    for a file the next launch will read on its own.
+
+    With the overlay applied to a candidate, a draft missing `db_path` was
+    ACCEPTED whenever `APP_DB_PATH` happened to be set, and then refused at
+    the startup it was supposed to be certifying. The live path keeps the
+    overlay; only the candidate path loses it.
+    """
+    from ruamel.yaml import YAML
+
+    import config_schema
+
+    monkeypatch.setenv("APP_DB_PATH", "from-the-shell.db")
+    data = _edited_document()
+    del data["db_path"]
+    draft = tmp_path / "draft.yaml"
+    with open(draft, "w", encoding="utf-8", newline="\n") as handle:
+        YAML().dump(data, handle)
+
+    with pytest.raises(ValueError, match="db_path"):
+        config_schema.load(path=str(draft))
+
+    # The positive half: the LIVE document still takes the override, so this
+    # is a difference between the two paths rather than a lost feature.
+    assert config_schema.load(force=True).db_path == "from-the-shell.db"
+
+
+def test_a_candidate_never_becomes_the_live_document(tmp_path):
+    """The cache is the process's answer; a candidate is only a question."""
+    from ruamel.yaml import YAML
+
+    import config_schema
+
+    data = _edited_document(model_name="a-model-nothing-ships")
+    draft = tmp_path / "draft.yaml"
+    with open(draft, "w", encoding="utf-8", newline="\n") as handle:
+        YAML().dump(data, handle)
+
+    before = config_schema.current().model_name
+    assert config_schema.load(
+        path=str(draft)).model_name == "a-model-nothing-ships"
+    assert config_schema.current().model_name == before
+
+
+def test_path_and_force_together_are_refused():
+    """They ask for two different things, and the flag used to be dropped in
+    silence -- so a caller reaching for "definitely re-read this file" got a
+    candidate validation and no cache write.
+    """
+    import config_schema
+
+    with pytest.raises(TypeError, match="two different things"):
+        config_schema.load(path=config_schema.CONFIG_PATH, force=True)
+
+
+def test_a_key_that_is_not_a_setting_name_is_reported_as_one():
+    """De-indenting a nested block to column 0 yields a mapping with a
+    non-string key, which passed the mapping guard and then raised a bare
+    `TypeError: keywords must be strings` out of `HarnessConfig(**data)` --
+    before pydantic, so `except ValidationError` never saw it.
+    """
+    import config_schema
+
+    with pytest.raises(ValueError, match="not a setting name"):
+        config_schema.validate({1: 0.4}, source="test-config.yaml")
+
+
+def test_a_file_that_is_not_utf_8_says_so(tmp_path):
+    """`UnicodeDecodeError` is a `ValueError` and NOT an `OSError`, so it
+    escaped the wrapper and arrived naming neither the file nor the remedy.
+    On Windows the way to produce one is an editor's ANSI or UTF-16 save.
+    """
+    import config_schema
+
+    bad = tmp_path / "ansi.yaml"
+    bad.write_bytes("model_name: caf\xe9\n".encode("latin-1"))
+    with pytest.raises(ValueError, match="UTF-8"):
+        config_schema.read_document(str(bad))
+
+
+def test_the_permission_dataclasses_survive_a_process_boundary():
+    """`make_dataclass` sets `__module__` from the calling frame, so pickle
+    looks the class up in `config_schema` -- where it was never bound. The
+    original `@dataclass` in `config.py` pickled fine, so this was a silent
+    shape regression nothing would notice until one of these crossed a
+    process boundary.
+    """
+    import pickle
+
+    import config
+
+    for name in ("ToolPermissions", "ToolApprovals"):
+        klass = getattr(config, name)
+        revived = pickle.loads(pickle.dumps(klass()))
+        assert revived == klass(), (
+            f"{name} does not survive a pickle round trip as an equal value")
+
+
+def test_the_dataclass_factories_are_idempotent():
+    """Dataclass `__eq__` compares `other.__class__ is self.__class__`, so a
+    second class built from the same values produced instances that compared
+    unequal to the harness's own.
+    """
+    import config
+    import config_schema
+
+    assert config_schema.tool_permissions_dataclass() is config.ToolPermissions
+    assert config_schema.tool_approvals_dataclass() is config.ToolApprovals
