@@ -22,10 +22,11 @@
 #    arrives with a directory you cloned.
 #
 # 2. Keys marked AUTHORITY decide what this harness may do to its host, or
-#    name a provider it sends your research content to. Nothing reachable
-#    from a running session can change them -- not a tool call, not a
-#    settings file, not an environment variable, not a slash command. This
-#    file is the only route, and it needs a human.
+#    name a provider it sends your research content to. Nothing UNATTENDED
+#    can change them -- not a tool call, not a settings file, not an
+#    environment variable. This file is the only route and it needs a
+#    human: `/config` writes one, but only after saying what the key
+#    permits and asking (batch 84).
 #
 # 3. Values are read ONCE, at startup. Editing this file while the harness is
 #    running changes nothing until the next launch.

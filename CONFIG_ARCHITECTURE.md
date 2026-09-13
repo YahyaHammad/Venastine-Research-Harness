@@ -81,12 +81,29 @@ until the next launch.
 ### The keys marked AUTHORITY
 
 Nine keys decide what the harness may do to its host, or name a provider it
-sends your content to. Nothing reachable from a running session can change
-them -- not a tool call, not a settings file, not an environment variable, not
-a slash command. `config_schema.HARNESS_AUTHORITY_KEYS` is the machine-readable
-list, and a test holds it against `security/posture.Posture`'s fields and the
-five by-name `settings.json` rejections. (Four ROADMAP markers, five
-keys: `critic_model` and `embedder_model` share SQ7.)
+sends your content to. Nothing *unattended* can change them -- not a tool
+call, not a settings file, not an environment variable.
+`config_schema.HARNESS_AUTHORITY_KEYS` is the machine-readable list, and a
+test holds it against `security/posture.Posture`'s fields and the five
+by-name `settings.json` rejections. (Four ROADMAP markers, five keys:
+`critic_model` and `embedder_model` share SQ7.)
+
+**Batch 84 gave `/config` a route to them, behind a confirmation.** Until
+then the rule was absolute: no in-session surface at all, a slash command
+included. What changed is the reading of *why*. The `settings.json`
+rejections argue from a file that arrives with a directory you cloned, and
+the environment argument from a variable a subprocess can set; neither
+describes a person typing at the prompt, who is the harness operator and is
+the one `config.yaml` has always been edited by. The model cannot reach the
+route -- `tui/commands.dispatch` is called from the prompt's submit handler
+and nowhere else, and the file tools refuse the harness install tree.
+
+The compensating control is that the confirmation says what the key
+PERMITS, not "are you sure": `config_edit.AUTHORITY_EFFECT` carries one
+sentence per key and a test fails if a key has none. And the change still
+does not take effect in the running process -- it is written to the file
+and applied by relaunching, so the frozen posture is never edited under a
+session that has already read it.
 
 `ensemble_mode` is deliberately *not* one of them. It is a mode, persistable in
 `settings.json`, and the worst it can do is spend more of a provider you

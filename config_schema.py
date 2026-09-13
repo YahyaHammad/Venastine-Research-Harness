@@ -531,8 +531,12 @@ HARNESS_ENV_VARS = tuple(sorted(
 #: round-trip check in `tests/` can tell "absent on purpose" from "forgotten".
 DERIVED_VALUES = ("OUTPUT_DIR", "WORKSPACE_DIR_EXPLICIT")
 
-#: Keys no in-session surface may write: not a slash command, not a settings
-#: file, not a future config editor. Four are the frozen security posture
+#: Keys that need a human at the keyboard. No UNATTENDED surface may write
+#: them -- not a settings file, not an environment variable, not a tool
+#: call -- and `/config` writes one only behind a confirmation naming what
+#: the key permits (batch 84; `config_edit.AUTHORITY_EFFECT` is that
+#: sentence, per key, and a test holds the two lists against each other).
+#: Four are the frozen security posture
 #: (`security/posture.Posture`); three are the Authority rosters that name a
 #: provider the harness will call (E2, SQ7); two are the global tool floor.
 #:

@@ -12978,3 +12978,158 @@ hand-maintained: it was produced once by a migration script that was not kept.
 - `tests/test_docs_consistency.py` -- the ceiling check and its guard.
 - `README.md`, `CONFIG_ARCHITECTURE.md`, `ARCHITECTURE.md`, `config.py`,
   `THIRD_PARTY_NOTICES.md`, `CONTRIBUTING.md`, `TECHNICAL_DEBT.md`.
+
+
+---
+
+## Batch 84 -- `/config`, and the authority rule that moved with it (2026-09-13)
+
+Technical debt item 20, built. The values moved into `config.yaml` in batch
+82 and the only way to change one was still to open the file in an editor and
+relaunch by hand. `/config` browses all 133 of them in the panel the slash
+commands already use, sets 116 by name, and relaunches the harness on the
+thread that was open.
+
+### The panel needed almost nothing
+
+`SlashSuggest._entry` draws `"/" + command.name` and
+`PromptInput._complete` writes `"/" + command.name + " "`. So a row named
+`config max_tokens` renders as `/config max_tokens ● …` and completes to the
+text that dispatches, with no change to the panel, its row budget, its
+sliding window or the four keys it spends. The only change near them is
+`CommandRegistry.matching` learning to look past the first space and ask the
+command what comes next -- opt-in, through a new `SlashCommand.complete`,
+which is what keeps `"/copy last"` offering nothing and
+`test_a_space_ends_it_at_either_end` green as written.
+
+Two details were not obvious.
+
+**The split is on a space and nothing else.** `dispatch` partitions on a
+space, so a line with a newline in it is not a command line there and must
+not look like one here. The panel and the shell agreeing about what a command
+line is is the whole reason `matching` lives in the registry.
+
+**Completion had to re-offer, and could not do it by posting.** Completing
+`/config` left an empty panel over a line whose next stage was ready:
+`self.value = ...` goes through `load_text`, which `on_text_area_changed`
+reads as an API edit and answers by closing the panel -- right for
+`.value = "/help"` in a test, wrong for a tab. The first fix posted the new
+list from inside `_complete` and appeared to work; measured, the panel came
+back with 133 rows and was cleared a tick later, because the assignment
+queues its own `TextArea.Changed` which is handled afterwards. A `_completing`
+flag carries the intent across that gap instead.
+
+### The authority rule narrowed, deliberately
+
+Nine keys are marked AUTHORITY. Three documents and three tests said no
+in-session surface could write them, a slash command explicitly included, and
+`test_no_slash_command_touches_the_posture` said in its own docstring that
+adding a posture command turns it red on purpose.
+
+The owner chose to let `/config` write them. What the old rule was actually
+protecting still holds, and the documents now say this instead: no
+*unattended* route can reach these keys -- not a settings file that arrives
+with a directory you cloned, not an environment variable a subprocess can
+set, not a tool call. `tui/commands.dispatch` is reached from the prompt's
+submit handler and nowhere else, and the file tools already refuse the
+harness install tree, so the model cannot type this command.
+
+Two things make that defensible rather than merely argued:
+
+- **The confirmation says what the key PERMITS.** `AUTHORITY_EFFECT` carries
+  one sentence per key -- that `never` runs every command the agent writes
+  without asking, that the insecure fallback runs on the host with your
+  files, that an embedder receives the text of every page a run fetched. A
+  generic "are you sure" is a dialog people dismiss. Two tests fail if a key
+  has no sentence.
+- **The write does not move a running process.** It goes to the file and
+  takes effect at the relaunch, so the frozen posture is never edited under a
+  session that has already read it. UN1 is untouched.
+
+### Validating a change as the bytes it will become
+
+`propose()` applies the edit to the round-trip tree, dumps it, writes it to a
+temp file beside `config.yaml`, and hands THAT to
+`config_schema.load(path=...)` -- the candidate seam batch 83 built for
+exactly this caller, which validates with no environment overlay and without
+touching the cache. So a draft missing `db_path` is refused even in a shell
+where `APP_DB_PATH` would have covered for it at this launch but not the
+next.
+
+It also means a change is judged against the whole document rather than
+against its own field: `config_schema`'s cross-field invariants see it, and a
+file already broken elsewhere refuses a perfectly good `max_tokens`.
+
+### The write keeps the file
+
+Measured before it was relied on: with `preserve_quotes`, `indent(mapping=2,
+sequence=4, offset=2)`, an explicit `null` representer and a wide `width`,
+loading and re-dumping `config.yaml` reproduces all 28,177 bytes exactly.
+Without any one of them it does not -- ruamel un-indents a list under its
+key, and writes a None as an empty value, which would have reformatted five
+lines it was not asked to touch. A one-value change is therefore a one-line
+diff, and all ~600 comment lines and every AUTHORITY marker survive.
+
+The path resolution is checked over the WHOLE catalogue rather than a sample:
+set all 114 settable scalars to their own current values, dump once, assert
+the document is byte-identical. That is what would catch a leaf written to
+the wrong table, and the two tables share all 23 tool names.
+
+### The relaunch
+
+`/config` writes, then offers to restart. Idle restarts immediately; a chat
+turn is queued behind (through the `_busy` setter, the one funnel all four
+turn exits already go through) and `/config --cancel-restart` calls it off. A
+research run is NOT queued behind: a pipeline run is minutes, and a restart
+that fires long after the question scrolled away is a restart nobody asked
+for -- the write has already landed, so saying so costs nothing.
+
+The app exits with a `RestartRequest` rather than replacing the process
+itself. The MCP servers are subprocesses of this one and the database is
+open; `main.py` closes both in a `finally` a process replaced from inside the
+UI would never reach. The relaunch repeats this launch's arguments with
+`--thread` set to the conversation on screen, and names the provider and
+model only when a flag pinned them at launch -- unpinned, the remembered pair
+in `tui/preferences.py` answers exactly as it did this time, and writing a
+flag the user never typed would outrank it.
+
+**Windows has no exec**, and this is the one place the two platforms differ.
+The C runtime emulates `execv` by starting a new process and exiting, which
+gives the replacement a different pid: `bin/venastine.mjs` waits on THIS one
+with inherited stdio, so its wait would return and the shell prompt would
+come back over a terminal the replacement is still drawing in. On Windows the
+process therefore stays as a waiter around the new one and passes its exit
+code up. One idle process per restart, and it is the only arrangement that
+keeps the terminal single-owner.
+
+### What is not built
+
+Containers are listed and pointed at, not edited: 16 of them, including 105
+domain suffixes of which 100 contain a dot and one venue key with a space in
+it, so a path syntax would need quoting rules for a surface nobody asked for.
+`critic_model` and `embedder_model` are the exception and take `/critic`'s
+own grammar through its own parser. There is no command-line surface and no
+modal screen; the catalogue module is outside `tui/` so either can be added
+over it without moving a line.
+
+### Files
+
+- `config_edit.py` -- new. The catalogue, the value grammar, the round-trip
+  writer, `AUTHORITY_EFFECT`, `RestartRequest`.
+- `tui/commands.py` -- `SlashCommand.complete`, and `matching` past the first
+  space.
+- `tui/widgets.py` -- `_completing`, so a tab re-offers where an assignment
+  does not.
+- `tui/app.py` -- `/config`, its two-stage completer, the authority
+  confirmation, the queued restart, and `run()` returning the request. Plus
+  three stale `config.py` pointers batch 83's sweep did not reach.
+- `main.py` -- `relaunch_argv`, `replace_process`, and the branch after the
+  teardown.
+- `tests/test_config_edit.py` -- new, 42 tests.
+- `tests/test_tui.py` -- 30 new; eleven panel tests re-measured against the
+  27-command list.
+- `tests/test_posture.py` -- the narrowed rule, and the gate held where the
+  posture is.
+- `config.yaml`, `config_schema.py`, `CONFIG_ARCHITECTURE.md`,
+  `ARCHITECTURE.md`, `AGENTS.md`, `README.md`, `TECHNICAL_DEBT.md`,
+  `package.json`, `tests/BREAKING_CHANGES.md`.

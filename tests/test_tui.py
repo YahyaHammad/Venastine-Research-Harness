@@ -29,11 +29,13 @@ import logging
 import queue
 import time
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 from rich.cells import cell_len
 
 import config
+import config_edit
 from core.events import LoopEvent
 from tests.conftest import (
     make_model_response,
@@ -42,7 +44,12 @@ from tests.conftest import (
     settle,
     whole_line_style,
 )
-from tui.app import EffortLevelsReady, LoopEventMessage, VenastineApp
+from tui.app import (
+    EffortLevelsReady,
+    LoopEventMessage,
+    VenastineApp,
+    _cmd_config,
+)
 from tui.commands import registry as commands
 from tui.screens import (
     ConfirmScreen,
@@ -5480,7 +5487,7 @@ class TestMatchingIsTheListHelpReads:
 
     def test_a_prefix_offers_the_commands_that_start_with_it(self):
         names = [c.name for c in commands.matching("/co")]
-        assert names == ["compact", "copy"], (
+        assert names == ["compact", "config", "copy"], (
             f"/co offered {names}; prefix matching on the NAME is what a "
             f"user typing a command is doing")
 
@@ -5575,12 +5582,15 @@ class TestThePanelOpensOnWhatIsTyped:
             await pilot.press("slash", "c")
             assert await settle(pilot, lambda: panel.shown == 4)
             names = [c.name for c in panel._matches]
-            assert names == ["claims", "compact", "copy", "critic"]
+            assert names == ["claims", "compact", "config", "copy",
+                             "critic"], (
+                "five commands start with c since batch 84 added "
+                "/config; four of them fit")
 
             await pilot.press("o")
             assert await settle(
                 pilot, lambda: [c.name for c in panel._matches] ==
-                ["compact", "copy"])
+                ["compact", "config", "copy"])
 
     @pytest.mark.asyncio
     async def test_a_space_closes_it_and_a_backspace_brings_it_back(self):
@@ -5795,7 +5805,7 @@ class TestThePanelFitsTheRowsItHas:
                 f"the panel drew {panel.size.height} content rows past a "
                 f"budget of 8")
             names = [c.name for c in panel.visible]
-            assert names == ["agent", "claims", "compact", "copy"], (
+            assert names == ["agent", "claims", "compact", "config"], (
                 f"the visible entries are {names}; an entry that did not "
                 f"fit must end the list, not be skipped over")
 
@@ -5824,7 +5834,7 @@ class TestThePanelFitsTheRowsItHas:
 
             await pilot.press("c")
             assert await settle(pilot, lambda: panel.shown == 4)
-            assert panel.border_title.startswith("4 of 4 "), (
+            assert panel.border_title.startswith("1-4 of 5 "), (
                 f"the title reads {panel.border_title!r}; four commands "
                 f"start with c and all four are on screen, so claiming "
                 f"twenty-six candidates would be a lie about the filter")
@@ -5919,7 +5929,7 @@ class TestTheKeysWhileThePanelIsOpen:
             await pilot.press("down")
             assert await settle(pilot, lambda: panel.chosen.name == "compact")
             await pilot.press("down")
-            assert await settle(pilot, lambda: panel.chosen.name == "copy")
+            assert await settle(pilot, lambda: panel.chosen.name == "config")
             await pilot.press("up")
             assert await settle(pilot, lambda: panel.chosen.name == "compact")
 
@@ -6286,17 +6296,17 @@ class TestTheWindowSlidesOverTheMatches:
             await pilot.press("slash")
             assert await settle(pilot, lambda: panel.display)
             assert [c.name for c in panel.visible] == [
-                "agent", "claims", "compact", "copy"]
+                "agent", "claims", "compact", "config"]
 
             for _ in range(4):
                 await pilot.press("down")
-            assert await settle(pilot, lambda: panel.chosen.name == "critic")
+            assert await settle(pilot, lambda: panel.chosen.name == "copy")
 
             assert [c.name for c in panel.visible] == [
-                "claims", "compact", "copy", "critic"], (
+                "claims", "compact", "config", "copy"], (
                 f"the window is {[c.name for c in panel.visible]}; a fourth "
                 f"down should have dropped /agent off the top and brought "
-                f"/critic in at the bottom, not cycled back to the start")
+                f"/copy in at the bottom, not cycled back to the start")
 
     @pytest.mark.asyncio
     async def test_the_window_can_drop_one_and_gain_two(self):
@@ -6314,7 +6324,7 @@ class TestTheWindowSlidesOverTheMatches:
             await pilot.press("slash")
             assert await settle(pilot, lambda: panel.display)
 
-            for _ in range(6):
+            for _ in range(7):
                 await pilot.press("down")
             assert await settle(pilot, lambda: panel.chosen.name == "embedder")
 
@@ -6338,7 +6348,7 @@ class TestTheWindowSlidesOverTheMatches:
             await pilot.press("slash")
             assert await settle(pilot, lambda: panel.display)
 
-            for _ in range(6):
+            for _ in range(7):
                 await pilot.press("down")
             assert await settle(pilot, lambda: panel.chosen.name == "embedder")
             scrolled = [c.name for c in panel.visible]
@@ -6353,12 +6363,12 @@ class TestTheWindowSlidesOverTheMatches:
                 f"the window moved to {[c.name for c in panel.visible]} for "
                 f"a selection it was already showing")
 
-            for _ in range(5):
+            for _ in range(6):
                 await pilot.press("up")
             assert await settle(pilot, lambda: panel.chosen.name == "agent")
 
             assert [c.name for c in panel.visible] == [
-                "agent", "claims", "compact", "copy"], (
+                "agent", "claims", "compact", "config"], (
                 f"the window came home to {[c.name for c in panel.visible]}")
 
     @pytest.mark.asyncio
@@ -6397,7 +6407,7 @@ class TestTheWindowSlidesOverTheMatches:
             panel = app.query_one("#slash-suggest")
             await pilot.press("slash")
             assert await settle(pilot, lambda: panel.display)
-            for _ in range(6):
+            for _ in range(7):
                 await pilot.press("down")
             assert await settle(pilot, lambda: panel.chosen.name == "embedder")
 
@@ -6420,7 +6430,7 @@ class TestTheWindowSlidesOverTheMatches:
 
             for _ in range(4):
                 await pilot.press("down")
-            assert await settle(pilot, lambda: panel.chosen.name == "critic")
+            assert await settle(pilot, lambda: panel.chosen.name == "copy")
             assert panel.border_title.startswith(
                 f"2-5 of {len(commands.all())} "), (
                 f"the title reads {panel.border_title!r}; once the window "
@@ -6434,7 +6444,9 @@ class TestTheWindowSlidesOverTheMatches:
             await pilot.pause()
             panel = app.query_one("#slash-suggest")
 
-            await pilot.press("slash", "c")
+            # /t, not /c: batch 84 made the c list five long, and this
+            # case needs a prefix whose matches all fit.
+            await pilot.press("slash", "t")
             assert await settle(pilot, lambda: panel.shown == 4)
             assert panel.border_title.startswith("4 of 4 "), (
                 f"the title reads {panel.border_title!r}; all four matches "
@@ -7585,3 +7597,353 @@ async def test_the_tick_runs_only_while_a_turn_does(mocker):
         app._busy = False
         await pilot.pause()
         assert app._meter_timer._active.is_set() is False
+
+
+def _bare_app():
+    """An app object with just enough of one to run a command handler.
+
+    `VenastineApp.__new__` with a recording transcript, the same seam four
+    other classes in this file already use: a slash-command handler touches
+    the transcript, `_busy`, `push_screen` and nothing else, and standing a
+    whole Textual app up for each case costs seconds apiece.
+    """
+    app = VenastineApp.__new__(VenastineApp)
+    recorder = SimpleNamespace(systems=[], errors=[])
+    recorder.write_system = recorder.systems.append
+    recorder.write_error = recorder.errors.append
+    # The BACKING field, not the property: `_transcript` is read-only and
+    # falls back to a query against a screen a bare app does not have.
+    app._transcript_widget = recorder
+    app._busy_state = False
+    app._pending_restart = None
+    app._research_is_running = lambda: False
+    app.push_screen = MagicMock()
+    app.restart_for_config = MagicMock()
+    app.provider_name = "ANTHROPIC"
+    app.model = "test-model"
+    return app
+
+
+# ---------------------------------------------------------------------------
+# ---- /config (batch 84) ---------------------------------------------------
+# ---------------------------------------------------------------------------
+
+
+class TestTheConfigPanelIsTheCommandPanel:
+    """The whole point of routing this through `matching()`: there is one
+    suggestion mechanism, and `/config` is the first command to use its
+    argument half. Nothing about the panel changed, so what these assert is
+    that the ROWS are shaped the way the panel already draws."""
+
+    def test_a_space_after_config_offers_the_catalogue(self):
+        rows = commands.matching("/config ")
+        assert len(rows) == len(config_edit.catalogue())
+        assert rows[0].name.startswith("config "), (
+            "a row's name is the whole line after the slash, because that "
+            "is what the panel draws and what completion writes back")
+
+    def test_a_space_after_any_other_command_still_offers_nothing(self):
+        """The contract `test_a_space_ends_it_at_either_end` pins, kept by
+        making the argument half opt-in per command rather than general."""
+        assert commands.matching("/copy ") == []
+        assert commands.matching("/copy last") == []
+        assert commands.matching("/help ") == []
+
+    def test_a_prefix_narrows_the_keys(self):
+        names = [row.name for row in commands.matching("/config max_it")]
+        assert names == ["config max_iterations"]
+
+    def test_both_tool_tables_are_reachable_and_distinct(self):
+        """The user's own example. All 23 tool names live in both tables,
+        so an unprefixed `shell` could not say which one was meant."""
+        names = [row.name for row in commands.matching("/config tool_")]
+        assert "config tool_permissions.shell" in names
+        assert "config tool_approvals.shell" in names
+        assert len([n for n in names if n.endswith(".shell")]) == 2
+
+    def test_a_closed_vocabulary_is_offered_as_values(self):
+        rows = commands.matching("/config shell_approval_mode ")
+        assert [row.name for row in rows] == [
+            "config shell_approval_mode always",
+            "config shell_approval_mode tiered",
+            "config shell_approval_mode never"]
+        rows = commands.matching("/config shell_approval_mode n")
+        assert [row.name for row in rows] == [
+            "config shell_approval_mode never"]
+
+    def test_a_free_form_value_is_offered_only_into_an_empty_slot(self):
+        """A bug fix rather than a preference. `enter` completes while the
+        panel is open, so a number offered against a half-typed number
+        would be taken INSTEAD of it: with 16000 on offer, typing
+        `/config max_tokens 1` and pressing enter to send would silently
+        write 16000, because `16000` starts with `1`."""
+        assert [row.name for row in commands.matching("/config max_tokens ")] \
+            == ["config max_tokens 16000"]
+        assert commands.matching("/config max_tokens 1") == []
+        assert commands.matching("/config max_tokens 18000") == []
+
+    def test_a_container_offers_no_values(self):
+        assert commands.matching("/config domain_authority_suffixes ") == []
+
+    def test_an_unknown_key_offers_nothing(self):
+        assert commands.matching("/config not_a_key ") == []
+
+    @pytest.mark.asyncio
+    async def test_tab_completes_a_key_and_then_offers_its_values(self):
+        """The two stages in one gesture. Completion appends a trailing
+        space, and that space is what asks for the next stage."""
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            panel = app.query_one("#slash-suggest")
+            prompt = app.query_one("#prompt")
+
+            for key in "/config":
+                await pilot.press(key if key != "/" else "slash")
+            assert await settle(pilot, lambda: panel.display)
+            await pilot.press("tab")
+            assert await settle(pilot, lambda: prompt.value == "/config ")
+            assert await settle(
+                pilot, lambda: panel.display and len(panel._matches) > 100), (
+                "completing the command name did not open the key list")
+
+            # `shell_a`, not `shell_`: the catalogue is in FILE order and
+            # `shell_binary` is written above `shell_approval_mode`, so the
+            # shorter prefix highlights the wrong one of the two.
+            for key in ("s", "h", "e", "l", "l", "_", "a"):
+                await pilot.press(key)
+            assert await settle(
+                pilot,
+                lambda: panel.chosen.name == "config shell_approval_mode")
+            await pilot.press("tab")
+            assert await settle(
+                pilot, lambda: prompt.value == "/config shell_approval_mode ")
+            assert await settle(
+                pilot,
+                lambda: [c.name for c in panel._matches] == [
+                    "config shell_approval_mode always",
+                    "config shell_approval_mode tiered",
+                    "config shell_approval_mode never"])
+
+
+class TestTheConfigCommandReports:
+    def test_a_bare_config_says_how_to_browse(self):
+        app = _bare_app()
+        _cmd_config(app, "")
+        written = " ".join(app._transcript.systems)
+        assert "settings" in written
+        assert "/config and a space" in written
+        assert "CONFIG_ARCHITECTURE.md" in written
+
+    def test_one_argument_explains_that_key(self):
+        app = _bare_app()
+        _cmd_config(app, "max_tokens")
+        written = " ".join(app._transcript.systems)
+        assert "max_tokens: 16000" in written
+        assert "whole number, above 0" in written
+
+    def test_an_unknown_key_points_at_the_nearest(self):
+        app = _bare_app()
+        _cmd_config(app, "max_tok")
+        assert "Did you mean max_tokens?" in " ".join(app._transcript.errors)
+
+    def test_an_unknown_key_with_no_neighbour_says_how_to_browse(self):
+        app = _bare_app()
+        _cmd_config(app, "zzz")
+        assert "browse" in " ".join(app._transcript.errors)
+
+
+class TestWritingThroughTheCommand:
+    """The handler's half. The writer itself is tested in
+    tests/test_config_edit.py; what matters here is which path a key takes
+    and that a refusal writes nothing."""
+
+    def test_a_refused_value_names_the_key_and_writes_nothing(self, mocker):
+        write = mocker.patch("config_edit.write")
+        app = _bare_app()
+        _cmd_config(app, "max_tokens -5")
+        assert "max_tokens" in " ".join(app._transcript.errors)
+        write.assert_not_called()
+
+    def test_an_ordinary_key_is_written_without_a_modal(self, mocker):
+        write = mocker.patch("config_edit.write")
+        app = _bare_app()
+        _cmd_config(app, "max_tokens 18000")
+        write.assert_called_once()
+        app.push_screen.assert_called_once()
+        assert "Restart now?" == app.push_screen.call_args[0][0]._title
+        written = " ".join(app._transcript.systems)
+        assert "max_tokens is now 18000" in written
+        assert "was 16000" in written
+
+    def test_an_authority_key_asks_first_and_says_what_it_permits(self,
+                                                                  mocker):
+        """The compensating control for letting a slash command reach these
+        at all. The body names THIS key's effect, which is what makes it a
+        decision rather than a dialog to dismiss."""
+        write = mocker.patch("config_edit.write")
+        app = _bare_app()
+        _cmd_config(app, "shell_approval_mode never")
+        write.assert_not_called()
+
+        screen = app.push_screen.call_args[0][0]
+        assert screen._title == "Change shell_approval_mode?"
+        assert "without asking" in screen._body
+        assert "now:  tiered" in screen._body
+        assert "after: never" in screen._body
+
+        app.push_screen.call_args[0][1](True)
+        write.assert_called_once()
+
+    def test_declining_the_authority_modal_writes_nothing(self, mocker):
+        write = mocker.patch("config_edit.write")
+        app = _bare_app()
+        _cmd_config(app, "tool_approvals.shell true")
+        app.push_screen.call_args[0][1](False)
+        write.assert_not_called()
+        assert "Nothing written." in app._transcript.systems
+
+    def test_a_value_that_is_already_set_writes_nothing(self, mocker):
+        write = mocker.patch("config_edit.write")
+        app = _bare_app()
+        _cmd_config(app, "max_tokens 16000")
+        write.assert_not_called()
+        assert any("already" in line for line in app._transcript.systems)
+
+    def test_an_unwritable_file_says_so_and_does_not_offer_a_restart(self,
+                                                                     mocker):
+        mocker.patch("config_edit.write", side_effect=OSError("read-only"))
+        app = _bare_app()
+        _cmd_config(app, "max_tokens 18000")
+        assert "could not be written" in " ".join(app._transcript.errors)
+        app.push_screen.assert_not_called()
+
+
+class TestTheRestartWaitsForTheRightThings:
+    def test_an_idle_shell_restarts_straight_away(self, mocker):
+        mocker.patch("config_edit.write")
+        app = _bare_app()
+        _cmd_config(app, "max_tokens 18000")
+        app.push_screen.call_args[0][1](True)
+        app.restart_for_config.assert_called_once_with("max_tokens")
+
+    def test_a_turn_in_flight_queues_the_restart(self, mocker):
+        mocker.patch("config_edit.write")
+        app = _bare_app()
+        app._busy_state = True
+        _cmd_config(app, "max_tokens 18000")
+        app.push_screen.call_args[0][1](True)
+        app.restart_for_config.assert_not_called()
+        assert app._pending_restart == "max_tokens"
+        assert any("when this turn finishes" in line
+                   for line in app._transcript.systems)
+
+    def test_a_research_run_is_not_queued_behind(self, mocker):
+        """A turn is seconds and queueing behind it is reasonable. A
+        pipeline run is minutes, and a restart queued behind one arrives
+        long after the question scrolled away."""
+        mocker.patch("config_edit.write")
+        app = _bare_app()
+        app._research_is_running = lambda: True
+        _cmd_config(app, "max_tokens 18000")
+        app.push_screen.assert_not_called()
+        assert app._pending_restart is None
+        assert any("research run is in flight" in line
+                   for line in app._transcript.systems)
+
+    def test_declining_the_restart_says_when_it_applies(self, mocker):
+        mocker.patch("config_edit.write")
+        app = _bare_app()
+        _cmd_config(app, "max_tokens 18000")
+        app.push_screen.call_args[0][1](False)
+        app.restart_for_config.assert_not_called()
+        assert any("next launch" in line for line in app._transcript.systems)
+
+    def test_cancel_restart_drops_a_queued_one(self):
+        app = _bare_app()
+        app._pending_restart = "max_tokens"
+        _cmd_config(app, "--cancel-restart")
+        assert app._pending_restart is None
+        assert any("cancelled" in line.lower()
+                   for line in app._transcript.systems)
+
+    def test_cancel_restart_with_nothing_queued_says_so(self):
+        app = _bare_app()
+        _cmd_config(app, "--cancel-restart")
+        assert "No restart is queued." in app._transcript.errors
+
+    @pytest.mark.asyncio
+    async def test_the_queued_restart_fires_when_the_turn_ends(self, mocker):
+        """Through the `_busy` setter, which is the one funnel every turn
+        exit already goes through -- four of them, in four different
+        handlers."""
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            fired = mocker.patch.object(app, "restart_for_config")
+            app._busy = True
+            await pilot.pause()
+            app._pending_restart = "max_tokens"
+
+            app._busy = False
+            await pump(pilot)
+            fired.assert_called_once_with("max_tokens")
+            assert app._pending_restart is None
+
+    @pytest.mark.asyncio
+    async def test_nothing_fires_without_a_queued_restart(self, mocker):
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            fired = mocker.patch.object(app, "restart_for_config")
+            app._busy = True
+            await pilot.pause()
+            app._busy = False
+            await pump(pilot)
+            fired.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_the_request_carries_the_thread_on_screen(self):
+        """So the relaunch reopens the conversation rather than starting an
+        empty one beside it."""
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            thread = str(app.memory.thread_id)
+            app.restart_for_config("max_tokens")
+            await pilot.pause()
+        request = app.return_value
+        assert isinstance(request, config_edit.RestartRequest)
+        assert request.key == "max_tokens"
+        assert request.thread_id == thread
+
+    @pytest.mark.asyncio
+    async def test_a_session_with_no_thread_yet_asks_for_none(self):
+        """`ConversationMemory` is built on the first message, and `/new`
+        leans on that -- twice in a row leaves nothing behind. A restart
+        before anything was said has no conversation to reopen, and naming
+        one would write the empty thread `/new` exists not to write."""
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            assert app._memory is None
+            app.restart_for_config("max_tokens")
+            await pilot.pause()
+        assert app.return_value.thread_id is None
+
+    @pytest.mark.asyncio
+    async def test_the_pair_is_carried_only_when_a_flag_pinned_it(self):
+        app = VenastineApp("ANTHROPIC", "test-model", {}, cli_pinned=False)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            app.restart_for_config("max_tokens")
+            await pilot.pause()
+        assert app.return_value.model is None
+
+        pinned = VenastineApp("ANTHROPIC", "test-model", {}, cli_pinned=True)
+        async with pinned.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            pinned.restart_for_config("max_tokens")
+            await pilot.pause()
+        assert pinned.return_value.model == "test-model"
+        assert pinned.return_value.provider == "ANTHROPIC"

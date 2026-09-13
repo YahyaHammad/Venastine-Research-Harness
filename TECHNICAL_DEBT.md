@@ -647,7 +647,7 @@ together, or the next fix creates the next finding). The tier pin in
 `tests/test_docs_consistency.py` waits on the answer, which is an owner
 call about what a tier is, not a measurement.
 
-## 20. Restart-required config editor (open, deferred 2026-09-12)
+## 20. Restart-required config editor (closed, batch 84)
 
 `config_schema.load(path)` now never touches the live cache -- `path`
 validates a candidate, `force` only re-reads the live document -- which is
@@ -657,6 +657,20 @@ TUI, validating via the candidate path, then requiring a restart to apply
 protocol for `HARNESS_AUTHORITY_KEYS`, in-flight pipeline/pass handling, and
 cache clears for `effort_levels`/`context_window`). Owner chose restart-
 required over immediate-apply; the command itself is future work.
+
+**RESOLVED (batch 84).** `/config` is built, on the seam this item
+describes. What shipped differs from the sketch above in one place, and
+the owner chose it: the nine `HARNESS_AUTHORITY_KEYS` are WRITABLE from
+the command, behind a confirmation naming what each key permits, rather
+than refused. Nothing else about the posture argument moved -- the write
+goes to the file and takes effect at the relaunch, so no frozen value is
+edited under a session that has already read it, and no unattended route
+(settings file, environment variable, tool call) gained anything.
+
+Not built, and not needed by the above: live reload. The re-freeze
+protocol, the in-flight pass handling and the `effort_levels` /
+`context_window` cache clears this item lists are all consequences of
+applying a change in place, which the restart makes unnecessary.
 
 ## 21. L4 broad docs sweep remainder (open, deferred 2026-09-12)
 

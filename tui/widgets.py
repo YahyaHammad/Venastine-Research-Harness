@@ -1667,6 +1667,7 @@ class PromptInput(TextArea):
     suggest = None          # the SlashSuggest panel; app.py hands it over
     _api_edit = False       # the next Changed came from .value, not a key
     _dismissed = False      # escape latched the panel shut
+    _completing = False     # ...and that .value came from tab or enter
 
     class Submitted(Message):
         """Posted when enter is pressed. `Input.Submitted`'s shape.
@@ -1755,6 +1756,13 @@ class PromptInput(TextArea):
             # what makes `event.prompt.value = ""` on submit tidy up.
             self._api_edit = False
             self._dismissed = False
+            if self._completing:
+                # ...except the one assignment a keystroke made. See
+                # `_complete`.
+                self._completing = False
+                self.post_message(
+                    self.SuggestionsChanged(self, commands.matching(self.text)))
+                return
             self.post_message(self.SuggestionsChanged(self, []))
             return
         matches = commands.matching(self.text)
@@ -1776,13 +1784,26 @@ class PromptInput(TextArea):
         command = self.suggest.chosen
         if command is None:
             return False
-        # The TRAILING SPACE is doing two jobs: `matching()` is empty once
-        # the line has whitespace in it, so the panel closes on its own,
-        # and deleting that one character is what brings it back.
+        # The TRAILING SPACE is doing two jobs: for a command with no
+        # argument completer `matching()` is empty once the line has a
+        # space in it, so the panel closes on its own, and deleting that
+        # one character is what brings it back.
         self.value = "/" + command.name + " "
         # load_text leaves the cursor at the START of the document, which
         # would have the next typed argument land in front of the command.
         self.move_cursor(self.document.end)
+        # RE-OFFER (batch 84), through a FLAG rather than a message posted
+        # from here. The assignment above went through `load_text`, which
+        # queues a `TextArea.Changed` -- so anything posted here is handled
+        # BEFORE that Changed arrives and is then overwritten by the empty
+        # list its api-edit branch posts. Measured: the panel came back
+        # with 133 rows and was cleared a tick later.
+        #
+        # The branch exists because assignment is the API and typing is the
+        # user; a tab is the user, which is why this one re-offers. For
+        # every command without an argument completer it posts the same
+        # empty list that branch already did.
+        self._completing = True
         return True
 
     def check_action(self, action: str, parameters) -> bool | None:

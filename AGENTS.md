@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 4345 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 4418 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -176,6 +176,7 @@ That qualifier is load-bearing, not pedantry (audit #128). This file used to say
 |---|---|---|
 | `config.yaml` | Plain values only, harness tier, ONE location | Anything derived; a user or project tier; an override variable |
 | `config_schema.py` | The schema, the env-override table, the loader, `HARNESS_AUTHORITY_KEYS` | Any first-party import — that is a cycle back through `core/config_loader.py` |
+| `config_edit.py` | `/config`'s catalogue, the value grammar, the comment-preserving writer, `RestartRequest` | Anything about a terminal; applying a change to a running process |
 | `config.py` | Publishing those values as plain mutable module globals | Any logic, any `if`/`else`, any `os.environ` read, any decision-making function |
 | `credentials.py` / `env_secrets.py` | LLM provider keys / misc tool keys | Each other's domain |
 | `database.py` | The engine/connection only | Table classes, CRUD, awareness of what data exists |
@@ -218,6 +219,8 @@ Three stop conditions, all in `_run()`: no tool calls (`complete`), `max_steps` 
 ### The TUI (`tui/`, §16)
 
 A **shell**, not a feature home. D12 makes the CLI a permanent fallback, so anything implemented in `tui/` is invisible to the CLI *and* the research pipeline — which is why the question tool, todo list, goal mode, `/init`, session summaries and cross-thread referencing are all specified in §18/§21/§23/§24 instead. `tui/commands.py` is a registry other sections register into.
+
+**`/config` is the exception that proves the rule** (batch 84). The command lives here; the catalogue, the value grammar and the comment-preserving writer live in `config_edit.py` at the root, so a command-line surface can be added over the same module without moving a line. What is in `tui/` is the two-stage completer, the authority confirmation and the queued restart -- drawing and asking, which is what a shell is for.
 
 §19 follows the same split: `skills/manager.py` holds **no session state** (K3), so the TUI owning `active_skills` is a call-site fact rather than a design one. §25 is the cautionary tale — the pipeline could not reach a whole capability, and undoing that was a section of work.
 
@@ -625,13 +628,13 @@ not_open_it` goes red first, before the four files that follow.
 
 **The suggestion panel owns the highlight because it owns the width** (batch 55). How many
 entries fit is a function of the rendered width — at 80 columns the main column is 54, most
-entries wrap to two rows, and a bare `/` therefore shows four of twenty-six under an eight-row
+entries wrap to two rows, and a bare `/` therefore shows four of twenty-seven under an eight-row
 budget. Split the selection from the budget and the prompt can highlight a sixth entry the
 panel had no room for: an invisible selection that `enter` would then complete. `SlashSuggest`
 exposes `chosen`, `move()` and `shown`, and that is the whole interface. The budget stops at
 the first entry that would overflow rather than skipping it, so the list stays contiguous and
 alphabetical, and the border title counts what was DRAWN against what MATCHED (`4 of 4` under
-`/c`, not `4 of 26`, which would claim candidates that do not exist).
+`/t`, not `4 of 27`, which would claim candidates that do not exist).
 
 **`up`/`down` are ordinary bindings on `TextArea`; `enter` is not** (batch 55). `enter` needs
 batch 54's `priority=True` because `TextArea._on_key` intercepts it. The arrows do not: they
@@ -661,6 +664,18 @@ stripped back to `"/copy"`, so the panel stayed open over a line that had alread
 its arguments, and `enter` would have completed `/copy` on top of itself rather than sending.
 Once a space is typed there is nothing left to complete, whichever end of the token it is on.
 The leading half stays tolerant, because `dispatch` tolerates it and `"  /help"` genuinely runs.
+
+**Past the first space, the command answers** (batch 84). `SlashCommand` grew an optional
+`complete(argument) -> [SlashCommand]`, and a command without one behaves exactly as every
+command did before the field existed — which is what keeps `"/copy last"` offering nothing.
+The rows a completer returns are named for the WHOLE line, so `/config max_tokens` draws and
+completes with no change to the panel at all. Two details are load-bearing. The split is on
+a SPACE and nothing else, because `dispatch` partitions on a space and nothing else — a line
+with a newline in it is not a command line there and must not look like one here. And
+`_complete` sets `_completing` rather than posting the new list itself: the assignment it just
+made queues a `TextArea.Changed`, so anything posted from inside `_complete` is handled
+BEFORE that Changed arrives and is then overwritten by the empty list its api-edit branch
+posts. Measured: the panel came back with 133 rows and was cleared a tick later.
 
 **The suggestion window is DERIVED from the selection, never stored beside it** (batch 56).
 Batch 55 wrapped the highlight at the last *drawn* entry, so a bare `/` matched twenty-six

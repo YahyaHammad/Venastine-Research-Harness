@@ -4304,3 +4304,36 @@ files were left untouched on purpose. What follows is what does break.
 | Move a posture value and not tell `scripts/prepublish-check.mjs` | Nothing fails, which is the problem | Exactly what happened here: its `config.py` regex could not see `unsafe_no_approval: true` in the YAML and stayed green through the whole migration. There are three detectors now, and `test_the_publish_guard_is_wired_into_the_prepublish_check` asserts each one's needle |
 | Drop `config.yaml` or `config_schema.py` from `package.json`'s `files` | `npm pack` ships a shim with no data; nothing starts | `files` is an allowlist and root `.py` files are listed one by one. `test_every_npm_allowlist_entry_exists` only checks the reverse direction, so this one is caught by `node scripts/prepublish-check.mjs` |
 | Assert on the old Authority rejection text | Three message assertions fail | The remediation text names `config.yaml` and the lowercase key now, because that is where the value is. `tests/test_ensemble_guard.py`, `tests/test_shell.py` assert the name and the file TOGETHER, so neither half can keep pointing at a file the value has left |
+
+
+---
+
+## `/config` writes the file the suite reads (batch 84)
+
+`/config` is the first command that CHANGES a tracked file the rest of the
+suite loads at import. `config_edit.write()` writes
+`config_schema.CONFIG_PATH`, and nothing in that module knows it is running
+under pytest -- so a test that exercises the writer without redirecting the
+path first edits the developer's checkout and passes.
+
+`tests/test_config_edit.py` redirects with
+`monkeypatch.setattr(config_schema, "CONFIG_PATH", <tmp copy>)` and closes
+with `test_the_shipped_file_is_untouched`, which holds every scalar in the
+live file against the model this process bound at import. Those two disagree
+only if something wrote the real file mid-run, whatever the value was.
+
+`tests/test_tui.py` takes the other route and patches `config_edit.write`
+itself, because what the handler tests are about is which path a key takes,
+not what lands on disk.
+
+| Change | What breaks | Symptom / fix |
+|---|---|---|
+| Register a 28th slash command whose name sorts among the `c`s | Eleven panel tests in `test_tui.py` | They walk the bare-slash list by ORDINAL and `/c` by count. The numbers are measured, not derived: run the panel, read `visible`, `shown` and `border_title` at each step, and set the expectations from that. Batch 84 did exactly this when `/config` landed between `compact` and `copy` |
+| Give another command a `complete` | `test_a_space_after_any_other_command_still_offers_nothing` fails for that command | Intended. The field is opt-in precisely so `"/copy last"` keeps offering nothing; adding one is a deliberate choice per command, and the test names which commands have made it |
+| Post the new suggestions from inside `_complete` instead of setting `_completing` | Nothing raises. The panel opens with the right rows and is cleared a tick later | The assignment queues a `TextArea.Changed`, so a message posted from `_complete` is handled BEFORE it and then overwritten by the empty list the api-edit branch posts. Measured. The flag is what carries the intent across that gap |
+| Split the argument on any whitespace rather than on a space | A line with a newline in it starts offering completions | `dispatch` partitions on a space and nothing else, so such a line is not a command line there. The panel and the shell have to agree about what a command line is |
+| Change `KeyRow.values`'s wording for a closed vocabulary | `_config_value_choices` stops offering values | It splits that string on `\|`. The phrasing is generated in `config_edit.describe`, and the value offers read it back — one string, two readers, which is why `test_a_closed_vocabulary_lists_its_words` asserts the exact text |
+| Add a schema field without adding its key to `config.yaml` | `test_setting_every_leaf_to_its_own_value_changes_nothing` fails alongside the import | Same fix as the batch-82 rows above: the file and the schema move together |
+| Change a range in `config_schema.py` | `test_the_ranges_are_read_off_the_constraints` fails | Update the expected phrase. The description is GENERATED from the constraint, so this is the check that the generation still tracks it rather than a second copy of the number |
+| Make `HARNESS_AUTHORITY_KEYS` and `config_edit.AUTHORITY_EFFECT` disagree | `test_every_authority_key_has_a_sentence` and `test_the_config_command_gates_every_posture_key` both fail | A key with no sentence is a key whose confirmation says nothing about what it permits, which is the only reason a slash command may write one at all |
+| Rename `--thread`, `--provider` or `--model` | `TestTheRelaunch` fails | `main.relaunch_argv` drops and re-adds them by name, in both `--flag X` and `--flag=X` spellings. It is pure so that this is assertable without replacing the test process |

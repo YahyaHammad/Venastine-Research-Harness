@@ -32,6 +32,16 @@ class SlashCommand:
     # second in that menu, ahead of `/claims`, for a name nobody browses
     # for -- and moved every window position batch 56 measured.
     aliases: tuple[str, ...] = ()
+    # Batch 84. What to offer once this command's name has been typed and a
+    # space follows it: `(argument_text) -> [SlashCommand]`, where each row's
+    # `name` is the WHOLE line after the slash, because that is what the
+    # panel draws and what completion writes into the prompt.
+    #
+    # Opt-in per command, and that is what keeps `/copy last` offering
+    # nothing: a command without one behaves exactly as every command did
+    # before this field existed, which is the contract
+    # `test_a_space_ends_it_at_either_end` pins.
+    complete: Optional[Callable] = None
 
 
 class CommandRegistry:
@@ -106,9 +116,21 @@ class CommandRegistry:
         anywhere and both change, which is the whole reason the matching
         lives here rather than in the widget.
 
-        Empty unless `text` is a BARE slash token: leading whitespace
-        allowed (`dispatch` tolerates it, so `"  /help"` runs and had
-        better offer), a leading `/`, and NO whitespace after that.
+        A BARE slash token offers commands: leading whitespace allowed
+        (`dispatch` tolerates it, so `"  /help"` runs and had better
+        offer), a leading `/`, and no whitespace inside the name.
+
+        PAST THE FIRST SPACE, the command itself answers (batch 84). If it
+        declares a `complete` the rows come from there, and if it does not
+        the answer is nothing, exactly as it was for every command before
+        the field existed. `/config ` is the only one today.
+
+        The split is on a SPACE and nothing else, because `dispatch`
+        partitions on a space and nothing else: a line with a newline or a
+        tab in it is not a command line there, so it must not look like one
+        here. A panel that offered `/config` for a line `dispatch` would
+        send to the model as chat is the disagreement this whole method is
+        written to avoid.
 
         `lstrip`, not `strip`, and the difference is a bug this had: a
         TRAILING space survives `strip()`, so `"/copy "` read as `"/copy"`
@@ -128,8 +150,19 @@ class CommandRegistry:
         alias surfaces it.
         """
         token = text.lstrip()
-        if not token.startswith("/") or any(c.isspace() for c in token):
+        if not token.startswith("/"):
             return []
+        head, space, rest = token.partition(" ")
+        if any(c.isspace() for c in head):
+            # A newline or a tab before any space. Not a command line.
+            return []
+        if space:
+            if any(c.isspace() and c != " " for c in rest):
+                return []
+            command = self.get(head[1:].lower())
+            if command is None or command.complete is None:
+                return []
+            return command.complete(rest)
         prefix = token[1:].lower()
         matches = [c for c in self.all() if c.name.startswith(prefix)]
         if not prefix:
@@ -149,7 +182,7 @@ class CommandRegistry:
         command = self._commands[self._aliases[alias]]
         return SlashCommand(
             alias, f"{command.summary} (alias of /{command.name})",
-            command.handler, command.usage)
+            command.handler, command.usage, complete=command.complete)
 
     def dispatch(self, app, raw: str) -> bool:
         """Run the command in `raw` (a line starting with '/').

@@ -249,7 +249,18 @@ class TestNothingReachableChangesIt:
     def test_no_slash_command_touches_the_posture(self):
         """A slash command is the one surface reachable AFTER untrusted
         content is already in the context window. There is deliberately no
-        posture command; adding one turns this red on purpose."""
+        command that moves the posture in a RUNNING session; adding one
+        turns this red on purpose.
+
+        Batch 84 narrowed what this claims, and the narrowing is worth
+        stating rather than leaving to be inferred from the name list.
+        `/config` can now WRITE a posture key into config.yaml -- behind a
+        confirmation that says what the key permits, and taking effect only
+        at the relaunch that follows, so nothing moves under a session that
+        has already read it. What stays forbidden is a command that flips
+        the posture where it stands, which is what every name below would
+        be. `test_the_config_command_gates_every_posture_key` is the other
+        half: it holds the gate itself."""
         from tui.app import register_builtin_commands
         from tui.commands import registry as command_registry
         register_builtin_commands()
@@ -267,6 +278,44 @@ class TestNothingReachableChangesIt:
             "asserting against nothing")
         assert not (names & {"unsafe", "posture", "approval", "sandbox",
                              "yolo", "insecure"})
+
+    def test_the_config_command_gates_every_posture_key(self):
+        """Batch 84's compensating control, held where the posture is.
+
+        Letting `/config` write these is defensible only because the person
+        is told what they are turning on. A posture field with no sentence
+        is a posture field whose modal says nothing, so this asserts the
+        two things that make the gate real: every authority key resolves
+        through the gate, and every one of them has an effect sentence.
+
+        Over all nine rather than over `Posture`'s own fields, because the
+        two do not share a spelling: the dataclass says
+        `allow_insecure_fallback` where `config.yaml` says
+        `allow_insecure_sandbox_fallback`, and `redact_off_env` is a fact
+        about the environment with no key at all. Which config keys make up
+        the posture is `test_the_authority_keys_name_every_unreachable_
+        value` a few lines down; this is the half that says each of them
+        arrives at a modal with something to read.
+        """
+        import config_edit
+        import config_schema
+
+        keys = config_schema.HARNESS_AUTHORITY_KEYS
+        assert len(keys) == 9
+        for key in keys:
+            assert config_edit.authority_key(key) == key, (
+                f"{key} does not resolve through the gate, so /config "
+                f"would write it with no confirmation at all")
+            assert config_edit.AUTHORITY_EFFECT.get(key, "").strip(), (
+                f"{key}'s confirmation would say nothing about what it "
+                f"permits, which is the only reason it may be written")
+        # And a LEAF of a gated table resolves to the table, so all 46
+        # tool booleans are covered by the two sentences above them.
+        assert config_edit.authority_key(
+            "tool_permissions.shell") == "tool_permissions"
+        assert config_edit.authority_key(
+            "tool_approvals.shell") == "tool_approvals"
+        assert config_edit.authority_key("max_tokens") is None
 
     def test_writing_config_py_still_needs_a_human(self):
         """config.py is where a human writes the posture, so the route a

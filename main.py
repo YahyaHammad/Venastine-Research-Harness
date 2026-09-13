@@ -27,6 +27,7 @@ import sys
 from uuid import UUID
 
 import config
+import config_edit
 import core.reasoning.pipeline_storage  # noqa: F401 -- registers PipelineRunRecord
 
 # Importing these for their SIDE EFFECT, and the side effect is load-bearing:
@@ -1742,6 +1743,87 @@ def _classify_legacy_threads() -> None:
         connection.close()
 
 
+def _drop_flag(args: list, flag: str) -> list:
+    """`args` without `flag` and its value, in either spelling.
+
+    argparse accepts `--thread X` and `--thread=X` alike, so a relaunch
+    that handled only the first would pass the old thread AND the new one,
+    and argparse would keep the last -- which happens to be right, and
+    would stop being right the day the order changed.
+    """
+    out, skip = [], False
+    for item in args:
+        if skip:
+            skip = False
+            continue
+        if item == flag:
+            skip = True
+            continue
+        if item.startswith(f"{flag}="):
+            continue
+        out.append(item)
+    return out
+
+
+def relaunch_argv(request, argv=None) -> list:
+    """The command line that relaunches this harness where it left off.
+
+    THIS LAUNCH'S ARGUMENTS, with three replaced. Everything else is
+    carried verbatim because the user typed it and a restart is not a
+    chance to reinterpret it.
+
+      * `--thread` becomes the conversation that was open, so the restart
+        reopens where it was rather than starting an empty thread beside
+        it. Replaced rather than appended, since this launch may have had
+        one and `/new` or `/resume` may have moved on from it.
+      * `--provider` / `--model` are named only when THIS launch pinned
+        them, which is the fact `request` carries. Unpinned, the
+        remembered pair in tui/preferences.py answers at the next launch
+        exactly as it did at this one, and writing a flag the user never
+        typed would outrank it.
+
+    Pure, and separate from the exec for that reason: what a relaunch
+    should consist of is worth asserting without replacing the test
+    process to find out.
+    """
+    argv = list(sys.argv if argv is None else argv)
+    rest = argv[1:]
+    for flag in ("--thread", "--provider", "--model"):
+        rest = _drop_flag(rest, flag)
+    if request.thread_id:
+        rest += ["--thread", request.thread_id]
+    if request.provider:
+        rest += ["--provider", request.provider]
+    if request.model:
+        rest += ["--model", request.model]
+    return [sys.executable, argv[0], *rest]
+
+
+def replace_process(command: list) -> int:
+    """Become `command`. Returns only on Windows, and only when it exits.
+
+    POSIX REPLACES THE PROCESS. `execv` keeps the pid, the terminal and
+    the parent's wait, so `bin/venastine.mjs` -- which runs this under
+    `spawnSync` with inherited stdio -- is none the wiser.
+
+    WINDOWS HAS NO EXEC. The C runtime emulates `execv` by starting a new
+    process and exiting, which gives the replacement a DIFFERENT pid: the
+    launcher's wait on this one would return, and the shell prompt would
+    come back over a terminal the replacement is still drawing in. So this
+    process stays, as a waiter around the new one, and passes its exit
+    code up. One extra idle process per restart is the price, and it is
+    the only arrangement that keeps the terminal single-owner.
+
+    The teardown has already run by the time this is called -- see the
+    call site -- so nothing is held open across it either way.
+    """
+    if os.name == "nt":
+        import subprocess
+        return subprocess.call(command)
+    os.execv(command[0], command)
+    raise AssertionError("execv returned")  # pragma: no cover
+
+
 def main(argv=None) -> int:
     """The CLI, as a function (ROADMAP_v2 §29, N7). Returns an exit code.
 
@@ -1931,6 +2013,11 @@ def main(argv=None) -> int:
     _classify_legacy_threads()
 
     mcp = setup_mcp(project_path)
+    # Batch 84. Set only by a `/config` write the user chose to apply. The
+    # relaunch happens AFTER the teardown below, never from inside the TUI:
+    # the MCP servers are subprocesses of this one and the database is open,
+    # and a process replaced from in there would never reach that `finally`.
+    restart = None
     try:
         if args.tui:
             # Detach the stderr handler before Textual takes the screen.
@@ -1958,9 +2045,9 @@ def main(argv=None) -> int:
             # apply. Computed from args rather than by comparing the
             # resolved pair against settings.json, which would read a
             # flag that happens to match the configured value as absent.
-            run_tui(provider, model, settings,
-                    cli_pinned=args.provider is not None
-                    or args.model is not None)
+            restart = run_tui(provider, model, settings,
+                              cli_pinned=args.provider is not None
+                              or args.model is not None)
         elif args.mode == "research":
             # AFTER setup_mcp: the tools a grant can cover are named at
             # connection time, so asking any earlier would offer a list
@@ -2001,6 +2088,11 @@ def main(argv=None) -> int:
         # Both are ordinary exits that must still reap child processes.
         from tools.registry import registry
         teardown_mcp(mcp, registry)
+    if isinstance(restart, config_edit.RestartRequest):
+        # Everything this process held is closed. `replace_process` does
+        # not return on POSIX.
+        print(f"[restarting to apply {restart.key}]")
+        return replace_process(relaunch_argv(restart))
     return 0
 
 

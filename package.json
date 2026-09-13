@@ -40,6 +40,7 @@
     "config.py",
     "config.yaml",
     "config_schema.py",
+    "config_edit.py",
     "storage.py",
     "database.py",
     "credentials.py",

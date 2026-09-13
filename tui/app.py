@@ -47,6 +47,8 @@ from textual.widgets import ContentSwitcher, Footer, Header
 from textual.worker import Worker, WorkerState
 
 import config
+import config_edit
+import config_schema
 import storage
 from agents.manager import manager
 from agents.tui_commands import register_agent_commands
@@ -536,6 +538,12 @@ class VenastineApp(App):
     # footer is composing -- before anything of ours has run.
     _quit_armed = False
     _quit_timer = None
+
+    # Batch 84. The config key whose write is waiting for this turn to end
+    # before the harness relaunches, or None. A CLASS attribute for
+    # `_shutting_down`'s reason -- the `_busy` setter reads it, and that
+    # setter runs on bare-built apps across the suite.
+    _pending_restart = None
 
     # Batch 61. CLASS-level defaults, so an app built with __new__ and
     # no __init__ -- four tests do exactly that, to exercise one method
@@ -1100,6 +1108,15 @@ class VenastineApp(App):
             # Idempotent. `_busy = True` is assigned twice on at least
             # one path, and the second must not restart the clock.
             return
+        if not value and self._pending_restart is not None:
+            # Batch 84. A turn just ended and a `/config` write is waiting
+            # on it. Deferred to the message pump rather than exiting from
+            # inside this setter: the assignment happens in the middle of
+            # on_turn_finished, which still has a transcript to write and a
+            # meter to stop after it returns. Below the bare-app guard for
+            # the same reason everything else here is -- an app with no
+            # screen has no pump to defer onto.
+            self.call_after_refresh(self._fire_pending_restart)
         now = monotonic()
         if value:
             self._meter.start(now)
@@ -2757,6 +2774,52 @@ class VenastineApp(App):
             self._quit_timer.stop()
             self._quit_timer = None
         self.exit()
+
+    # -- restarting to apply a config change (batch 84) ----------------------
+
+    def _research_is_running(self) -> bool:
+        """True while the deep-research worker is alive.
+
+        `_busy` covers a chat turn, a research run and `/compact` alike,
+        and the restart treats the first two differently: a turn is worth
+        queueing behind, a pipeline run is minutes long and a restart
+        queued behind one arrives after the question has scrolled away.
+        The worker has been named `research` since §22, which is what makes
+        the distinction readable without a second flag to keep in step
+        with `_busy`.
+        """
+        return any(worker.name == "research"
+                   and worker.state is WorkerState.RUNNING
+                   for worker in self.workers)
+
+    def _fire_pending_restart(self) -> None:
+        """The queued restart, once the turn that blocked it has ended."""
+        key, self._pending_restart = self._pending_restart, None
+        if key is None or self._shutting_down:
+            return
+        self.restart_for_config(key)
+
+    def restart_for_config(self, key: str) -> None:
+        """Leave, asking `main.py` to launch again where this left off.
+
+        EXIT WITH A REQUEST rather than replacing the process from in here.
+        The MCP servers are subprocesses of this one and the database is
+        open; `main.py` closes both in a `finally` that a process replaced
+        from inside the UI would never reach. So this hands back a record,
+        the ordinary shutdown runs, and the relaunch happens at the top
+        level where there is nothing left to leak.
+        """
+        thread = getattr(self._memory, "thread_id", None)
+        self._transcript.write_system(f"Restarting to apply {key}…")
+        self.exit(config_edit.RestartRequest(
+            key=key,
+            thread_id=str(thread) if thread else None,
+            # Named only when a FLAG pinned the pair at launch. Without one
+            # the remembered choice in tui/preferences.py answers at the
+            # next launch exactly as it did at this one, and passing a flag
+            # the user never typed would outrank it.
+            provider=self.provider_name if self._cli_pinned else None,
+            model=self.model if self._cli_pinned else None))
 
     def _disarm_quit(self) -> None:
         """The window closed with one press in it. The label goes back."""
@@ -4763,7 +4826,7 @@ def _pipeline_role_args(app: VenastineApp, args: str, command: str):
 def _clear_pipeline_role(app: VenastineApp, role: str, label: str) -> None:
     """`/critic off`. Three outcomes, because the store has three.
 
-    "Cleared" is not the same as "unset": config.py may still answer, and
+    "Cleared" is not the same as "unset": config.yaml may still answer, and
     saying otherwise would be a lie about behaviour the next run will
     show. So the sentence names what is in force AFTERWARDS.
     """
@@ -4811,7 +4874,7 @@ def _cmd_critic(app: VenastineApp, args: str) -> None:
         current = pipeline_models.resolve("critic")
         if current:
             source = ("remembered" if pipeline_models.remembered("critic")
-                      else "config.py")
+                      else "config.yaml")
             app._transcript.write_system(
                 f"Critic model: {current['provider_name']} | "
                 f"{current['model']} ({source}).")
@@ -4877,7 +4940,7 @@ def _cmd_embedder(app: VenastineApp, args: str) -> None:
         current = pipeline_models.resolve("embedder")
         if current:
             source = ("remembered" if pipeline_models.remembered("embedder")
-                      else "config.py")
+                      else "config.yaml")
             app._transcript.write_system(
                 f"Embedder: {current['provider_name']} | {current['model']} "
                 f"({source}).")
@@ -4909,6 +4972,246 @@ def _cmd_embedder(app: VenastineApp, args: str) -> None:
     app.start_embedder_probe(provider, model)
 
 
+# ---------------------------------------------------------------------------
+# ---- /config (batch 84) ---------------------------------------------------
+# ---------------------------------------------------------------------------
+#
+# THE ROWS ARE `SlashCommand`s WHOSE NAME IS THE WHOLE LINE, and that is the
+# whole trick. `SlashSuggest._entry` draws `"/" + command.name` and
+# `PromptInput._complete` writes `"/" + command.name + " "`, so a row named
+# `config max_tokens` renders as `/config max_tokens ● …` and completes to
+# exactly the text that dispatches. The panel, its row budget, its sliding
+# window and the four keys it spends are untouched by this feature -- the only
+# change anywhere near them is `CommandRegistry.matching` learning to ask the
+# command what comes after its own name.
+#
+# The trailing space `_complete` appends is not incidental either: it is what
+# asks this function for the next stage. Typing a key and pressing tab moves
+# from the key list to that key's value list in one keystroke.
+
+
+def _config_value_choices(row, typed: str) -> list:
+    """The values to offer for `row`, given what has been typed so far.
+
+    A CLOSED VOCABULARY IS OFFERED WHENEVER IT MATCHES; A FREE-FORM VALUE IS
+    OFFERED ONLY INTO AN EMPTY SLOT. That asymmetry is a bug fix rather than
+    a preference. `enter` completes while the panel is open, so a number
+    offered against a half-typed number would be taken INSTEAD of what was
+    being typed: with the shipped 16000 on offer, typing `/config max_tokens
+    1` and pressing enter to send would silently write 16000, because `16000`
+    starts with `1`. A bool or a Literal cannot do that -- completing one is
+    the only reason to have typed its first letter.
+    """
+    if "|" in row.values:
+        return [choice.strip() for choice in row.values.split("|")
+                if choice.strip().startswith(typed)]
+    if typed:
+        return []
+    if row.kind == "pair":
+        # `off` is the only single token this kind takes; a pair is two.
+        return ["off"]
+    return [config_edit.shown(row.current)]
+
+
+def _config_rows(argument: str) -> list:
+    """The panel's offers after `/config `. Keys first, then that key's
+    values once a space follows it."""
+    typed = argument.lstrip()
+    key, space, value_text = typed.partition(" ")
+    if not space:
+        return [SlashCommand(f"config {row.name}", row.summary, _cmd_config)
+                for row in config_edit.matching(key)]
+    row = config_edit.find(key)
+    if row is None or not row.settable:
+        return []
+    in_force = config_edit.shown(row.current)
+    rows = []
+    for choice in _config_value_choices(row, value_text):
+        note = ("the value in force" if choice == in_force
+                else f"replaces {in_force}")
+        rows.append(SlashCommand(f"config {key} {choice}", note, _cmd_config))
+    return rows
+
+
+def _cmd_config(app: VenastineApp, args: str) -> None:
+    """Browse and set the values in `config.yaml` (debt item 20).
+
+    Every tunable the harness has moved into `config.yaml` in batch 82, and
+    the only way to change one was still to open the file in an editor. This
+    is the other half: the same 89 keys, browsable in the panel, settable by
+    name, written back through a round trip that keeps the file's 600 lines
+    of comments, and applied by relaunching -- because `config.py` binds at
+    import and `security/posture.py` depends on that (UN1), so there is no
+    honest way to move a value in a running process.
+    """
+    text = args.strip()
+    if not text:
+        _config_orientation(app)
+        return
+    if text == "--cancel-restart":
+        if app._pending_restart is None:
+            app._transcript.write_error("No restart is queued.")
+            return
+        app._pending_restart = None
+        app._transcript.write_system(
+            "Restart cancelled. The change is still written and will apply "
+            "whenever you next launch.")
+        return
+
+    name, _, value_text = text.partition(" ")
+    row = config_edit.find(name)
+    if row is None:
+        near = config_edit.matching(name)
+        app._transcript.write_error(
+            f"{name} is not a key in config.yaml."
+            + (f" Did you mean {near[0].name}?" if near else
+               " Type /config and a space to browse them."))
+        return
+    if not value_text.strip():
+        for line in config_edit.explain(name):
+            app._transcript.write_system(line)
+        return
+    _config_set(app, row, value_text.strip())
+
+
+def _config_orientation(app: VenastineApp) -> None:
+    """Bare `/config`. What is here and how to reach it.
+
+    NOT a listing. 133 names would fill the transcript and bury the
+    conversation, and the panel is the browser -- so this says how to open
+    it, which is the one thing someone typing a bare `/config` does not yet
+    know.
+    """
+    rows = config_edit.catalogue()
+    settable = sum(1 for row in rows if row.settable)
+    app._transcript.write_system(
+        f"config.yaml holds {len(rows)} settings, {settable} of them "
+        f"settable from here.")
+    app._transcript.write_system(
+        "Type /config and a space to browse them; the panel completes a "
+        "name, then offers that name's values.")
+    app._transcript.write_system(
+        "/config <key> explains one. /config <key> <value> writes it and "
+        "offers to relaunch, because values are read once at startup.")
+    app._transcript.write_system(
+        f"The file is {config_schema.CONFIG_PATH}. CONFIG_ARCHITECTURE.md "
+        f"says why each value is what it is.")
+
+
+def _config_set(app: VenastineApp, row, value_text: str) -> None:
+    """Parse, validate against the whole document, then gate and write."""
+    if row.kind == "pair":
+        role = "critic" if row.name == "critic_model" else "embedder"
+        if value_text.lower() in ("off", "clear", "auto", "none", "null"):
+            value = None
+        else:
+            resolved = _pipeline_role_args(app, value_text, role)
+            if resolved is None:
+                return
+            value = {"provider_name": resolved[0], "model": resolved[1]}
+    else:
+        try:
+            value = config_edit.parse_value(row, value_text)
+        except ValueError as exc:
+            app._transcript.write_error(str(exc))
+            return
+
+    try:
+        proposal = config_edit.propose(row.name, value)
+    except ValueError as exc:
+        # The loader's own message, naming the key and the problem. It
+        # covers the cross-field invariants too -- a strategy that is not
+        # in the roster beside it fails here, before anything is written.
+        app._transcript.write_error(str(exc))
+        return
+
+    if not proposal.lines:
+        app._transcript.write_system(
+            f"{row.name} is already {config_edit.shown(value)}. Nothing "
+            f"written.")
+        return
+
+    key = config_edit.authority_key(row.name)
+    if key is None:
+        _config_write(app, proposal)
+        return
+
+    # AUTHORITY. The gate is the compensating control for letting a slash
+    # command reach these at all (batch 84): what makes it defensible is
+    # that the person is told what the key permits, so the body is the
+    # sentence for THIS key rather than a generic "are you sure".
+    body = (f"{config_edit.AUTHORITY_EFFECT[key].capitalize()}\n\n"
+            f"{row.name}\n"
+            f"  now:  {config_edit.shown(proposal.before)}\n"
+            f"  after: {config_edit.shown(proposal.after)}\n\n"
+            f"No settings file, environment variable or tool call can "
+            f"change this. Writing it needs you.")
+
+    def _decided(confirmed) -> None:
+        if confirmed:
+            _config_write(app, proposal)
+        else:
+            app._transcript.write_system("Nothing written.")
+
+    app.push_screen(
+        ConfirmScreen(f"Change {row.name}?", body, "Write it"), _decided)
+
+
+def _config_write(app: VenastineApp, proposal) -> None:
+    """Write the validated document, then offer the relaunch."""
+    try:
+        config_edit.write(proposal.text, proposal.newline)
+    except OSError as exc:
+        app._transcript.write_error(
+            f"config.yaml could not be written ({exc}). Nothing changed. "
+            f"An installed copy may sit in a directory you cannot write.")
+        return
+    app._transcript.write_system(
+        f"config.yaml: {proposal.name} is now "
+        f"{config_edit.shown(proposal.after)} "
+        f"(was {config_edit.shown(proposal.before)}).")
+    _config_offer_restart(app, proposal.name)
+
+
+def _config_offer_restart(app: VenastineApp, key: str) -> None:
+    """Ask whether to relaunch, or explain why now is not the moment.
+
+    A RESEARCH RUN IS NOT WAITED FOR. A chat turn is seconds and queueing
+    behind it is reasonable; a pipeline run is minutes to tens of minutes,
+    and a restart queued behind one is a restart nobody remembers asking
+    for, arriving long after the question scrolled away. The write has
+    already landed either way, so nothing is lost by saying so.
+    """
+    if app._research_is_running():
+        app._transcript.write_system(
+            "A research run is in flight, so the restart is not queued. "
+            "The change is written; relaunch when the run finishes and it "
+            "takes effect.")
+        return
+
+    def _decided(confirmed) -> None:
+        if not confirmed:
+            app._transcript.write_system(
+                "Not restarting. It applies at your next launch.")
+            return
+        if app._busy:
+            app._pending_restart = key
+            app._transcript.write_system(
+                "Restarting when this turn finishes. /config "
+                "--cancel-restart calls it off.")
+            return
+        app.restart_for_config(key)
+
+    app.push_screen(
+        ConfirmScreen(
+            "Restart now?",
+            f"{key} is written. Values are read once at startup, so it "
+            f"changes nothing until the harness restarts.\n\n"
+            f"Restarting reopens this conversation where it is.",
+            "Restart"),
+        _decided)
+
+
 def register_builtin_commands() -> None:
     """Idempotent — registering by name overwrites, so a re-import or a
     second app instance in the test suite does not duplicate entries."""
@@ -4934,6 +5237,8 @@ def register_builtin_commands() -> None:
                      _cmd_window, "[tokens|off]"),
         SlashCommand("trigger", "override when this chat compacts, for the session",
                      _cmd_trigger, "[tokens|off]"),
+        SlashCommand("config", "browse and set the harness configuration",
+                     _cmd_config, "[key] [value]", complete=_config_rows),
         SlashCommand("claims", "show a research run's claims and their tiers",
                      _cmd_claims, "[run id]"),
         SlashCommand("copy", "copy text out of the session", _cmd_copy,
@@ -4956,14 +5261,19 @@ register_init_commands()  # §24: /init
 
 
 def run(provider_name: str, model: str, settings: dict | None = None,
-        cli_pinned: bool = False) -> None:
+        cli_pinned: bool = False):
     """Entry point used by main.py --tui.
 
     `cli_pinned` says whether --provider/--model named this launch's
     pair (§43, RM3). main.resolve_runtime_defaults has already collapsed
     the flags into `provider_name`/`model` by here, so the app cannot
     tell by looking -- and a flag has to outrank a remembered choice.
+
+    RETURNS whatever the app exited with, which is `None` for every exit
+    except a `/config` write the user chose to apply (batch 84): that one
+    returns a `config_edit.RestartRequest`, and `main.py` relaunches on it
+    after its own teardown has run.
     """
     config_loader_settings = settings if settings is not None else config_loader.get_settings()
-    VenastineApp(provider_name, model, config_loader_settings,
-                 cli_pinned=cli_pinned).run()
+    return VenastineApp(provider_name, model, config_loader_settings,
+                        cli_pinned=cli_pinned).run()
