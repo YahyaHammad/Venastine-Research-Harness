@@ -271,13 +271,16 @@ def test_ac5_check_output_policy_still_runs_on_dispatched_results(reg, monkeypat
 def test_ac6_every_registered_tool_declared_in_both_dataclasses():
     """Walks the real registry. Fails on `fetch_url` before §15 -- which
     had been registered, documented as working, and denied on every call
-    for its entire life because the field was never added."""
+    for its entire life because the field was never added. `shell` is the
+    deliberate exception: it needs the permissions field like every tool,
+    but its approval lives solely in `shell_approval_mode`."""
     permissions = config.ToolPermissions()
     approvals = config.ToolApprovals()
 
     missing = [
         name for name in registry._tools
-        if not (hasattr(permissions, name) and hasattr(approvals, name))
+        if not (hasattr(permissions, name)
+                and (name == "shell" or hasattr(approvals, name)))
     ]
     assert missing == []
 
@@ -302,6 +305,17 @@ def test_ac6_assert_permissions_declared_exempts_mcp_tools():
     check must skip them -- otherwise connecting an MCP server would
     trip an invariant meant for built-ins."""
     assert_permissions_declared(["web_search", "mcp__server__tool"])  # must not raise
+
+
+def test_ac6_shell_is_the_sole_approvals_exemption():
+    """`shell` needs a permissions field like every tool, but no approvals
+    field: its approval lives solely in `shell_approval_mode`, and a
+    second switch there could only force `always`. The exemption is
+    pinned to exactly this one name so a future omission cannot ride in
+    on its precedent -- that is the `fetch_url` defect by another door."""
+    assert_permissions_declared(["web_search", "shell"])  # must not raise
+    with pytest.raises(RuntimeError, match="no_such_tool"):
+        assert_permissions_declared(["web_search", "shell", "no_such_tool"])
 
 
 # ---------------------------------------------------------------------------

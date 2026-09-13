@@ -504,22 +504,19 @@ class TestRunSandboxedRouting:
 class TestShellApprovalCheck:
 
     def test_base_approval_true(self, monkeypatch):
-        monkeypatch.setattr(config, "ToolApprovals", lambda: type("A", (), {"shell": True})())
+        set_posture(monkeypatch, shell_approval_mode="always")
         assert _shell_approval_check("shell", {"command": "ls"}) is True
 
     def test_inert_no_approval(self, monkeypatch):
-        monkeypatch.setattr(config, "ToolApprovals", lambda: type("A", (), {"shell": False})())
         monkeypatch.setattr(config, "INERT_COMMANDS", ["ls", "cat"])
         assert _shell_approval_check("shell", {"command": "ls -la"}) is False
 
     def test_docker_no_approval(self, monkeypatch):
-        monkeypatch.setattr(config, "ToolApprovals", lambda: type("A", (), {"shell": False})())
         monkeypatch.setattr(config, "INERT_COMMANDS", ["ls"])
         with patch("tools.builtin.shell.is_docker_available", return_value=True):
             assert _shell_approval_check("shell", {"command": "python x.py"}) is False
 
     def test_fallback_no_auto_approve_requires_approval(self, monkeypatch):
-        monkeypatch.setattr(config, "ToolApprovals", lambda: type("A", (), {"shell": False})())
         monkeypatch.setattr(config, "INERT_COMMANDS", ["ls"])
         set_posture(monkeypatch, allow_insecure_fallback=True)
         set_posture(monkeypatch, auto_approve_fallback=False)
@@ -527,7 +524,6 @@ class TestShellApprovalCheck:
             assert _shell_approval_check("shell", {"command": "python x.py"}) is True
 
     def test_fallback_auto_approve_no_approval(self, monkeypatch):
-        monkeypatch.setattr(config, "ToolApprovals", lambda: type("A", (), {"shell": False})())
         monkeypatch.setattr(config, "INERT_COMMANDS", ["ls"])
         set_posture(monkeypatch, allow_insecure_fallback=True)
         set_posture(monkeypatch, auto_approve_fallback=True)
@@ -565,12 +561,11 @@ class TestRegistryIntegration:
 def _tiered(monkeypatch, tmp_path):
     """Shipped §28 posture, with a real empty workspace to measure against.
 
-    ToolApprovals.shell False is the SHIPPED value since §28 -- the mode is
-    the gate. Tests that want the ratchet set it back to True explicitly.
+    The mode is the gate and the ONLY gate: `tool_approvals` deliberately
+    has no `shell` key, so there is no stub to set back. Tests that want
+    shell gated set the posture to `always` explicitly.
     """
     set_posture(monkeypatch, shell_approval_mode="tiered")
-    monkeypatch.setattr(config, "ToolApprovals",
-                        lambda: type("A", (), {"shell": False})())
     monkeypatch.setattr(config, "WORKSPACE_DIR", str(tmp_path))
     return str(tmp_path)
 
@@ -719,16 +714,18 @@ class TestTheModeIsTheGateAndTheFieldIsTheRatchet:
     def test_tiered_sits_between_them(self, _tiered):
         assert (_asks("ls -la"), _asks("cat /etc/shadow")) == (False, True)
 
-    def test_the_approvals_field_still_forces_always(self, _tiered,
-                                                     monkeypatch):
-        """D14's one-way ratchet. SHELL_APPROVAL_MODE is the gate, but
-        ToolApprovals.shell can only ever tighten it -- and `never` is the
-        mode where that has to hold or the field is decorative."""
+    def test_no_approvals_field_can_force_shell_approval(self, _tiered,
+                                                         monkeypatch):
+        """The ratchet is gone, not defaulted off. A stale stub built the
+        old way -- a `ToolApprovals` carrying `shell = True` -- must not
+        resurrect it: `requires_approval` falls through to the dynamic
+        default and the mode alone decides. `never` plus the stub still
+        asks about nothing."""
         set_posture(monkeypatch, shell_approval_mode="never")
         monkeypatch.setattr(config, "ToolApprovals",
                             lambda: type("A", (), {"shell": True})())
-        assert _asks("cat /etc/shadow") is True
-        assert _asks("ls -la") is True
+        assert _asks("cat /etc/shadow") is False
+        assert _asks("ls -la") is False
 
     def test_a_bogus_mode_raises_rather_than_defaulting(self, _tiered,
                                                         monkeypatch):
@@ -757,13 +754,12 @@ class TestTheModeIsTheGateAndTheFieldIsTheRatchet:
         assert APPROVAL_MODES == ("always", "tiered", "never")
         assert fresh.SHELL_APPROVAL_MODE in APPROVAL_MODES
 
-    def test_the_shipped_approvals_field_is_the_ratchet_not_the_gate(self):
-        """§28 flipped this to False and the two must move together: with
-        it True the tool's check can never lower the answer, because
-        approval_needed ORs it with requires_approval and BOTH read this
-        field. A future edit setting it back True silently disables
-        `tiered` without disabling the setting."""
-        assert config.ToolApprovals().shell is False
+    def test_shell_has_no_approvals_field_only_a_mode(self):
+        """`tool_approvals` deliberately has no `shell` key: shell approval
+        is governed solely by `shell_approval_mode`, so there is no second
+        switch that can disagree with it. `tool_permissions.shell` stays --
+        the D14 floor still needs somewhere to live."""
+        assert not hasattr(config.ToolApprovals(), "shell")
         assert config.ToolPermissions().shell is False
 
 
@@ -2016,8 +2012,6 @@ class TestProtectedSegmentsAlwaysAsk:
         to keep commands out of."""
         set_posture(monkeypatch, shell_approval_mode="tiered",
                     allow_insecure_fallback=True, auto_approve_fallback=True)
-        monkeypatch.setattr(config, "ToolApprovals",
-                            lambda: type("A", (), {"shell": False})())
         monkeypatch.setattr(config, "WORKSPACE_DIR", str(tmp_path))
         assert _asks("touch .venastine/notes.txt", docker=False) is True
         # The control: the same opt-in still covers an ordinary write.
@@ -2028,8 +2022,6 @@ class TestProtectedSegmentsAlwaysAsk:
         is an opt-out of ALL approval and already auto-approves a host
         read of /etc/shadow. G3: the mode is the gate."""
         set_posture(monkeypatch, shell_approval_mode="never")
-        monkeypatch.setattr(config, "ToolApprovals",
-                            lambda: type("A", (), {"shell": False})())
         monkeypatch.setattr(config, "WORKSPACE_DIR", str(tmp_path))
         assert _asks("cat .venastine/settings.json") is False
 

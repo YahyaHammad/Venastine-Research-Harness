@@ -1273,19 +1273,19 @@ every research pass), so gating fetch_url would leave it denied in
 exactly the places the grounding passes need it -- the same outcome
 as the D24 bug, with a different error string. See DEVLOG §15.
 
-#### `tool_approvals.shell`  -- ships `false`
+#### `tool_approvals.shell`  -- removed, not shipped
 
-ROADMAP_v2 §28 (G3). False since §28, and False here does NOT mean
-"never ask" -- SHELL_APPROVAL_MODE is the gate, and it ships
-"tiered". This field is the RATCHET, and it still only tightens:
-approval_needed() ORs the tool's own check with requires_approval(),
-and requires_approval() reads this field, so setting it True forces
-"always" whatever the mode says. An agent's approval_overrides
-reaches the same OR and has the same one-way power (D14).
-
-It stays declared because D24 requires every registered tool to have
-a field in both dataclasses, and because the ratchet needs somewhere
-to live. Do not delete it and do not read it as the gate.
+There is deliberately no such key. Shell approval is governed solely by
+`shell_approval_mode` above: the field this section used to describe was
+the RATCHET (`True` forced `always` whatever the mode said), and every
+outcome it could produce is an outcome the mode already names -- so a
+second switch could only ever agree with the gate or surprise someone who
+set the two differently. An agent's `approval_overrides` keeps its own
+one-way power over shell through the context layer (D14); what is gone is
+only the global duplicate. An old file still carrying the key is refused
+at startup naming it (unknown keys are refused, always), and the npm-update
+merge drops it as "not a setting in this version" while keeping every
+other edit.
 
 #### `tool_approvals.spawn_subagent`  -- ships `true`
 

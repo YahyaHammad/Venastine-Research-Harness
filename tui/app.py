@@ -5022,6 +5022,21 @@ def _config_value_choices(row, typed: str) -> list:
     return [config_edit.shown(row.in_file)]
 
 
+def _remembered_for_panel() -> "tuple[str, str] | None":
+    """The `/model` store's whole pair, or None.
+
+    A STORE FACT for the panel, deliberately unvalidated: staleness and
+    provider checks belong to `_startup_model`, which alone knows the flags
+    that outrank them. `KeyRow` labels it remembered rather than running,
+    so the row stays true however the session resolved; `_cmd_config`
+    (which has the app) turns it into the authoritative sentence.
+    """
+    record = preferences.load_model()
+    if record is None:
+        return None
+    return record["provider"], record["model"]
+
+
 def _config_rows(argument: str) -> list:
     """The panel's offers after `/config `. Keys first, then that key's
     values once a space follows it.
@@ -5035,12 +5050,13 @@ def _config_rows(argument: str) -> list:
     """
     typed = argument.lstrip()
     key, space, value_text = typed.partition(" ")
+    remembered = _remembered_for_panel()
     try:
         if not space:
             return [SlashCommand(f"config {row.name}", row.summary,
                                  _cmd_config)
-                    for row in config_edit.matching(key)]
-        row = config_edit.find(key)
+                    for row in config_edit.matching(key, remembered)]
+        row = config_edit.find(key, remembered)
     except (ValueError, OSError):
         return []
     if row is None or not row.settable:
@@ -5084,16 +5100,20 @@ def _cmd_config(app: VenastineApp, args: str) -> None:
         return
 
     name, _, value_text = text.partition(" ")
-    row = config_edit.find(name)
+    remembered = _remembered_for_panel()
+    row = config_edit.find(name, remembered)
     if row is None:
-        near = config_edit.matching(name)
+        near = config_edit.matching(name, remembered)
         app._transcript.write_error(
             f"{name} is not a key in config.yaml."
             + (f" Did you mean {near[0].name}?" if near else
                " Type /config and a space to browse them."))
         return
     if not value_text.strip():
-        for line in config_edit.explain(name):
+        for line in config_edit.explain(
+                name, remembered=remembered,
+                cli_pinned=getattr(app, "_cli_pinned", False),
+                session_pair=(app.provider_name, app.model)):
             app._transcript.write_system(line)
         return
     _config_set(app, row, value_text.strip())
@@ -5102,7 +5122,7 @@ def _cmd_config(app: VenastineApp, args: str) -> None:
 def _config_orientation(app: VenastineApp) -> None:
     """Bare `/config`. What is here and how to reach it.
 
-    NOT a listing. 133 names would fill the transcript and bury the
+    NOT a listing. 132 names would fill the transcript and bury the
     conversation, and the panel is the browser -- so this says how to open
     it, which is the one thing someone typing a bare `/config` does not yet
     know.
@@ -5124,7 +5144,7 @@ def _config_orientation(app: VenastineApp) -> None:
 
     # WHAT IS PENDING, last and only when there is any. This is the place a
     # person checks their work before applying it, and after four writes
-    # the alternative is scrolling 133 rows looking for the marker.
+    # the alternative is scrolling 132 rows looking for the marker.
     pending = config_edit.pending_changes()
     if not pending:
         return

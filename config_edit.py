@@ -164,9 +164,11 @@ class KeyRow:
     """One addressable name in `config.yaml`, as `/config` shows it.
 
     `name` is what the user types: a top-level key, or `<table>.<tool>` for
-    the 46 leaves of the two permission tables. Those 23 tool names appear in
-    BOTH tables, so the prefix is not decoration -- it is the only thing that
-    tells `tool_permissions.shell` from `tool_approvals.shell`.
+    the 45 leaves of the two permission tables. All 23 tool names appear in
+    `tool_permissions`; all but `shell` appear in `tool_approvals`, whose
+    approval is governed solely by `shell_approval_mode` -- so the prefix
+    is not decoration, it is the only thing that tells
+    `tool_permissions.shell` from `tool_approvals.read`.
 
     TWO VALUES, NOT ONE, and keeping them apart is batch 85's whole subject.
     `in_file` is what `config.yaml` says: the thing `/config` edits and the
@@ -189,6 +191,15 @@ class KeyRow:
     in_file: Any       # what config.yaml says right now
     in_session: Any    # what this process is running
     authority: bool
+    #: The remembered `/model` pair, if the preference store holds one.
+    #:
+    #: A STORE FACT, not a session claim: it says what the user last chose,
+    #: which the session runs only when no flag pinned the launch and the
+    #: staleness key still matches -- facts `explain()` (which is told
+    #: whether they hold) turns into the authoritative sentence. Set on the
+    #: `model_name` row only; every other row carries None. Display-only:
+    #: `pending` and every write path ignore it.
+    remembered: Optional[tuple[str, str]] = None
     #: The environment variable that beats this key, `$`-prefixed, if any.
     #: STRUCTURED rather than folded into one display string: `pending` and
     #: `explain` both have to READ the variable's name, and a key can be
@@ -268,6 +279,9 @@ class KeyRow:
         reason.
         """
         parts = [self.values, f"now {shown(self.in_file)}"]
+        if self.remembered is not None:
+            provider, model = self.remembered
+            parts.append(f"remembered {provider} | {model}")
         if self.pending:
             parts.append("pending restart")
         if self.outranked_by:
@@ -595,7 +609,7 @@ def describe(name: str, annotation, metadata) -> tuple:
 # ---- The catalogue --------------------------------------------------------
 # ---------------------------------------------------------------------------
 
-def catalogue() -> list[KeyRow]:
+def catalogue(remembered_pair: Optional[tuple[str, str]] = None) -> list[KeyRow]:
     """Every addressable name, in `config.yaml`'s own order.
 
     FILE ORDER, not alphabetical, and it is worth saying why: the schema
@@ -606,11 +620,13 @@ def catalogue() -> list[KeyRow]:
 
     The two tables are expanded rather than listed, because a row that says
     `tool_permissions · 23 entries` is not something anyone can act on, and
-    the 46 leaves are exactly the rows a person comes here for.
+    the 45 leaves are exactly the rows a person comes here for.
 
     BOTH VALUES COME FROM HERE: the file's, parsed through the cached
     document, and the session's, off the model bound at import. See
-    `KeyRow` for why one of them was not enough.
+    `KeyRow` for why one of them was not enough. `remembered_pair` is the
+    `/model` store's whole pair, or None; it is carried on the `model_name`
+    row's `remembered` field and changes nothing else.
     """
     config = config_schema.current()
     tree = document()
@@ -669,7 +685,8 @@ def catalogue() -> list[KeyRow]:
             environment_variable=variable,
             settings_key=settings_key,
             takes_text=takes_text,
-            nullable=nullable))
+            nullable=nullable,
+            remembered=(remembered_pair if name == "model_name" else None)))
     return rows
 
 
@@ -684,7 +701,8 @@ def pending_changes() -> list:
     return [row for row in catalogue() if row.settable and row.pending]
 
 
-def find(name: str) -> Optional[KeyRow]:
+def find(name: str,
+         remembered_pair: Optional[tuple[str, str]] = None) -> Optional[KeyRow]:
     """The row called `name`, or None. Exact match, never a prefix.
 
     CASE-INSENSITIVE, because every key in this file is lowercase and the
@@ -696,13 +714,14 @@ def find(name: str) -> Optional[KeyRow]:
     what `find` resolves stay one rule.
     """
     wanted = name.lower()
-    for row in catalogue():
+    for row in catalogue(remembered_pair):
         if row.name.lower() == wanted:
             return row
     return None
 
 
-def matching(prefix: str) -> list[KeyRow]:
+def matching(prefix: str,
+             remembered_pair: Optional[tuple[str, str]] = None) -> list[KeyRow]:
     """Every row whose name starts with `prefix`, in catalogue order.
 
     Substring would be friendlier and is deliberately not done: the panel
@@ -715,14 +734,15 @@ def matching(prefix: str) -> list[KeyRow]:
     the user meant.
     """
     wanted = prefix.lower()
-    return [row for row in catalogue() if row.name.lower().startswith(wanted)]
+    return [row for row in catalogue(remembered_pair)
+            if row.name.lower().startswith(wanted)]
 
 
 def file_value(name: str, tree=None) -> Any:
     """What `config.yaml` itself says for `name`. `KeyRow.in_file`'s source.
 
     Kept as its own function for the callers that want one name without
-    building 133 rows to get it. `tree` is for a caller asking about many
+    building 132 rows to get it. `tree` is for a caller asking about many
     at once, and matters less than it did now that `document()` caches.
     """
     if tree is None:
@@ -733,15 +753,25 @@ def file_value(name: str, tree=None) -> Any:
     return tree[name]
 
 
-def explain(name: str) -> list[str]:
+def explain(name: str, *,
+            remembered: Optional[tuple[str, str]] = None,
+            cli_pinned: bool = False,
+            session_pair: Optional[tuple[str, str]] = None) -> list[str]:
     """The lines `/config <key>` writes. Plain facts, no styling.
 
     HERE RATHER THAN IN THE HANDLER, for AGENTS.md's §16 rule: the terminal
     is a shell, so what there is to SAY about a key is this module's, and
     drawing it is `tui/app.py`'s. It also means the sentences are testable
     without a terminal, which is where every one of them is checked.
+
+    `remembered` is the `/model` store's whole pair, if one is stored;
+    `cli_pinned` says a --provider/--model flag named this launch; and
+    `session_pair` is the provider/model actually running. All three are
+    read only for `model_name` -- the one key whose session value can come
+    from somewhere `catalogue()` cannot see -- and default to saying
+    nothing, so every existing caller keeps its current sentences.
     """
-    row = find(name)
+    row = find(name, remembered)
     if row is None:
         return [f"{name} is not a key in config.yaml."]
 
@@ -753,19 +783,49 @@ def explain(name: str) -> list[str]:
         lines.extend(_entries(row.in_session))
 
     if row.pending:
+        running = shown(row.in_session)
+        if name == "model_name" and session_pair is not None:
+            running = f"{session_pair[0]} | {session_pair[1]}"
         lines.append(
             f"Written this session. This one is still running "
-            f"{shown(row.in_session)} and will pick the new value up at the "
+            f"{running} and will pick the new value up at the "
             f"next launch.")
+
+    if name == "model_name" and remembered is not None:
+        provider, model = remembered
+        if session_pair == remembered and not cli_pinned:
+            lines.append(
+                f"This session is running {provider} | {model}, remembered "
+                f"with /model. A /config write here changes the harness "
+                f"default, not the remembered choice: it still wins at the "
+                f"next launch. Choose again with /model to move it.")
+        else:
+            lines.append(
+                f"A remembered {provider} | {model} is stored, but this "
+                f"session is not running it.")
+    elif (name == "model_name" and cli_pinned
+            and session_pair is not None):
+        lines.append(
+            f"This launch was pinned with --provider/--model, so this "
+            f"session is running {session_pair[0]} | {session_pair[1]}.")
 
     if row.environment_variable:
         variable = row.environment_variable
+        memory_wins = (
+            name == "model_name" and remembered is not None
+            and session_pair == remembered and not cli_pinned)
         if os.environ.get(variable) is not None:
-            lines.append(
-                f"{variable} is set to {shown(row.in_session)}, so that is "
-                f"what this session is using and what the next launch will "
-                f"use too. config.yaml says {shown(row.in_file)}, and a "
-                f"write here changes that rather than what is in force.")
+            if memory_wins:
+                lines.append(
+                    f"{variable} is set to {shown(row.in_session)}, but the "
+                    f"remembered pair above outranks it this session -- only "
+                    f"a --provider/--model flag outranks a remembered choice.")
+            else:
+                lines.append(
+                    f"{variable} is set to {shown(row.in_session)}, so that is "
+                    f"what this session is using and what the next launch will "
+                    f"use too. config.yaml says {shown(row.in_file)}, and a "
+                    f"write here changes that rather than what is in force.")
         else:
             lines.append(
                 f"{variable} would override this if it were set.")

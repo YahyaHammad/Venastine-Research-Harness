@@ -309,12 +309,12 @@ class TestNothingReachableChangesIt:
             assert config_edit.AUTHORITY_EFFECT.get(key, "").strip(), (
                 f"{key}'s confirmation would say nothing about what it "
                 f"permits, which is the only reason it may be written")
-        # And a LEAF of a gated table resolves to the table, so all 46
+        # And a LEAF of a gated table resolves to the table, so all 45
         # tool booleans are covered by the two sentences above them.
         assert config_edit.authority_key(
             "tool_permissions.shell") == "tool_permissions"
         assert config_edit.authority_key(
-            "tool_approvals.shell") == "tool_approvals"
+            "tool_approvals.read") == "tool_approvals"
         assert config_edit.authority_key("max_tokens") is None
 
     def test_writing_config_py_still_needs_a_human(self):
@@ -597,10 +597,8 @@ class TestTheConsumersRead:
     """Without these, everything above could pass while the gate still read
     `config` -- the vacuity class this record keeps finding."""
 
-    def test_the_shell_gate_reads_the_posture(self, monkeypatch):
+    def test_the_shell_gate_reads_the_posture(self):
         from tools.builtin.shell import _shell_approval_check
-        monkeypatch.setattr(config, "ToolApprovals",
-                            lambda: type("A", (), {"shell": False})())
         with posture.override_for_tests(shell_approval_mode="never"):
             assert _shell_approval_check("shell", {"command": "rm -rf /"}) is False
         with posture.override_for_tests(shell_approval_mode="always"):

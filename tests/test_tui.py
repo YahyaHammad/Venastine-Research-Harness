@@ -7655,12 +7655,14 @@ class TestTheConfigPanelIsTheCommandPanel:
         assert names == ["config max_iterations"]
 
     def test_both_tool_tables_are_reachable_and_distinct(self):
-        """The user's own example. All 23 tool names live in both tables,
-        so an unprefixed `shell` could not say which one was meant."""
+        """The user's own example. All 23 tool names live in permissions;
+        all but `shell` -- governed solely by `shell_approval_mode` -- live
+        in approvals, so an unprefixed `shell` could not say which one was
+        meant."""
         names = [row.name for row in commands.matching("/config tool_")]
         assert "config tool_permissions.shell" in names
-        assert "config tool_approvals.shell" in names
-        assert len([n for n in names if n.endswith(".shell")]) == 2
+        assert "config tool_approvals.shell" not in names
+        assert len([n for n in names if n.endswith(".shell")]) == 1
 
     def test_a_closed_vocabulary_is_offered_as_values(self):
         rows = commands.matching("/config shell_approval_mode ")
@@ -7800,6 +7802,45 @@ class TestWhatIsPendingIsVisible:
         assert "now 18000" in row.summary
         assert "pending restart" in row.summary
 
+    def test_the_panel_names_a_remembered_model(self):
+        """The store fact, unvalidated: staleness and provider checks belong
+        to mount, which alone knows the flags that outrank them. The row is
+        labelled remembered rather than running, so it stays true however
+        the session resolved; `_cmd_config` turns it into the authoritative
+        sentence."""
+        from tui import preferences
+
+        assert preferences.remember_model(
+            "OPENROUTER", "nex", None, None) is True
+        rows = _config_rows("model_name")
+        assert any("remembered OPENROUTER | nex" in row.summary
+                   for row in rows)
+
+    def test_explaining_model_name_names_the_running_pair(self):
+        from tui import preferences
+
+        assert preferences.remember_model(
+            "OPENROUTER", "nex", None, None) is True
+        app = _bare_app()
+        app.provider_name, app.model = "OPENROUTER", "nex"
+        _cmd_config(app, "model_name")
+        written = " ".join(app._transcript.systems)
+        assert "running OPENROUTER | nex" in written
+        assert "remembered with /model" in written
+
+    def test_explaining_model_name_says_when_the_pair_is_dormant(self):
+        """The bare app never mounted, so it runs its constructed pair
+        rather than the stored one -- the same dormant shape a stale store,
+        a missing provider or a pinned launch produces."""
+        from tui import preferences
+
+        assert preferences.remember_model(
+            "OPENROUTER", "nex", None, None) is True
+        app = _bare_app()
+        _cmd_config(app, "model_name")
+        written = " ".join(app._transcript.systems)
+        assert "stored, but this session is not running it" in written
+
 
 class TestWritingThroughTheCommand:
     """The handler's half. The writer itself is tested in
@@ -7846,7 +7887,7 @@ class TestWritingThroughTheCommand:
     def test_declining_the_authority_modal_writes_nothing(self, mocker):
         write = mocker.patch("config_edit.write")
         app = _bare_app()
-        _cmd_config(app, "tool_approvals.shell true")
+        _cmd_config(app, "tool_approvals.read true")
         app.push_screen.call_args[0][1](False)
         write.assert_not_called()
         assert "Nothing written." in app._transcript.systems

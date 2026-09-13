@@ -629,10 +629,10 @@ def test_candidate_approvals_omits_tools_the_grant_cannot_cover(
     exclusion below was true of every string ever written. That predates
     R13 -- it is the same vacuity class, found by sweeping for it. The
     positive assertion is what makes the negative one mean something."""
+    from tests.conftest import set_posture
     monkeypatch.setattr(config, "ToolPermissions",
                         lambda: type("P", (), {"shell": True})())
-    monkeypatch.setattr(config, "ToolApprovals",
-                        lambda: type("A", (), {"shell": True})())
+    set_posture(monkeypatch, shell_approval_mode="always")
 
     _write_harness_agent(_roots, "worker")
     config_loader.initialize(str(_roots["project"]))

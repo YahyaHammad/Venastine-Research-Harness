@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 4504 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 4518 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -1646,12 +1646,7 @@ likely to be re-derived wrongly:
 
 And the four from §28 itself:
 
-- **`SHELL_APPROVAL_MODE` is the gate; `ToolApprovals.shell` is the ratchet** (G3). The
-  field ships `False` and that does NOT mean "never ask". It cannot be the gate:
-  `approval_needed` ORs the tool's check with `requires_approval` and **both** read it,
-  so `True` there makes the tool's check unable to lower the answer — which is why a
-  tiered mode was unreachable dead code until §28 flipped it. Setting it `True` still
-  forces `always`, so D14's one-way ratchet is intact. **Do not "fix" the default back.**
+- **`SHELL_APPROVAL_MODE` is the gate, and the only one** (G3, ratchet removed). `tool_approvals` deliberately has no `shell` key: the field used to be the ratchet (`True` forced `always`), and every outcome it could produce is an outcome the mode already names -- so the second switch could only agree with the gate or surprise someone who set the two differently. The mode check reads the frozen posture; an agent's `approval_overrides` keeps its one-way tightening power through the context layer, so D14's ratchet is intact where it was never redundant. **Do not re-add the field.**
 - **The argument rule must never parse** (G2). Every token after the first is read as a
   path; a flag passes only because it is relative. `_is_inert` is sound *because* it
   rejects metacharacters rather than understanding them, and a classifier that learns
@@ -2208,7 +2203,7 @@ That example is deliberately a *current* divergence. This paragraph used to cite
 
 **Never name a top-level file after a stdlib or installed package.** A root `logging.py` once silently shadowed stdlib `logging`; hence `logging_setup.py`.
 
-**Registering a tool is four steps**: import the module, `registry.register(ToolSpec(...))`, add a boolean to **both** `config.ToolPermissions` and `config.ToolApprovals`, and `assert_permissions_declared()` at the bottom of `tools/registry.py` enforces the third at import time (D24). Skipping the declaration used to fail silently — `fetch_url` was registered, documented as working, and denied on every call for its entire life, with the schema still advertised so the model kept choosing it. It now raises `RuntimeError` on import instead. `mcp__*` names are exempt (they get `_default_for_unknown_tool`'s named default).
+**Registering a tool is four steps**: import the module, `registry.register(ToolSpec(...))`, add a boolean to `config.ToolPermissions` and -- with one deliberate exception -- to `config.ToolApprovals`, and `assert_permissions_declared()` at the bottom of `tools/registry.py` enforces the third at import time (D24). The exception is `shell`, whose approval lives solely in `shell_approval_mode`; a test pins it as the sole exemption. Skipping the declaration used to fail silently — `fetch_url` was registered, documented as working, and denied on every call for its entire life, with the schema still advertised so the model kept choosing it. It now raises `RuntimeError` on import instead. `mcp__*` names are exempt (they get `_default_for_unknown_tool`'s named default).
 
 **A raising tool must not kill the run.** `dispatch()` wraps the handler call and turns any exception into `{"error": ...}`, logged at ERROR with the traceback so a real bug stays findable. `ToolCallDenied` and the unknown-tool `ValueError` are raised *above* the handler and deliberately still propagate. The error result goes through `check_output_policy` like any other — an exception message often carries the request that produced it, and for an HTTP client that means a URL with an API key in it. This is a backstop: `web_search` and `arxiv_search` return their own error dicts after exhausting retries (`fetch_url` always did), so the model gets something specific. The bug that forced this: `arxiv_search` requested `http://export.arxiv.org`, arXiv now 301-redirects it, httpx does **not** follow redirects by default, `raise_for_status()` ignores 3xx, and `ET.fromstring("")` on the empty redirect body raised — three retries, then an exception that flipped a finished ten-pass research run to `status='failed'`.
 

@@ -542,7 +542,8 @@ auto_approve_sandbox_fallback: false
 # direction of a fallback asks about everything and the other about
 # nothing, and a typo cannot pick. Rejected by name from settings.json at
 # every tier: a cloned repo could otherwise set `never`.
-# Note that `tool_approvals.shell` is the RATCHET, not this gate.
+# Shell approval is governed solely here: `tool_approvals` deliberately has
+# no `shell` key, so there is no second switch that can disagree with this.
 shell_approval_mode: tiered
 
 # The image sandboxed commands run in. AGENT_SANDBOX_IMAGE overrides.
@@ -813,10 +814,9 @@ tool_permissions:
 
 # AUTHORITY -- whether each tool needs a human yes before it runs. Approval ORs
 # across every layer, so a true here is a one-way ratchet that can only
-# add prompts.
-# `shell` is the one to read carefully: it is the RATCHET, not the gate.
-# shell_approval_mode is the gate. Setting this true forces `always`
-# whatever the mode says, and false does NOT mean "never ask".
+# add prompts. `shell` is deliberately absent: shell approval is governed
+# solely by `shell_approval_mode` above -- there is no second switch, so
+# there is nothing here that can disagree with it.
 # A tool gated here is not merely denied where nothing can ask -- it stops
 # being advertised at all, which is why ask_user, pin and todo_write are
 # ungated.
@@ -834,7 +834,6 @@ tool_approvals:
   read: false
   write: false
   edit: false
-  shell: false
   load_skill: false
   spawn_subagent: true
   pin: false

@@ -33,8 +33,9 @@ SANDBOX MODEL (ROADMAP_v2 §46 moved one tier of this):
 
 APPROVAL MODEL (ROADMAP_v2 §28):
   config.SHELL_APPROVAL_MODE is the gate -- "always", "tiered" or
-  "never" -- and ToolApprovals.shell is the RATCHET above it: True
-  forces "always", and can never loosen (D14).
+  "never" -- and it is the ONLY gate: there is no second switch that can
+  disagree with it (D14's one-way tightening for shell lives in the
+  agent's `approval_overrides`, which reach the same OR below).
 
   Under "tiered", the command is classified ONCE
   (security/sandbox.classify_command) into a capability set, and the
@@ -268,26 +269,23 @@ def _shell_approval_check(tool_name: str, params: dict) -> bool:
 
     Reads top to bottom as the policy it is:
 
-      1. ToolApprovals.shell is the RATCHET. True forces "always",
-         whatever the mode says, so a config or an agent override can
-         still only tighten (D14).
-      2. The mode answers outright unless it is "tiered".
-      3. A command naming a protected path segment
+      1. The mode answers outright unless it is "tiered".
+      2. A command naming a protected path segment
          (security.protected_paths.PROTECTED_SEGMENTS) always asks --
          before the fallback opt-in and the capability rule can answer
          for it. The file tools DENY such a path outright; the shell
          only asks, because a command is free text and the token check
          refuses to parse it (G2), so what slips past the check still
-         meets a human. Behind step 2 deliberately: mode "never" is a
+         meets a human. Behind step 1 deliberately: mode "never" is a
          documented opt-out of ALL approval, and it already answers
          "auto-approve" for a host read of /etc/shadow.
-      4. AUTO_APPROVE_SANDBOX_FALLBACK is applied HERE, visibly, rather
+      3. AUTO_APPROVE_SANDBOX_FALLBACK is applied HERE, visibly, rather
          than passed into the generic rule to be honoured out of sight.
          It is the user's own opt-in to an isolation level the harness
          has already told them is weak -- and it sits BELOW the
          protected-segment check, so one opt-in cannot cover the
          directory the ro-mount exists to keep commands out of.
-      5. Otherwise the capability rule decides.
+      4. Otherwise the capability rule decides.
 
     The return is `not auto_approved(...)` -- this function answers "must
     someone be asked", the rule answers "is this covered". Two names for
@@ -295,10 +293,6 @@ def _shell_approval_check(tool_name: str, params: dict) -> bool:
     is a silent auto-approve, so the negation stays on one line where it
     can be read.
     """
-    approvals = config.ToolApprovals()
-    if getattr(approvals, tool_name, False):
-        return True
-
     active = posture.current()
     mode = capability.validate_mode(active.shell_approval_mode,
                                     "config.SHELL_APPROVAL_MODE")
@@ -324,12 +318,12 @@ def _shell_approval_check(tool_name: str, params: dict) -> bool:
     if containment == UNAVAILABLE:
         return False
 
-    # Step 3: a protected segment always asks, whatever the sandbox says.
+    # Step 2: a protected segment always asks, whatever the sandbox says.
     segment = _command_touches_protected(command)
     if segment is not None:
         return True
 
-    # The pre-§28 steps 4 and 5, preserved exactly. For a non-inert tier,
+    # The pre-§28 fallback steps, preserved exactly. For a non-inert tier,
     # UNCONTAINED can only mean "Docker is down AND the insecure fallback
     # is enabled" -- that is what containment_for computed -- so this
     # reads the answer already in hand instead of re-deriving it from two
@@ -423,16 +417,13 @@ def run(params: dict) -> dict:
     # we'd use the fallback, check whether the fallback would have
     # required approval that was never given.
     if not docker_up and not _is_inert(parsed.command):
-        approvals = config.ToolApprovals()
-        base_needs_approval = getattr(approvals, "shell", False)
         # Read here rather than passed in from the approval check: §40
         # makes the two reads the SAME object for the life of the process,
         # so re-reading cannot reintroduce the TOCTOU gap this block
         # exists to close. Before §40 it could have.
         active = posture.current()
         if (
-            not base_needs_approval
-            and active.allow_insecure_fallback
+            active.allow_insecure_fallback
             and not active.auto_approve_fallback
         ):
             return {

@@ -13495,3 +13495,75 @@ what the command resolves stay one rule.
   `matching()`.
 - `tui/app.py` -- the modal's first character.
 - `tests/test_config_edit.py` -- six new.
+
+## `/config model_name` names the remembered pair beside the file value
+
+The panel row for `model_name` said `now <config.yaml>` while the session
+was running the remembered `/model` pair, and nothing in the row named the
+tier that wins short of a flag -- reported against a session on nex with
+the file still on claude-sonnet-5. `catalogue()` only ever knew the file
+(the tree) and the import (`config_schema.current()`), so a third tier was
+invisible by construction, and `explain()`'s "`$AGENT_MODEL` is set, so
+that is what this session is using" was wrong a second way whenever the
+memory was active, since the memory outranks the variable too.
+
+`KeyRow.remembered` carries the store's whole pair on the `model_name`
+row only, as a store fact rather than a session claim: the panel shows
+`remembered P | M` beside `now <file>`, and `explain()` -- which is told
+whether the pair is in force, whether flags pinned the launch, and what
+is actually running -- writes the authoritative sentence, including the
+dormant and flag-pinned shapes. The label choice is the load-bearing half:
+the panel has no app and cannot know the flags, so `running` there would
+be a claim it cannot defend, while `remembered` stays true however the
+session resolved. A `/config` write still targets the file, and the
+explain text says so where the memory wins -- unifying the stores (RM3's
+user-tier preference into the harness default) was considered and refused.
+
+### Files
+
+- `config_edit.py` -- `KeyRow.remembered`, the parameter on `catalogue()`,
+  `find()` and `matching()`, the `summary` part, the `explain()` branch
+  and the environment-claim correction.
+- `tui/app.py` -- `_remembered_for_panel()`, threaded through
+  `_config_rows` and `_cmd_config`.
+- `tests/test_config_edit.py` -- ten new; `tests/test_tui.py` -- three new.
+- `ARCHITECTURE.md` -- one sentence on the batch-85 paragraph.
+
+## `tool_approvals.shell` removed: the ratchet was the mode wearing another name
+
+A review round asked whether `tool_approvals.shell: false` and
+`shell_approval_mode: tiered` can conflict, and then whether anything else
+in `config.yaml` has the same shape. The composition is an OR -- the tool's
+own check against the mode, or the global flag -- so there is no
+contradiction to resolve, only redundancy: every outcome the flag's `True`
+produces is an outcome `mode: always` already names, in all six
+combinations. The sweep applied that subsumption test to every bool, mode
+and switch pair in the file (switch-plus-knobs, value-plus-vocabulary,
+specific-plus-default, tiered overrides, enable-plus-prompt, complementary
+axes); shell is the only full subsumption. `read`/`write`/`edit` keep
+their flags because those ARE the only always-route each has.
+
+The removal is a deletion, not a defaulting, and that distinction is the
+whole implementation: `_shell_approval_check` read the field through
+`getattr(..., False)` and `requires_approval` through `hasattr`, so leaving
+either read in place would let a stale stub -- or an old edited file no one
+deleted the key from -- keep working invisibly. Both reads are gone; an
+old key is refused at startup naming it, and the npm-update merge drops it
+as "not a setting in this version". D24 carries the one exemption with a
+test pinning it as the sole one, and the per-agent `approval_overrides`
+ratchet is untouched -- it was always dict-based and never needed the
+field.
+
+### Files
+
+- `config_schema.py` -- field deleted, exemption noted where D24 is argued.
+- `config.yaml` -- key deleted, both comments rewritten.
+- `tools/builtin/shell.py` -- ratchet step and TOCTOU re-read deleted.
+- `security/permissions.py` -- the D24 carve-out and message.
+- `tests/test_shell.py`, `test_grants.py`, `test_agents.py`,
+  `test_permission_context.py`, `test_config_edit.py`, `test_tui.py`,
+  `test_posture.py` -- ratchet tests rewritten to the mode, stale stubs
+  removed, sole-exemption pin added.
+- `README.md`, `CONFIG_ARCHITECTURE.md`, `AGENTS.md`, `ARCHITECTURE.md`,
+  `tests/BREAKING_CHANGES.md` -- present-tense prose; history rows left
+  as history.

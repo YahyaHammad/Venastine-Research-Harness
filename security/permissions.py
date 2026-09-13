@@ -158,8 +158,9 @@ def requires_approval(
 
 
 def assert_permissions_declared(tool_names: Iterable[str]) -> None:
-    """D24: every statically registered tool must have a field in BOTH
-    config dataclasses. Raises rather than warning, because the failure
+    """D24: every statically registered tool must have a declared permission
+    field, and -- with one deliberate exception -- a declared approval
+    field. Raises rather than warning, because the failure
     this guards against is invisible at runtime.
 
     The precedent is `fetch_url`: registered, documented as working, and
@@ -171,6 +172,11 @@ def assert_permissions_declared(tool_names: Iterable[str]) -> None:
     _default_for_unknown_tool) is exactly what makes it important that
     omission is never accidental for built-in ones.
 
+    The exception is `shell` in approvals: its approval is governed solely
+    by `shell_approval_mode`, and a second switch there could only force
+    `always` -- exactly what the mode already says. A test pins this as
+    the SOLE exemption, so a future omission cannot ride in on it.
+
     Dynamically-named `mcp__*` tools are exempt by design; they can never
     have a declared field. Call this after static registration only.
     """
@@ -180,15 +186,18 @@ def assert_permissions_declared(tool_names: Iterable[str]) -> None:
         name
         for name in tool_names
         if not name.startswith("mcp__")
-        and not (hasattr(permissions, name) and hasattr(approvals, name))
+        and not (hasattr(permissions, name)
+                 and (name == "shell" or hasattr(approvals, name)))
     ]
     if missing:
         raise RuntimeError(
             "Tools are registered with no declared permission/approval "
             f"field, so they would be silently denied forever: {sorted(missing)}. "
-            "Add a bool field for each to BOTH ToolPermissionsModel and "
-            "ToolApprovalsModel in config_schema.py, and a key for each to "
-            "BOTH tool_permissions and tool_approvals in config.yaml "
+            "Add a bool field for each to ToolPermissionsModel and -- "
+            "except `shell`, whose approval lives solely in "
+            "shell_approval_mode -- to ToolApprovalsModel in "
+            "config_schema.py, and a key for each to tool_permissions "
+            "(and, with the same exception, tool_approvals) in config.yaml "
             "(ROADMAP_v2 §15, D24). The field names live in Python so this "
             "check stays a build-time one; the values live in the YAML."
         )

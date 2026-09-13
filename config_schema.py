@@ -165,10 +165,16 @@ class _Model(BaseModel):
 #
 # The FIELD NAMES stay declared in Python while the booleans come from YAML,
 # and the split is deliberate. `tools/registry.py` checks at import that every
-# statically registered tool has a field in both tables (D24); with the names
+# statically registered tool has a field in `ToolPermissions` and -- with one
+# deliberate exception -- in `ToolApprovals` (D24); with the names
 # in YAML, omitting one would turn that build-time check into a runtime
 # surprise in a data file. With the names here and the fields required, a
 # `config.yaml` missing `shell` cannot start the harness at all.
+#
+# The exception is `shell` in approvals: its approval is governed solely by
+# `shell_approval_mode`, and a second switch there could only force `always`
+# -- exactly what the mode already says. A test pins this as the SOLE
+# exemption, so a future omission cannot ride in on its precedent.
 #
 # Field ORDER matters and follows `config.py`'s: `ToolPermissions` and
 # `ToolApprovals` are rebuilt as real dataclasses from these models, and
@@ -212,8 +218,11 @@ class ToolApprovalsModel(_Model):
     """Whether each tool needs a human yes before it runs.
 
     Approval ORs across every layer, so a `True` here is a one-way ratchet
-    that can only ever add prompts. `shell` is the case to read carefully: it
-    is the RATCHET and not the gate -- `shell_approval_mode` is the gate.
+    that can only ever add prompts. `shell` is deliberately absent: its
+    approval is governed solely by `shell_approval_mode` (always / tiered /
+    never), and a second switch here could only force `always` -- exactly
+    what the mode already says. An agent's `approval_overrides` keeps its
+    own one-way power over shell through the context layer.
     """
 
     web_search: StrictBool
@@ -229,7 +238,6 @@ class ToolApprovalsModel(_Model):
     read: StrictBool
     write: StrictBool
     edit: StrictBool
-    shell: StrictBool
     load_skill: StrictBool
     spawn_subagent: StrictBool
     pin: StrictBool

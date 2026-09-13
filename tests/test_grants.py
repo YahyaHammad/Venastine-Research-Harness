@@ -689,11 +689,17 @@ def _raise_policy(mocker, *tool_names):
     cases did. The configuration the claim is about is one where the tool IS
     callable and the gate is the only thing left standing.
 
-    ToolApprovals.shell is the RATCHET (see tools/builtin/shell.py): True
-    forces "always ask" whatever the posture says, so the case does not
+    ToolApprovals.shell used to be the RATCHET (see tools/builtin/shell.py):
+    True forced "always ask" whatever the posture said, so the case did not
     depend on which sandbox happens to be available on the machine running
-    the suite.
+    the suite. The field is gone -- shell approval lives solely in
+    shell_approval_mode -- so the posture is set to `always` instead, which
+    is the same always-ask by the only route that remains.
     """
+    import dataclasses
+
+    from security import posture
+
     real_perms, real_approvals = config.ToolPermissions, config.ToolApprovals
 
     def _perms():
@@ -703,10 +709,13 @@ def _raise_policy(mocker, *tool_names):
         return p
 
     def _approvals():
-        a = real_approvals()
-        if "shell" in tool_names:
-            a.shell = True
-        return a
+        return real_approvals()
+
+    if "shell" in tool_names:
+        mocker.patch.object(
+            posture, "_posture",
+            dataclasses.replace(posture.current(),
+                                shell_approval_mode="always"))
 
     mocker.patch("config.ToolPermissions", _perms)
     mocker.patch("config.ToolApprovals", _approvals)

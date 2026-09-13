@@ -50,9 +50,11 @@ class TestTheCatalogueCoversTheFile:
             "the catalogue and the schema disagree about the top-level keys")
 
     def test_the_two_tool_tables_are_expanded_AND_listed(self):
-        """The 23 tool names appear in BOTH tables, which is the whole
-        reason the rows are prefixed. `shell` alone would be ambiguous in a
-        way nothing downstream could resolve.
+        """The 23 tool names appear in `tool_permissions`; all but `shell`
+        appear in `tool_approvals`, which is the whole reason the rows are
+        prefixed. `shell` alone would be ambiguous in a way nothing
+        downstream could resolve -- and `shell`'s approval lives solely in
+        `shell_approval_mode`, so it has no approvals leaf at all.
 
         Batch 87 gave the tables a row of their own as well. Expanding them
         and emitting nothing for the table meant `/config tool_permissions`
@@ -70,7 +72,10 @@ class TestTheCatalogueCoversTheFile:
         assert len(tools) == 23
         for tool in tools:
             assert f"tool_permissions.{tool}" in names
-            assert f"tool_approvals.{tool}" in names
+            if tool == "shell":
+                assert f"tool_approvals.{tool}" not in names
+            else:
+                assert f"tool_approvals.{tool}" in names
 
     def test_the_order_is_the_files_order(self):
         """Not alphabetical. The schema declares fields in the order the
@@ -94,7 +99,10 @@ class TestTheCatalogueCoversTheFile:
         marked = {row.name for row in config_edit.catalogue() if row.authority}
         expected = set(config_schema.HARNESS_AUTHORITY_KEYS)
         leaves = {name for name in marked if "." in name}
-        assert len(leaves) == 46, "both tool tables must be gated whole"
+        assert len(leaves) == 45, (
+            "tool_permissions holds all 23 tools and tool_approvals holds "
+            "all but shell, whose approval lives solely in "
+            "shell_approval_mode")
         assert marked - leaves == expected
 
     def test_every_settings_override_names_something_real(self):
@@ -137,7 +145,7 @@ class TestTheCatalogueCoversTheFile:
 
 
 class TestTheDescriptionsComeFromTheSchema:
-    """Generated, not written down. 133 rows and one function, so a range
+    """Generated, not written down. 132 rows and one function, so a range
     that changes in `config_schema.py` changes what `/config` offers with
     no second copy to update."""
 
@@ -228,8 +236,9 @@ class TestTheRoundTripIsLossless:
     def test_setting_every_leaf_to_its_own_value_changes_nothing(self):
         """The path-resolution check, over the WHOLE catalogue rather than
         a sample. A leaf written to the wrong place shows up here as a
-        diff, including all 46 of the tool booleans whose names collide
-        across the two tables."""
+        diff, including all 45 of the tool booleans whose names collide
+        across the two tables (`tool_approvals` deliberately has no
+        `shell`)."""
         text, _ = config_edit.read_text()
         tree = config_edit.document()
         touched = 0
@@ -242,7 +251,7 @@ class TestTheRoundTripIsLossless:
             else:
                 tree[row.name] = tree[row.name]
             touched += 1
-        assert touched == 114, f"{touched} settable scalars, expected 114"
+        assert touched == 113, f"{touched} settable scalars, expected 113"
         assert config_edit._dump(tree) == text
 
     def test_a_one_value_change_is_a_one_line_diff(self, tmp_path,
@@ -824,6 +833,84 @@ class TestTheRelaunch:
             main.replace_process(["python", "main.py"])
         execv.assert_called_once_with("python", ["python", "main.py"])
         call.assert_not_called()
+
+
+class TestRememberedPairIsSurfaced:
+    """The `/model` memory and the `/config model_name` row are two tiers:
+    the remembered whole-pair from ui_preferences.json and the harness
+    default from config.yaml. The panel used to show only the file value
+    as `now`, so a session running a remembered model read as running the
+    file's -- while the remembered tier wins short of a --provider/--model
+    flag."""
+
+    pair = ("OPENROUTER", "nex-agi/nex-n2.5-pro:free")
+
+    def test_the_panel_names_the_remembered_pair(self):
+        row = config_edit.find("model_name", self.pair)
+        assert (f"remembered {self.pair[0]} | {self.pair[1]}"
+                in row.summary)
+        assert "now " in row.summary  # the file value stays first
+
+    def test_other_rows_carry_no_remembered_pair(self):
+        row = config_edit.find("max_tokens", self.pair)
+        assert row.remembered is None
+        assert "remembered" not in row.summary
+
+    def test_nothing_is_shown_when_nothing_is_remembered(self):
+        row = config_edit.find("model_name")
+        assert row.remembered is None
+        assert "remembered" not in row.summary
+
+    def test_explain_names_the_running_pair_when_it_is_in_force(self):
+        lines = " ".join(config_edit.explain(
+            "model_name", remembered=self.pair, session_pair=self.pair))
+        assert f"running {self.pair[0]} | {self.pair[1]}" in lines
+        assert "remembered with /model" in lines
+        assert "still wins at the next launch" in lines
+
+    def test_explain_says_when_a_remembered_pair_is_dormant(self):
+        lines = " ".join(config_edit.explain(
+            "model_name", remembered=self.pair,
+            session_pair=("ANTHROPIC", "claude-sonnet-5")))
+        assert "stored, but this session is not running it" in lines
+
+    def test_explain_says_flags_outrank_a_remembered_pair(self):
+        lines = " ".join(config_edit.explain(
+            "model_name", remembered=self.pair, cli_pinned=True,
+            session_pair=self.pair))
+        assert "stored, but this session is not running it" in lines
+
+    def test_explain_names_a_flag_pinned_session(self):
+        lines = " ".join(config_edit.explain(
+            "model_name", cli_pinned=True,
+            session_pair=("OPENAI", "gpt-5.1")))
+        assert "pinned with --provider/--model" in lines
+        assert "running OPENAI | gpt-5.1" in lines
+
+    def test_an_environment_claim_yields_to_an_active_remembered_pair(
+            self, monkeypatch):
+        monkeypatch.setenv("AGENT_MODEL", "from-the-variable")
+        lines = " ".join(config_edit.explain(
+            "model_name", remembered=self.pair, session_pair=self.pair))
+        assert "outranks it this session" in lines
+        assert "what this session is using" not in lines
+
+    def test_an_environment_claim_stands_without_one(self, monkeypatch):
+        monkeypatch.setenv("AGENT_MODEL", "from-the-variable")
+        lines = " ".join(config_edit.explain("model_name"))
+        assert "what this session is using" in lines
+
+    def test_a_pending_write_names_the_running_pair(
+            self, tmp_path, monkeypatch):
+        monkeypatch.delenv("AGENT_MODEL", raising=False)
+        _copy_config(tmp_path, monkeypatch)
+        config_edit.forget_document()
+        proposal = config_edit.propose("model_name", "other-model")
+        config_edit.write(proposal.text, proposal.newline)
+        lines = " ".join(config_edit.explain(
+            "model_name", session_pair=self.pair))
+        assert ("still running OPENROUTER | "
+                "nex-agi/nex-n2.5-pro:free" in lines)
 
 
 def test_the_shipped_file_is_untouched():

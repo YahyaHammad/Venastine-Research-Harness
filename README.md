@@ -353,7 +353,7 @@ Every registered tool appears in that table, and a test asserts it (audit #125):
 | `tiered` | **shipped.** The classifier decides — see below |
 | `never` | nothing is ever asked about |
 
-`tool_approvals.shell` is **not** the gate; it is the ratchet. It ships `false`, and setting it `true` forces `always` regardless of the mode. An agent's `approval_overrides` reaches the same place with the same one-way power: these can tighten and never loosen. An unknown mode string raises at startup rather than falling back to a default — one direction of that default asks about everything and the other about nothing, and a typo cannot pick.
+There is deliberately no second switch: `tool_approvals` has no `shell` key, so nothing here can disagree with the mode. An agent's `approval_overrides` still reaches shell with the same one-way power -- an agent can demand approval for a command the mode would auto-approve, and can never wave one past a gate the mode set. An unknown mode string raises at startup rather than falling back to a default — one direction of that default asks about everything and the other about nothing, and a typo cannot pick.
 
 Under `tiered`, each command is classified **once** into what it can do, and the same answer is read by the approval check and by the sandbox that runs it:
 
@@ -881,10 +881,11 @@ worked in numbered fix batches — 32 so far, each recorded in `DEVLOG.md` and
 
 **#157 — `shell`'s unbounded auto-approval — is closed** by batch 8 and ROADMAP_v2 §28; the
 classifier is described under *Security model* above. If you have a fork or a local config,
-note that `tool_approvals.shell` now ships `false` and `shell_approval_mode` is the gate — see
-`tests/BREAKING_CHANGES.md` §24.
+note that shell approval is governed solely by `shell_approval_mode` -- `tool_approvals`
+deliberately has no `shell` key, so an old file carrying one is refused at startup
+naming the key — see `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 4504 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+Run the test suite with `pytest` — 4518 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
 ## Documentation
 
