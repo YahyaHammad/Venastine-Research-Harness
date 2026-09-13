@@ -635,3 +635,48 @@ class TestTheConsumersRead:
                                         redact_off_env=False):
             from safety.policy_enforcement import redaction_enabled
             assert redaction_enabled() is False
+
+
+class TestWhatKeepsAToolCallOutOfConfigYaml:
+    """Batch 87. `config_edit.py` and CONFIG_ARCHITECTURE.md both claimed
+    "the file tools refuse the harness install tree" as half the argument
+    for letting `/config` write the nine AUTHORITY keys. They do not, and
+    the claim stood for three batches.
+
+    These pin what actually holds, so the corrected wording cannot rot the
+    next time the path rules move.
+    """
+
+    def test_the_file_tools_deny_only_the_venastine_segment(self):
+        """The measurement that found it. Both directions, because the
+        useful fact is the BOUNDARY, not that something is denied."""
+        import config_schema
+        from tools.builtin.file_ops import _protected_path_error
+
+        assert _protected_path_error(config_schema.CONFIG_PATH) is None
+        assert _protected_path_error(
+            os.path.join(config_schema.HARNESS_ROOT, "config.py")) is None
+        assert _protected_path_error(
+            os.path.join(os.getcwd(), ".venastine", "settings.json"))
+
+    def test_the_write_tools_ship_denied_and_cannot_be_widened(self):
+        """The first control that does hold. D14: `tool_permissions` is the
+        global floor, so nothing at runtime can turn these on."""
+        import config_schema
+
+        permissions = config_schema.current().tool_permissions
+        for tool in ("write", "edit"):
+            assert getattr(permissions, tool) is False, (
+                f"{tool} ships enabled -- the argument for /config writing "
+                f"an AUTHORITY key rests on it not being reachable "
+                f"unattended")
+
+    def test_a_workspace_overlapping_the_harness_is_refused(self):
+        """The second. It is what makes the install tree always OUTSIDE the
+        workspace, so a write there is approval-gated rather than
+        auto-approved by workspace membership."""
+        from security.protected_paths import check_workspace, harness_root
+
+        assert check_workspace(harness_root()) is not None
+        assert check_workspace(
+            os.path.join(harness_root(), "tools")) is not None

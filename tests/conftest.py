@@ -451,6 +451,33 @@ def clear_client_cache():
 
 
 @pytest.fixture(autouse=True)
+def restore_config_schema_cache():
+    """`config_schema._cached` is the document this process is running on,
+    and a test that calls `load(force=True)` under a patched environment
+    leaves the override in it after monkeypatch has torn the variable down.
+
+    MEASURED, not hypothetical: `pytest tests/test_config_loader.py
+    tests/test_config_edit.py` failed two of batch 85's tests, because
+    `test_a_candidate_file_is_judged_without_the_environment` re-read the
+    live document with `APP_DB_PATH` set and the cache then disagreed with
+    both the file and the environment -- so `db_path` read as a change
+    somebody had made and was waiting to restart for. The full suite passed
+    only because collection is alphabetical and `test_config_edit` runs
+    first, which is the worst way for an ordering bug to hide.
+
+    Restoring the OBJECT, and only between tests: `load()`'s own docstring
+    notes that a cache outliving a re-import of `config` is a technique the
+    suite uses WITHIN a test, and that still works.
+    `TestTheLoaderCacheDoesNotLeakBetweenTests` is the pair of tests that
+    fails if this fixture is removed.
+    """
+    import config_schema
+    cached = config_schema._cached
+    yield
+    config_schema._cached = cached
+
+
+@pytest.fixture(autouse=True)
 def clear_config_loader_state():
     """core.config_loader caches the startup discovery (agents, skills,
     settings, trust state). Reset between tests so one test's

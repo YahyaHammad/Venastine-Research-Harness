@@ -1338,15 +1338,16 @@ def test_the_launcher_never_sets_the_two_variables_that_would_break_it():
 
 
 def test_the_launcher_and_python_agree_about_the_config_state():
-    """Batch 86. Four names are spelled in two languages, and a drift in any
-    of them is silent in the worst way: the launcher would copy the user's
-    `config.yaml` to a path the merge never reads, so `npm update` would go
-    back to discarding every setting with nothing failing anywhere.
+    """Batch 86, narrowed in batch 87. Every name spelled in two languages is
+    a drift that fails silently in the worst way -- the launcher writing to a
+    path the merge never reads means `npm update` goes back to discarding
+    every setting with nothing failing anywhere.
 
-    Node owns only the cheap halves -- the post-session copy and the doctor
-    line -- because this file has ZERO npm dependencies by design and the
-    merge needs a YAML parser. That split is what puts the same four strings
-    in both files.
+    So batch 87 removed the duplication that mattered. The launcher no longer
+    writes the mirror (it spawns `--mirror` and Python decides), and it no
+    longer computes a state path (it READS `installs.json`, which Python
+    writes). What is left is a read-only doctor line, and these are the only
+    strings it still has to know.
     """
     import config_update
 
@@ -1354,16 +1355,20 @@ def test_the_launcher_and_python_agree_about_the_config_state():
         source = f.read()
 
     for spelling in (config_update.STATE_DIRNAME, config_update.VERSION_FILE,
-                     config_update.YOURS_FILE, config_update.REPORT_FILE):
+                     config_update.REPORT_FILE, config_update.INSTALLS_FILE):
         assert f"'{spelling}'" in source, (
             f"bin/venastine.mjs no longer spells {spelling!r}, which "
-            f"config_update.py still expects. The launcher writes the mirror "
-            f"this module reads; a path that only one of them believes in "
-            f"fails nothing and loses the user's settings at the next update.")
+            f"config_update.py still writes. The doctor line reads these; a "
+            f"name only one side believes in reports the wrong directory.")
 
-    assert os.path.basename(config_update.LIVE) in source, (
-        "the launcher no longer names config.yaml, so mirrorConfig() cannot "
-        "be copying the file the merge is about.")
+    assert "'--mirror'" in source, (
+        "the launcher no longer spawns the post-session mirror. Without it a "
+        "/config write made in a session is lost by an `npm update` that "
+        "happens before the next launch -- the common upgrade order.")
+    assert config_update.YOURS_FILE not in source, (
+        "bin/venastine.mjs names yours.yaml again. Writing the mirror from "
+        "Node is what batch 87 removed: it was the one writer not subject to "
+        "rule 1, and it destroyed the user's settings after a failed merge.")
 
 
 # ---------------------------------------------------------------------------

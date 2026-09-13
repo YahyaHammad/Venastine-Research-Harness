@@ -27,9 +27,12 @@ pyyaml==6.0.3
 # DELIBERATE -- do not "unify" them. pyyaml above parses agent/skill
 # frontmatter, where nothing is ever written back and ~70 tests pin the
 # behaviour; ruamel is here for the half pyyaml cannot do, which is
-# preserving a hand-authored file's comments across a WRITE. Nothing writes
-# config.yaml yet (the import path uses typ="safe"), so this pin is bought
-# for the config editor that will.
+# preserving a hand-authored file's comments across a WRITE. Since batch 84
+# two modules do exactly that -- config_edit.py behind /config, and
+# config_update.py putting a user's values back after an npm update replaces
+# the file -- while the IMPORT path still uses typ="safe". (This said
+# "nothing writes config.yaml yet ... this pin is bought for the config
+# editor that will", which those batches made false.)
 #
 # EXACT, for the reason `mcp` and `textual` are exact: an upper bound lets a
 # MINOR change behaviour underneath CI and makes CI's result depend on when

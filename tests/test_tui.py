@@ -7867,7 +7867,52 @@ class TestWritingThroughTheCommand:
         app.push_screen.assert_not_called()
 
 
+class TestTheConfigSurfaceContainsItsFailures:
+    """Batch 87. Two paths into `config_edit` run where an exception is not
+    an error message but a dead app."""
+
+    def test_an_unwritable_install_is_reported_not_raised(self, mocker):
+        """A global npm prefix owned by root: validating writes a candidate
+        beside config.yaml and cannot. This used to escape into Textual's
+        message handler on the first /config write of the session."""
+        mocker.patch("config_edit.propose",
+                     side_effect=OSError(13, "Permission denied"))
+        app = _bare_app()
+        _cmd_config(app, "max_tokens 18000")
+        assert any("could not be validated" in line
+                   for line in app._transcript.errors)
+
+    def test_the_panel_offers_nothing_rather_than_crashing(self, mocker):
+        """`_config_rows` runs on every keystroke, and the catalogue parses
+        config.yaml -- which raises if the file is deleted, locked by an
+        editor or saved as UTF-16 mid-session."""
+        mocker.patch("config_edit.matching",
+                     side_effect=ValueError("config.yaml is not valid UTF-8"))
+        assert _config_rows("max") == []
+
+
 class TestTheRestartWaitsForTheRightThings:
+    def test_a_research_run_started_while_the_modal_was_open_is_refused(
+            self, mocker):
+        """The check ran once, BEFORE push_screen; the callback then only
+        read `_busy`, which covers a research run too -- so a pipeline
+        started while the modal was open got waited on, which is exactly
+        what this refuses to do."""
+        mocker.patch("config_edit.write")
+        app = _bare_app()
+        _cmd_config(app, "max_tokens 18000")
+        # The run starts while the modal is open -- `_bare_app` hands out a
+        # plain lambda, so this replaces it rather than setting return_value.
+        app._research_is_running = lambda: True
+        app._busy_state = True
+        app.push_screen.call_args[0][1](True)
+        app.restart_for_config.assert_not_called()
+        assert app._pending_restart is None, (
+            "a restart queued behind a research run arrives long after the "
+            "question has scrolled away")
+        assert any("research run is in flight" in line
+                   for line in app._transcript.systems)
+
     def test_an_idle_shell_restarts_straight_away(self, mocker):
         mocker.patch("config_edit.write")
         app = _bare_app()

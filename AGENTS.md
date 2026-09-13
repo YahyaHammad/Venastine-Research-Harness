@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 4470 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 4498 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -72,7 +72,7 @@ cwd and stdio. The harness itself did not have to change to support this, becaus
 asset already resolves from `__file__` (`HARNESS_ROOT`, `_package_root()`, `prompts/system_prompts.py`)
 and every piece of state from cwd with an env override.
 
-**`npm update` replaces the package directory wholesale, `config.yaml` included** (batch 86, measured with `npm pack` and two installs into a scratch prefix). `config_update.py` is what makes that survivable: the launcher runs it before `main.py`, and it re-applies the user's own values onto the freshly shipped file from a pristine copy and a mirror kept in `~/.config/venastine/config-state/`. Two rules there are load-bearing rather than tidy. **The mirror is refreshed only after the version check** -- copying `config.yaml` over it first overwrites it with the file npm just replaced, and every other test still passes. **Nothing in that path may fail a launch**: the module always exits 0 and the launcher does not check its status, which is why the cheap path imports no first-party code at all (`import config_schema` alone costs 294ms of pydantic and ruamel, on a path that runs at every launch and does nothing on almost all of them).
+**`npm update` replaces the package directory wholesale, `config.yaml` included** (batch 86, measured with `npm pack` and two installs into a scratch prefix). `config_update.py` is what makes that survivable: the launcher runs it before `main.py`, and it re-applies the user's own values onto the freshly shipped file from a pristine copy and a mirror kept in `~/.config/venastine/config-state/`. Two rules there are load-bearing rather than tidy. **The mirror is refreshed only after the version check** -- copying `config.yaml` over it first overwrites it with the file npm just replaced, and every other test still passes. Batch 87 moved the post-session copy out of this file for that reason: it was four lines of `fs.copyFileSync` guarded only by a version file EXISTING, so a merge that failed was followed at session end by the newly shipped file being copied over the mirror, and the user's settings were gone from every copy. The launcher now spawns `config_update.py --mirror` and owns no decision at all; the state is keyed per install, and the launcher READS `installs.json` rather than recomputing a path. **Nothing in that path may fail a launch**: the module always exits 0 and the launcher does not check its status, which is why the cheap path imports no first-party code at all (`import config_schema` alone costs 294ms of pydantic and ruamel, on a path that runs at every launch and does nothing on almost all of them).
 
 **The launcher must never set `PYTHONPATH` or `AGENT_WORKSPACE`** (test-pinned,
 `test_the_launcher_never_sets_the_two_variables_that_would_break_it`). `tools/isolation.py` builds

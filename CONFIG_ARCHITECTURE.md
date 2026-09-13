@@ -104,7 +104,20 @@ the environment argument from a variable a subprocess can set; neither
 describes a person typing at the prompt, who is the harness operator and is
 the one `config.yaml` has always been edited by. The model cannot reach the
 route -- `tui/commands.dispatch` is called from the prompt's submit handler
-and nowhere else, and the file tools refuse the harness install tree.
+and nowhere else.
+
+**What the file tools do here, stated accurately** (corrected in batch 87).
+This said "the file tools refuse the harness install tree", and they do not:
+`security/protected_paths.PROTECTED_SEGMENTS` is `{".venastine"}`, so
+`file_ops._protected_path_error` denies a path carrying that segment and
+returns None for `<install>/config.yaml`. The control that actually holds is
+weaker and still real — `write` and `edit` ship **denied** in
+`tool_permissions` and cannot be enabled at runtime, and `protected_paths`
+makes a workspace that overlaps the harness tree a *startup error*, so the
+install tree is never inside the workspace and a write there is
+approval-gated rather than auto-approved. `protected_paths.py` says why the
+difference is worth a paragraph: a half-understood control is worse than
+none.
 
 The compensating control is that the confirmation says what the key
 PERMITS, not "are you sure": `config_edit.AUTHORITY_EFFECT` carries one

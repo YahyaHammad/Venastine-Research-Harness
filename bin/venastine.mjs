@@ -312,17 +312,29 @@ function syncConfig(rt, firstRun) {
  * then npm has replaced the file, so the only copy of that change is the one
  * taken here. The next launch's mirror is too late.
  *
- * Safe to run unconditionally: config_update.py has already re-recorded the
- * version by this point, so this can never be the copy that overwrites the
- * mirror with a file npm just replaced.
+ * THIS USED TO BE FOUR LINES OF fs.copyFileSync HERE, and they were the one
+ * writer not subject to the module's rule 1 ("the mirror is refreshed only
+ * when the version still matches"). They copied whenever a `version` file
+ * existed -- so a merge that FAILED, which deliberately leaves the version
+ * and the mirror untouched so the next launch can retry, was followed at
+ * session end by the newly shipped config.yaml being copied over the mirror.
+ * The user's settings were then gone from every copy, permanently, and the
+ * retry found nothing to restore. The state directory is also global while
+ * this file's ROOT is not, so a checkout run overwrote an npm install's
+ * mirror with the checkout's own config.yaml.
+ *
+ * So the decision lives in Python, where it is tested, and this spawns it.
+ * An interpreter start at session EXIT costs nothing anybody is waiting for.
  */
-function mirrorConfig() {
+function mirrorConfig(rt) {
   try {
-    if (fs.existsSync(path.join(CONFIG_STATE, 'version'))) {
-      fs.copyFileSync(CONFIG_FILE, path.join(CONFIG_STATE, 'yours.yaml'));
-    }
+    spawnSync(rt.python, [CONFIG_UPDATE, '--mirror'], {
+      stdio: 'inherit',
+      cwd: ROOT,
+      windowsHide: true,
+    });
   } catch {
-    // A read-only install, a removed state directory. Not worth a word.
+    // Never fatal, for syncConfig's reason.
   }
 }
 
@@ -385,12 +397,19 @@ function childEnv() {
  */
 function configStateSummary() {
   try {
-    const version = fs.readFileSync(path.join(CONFIG_STATE, 'version'), 'utf8').trim();
-    const record = path.join(CONFIG_STATE, 'last-update.txt');
+    // installs.json maps an install directory to its state subdirectory.
+    // READ, never recomputed: config_update.py owns that naming, and two
+    // languages agreeing about a hash by inspection would fail silently --
+    // the mirror would be written where the merge does not look.
+    const installs = JSON.parse(
+      fs.readFileSync(path.join(CONFIG_STATE, 'installs.json'), 'utf8'));
+    const dir = path.join(CONFIG_STATE, installs[fs.realpathSync(ROOT)]);
+    const version = fs.readFileSync(path.join(dir, 'version'), 'utf8').trim();
+    const record = path.join(dir, 'last-update.txt');
     const last = fs.existsSync(record)
-      ? `, last merged at ${fs.statSync(record).mtime.toISOString().slice(0, 10)}`
+      ? `, last merged ${fs.statSync(record).mtime.toISOString().slice(0, 10)}`
       : '';
-    return `${CONFIG_STATE} (tracking ${version}${last})`;
+    return `${dir} (tracking ${version}${last})`;
   } catch {
     return `${CONFIG_STATE} (not tracked yet; the next launch starts it)`;
   }
@@ -475,7 +494,7 @@ async function main() {
     windowsHide: false,
   });
 
-  mirrorConfig();
+  mirrorConfig(rt);
 
   if (child.error) fail(`Could not start the harness: ${child.error.message}`);
   if (child.signal) process.exit(128 + (os.constants.signals[child.signal] || 0));

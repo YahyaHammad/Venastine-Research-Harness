@@ -65,6 +65,7 @@ FOUR RULES, all of them load-bearing.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import os
 import shutil
@@ -86,19 +87,67 @@ LIVE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.yaml")
 #: that convention exists to avoid.
 CONFIG_HOME = os.path.join(os.path.expanduser("~"), ".config", "venastine")
 
-#: Shared with `bin/venastine.mjs`, which copies the mirror after a session.
-#: A docs-consistency test holds the two spellings together.
+#: The base under `CONFIG_HOME`. Every install gets a SUBDIRECTORY of it.
 STATE_DIRNAME = "config-state"
 
 VERSION_FILE = "version"
 SHIPPED_FILE = "shipped.yaml"
 YOURS_FILE = "yours.yaml"
 REPORT_FILE = "last-update.txt"
+SEEN_FILE = "last-update.seen"
+INSTALLS_FILE = "installs.json"
 
 
-def state_dir() -> str:
+def state_base() -> str:
     """`~/.config/venastine/config-state`, beside `runtime/` and `app.db`."""
     return os.path.join(CONFIG_HOME, STATE_DIRNAME)
+
+
+def install_slug(live: Optional[str] = None) -> str:
+    """A short, stable name for the install the live document belongs to.
+
+    KEYED BY THE INSTALL, the way `runtimePaths()` in the launcher is already
+    keyed by version and requirements hash. The state directory is global
+    while `config.yaml` is not, so one flat directory made a global npm
+    install, a local one and a checkout share a single mirror -- and
+    whichever ran last overwrote the others' saved settings with its own
+    file.
+
+    Computed HERE AND NOWHERE ELSE. The launcher used to spell these paths
+    itself, and two languages agreeing about a hash by inspection is a bug
+    waiting for a path separator to change: a mismatch would not raise, it
+    would silently write the mirror somewhere the merge never reads.
+    `installs.json` is how the launcher finds this without recomputing it.
+    """
+    root = os.path.realpath(os.path.dirname(live or LIVE))
+    return hashlib.sha256(root.encode("utf-8")).hexdigest()[:12]
+
+
+def state_dir(live: Optional[str] = None) -> str:
+    """This install's own state directory."""
+    return os.path.join(state_base(), install_slug(live))
+
+
+def _record_install(live: str) -> None:
+    """Note which install a slug belongs to, for the launcher and for humans.
+
+    `--venastine-doctor` returns before `ensureRuntime()`, so there may be no
+    interpreter to ask which directory is in force; and a directory of hashes
+    is unreadable to whoever opens it wondering what is stored about them.
+    """
+    base = state_base()
+    path = os.path.join(base, INSTALLS_FILE)
+    try:
+        with open(path, encoding="utf-8") as handle:
+            known = json.load(handle)
+        if not isinstance(known, dict):
+            known = {}
+    except (OSError, ValueError):
+        known = {}
+    known[os.path.realpath(os.path.dirname(live))] = install_slug(live)
+    os.makedirs(base, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(known, handle, indent=2, sort_keys=True)
 
 
 def package_version(live: Optional[str] = None) -> str:
@@ -175,8 +224,8 @@ class Report:
         head = ("venastine: this update replaced config.yaml; your settings "
                 "were merged back in.")
         if self.action == "reinstalled":
-            head = ("venastine: config.yaml was reset by a reinstall; your "
-                    "settings were merged back in.")
+            head = ("venastine: config.yaml was back at its shipped defaults; "
+                    "your settings were put back.")
         out = [head, f"  version : {self.detail}"]
         authority = [name for name, _, marked in self.restored if marked]
         out.append(f"  kept    : {len(self.restored)} of your settings"
@@ -194,6 +243,14 @@ class Report:
         if self.added:
             out.append(f"  new     : {len(self.added)} setting(s) this "
                        f"version adds, at their shipped defaults")
+        if self.action == "reinstalled":
+            # A re-extracted package and a deliberate revert to the defaults
+            # look identical from here -- both leave config.yaml matching the
+            # recorded pristine while the mirror still holds the edits. The
+            # ambiguity cannot be resolved, so it is named instead of hidden.
+            out.append("  If you reset config.yaml on purpose, set the values "
+                       "again with /config, or delete the yours.yaml named "
+                       "by --venastine-doctor.")
         return out
 
 
@@ -252,10 +309,16 @@ def deviations(yours: dict, shipped: Optional[dict],
     rather than a missing answer. An install that was already running before
     this module existed has no pristine copy on record, so nothing can say
     which of its values were chosen and which were shipped. Returning the
-    whole file means the next update keeps every one of them -- one update
-    where a changed default does not reach that user, against losing a
-    setting they had deliberately made. It self-heals: the merge records a
-    real `shipped.yaml` on its way out.
+    whole file keeps every one of them, which is the right trade against
+    losing a setting somebody deliberately made.
+
+    STATE THE COST PROPERLY, because "one update where a changed default
+    does not reach you" understates it. Every default that changed during
+    that one update is captured here as a deviation, so it is re-applied by
+    EVERY later merge too -- the user is pinned to their pre-adoption
+    defaults for those keys until they set them again. What self-heals is
+    the baseline, not the values: the merge records a real `shipped.yaml` on
+    its way out, so no FURTHER keys are captured this way.
     """
     mine = leaves(yours, tables)
     if shipped is None:
@@ -279,38 +342,15 @@ def _set(tree, name: str, value: Any) -> None:
 
 
 def _place(tree, name: str, value: Any) -> None:
-    """Set a value, carrying the comment that FOLLOWS a container block.
+    """`config_edit.place`, which is where this logic now lives.
 
-    MEASURED, and it cost six comment lines before it was found. ruamel
-    anchors the text after a block sequence to that sequence's LAST INDEX --
-    `node.ca.items[5]` on a six-entry list -- rather than to the key in the
-    parent mapping. So restoring a user's `models_rejecting_sampling_params`
-    dropped the `# Critic and embedder routing` banner AND the AUTHORITY note
-    under it from the file, silently, while every scalar restored cleanly
-    (a scalar's following comment lives on the parent, which is untouched).
-
-    The trailer is read from the NEW pristine document and re-anchored to the
-    new last entry, so what survives is THIS version's documentation around
-    the user's own values -- not the wording their old copy happened to have.
-
-    Mutating the node in place instead does not help; that was measured too.
+    It started here, for the container half; then `propose()` turned out to
+    need the same thing for the shape half, and two writers with one rule
+    between them is how a rule drifts. `config_edit` owns the round trip, so
+    it owns this.
     """
-    from ruamel.yaml.comments import CommentedMap, CommentedSeq
-
-    if not isinstance(value, (list, dict)):
-        _set(tree, name, value)
-        return
-
-    old = _get(tree, name)
-    new = CommentedMap(value) if isinstance(value, dict) else CommentedSeq(value)
-    anchors = getattr(getattr(old, "ca", None), "items", None)
-    if anchors and len(new):
-        was = list(old.keys()) if isinstance(old, dict) else range(len(old))
-        now = list(new.keys()) if isinstance(new, dict) else range(len(new))
-        last = list(was)[-1] if len(was) else None
-        if last is not None and last in anchors:
-            new.ca.items[list(now)[-1]] = anchors[last]
-    _set(tree, name, new)
+    import config_edit
+    config_edit.place(tree, name, value)
 
 
 def _get(tree, name: str):
@@ -462,16 +502,61 @@ def _same_bytes(one: str, two: str) -> bool:
 def reconcile(state: Optional[str] = None, first_run: bool = False,
               live: Optional[str] = None) -> Report:
     """Decide what the launch needs and do it. Never raises -- see rule 2."""
-    state = state or state_dir()
     live = live or LIVE
+    state = state or state_dir(live)
     try:
         return _reconcile(state, first_run, live)
     except Exception as exc:                       # noqa: BLE001 -- rule 2
         return Report(action="failed", note=f"{type(exc).__name__}: {exc}")
 
 
+def _is_checkout(live: str) -> bool:
+    """True when git is already managing the live document.
+
+    `exists`, NOT `isdir`. A linked worktree (`git worktree add`) and a
+    submodule both carry a `.git` FILE holding `gitdir: ...`, so the
+    directory test read False in exactly the setup a contributor uses to
+    test the launcher -- and rule 4 then did not fire, leaving the
+    reconciler free to rewrite a tracked file from a mirror.
+    """
+    return os.path.exists(os.path.join(os.path.dirname(live), ".git"))
+
+
+def mirror(state: Optional[str] = None,
+           live: Optional[str] = None) -> Report:
+    """Copy the live document into the mirror. The POST-SESSION half.
+
+    `bin/venastine.mjs` used to do this itself, in four lines that looked
+    too small to be wrong, and it was the one writer not subject to rule 1:
+    it copied whenever a `version` file existed. So a merge that FAILED --
+    which correctly leaves the version and the mirror untouched so the next
+    launch can retry -- was followed at session end by the new pristine file
+    being copied over the mirror. The user's settings were then gone from
+    every copy, and the retry found nothing to restore.
+
+    Here instead, behind the same guards as the launch path, in the language
+    that has tests. It costs an interpreter start at session EXIT, where
+    nothing is waiting on it.
+    """
+    live = live or LIVE
+    state = state or state_dir(live)
+    try:
+        if _is_checkout(live) or not os.path.exists(live):
+            return Report(action="skipped", note="nothing to mirror")
+        recorded = _read(os.path.join(state, VERSION_FILE))
+        if recorded is None or recorded != package_version(live):
+            # RULE 1. An unrecorded or stale version means the file in front
+            # of us may be one npm has just written, and mirroring it would
+            # destroy the very edits the mirror exists to carry.
+            return Report(action="skipped", note="version is not current")
+        shutil.copyfile(live, os.path.join(state, YOURS_FILE))
+        return Report(action="mirrored", detail=recorded)
+    except Exception as exc:                       # noqa: BLE001 -- rule 2
+        return Report(action="failed", note=f"{type(exc).__name__}: {exc}")
+
+
 def _reconcile(state: str, first_run: bool, live: str) -> Report:
-    if os.path.isdir(os.path.join(os.path.dirname(live), ".git")):
+    if _is_checkout(live):
         return Report(action="skipped", note="a checkout manages its own file")
     if not os.path.exists(live):
         return Report(action="skipped", note="no config.yaml to track")
@@ -493,6 +578,7 @@ def _reconcile(state: str, first_run: bool, live: str) -> Report:
         elif os.path.exists(shipped):
             os.unlink(shipped)
         _write(os.path.join(state, VERSION_FILE), version)
+        _record_install(live)
         return Report(action="adopted", detail=version,
                       note="" if first_run else
                            "existing settings will be kept whole at the next "
@@ -539,22 +625,92 @@ def _merge_into(state: str, live: str, was: str, now: str,
                     else now, restored=kept, dropped=dropped,
                     overridden=overridden, added=added)
 
-    # THE PRISTINE COPY GOES DOWN FIRST. It is what the next update will diff
-    # against, and the live file stops being pristine the moment we write it.
-    shutil.copyfile(live, shipped_path)
+    # THE PRISTINE BYTES ARE HELD, NOT COMMITTED YET. They are what the next
+    # update diffs against, and the live file stops being pristine the moment
+    # the write lands -- but committing them BEFORE the write meant a write
+    # that raised left the baseline advanced while `version` still named the
+    # old release. The retry then diffed `yours` against the NEW pristine,
+    # read every default that changed between the two as a user edit, and
+    # pinned them forever on top of the original failure. Nothing is recorded
+    # until the write it describes has actually happened.
+    with open(live, "rb") as handle:
+        pristine = handle.read()
+
     if kept:
         import config_edit
         config_edit.write(text, newline)
+
+    with open(shipped_path, "wb") as handle:
+        handle.write(pristine)
     shutil.copyfile(live, yours_path)
     _write(os.path.join(state, VERSION_FILE), now)
-    _write(os.path.join(state, REPORT_FILE),
-           "\n".join(report.lines()) + "\n")
+    if not report.quiet:
+        # A quiet report used to leave a file holding one newline, which the
+        # launcher's doctor line then read as "last merged at <date>".
+        _write(os.path.join(state, REPORT_FILE),
+               "\n".join(report.lines()) + "\n")
+        _forget(os.path.join(state, SEEN_FILE))
+    _record_install(live)
     return report
+
+
+def _forget(path: str) -> None:
+    """Drop a marker file. Missing is the state it is being put into."""
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------------------
 # ---- What the launcher runs -----------------------------------------------
 # ---------------------------------------------------------------------------
+
+def unseen_report(live: Optional[str] = None,
+                  state: Optional[str] = None) -> list:
+    """The last merge report, if nothing has shown it to a person yet.
+
+    THE LAUNCHER'S PRINT DOES NOT REACH A TUI USER. `syncConfig` writes to
+    stdout immediately before `main.py` is spawned, and main.py's own #138
+    note states the rule it falls foul of: anything on stdout before Textual
+    takes the screen vanishes the moment it renders. The lines that vanish
+    are the ones that matter most -- a setting the user chose was dropped
+    because this version no longer accepts it.
+
+    So the report is also a file, and the session shows it where the user is
+    actually looking. `_merge_into` clears the seen marker when it writes a
+    new one; nothing else creates it, so "unseen" is simply its absence.
+    """
+    live = live or LIVE
+    state = state or state_dir(live)
+    try:
+        # Rule 4 again, and here it also keeps the SUITE out of the user's
+        # real state directory: `on_mount` calls this in every TUI test, and
+        # a checkout has no merge reports because the reconciler never ran
+        # for it.
+        if _is_checkout(live):
+            return []
+        if os.path.exists(os.path.join(state, SEEN_FILE)):
+            return []
+        text = _read(os.path.join(state, REPORT_FILE))
+        return text.rstrip("\n").split("\n") if text and text.strip() else []
+    except OSError:
+        return []
+
+
+def mark_report_seen(live: Optional[str] = None,
+                     state: Optional[str] = None) -> None:
+    """Record that a person has been shown the last merge report."""
+    live = live or LIVE
+    state = state or state_dir(live)
+    try:
+        if not _is_checkout(live) and os.path.isdir(state):
+            _write(os.path.join(state, SEEN_FILE), "")
+    except OSError:
+        # Nothing here may fail a launch -- rule 2. The cost of losing this
+        # is one report shown twice.
+        pass
+
 
 def _say(line: str) -> None:
     """Print a report line on a console that may not be UTF-8.
@@ -571,9 +727,19 @@ def _say(line: str) -> None:
 
 
 def main(argv: Optional[list] = None) -> int:
-    """Always 0. The launcher ignores the status; this says why it may."""
+    """Always 0. The launcher ignores the status; this says why it may.
+
+    Two modes, both spawned by `bin/venastine.mjs`: the default runs before
+    the harness and merges, `--mirror` runs after the session and records
+    what it left behind. The launcher owns neither decision -- it used to
+    own the second one in four lines of its own, which is how the mirror
+    came to be written without the version check rule 1 requires.
+    """
     argv = sys.argv[1:] if argv is None else argv
-    report = reconcile(first_run="--first-run" in argv)
+    if "--mirror" in argv:
+        report = mirror()
+    else:
+        report = reconcile(first_run="--first-run" in argv)
     for line in report.lines():
         _say(line)
     return 0

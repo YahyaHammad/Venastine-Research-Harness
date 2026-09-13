@@ -49,6 +49,7 @@ from textual.worker import Worker, WorkerState
 import config
 import config_edit
 import config_schema
+import config_update
 import storage
 from agents.manager import manager
 from agents.tui_commands import register_agent_commands
@@ -899,6 +900,14 @@ class VenastineApp(App):
         # provider or a missing key is the same fact at both moments.
         for warning in self._startup_warnings:
             self._transcript.write_error(warning)
+        # Batch 87. Same rule, one batch later and a different source: an
+        # `npm update` replaces config.yaml, config_update.py merges the
+        # user's values back in and PRINTS what it kept and dropped -- to a
+        # stdout this screen is about to erase. The file it also leaves is
+        # what survives that, and this is where a person reads it.
+        for line in config_update.unseen_report():
+            self._transcript.write_system(line)
+        config_update.mark_report_seen()
         self._transcript.write_system("Type /help for commands.")
         prompt = self.query_one("#prompt", PromptInput)
         # Batch 55. Handed over once, here, rather than looked up per
@@ -5015,13 +5024,25 @@ def _config_value_choices(row, typed: str) -> list:
 
 def _config_rows(argument: str) -> list:
     """The panel's offers after `/config `. Keys first, then that key's
-    values once a space follows it."""
+    values once a space follows it.
+
+    CONTAINED, because this runs on every keystroke. The catalogue parses
+    `config.yaml`, which raises if the file has been deleted, locked by an
+    editor or an antivirus scan, or saved as UTF-16 -- and an exception out
+    of a suggestion callback takes the whole app down. Offering nothing is
+    the right answer to "what can I complete"; `/config <key>` is where the
+    loader's message, which names the file and the remedy, belongs.
+    """
     typed = argument.lstrip()
     key, space, value_text = typed.partition(" ")
-    if not space:
-        return [SlashCommand(f"config {row.name}", row.summary, _cmd_config)
-                for row in config_edit.matching(key)]
-    row = config_edit.find(key)
+    try:
+        if not space:
+            return [SlashCommand(f"config {row.name}", row.summary,
+                                 _cmd_config)
+                    for row in config_edit.matching(key)]
+        row = config_edit.find(key)
+    except (ValueError, OSError):
+        return []
     if row is None or not row.settable:
         return []
     # The FILE's value, because that is what a write replaces. Once a value
@@ -5042,8 +5063,8 @@ def _cmd_config(app: VenastineApp, args: str) -> None:
 
     Every tunable the harness has moved into `config.yaml` in batch 82, and
     the only way to change one was still to open the file in an editor. This
-    is the other half: the same 89 keys, browsable in the panel, settable by
-    name, written back through a round trip that keeps the file's 600 lines
+    is the other half: every one of those keys, browsable in the panel and
+    settable by name, written back through a round trip that keeps 600 lines
     of comments, and applied by relaunching -- because `config.py` binds at
     import and `security/posture.py` depends on that (UN1), so there is no
     honest way to move a value in a running process.
@@ -5119,7 +5140,7 @@ def _config_set(app: VenastineApp, row, value_text: str) -> None:
     """Parse, validate against the whole document, then gate and write."""
     if row.kind == "pair":
         role = "critic" if row.name == "critic_model" else "embedder"
-        if value_text.lower() in ("off", "clear", "auto", "none", "null"):
+        if value_text.lower() in config_edit.NULL_WORDS:
             value = None
         else:
             resolved = _pipeline_role_args(app, value_text, role)
@@ -5140,6 +5161,14 @@ def _config_set(app: VenastineApp, row, value_text: str) -> None:
         # covers the cross-field invariants too -- a strategy that is not
         # in the roster beside it fails here, before anything is written.
         app._transcript.write_error(str(exc))
+        return
+    except OSError as exc:
+        # Validating writes a candidate beside config.yaml, and a global npm
+        # prefix owned by root is not writable -- an ordinary install, not a
+        # broken one. This used to escape into Textual's message handler and
+        # take the app down on the first /config write of such a session.
+        app._transcript.write_error(
+            f"{row.name} could not be validated: {exc}. Nothing changed.")
         return
 
     if not proposal.lines:
@@ -5199,17 +5228,28 @@ def _config_offer_restart(app: VenastineApp, key: str) -> None:
     for, arriving long after the question scrolled away. The write has
     already landed either way, so nothing is lost by saying so.
     """
-    if app._research_is_running():
+    def _refuse() -> None:
         app._transcript.write_system(
             "A research run is in flight, so the restart is not queued. "
             "The change is written; relaunch when the run finishes and it "
             "takes effect.")
+
+    if app._research_is_running():
+        _refuse()
         return
 
     def _decided(confirmed) -> None:
         if not confirmed:
             app._transcript.write_system(
                 "Not restarting. It applies at your next launch.")
+            return
+        # RE-ASKED HERE, beside the `_busy` read it is paired with. The check
+        # above runs before the modal opens; a pipeline started while it was
+        # open would otherwise be caught by `_busy` -- which covers a chat
+        # turn, a research run and /compact alike -- and the restart would
+        # queue behind the very thing this refuses to wait for.
+        if app._research_is_running():
+            _refuse()
             return
         if app._busy:
             app._pending_restart = key

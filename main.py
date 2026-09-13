@@ -28,6 +28,7 @@ from uuid import UUID
 
 import config
 import config_edit
+import config_update
 import core.reasoning.pipeline_storage  # noqa: F401 -- registers PipelineRunRecord
 
 # Importing these for their SIDE EFFECT, and the side effect is load-bearing:
@@ -2018,6 +2019,13 @@ def main(argv=None) -> int:
     # the MCP servers are subprocesses of this one and the database is open,
     # and a process replaced from in there would never reach that `finally`.
     restart = None
+    if not args.tui:
+        # The CLI shells print to a stdout nothing erases, so the launcher's
+        # own print of the config merge report already reached the user on
+        # this path. Marking it seen here stops a later TUI session replaying
+        # a report they have read; the TUI branch below marks it at mount
+        # instead, after writing it into the transcript where it survives.
+        config_update.mark_report_seen()
     try:
         if args.tui:
             # Detach the stderr handler before Textual takes the screen.
@@ -2097,4 +2105,14 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        # THE WINDOWS RESTART WAITER NEEDS THIS. `replace_process` keeps this
+        # process alive around `subprocess.call` because Windows has no exec,
+        # and the console delivers CTRL_C_EVENT to every process attached to
+        # it -- so a Ctrl+C aimed at the RELAUNCHED TUI also lands here, and
+        # an unhandled one prints a traceback over the child's live screen.
+        # `bin/venastine.mjs` ignores SIGINT for the same reason, in its own
+        # words: let the child own the terminal's interrupt.
+        raise SystemExit(130) from None

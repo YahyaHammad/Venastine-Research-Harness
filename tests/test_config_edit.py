@@ -13,6 +13,7 @@ those two disagree only if something in the run wrote the real file.
 
 import os
 import shutil
+import tempfile
 
 import pytest
 
@@ -45,16 +46,26 @@ class TestTheCatalogueCoversTheFile:
         assert len(names) == len(set(names)), "a name is offered twice"
         fields = set(config_schema.HarnessConfig.model_fields)
         top = {name for name in names if "." not in name}
-        assert top == fields - set(config_edit.TABLES), (
+        assert top == fields, (
             "the catalogue and the schema disagree about the top-level keys")
 
-    def test_the_two_tool_tables_are_expanded_not_listed(self):
+    def test_the_two_tool_tables_are_expanded_AND_listed(self):
         """The 23 tool names appear in BOTH tables, which is the whole
         reason the rows are prefixed. `shell` alone would be ambiguous in a
-        way nothing downstream could resolve."""
-        names = {row.name for row in config_edit.catalogue()}
+        way nothing downstream could resolve.
+
+        Batch 87 gave the tables a row of their own as well. Expanding them
+        and emitting nothing for the table meant `/config tool_permissions`
+        answered "is not a key in config.yaml" -- false three times over:
+        it is a key, a top-level block in the file, and one of the nine
+        AUTHORITY keys."""
+        rows = {row.name: row for row in config_edit.catalogue()}
         for table in config_edit.TABLES:
-            assert table not in names
+            assert table in rows, f"{table} cannot be asked about"
+            assert rows[table].kind == "container"
+            assert not rows[table].settable, "a whole table is not settable"
+            assert rows[table].authority
+        names = set(rows)
         tools = list(config_schema.ToolPermissionsModel.model_fields)
         assert len(tools) == 23
         for tool in tools:
@@ -68,8 +79,7 @@ class TestTheCatalogueCoversTheFile:
         the scholar lookup."""
         top = [row.name for row in config_edit.catalogue()
                if "." not in row.name]
-        expected = [name for name in config_schema.HarnessConfig.model_fields
-                    if name not in config_edit.TABLES]
+        expected = list(config_schema.HarnessConfig.model_fields)
         assert top == expected
 
     def test_every_authority_key_has_a_sentence(self):
@@ -82,8 +92,7 @@ class TestTheCatalogueCoversTheFile:
 
     def test_the_authority_rows_are_the_authority_keys(self):
         marked = {row.name for row in config_edit.catalogue() if row.authority}
-        expected = {key for key in config_schema.HARNESS_AUTHORITY_KEYS
-                    if key not in config_edit.TABLES}
+        expected = set(config_schema.HARNESS_AUTHORITY_KEYS)
         leaves = {name for name in marked if "." in name}
         assert len(leaves) == 46, "both tool tables must be gated whole"
         assert marked - leaves == expected
@@ -108,11 +117,23 @@ class TestTheCatalogueCoversTheFile:
                 assert section in _KNOWN_SETTINGS, path
 
     def test_the_env_overrides_are_marked(self):
-        marked = {row.name: row.outranked_by for row in config_edit.catalogue()
-                  if row.outranked_by and row.outranked_by.startswith("$")}
-        expected = {key.lower(): f"${variable}"
+        marked = {row.name: row.environment_variable
+                  for row in config_edit.catalogue()
+                  if row.environment_variable}
+        expected = {key.lower(): variable
                     for key, variable in config_schema.ENV_OVERRIDES.items()}
         assert marked == expected
+
+    def test_a_key_with_two_masters_names_both(self):
+        """Batch 87. `model_name` loses to `$AGENT_MODEL` AND to
+        `settings.json default_model`, and an `if/elif` reported only the
+        first -- so the tier that arrives with a directory you cloned was
+        the one never mentioned."""
+        row = config_edit.find("model_name")
+        assert row.environment_variable == "AGENT_MODEL"
+        assert row.settings_key == "default_model"
+        assert "$AGENT_MODEL" in row.outranked_by
+        assert "settings.json default_model" in row.outranked_by
 
 
 class TestTheDescriptionsComeFromTheSchema:
@@ -263,6 +284,106 @@ class TestTheRoundTripIsLossless:
         assert len(proposal.lines) == 1
 
 
+class TestTheWriteKeepsTheProseAroundIt:
+    """Batch 87. Rule 2 says the write preserves everything it did not
+    change, and for the two pair keys it did not."""
+
+    def test_setting_and_clearing_a_pair_keeps_every_comment(
+            self, tmp_path, monkeypatch):
+        """MEASURED, and it deleted an AUTHORITY warning. `/config
+        critic_model OPENAI gpt-4o` then `/config critic_model off` removed
+        `embedder_model`'s three-line `# AUTHORITY -- names a provider that
+        receives claim text` block from the user's file. ruamel keeps the
+        text following a scalar in the parent's comment slot 2 and moves it
+        to slot 3 when the value becomes a block; going back it writes a
+        scalar and slot 3 is never emitted."""
+        target = _copy_config(tmp_path, monkeypatch)
+        config_edit.forget_document()
+        before = _read(target)
+
+        pair = config_edit.propose(
+            "critic_model", {"provider_name": "OPENAI", "model": "gpt-4o"})
+        config_edit.write(pair.text, pair.newline)
+        assert _read(target).count("#") == before.count("#")
+
+        back = config_edit.propose("critic_model", None)
+        config_edit.write(back.text, back.newline)
+        after = _read(target)
+        assert after.count("#") == before.count("#")
+        assert "# AUTHORITY -- names a provider that receives claim text" in \
+            after
+        assert after == before, "the round trip is not byte-exact"
+
+    def test_a_container_keeps_the_section_that_follows_it(
+            self, tmp_path, monkeypatch):
+        """The other half, from batch 86: prose after a block SEQUENCE is
+        anchored to the sequence's last index, not to the parent."""
+        target = _copy_config(tmp_path, monkeypatch)
+        config_edit.forget_document()
+        before = _read(target)
+        tree = config_edit.document(fresh=True)
+        config_edit.place(tree, "models_rejecting_sampling_params", ["only"])
+        after = config_edit._dump(tree)
+        assert after.count("#") == before.count("#")
+        assert "# Critic and embedder routing" in after
+
+
+class TestWhatChangedIsReportedHonestly:
+
+    def test_a_line_count_change_reports_only_what_moved(
+            self, tmp_path, monkeypatch):
+        """`zip(old, new)` mis-pairs every line after an edit that grows the
+        file: measured at 707 of 847 lines for this one change, and it
+        truncated at the shorter document so a removal under-reported."""
+        _copy_config(tmp_path, monkeypatch)
+        config_edit.forget_document()
+        grown = config_edit.propose(
+            "critic_model", {"provider_name": "OPENAI", "model": "gpt-4o"})
+        assert len(grown.lines) == 3, grown.lines
+
+    def test_a_one_line_change_is_one_line(self, tmp_path, monkeypatch):
+        _copy_config(tmp_path, monkeypatch)
+        config_edit.forget_document()
+        one = config_edit.propose("max_tokens", 18000)
+        assert [(n, a, b) for n, a, b in one.lines] == [
+            (49, "max_tokens: 16000", "max_tokens: 18000")]
+
+
+class TestTheTablesCanBeAskedAbout:
+    """`/config tool_permissions` used to answer "is not a key in
+    config.yaml" -- false three times over."""
+
+    def test_a_table_is_found_and_explained(self):
+        row = config_edit.find("tool_permissions")
+        assert row is not None
+        assert "23 tools" in row.values
+        lines = " ".join(config_edit.explain("tool_permissions"))
+        assert "not a key" not in lines
+        assert "AUTHORITY" in lines
+
+    def test_a_table_is_not_settable_from_here(self):
+        assert not config_edit.find("tool_approvals").settable
+
+
+class TestWhatOutranksAKeyIsReportedWhole:
+
+    def test_a_settings_only_key_names_its_path(self):
+        """`main.py:resolve_review` states `research.subagent_review >
+        config.SUBAGENT_REVIEW`, and the table was missing the entry."""
+        row = config_edit.find("subagent_review")
+        assert row.settings_key == "research.subagent_review"
+        assert any("settings.json" in line
+                   for line in config_edit.explain("subagent_review"))
+
+    def test_one_vocabulary_for_the_words_that_mean_nothing(self):
+        """`tui/app._config_set` carried its own copy WITH `auto` while this
+        one was without, so one word cleared one key and was refused on
+        another."""
+        assert "auto" in config_edit.NULL_WORDS
+        for word in ("null", "none", "off", "clear"):
+            assert word in config_edit.NULL_WORDS
+
+
 class TestAChangeIsValidatedBeforeItIsWritten:
     def test_a_bad_value_is_refused_naming_the_key(self, tmp_path,
                                                    monkeypatch):
@@ -327,6 +448,42 @@ class TestAChangeIsValidatedBeforeItIsWritten:
             self, tmp_path, monkeypatch):
         _copy_config(tmp_path, monkeypatch)
         assert config_edit.propose("max_tokens", 16000).lines == []
+
+
+class TestAnUnwritableInstallIsAnOrdinaryInstall:
+    """A global npm prefix owned by root. `/config` used to take the app
+    down there rather than say the file could not be written."""
+
+    def test_validation_falls_back_when_the_install_is_read_only(
+            self, tmp_path, monkeypatch):
+        _copy_config(tmp_path, monkeypatch)
+        config_edit.forget_document()
+        real = tempfile.mkstemp
+
+        def refuse_the_install_directory(*args, **kwargs):
+            if kwargs.get("dir"):
+                raise OSError(13, "Permission denied")
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(tempfile, "mkstemp", refuse_the_install_directory)
+        assert config_edit.propose("max_tokens", 18000).after == 18000
+
+    def test_a_failed_write_leaves_no_rubble(self, tmp_path, monkeypatch):
+        """The old fixed `config.yaml.tmp` survived a failed os.replace --
+        on Windows, opening the temp succeeds where replacing a read-only
+        target does not -- and sat in the install tree forever."""
+        target = _copy_config(tmp_path, monkeypatch)
+        config_edit.forget_document()
+        monkeypatch.setattr(os, "replace", _boom)
+        with pytest.raises(OSError):
+            config_edit.write("max_tokens: 1\n")
+        leftovers = [p for p in os.listdir(tmp_path)
+                     if p != os.path.basename(str(target))]
+        assert leftovers == [], leftovers
+
+
+def _boom(*args, **kwargs):
+    raise OSError(13, "Permission denied")
 
 
 class TestTheFileAndTheSessionAreTwoThings:
@@ -394,7 +551,9 @@ class TestTheFileAndTheSessionAreTwoThings:
         every container row read `pending restart` from launch."""
         containers = [row for row in config_edit.catalogue()
                       if row.kind == "container"]
-        assert len(containers) == 17
+        assert len(containers) == 19, (
+            "17 value containers plus the two permission tables, which "
+            "batch 87 gave rows of their own")
         assert not [row.name for row in containers if row.pending]
 
     def test_an_environment_override_is_not_pending(self, monkeypatch):
@@ -406,7 +565,7 @@ class TestTheFileAndTheSessionAreTwoThings:
         row = config_edit.KeyRow(
             name="model_name", kind="scalar", values="text",
             in_file="from-the-file", in_session="from-the-variable",
-            authority=False, outranked_by="$AGENT_MODEL")
+            authority=False, environment_variable="AGENT_MODEL")
 
         monkeypatch.setenv("AGENT_MODEL", "from-the-variable")
         assert not row.pending
@@ -418,6 +577,30 @@ class TestTheFileAndTheSessionAreTwoThings:
 
     def test_pending_lists_nothing_on_an_untouched_file(self):
         assert config_edit.pending_changes() == []
+
+
+class TestTheLoaderCacheDoesNotLeakBetweenTests:
+    """Batch 87. These two run in definition order, and the second is what
+    the `restore_config_schema_cache` fixture in conftest exists for.
+
+    The symptom, measured: `pytest tests/test_config_loader.py
+    tests/test_config_edit.py` failed two of batch 85's tests, because a
+    loader test re-read the live document with `APP_DB_PATH` set and
+    monkeypatch then removed the variable without touching the cache. The
+    file said `app.db`, the session said `from-the-shell.db`, nothing was
+    overriding either, so `db_path` read as a pending restart. The full
+    suite passed only because collection is alphabetical.
+    """
+
+    def test_one_leaves_an_environment_override_in_the_cache(self,
+                                                             monkeypatch):
+        monkeypatch.setenv("APP_DB_PATH", "from-the-shell.db")
+        assert config_schema.load(force=True).db_path == "from-the-shell.db"
+
+    def test_two_still_sees_the_document_this_process_started_on(self):
+        assert config_schema.current().db_path != "from-the-shell.db"
+        assert not [row for row in config_edit.pending_changes()
+                    if row.name == "db_path"]
 
 
 class TestTheDocumentIsCached:

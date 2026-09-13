@@ -142,8 +142,25 @@ def test_the_two_modules_agree_about_where_the_file_is():
 
 
 def test_the_state_directory_is_named_once():
-    assert config_update.state_dir().endswith(config_update.STATE_DIRNAME)
-    assert ".config" in config_update.state_dir()
+    assert config_update.state_base().endswith(config_update.STATE_DIRNAME)
+    assert ".config" in config_update.state_base()
+    assert config_update.state_dir().startswith(config_update.state_base())
+
+
+def test_each_install_gets_its_own_state(tmp_path):
+    """Batch 87. The state directory is global while `config.yaml` is not, so
+    one flat directory had a global npm install, a local one and a checkout
+    sharing a single mirror -- and whichever ran last overwrote the others'
+    saved settings with its own file."""
+    one = tmp_path / "global" / "config.yaml"
+    two = tmp_path / "local" / "config.yaml"
+    for path in (one, two):
+        path.parent.mkdir(parents=True)
+        path.write_text("max_tokens: 1\n", encoding="utf-8")
+    assert config_update.install_slug(str(one)) != \
+        config_update.install_slug(str(two))
+    assert config_update.install_slug(str(one)) == \
+        config_update.install_slug(str(one)), "the slug must be stable"
 
 
 # ---------------------------------------------------------------------------
@@ -511,6 +528,72 @@ class TestAReExtractedPackage:
 # ---- Nothing here may stop a launch ---------------------------------------
 # ---------------------------------------------------------------------------
 
+class TestThePostSessionMirror:
+    """Batch 87. This was four lines of `fs.copyFileSync` in the launcher,
+    and they were the one writer not subject to rule 1."""
+
+    def test_it_records_what_the_session_left(self, install):
+        _adopted(install)
+        _set_scalar(str(install.live), "max_tokens", 31337)
+        report = config_update.mirror(state=str(install.state),
+                                      live=str(install.live))
+        assert report.action == "mirrored"
+        assert config_schema.read_document(
+            str(install.yours))["max_tokens"] == 31337
+
+    def test_it_refuses_when_the_version_moved_under_it(self, install):
+        """THE DATA-LOSS REGRESSION. A merge that failed leaves the version
+        and the mirror untouched so the next launch can retry. The launcher
+        then copied the newly shipped config.yaml over the mirror anyway, and
+        the user's settings were gone from every copy -- permanently, because
+        the retry then found nothing to restore."""
+        _adopted(install)
+        _set_scalar(str(install.yours), "max_tokens", 31337)
+        install.bump("0.3.0")          # npm replaced the file; no merge yet
+        report = config_update.mirror(state=str(install.state),
+                                      live=str(install.live))
+        assert report.action == "skipped"
+        assert config_schema.read_document(
+            str(install.yours))["max_tokens"] == 31337, (
+            "the mirror was overwritten with the file npm just shipped")
+
+    def test_a_checkout_is_not_mirrored(self, install):
+        _adopted(install)
+        (install.root / ".git").mkdir()
+        assert config_update.mirror(state=str(install.state),
+                                    live=str(install.live)).action == "skipped"
+
+    def test_no_state_is_not_an_error(self, install):
+        assert config_update.mirror(state=str(install.state),
+                                    live=str(install.live)).action == "skipped"
+
+
+class TestTheReportReachesAPerson:
+    """The launcher prints to a stdout Textual is about to erase -- main.py's
+    own #138 note states that rule. The file is what survives it."""
+
+    def test_a_merge_leaves_a_report_to_be_read(self, install):
+        TestAnUpdateKeepsYourSettings()._updated(install, {"max_tokens": 31337})
+        lines = config_update.unseen_report(state=str(install.state),
+                                            live=str(install.live))
+        assert any("max_tokens" in line for line in lines)
+
+    def test_reading_it_once_is_enough(self, install):
+        TestAnUpdateKeepsYourSettings()._updated(install, {"max_tokens": 31337})
+        config_update.mark_report_seen(state=str(install.state),
+                                       live=str(install.live))
+        assert config_update.unseen_report(state=str(install.state),
+                                           live=str(install.live)) == []
+
+    def test_a_quiet_update_leaves_no_report(self, install):
+        """It used to write a lone newline, which the launcher's doctor line
+        then reported as 'last merged at <date>'."""
+        _adopted(install)
+        install.bump("0.3.0")
+        install.run()
+        assert not (install.state / config_update.REPORT_FILE).exists()
+
+
 class TestTheLaunchSurvivesAnything:
     """A configuration-history feature must not be able to stop the harness
     from starting. Every one of these is a report, never an exception."""
@@ -534,18 +617,37 @@ class TestTheLaunchSurvivesAnything:
     def test_an_unwritable_config_is_reported(self, install, monkeypatch):
         _adopted(install)
         _set_scalar(str(install.yours), "max_tokens", 31337)
+        # The new version ships a CHANGED default, so `shipped.yaml` and the
+        # live file genuinely differ -- without that the baseline assertion
+        # below cannot tell a premature copy from a no-op.
+        _set_scalar(str(install.live), "max_iterations", 55)
         install.bump("0.3.0")
 
         def refuse(*args, **kwargs):
             raise OSError(13, "Permission denied")
 
         monkeypatch.setattr(config_edit, "write", refuse)
+        before = _read(install.shipped)
         report = install.run()
         assert report.action == "failed"
         assert config_schema.read_document(
             str(install.live))["max_tokens"] != 31337
         assert _read(install.yours) != _read(install.live), (
             "a failed merge must not overwrite the mirror it still needs")
+        assert _read(install.version) == "0.2.0"
+        assert _read(install.shipped) == before, (
+            "the baseline moved even though the write it describes never "
+            "happened -- the retry then reads every changed default as a "
+            "user edit and pins it forever")
+
+    def test_a_checkout_is_left_alone_in_a_worktree_too(self, install):
+        """`.git` is a FILE in a linked worktree and in a submodule, so the
+        directory test read False in exactly the setup a contributor uses to
+        test the launcher."""
+        (install.root / ".git").write_text("gitdir: ../../.git/worktrees/x\n",
+                                           encoding="utf-8")
+        assert install.run(first_run=True).action == "skipped"
+        assert not install.state.exists()
 
     def test_a_missing_config_is_not_an_error(self, install):
         os.unlink(install.live)

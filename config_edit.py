@@ -42,9 +42,21 @@ FOUR RULES, all of them load-bearing.
 4. THE AUTHORITY KEYS ARE MARKED, NOT BLOCKED (batch 84). `config_schema.
    HARNESS_AUTHORITY_KEYS` used to mean "no in-session surface may write
    this". It now means "no UNATTENDED surface may": a settings file still
-   cannot reach these keys, nor an environment variable, nor a tool call, and
-   the file tools still refuse the harness install tree. A person typing at
-   the prompt can, behind a confirmation that names what the key permits.
+   cannot reach these keys, nor an environment variable, nor a tool call.
+   A person typing at the prompt can, behind a confirmation that names what
+   the key permits.
+
+   STATE THE FILE-TOOL HALF ACCURATELY -- this said "the file tools refuse
+   the harness install tree" for three batches and they do not. Measured:
+   `file_ops._protected_path_error` denies a path carrying a `.venastine`
+   SEGMENT and nothing else, so `<install>/config.yaml` comes back allowed.
+   What actually holds is weaker and still real: `write` and `edit` ship
+   DENIED in `tool_permissions` and cannot be enabled at runtime, and
+   `security/protected_paths` makes a workspace overlapping the harness tree
+   a startup error -- so the install tree is never inside the workspace and
+   a write there is approval-gated rather than auto-approved. That module's
+   own docstring is why the wording matters: a half-understood control is
+   worse than none.
    `AUTHORITY_EFFECT` below is that sentence, per key, and it is the reason
    the gate is not a generic "are you sure".
 """
@@ -123,6 +135,11 @@ _SETTINGS_OVERRIDES = {
     "scholar_h_saturation": "source_scoring.h_saturation",
     "scholar_min_cohort_size": "source_scoring.min_cohort_size",
     "scholar_min_citation_age_days": "source_scoring.min_citation_age_days",
+    # main.py:resolve_review states the precedence in so many words --
+    # `research.subagent_review > config.SUBAGENT_REVIEW` -- and this table
+    # was missing it, so `/config subagent_review` reported nothing
+    # outranking a key a settings file silently wins.
+    "subagent_review": "research.subagent_review",
 }
 
 
@@ -172,7 +189,26 @@ class KeyRow:
     in_file: Any       # what config.yaml says right now
     in_session: Any    # what this process is running
     authority: bool
-    outranked_by: Optional[str] = None
+    #: The environment variable that beats this key, `$`-prefixed, if any.
+    #: STRUCTURED rather than folded into one display string: `pending` and
+    #: `explain` both have to READ the variable's name, and a key can be
+    #: outranked by a variable AND a settings.json key at once -- `model_name`
+    #: is. One field for both meant whichever was found first was the only
+    #: one ever reported, and the one that lost was `settings.json
+    #: default_model`: the tier that arrives with a directory you cloned.
+    environment_variable: Optional[str] = None
+    #: The `settings.json` path that beats this key, if any.
+    settings_key: Optional[str] = None
+
+    @property
+    def outranked_by(self) -> Optional[str]:
+        """Every source that beats this key, for display. None if none do."""
+        sources = []
+        if self.environment_variable:
+            sources.append(f"${self.environment_variable}")
+        if self.settings_key:
+            sources.append(f"settings.json {self.settings_key}")
+        return " and ".join(sources) if sources else None
 
     @property
     def settable(self) -> bool:
@@ -205,8 +241,8 @@ class KeyRow:
             return False
         if self.in_file == self.in_session:
             return False
-        if self.outranked_by and self.outranked_by.startswith("$"):
-            return os.environ.get(self.outranked_by[1:]) is None
+        if self.environment_variable:
+            return os.environ.get(self.environment_variable) is None
         return True
 
     @property
@@ -347,6 +383,71 @@ def _dump(tree) -> str:
     return stream.getvalue()
 
 
+def get_leaf(tree, name: str):
+    """Read a dotted name off a round-trip tree."""
+    if "." in name:
+        table, leaf = name.split(".", 1)
+        return tree[table][leaf]
+    return tree[name]
+
+
+def place(tree, name: str, value: Any) -> None:
+    """Set a dotted name, keeping the prose that FOLLOWS it. Rule 2's teeth.
+
+    `tree[name] = value` loses comments, in two different ways, and both
+    were found by running it rather than by reading ruamel. Each costs the
+    user documentation out of their own file, silently, on a write that
+    reported itself as a one-line change.
+
+    ONE: THE TEXT AFTER A BLOCK SEQUENCE IS ANCHORED TO ITS LAST INDEX.
+    `node.ca.items[5]` on a six-entry list, not the key in the parent. So
+    replacing `models_rejecting_sampling_params` took the
+    `# Critic and embedder routing` banner and the AUTHORITY note under it
+    with it -- six lines. Mutating the node in place does not help; measured.
+
+    TWO: A VALUE THAT CHANGES SHAPE MOVES ITS PARENT'S COMMENT BETWEEN TWO
+    SLOTS. For a scalar the following text sits in `ca.items[name][2]`; when
+    the value becomes a block mapping ruamel moves it to slot 3 and emits it
+    after the block. Going back -- `/config critic_model off` after setting
+    a provider -- it writes a scalar again and slot 3 is never emitted, so
+    `embedder_model`'s three-line AUTHORITY comment was deleted from the
+    file. ruamel handles scalar -> block by itself; this handles the return
+    trip, and the leading newline is what makes the result byte-identical to
+    the document before the round trip rather than merely comment-complete.
+    """
+    from ruamel.yaml.comments import CommentedMap, CommentedSeq
+    from ruamel.yaml.tokens import CommentToken
+
+    parent, key = tree, name
+    if "." in name:
+        table, key = name.split(".", 1)
+        parent = tree[table]
+    was = parent.get(key)
+
+    if isinstance(value, (list, dict)):
+        new = (CommentedMap(value) if isinstance(value, dict)
+               else CommentedSeq(value))
+        anchors = getattr(getattr(was, "ca", None), "items", None)
+        if anchors and len(new):
+            old_keys = (list(was.keys()) if isinstance(was, dict)
+                        else list(range(len(was))))
+            new_keys = (list(new.keys()) if isinstance(new, dict)
+                        else list(range(len(new))))
+            if old_keys and old_keys[-1] in anchors:
+                new.ca.items[new_keys[-1]] = anchors[old_keys[-1]]
+        parent[key] = new
+        return
+
+    parent[key] = value
+    if not isinstance(was, (list, dict)):
+        return
+    slot = getattr(getattr(parent, "ca", None), "items", {}).get(key)
+    if slot and slot[3]:
+        slot[2] = CommentToken("\n" + "".join(tok.value for tok in slot[3]),
+                               slot[3][0].start_mark)
+        slot[3] = None
+
+
 def write(text: str, newline: str = "\n") -> None:
     """Replace `config.yaml` with `text`, atomically. Raises OSError.
 
@@ -360,10 +461,24 @@ def write(text: str, newline: str = "\n") -> None:
     a "or just write these bytes" mode to be shared.
     """
     path = config_schema.CONFIG_PATH
-    tmp = f"{path}.tmp"
-    with open(tmp, "w", encoding="utf-8", newline="") as handle:
-        handle.write(text.replace("\n", newline))
-    os.replace(tmp, path)
+    # A UNIQUE NAME, not a fixed `config.yaml.tmp` sibling. Two writers --
+    # a `/config` write and the launcher's merge in another process -- raced
+    # on the one name, and a failed `os.replace` (a read-only file on
+    # Windows, where opening the temp still succeeds) left the leftover in
+    # the install tree forever. `_validate_candidate` below already does it
+    # this way.
+    handle_fd, tmp = tempfile.mkstemp(prefix="config.", suffix=".writing.yaml",
+                                      dir=os.path.dirname(path))
+    try:
+        with open(handle_fd, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text.replace("\n", newline))
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
     # See `document()`: a one-value change can leave the size identical, so
     # the stamp alone would not always notice our own write.
     forget_document()
@@ -482,7 +597,22 @@ def catalogue() -> list[KeyRow]:
     for name, field in config_schema.HarnessConfig.model_fields.items():
         if name in TABLES:
             table = getattr(config, name)
-            for tool in type(table).model_fields:
+            tools = list(type(table).model_fields)
+            # THE TABLE ITSELF GETS A ROW, ahead of its leaves. Without one
+            # `/config tool_permissions` answered "tool_permissions is not a
+            # key in config.yaml" -- false three times over: it is a key, it
+            # is a top-level block in the file, and it is one of the nine
+            # AUTHORITY keys. A container row is what the other 17 containers
+            # already get: explained and counted, with the leaves set
+            # individually.
+            rows.append(KeyRow(
+                name=name,
+                kind="container",
+                values=f"{len(tools)} tools, each true | false",
+                in_file=tree[name],
+                in_session=table,
+                authority=True))
+            for tool in tools:
                 rows.append(KeyRow(
                     name=f"{name}.{tool}",
                     kind="scalar",
@@ -492,11 +622,12 @@ def catalogue() -> list[KeyRow]:
                     authority=True))
             continue
         kind, values = describe(name, field.annotation, field.metadata)
-        outranked = None
-        if name in environment:
-            outranked = f"${environment[name]}"
-        elif name in overrides:
-            outranked = f"settings.json {overrides[name]}"
+        # EVERY SOURCE, not the first one found. An `if/elif` reported
+        # `model_name` as outranked by `$AGENT_MODEL` and never mentioned
+        # `settings.json default_model` -- the tier that arrives with a
+        # directory you cloned, and the one a person most needs told about.
+        variable = environment.get(name)
+        settings_key = overrides.get(name)
         rows.append(KeyRow(
             name=name,
             kind=kind,
@@ -508,7 +639,8 @@ def catalogue() -> list[KeyRow]:
             in_file=tree[name],
             in_session=getattr(config, name),
             authority=name in authority,
-            outranked_by=outranked))
+            environment_variable=variable,
+            settings_key=settings_key))
     return rows
 
 
@@ -582,8 +714,8 @@ def explain(name: str) -> list[str]:
             f"{shown(row.in_session)} and will pick the new value up at the "
             f"next launch.")
 
-    if row.outranked_by and row.outranked_by.startswith("$"):
-        variable = row.outranked_by[1:]
+    if row.environment_variable:
+        variable = row.environment_variable
         if os.environ.get(variable) is not None:
             lines.append(
                 f"{variable} is set to {shown(row.in_session)}, so that is "
@@ -656,7 +788,16 @@ def authority_key(name: str) -> Optional[str]:
 # ---- Proposing a change ---------------------------------------------------
 # ---------------------------------------------------------------------------
 
-_NULL_WORDS = ("null", "none", "off", "clear")
+#: The words that mean "no value" wherever `/config` takes one.
+#:
+#: PUBLIC, and `auto` is in it, because `tui/app._config_set` carried its own
+#: copy with `auto` and this one without -- so `/config critic_model auto`
+#: cleared the key while `/config default_effort auto` wrote the literal
+#: string and was refused by the schema. One word, two behaviours, decided by
+#: which branch a key happened to take. The value grammar lives here by this
+#: module's own rule; the terminal reads it.
+NULL_WORDS = ("null", "none", "off", "clear", "auto")
+_NULL_WORDS = NULL_WORDS
 
 
 def _unquoted(text: str) -> str:
@@ -731,8 +872,18 @@ def _validate_candidate(candidate: str, name: str, value: Any) -> None:
     problem, one line per fault -- is the loader's and is kept verbatim.
     """
     directory = os.path.dirname(config_schema.CONFIG_PATH)
-    handle, path = tempfile.mkstemp(prefix="config.", suffix=".proposed.yaml",
-                                    dir=directory)
+    try:
+        handle, path = tempfile.mkstemp(prefix="config.",
+                                        suffix=".proposed.yaml", dir=directory)
+    except OSError:
+        # A GLOBAL npm PREFIX OWNED BY ROOT is an ordinary install, and the
+        # directory above is not writable there. Without this the first
+        # `/config` write of such a session raised PermissionError out of the
+        # command handler and took the app down -- before anything could tell
+        # the user the far more useful fact that the file cannot be written.
+        # The same fallback `config_update._validates` carries.
+        handle, path = tempfile.mkstemp(prefix="config.",
+                                        suffix=".proposed.yaml")
     try:
         with open(handle, "w", encoding="utf-8", newline="") as stream:
             stream.write(candidate)
@@ -751,6 +902,34 @@ def _validate_candidate(candidate: str, name: str, value: Any) -> None:
             # A leftover temp file is untidy, not a failure to report over
             # the outcome of the validation the caller asked for.
             pass
+
+
+def _changed_lines(before: str, after: str) -> list:
+    """`(line number, old, new)` for what actually moved between two texts.
+
+    ALIGNED, not zipped. `zip(old, new)` assumes the documents stay the same
+    length: setting `critic_model` from `null` to a provider pair grows the
+    file by two lines, and every line after the edit then pairs against its
+    neighbour -- measured at 707 of 847 lines reported as changed for a
+    one-line edit. It also stopped at the shorter document, so a change that
+    only removes lines under-reported.
+
+    Line numbers are the NEW document's, because what the caller shows is
+    the file as it will be.
+    """
+    import difflib
+
+    old, new = before.split("\n"), after.split("\n")
+    changed = []
+    matcher = difflib.SequenceMatcher(None, old, new, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        for offset in range(max(i2 - i1, j2 - j1)):
+            a = old[i1 + offset] if i1 + offset < i2 else ""
+            b = new[j1 + offset] if j1 + offset < j2 else ""
+            changed.append((j1 + offset + 1, a, b))
+    return changed
 
 
 @dataclasses.dataclass(frozen=True)
@@ -786,18 +965,11 @@ def propose(name: str, value: Any) -> Proposal:
 
     text, newline = read_text()
     tree = _round_trip().load(io.StringIO(text))
-    if "." in name:
-        table, leaf = name.split(".", 1)
-        tree[table][leaf] = value
-    else:
-        tree[name] = value
+    place(tree, name, value)
     candidate = _dump(tree)
     _validate_candidate(candidate, name, value)
 
-    old = text.split("\n")
-    new = candidate.split("\n")
-    changed = [(index + 1, a, b)
-               for index, (a, b) in enumerate(zip(old, new)) if a != b]
+    changed = _changed_lines(text, candidate)
     # `in_file`, not `in_session`: "was" is about the value this write is
     # REPLACING, which is the document's. The two are the same until the
     # first write of a session, which is why taking the wrong one read as

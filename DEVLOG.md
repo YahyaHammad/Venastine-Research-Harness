@@ -13306,3 +13306,136 @@ update.
 - `tests/test_config_update.py` -- 36 new.
 - `package.json`, `README.md`, `AGENTS.md`, `ARCHITECTURE.md`,
   `CONFIG_ARCHITECTURE.md`, `tests/BREAKING_CHANGES.md`.
+
+
+---
+
+## Batch 87 -- what three reviews of the config arc found (2026-09-13)
+
+Three independent reviews ran over the six commits that moved every tunable
+into `config.yaml`, added `/config`, and made an edited file survive an npm
+update. **25 findings confirmed, 2 did not reproduce.** Nothing critical: the
+read path still uses `typ="safe"`, no unattended surface reaches the AUTHORITY
+keys, and no posture changes silently. But five lost data or took the app
+down, and three documented claims were false.
+
+**Verified rather than accepted, and two claims dissolved on measurement.**
+`propose()` was reported to re-quote a quoted scalar: it does not --
+`shell_binary: ''` becomes `'bash'`, `preserve_quotes` handles it. The
+catalogue was reported as too slow to rebuild per keystroke: batch 85 measured
+20 builds at 6.4ms total. Both are recorded here so they are not raised again.
+
+### The two that lost data, both in the newest commit
+
+**The launcher destroyed the user's only surviving settings.** `mirrorConfig()`
+copied `config.yaml` over `yours.yaml` guarded only by a `version` file
+EXISTING. When a merge fails -- `reconcile()` deliberately leaves the version
+and the mirror untouched so the next launch can retry -- the session ended and
+that copy replaced the mirror with the file npm had just shipped. Gone from
+every copy, permanently, and the retry then found nothing to restore. The
+Python side asserts that protection in `test_an_unwritable_config_is_reported`;
+the launcher undid it four lines later, and nothing tested the launcher.
+
+The fix deletes the Node implementation. It is `config_update.py --mirror`
+now, behind the same guards, in the language that has tests. An interpreter
+start at session EXIT costs nothing anybody is waiting for.
+
+**A failed write advanced the baseline.** `_merge_into` copied `live` to
+`shipped.yaml` before `config_edit.write()`. If the write raised, the baseline
+had moved while `version` had not -- so the retry diffed `yours` against the
+NEW pristine, read every default that changed between the two versions as a
+user edit, and pinned them forever on top of the original failure. Nothing is
+recorded now until the write it describes has actually happened.
+
+### The one that deleted an AUTHORITY warning
+
+`/config critic_model OPENAI gpt-4o` followed by `/config critic_model off`
+removed `embedder_model`'s three-line `# AUTHORITY -- names a provider that
+receives claim text` block from the user's file. Directly against this
+module's own rule 2.
+
+ruamel keeps the text following a scalar in the parent's comment slot 2 and
+moves it to slot 3 when the value becomes a block mapping; going back it
+writes a scalar and slot 3 is never emitted. Batch 86 had already met the
+sibling of this -- prose after a block SEQUENCE anchored to the sequence's
+last index -- and written `_place` for it, which `propose()` never got. So
+`place()` now lives in `config_edit`, handles both, and `config_update`
+delegates to it. **The round trip null -> dict -> null is byte-identical to
+the original file**, and the leading newline is what makes that true rather
+than merely comment-complete.
+
+### The state is keyed by the install
+
+`config-state/<12 hex of sha256 of the install directory>/`, following
+`runtimePaths()`'s convention. One flat directory had a global npm install, a
+local one and a checkout sharing a mirror. The slug is computed in Python and
+nowhere else, with `installs.json` for the launcher's doctor line: two
+languages agreeing about a hash by inspection fails silently, and what it
+fails at is writing the mirror where the merge does not look.
+
+### What the reporting got wrong
+
+- `Proposal.lines` used `zip(old, new)`, which mis-pairs every line after an
+  edit that changes the file's length: **707 of 847 lines** reported as
+  changed for a one-line edit that grows the file by two. `difflib` now.
+- `/config tool_permissions` answered "is not a key in config.yaml" -- false
+  three times over. The tables have rows of their own.
+- `outranked_by` was an `if/elif`, so `model_name` reported `$AGENT_MODEL` and
+  never `settings.json default_model` -- the tier that arrives with a
+  directory you cloned. `KeyRow` carries the two sources separately now,
+  because one string was also being PARSED by `pending` and `explain`.
+- `subagent_review` was missing from the overrides table though `main.py`
+  states `research.subagent_review > config.SUBAGENT_REVIEW`.
+- `tui/app._config_set` carried its own null-word list WITH `auto` while
+  `config_edit` was without, so one word cleared one key and was refused on
+  another.
+
+### Two crashes and a queue
+
+`/config` took the app down on a global npm prefix owned by root:
+`_validate_candidate` writes its candidate beside `config.yaml` and cannot
+there, and the handler caught only `ValueError`. The suggestion panel was
+equally uncontained -- `catalogue()` parses the file on every keystroke.
+And `_config_offer_restart` checked for a research run BEFORE opening the
+modal while the callback only read `_busy`, so a pipeline started while the
+modal was open got waited on -- the one thing that function refuses to do.
+
+### The claim that was false for three batches
+
+`config_edit.py` and CONFIG_ARCHITECTURE.md both said "the file tools refuse
+the harness install tree", as half the argument for letting `/config` write
+the nine AUTHORITY keys. They do not:
+`PROTECTED_SEGMENTS` is `{".venastine"}`, and `<install>/config.yaml` comes
+back allowed. What holds is weaker and still real -- `write` and `edit` ship
+denied and cannot be enabled at runtime, and a workspace overlapping the
+harness tree is a startup error, so a write there is approval-gated. Both
+places say that now, and `TestWhatKeepsAToolCallOutOfConfigYaml` pins it.
+
+### An ordering bug that hid behind the alphabet
+
+`pytest tests/test_config_loader.py tests/test_config_edit.py` failed two of
+batch 85's tests. A loader test re-read the live document with `APP_DB_PATH`
+set; monkeypatch then removed the variable without touching
+`config_schema._cached`, so the file said `app.db`, the session said
+`from-the-shell.db`, nothing was overriding either, and `db_path` read as a
+pending restart. The full suite passed only because collection is
+alphabetical and `test_config_edit` runs first. A conftest fixture restores
+the cache between tests, and a pair of tests in definition order fails if it
+is removed.
+
+### Deferred to batch 88
+
+`.capitalize()` downcasing "Docker" in the AUTHORITY modal, `parse_value`
+branching on the human-readable display string, `document()`'s stat-then-read
+racing one torn cache entry, and case-sensitive key lookup.
+
+### Files
+
+- `config_update.py` -- `--mirror`, per-install state, the commit ordering,
+  `_is_checkout` on `exists` not `isdir`, the reinstall report.
+- `config_edit.py` -- `place()`, `_changed_lines()`, the table rows, the two
+  outranking sources, `NULL_WORDS`, the temp-file fallback and the unique
+  write temp name.
+- `bin/venastine.mjs`, `main.py`, `tui/app.py`, `tests/conftest.py`.
+- `requirements.txt`, `CONFIG_ARCHITECTURE.md`, `AGENTS.md`,
+  `ARCHITECTURE.md`, `tests/BREAKING_CHANGES.md`.
