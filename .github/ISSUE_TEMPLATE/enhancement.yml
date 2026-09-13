@@ -14,7 +14,7 @@ body:
         D-number, changes a file-level contract in `ARCHITECTURE.md`, or touches
         `core/loop.py` / `core/client.py` / `tools/registry.py` / `security/` boundaries should be
         agreed here first — see
-        [CONTRIBUTING.md](https://github.com/YahyaHammad/Venastine-Research-Harness/blob/main/CONTRIBUTING.md#proposing-a-large-or-design-change).
+        [CONTRIBUTING.md](https://github.com/YahyaHammad/Venastine-Research-Harness/blob/main/docs/CONTRIBUTING.md#proposing-a-large-or-design-change).
         That is what this form is for.
 
   - type: textarea

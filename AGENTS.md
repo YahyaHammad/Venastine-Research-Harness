@@ -136,8 +136,19 @@ public and the secret is added deliberately, in that order.
 
 Read these before changing anything non-trivial — they carry design decisions that are locked, not defaults to re-derive.
 
-- **ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§47, all built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A15 from §32, W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46 and NA1–NA18 from §47). Section and D-numbers are stable and cross-referenced everywhere.
+**The record lives in `docs/` and six documents stayed at the root, each for a reason that is not
+tidiness** (batch 89). `README.md` is the landing preview; `LICENSE` and `NOTICE` are what GitHub
+detects and what `pyproject.toml`'s `license-files` names; `CONFIG_ARCHITECTURE.md` ships in the npm
+tarball and `config.py` points at it. `AGENTS.md` is the load-bearing one: `core/config_loader.py`
+reads it through `workspace_trust.PROJECT_CONTEXT_FILENAME`, and WS9 puts the ROOT copy inside D17's
+trust content hash -- moving it would break a runtime path and silently change every project's hash.
+`CLAUDE.md` / `QWEN.md` follow it, since the whole point of them is that a harness looking for one
+filename finds it without searching. Nothing under `docs/` is read by production code, which is what
+made the move free: no import changed, and `tests/test_docs_consistency.py` is the only module that
+opens any of these files (its `DOCS` constant is where the path now comes from).
+
+- **docs/ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
+- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§47, all built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A15 from §32, W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46 and NA1–NA18 from §47). Section and D-numbers are stable and cross-referenced everywhere.
 
 **Six namespaces use the same `LETTER+NUMBER` shape, and only the first is the
 record.** An id that resolves to two places is a cross-reference that fails
@@ -148,7 +159,7 @@ fails on one that does not.
 
 | namespace | ids | written as | where defined |
 |---|---|---|---|
-| **design decisions** | the families above | bare — `D14 forbids widening` | `ROADMAP.md` / `ROADMAP_v2.md` |
+| **design decisions** | the families above | bare — `D14 forbids widening` | `docs/ROADMAP.md` / `docs/ROADMAP_v2.md` |
 | pipeline gates | `D0`, `D1`, `D2` | `gate D0` | §4/§26 — pure-code routing between passes, no LLM call |
 | acceptance criteria | `AC1`… | `§21 AC6` — **section-scoped**, so the section is required | each section's *Acceptance criteria* block |
 | Rev. 1 open questions | `S11`, `S12`, `S16` | `Rev. 1 S12` | resolved inline in `ROADMAP_v2.md` |
@@ -160,7 +171,7 @@ so nothing can force the distinction mechanically — write `gate D1` when you m
 the gate. A seventh use of `C1`–`C10` is the research pipeline's **claim ids**,
 which are run data rather than references; see the C table in `ROADMAP_v2.md`.
 - **CONFIG_ARCHITECTURE.md** — why every value in `config.yaml` is what it is. `config.py`'s 788 lines of rationale, carried over verbatim when the values moved into YAML, keyed by the YAML's own names. Read the entry for a key before changing it; several of these numbers have already been "corrected" back to a value they were deliberately moved away from.
-- **DEVLOG.md** — per-section implementation notes: what was followed verbatim, what was deviated from (every deviation was an explicit user decision — do not silently override).
+- **docs/DEVLOG.md** — per-section implementation notes: what was followed verbatim, what was deviated from (every deviation was an explicit user decision — do not silently override).
 - **tests/BREAKING_CHANGES.md** — what breaks each test when production code changes, the symptom, and the fix.
 - **CLAUDE.md / QWEN.md** — pointers to this file, nothing more. They exist so a harness that looks for one filename finds it without searching; the content has one copy.
 

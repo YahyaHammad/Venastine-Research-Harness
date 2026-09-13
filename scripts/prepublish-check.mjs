@@ -42,7 +42,7 @@ const problems = [];
 const REQUIRED = [
   'LICENSE',
   'NOTICE',
-  'THIRD_PARTY_NOTICES.md',
+  'docs/THIRD_PARTY_NOTICES.md',
   'README.md',
   'requirements.txt',
   'main.py',

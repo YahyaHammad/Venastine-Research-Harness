@@ -69,6 +69,10 @@ from collections import Counter
 import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# The reference record moved out of the root (batch 89). Everything the
+# root still owns -- README, AGENTS, CONFIG_ARCHITECTURE, LICENSE, NOTICE --
+# keeps joining ROOT; everything under docs/ joins this.
+DOCS = os.path.join(ROOT, "docs")
 
 # Anchored on the surrounding words, NOT a bare r"(\d+) tests". ARCHITECTURE
 # lists a per-file count for every test module in its tree ("# 29 tests --
@@ -77,7 +81,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DOC_PATTERNS = {
     "README.md": r"pytest` — (\d+) tests, fully offline",
     "AGENTS.md": r"# (\d+) tests, offline",
-    "ARCHITECTURE.md": r"# (\d+) tests, all offline",
+    "docs/ARCHITECTURE.md": r"# (\d+) tests, all offline",
 }
 
 
@@ -307,7 +311,7 @@ _TREE_ENTRY = re.compile(r"(test_\w+\.py)\s*#\s*(\d+) tests?\b")
 
 
 def _tree_entries() -> dict:
-    with open(os.path.join(ROOT, "ARCHITECTURE.md"), encoding="utf-8") as f:
+    with open(os.path.join(DOCS, "ARCHITECTURE.md"), encoding="utf-8") as f:
         entries = _TREE_ENTRY.findall(f.read())
     assert entries, (
         "ARCHITECTURE.md's tree no longer states any per-file test count in "
@@ -389,7 +393,7 @@ def test_the_tree_names_every_production_module():
     document cannot tell "listed in the map" from "mentioned in a
     paragraph", which is the distinction the map is for.
     """
-    with open(os.path.join(ROOT, "ARCHITECTURE.md"), encoding="utf-8") as f:
+    with open(os.path.join(DOCS, "ARCHITECTURE.md"), encoding="utf-8") as f:
         tree = f.read().split("```")[1]
     entries = {e.rstrip("/").split("/")[-1]
                for e in re.findall(r"[\u251c\u2514]\u2500\u2500\s+([\w./-]+)", tree)}
@@ -460,7 +464,7 @@ def test_every_roadmap_v2_index_entry_carries_a_status_marker():
     Checks only that a marker is PRESENT. What it says is a judgement no
     test can make -- the point is that the question was answered at all.
     """
-    with open(os.path.join(ROOT, "ROADMAP_v2.md"), encoding="utf-8") as f:
+    with open(os.path.join(DOCS, "ROADMAP_v2.md"), encoding="utf-8") as f:
         entries = _INDEX_ENTRY.findall(f.read())
 
     assert len(entries) >= 15, (
@@ -561,7 +565,7 @@ def test_architecture_states_the_real_registry_counts():
     advertised = len(registry.schemas(None))
     callable_ = len(registry.schemas(None, callable_only=True))
 
-    with open(os.path.join(ROOT, "ARCHITECTURE.md"), encoding="utf-8") as f:
+    with open(os.path.join(DOCS, "ARCHITECTURE.md"), encoding="utf-8") as f:
         arch = f.read()
 
     claim = f"this is {advertised} of {registered} registered tools"
@@ -817,7 +821,7 @@ def _decision_definitions(docs=_RECORD_DOCS):
     """{id: [document, ...]} for every decision the record defines."""
     found = {}
     for name in docs:
-        path = os.path.join(ROOT, name)
+        path = os.path.join(DOCS, name)
         with open(path, encoding="utf-8", errors="replace") as f:
             for line in f:
                 for pattern in (_DEFINITION_ROW, _DEFINITION_LEAD):
@@ -1437,7 +1441,7 @@ def test_the_documented_provider_roster_matches_the_example():
              r"across the (\d+) providers in `providers.json.example`"),
             ("ROADMAP.md",
              r"Across the (\d+) providers in `providers.json.example`")):
-        with open(os.path.join(ROOT, doc), encoding="utf-8") as f:
+        with open(os.path.join(DOCS, doc), encoding="utf-8") as f:
             hit = re.search(pattern, f.read())
         assert hit is not None, (
             f"{doc} no longer states the roster size where it used to -- "
@@ -1505,7 +1509,7 @@ def test_the_roadmap_v2_index_covers_every_section():
     index block is everything between `## Index` and its closing rule, in
     both of the two row spellings it uses (`- 13.` and `- **§32.**`).
     """
-    with open(os.path.join(ROOT, "ROADMAP_v2.md"), encoding="utf-8") as f:
+    with open(os.path.join(DOCS, "ROADMAP_v2.md"), encoding="utf-8") as f:
         text = f.read()
     headings = set(int(n) for n in
                    re.findall(r"^## (?:§)?(\d+)\.", text, re.M))
@@ -1537,7 +1541,7 @@ def test_the_revisit_note_covers_the_ensemble_family():
     highest = max(int(re.match(r"E(\d+)$", one).group(1))
                   for one in record if re.match(r"E\d+$", one))
 
-    with open(os.path.join(ROOT, "ROADMAP.md"), encoding="utf-8") as f:
+    with open(os.path.join(DOCS, "ROADMAP.md"), encoding="utf-8") as f:
         roadmap = f.read()
     hit = re.search(r"Decisions record: E1[–-]E?(\w+)", roadmap)
     assert hit is not None, (

@@ -54,7 +54,21 @@ Venastine Research Harness/
 ├── pytest.ini                      # testpaths=tests, --strict-markers
 ├── AGENTS.md                       # THE agent-context file -- locked decisions, invariants, the canonical bug story. Read it before any non-trivial change
 ├── CLAUDE.md / QWEN.md             # pointers to AGENTS.md, so a harness that auto-loads one of those names finds the context instead of a second copy of it
-├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
+│
+├── docs/                           # batch 89: the reference record and the policy documents, moved out of the root. NOTHING here is read by production code -- tests/test_docs_consistency.py is the only module that opens any of it, through its DOCS constant. What stayed at the root stayed for a reason AGENTS.md § Documentation map records
+│   ├── ARCHITECTURE.md             # this file -- file-by-file contracts ("what belongs here / what does NOT"), and the known gotchas (§11)
+│   ├── ROADMAP.md                  # §1-§12, all built -- specs plus the locked Design Decisions Record
+│   ├── ROADMAP_v2.md               # §13-§47, all built -- the same, continued. Append-only: never edit a built section's decision record, add a § or a DEVLOG deviation entry instead
+│   ├── DEVLOG.md                   # implementation notes for built ROADMAP sections -- see §0
+│   ├── TECHNICAL_DEBT.md           # open debt items from reviews, with what was fixed and what was left by design
+│   ├── CONTRIBUTING.md             # inbound licence (Apache-2.0 + DCO), the contributor workflow, and the "what lives where" table the PR template points at
+│   ├── SECURITY.md                 # private vulnerability reporting, scope, and the coordinated-disclosure timeline
+│   ├── CODE_OF_CONDUCT.md          # Contributor Covenant 2.1
+│   ├── PRIVACY.md                  # what is stored locally vs. what leaves the machine, and how to delete it
+│   ├── THIRD_PARTY_NOTICES.md      # the dependency licence assessment. SHIPS in the npm tarball, so package.json's `files` and scripts/prepublish-check.mjs's REQUIRED both name it by its docs/ path -- the second is checked by nothing but `npm publish`
+│   └── assets/
+│       ├── Venastine_Research_Harness_Demo_Photo.png  # README.md line 1, its only reference
+│       └── research-mode-birds-eye.mermaid           # the research pipeline as a diagram; referenced by no code
 │
 ├── bin/                            # batch 35: the npm channel's entry point. The package ships as a FOLDER OF SOURCE -- no bundle, no binary
 │   └── venastine.mjs               # the only thing npm can execute: find a Python >=3.11, make sure the dependencies exist, spawn <root>/main.py with the user's argv, cwd and stdio. Must NEVER set PYTHONPATH or AGENT_WORKSPACE -- test-pinned, because isolation.py builds its child's PYTHONPATH from the parent's resolved sys.path and WORKSPACE_DIR is a permission boundary

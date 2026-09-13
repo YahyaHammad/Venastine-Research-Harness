@@ -58,7 +58,7 @@ returns only this project's own design prose; and the 34 tracked files that are 
 nor `.md` are first-party without exception — the licence texts, configuration and packaging
 (`config.yaml`, `pyproject.toml`, `requirements.txt`, `package.json`, `pytest.ini`, the `.github/`
 workflows and issue templates, the dotfiles), the two prompt texts, `bin/venastine.mjs` and
-`scripts/prepublish-check.mjs`, `research-mode-birds-eye.mermaid`, `tui/app.tcss`, the two
+`scripts/prepublish-check.mjs`, `docs/assets/research-mode-birds-eye.mermaid`, `tui/app.tcss`, the two
 `.example` templates, and one screenshot of this project's own interface. **No third-party
 fonts, images or data files are bundled.**
 

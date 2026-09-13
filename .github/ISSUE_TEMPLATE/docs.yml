@@ -15,7 +15,7 @@ body:
         Note which document owns a given fact: this project keeps **one copy, several filenames**,
         so the fix is usually to correct the owning document rather than to add the fact
         somewhere else. The table in
-        [CONTRIBUTING.md](https://github.com/YahyaHammad/Venastine-Research-Harness/blob/main/CONTRIBUTING.md#project-documentation--what-lives-where)
+        [CONTRIBUTING.md](https://github.com/YahyaHammad/Venastine-Research-Harness/blob/main/docs/CONTRIBUTING.md#project-documentation--what-lives-where)
         says which document owns what.
 
   - type: input

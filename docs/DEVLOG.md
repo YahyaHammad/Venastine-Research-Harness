@@ -13567,3 +13567,95 @@ field.
 - `README.md`, `CONFIG_ARCHITECTURE.md`, `AGENTS.md`, `ARCHITECTURE.md`,
   `tests/BREAKING_CHANGES.md` -- present-tense prose; history rows left
   as history.
+
+---
+
+## Batch 89 -- the record moved out of the root (2026-09-13)
+
+Forty-one tracked files sat at the repository root, and nineteen of them were
+documentation. The four largest -- `DEVLOG.md` at 867KB, `ROADMAP_v2.md` at
+450KB, `ARCHITECTURE.md` at 314KB and `AGENTS.md` at 226KB -- came to 1.8MB
+on their own, so anyone opening the repository scrolled past the entire
+internal record before reaching a line of code. Ten documents and two assets
+moved into `docs/` and `docs/assets/`; the root is 29 tracked files now.
+
+**Nothing about this change is a design change, and the work was in proving
+that.** No production module reads any of the ten. The single runtime
+document path in the codebase is `core/workspace_trust.py`'s
+`PROJECT_CONTEXT_FILENAME = "AGENTS.md"`, read by `core/config_loader.py`
+through `workspace_trust`, which is why `AGENTS.md` did not move and could
+not have: WS9 puts the ROOT copy inside D17's trust content hash, so
+relocating it would have broken a runtime path AND silently changed the hash
+of every project in one edit. `CLAUDE.md` and `QWEN.md` stayed with it, since
+the whole point of them is that a harness looking for one filename finds it
+without searching.
+
+The other four that stayed did so for named reasons rather than caution.
+`README.md` is GitHub's landing preview. `LICENSE` and `NOTICE` are what
+GitHub's licence detection looks for and what `pyproject.toml`'s
+`license-files` names -- and a `license-files` entry that points at nothing
+ships no licence in any sdist or wheel. `CONFIG_ARCHITECTURE.md` ships in the
+npm tarball and `config.py`'s docstring points at it.
+
+**`CONTRIBUTING.md`, `SECURITY.md` and `CODE_OF_CONDUCT.md` moved, and that
+is a decision that looks riskier than it is.** GitHub resolves all three from
+the root, from `.github/` or from `docs/`, so the Security-policy tab, the
+Code-of-Conduct badge and the contributing banner on a new issue or PR are
+unaffected. What is NOT resolved automatically is the five absolute
+`blob/main/<FILE>.md` URLs in `.github/ISSUE_TEMPLATE/`, which would have
+404ed after the merge with nothing failing first -- the issue forms render
+fine with a dead link in them.
+
+**The one edit no test can see is in `scripts/prepublish-check.mjs`.** Its
+`REQUIRED` array names `THIRD_PARTY_NOTICES.md` and is compared against
+`npm pack --dry-run --json`; nothing in the suite reads that array, so a
+missed path there surfaces at `npm publish`, and a published npm version can
+never be replaced. `package.json`'s `files` is pinned by
+`test_every_npm_allowlist_entry_exists` and failed immediately, as designed
+-- the two halves of the same fact, one checked and one not.
+
+`files` keeps naming the three shipped documents individually rather than
+gaining a `docs/` directory entry: a directory entry there would put 1.8MB of
+ROADMAP and DEVLOG into every tarball, which is the opposite of what the npm
+channel is for.
+
+**What was deliberately not done.** Roughly 300 bare-filename mentions
+("see ARCHITECTURE.md §4.1") live inside the moved documents. They name a
+document rather than a path and stay correct, and most of them are inside
+`ROADMAP.md`, `ROADMAP_v2.md` and `DEVLOG.md`, which are append-only records
+-- a sweep through them is precisely the edit CONTRIBUTING.md forbids. Only
+the documentation map, the ownership table, the source tree and real markdown
+links were rewritten. No `docs/README.md` index was added either: it would be
+a second hand-maintained copy of README's own doc index, which is the
+duplicate shape `AGENTS.md` opens by warning about.
+
+### Verification
+
+`git status` reported twelve `R` renames rather than delete/add pairs, so the
+history follows the files. `tests/test_docs_consistency.py` alone -- the
+`docs-consistency` job's invocation -- failed on exactly one test before the
+packaging edit (`test_every_npm_allowlist_entry_exists`, naming all three
+moved entries) and passed 32/32 after. Then the full suite.
+
+### Files touched
+
+- `docs/` -- `ARCHITECTURE.md`, `ROADMAP.md`, `ROADMAP_v2.md`, `DEVLOG.md`,
+  `TECHNICAL_DEBT.md`, `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`,
+  `PRIVACY.md`, `THIRD_PARTY_NOTICES.md` moved in; `docs/assets/` took the
+  screenshot and the mermaid diagram.
+- `tests/test_docs_consistency.py` -- a `DOCS` anchor beside `ROOT`, eight
+  call sites repointed, `DOC_PATTERNS`' keys made repo-relative.
+- `package.json`, `scripts/prepublish-check.mjs` -- the three shipped
+  documents and `REQUIRED`.
+- `.github/ISSUE_TEMPLATE/{audit-finding,config,docs,enhancement}.yml`,
+  `.github/PULL_REQUEST_TEMPLATE.md` -- five absolute URLs and the prose.
+- `README.md` -- the screenshot on line 1 and eleven documentation links.
+- `AGENTS.md` -- the documentation map, plus the paragraph recording which
+  six documents stayed at the root and why.
+- `CLAUDE.md`, `QWEN.md`, `NOTICE` -- pointers repointed.
+- `docs/CONTRIBUTING.md` -- nine rows of the "what lives where" table, and
+  the sentence that used to say every document was at the root.
+- `docs/ARCHITECTURE.md` -- a `docs/` branch in the source tree.
+- `docs/THIRD_PARTY_NOTICES.md` -- the mermaid file's path.
+- `tests/BREAKING_CHANGES.md` -- the new section, including the packaging
+  row that nothing tests.

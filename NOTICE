@@ -10,5 +10,5 @@ You may obtain a copy of the License at
     http://www.apache.org/licenses/LICENSE-2.0
 
 This project does not redistribute its dependencies; they are resolved from
-PyPI at install time under their own licenses. See THIRD_PARTY_NOTICES.md for
+PyPI at install time under their own licenses. See docs/THIRD_PARTY_NOTICES.md for
 the license assessment of each declared dependency.

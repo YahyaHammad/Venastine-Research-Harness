@@ -4369,3 +4369,26 @@ not what lands on disk.
 | `str.capitalize()` on a sentence that is not all lowercase | `Docker` becomes `docker` and a deliberate `WITHOUT` becomes `without` | It lowercases everything after the first character. In the AUTHORITY modal those words are the content |
 | Stamp `document()`'s cache before reading the file | One save lands between the stat and the read and is cached under the old stamp | The next stat matches, so the stale tree is served until the save after that. Re-stat after the read |
 | Make `/config` key lookup case-sensitive again | `/config MAX_TOKENS` reports a key that plainly exists as missing | `config.py` publishes these names upper-cased and the docs quote both. Two rows differing only in case cannot exist, so there is nothing for case-sensitivity to disambiguate |
+
+---
+
+## The reference record moved into `docs/` (batch 89)
+
+`tests/test_docs_consistency.py` is the only module in the suite that opens
+a repository document from disk, and it did so as `os.path.join(ROOT, name)`
+for all of them. Batch 89 moved ten documents into `docs/`, so the file now
+carries two anchors -- `ROOT` for what stayed (`README.md`, `AGENTS.md`,
+`CONFIG_ARCHITECTURE.md`, `package.json`, `pyproject.toml`,
+`bin/venastine.mjs`, `providers.json.example`) and `DOCS` for what moved.
+
+The failure is loud and immediate, which is the good case: `FileNotFoundError`
+naming the joined path. The bad case is the packaging one below, where
+nothing in the suite is looking.
+
+| Change | Test | Fix |
+|---|---|---|
+| Move another document into or out of `docs/` | every check in `test_docs_consistency.py` that opens it | Swap `ROOT` for `DOCS` (or back) at that call site; `DOC_PATTERNS`' keys are repo-relative paths, so its entry moves too |
+| Add a root-then-`docs/` fallback resolver instead | nothing -- it passes | A fallback makes a genuinely missing document look present, which is the one thing this file exists to catch. Two explicit anchors, no search |
+| Move a document that `package.json`'s `files` ships | `test_every_npm_allowlist_entry_exists` | Update the allowlist entry to the new path. It ships `docs/THIRD_PARTY_NOTICES.md`, `docs/SECURITY.md` and `docs/PRIVACY.md` individually -- a bare `docs/` would put 1.8 MB of ROADMAP and DEVLOG in the tarball |
+| Move `THIRD_PARTY_NOTICES.md` without updating `scripts/prepublish-check.mjs` | **nothing** | `REQUIRED` there is read by no test. It fails at `npm publish`, after which the version can never be replaced. Change both in one commit |
+| Move `AGENTS.md` | `test_workspace_trust.py`, and the harness at runtime | Do not. `core/config_loader.py` reads it through `workspace_trust.PROJECT_CONTEXT_FILENAME`, and WS9 puts the root copy inside D17's trust content hash |

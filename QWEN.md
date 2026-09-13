@@ -5,8 +5,8 @@
 It is the agent-context file for this project, and it is not optional reading: it records design
 decisions that are *locked* rather than defaults to re-derive, and several of them have already
 been broken once by someone who reasoned from the code alone. It also names which of
-`ARCHITECTURE.md`, `ROADMAP.md`, `ROADMAP_v2.md`, `DEVLOG.md` and `tests/BREAKING_CHANGES.md` to
-read for what.
+`docs/ARCHITECTURE.md`, `docs/ROADMAP.md`, `docs/ROADMAP_v2.md`, `docs/DEVLOG.md` and
+`tests/BREAKING_CHANGES.md` to read for what.
 
 This file used to carry its own copy of that guidance. It drifted — by the time it was audited,
 five of its claims were false about the present code, including a test count off by an order of

@@ -1,4 +1,4 @@
-![Venastine Research Harness Screenshot](Venastine_Research_Harness_Demo_Photo.png)
+![Venastine Research Harness Screenshot](docs/assets/Venastine_Research_Harness_Demo_Photo.png)
 
 # Venastine Research Harness
 
@@ -892,22 +892,22 @@ Run the test suite with `pytest` — 4518 tests, fully offline, no API keys need
 This file is the user-facing one. For working on the code:
 
 - **[AGENTS.md](./AGENTS.md)** — the agent-context file, and the place to start. `CLAUDE.md` and `QWEN.md` are pointers to it so a tool looking for a particular filename finds one without the guidance being duplicated.
-- **[ARCHITECTURE.md](./ARCHITECTURE.md)** — file-by-file contracts, what belongs where, and the known gotchas. Read before changing anything non-trivial, especially around persistence (`database.py` / `storage.py` / `core/memory.py` are three distinct and easily confused responsibilities).
-- **[ROADMAP.md](./ROADMAP.md)** and **[ROADMAP_v2.md](./ROADMAP_v2.md)** — implementation specs plus the locked Design Decisions Record that most of the reasoning above traces back to.
-- **[DEVLOG.md](./DEVLOG.md)** — what was followed, what was deviated from, and why.
+- **[ARCHITECTURE.md](./docs/ARCHITECTURE.md)** — file-by-file contracts, what belongs where, and the known gotchas. Read before changing anything non-trivial, especially around persistence (`database.py` / `storage.py` / `core/memory.py` are three distinct and easily confused responsibilities).
+- **[ROADMAP.md](./docs/ROADMAP.md)** and **[ROADMAP_v2.md](./docs/ROADMAP_v2.md)** — implementation specs plus the locked Design Decisions Record that most of the reasoning above traces back to.
+- **[DEVLOG.md](./docs/DEVLOG.md)** — what was followed, what was deviated from, and why.
 
 ### Contributing and policies
 
-- **[CONTRIBUTING.md](./CONTRIBUTING.md)** — inbound license (Apache-2.0 + DCO), the setup and test loop, the issue and PR format, and a table of which document to update for what.
-- **[SECURITY.md](./SECURITY.md)** — how to report a vulnerability privately, what is in and out of scope, and the coordinated-disclosure timeline. **Do not open a public issue for one.**
-- **[PRIVACY.md](./PRIVACY.md)** — what is stored locally, what leaves your machine, and how to delete it. No telemetry.
-- **[CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md)** — Contributor Covenant 2.1, and the private channel for reporting a violation.
-- **[THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)** — the dependency license assessment: every declared direct dependency, its license, and its Apache-2.0 compatibility.
+- **[CONTRIBUTING.md](./docs/CONTRIBUTING.md)** — inbound license (Apache-2.0 + DCO), the setup and test loop, the issue and PR format, and a table of which document to update for what.
+- **[SECURITY.md](./docs/SECURITY.md)** — how to report a vulnerability privately, what is in and out of scope, and the coordinated-disclosure timeline. **Do not open a public issue for one.**
+- **[PRIVACY.md](./docs/PRIVACY.md)** — what is stored locally, what leaves your machine, and how to delete it. No telemetry.
+- **[CODE_OF_CONDUCT.md](./docs/CODE_OF_CONDUCT.md)** — Contributor Covenant 2.1, and the private channel for reporting a violation.
+- **[THIRD_PARTY_NOTICES.md](./docs/THIRD_PARTY_NOTICES.md)** — the dependency license assessment: every declared direct dependency, its license, and its Apache-2.0 compatibility.
 
 ## License
 
 Apache-2.0 — see [LICENSE](./LICENSE) and [NOTICE](./NOTICE). Copyright 2026 Yahya Hammad.
 
 No third-party source code is bundled here; dependencies are resolved from PyPI at install time
-under their own licenses. [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md) records the
+under their own licenses. [THIRD_PARTY_NOTICES.md](./docs/THIRD_PARTY_NOTICES.md) records the
 assessment of each one, and of the third-party text the repository reproduces.
