@@ -60,6 +60,14 @@ risk. An `AGENT_CONFIG_FILE` variable would hand it straight back, and it would
 look like the obvious sibling of `AGENT_ENV_FILE` and `APP_DB_PATH`. It is not:
 those redirect *state*, and this is a shipped asset.
 
+### The one location survives an npm update (batch 86)
+
+`config.yaml` ships inside the package, and **npm replaces a package directory wholesale** -- measured with `npm pack` and two installs into a scratch prefix: an edited `max_tokens: 31337` came back as the shipped `16000`, and the new version's `max_iterations` default arrived with it. So the rule above had a cost nobody had paid attention to: every value an npm user had chosen was discarded at each update.
+
+The fix is a merge, **not a second location**. `config_update.py` keeps the pristine copy of the installed version and a mirror of the user's own file in `~/.config/venastine/config-state/`, and after an update it re-applies the difference onto whatever npm has just written. The live document is still the one inside the harness, still resolved from `__file__`, still with no variable that redirects it -- the state directory holds HISTORY, which is state, and state has always been redirectable here. A reader who finds a `config.yaml` under the home directory and concludes the user tier is back has found the mirror, which nothing reads at startup.
+
+Two consequences worth stating. Keys the user never touched adopt the new version's defaults, and keys the new version adds arrive at theirs -- the merge starts FROM the shipped file, so that half needs no code. And the nine AUTHORITY keys are restored like any other, each one named in the report the launch prints: an update must neither silently loosen nor silently tighten the posture, and the file surviving is the status quo.
+
 ### Read once, at startup
 
 `config.py` imports `config_schema`, which reads the file, folds the

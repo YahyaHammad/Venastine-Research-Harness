@@ -40,6 +40,8 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.dirname(HERE);
 const REQUIREMENTS = path.join(ROOT, 'requirements.txt');
 const MAIN = path.join(ROOT, 'main.py');
+const CONFIG_FILE = path.join(ROOT, 'config.yaml');
+const CONFIG_UPDATE = path.join(ROOT, 'config_update.py');
 
 /**
  * ~/.config/venastine ON EVERY PLATFORM, Windows included.
@@ -51,6 +53,16 @@ const MAIN = path.join(ROOT, 'main.py');
  * across two locations by platform is the bug this constant exists to avoid.
  */
 const CONFIG_HOME = path.join(os.homedir(), '.config', 'venastine');
+
+/**
+ * Where config_update.py keeps the pristine copy and the user's mirror.
+ *
+ * Spelled in two languages, so a docs-consistency test holds this against
+ * `config_update.STATE_DIRNAME`. Node owns only the two cheap halves -- the
+ * post-session copy below, and the doctor lines -- because everything else
+ * needs a YAML parser and this file has ZERO dependencies by design.
+ */
+const CONFIG_STATE = path.join(CONFIG_HOME, 'config-state');
 
 const MIN_PYTHON = [3, 11];
 
@@ -255,6 +267,65 @@ function run(cmd, args) {
   if (r.status !== 0) throw new Error(`${path.basename(cmd)} ${args[0]} exited ${r.status}`);
 }
 
+/**
+ * Put the user's own settings back into config.yaml after npm replaced it.
+ *
+ * npm replaces a package directory WHOLESALE on update -- measured with
+ * `npm pack` and two installs into a scratch prefix: an edited
+ * `max_tokens: 31337` came back as the shipped `16000`. `config.yaml` ships
+ * inside the package (CONFIG_ARCHITECTURE.md locks it to one location for a
+ * security reason that this problem does not touch), so without this the
+ * update silently discards every value the user set.
+ *
+ * `config_update.py` owns every decision; this call owns none of them. It
+ * runs on every launch and does nothing on almost all of them -- the module
+ * imports no first-party code until it has decided there is a merge to do,
+ * because `import config_schema` alone costs 294ms of pydantic and ruamel.
+ *
+ * THE STATUS IS DELIBERATELY UNCHECKED. A configuration-history feature must
+ * not be able to stop the harness from starting; the module says so itself by
+ * always exiting 0, and this is the other half of that promise.
+ *
+ * `firstRun` is the one fact Python cannot work out for itself: it is read
+ * from the venv stamp BEFORE ensureRuntime() builds it. Without it, an
+ * install that was already in use when this feature arrived would have its
+ * edited config.yaml recorded as the pristine baseline, and those edits would
+ * be lost at the next update instead of preserved by it.
+ */
+function syncConfig(rt, firstRun) {
+  try {
+    spawnSync(rt.python, [CONFIG_UPDATE, ...(firstRun ? ['--first-run'] : [])], {
+      stdio: 'inherit',
+      cwd: ROOT,
+      windowsHide: true,
+    });
+  } catch {
+    // See above: never fatal.
+  }
+}
+
+/**
+ * Mirror config.yaml AFTER the session, so a /config write survives an update.
+ *
+ * This is the common upgrade order and the whole feature misses its own case
+ * without it: change a setting, exit, `npm update` days later, launch. By
+ * then npm has replaced the file, so the only copy of that change is the one
+ * taken here. The next launch's mirror is too late.
+ *
+ * Safe to run unconditionally: config_update.py has already re-recorded the
+ * version by this point, so this can never be the copy that overwrites the
+ * mirror with a file npm just replaced.
+ */
+function mirrorConfig() {
+  try {
+    if (fs.existsSync(path.join(CONFIG_STATE, 'version'))) {
+      fs.copyFileSync(CONFIG_FILE, path.join(CONFIG_STATE, 'yours.yaml'));
+    }
+  } catch {
+    // A read-only install, a removed state directory. Not worth a word.
+  }
+}
+
 /** Walks up from cwd the way dotenv's find_dotenv(usecwd=True) now does. */
 function findEnvFile() {
   let dir = process.cwd();
@@ -306,6 +377,25 @@ function childEnv() {
   return env;
 }
 
+/**
+ * One line about the config merge, WITHOUT starting Python.
+ *
+ * --venastine-doctor returns before ensureRuntime(), so there may be no
+ * interpreter to ask. Everything here is a plain text file for that reason.
+ */
+function configStateSummary() {
+  try {
+    const version = fs.readFileSync(path.join(CONFIG_STATE, 'version'), 'utf8').trim();
+    const record = path.join(CONFIG_STATE, 'last-update.txt');
+    const last = fs.existsSync(record)
+      ? `, last merged at ${fs.statSync(record).mtime.toISOString().slice(0, 10)}`
+      : '';
+    return `${CONFIG_STATE} (tracking ${version}${last})`;
+  } catch {
+    return `${CONFIG_STATE} (not tracked yet; the next launch starts it)`;
+  }
+}
+
 function doctor(python, rt) {
   const cwd = process.cwd();
   const env = childEnv();
@@ -325,6 +415,8 @@ function doctor(python, rt) {
     `  log file      : ${env.AGENT_LOG_FILE || path.join(cwd, 'logs', 'app.log')}`,
     `  output dir    : ${env.AGENT_OUTPUT_DIR || path.join(cwd, 'output')}`,
     `  workspace     : ${env.AGENT_WORKSPACE || path.join(cwd, 'workspace')}`,
+    `  config.yaml   : ${CONFIG_FILE}`,
+    `  config state  : ${configStateSummary()}`,
   ];
   process.stdout.write(lines.join('\n') + '\n');
 }
@@ -348,7 +440,15 @@ async function main() {
   const python = findPython();
   const rt = runtimePaths();
 
+  // BEFORE ensureRuntime, which is what makes it an answer: "has this install
+  // ever been launched?" is the only way to know whether the config.yaml in
+  // front of us is pristine or already edited. See syncConfig().
+  const firstRun = !isReady(rt);
+
   if (wantReinstall) {
+    // The venv only. The config state in CONFIG_STATE is the user's own
+    // settings history and has nothing to do with a broken environment --
+    // removing it here would throw away the edits an update is about to need.
     fs.rmSync(rt.dir, { recursive: true, force: true });
     process.stdout.write(`Removed ${rt.dir}\n`);
   }
@@ -359,6 +459,7 @@ async function main() {
   }
 
   await ensureRuntime(python, rt, { assumeYes });
+  syncConfig(rt, firstRun);
 
   // Let the child own the terminal's interrupt. Without this, Ctrl+C kills
   // the launcher first and the harness loses its chance to shut down.
@@ -373,6 +474,8 @@ async function main() {
     env: childEnv(),
     windowsHide: false,
   });
+
+  mirrorConfig();
 
   if (child.error) fail(`Could not start the harness: ${child.error.message}`);
   if (child.signal) process.exit(128 + (os.constants.signals[child.signal] || 0));

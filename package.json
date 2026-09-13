@@ -41,6 +41,7 @@
     "config.yaml",
     "config_schema.py",
     "config_edit.py",
+    "config_update.py",
     "storage.py",
     "database.py",
     "credentials.py",

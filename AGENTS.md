@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 4431 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 4470 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -71,6 +71,8 @@ no bundle. `bin/venastine.mjs` is the only thing npm can execute; its whole job 
 cwd and stdio. The harness itself did not have to change to support this, because every shipped
 asset already resolves from `__file__` (`HARNESS_ROOT`, `_package_root()`, `prompts/system_prompts.py`)
 and every piece of state from cwd with an env override.
+
+**`npm update` replaces the package directory wholesale, `config.yaml` included** (batch 86, measured with `npm pack` and two installs into a scratch prefix). `config_update.py` is what makes that survivable: the launcher runs it before `main.py`, and it re-applies the user's own values onto the freshly shipped file from a pristine copy and a mirror kept in `~/.config/venastine/config-state/`. Two rules there are load-bearing rather than tidy. **The mirror is refreshed only after the version check** -- copying `config.yaml` over it first overwrites it with the file npm just replaced, and every other test still passes. **Nothing in that path may fail a launch**: the module always exits 0 and the launcher does not check its status, which is why the cheap path imports no first-party code at all (`import config_schema` alone costs 294ms of pydantic and ruamel, on a path that runs at every launch and does nothing on almost all of them).
 
 **The launcher must never set `PYTHONPATH` or `AGENT_WORKSPACE`** (test-pinned,
 `test_the_launcher_never_sets_the_two_variables_that_would_break_it`). `tools/isolation.py` builds
@@ -177,6 +179,7 @@ That qualifier is load-bearing, not pedantry (audit #128). This file used to say
 | `config.yaml` | Plain values only, harness tier, ONE location | Anything derived; a user or project tier; an override variable |
 | `config_schema.py` | The schema, the env-override table, the loader, `HARNESS_AUTHORITY_KEYS` | Any first-party import — that is a cycle back through `core/config_loader.py` |
 | `config_edit.py` | `/config`'s catalogue, the value grammar, the comment-preserving writer, `RestartRequest` | Anything about a terminal; applying a change to a running process |
+| `config_update.py` | The three-way merge that carries an edited `config.yaml` across an `npm update`; `bin/venastine.mjs` runs it before `main.py` | Anything at runtime; a user tier or a redirectable config path -- it puts values back into the ONE location, it does not add a second |
 | `config.py` | Publishing those values as plain mutable module globals | Any logic, any `if`/`else`, any `os.environ` read, any decision-making function |
 | `credentials.py` / `env_secrets.py` | LLM provider keys / misc tool keys | Each other's domain |
 | `database.py` | The engine/connection only | Table classes, CRUD, awareness of what data exists |

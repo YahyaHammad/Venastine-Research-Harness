@@ -13212,3 +13212,97 @@ old to new, which is where someone checks their work before applying it.
   states the defect.
 - `tests/test_tui.py` -- four new.
 - `ARCHITECTURE.md`, `README.md`, `tests/BREAKING_CHANGES.md`.
+
+
+---
+
+## Batch 86 -- `npm update` was throwing away every edited setting (2026-09-13)
+
+`config.yaml` ships INSIDE the package. npm replaces a package directory
+wholesale on update, so every value a user had chosen was discarded at each
+`npm update` and replaced by the new version's defaults.
+
+**Measured before it was written**, with `npm pack` and two installs into a
+scratch prefix: an edited `max_tokens: 31337` came back as the shipped
+`16000`, and the new version's `max_iterations` default arrived with it. Also
+measured, and it narrowed one branch: a SAME-version `npm install` re-extracts
+nothing at all, `--force` included, so the reinstall case is reachable only
+through a real re-extract (`npm ci`, a cleared cache, a deleted
+`node_modules`).
+
+### Why a merge and not a move
+
+The obvious fix is to put the live file in `~/.config/venastine`. That trades
+a packaging annoyance for the security property CONFIG_ARCHITECTURE.md's *One
+location, and no override variable* exists to hold: `settings.json` rejects
+`shell_approval_mode`, `ensemble_models`, `critic_model` and `embedder_model`
+BY NAME because a project's file beats the user's and arrives with a directory
+you cloned, and a file that lives in exactly one place inside the harness
+carries none of that. So the file stays where it is and `config_update.py`
+puts the user's values back into it.
+
+### Why not a journal of `/config` writes, which is half the code
+
+Because `/config` cannot write containers at all -- they are view-only by
+design -- while README.md sends people to the file BY HAND for exactly those:
+`ensemble_models`, `domain_authority_classes`, `similarity_calibration`. A
+record of what `/config` did would lose the keys the documentation tells
+people to edit by hand. That is what forces the three-way shape: a pristine
+copy has to be kept so the whole file can be diffed against it.
+
+### The state, and the one ordering that matters
+
+`~/.config/venastine/config-state/` holds `version`, `shipped.yaml` (the
+pristine file of that version) and `yours.yaml` (a mirror of the user's). The
+merge is deviations of the second against the first, re-applied onto whatever
+npm just wrote -- so untouched keys adopt the new defaults, and keys the new
+version ADDS need no code at all, because the merge starts from the new file.
+
+**The mirror is refreshed only after the version check, and getting that
+backwards is invisible.** Copy `config.yaml` over `yours.yaml` first and the
+mirror is overwritten with the file npm just replaced: the edits are gone
+before anything looks at them. Mutating the order deliberately turns 14 tests
+red, which is the only reason it is safe to state so plainly.
+
+The launcher owns two cheap halves and no decisions: it passes `--first-run`
+(read from its own venv stamp BEFORE `ensureRuntime` builds it -- the one fact
+Python cannot work out for itself), and it copies the file to the mirror after
+the session, because "change a setting, exit, update days later, launch" is
+the common upgrade order and the next launch's mirror would be too late.
+
+### A container took its section banner with it
+
+Found by running it, not by reasoning. Restoring
+`models_rejecting_sampling_params` dropped SIX comment lines -- the
+`Critic and embedder routing` banner and the AUTHORITY note under
+`critic_model` -- from the user's file, silently, while every scalar restored
+cleanly. ruamel anchors the prose that FOLLOWS a block sequence to that
+sequence's last index (`node.ca.items[5]` on a six-entry list), not to the key
+in the parent mapping, so replacing the node takes the following section with
+it. Mutating the node in place does not help; that was measured too. `_place`
+re-anchors the trailer from the NEW pristine document onto the new last entry,
+so what survives is this version's documentation around the user's values.
+
+### What the decisions were
+
+Asked and answered rather than assumed. AUTHORITY keys are restored like any
+other and each one is NAMED in the report, because the file surviving is the
+status quo and an update must neither silently loosen nor silently tighten the
+posture. A container edited on both sides keeps the user's whole value -- never
+a deep merge, since a deletion the user made and an entry the new version
+added are the same shape. A value the new schema rejects is dropped on its own
+after a per-key walk, so one dead key costs that key rather than every edit
+ever made. And an install adopted mid-life records no baseline at all and
+falls back to a two-way merge once, because recording an already-edited file
+as pristine would make those edits the baseline and lose them at the very next
+update.
+
+### Files
+
+- `config_update.py` -- new. The state, the diff, the merge, the report.
+- `bin/venastine.mjs` -- `syncConfig`, `mirrorConfig`, the `firstRun` capture,
+  a doctor line, and a note that `--venastine-reinstall` leaves the config
+  state alone.
+- `tests/test_config_update.py` -- 36 new.
+- `package.json`, `README.md`, `AGENTS.md`, `ARCHITECTURE.md`,
+  `CONFIG_ARCHITECTURE.md`, `tests/BREAKING_CHANGES.md`.

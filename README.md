@@ -37,6 +37,8 @@ Two things differ from a clone, both to make a command you run from anywhere beh
 * **Credentials** fall back to `~/.config/venastine/providers.json` when the directory you are in has no `providers.json` of its own. A local one still wins, so per-project keys keep working.
 * **Conversation state** — `app.db` and the log — lives in `~/.config/venastine/`, so threads and memories follow you between directories instead of each folder getting its own silo. Research reports still land in `./output` beside the work that produced them, and the file-ops workspace stays in the current directory because it is a permission boundary. An existing `./app.db` always wins, so running the command inside a clone uses that clone's data.
 
+**Updating keeps your settings.** `npm update` replaces the package directory wholesale, `config.yaml` with it, so the launcher merges your own values back in before the harness starts and prints what it kept. Settings you never touched pick up the new version's defaults, and keys the new version adds arrive at theirs; a value the new version no longer accepts is dropped on its own and named, rather than costing you the rest. It works for values set with `/config` and for ones you edited in the file by hand, which is the only way to set a list like `ensemble_models`. The one case it cannot help with is an edit made after your last session and never launched before you updated -- npm has already replaced the file by the time anything of ours runs.
+
 `venastine --venastine-doctor` prints every one of those resolved paths, plus the interpreter and environment it found.
 
 ### From a clone
@@ -882,7 +884,7 @@ classifier is described under *Security model* above. If you have a fork or a lo
 note that `tool_approvals.shell` now ships `false` and `shell_approval_mode` is the gate — see
 `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 4431 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+Run the test suite with `pytest` — 4470 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
 ## Documentation
 

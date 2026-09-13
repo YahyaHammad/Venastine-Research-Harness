@@ -1337,6 +1337,35 @@ def test_the_launcher_never_sets_the_two_variables_that_would_break_it():
             f"launcher breaks that quietly rather than loudly.")
 
 
+def test_the_launcher_and_python_agree_about_the_config_state():
+    """Batch 86. Four names are spelled in two languages, and a drift in any
+    of them is silent in the worst way: the launcher would copy the user's
+    `config.yaml` to a path the merge never reads, so `npm update` would go
+    back to discarding every setting with nothing failing anywhere.
+
+    Node owns only the cheap halves -- the post-session copy and the doctor
+    line -- because this file has ZERO npm dependencies by design and the
+    merge needs a YAML parser. That split is what puts the same four strings
+    in both files.
+    """
+    import config_update
+
+    with open(os.path.join(ROOT, "bin", "venastine.mjs"), encoding="utf-8") as f:
+        source = f.read()
+
+    for spelling in (config_update.STATE_DIRNAME, config_update.VERSION_FILE,
+                     config_update.YOURS_FILE, config_update.REPORT_FILE):
+        assert f"'{spelling}'" in source, (
+            f"bin/venastine.mjs no longer spells {spelling!r}, which "
+            f"config_update.py still expects. The launcher writes the mirror "
+            f"this module reads; a path that only one of them believes in "
+            f"fails nothing and loses the user's settings at the next update.")
+
+    assert os.path.basename(config_update.LIVE) in source, (
+        "the launcher no longer names config.yaml, so mirrorConfig() cannot "
+        "be copying the file the merge is about.")
+
+
 # ---------------------------------------------------------------------------
 # ---- hand-counted roster numbers (the September 2026 drift) -----------------
 # ---------------------------------------------------------------------------
