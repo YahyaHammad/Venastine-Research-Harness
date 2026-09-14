@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 from rich import box
 from rich.console import Console
+from rich.measure import measure_renderables
 from rich.style import Style
 from rich.syntax import Syntax
 from rich.table import Table
@@ -18,7 +19,7 @@ from textual.binding import Binding
 from textual.content import Content
 from textual.message import Message
 from textual.reactive import reactive
-from textual.widgets import RichLog, Static, TextArea
+from textual.widgets import ContentSwitcher, RichLog, Static, TextArea
 
 from prompts.system_prompts import pass_label
 from tui import diffs, markdown, ravens, themes
@@ -1886,11 +1887,12 @@ class Transcript(RichLog):
     streaming latency should look here first." They should still look
     here first; the answer is now the two rules above.
 
-    Known edge, stated rather than fixed: a terminal resize mid-answer
-    leaves already-drawn rows wrapped to the old width. `_entries` keeps
-    the unwrapped source, so rerender() puts it right, and a resize
-    handler for the seconds an answer is in flight is machinery with no
-    user.
+    Known edge, stated rather than fixed: a terminal resize leaves every
+    already-drawn row wrapped to the old width, not only an answer in
+    flight. `_entries` keeps the unwrapped source, so rerender() puts it
+    right, but it flushes an open span and cannot simply run on a resize
+    -- TECHNICAL_DEBT item 23. A pane the switcher HIDES is a different
+    cause with the same look, and that one is fixed: see `_region_width`.
 
     §26 adds two things and one obligation.
 
@@ -1937,13 +1939,6 @@ class Transcript(RichLog):
         self._links: dict[int, tuple] = {}
         # §47. entry index -> the spawn call that drew that line.
         self._agents: dict = {}
-        # §47. Paint-as-if-this-wide, or None to measure. The read-only
-        # viewer is painted while the switcher is hiding it (region 0,
-        # floored to min_width), so the app hands it the live transcript's
-        # width for the paint and clears it after. An attribute rather than
-        # a parameter because five sites measure and only this one is ever
-        # hidden; None keeps every other caller exactly as measured.
-        self._paint_width: int | None = None
         # §38. An assistant span with rows already on screen: its label is
         # drawn and its single entry is open at _entries[-1].
         self._stream_open = False
@@ -1960,33 +1955,75 @@ class Transcript(RichLog):
         self._label_in_force = False
 
     def write(self, content, *args, width=None, **kwargs):
-        """Funnel every row through the paint width when one is set (§47).
+        """Write at the width this pane will be SHOWN at (§47).
 
         `RichLog.write` wraps at WRITE time -- 8.x stores Strips --
-        measuring the widget's own region: 0 while the switcher hides
-        this pane, floored to min_width (78). The viewer paints hidden
-        (see `_paint_thread_view`), so without this the prose half of a
-        replay froze at 78 while our own pre-wrap (thinking, lists,
-        diffs, streamed commits via `_wrap_width`) used the override:
-        two widths in one transcript. An explicit width also overrides
-        min_width on RichLog's side, which is what makes the two agree
-        rather than merely narrow together.
+        measuring the widget's own region, which is 0 while the switcher
+        hides this pane and is then floored to min_width (78). Both panes
+        are written hidden (see `_region_width`), so a `width=None` write
+        there is handed the width RichLog would have chosen with the pane
+        on screen; our own pre-wrap (thinking, lists, diffs, streamed
+        commits) reads the same region through `_wrap_width`, so the two
+        halves of one transcript cannot break at two widths.
+
+        The borrowed REGION is not that width, and passing it is the
+        obvious shortcut this used to take. An explicit width switches off
+        RichLog's shrink, so a renderable that pads to its render width --
+        a code block under a syntax theme with a background -- drew edge
+        to edge where the same block on screen stopped at
+        max(longest line, 78). Both shipped syntax themes are transparent,
+        which is why nobody saw it; the width pins run under monokai.
+
+        An explicit width is the caller's and passes through untouched.
 
         `*args` because Textual itself replays deferred writes
         positionally (`self.write(*deferred_render)` on resize, with
         content/width/expand/shrink/scroll_end all filled) -- a
-        keyword-only width would turn its own replay into a TypeError.
-        Positional width counts as explicit and wins over the override,
-        exactly like the keyword form.
+        keyword-only width would turn its own replay into a TypeError. A
+        never-shown pane defers every write, so its deferred entries carry
+        the width computed here, which is the width it is shown at.
         """
-        if not args and width is None and self._paint_width:
-            return super().write(content, width=self._paint_width,
-                                 **kwargs)
         if args:
             # Textual's own replay (or any positional caller): pass
             # through byte-identical, never merging a keyword beside it.
             return super().write(content, *args, **kwargs)
+        if width is None:
+            width = self._borrowed_render_width(content, **kwargs)
         return super().write(content, width=width, **kwargs)
+
+    def _borrowed_render_width(self, content, expand: bool = False,
+                               shrink: bool = True,
+                               **_ignored) -> int | None:
+        """RichLog.write's render width as if this pane were on screen, or
+        None when it is on screen (or there is nothing to borrow), which
+        leaves RichLog to measure for itself.
+
+        Mirrors `RichLog.write` in the pinned textual step for step:
+        measure the renderable, expand or shrink it against the region,
+        raise the result to min_width. A pin bump that changes that
+        computation fails the row equality in
+        `TestTheLiveTranscriptWritesAtTheOnScreenWidth`.
+        """
+        try:
+            if self.scrollable_content_region.width:
+                return None
+            region = self._borrowed_width()
+        except Exception:  # noqa: BLE001 -- unmounted; RichLog decides
+            return None
+        if not region:
+            return None
+        renderable = self._make_renderable(content)
+        console = self.app.console
+        options = console.options
+        if isinstance(renderable, Text) and not self.wrap:
+            options = options.update(overflow="ignore", no_wrap=True)
+        measured = measure_renderables(console, options, [renderable]).maximum
+        render_width = measured
+        if expand and measured < region:
+            render_width = max(measured, region)
+        if shrink and measured > region:
+            render_width = min(measured, region)
+        return max(render_width, self.min_width)
 
     # -- styling -----------------------------------------------------------
 
@@ -2535,6 +2572,42 @@ class Transcript(RichLog):
 
     # -- streaming ---------------------------------------------------------
 
+    def _region_width(self) -> int:
+        """This pane's scrollable width -- or, while `#pane` hides it, the
+        width of the pane the switcher is showing instead (§47).
+
+        A hidden widget has no region, so it measures 0 and RichLog floors
+        the write to min_width (78). Both panes are written while hidden:
+        the viewer is painted before the switcher shows it, and a running
+        turn goes on writing to the live transcript while a stored run is
+        being read. RichLog stores Strips, so a row drawn at 78 stays at 78
+        after the pane comes back -- the answer down the left half of a
+        wide panel, healed only by a restart's replay.
+
+        Equal by construction rather than by hope: the two panes are the
+        same box in app.tcss (`border: solid`, `padding: 0 1`) and RichLog
+        is `overflow-y: scroll`, so the scrollbar gutter is the same on
+        both. `test_both_panes_measure_the_same_width_when_shown` holds
+        that. Measured at every write, so there is nothing to set when the
+        viewer opens, nothing to clear when it closes, and a resize with the
+        viewer up is simply the next measurement.
+
+        Raises where the widget cannot be measured at all (built bare in the
+        suite); callers guard, as `_wrap_width` always has.
+        """
+        return self.scrollable_content_region.width or self._borrowed_width()
+
+    def _borrowed_width(self) -> int:
+        """The on-screen sibling's width while the switcher hides this pane,
+        or 0 when there is no such sibling to measure."""
+        parent = self.parent
+        if not isinstance(parent, ContentSwitcher):
+            return 0
+        shown = parent.visible_content
+        if shown is self or not isinstance(shown, Transcript):
+            return 0
+        return shown.scrollable_content_region.width
+
     def _wrap_width(self, prefix: str = "") -> int:
         """Usable text columns for one rendered row, or 0 when there is
         nothing to measure.
@@ -2548,20 +2621,17 @@ class Transcript(RichLog):
         for safety) wrapped a streamed answer ~15 columns narrower than the
         same text replayed by rerender() -- so a /theme mid-session visibly
         reflowed the conversation, which is the one thing a pre-wrap must
-        not do.
+        not do. The region is read through `_region_width`, so a pane the
+        switcher is hiding pre-wraps at the width it will be shown at.
 
         A widget has no size before mount and is built bare throughout the
         suite, so the guard is around the measurement itself, for the same
         reason _styles' is.
         """
-        if self._paint_width:
-            width = self._paint_width
-        else:
-            try:
-                width = max(self.scrollable_content_region.width,
-                            self.min_width)
-            except Exception:  # noqa: BLE001 -- unmounted; the newline rule
-                return 0
+        try:
+            width = max(self._region_width(), self.min_width)
+        except Exception:  # noqa: BLE001 -- unmounted; the newline rule alone
+            return 0
         width -= len(prefix)
         return width if width >= MIN_WRAP_WIDTH else 0
 
@@ -2724,16 +2794,31 @@ class Transcript(RichLog):
                         self._style("thinking")))
 
     def _write_thinking_lines(self, text: str) -> None:
-        """One bar-prefixed row per source line. The rows are pre-wrapped
-        by the time they arrive here (that is what _wrap_width's prefix
-        argument is for), because RichLog's own soft wrap would put the
-        bar on the first row of a wrapped line and nothing on the rest."""
+        """One bar-prefixed row per RENDERED row.
+
+        RichLog's own soft wrap would put the bar on the first row of a
+        wrapped line and nothing on the rest, so every source line is cut
+        into rows here, at `_wrap_width`'s width after the bar, by
+        `markdown.plain_wrap` -- `plain_split`'s rule, the one
+        `thinking_delta` commits by.
+
+        It has to happen HERE and not only in `thinking_delta`, because two
+        callers hand this lines longer than a row: a replay (`rerender()`, a
+        resumed thread, the thread viewer) passes the whole entry, and the
+        newline rule commits everything through the last newline uncut.
+        Both drew their continuation rows with no bar -- visible in any
+        restarted session with long reasoning. A chunk `thinking_delta` has
+        already cut fits one row and passes through as it was.
+        """
+        width = self._wrap_width(THINKING_INDENT + THINKING_BAR)
         lines = text.split("\n")
         if lines and lines[-1] == "":
             lines.pop()
+        style = self._style("thinking")
         for line in lines:
-            self.write(Text(f"{THINKING_INDENT}{THINKING_BAR}{line}",
-                            self._style("thinking")))
+            for row in markdown.plain_wrap(line, width):
+                self.write(Text(f"{THINKING_INDENT}{THINKING_BAR}{row}",
+                                style))
 
     def thinking_delta(self, delta: str) -> None:
         self._thinking_pending += delta

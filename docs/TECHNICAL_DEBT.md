@@ -717,3 +717,60 @@ documentation and validation round would sweep in ~250 unrelated findings and
 hide both. Whoever takes it should first establish whether the baseline is
 merely stale or was generated under a different bandit, since a version
 mismatch unmatches findings wholesale and looks identical.
+
+## 23. The transcript does not reflow on a terminal resize (open, 2026-09-14)
+
+Rows already drawn keep the width they were drawn at when the terminal is
+resized. RichLog renders at write time and stores Strips; its `on_resize`
+only replays writes deferred before the widget's first size and never
+re-wraps a stored row. Measured headless, with the console sized to match
+the terminal: an answer streamed at 120 columns drew rows 114 wide, and after
+widening to 200 the same rows were still 114 wide against a 198-column panel,
+while new rows used the full width. A restart's replay puts it right, and so
+does `/theme`, the only production caller of `Transcript.rerender()`.
+`Transcript`'s class docstring has named this a known edge since §38, scoped
+to "a terminal resize mid-answer" -- it is wider than that: every row drawn
+before the resize keeps its width.
+
+Found in batch 90, while fixing the hidden-pane wrap, which has the same
+signature -- rows at a stale width, healed by a restart -- and a different
+cause (`Transcript._region_width`). That one is fixed; this one is not.
+
+**Deliberately not done in batch 90** (owner decision). Reflowing on resize
+means redrawing from `_entries`, and `rerender()` is not safe to call at an
+arbitrary moment: it starts with `flush_stream()`, which closes an open answer
+span, so a resize mid-turn would split the live answer into two entries under
+two `venastine ›` labels -- the thing §38's one-entry-per-span rule exists to
+prevent. A fix needs a redraw that leaves an open span open, debounced so a
+window drag is not one replay per event, and a decision about where the
+scroll position lands. That is its own change.
+
+## 24. A newline after a row that filled the width draws a blank row live (open, 2026-09-14)
+
+When the last row of a line fills the transcript exactly, the width rule
+commits the whole buffer -- the cut lands after a trailing space that
+overflows by its own cell, and `_split_committable` keeps nothing back. If
+the model's NEXT delta begins with the newline, the newline rule commits a
+chunk that is only `"\n"`, and both commit paths draw it as a blank row:
+`_write_stream_chunk` deliberately ("a chunk that is only a newline is the
+blank line between paragraphs"), and `_write_thinking_lines` as a bar with
+nothing beside it. A replay of the same entry has no such row, because there
+the newline simply ends the line.
+
+Measured in batch 90 on a 160-column pane, streaming a row of exactly the
+wrap width plus a space, then `"\n"`, then more text: an answer drew 5 rows
+live and 4 replayed, and thinking drew 7 live and 6 replayed. It predates
+the batch -- the answer path was not touched by it. It is rare in practice:
+the row has to end on the edge AND the newline has to arrive in the
+following delta, and a `/theme` or a restart silently removes the row, which
+is the "rerender reflows what it was only meant to recolour" symptom
+`TestAStreamedAnswerRendersLikeAWrittenOne` exists to catch; none of its
+cases happens to land a row on the edge.
+
+**Deliberately not done in batch 90** (owner decision). The fix is to
+remember that the last committed row ended exactly at the width and treat
+one immediately following newline as the end of that line rather than a
+blank one, on both paths. The answer path's single-trailing-newline and
+blank-line-between-paragraphs rules are pinned, and getting this wrong
+swallows a real paragraph break, so it wants its own cases in both
+row-equality classes rather than riding along with a width fix.

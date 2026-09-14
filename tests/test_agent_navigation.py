@@ -1898,19 +1898,199 @@ class TestTheViewerPaintsAtLiveWidth:
                 f"three figures wide: entries wrapped to the hidden-measure "
                 f"floor instead of the live width")
 
+
+# ---------------------------------------------------------------------------
+# ---- the live transcript writes at the on-screen width --------------------
+# ---------------------------------------------------------------------------
+
+def _rows(view):
+    """(text, cell width) per drawn row: what the reader sees, and where
+    the row's background stops."""
+    return list(zip((line.text for line in view.lines), _drawn_widths(view)))
+
+
+def _size_console(app, columns, rows=40):
+    """Give the headless console the pilot's width.
+
+    `run_test` sizes the screen, not `app.console`, which stays 80 wide --
+    and RichLog clamps a `width=None` write's measurement to the console.
+    At 80 an on-screen prose row tops out at 80 and the hidden-pane floor
+    is 78, so a pin about that floor cannot tell the two apart. In a real
+    terminal the console IS the terminal, which is what this restores.
+    """
+    app.console.size = (columns, rows)
+
+
+class TestTheLiveTranscriptWritesAtTheOnScreenWidth:
+    """The mirror image of the class above. While a stored run is on screen
+    the switcher hides `#transcript`, whose region then measures 0, and a
+    running turn goes on writing into it. RichLog stores Strips at write
+    time, so every row drawn in that window stayed at min_width (78) after
+    escape -- a wide panel with the answer down its left half, healed only
+    by a restart's replay."""
+
+    LONG = "word " * 80
+    FENCED = "```python\nx = 1\nprint(x)\n```"
+
+    @pytest.fixture(autouse=True)
+    def a_syntax_theme_with_a_background(self, mocker):
+        """Rich pads a code block's rows out to the render width only when
+        the syntax theme HAS a background (`pad=not transparent_background`),
+        and the suite's fallback, `ansi_dark`, has none. Under it an explicit
+        width and RichLog's own computation draw identical rows, so the
+        code-block half of these pins would pass against either -- measured:
+        the viewer pin was green on the unfixed tree until this was added."""
+        mocker.patch.object(Transcript, "_syntax_theme",
+                            return_value="monokai")
+
     @pytest.mark.asyncio
-    async def test_the_width_override_does_not_survive_the_paint(
+    async def test_what_the_main_agent_writes_while_a_run_is_open_uses_the_panel(
             self, lineage, mocker):
-        """A pinned override would follow the viewer into later polls and
-        resumes at whatever width the first paint saw. Cleared in a
-        finally, so even a mid-paint exception leaves None behind."""
+        mocker.patch("tui.app.replay_entries",
+                      return_value=_entries("hi"))
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(160, 40)) as pilot:
+            _size_console(app, 160)
+            await pilot.pause()
+            app.open_agent_thread(str(lineage.child))
+            await pilot.pause()
+
+            live = app.query_one("#transcript", Transcript)
+            start = len(live.lines)
+            live.thinking_delta(self.LONG)
+            live.end_thinking()
+            for word in self.LONG.split(" "):
+                live.stream_delta(word + " ")
+            live.flush_stream()
+            await pilot.pause()
+            app.close_thread_view()
+            await pilot.pause()
+
+            # VISIBLE width, trailing spaces stripped. A committed row keeps
+            # the space it was cut after, and that one cell carried a
+            # 78-column wrap past `> 78` -- measured: the mutation that
+            # pre-wraps at the floor survived this pin until it read the
+            # text rather than the cells.
+            visible = [len(line.text.rstrip()) for line in live.lines[start:]]
+            assert visible, "the turn drew nothing while the run was open"
+            assert max(visible) > live.min_width, (
+                f"widest row written behind the viewer shows {max(visible)} "
+                f"characters on a "
+                f"{live.scrollable_content_region.width}-column panel: the "
+                f"hidden pane wrapped to the min_width floor")
+
+    @pytest.mark.asyncio
+    async def test_rows_written_while_hidden_match_rows_written_on_screen(
+            self, lineage, mocker):
+        """`rerender()` draws every entry again with the pane on screen,
+        which is the rendering a restart's replay produces, so the rows
+        drawn behind the viewer must equal it -- text AND cell width.
+
+        The width is what catches the obvious shortcut. Handing RichLog the
+        borrowed region as an explicit `width=` wraps prose correctly but
+        paints a code block's background across the whole panel, where an
+        on-screen write stops at max(longest line, min_width)."""
+        mocker.patch("tui.app.replay_entries",
+                      return_value=_entries("hi"))
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(160, 40)) as pilot:
+            _size_console(app, 160)
+            await pilot.pause()
+            app.open_agent_thread(str(lineage.child))
+            await pilot.pause()
+
+            live = app.query_one("#transcript", Transcript)
+            start = len(live.lines)
+            live.thinking_delta(self.LONG)
+            live.end_thinking()
+            live.write_answer(f"{self.LONG}\n\n{self.FENCED}\n")
+            await pilot.pause()
+            hidden = _rows(live)[start:]
+            app.close_thread_view()
+            await pilot.pause()
+            live.rerender()
+            await pilot.pause()
+
+            assert hidden
+            assert _rows(live)[-len(hidden):] == hidden
+
+    @pytest.mark.asyncio
+    async def test_a_code_block_in_the_viewer_matches_the_live_pane(
+            self, lineage, mocker):
+        """The viewer is painted hidden too, so it takes the same rule --
+        and it used to take the explicit-width shortcut above, which drew a
+        stored run's code block edge to edge while the same block in the
+        conversation stopped at 78."""
+        mocker.patch("tui.app.replay_entries",
+                      return_value=_entries(self.FENCED))
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(160, 40)) as pilot:
+            _size_console(app, 160)
+            await pilot.pause()
+            live = app.query_one("#transcript", Transcript)
+            start = len(live.lines)
+            live.write_answer(self.FENCED)
+            await pilot.pause()
+            on_screen = max(_drawn_widths(live)[start:])
+
+            app.open_agent_thread(str(lineage.child))
+            await pilot.pause()
+            painted = max(_drawn_widths(
+                app.query_one("#thread-view", Transcript)))
+
+            assert painted == on_screen
+
+    @pytest.mark.asyncio
+    async def test_the_width_is_measured_at_write_time(
+            self, lineage, mocker):
+        """A width taken once, when the viewer opened, would go stale the
+        moment the terminal is resized with the viewer still up. Measured
+        per write, a resize is simply the next measurement."""
+        mocker.patch("tui.app.replay_entries",
+                      return_value=_entries("hi"))
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(160, 40)) as pilot:
+            _size_console(app, 160)
+            await pilot.pause()
+            live = app.query_one("#transcript", Transcript)
+            narrow = live.scrollable_content_region.width
+            app.open_agent_thread(str(lineage.child))
+            await pilot.pause()
+            await pilot.resize_terminal(220, 40)
+            _size_console(app, 220)
+            await pilot.pause()
+
+            start = len(live.lines)
+            live.write_answer(self.LONG)
+            await pilot.pause()
+            app.close_thread_view()
+            await pilot.pause()
+
+            wide = live.scrollable_content_region.width
+            widest = max(_drawn_widths(live)[start:])
+            assert narrow < widest <= wide, (
+                f"widest row {widest}: the panel was {narrow} when the viewer "
+                f"opened and {wide} when the row was written")
+
+    @pytest.mark.asyncio
+    async def test_both_panes_measure_the_same_width_when_shown(
+            self, lineage, mocker):
+        """The borrow is only right because the two panes are the same box
+        -- identical border and padding in app.tcss, and RichLog's
+        `overflow-y: scroll` keeping the scrollbar gutter constant. Give one
+        of them a different gutter and every row written behind the other
+        is off by the difference."""
         mocker.patch("tui.app.replay_entries",
                       return_value=_entries("hi"))
         app = VenastineApp("ANTHROPIC", "test-model", {})
         async with app.run_test(size=(160, 40)) as pilot:
             await pilot.pause()
+            live_width = app.query_one(
+                "#transcript", Transcript).scrollable_content_region.width
             app.open_agent_thread(str(lineage.child))
             await pilot.pause()
+            view_width = app.query_one(
+                "#thread-view", Transcript).scrollable_content_region.width
 
-            assert app.query_one(
-                "#thread-view", Transcript)._paint_width is None
+            assert live_width
+            assert live_width == view_width

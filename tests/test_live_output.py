@@ -1003,6 +1003,79 @@ class TestAStreamedAnswerRendersLikeAWrittenOne:
         assert await self._rows(text, True) == await self._rows(text, False)
 
 
+class TestStreamedThinkingRendersLikeReplayedThinking:
+    """The class above's rule, for the reasoning span.
+
+    A replay -- `rerender()` for a /theme, a resumed thread, the thread
+    viewer -- hands `_write_thinking_lines` the whole entry, and it used to
+    write each source line as ONE Text: Rich soft-wrapped it and every
+    continuation row came out with no bar. Measured before the fix on a
+    160-column pane: seven rows streamed with the bar on three, the same
+    seven replayed with the bar on one.
+
+    Equality alone cannot hold this, because the newline rule commits a long
+    line uncut on the LIVE path too, so both paths could be equally barless.
+    Every body row carrying the bar is asserted beside it.
+    """
+
+    LONG = "reasoning about the width of a row " * 12
+
+    CASES = {
+        "one long paragraph": LONG,
+        "a long paragraph ending in a newline": LONG + "\n",
+        "two paragraphs": LONG + "\n\n" + LONG,
+        "a token wider than a row": (
+            "see https://example.com/" + "x" * 150 + " and then more words"),
+        "double-width glyphs": "漢字 " * 60,
+    }
+
+    @staticmethod
+    def _body(rows):
+        """Rows that carry reasoning: not the label, the delimiters or the
+        blank row above the label."""
+        return [row for row in rows
+                if row.strip() and LABEL not in row
+                and THINKING_OPEN not in row and THINKING_CLOSE not in row]
+
+    @staticmethod
+    async def _rows(text, streamed, *, chunk=5):
+        from tui.app import VenastineApp
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(84, 40)) as pilot:
+            transcript = app._transcript
+            transcript.clear()
+            transcript._entries.clear()
+            if streamed:
+                for i in range(0, len(text), chunk):
+                    transcript.thinking_delta(text[i:i + chunk])
+                transcript.end_thinking()
+            else:
+                # The replay path: what rerender() and a resumed thread do
+                # with the entry the live path recorded.
+                transcript._emit("thinking", text)
+            await pilot.pause()
+            return [strip.text for strip in transcript.lines]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name", list(CASES))
+    async def test_the_two_paths_agree(self, name):
+        text = self.CASES[name]
+        streamed = await self._rows(text, True)
+        assert streamed == await self._rows(text, False)
+        assert all(THINKING_BAR in row for row in self._body(streamed))
+
+    @pytest.mark.asyncio
+    async def test_a_long_line_committed_by_its_newline_keeps_the_bar(self):
+        """ONE delta carrying a long line and its newline. The newline rule
+        commits everything through the last newline uncut, which was the
+        live path's own way to a barless row."""
+        text = self.LONG + "\n"
+        body = self._body(await self._rows(text, True, chunk=len(text)))
+        assert len(body) > 1, "the line fit one row, so this pins nothing"
+        assert all(THINKING_BAR in row for row in body)
+
+
 class TestTheThinkingCommand:
 
     @pytest.mark.asyncio

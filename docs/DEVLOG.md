@@ -13659,3 +13659,172 @@ moved entries) and passed 32/32 after. Then the full suite.
 - `docs/THIRD_PARTY_NOTICES.md` -- the mermaid file's path.
 - `tests/BREAKING_CHANGES.md` -- the new section, including the packaging
   row that nothing tests.
+
+## Batch 90 -- the pane the switcher hides, and the bar a replay dropped (2026-09-14)
+
+### What was reported, and what it turned out to be
+
+After 663be29 fixed a stored run's text wrapping down half of the thread
+viewer, the same thing was seen on the MAIN agent's transcript, with no known
+trigger, healed by a restart. Two screenshots came with it.
+
+The wrap was not "half the panel". It was **78 columns**, which is RichLog's
+`min_width`, and that number is the whole diagnosis. `#pane` is a
+`ContentSwitcher`; it hides a pane with `display = False`; a hidden widget has
+no region, so `scrollable_content_region.width` is 0; and RichLog, whose size
+is already known, writes at once at `max(0, min_width)` and stores the Strips.
+Nothing re-wraps a stored Strip -- `on_resize` only replays writes deferred
+before the widget's first size -- so rows drawn behind the viewer come back
+at 78 when the pane is shown again. 663be29 was this bug on the viewer's side;
+the live transcript is the other side. Trigger confirmed by the owner: a
+subagent's thread was open while the main agent wrote its final reasoning and
+answer.
+
+Measured headless at 200 columns, with the console sized to match:
+
+| rows | widest |
+|---|---|
+| written with the live pane visible | 194 |
+| written while the viewer is up (stream, answer, thinking) | **78** |
+| the same rows after escape (panel 198) | **78** |
+| new rows after escape | 194 |
+| everything after `rerender()` | 198 |
+
+### One rule for both panes, measured per write
+
+`Transcript._region_width` returns the pane's own width, or -- while the
+switcher hides it -- the width of the pane the switcher is showing, read from
+`ContentSwitcher.visible_content`. Both `_wrap_width` (thinking, lists, diffs,
+streamed commits) and the `write` funnel (everything else) read it, so the two
+halves of one transcript cannot break at two widths. It is equal by
+construction: the two panes are the same box in `app.tcss`, and RichLog's
+`overflow-y: scroll` keeps the scrollbar gutter the same on both.
+
+663be29's mechanism is retired in favour of the same rule (owner decision):
+`_paint_width`, set before the viewer's paint and cleared in a `finally`, is
+gone, and so is `test_the_width_override_does_not_survive_the_paint`, which
+guarded state that no longer exists. The concern it stood for -- a width that
+outlives the moment it was taken -- is pinned instead by
+`test_the_width_is_measured_at_write_time`, which resizes the terminal with
+the viewer up. A width taken once at open would fail it, and that is
+precisely what a set-and-clear design is.
+
+### The funnel copies RichLog's computation, and the plan said the wrong thing about why
+
+The funnel does not hand RichLog the borrowed region as `width=`. It hands it
+the width RichLog would have chosen itself with that region: the renderable's
+measured maximum, shrunk to the region, raised to `min_width`. An explicit
+width switches shrink off, so a renderable that pads to its render width is
+drawn edge to edge -- measured, a code block under a background theme: 158
+cells hidden against 78 on screen.
+
+The approved plan claimed 663be29 had already made the viewer's code blocks
+visibly wider than the live pane's. **That was false for the shipped app**, and
+the owner was told before the funnel was written. `syntax_theme_for` returns
+only `ansi_dark` or `ansi_light`, neither has a background, and Rich pads a
+word-wrapped Syntax row only when there is one (`pad=not
+transparent_background`). The viewer pin passed on the unfixed tree for
+exactly that reason; the 158 came from a probe that forced a background. The
+divergence is latent, not visible. The owner chose to copy the computation
+anyway, so a future theme cannot reintroduce it, and the width pins run under
+`monokai` so the difference is observable.
+
+### A second bug the row-equality pin found
+
+`test_rows_written_while_hidden_match_rows_written_on_screen` failed for a
+reason unrelated to width. A replayed thinking entry was never pre-wrapped:
+`_render_entry` handed the whole reasoning text to `_write_thinking_lines`,
+which wrote each source line as ONE `Text`, so Rich soft-wrapped it and every
+continuation row lost the bar. Measured on a pane that is never hidden: a long
+paragraph streamed as 7 rows with the bar on 3, and replayed as 7 rows with the
+bar on 1. The owner's own "good" screenshot -- a restart's replay -- shows it,
+with bare continuation rows under the bar. The newline rule did the same thing
+live whenever one delta carried a long line and its newline.
+
+Fixed in this batch (owner decision) at the one place both paths share:
+`_write_thinking_lines` cuts every line into rows with `markdown.plain_wrap`.
+`plain_split`'s rule moved into `_plain_cut` so the streamed commit and the
+replayed wrap have one copy of it, and `plain_wrap` walks a line once rather
+than calling `plain_split` in a loop, which re-measures the whole remainder
+per row -- `wrap_display`'s quadratic reason, one grammar over. A frozen copy
+of the old `plain_split` is the test oracle, so the refactor is checked
+against the rule it replaced rather than against itself.
+
+The first version of `plain_wrap` kept an empty remainder as a row. A cut after
+a trailing space that overflows the width by its own cell leaves one, Rich
+folds that space into the row it ends, and drawing the remainder put a bare bar
+under every chunk committed that way: three extra rows in the double-width
+glyph case, which is the only case that caught it.
+
+### Two traps, both measured
+
+**The headless console is 80 columns whatever `run_test(size=)` says.** RichLog
+clamps a `width=None` write's measurement to the console, so in a pilot an
+on-screen prose row tops out at 80 -- two cells from the floor this batch is
+about. Every width pin sets `app.console.size`.
+
+**A pin that read cells was weaker than its docstring.** The first mutation
+pass killed "pre-wrap at the floor" (M4) only through the row-equality pin; the
+pin written for it survived, because a committed row keeps the space it was cut
+after and that one cell carried a 78-column wrap past `> 78`. It now measures
+visible text, and the second pass killed M4 with it.
+
+### Deliberately not done
+
+- **A terminal resize does not reflow drawn rows** -- the same look, a
+  different cause. `rerender()` would fix it but flushes an open span, so it
+  cannot run on a resize mid-turn. TECHNICAL_DEBT item 23.
+- **A newline arriving right after a row that filled the width draws a blank
+  row live** -- measured 5 rows live against 4 replayed for an answer, 7
+  against 6 for thinking. It predates the batch and touches the answer path's
+  pinned newline rules. TECHNICAL_DEBT item 24.
+
+### Verification
+
+Every new pin was run against the unfixed tree first: the four width pins went
+red on their assertions, the viewer code-block pin only once the background
+theme was in, and the geometry pin stayed green as an invariant should. The
+mutation pass (`mutate90.py`, restoring from in-memory bytes because the fix
+was uncommitted) ran a green control and killed 10 of 10, each by a pin
+expected to catch it:
+
+| mutation | killed by |
+|---|---|
+| M1 the funnel passes the borrowed region as `width=` | hidden rows match on-screen rows; viewer code block |
+| M2 the funnel does not borrow | hidden rows match; measured at write time; main agent uses the panel |
+| M3 no sibling borrow | the same three |
+| M4 `_wrap_width` measures its own region only | main agent uses the panel; hidden rows match |
+| M5 the width is captured when the viewer opens | measured at write time |
+| M6 `#thread-view` gets `padding: 0 2` | both panes measure the same width |
+| M7 replayed thinking is not wrapped | thinking paths agree; newline keeps the bar; hidden rows match |
+| M8 `plain_wrap` keeps an empty remainder row | overflowing space; wrap parity; thinking paths agree |
+| M9 `_plain_cut` tests the space against 0 | wrap parity |
+| M10 the hard cut lands one character late | split parity; wrap parity; thinking paths agree |
+
+The first full run failed exactly the two count checks in
+`test_docs_consistency.py`: the quoted total (4518 against 4535 collected) and
+`ARCHITECTURE.md`'s per-file counts for the three test files this batch
+touched. The focused runs could not see either, because the count checks skip
+under any invocation that names more than their own file. Counts corrected in
+`README.md`, `AGENTS.md` and `ARCHITECTURE.md`; the second full run: 4515
+passed, 20 skipped, 1 deselected.
+
+### Files touched
+
+- `tui/widgets.py` -- `_region_width`, `_borrowed_width`,
+  `_borrowed_render_width`; the `write` funnel and `_wrap_width` read them;
+  `_paint_width` removed; `_write_thinking_lines` wraps; the class docstring's
+  resize note points at item 23.
+- `tui/app.py` -- `_paint_thread_view`'s set-and-clear block removed; the
+  switcher's comment in `compose`.
+- `tui/markdown.py` -- `_plain_cut` and `plain_wrap`; `plain_split` delegates.
+- `tests/test_agent_navigation.py` -- `TestTheLiveTranscriptWritesAtTheOnScreenWidth`
+  (five pins), `_rows`, `_size_console`; one test retired.
+- `tests/test_live_output.py` -- `TestStreamedThinkingRendersLikeReplayedThinking`.
+- `tests/test_markdown_render.py` -- `TestPlainWrap` and its reference oracle.
+- `AGENTS.md` -- the hidden-pane paragraph in §47, the thinking-wrap paragraph,
+  the suite count.
+- `README.md`, `docs/ARCHITECTURE.md` -- the suite count and three per-file
+  counts.
+- `docs/TECHNICAL_DEBT.md` -- items 23 and 24.
+- `tests/BREAKING_CHANGES.md` -- the batch 90 section.

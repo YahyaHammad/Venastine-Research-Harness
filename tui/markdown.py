@@ -1027,26 +1027,76 @@ def plain_split(line: str, width: int):
     hard cut at the width Rich would use), over plain characters rather
     than mark spans. A character is atomic: the cut never lands inside
     one, so a glyph wider than the row survives whole for Rich to wrap.
+
+    The rule itself is `_plain_cut`, shared with `plain_wrap`, so the
+    streamed commit and the replayed wrap cannot disagree about a row.
     """
-    if sum(cell_len(char) for char in line) <= width:
+    cut = _plain_cut(line, 0, width)
+    if cut is None:
         return "", line
+    return line[:cut], line[cut:]
+
+
+def _plain_cut(line: str, start: int, width: int):
+    """Where `plain_split`'s rule ends the row that begins at `start`, or
+    None when the rest of the line fits in one row or cannot be cut.
+
+    Last space that still fits, else a hard cut at the width -- and never
+    at `start` itself, which is how a glyph wider than the row survives
+    whole. It scans about one row past `start`, never the whole
+    remainder, which is what lets `plain_wrap` walk a long line once.
+    """
     cells, space_at = 0, -1
-    for index, char in enumerate(line):
+    for index in range(start, len(line)):
+        char = line[index]
         if char == " " and cells <= width:
             space_at = index
         cells += cell_len(char)
         if cells > width:
             break
     else:
-        return "", line
-    if space_at > 0:
-        return line[:space_at + 1], line[space_at + 1:]
+        return None
+    if space_at > start:
+        return space_at + 1
     cells = 0
-    for index, char in enumerate(line):
-        if cells + cell_len(char) > width:
-            return (line[:index], line[index:]) if index > 0 else ("", line)
-        cells += cell_len(char)
-    return "", line
+    for index in range(start, len(line)):
+        char_cells = cell_len(line[index])
+        if cells + char_cells > width:
+            return index if index > start else None
+        cells += char_cells
+    return None
+
+
+def plain_wrap(line: str, width: int) -> list[str]:
+    """The rows `line` occupies when drawn at `width` cells, by
+    `plain_split`'s rule -- the thinking span's wrap.
+
+    `plain_split` applied until it commits nothing, but in one walk over
+    the line: calling it in a loop re-measures the whole remainder for
+    every row, which is quadratic on a long paragraph and paid again on
+    every replay (`wrap_display`'s reason, one grammar over). The last row
+    is what that rule would have kept buffered, so a line that fits comes
+    back as itself and an empty line as one empty row.
+
+    A cut at the very END of the line -- a trailing space that overflows
+    the row by its own cell -- closes the last row rather than opening an
+    empty one. `plain_split` hands that empty remainder back, and Rich
+    folds the space into the row it ends, so drawing the remainder put a
+    bar with nothing beside it under every chunk `thinking_delta` commits
+    that way (measured: three extra rows in a streamed run of wide glyphs).
+    """
+    if width <= 0:
+        return [line]
+    rows, start = [], 0
+    while True:
+        cut = _plain_cut(line, start, width)
+        if cut is None:
+            break
+        rows.append(line[start:cut])
+        start = cut
+    if start < len(line) or not rows:
+        rows.append(line[start:])
+    return rows
 
 
 def wrap_display(line: str, width: int, *, block: bool = False):

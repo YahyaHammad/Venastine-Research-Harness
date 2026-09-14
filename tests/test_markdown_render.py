@@ -787,6 +787,106 @@ class TestWrapDisplay:
 
 
 # ===========================================================================
+# ---- Wrapping a thinking row (batch 90) ------------------------------------
+# ===========================================================================
+
+def _reference_plain_split(line, width):
+    """`plain_split` exactly as it stood before batch 90 moved its rule into
+    `_plain_cut`. The oracle for the refactor: kept here verbatim so the
+    shared helper is checked against the rule it replaced, not against
+    itself."""
+    if sum(md.cell_len(char) for char in line) <= width:
+        return "", line
+    cells, space_at = 0, -1
+    for index, char in enumerate(line):
+        if char == " " and cells <= width:
+            space_at = index
+        cells += md.cell_len(char)
+        if cells > width:
+            break
+    else:
+        return "", line
+    if space_at > 0:
+        return line[:space_at + 1], line[space_at + 1:]
+    cells = 0
+    for index, char in enumerate(line):
+        if cells + md.cell_len(char) > width:
+            return (line[:index], line[index:]) if index > 0 else ("", line)
+        cells += md.cell_len(char)
+    return "", line
+
+
+def _wrapped_by_reference(line, width):
+    """The reference split applied until it commits nothing. An EMPTY
+    remainder after a cut is not a row -- see
+    `test_a_space_that_overflows_ends_its_row`."""
+    rows = []
+    while True:
+        head, line = _reference_plain_split(line, width)
+        if not head:
+            break
+        rows.append(head)
+    if line or not rows:
+        rows.append(line)
+    return rows
+
+
+class TestPlainWrap:
+    """The thinking span's wrap. `_write_thinking_lines` cuts every source
+    line into rows so each carries the bar, on the live path and the replay
+    alike, and it must cut where `thinking_delta` commits or the two paths
+    draw different rows. One rule (`_plain_cut`), two walks over it."""
+
+    LINES = [
+        "", "short", "one two three four five", "supercalifragilistic",
+        " a leading space then words", "a trailing space ",
+        "two  spaces  between  words", "x " * 20, "a" * 30,
+        "漢字 " * 7, "漢字漢字漢字", "wide漢 glyph near the edge",
+        "see https://example.com/xxxxxxxxxxxxxxxxxxxx and then",
+        "é combining marks é are zero width é",
+    ]
+    WIDTHS = [-1, 0, 1, 2, 3, 5, 8, 10, 11, 12, 20, 40]
+
+    def test_plain_split_is_the_rule_it_always_was(self):
+        for line in self.LINES:
+            for width in self.WIDTHS:
+                assert md.plain_split(line, width) == \
+                    _reference_plain_split(line, width), (line, width)
+
+    def test_the_wrap_is_the_split_applied_until_nothing_commits(self):
+        for line in self.LINES:
+            for width in self.WIDTHS:
+                assert md.plain_wrap(line, width) == \
+                    _wrapped_by_reference(line, width), (line, width)
+
+    def test_it_breaks_after_the_last_space_that_fits(self):
+        assert md.plain_wrap("one two three four five", 10) == \
+            ["one two ", "three four ", "five"]
+
+    def test_marks_are_measured_as_written(self):
+        """Reasoning renders marks as literal characters, so they take up
+        the cells they are written in -- unlike `wrap_display`, which
+        breaks the same line as `["a **bold word** ", "here now"]`."""
+        assert md.plain_wrap("a **bold word** here now", 12) == \
+            ["a **bold ", "word** here ", "now"]
+
+    def test_a_double_width_glyph_counts_two_cells(self):
+        assert md.plain_wrap("漢字 漢字 漢字", 5) == ["漢字 ", "漢字 ", "漢字"]
+
+    def test_an_empty_line_is_one_empty_row(self):
+        """A blank line inside reasoning still draws its bar."""
+        assert md.plain_wrap("", 10) == [""]
+
+    def test_a_space_that_overflows_ends_its_row(self):
+        """`plain_split("abcd ", 4)` cuts after the space and hands back an
+        EMPTY remainder. Rich folds that space into the row it ends, so it
+        is not a second row -- drawing one put a bare bar under every
+        thinking chunk committed this way."""
+        assert md.plain_split("abcd ", 4) == ("abcd ", "")
+        assert md.plain_wrap("abcd ", 4) == ["abcd "]
+
+
+# ===========================================================================
 # ---- link_spans: the scanner a harness line gets (batch 65) ---------------
 # ===========================================================================
 

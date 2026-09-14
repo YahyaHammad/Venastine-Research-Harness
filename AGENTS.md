@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 4518 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 4535 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -376,6 +376,16 @@ commit cap: a fragment committed without its marker could never be indented afte
 `wrap_display` is ONE pass over ONE `_cut_points` list, shared with `width_split` — calling
 `width_split` in a loop rescans from the start of the remainder each time, which is quadratic on
 a long line and paid again on every `/theme`.
+
+**The thinking bar is wrapped in `_write_thinking_lines`, so both paths get it** (batch 90). It used
+to be cut only by `thinking_delta`'s commit rule, so a replay — `rerender()`, a resumed thread, the
+thread viewer — handed a whole entry to one `Text` and Rich soft-wrapped it with the bar on the first
+row alone; the newline rule did the same live, whenever one delta carried a long line and its
+newline. `markdown.plain_wrap` is `plain_split`'s rule walked once over the line (the rule has one
+copy, `_plain_cut`, for `wrap_display`'s quadratic reason), and **an empty remainder after a cut at
+the very end of a line is not a row**: `plain_split` hands one back when a trailing space overflows
+the width by its own cell, Rich folds that space into the row it ends, and drawing the remainder put
+a bare bar under every chunk committed that way.
 
 **`line_start=False` says a chunk begins mid-line, and it fixed a shipped bug.** With a prefix of
 exactly 77 characters the wrap boundary falls immediately before a `# ` token; the committed
@@ -1194,6 +1204,20 @@ once. Both panes stay mounted; only `current` changes, so a running turn goes on
 live one with nothing to buffer and nothing to flush on the way back. **That last part is batch
 66's held transcript doing the work** — a per-access `query_one` would put the answer in the pane
 being read.
+
+**A hidden pane measures 0, so both panes write at the width of the one on screen.** The switcher
+hides with `display = False`, a hidden widget has no region, and RichLog floors a write to
+`min_width` (78) and stores the Strips it drew — so a turn that went on writing behind the viewer
+left its answer down the left half of the panel after escape, healed only by a restart's replay.
+The viewer is painted hidden as well, which is the same bug from the other side (663be29 patched
+that side alone with a width set before the paint and cleared after). `Transcript._region_width`
+borrows the on-screen sibling's width, measured per write, and the `write` funnel hands RichLog the
+width RichLog ITSELF would have chosen with that region. Two traps, both measured. Passing the
+borrowed region as `width=` is the obvious shortcut and switches off RichLog's shrink, so a code
+block under a syntax theme with a background paints edge to edge — no shipped theme has one, so it
+cannot be seen, which is why the pins run under monokai. And a pilot's `app.console` stays 80 wide
+whatever `run_test(size=)` says, which clamps a `width=None` write's measurement to where it cannot
+be told from the floor: set `app.console.size` in any width pin.
 
 **`_viewing` is the one fact; everything else is derived from it.** The switcher's `current`, the
 crumb's rows, the prompt's `disabled` flag and whether escape is bound all follow from it, so they

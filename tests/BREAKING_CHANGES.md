@@ -4392,3 +4392,50 @@ nothing in the suite is looking.
 | Move a document that `package.json`'s `files` ships | `test_every_npm_allowlist_entry_exists` | Update the allowlist entry to the new path. It ships `docs/THIRD_PARTY_NOTICES.md`, `docs/SECURITY.md` and `docs/PRIVACY.md` individually -- a bare `docs/` would put 1.8 MB of ROADMAP and DEVLOG in the tarball |
 | Move `THIRD_PARTY_NOTICES.md` without updating `scripts/prepublish-check.mjs` | **nothing** | `REQUIRED` there is read by no test. It fails at `npm publish`, after which the version can never be replaced. Change both in one commit |
 | Move `AGENTS.md` | `test_workspace_trust.py`, and the harness at runtime | Do not. `core/config_loader.py` reads it through `workspace_trust.PROJECT_CONTEXT_FILENAME`, and WS9 puts the root copy inside D17's trust content hash |
+
+---
+
+## The pane the switcher hides, and the thinking bar a replay dropped (batch 90)
+
+`#pane` hides one `Transcript` with `display = False`, and a hidden widget
+measures 0. Both panes are written while hidden -- the viewer is painted before
+it is shown, and a running turn goes on writing to the live transcript while a
+stored run is read -- so both measure through `Transcript._region_width`, which
+borrows the on-screen sibling's width, and the `write` funnel hands RichLog the
+width RichLog itself would compute with that region.
+`TestTheLiveTranscriptWritesAtTheOnScreenWidth` in
+`tests/test_agent_navigation.py` holds it.
+
+**Every width pin sets `app.console.size`.** `run_test(size=)` sizes the screen
+and leaves `app.console` at 80, and RichLog clamps a `width=None` write's
+measurement to the console -- so in a pilot an on-screen prose row tops out at
+80, two cells from the 78 floor, and the pin cannot tell the two apart.
+`_size_console` is the helper.
+
+**The code-block pins need a syntax theme with a background.** Rich pads a
+Syntax row only then, and both shipped themes are transparent, so under them
+the explicit-width shortcut and the real computation draw identical rows. The
+class's autouse fixture patches `Transcript._syntax_theme` to `monokai`; without
+it `test_a_code_block_in_the_viewer_matches_the_live_pane` passed on the unfixed
+tree.
+
+**Measure visible text, not cells, when the bound is the floor.** A committed
+row keeps the space it was cut after, and that one cell carried a 78-column wrap
+past `> 78`: the pin written for "pre-wrap at the floor" survived that mutation
+until it read `line.text.rstrip()`.
+
+| Change | Test | Fix |
+|---|---|---|
+| Remove the sibling borrow from `_region_width` | `test_what_the_main_agent_writes_while_a_run_is_open_uses_the_panel`, `test_rows_written_while_hidden_match_rows_written_on_screen`, `test_the_width_is_measured_at_write_time` | A hidden pane floors to 78 and RichLog keeps the Strips. Borrow |
+| Borrow in `_wrap_width` but not in `write`, or the reverse | `test_rows_written_while_hidden_match_rows_written_on_screen` | Pre-wrapped rows and prose break at two widths. Both read `_region_width` |
+| Pass the borrowed region as `width=` | `test_a_code_block_in_the_viewer_matches_the_live_pane`, the row-equality pin | An explicit width switches off shrink, so a padded renderable goes edge to edge. Keep `_borrowed_render_width` |
+| Take the width once, when the viewer opens (663be29's shape) | `test_the_width_is_measured_at_write_time` | A resize with the viewer up leaves it stale. Measure per write |
+| Give `#transcript` and `#thread-view` different border, padding or scrollbar settings | `test_both_panes_measure_the_same_width_when_shown` | The borrow assumes one box. Change both, or stop borrowing |
+| A textual bump changes `RichLog.write`'s width computation | the row-equality pin | `_borrowed_render_width` mirrors it step for step; mirror the new one |
+| Draw a thinking line without `markdown.plain_wrap` | `TestStreamedThinkingRendersLikeReplayedThinking` in `tests/test_live_output.py`, the row-equality pin | A replay's continuation rows lose the bar, and so do live rows the newline rule commits. Wrap in `_write_thinking_lines` |
+| Keep `plain_wrap`'s empty remainder after a cut at the very end of a line | `test_a_space_that_overflows_ends_its_row`, the double-width thinking case | A bare bar row under every chunk committed after an overflowing space |
+| Change `_plain_cut` | `TestPlainWrap` in `tests/test_markdown_render.py` | Its oracle is the pre-batch-90 `plain_split`, kept verbatim in the test. Both the streamed commit and the replayed wrap must still match it |
+| Bring back a set-and-clear width override for the viewer's paint | **nothing** | Not needed -- a hidden pane measures its sibling on its own -- and two mechanisms for one width is the drift this batch removed |
+
+`test_the_width_override_does_not_survive_the_paint` is retired: it asserted
+`_paint_width is None` after a paint, and the attribute no longer exists.

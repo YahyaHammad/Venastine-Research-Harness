@@ -802,7 +802,10 @@ class VenastineApp(App):
                 # BOTH panes stay mounted; only `current` changes. That
                 # is what lets a running turn go on writing to the live
                 # transcript while you read something else, with no
-                # buffering and nothing to flush on the way back.
+                # buffering and nothing to flush on the way back. A hidden
+                # pane measures 0, so each one writes at the width of the
+                # pane on screen (`Transcript._region_width`) -- or what
+                # the turn wrote behind the viewer came back wrapped at 78.
                 with ContentSwitcher(initial="transcript", id="pane"):
                     yield Transcript(id="transcript")
                     yield Transcript(id="thread-view")
@@ -1778,29 +1781,12 @@ class VenastineApp(App):
         """
         view = self._thread_view
         view.reset()
-        # Paint at the live transcript's width: this runs while the
-        # switcher is still showing `#transcript`, so the viewer's own
-        # region measures 0 and every entry would freeze at min_width
-        # (78) -- the left-half transcript with a blank right half.
-        # Read twice: by our pre-wrap (`_wrap_width`, for thinking,
-        # lists, diffs and streamed commits) and by the `write` funnel
-        # below (8.x wraps prose at write time into Strips), which is
-        # what keeps the two at one width. Same box, same borders, same
-        # padding, so the widths are equal by construction rather than
-        # by hope. Cleared after, so a mid-paint exception cannot pin a
-        # stale width onto later polls; unset when the live pane is
-        # itself unmeasurable (never mounted), which keeps the old floor
-        # rather than painting at nothing.
-        try:
-            live_width = self._transcript.scrollable_content_region.width
-        except Exception:  # noqa: BLE001 -- never mounted; see _wrap_width
-            live_width = 0
-        if live_width:
-            view._paint_width = live_width
-        try:
-            self._paint_entries(view, entries)
-        finally:
-            view._paint_width = None
+        # This runs while the switcher is still showing `#transcript`, so
+        # the viewer measures 0 -- and paints at the live pane's width by
+        # itself, since a hidden pane borrows the on-screen one's. Nothing
+        # is handed over and nothing needs clearing: see
+        # `Transcript._region_width`.
+        self._paint_entries(view, entries)
         if not entries:
             # A run that has not written anything yet -- which is the
             # ordinary state for the first instant of a live one, and a
