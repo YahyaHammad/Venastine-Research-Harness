@@ -30,7 +30,7 @@ from dataclasses import dataclass
 # not a boolean, because "cannot run this at all" is a real third answer and
 # it changes what the gate should do: asking about a call that is going to
 # fail regardless burns a turn and teaches the model to retry.
-CONTAINED = "contained"      # confined to the workspace (a Docker container)
+CONTAINED = "contained"      # confined to the workspace (a Docker or Podman container)
 UNCONTAINED = "uncontained"  # runs with the user's own authority (host)
 UNAVAILABLE = "unavailable"  # no backend can run it
 

@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 4679 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 4700 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -148,7 +148,7 @@ made the move free: no import changed, and `tests/test_docs_consistency.py` is t
 opens any of these files (its `DOCS` constant is where the path now comes from).
 
 - **docs/ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A15 from §32, W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47 and CE1–CE7 from §48). Section and D-numbers are stable and cross-referenced everywhere.
+- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49 onward, in progress) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A15 from §32, W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 and SS1–SS24 from §49). Section and D-numbers are stable and cross-referenced everywhere.
 
 **Six namespaces use the same `LETTER+NUMBER` shape, and only the first is the
 record.** An id that resolves to two places is a cross-reference that fails
@@ -1649,7 +1649,7 @@ assert what the user was asked and whether it carried a deadline.
 A mutation that strands a reader **hangs** the suite rather than failing it, since two read paths now
 have no deadline. The mutation harness reports HANG as its own outcome.
 
-### The shell gate (`§28`, G1–G7; routing and disclosure amended by `§46`, EP4–EP8; what `tiered` approves amended by `§48`, CE1–CE7)
+### The shell gate (`§28`, G1–G7; routing and disclosure amended by `§46`, EP4–EP8; what `tiered` approves amended by `§48`, CE1–CE7; the container runtime amended by ROADMAP_v3 `§49`, SS22–SS24)
 
 Read §28's record before touching `security/sandbox.py`, `security/capability.py` or
 `_shell_approval_check`, and §46's before touching where a command RUNS. The four things most
@@ -1703,6 +1703,24 @@ And from §48, which amended what `tiered` approves (CE1–CE7):
   `unsafe_reasons()` has to follow the gate rather than the flags: under `always` the pair is not
   "no ask", and the badge said it was. A test holds the badge against the gate in every mode.
   `contained` itself is on the badge (CE4).
+
+And from §49 (`docs/ROADMAP_v3.md`), slice 0 -- Podman (SS22–SS24):
+
+- **The container route has two runtimes and one probe** (SS22). `security/sandbox._probe()` asks
+  `docker info` first and Podman only when Docker is missing or its daemon does not answer, once per
+  process under a lock. `is_docker_available`, `_run_docker`, `docker_available` and
+  `sandbox_docker_image` keep their names and now mean the container route: renaming the key would drop
+  a user's own value in `config_update.py`'s merge. **The CLI a route invokes is `known_runtime()`, which
+  never probes.** A test that patches availability gets Docker's CLI, and GitHub's runners ship Podman,
+  so a probing read would change the argv under CI.
+- **A Podman that cannot enforce the limits is not a runtime** (SS24). Rootless on cgroups other than
+  v2, or without cpu/memory/pids delegated, accepts `--memory` and ignores it.
+  `_why_podman_cannot_limit` reads `info --format {{json .}}` and fails CLOSED on anything unreadable. A
+  `docker` that is really Podman is recognised by `buildahVersion` in its `info` output and checked the
+  same way -- otherwise the podman-docker shim skips the check by name.
+- **The shipped image is fully qualified** (SS23). Podman resolves a short name through
+  `registries.conf`, and `python:3.13-slim` resolved on the machine it was measured on only because that
+  distro's `shortnames.conf` aliases `python`.
 
 And the four from §28 itself:
 

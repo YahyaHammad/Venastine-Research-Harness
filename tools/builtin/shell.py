@@ -6,7 +6,9 @@ Shell execution tool (ROADMAP §7). Runs commands in the detected shell
 (security/sandbox.py).
 
 SANDBOX MODEL (ROADMAP_v2 §46 moved one tier of this):
-  Almost everything runs in Docker. The one exception is HOST_READ --
+  Almost everything runs in a container -- Docker's, or Podman's when
+  Docker cannot run one (ROADMAP_v3 §49, SS22; the approval notice names
+  which). The one exception is HOST_READ --
   a read-only command from config.INERT_COMMANDS whose argument
   resolves OUTSIDE the workspace -- which runs as a host subprocess
   because the file it names is one no container can see. It always
@@ -23,7 +25,7 @@ SANDBOX MODEL (ROADMAP_v2 §46 moved one tier of this):
   approval answer (see security/sandbox.containment_for) and is
   reported to the model as `ran_on: "host"`.
 
-  Non-inert commands go through Docker (strong isolation) or the
+  Non-inert commands go through the container (strong isolation) or the
   explicit subprocess fallback (weak isolation, requires
   ALLOW_INSECURE_SANDBOX_FALLBACK=True).
 
@@ -90,6 +92,7 @@ from security.sandbox import (
     containment_for,
     detect_shell,
     is_docker_available,
+    known_runtime,
     run_sandboxed,
 )
 
@@ -164,8 +167,9 @@ class ShellParams(BaseModel):
 TOOL_SCHEMA = {
     "name": "shell",
     "description": (
-        "Execute a shell command. Commands run inside a Docker "
-        "container with the workspace mounted at /workspace -- EXCEPT "
+        "Execute a shell command. Commands run inside a container "
+        "(Docker, or Podman where Docker cannot run one) with the "
+        "workspace mounted at /workspace -- EXCEPT "
         "a read-only command with an argument outside the workspace, "
         "which runs on the HOST with the user's own file access "
         "because the container cannot see those files. The result "
@@ -381,8 +385,13 @@ def _shell_approval_notice(params: dict, _context=None) -> str:
     """
     command = params.get("command", "")
     profile, containment = _profile_and_containment(command)
+    # The runtime is read from the probe `_profile_and_containment` just
+    # ran, never re-probed: the person answering should see WHICH runtime
+    # isolates the command, since Podman and Docker are not the same
+    # product (ROADMAP_v3 §49, SS22).
     where = {
-        "contained": "in a Docker container, workspace mounted at /workspace",
+        "contained": (f"in a {known_runtime().capitalize()} container, "
+                      "workspace mounted at /workspace"),
         "uncontained": "on the HOST, with your own file access",
         "unavailable": "nowhere -- no sandbox backend is available",
     }.get(containment, containment)

@@ -185,9 +185,9 @@ class Posture:
         elif self.allow_insecure_fallback:
             reasons.append((
                 "host shell fallback",
-                "ALLOW_INSECURE_SANDBOX_FALLBACK is on -- if Docker is "
-                "down, commands run on the host with no filesystem or "
-                "network isolation"))
+                "ALLOW_INSECURE_SANDBOX_FALLBACK is on -- if no container "
+                "runtime (Docker or Podman) can run the sandbox, commands "
+                "run on the host with no filesystem or network isolation"))
         if not self.redact_tool_outputs:
             reasons.append((
                 "no redaction",

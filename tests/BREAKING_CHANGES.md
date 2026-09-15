@@ -4545,3 +4545,58 @@ says, so a stale copy would size them from a string that no longer exists.
 `TestQuotingCannotHideAnEscape` and `TestBackslashCannotHideAnEscape`:
 `test_and_with_docker_up_it_is_simply_contained` and
 `test_a_legitimate_*_workspace_path_still_works`.
+
+---
+
+## Podman runs the sandbox when Docker cannot; a third record document (batch 93)
+
+**The runtime probe is no longer an `lru_cache` on `is_docker_available`**
+(ROADMAP_v3 §49, SS22). `security/sandbox._probe()` memoises a `RuntimeProbe`
+(which CLI answered, and why none did) under a lock, and `is_docker_available()`
+is now `container_runtime() is not None`. A test that reset the probe with
+`is_docker_available.cache_clear()` must call `sandbox._reset_runtime_probe()`
+instead: there is no `cache_clear` attribute, so a `getattr` fallback silently
+leaves the previous test's answer in place. `TestDockerAvailable`'s fixture moved.
+
+**The route's CLI comes from `known_runtime()`, which never probes.** A test
+that patches `is_docker_available` or passes `docker_available=True` gets
+Docker's argv exactly as before. To exercise Podman, set
+`sandbox._runtime_probe = sandbox.RuntimeProbe("podman")` with `monkeypatch`;
+do NOT let a test run the real probe, because GitHub's ubuntu runners ship
+Podman and the argv would differ between CI and a local run.
+
+**Three strings moved.** The posture's fallback detail says "if no container
+runtime (Docker or Podman) can run the sandbox" (`tests/test_posture.py`'s two
+`"if Docker is"` pins), the unavailable error starts "No container runtime"
+(`test_non_inert_no_docker_fallback_disabled_raises`), and the approval notice
+says "Runs in a Docker container" or "Runs in a Podman container" by the probe
+-- `tests/test_tui.py`'s `_NOTICE` is unchanged because an unprobed test reads
+Docker.
+
+**The shipped image is `docker.io/library/python:3.13-slim`** (SS23), so
+`DOCUMENTED_CEILINGS`' README row template in `tests/test_docs_consistency.py`
+moved with it.
+
+**`ROADMAP_v3.md` is part of the record** (SS21). `_RECORD_DOCS` names it, so an
+id defined there resolves for production citations, and the AGENTS.md map line
+must claim `SS1–SS24` or `test_the_map_names_every_family_the_record_defines`
+fails. Its index has its own coverage and marker tests, because the v2 checks
+read `ROADMAP_v2.md` by name and v3's bold row spelling never matched
+`_INDEX_ENTRY`. **Its facts are a bullet list, not a table with ids in the first
+column:** `_DEFINITION_ROW` reads any `| X1 |` row as a decision, so a facts
+table keyed `F1`… would define a family the map does not name.
+
+| Change | Test | Fix |
+|---|---|---|
+| Probe Podman first, or whenever it is installed | `test_docker_wins_whenever_it_answers` | Docker first; Podman only when Docker is missing or does not answer |
+| Use a Podman that cannot enforce the limits | `test_a_podman_that_cannot_enforce_the_limits_is_refused[*]` | SS24: rootless needs cgroups v2 and cpu/memory/pids delegated |
+| Treat an unreadable `podman info` as capable | `test_a_podman_that_cannot_enforce_the_limits_is_refused[*could not be read*]` | Fail closed |
+| Refuse a rootful Podman on cgroups v1 | `test_a_rootful_podman_is_trusted_on_either_cgroup_version` | Only rootless can fail |
+| Skip the check for a `docker` that is really Podman | `test_a_docker_that_is_really_podman_is_checked_as_podman` | `buildahVersion` in `info` means Podman |
+| Probe per call, or without the lock | `test_the_podman_path_probes_once_per_process`, `test_the_probe_runs_once_per_process` | One `_probe()` per process |
+| Let `known_runtime()` probe | `test_known_runtime_reads_the_probe_and_never_runs_it` | Read `_runtime_probe`, default Docker |
+| Hard-code `docker` in the argv, the kill or the image inspect | `test_the_route_invokes_the_runtime_the_probe_found`, `test_a_timed_out_podman_container_is_killed_by_podman`, `test_the_image_is_inspected_by_the_runtime_that_runs_it` | Thread `runtime` from `known_runtime()` |
+| Drop the probe's reason from the unavailable error | `test_the_unavailable_message_carries_the_probes_reason` | `_known_unavailable_reason()` in the message |
+| Name Docker in the notice whatever runs | `test_the_approval_notice_names_the_runtime` | `known_runtime().capitalize()` |
+| Ship the short image name | `test_the_shipped_image_is_fully_qualified` | SS23 |
+| Add a §N to ROADMAP_v3 without an index row, or a row without a marker | `test_the_roadmap_v3_index_covers_every_section`, `test_every_roadmap_v3_index_entry_carries_a_status_marker` | One marked row per section |

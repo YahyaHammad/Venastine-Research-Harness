@@ -93,8 +93,8 @@ AUTHORITY_EFFECT = {
         "including in a session where untrusted content is already in the "
         "context window."),
     "allow_insecure_sandbox_fallback": (
-        "whether a shell command may run WITHOUT the container when Docker "
-        "is unavailable -- on the host, with your files."),
+        "whether a shell command may run WITHOUT the container when neither "
+        "Docker nor Podman can run one -- on the host, with your files."),
     "auto_approve_sandbox_fallback": (
         "whether that fallback to the host happens without asking you "
         "first."),
@@ -928,7 +928,8 @@ def parse_value(row: KeyRow, text: str) -> Any:
 
     THE STRING FIELDS TAKE THEIR TEXT VERBATIM, and that exception is the
     whole reason this is not one `yaml.load` call. `sandbox_docker_image` is
-    `python:3.13-slim`, `scholar_api_url` is a URL and `db_path` is a path:
+    `docker.io/library/python:3.13-slim`, `scholar_api_url` is a URL and
+    `db_path` is a path:
     handing those to a YAML parser asks it to guess, and the day a value
     contains `: ` it would guess "mapping" and the error would talk about a
     dict the user never typed.

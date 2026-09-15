@@ -3,10 +3,11 @@ security/sandbox.py
 
 Cross-platform command sandboxing with two backends:
 
-1. **Docker** (default) — strong isolation via container namespaces.
-   The workspace is mounted as a volume so output files appear on the
-   host seamlessly. Network is disabled unless the command matches
-   config.NETWORK_ALLOWED_COMMANDS.
+1. **A container** (default) — strong isolation via container namespaces,
+   run by Docker, or by Podman when Docker cannot run one (ROADMAP_v3
+   §49, SS22). The workspace is mounted as a volume so output files
+   appear on the host seamlessly. Network is disabled unless the command
+   matches config.NETWORK_ALLOWED_COMMANDS.
 
 2. **Subprocess + hardening** (fallback) — weak isolation. Requires
    explicit opt-in via config.ALLOW_INSECURE_SANDBOX_FALLBACK.
@@ -15,9 +16,18 @@ Cross-platform command sandboxing with two backends:
    Unix-only (rlimit); Windows relies on wall-clock timeout only.
 
 Inert commands (read-only inspection from config.INERT_COMMANDS with
-no shell metacharacters and no path-qualified binary) bypass both
-backends and run via a lightweight subprocess with a scrubbed
-environment and timeout — no Docker or fallback config needed.
+no shell metacharacters and no path-qualified binary) run in the
+container as an argv with no shell, and on the host only when no
+container runtime is available (ROADMAP_v2 §46, EP5). This docstring said
+they bypassed both backends, which stopped being true at EP5.
+
+THE WORD "docker" IN THIS MODULE'S NAMES MEANS THE CONTAINER ROUTE,
+whichever runtime serves it: `is_docker_available`, `_run_docker`, the
+`docker_available` parameter and `config.SANDBOX_DOCKER_IMAGE` all kept
+their names when Podman arrived. Renaming the config key would break
+config_update.py's merge of a user's own value across an npm update, and
+the function names are patched at about thirty-five test sites. What the
+route runs is `known_runtime()`.
 
 This module is intentionally separate from tools/builtin/shell.py so
 that other tools needing safe command execution can reuse it.
@@ -26,14 +36,17 @@ that other tools needing safe command execution can reuse it.
 from __future__ import annotations
 
 import functools
+import json
 import logging
 import os
 import platform
 import re
 import shlex
 import subprocess
+import threading
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Optional
 
 import config
@@ -85,42 +98,201 @@ def detect_shell() -> str:
 
 
 # ---------------------------------------------------------------------------
-# ---- Docker availability --------------------------------------------------
+# ---- Container runtime ----------------------------------------------------
 # ---------------------------------------------------------------------------
 
+DOCKER = "docker"
+PODMAN = "podman"
 
-@functools.lru_cache(maxsize=1)
-def is_docker_available() -> bool:
-    """Probe whether the Docker daemon is reachable.
+# The cgroup controllers the container argv's limits need: --cpus, --memory
+# and --pids-limit. A rootless runtime without all three delegated to the
+# user cannot bind those flags (ROADMAP_v3 §49, SS24).
+_LIMIT_CONTROLLERS = frozenset({"cpu", "memory", "pids"})
 
-    Cached for the process, and worth keeping cached -- but NOT for the
-    reason this docstring used to give (audit #21).
+# A key in Podman's `info` output that Docker's never carries -- measured
+# against podman 5.7.0 and Docker Desktop's CLI in batch 93. It is how a
+# `docker` command that is really Podman (the podman-docker shim) is
+# recognised without a second subprocess on the ordinary Docker path, so
+# that SS24's check cannot be skipped by the name alone.
+_PODMAN_INFO_MARKER = "buildahVersion"
 
-    It said §18's headless callability filter reaches here via shell's
-    approval_check on every schema build, costing roughly two `docker
-    info` subprocesses per _run(). It cannot: `schemas()` and
-    `headless_hidden()` both call `_advertised()` FIRST, `_advertised`
-    calls `is_tool_allowed`, and `shell` is permission `False` -- so the
-    filter never reaches approval_needed for it. Measured by making this
-    probe raise on entry: a full `schemas(callable_only=True)` build
-    reached it ZERO times.
 
-    What the cache is actually for is `shell.run()` and
-    `_shell_approval_check`, which both call this on the path a user
-    takes after enabling `shell` in config.py. Docker's availability does
-    not change meaningfully inside one process; a wrong answer costs a
-    restart, and each uncached probe costs up to the 10s timeout when the
-    daemon is unresponsive. So the cache stays -- it matters the moment
-    the tool is enabled, which is the only moment anything here runs.
+@dataclass(frozen=True)
+class RuntimeProbe:
+    """What the one probe per process found (SS22).
+
+    `name` is the CLI that runs the sandbox, or None. `reason` says why it
+    is None, for the unavailable message. `refused` marks the case worth a
+    WARNING: a runtime WAS there and was turned away because it cannot
+    enforce the limits, which a user can fix and would not otherwise learn.
     """
+
+    name: Optional[str]
+    reason: str = ""
+    refused: bool = False
+
+
+_runtime_probe: Optional[RuntimeProbe] = None
+_runtime_lock = threading.Lock()
+
+
+def _run_info(argv: list[str]) -> Optional[subprocess.CompletedProcess]:
+    """One `info` call, or None when the CLI is missing or does not answer
+    within the probe's 10s."""
     try:
-        result = subprocess.run(
-            ["docker", "info"],
-            capture_output=True, timeout=10,
-        )
-        return result.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
+        return subprocess.run(argv, capture_output=True, text=True,
+                              timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def _why_podman_cannot_limit(cli: str) -> str:
+    """Why the Podman behind *cli* cannot enforce the sandbox's resource
+    limits, or "" when it can (SS24).
+
+    ROOTLESS is the only case that can fail. A rootful runtime owns the
+    cgroup tree and binds the flags on either cgroup version; a rootless one
+    needs cgroups v2 AND the three controllers delegated to the user, and on
+    cgroups v1 Podman accepts `--memory` with a warning and ignores it -- a
+    container with no pids limit is a fork bomb that reaches the host.
+
+    Fails CLOSED on anything unreadable. Not knowing whether the limits bind
+    is not a reason to assume they do.
+    """
+    result = _run_info([cli, "info", "--format", "{{json .}}"])
+    if result is None or result.returncode != 0:
+        return (f"`{cli} info` would not report its cgroup setup, so whether "
+                f"it can enforce the sandbox's limits is unknown")
+    try:
+        host = json.loads(result.stdout)["host"]
+        rootless = bool(host["security"]["rootless"])
+        version = host.get("cgroupVersion")
+        controllers = set(host.get("cgroupControllers") or ())
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return (f"`{cli} info` could not be read, so whether it can enforce "
+                f"the sandbox's limits is unknown")
+    if not rootless:
+        return ""
+    if version != "v2":
+        return (f"rootless Podman on cgroups {version or 'of unknown version'} "
+                f"cannot enforce the sandbox's memory, CPU and process "
+                f"limits; move the host to cgroups v2")
+    missing = sorted(_LIMIT_CONTROLLERS - controllers)
+    if missing:
+        return (f"rootless Podman has no delegated {', '.join(missing)} "
+                f"cgroup controller, so the sandbox's limits would not "
+                f"bind; delegate cpu, memory and pids to your user")
+    return ""
+
+
+def _probe_container_runtime() -> RuntimeProbe:
+    """Docker first, then Podman (SS22). Uncached -- `_probe()` memoises it.
+
+    Docker wins whenever it answers, which is the only behaviour anyone had
+    before Podman was supported. Podman is asked only when Docker is not
+    installed or its daemon does not answer, and is used only if it can
+    enforce the limits (SS24).
+    """
+    docker = _run_info([DOCKER, "info"])
+    if docker is not None and docker.returncode == 0:
+        if (isinstance(docker.stdout, str)
+                and _PODMAN_INFO_MARKER in docker.stdout):
+            why = _why_podman_cannot_limit(DOCKER)
+            if why:
+                return RuntimeProbe(None, f"`docker` is Podman here, and "
+                                          f"{why}", refused=True)
+        return RuntimeProbe(DOCKER)
+
+    docker_why = ("Docker is not installed or did not answer"
+                  if docker is None else "Docker's daemon did not answer")
+    podman = _run_info([PODMAN, "info"])
+    if podman is None:
+        return RuntimeProbe(None, f"{docker_why}, and Podman is not "
+                                  f"installed or did not answer")
+    if podman.returncode != 0:
+        return RuntimeProbe(None, f"{docker_why}, and Podman did not answer "
+                                  f"(is its machine running?)")
+    why = _why_podman_cannot_limit(PODMAN)
+    if why:
+        return RuntimeProbe(None, f"{docker_why}, and {why}", refused=True)
+    return RuntimeProbe(PODMAN)
+
+
+def _probe() -> RuntimeProbe:
+    """The probe, run at most once per process.
+
+    Memoised for the process, and worth it -- but NOT for the reason this
+    module used to give (audit #21). §18's headless callability filter
+    never reaches here: `schemas()` and `headless_hidden()` call
+    `_advertised()` first, which asks `is_tool_allowed`, and `shell` ships
+    permission `False` (measured by making the probe raise on entry: a full
+    `schemas(callable_only=True)` build reached it zero times). What the memo
+    is for is `shell.run()` and `_shell_approval_check`, on the path a user
+    takes after enabling `shell`: whether a runtime can run the sandbox does
+    not change meaningfully inside one process, a wrong answer costs a
+    restart, and each uncached probe costs up to 10s per CLI when a daemon
+    is unresponsive.
+
+    A lock rather than lru_cache, because two threads asking at once must
+    get ONE probe -- a parallel batch of subagents each calling `shell` --
+    and because the memo now carries the reason alongside the answer.
+    """
+    global _runtime_probe
+    with _runtime_lock:
+        if _runtime_probe is None:
+            _runtime_probe = _probe_container_runtime()
+            if _runtime_probe.refused:
+                logger.warning("No container runtime can run the sandbox: %s",
+                               _runtime_probe.reason)
+            elif _runtime_probe.name == PODMAN:
+                logger.info("Container runtime: podman (Docker cannot run "
+                            "the sandbox)")
+        return _runtime_probe
+
+
+def container_runtime() -> Optional[str]:
+    """The CLI that runs the sandbox -- "docker", "podman" -- or None."""
+    return _probe().name
+
+
+def known_runtime() -> str:
+    """The CLI a container route invokes, read WITHOUT probing.
+
+    Every production path reaches a container route through
+    `is_docker_available()`, which runs the probe, so by then this is the
+    real answer. A caller that hands `run_sandboxed` `docker_available=True`
+    without probing -- only tests do -- gets Docker's CLI, which is what
+    every argv test asserts. Probing here instead would run real `docker`
+    and `podman` subprocesses inside a test that patched the availability
+    answer, and GitHub's runners ship Podman, so the argv would change
+    under CI.
+    """
+    probe = _runtime_probe
+    return probe.name if probe is not None and probe.name else DOCKER
+
+
+def _known_unavailable_reason() -> str:
+    """Why no runtime can run the sandbox, if the probe has said; never
+    probes, for `known_runtime()`'s reason."""
+    probe = _runtime_probe
+    return probe.reason if probe is not None and probe.name is None else ""
+
+
+def _reset_runtime_probe() -> None:
+    """Forget the probe's answer. Tests only."""
+    global _runtime_probe
+    with _runtime_lock:
+        _runtime_probe = None
+
+
+def is_docker_available() -> bool:
+    """Whether a container runtime can run the sandbox: Docker, or Podman
+    when Docker cannot (ROADMAP_v3 §49, SS22).
+
+    The name predates Podman and is kept, like `_run_docker`'s -- see the
+    module docstring. The probe behind it runs once per process.
+    """
+    return container_runtime() is not None
 
 
 # ---------------------------------------------------------------------------
@@ -569,8 +741,8 @@ def _run_inert(
 
 
 @functools.lru_cache(maxsize=8)
-def _resolved_image_id(image: str) -> str:
-    """The image ID `docker run` will actually use for *image*, or "".
+def _resolved_image_id(image: str, runtime: str = DOCKER) -> str:
+    """The image ID `<runtime> run` will actually use for *image*, or "".
 
     §46 (EP7). `SANDBOX_DOCKER_IMAGE` is a TAG, and a tag is not an
     identity: anything on the machine may `docker build -t
@@ -580,18 +752,22 @@ def _resolved_image_id(image: str) -> str:
     command reported a filesystem nobody recognised -- it was not what
     happened that time, and it is still worth being able to see.
 
+    Two runtimes make the point twice (ROADMAP_v3 §49): Docker and
+    Podman keep separate image stores, and measured, the same tag pulled
+    by each a week apart resolved to two different IDs.
+
     LOGGED, NOT ENFORCED. Pinning by digest is a separate decision with
     a maintenance cost (somebody has to bump it), while a line in
     app.log naming the ID costs one cached subprocess per process and
     turns a silent substitution into a visible one.
 
-    Failure is not an error here: the image ID is diagnostic, and a
-    `docker image inspect` that fails must not stop a run that Docker
+    Failure is not an error here: the image ID is diagnostic, and an
+    `image inspect` that fails must not stop a run that the runtime
     itself is about to accept.
     """
     try:
         result = subprocess.run(
-            ["docker", "image", "inspect", "--format", "{{.Id}}", image],
+            [runtime, "image", "inspect", "--format", "{{.Id}}", image],
             capture_output=True, text=True, timeout=10,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
@@ -599,15 +775,16 @@ def _resolved_image_id(image: str) -> str:
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
-def _log_image_identity() -> None:
-    """Say once per process which image the sandbox resolves to (EP7)."""
+def _log_image_identity(runtime: str = DOCKER) -> None:
+    """Say once per process which image the sandbox resolves to, and under
+    which runtime (EP7)."""
     image = config.SANDBOX_DOCKER_IMAGE
-    resolved = _resolved_image_id(image)
+    resolved = _resolved_image_id(image, runtime)
     if _log_image_identity._said:
         return
     _log_image_identity._said = True
-    logger.info("Sandbox image %s resolves to %s", image,
-                resolved or "an id docker would not report")
+    logger.info("Sandbox image %s resolves to %s under %s", image,
+                resolved or "an id the runtime would not report", runtime)
 
 
 _log_image_identity._said = False
@@ -705,11 +882,19 @@ def _run_docker(
     _shell_binary: str = "",
     network: bool = False,
     argv: bool = False,
+    runtime: str = DOCKER,
 ) -> dict:
-    """Run a command inside a Docker container with the workspace
-    mounted as a volume. On timeout, the container is explicitly
-    killed via ``docker kill`` to prevent orphaned containers from
-    continuing to write to the host via the volume mount.
+    """Run a command inside a container with the workspace mounted as a
+    volume. On timeout, the container is explicitly killed via
+    ``<runtime> kill`` to prevent orphaned containers from continuing to
+    write to the host via the volume mount.
+
+    *runtime* is the CLI -- "docker" or "podman" (ROADMAP_v3 §49, SS22) --
+    and nothing else in the argv changes with it: every flag here was
+    measured to mean the same thing under rootless Podman 5.7, the nested
+    `:ro` bind and `--network none` included. The default is Docker's so a
+    caller that never probed builds the argv every test asserts; the
+    production route passes `known_runtime()`.
 
     *argv* runs the command as a pre-split argument vector instead of
     through ``bash -c`` (§46, EP5). Only INERT commands set it, and
@@ -724,7 +909,7 @@ def _run_docker(
     container_name = f"sandbox-{uuid.uuid4().hex[:12]}"
 
     docker_args = [
-        "docker", "run", "--rm",
+        runtime, "run", "--rm",
         "--name", container_name,
         # §46 (EP7). Ours, and findable as ours. The name is a uuid, so
         # `docker ps` could not tell a container of ours from any other
@@ -778,7 +963,7 @@ def _run_docker(
         # (proc.kill()) does NOT stop the container under the daemon.
         try:
             subprocess.run(
-                ["docker", "kill", container_name],
+                [runtime, "kill", container_name],
                 capture_output=True, timeout=10,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -796,8 +981,8 @@ def _run_docker(
             proc.kill()
             proc.wait()
         raise SandboxUnavailable(
-            "Docker CLI not found. Install Docker Desktop or enable "
-            "ALLOW_INSECURE_SANDBOX_FALLBACK in config.py."
+            f"The {runtime} CLI was not found. Install Docker or Podman, "
+            "or set allow_insecure_sandbox_fallback: true in config.yaml."
         )
 
 
@@ -949,15 +1134,19 @@ def run_sandboxed(
 
     if docker_available:
         network = profile.network
+        # ROADMAP_v3 §49 (SS22). Docker's CLI or Podman's, as the probe that
+        # produced `docker_available` found -- read, never re-probed.
+        runtime = known_runtime()
         logger.debug(
-            "Docker path (network=%s): %s", network, command[:80],
+            "Container path (%s, network=%s): %s", runtime, network,
+            command[:80],
         )
         # HERE rather than inside _run_docker, which stays a function
         # that builds an argv and opens one process. Putting a second
         # subprocess in there would put it on the timeout and kill
         # paths too, and it collides with every test that patches Popen
         # to inspect the argv -- subprocess.run goes through Popen.
-        _log_image_identity()
+        _log_image_identity(runtime)
         return _annotate(
             _run_docker(command, workspace_dir, shell_binary, network,
                         # §46 (EP5). An inert command has no
@@ -967,7 +1156,8 @@ def run_sandboxed(
                         # executor, which is the gap #157 came through
                         # twice. argv keeps the `shell=False` semantics
                         # the light path always had.
-                        argv=(profile.tier == INERT)),
+                        argv=(profile.tier == INERT),
+                        runtime=runtime),
             profile, "container")
 
     # §46 (EP5). Docker is down. An inert command still has somewhere to
@@ -991,10 +1181,17 @@ def run_sandboxed(
             _run_subprocess_fallback(command, workspace_dir, shell_binary),
             profile, "host")
 
+    # The probe's reason goes in the message because the case it exists for
+    # is otherwise baffling: Podman IS installed and answering, and was
+    # refused for limits it cannot enforce (SS24). A user told only "no
+    # runtime" would reinstall the one they have.
+    reason = _known_unavailable_reason()
     raise SandboxUnavailable(
-        "Docker is not available and ALLOW_INSECURE_SANDBOX_FALLBACK is "
-        "False. Install Docker Desktop for strong isolation, or set "
-        "ALLOW_INSECURE_SANDBOX_FALLBACK = True in config.py to use the "
+        "No container runtime can run the sandbox"
+        + (f" ({reason})" if reason else "")
+        + " and ALLOW_INSECURE_SANDBOX_FALLBACK is False. Install Docker or "
+        "Podman for strong isolation, or set "
+        "allow_insecure_sandbox_fallback: true in config.yaml to use the "
         "weaker subprocess fallback (no filesystem isolation, no network "
         "restriction)."
     )

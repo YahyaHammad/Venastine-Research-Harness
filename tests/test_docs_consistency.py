@@ -764,7 +764,7 @@ def test_the_url_blocklist_is_defined_exactly_once():
 # What makes this computable is that ids are a closed set with two sides --
 # what the record DEFINES and what the code CITES -- and both are readable.
 
-_RECORD_DOCS = ("ROADMAP.md", "ROADMAP_v2.md")
+_RECORD_DOCS = ("ROADMAP.md", "ROADMAP_v2.md", "ROADMAP_v3.md")
 
 # THREE SHAPES FOR ONE DEFINITION, and this is the load-bearing detail. The
 # record writes a decision as a table row (`| **U1** | ... |`), as a bolded
@@ -1070,7 +1070,7 @@ def test_every_decision_id_cited_in_production_code_resolves():
 
     assert not unresolved, (
         f"these ids are cited in production code and resolve to nothing in "
-        f"ROADMAP.md or ROADMAP_v2.md: "
+        f"ROADMAP.md, ROADMAP_v2.md or ROADMAP_v3.md: "
         f"{ {k: v[:3] for k, v in sorted(unresolved.items())} }. Either the "
         f"decision belongs in the record, or the citation belongs to one of "
         f"the namespaces AGENTS.md lists and should say so -- `gate D0`, "
@@ -1495,6 +1495,25 @@ def test_the_held_widget_count_matches_the_prose():
         f"preconditions sentence beside it is the argument.")
 
 
+def _sections_missing_from_the_index(record):
+    """(headings, the section numbers with no index row) for one roadmap.
+
+    One `## N.` heading per section, in either of the two spellings the
+    record uses (`## 13.` for the older sections, `## §39.` for the newer
+    ones). The index block is everything between `## Index` and its closing
+    rule, in both of its row spellings (`- 13.` and `- **§32.**`).
+    """
+    with open(os.path.join(DOCS, record), encoding="utf-8") as f:
+        text = f.read()
+    headings = set(int(n) for n in
+                   re.findall(r"^## (?:§)?(\d+)\.", text, re.M))
+    index_block = text.split("## Index")[1].split("---")[0]
+    indexed = set(int(n) for n in re.findall(r"§(\d+)\.", index_block))
+    indexed.update(int(n) for n in
+                   re.findall(r"^- (\d+)\.", index_block, re.M))
+    return headings, sorted(headings - indexed)
+
+
 def test_the_roadmap_v2_index_covers_every_section():
     """TECHNICAL_DEBT's index entry, closed 2026-09-10: the index stopped at
     §31 while the record ran to §47, then backfills reached §45 and left
@@ -1504,26 +1523,43 @@ def test_the_roadmap_v2_index_covers_every_section():
     entries it found, and an absent row has no marker to miss.
 
     The prescription the debt entry recorded is the check: one index row per
-    `## N.` heading, in either of the two heading spellings the record uses
-    (`## 13.` for the older sections, `## §39.` for the newer ones). The
-    index block is everything between `## Index` and its closing rule, in
-    both of the two row spellings it uses (`- 13.` and `- **§32.**`).
+    section heading.
     """
-    with open(os.path.join(DOCS, "ROADMAP_v2.md"), encoding="utf-8") as f:
-        text = f.read()
-    headings = set(int(n) for n in
-                   re.findall(r"^## (?:§)?(\d+)\.", text, re.M))
-    index_block = text.split("## Index")[1].split("---")[0]
-    indexed = set(int(n) for n in re.findall(r"§(\d+)\.", index_block))
-    indexed.update(int(n) for n in
-                   re.findall(r"^- (\d+)\.", index_block, re.M))
-
+    headings, missing = _sections_missing_from_the_index("ROADMAP_v2.md")
     assert headings, "no section headings parsed -- the pattern moved."
-    missing = sorted(headings - indexed)
     assert not missing, (
         f"ROADMAP_v2.md sections without an index row: {missing}. A section "
         f"missing from the index reads as nonexistent, which is #129's "
         f"complaint one level up.")
+
+
+def test_the_roadmap_v3_index_covers_every_section():
+    """ROADMAP_v3 §49 (SS21) opened a third record document, and the two
+    index checks were written against ROADMAP_v2 by NAME -- so without
+    this, v3 could grow a section its index never lists, the exact drift
+    the v2 check was written after."""
+    headings, missing = _sections_missing_from_the_index("ROADMAP_v3.md")
+    assert 49 in headings, (
+        "ROADMAP_v3.md parsed no §49 heading -- it opens at §49, so the "
+        "pattern moved or the document did.")
+    assert not missing, (
+        f"ROADMAP_v3.md sections without an index row: {missing}.")
+
+
+def test_every_roadmap_v3_index_entry_carries_a_status_marker():
+    """#129's rule for the third document. v3 writes every row in the bold
+    `- **§49. Title** — **(STATUS)**` spelling, which `_INDEX_ENTRY` (the
+    `- 13.` spelling) never matches -- so the v2 marker test cannot see a
+    v3 row at all. The marker is the bolded parenthetical AFTER the title,
+    since the title is itself bold."""
+    with open(os.path.join(DOCS, "ROADMAP_v3.md"), encoding="utf-8") as f:
+        block = f.read().split("## Index")[1].split("---")[0]
+    rows = re.findall(r"^- \*\*§\d+\..*$", block, re.M)
+    assert rows, "ROADMAP_v3.md's index parsed no rows -- the spelling moved."
+    unmarked = [row[:40] for row in rows
+                if "**(" not in row.split("**", 2)[2]]
+    assert not unmarked, (
+        f"ROADMAP_v3.md index rows with no status marker: {unmarked}.")
 
 
 def test_the_revisit_note_covers_the_ensemble_family():
@@ -1591,7 +1627,7 @@ DOCUMENTED_CEILINGS = [
     ("README.md", "sandbox_timeout_seconds",
      "the container runs under a {}-second wall clock"),
     ("README.md", "sandbox_timeout_seconds",
-     "`python:3.13-slim`; {} s,"),
+     "`docker.io/library/python:3.13-slim`; {} s,"),
     ("README.md", "sandbox_memory_mb", "wall clock, {} MB of memory"),
     ("README.md", "sandbox_memory_mb", "s, {} MB, 30 CPU-s"),
     ("README.md", "sandbox_max_pids", "{} processes, 120 seconds"),

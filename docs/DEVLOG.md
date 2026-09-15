@@ -14111,3 +14111,124 @@ nothing: `pytest` runs a conftest.py, `make` runs a Makefile, and `"python"`,
 - `README.md` -- the mode and tier tables, the quoting paragraph, the count.
 - `docs/SECURITY.md`, `CONFIG_ARCHITECTURE.md`, `docs/ARCHITECTURE.md`.
 - `tests/BREAKING_CHANGES.md` -- the batch 92 section.
+
+## Batch 93 -- a third record document, and Podman when Docker cannot run the sandbox (2026-09-15)
+
+### What was asked
+
+The owner asked for background, monitor and interactive shell sessions, WSL and SSH execution
+beside the container, session secrets and sudo, a concurrency cap, a sidebar panel for sessions,
+sessions that outlive the turn and re-wake the agent, a block on user input while they run, and
+subagent use -- split across commits, with no new risk beyond "WSL or the SSH host is less
+protected than Docker". The design took five question rounds and merged a second agent's review,
+several of whose claims did not survive a check against the code. After approving the plan the owner
+added two things: use Podman instead of Docker when Docker is not found (the same container route,
+not a new backend), and record the work in a new document rather than in ROADMAP_v2.
+
+This batch builds the record -- `docs/ROADMAP_v3.md` §49, decisions SS1-SS24 -- and slice 0, Podman.
+Background and monitor sessions are slice 1, next.
+
+### Measured before building slice 0
+
+Podman was not installed on this machine, so the owner installed it in WSL Ubuntu and every Podman
+claim below was measured there (podman 5.7.0, rootless, cgroups v2, systemd, controllers cpu, memory
+and pids delegated):
+
+- **The container argv runs unchanged.** A writable workspace, a nested `:ro` bind that refused a write
+  with EROFS, `--network none` (unreachable), argv mode, `--label` with `ps -q --filter label=`, kill
+  by name with `--rm` removal, `--sig-proxy=false`, the in-container `timeout -k` backstop (137 after
+  6 s) and `image inspect --format {{.Id}}` all behaved as they do under Docker.
+- **The limits land:** `memory.max` 64 MiB, `pids.max` 20, `cpu.max` one CPU.
+- **Rootless ownership differs, for the better:** a file written in /workspace is owned by the host user,
+  where Docker's are root's.
+- **The short name resolved only through an alias.** `python:3.13-slim` resolved with no terminal because
+  Ubuntu's `shortnames.conf` maps `python`; `registries.conf` names no search registries.
+- **The two runtimes' IDs for the tag differed**, and the cause was the tag moving between pulls
+  (created 2026-08-25 against 2026-09-01), not the runtime. The first draft of SS23 said both would pull
+  "the same digest"; the record says a tag is not an identity instead.
+- **`podman info --format "{{json .}}"`** has a top-level `host` with `cgroupVersion`,
+  `cgroupControllers` and `security.rootless`; Docker's JSON has no `host` key. Plain `podman info`
+  contains `buildahVersion` and Docker's does not, which is how a `docker` that is really Podman is
+  recognised.
+
+The design-phase measurements (a pty inside the backend over plain pipes, WSL writing the harness's own
+authority files, CPython `re` freezing every thread, the in-container timeout, RE2's licence and wheels)
+are recorded in §49 itself.
+
+### Decisions (owner) -- ROADMAP_v3 §49
+
+| # | Decision |
+|---|---|
+| SS21 | The record is a new `docs/ROADMAP_v3.md`, numbering continuing at §49 |
+| SS22 | Podman runs the sandbox when Docker cannot and Podman can; Docker is probed first, once per process |
+| SS23 | The shipped image is fully qualified, `docker.io/library/python:3.13-slim` |
+| SS24 | A Podman that cannot enforce the memory, CPU and process limits is not used, and the error says why |
+
+SS1-SS20 are the sessions design (slices 1-5 and background subagents), recorded and not yet built.
+
+### What was built
+
+- **`security/sandbox.py`:**
+  - `_probe()` memoises a `RuntimeProbe` (the CLI, or None and why) under a lock -- one probe per process
+    even when parallel subagents ask at once. `is_docker_available()` is now
+    `container_runtime() is not None`.
+  - `_probe_container_runtime()` asks `docker info` first and Podman only when Docker is missing or its
+    daemon does not answer. `_why_podman_cannot_limit()` refuses rootless Podman on cgroups other than v2
+    or without cpu/memory/pids delegated, and fails closed on an unreadable `info`. A `docker` whose
+    `info` carries `buildahVersion` is checked the same way.
+  - `known_runtime()` reads the probe and never runs it; `_run_docker`, `_resolved_image_id` and
+    `_log_image_identity` take the runtime, and `run_sandboxed` passes it. The unavailable error carries
+    the probe's reason.
+  - Names kept: `is_docker_available`, `_run_docker`, `docker_available`, `sandbox_docker_image`. The
+    module docstring says they mean the container route.
+- **`tools/builtin/shell.py`:** the approval notice says "Runs in a Docker container" or "a Podman
+  container"; the tool schema tells the model either may run it.
+- **`security/posture.py`, `config_edit.py`, `security/capability.py`:** the fallback wording names both
+  runtimes. **`config.yaml`:** the qualified image.
+- **`docs/ROADMAP_v3.md`**, wired into `tests/test_docs_consistency.py` (`_RECORD_DOCS`, an index-coverage
+  test and a status-marker test for its bold row spelling) and into the AGENTS.md map line, CLAUDE.md,
+  QWEN.md, README, CONTRIBUTING, ARCHITECTURE and the PR template.
+
+### Corrected while there
+
+- `security/sandbox.py`'s module docstring said inert commands bypass both backends, and README said so
+  twice ("never touch Docker", "plain host subprocesses, skipping Docker entirely"). All false since §46
+  EP5.
+- CONTRIBUTING said ROADMAP_v2 ran §13-§37 and ARCHITECTURE said §13-§47.
+- The unavailable error told users to edit `config.py`, which has held no values since the move to YAML.
+
+### Verification
+
+- Focused (`test_shell.py`, `test_posture.py`, `test_config_edit.py`, `test_rationale.py`): 435 passed,
+  2 skipped (both platform skips).
+- `tests/test_docs_consistency.py` alone: 34 passed, 1 skipped -- after the count was corrected from 4701
+  to 4700. The check counts SELECTED tests and one is deselected by default; the first update used the
+  collected total.
+- **Mutation pass (`mutate93.py`, restoring from in-memory bytes): control green, 18 of 18 killed**, every
+  target restored byte for byte. Rows: Docker never asked; a Podman that cannot limit used anyway; an
+  unreadable `info` trusted; a rootful Podman held to the rootless rule; missing controllers ignored; the
+  shim skipping the check; the probe run per call; `known_runtime` probing; `docker` hard-coded in the
+  argv, the timeout kill or the image inspect; the route not passing the runtime; the error dropping the
+  reason; the notice always saying Docker; the shipped image a short name; the v3 index row losing its
+  marker or its section; and the AGENTS map forgetting the SS family. The rows that touch the record
+  documents are why its three new checks exist -- each was killed by the check written for it.
+- **Full suite:** 4680 passed, 20 skipped, 1 deselected in 419 s, pytest exit 0 -- 4700 selected, the
+  count now quoted in README, AGENTS and ARCHITECTURE.
+
+### Deliberately not done
+
+- Docker rootless on cgroups v1 ignores limits the same way, and is not checked. It is in §49's gap
+  register rather than decided.
+- Unmeasured: Podman on Windows (`podman machine`, `C:\` bind paths), rootless cgroups v1, SELinux
+  relabelling of bind mounts.
+
+### Files touched
+
+- `security/sandbox.py`, `tools/builtin/shell.py`, `security/posture.py`, `security/capability.py`,
+  `config_edit.py`, `config.yaml`.
+- Tests: `tests/test_shell.py` (`TestTheContainerRuntime`, the probe fixture, the unavailable-message
+  pin), `tests/test_posture.py` (two pins), `tests/test_docs_consistency.py` (record wiring, the image
+  template).
+- `docs/ROADMAP_v3.md` (new), `AGENTS.md`, `CLAUDE.md`, `QWEN.md`, `README.md`, `CONFIG_ARCHITECTURE.md`,
+  `docs/SECURITY.md`, `docs/ARCHITECTURE.md`, `docs/CONTRIBUTING.md`, `.github/PULL_REQUEST_TEMPLATE.md`,
+  `tests/BREAKING_CHANGES.md`.

@@ -360,9 +360,9 @@ Under `tiered` and `contained`, each command is classified **once** into what it
 
 | tier | what it is | where it runs | asked under `tiered`? | under `contained`? |
 |---|---|---|---|---|
-| `INERT` | read-only command, every argument inside the workspace | container (host when Docker is down) | no | no |
+| `INERT` | read-only command, every argument inside the workspace | container (host when no container runtime is available) | no | no |
 | `HOST_READ` | read-only, but an argument reaches outside the workspace | host | **yes** | **yes** |
-| `SANDBOXED` | anything else, no network — it may run code | container | **yes** | no, if Docker is confirmed up |
+| `SANDBOXED` | anything else, no network — it may run code | container | **yes** | no, if a container runtime (Docker or Podman) is confirmed up |
 | `SANDBOXED_NET` | **any** word is on the network allowlist (`curl`, `pip`, `git`, …) — first word only for an INERT command, which cannot chain | container, with network | **yes** | **yes** |
 | `UNKNOWN` | could not be characterised at all | — | **yes** | **yes** |
 
@@ -392,11 +392,11 @@ is set to something weaker than the shipped default, the harness says so at laun
 
 `shell_approval_mode` is **rejected** in `.venastine/settings.json`, by name and with a reason. A project's settings beat your own, and a cloned repository must not be able to set this. Set it in `config.yaml`.
 
-If your workspace contains a `.venastine/` directory, it is bind-mounted **read-only** inside the container, so a sandboxed command cannot rewrite the context and MCP definitions that feed later prompts. This covers writes on the Docker path only — not reads, and not the subprocess fallback.
+If your workspace contains a `.venastine/` directory, it is bind-mounted **read-only** inside the container, so a sandboxed command cannot rewrite the context and MCP definitions that feed later prompts. This covers writes on the container path only, under Docker or Podman — not reads, and not the subprocess fallback.
 
 **The workspace may not be the harness.** The container mounts your workspace read-write, and a sandboxed command with no network is auto-approved inside it — so a workspace pointing at the harness's own directory would be unattended write access to the code about to run next. `AGENT_WORKSPACE` is refused at startup, and by the sandbox, when it *is* or sits *inside* the harness install tree or `~/.config/venastine/`. The two artifact directories `workspace/` and `output/` stay usable, which is the shipped layout; everything else in the install tree is refused, including a module added in a later release — it is an allowlist, so it fails closed. When one of those trees is *nested inside* your workspace instead — a workspace set to your home directory, say — there is nothing to refuse, so it is bind-mounted read-only, along with `providers.json`, the conversation database and the log directory. The guard names the harness that is *running*, so pointing a globally-installed `venastine` at a development clone of its own source still works.
 
-**From approval to execution, one answer throughout.** The classification is computed once per call and the same profile is handed to both the approval check and the sandbox, so what was approved is what runs. Inert commands never touch Docker — they are plain subprocesses on the host. Anything else probes Docker once per call and shares the result between gate and runner: if Docker was up when the call was approved but down when it executes, and the only route left is the fallback, the call returns an error telling the model to retry rather than silently downgrading onto the host. With Docker unavailable and `allow_insecure_sandbox_fallback: true` in `config.yaml`, non-inert commands fall back to a weakly-isolated host subprocess — prompted per run unless `auto_approve_sandbox_fallback: true` opts that prompt away. Inside the container the workspace is mounted at `/workspace` and output comes back truncated at 50,000 characters (`max_read_chars`); the container runs under a 120-second wall clock, 2048 MB of memory, a single CPU core and a 200-process cap, while the weak fallback enforces its own rlimits instead — 30 CPU-seconds and the same memory ceiling. Two environment knobs affect the mechanics: `AGENT_SHELL` overrides the detected host shell (bash on Linux/macOS, PowerShell on Windows), and `AGENT_SANDBOX_IMAGE` swaps the default `python:3.13-slim` image.
+**From approval to execution, one answer throughout.** The classification is computed once per call and the same profile is handed to both the approval check and the sandbox, so what was approved is what runs. **The container comes from Docker, or from Podman when Docker cannot run one** — probed once per process, Docker first. Podman is used only if it can enforce the memory, CPU and process limits below: a rootless Podman on cgroups v1, or without those controllers delegated to your user, accepts the flags and ignores them, so it is refused and the reason is logged and shown. An inert command runs in that container as a plain argument list with no shell, and on the host only when no runtime is available. Anything else shares the probe's answer between gate and runner: if a runtime was up when the call was approved but gone when it executes, and the only route left is the fallback, the call returns an error telling the model to retry rather than silently downgrading onto the host. With no container runtime available and `allow_insecure_sandbox_fallback: true` in `config.yaml`, non-inert commands fall back to a weakly-isolated host subprocess — prompted per run unless `auto_approve_sandbox_fallback: true` opts that prompt away. Inside the container the workspace is mounted at `/workspace` and output comes back truncated at 50,000 characters (`max_read_chars`); the container runs under a 120-second wall clock, 2048 MB of memory, a single CPU core and a 200-process cap, while the weak fallback enforces its own rlimits instead — 30 CPU-seconds and the same memory ceiling. Two environment knobs affect the mechanics: `AGENT_SHELL` overrides the detected host shell (bash on Linux/macOS, PowerShell on Windows), and `AGENT_SANDBOX_IMAGE` swaps the default `docker.io/library/python:3.13-slim` image (fully qualified, so Podman resolves it without a short-name alias).
 
 ### "Headless" means *unable to ask*, not "not a GUI"
 
@@ -816,8 +816,8 @@ Deliberately not settings.json keys: editing these means editing the harness's o
 | `model_context_windows` / `default_context_window` | 256k fallback | The **fallback** for the window, not the only source: Anthropic and Google report it on their model endpoints, and the OpenAI-compatible providers that carry it (Groq, Mistral, Together, OpenRouter) are read through one alias sniff. This table answers for the ones that report nothing (OpenAI, DeepSeek, Perplexity). Feeds the research-pass compaction backstop **and** the summarizer's one-call input budget; an unknown model warns once and assumes the default. Keys are stored normalized — no date suffix, no `vendor/` prefix |
 | `shell_approval_mode` | `tiered` | The shell gate: `always` / `tiered` / `never`; a bad value raises at import. Rejected in settings.json by name, see above |
 | `network_allowed_commands` | pip, curl, git, npm, … | Binaries granted network access inside the sandbox. Matched against **every** word of a command that needs a sandbox, so `cd x && pip install .` is recognised and asked about — and against the **first word only** of an inert one, which cannot chain, so `grep pip notes.txt` still runs unprompted |
-| `inert_commands` | ls, cat, grep, wc, … | Read-only commands that run as plain host subprocesses, skipping Docker entirely |
-| Sandbox bounds | image `python:3.13-slim`; 120 s, 2048 MB, 30 CPU-s, 200 pids | `sandbox_docker_image`, `sandbox_timeout_seconds`, `sandbox_memory_mb`, `sandbox_cpu_seconds`, `sandbox_max_pids` |
+| `inert_commands` | ls, cat, grep, wc, … | Read-only commands eligible to run unprompted under `tiered` — as a plain argument list in the container, or on the host only when no container runtime is available |
+| Sandbox bounds | image `docker.io/library/python:3.13-slim`; 120 s, 2048 MB, 30 CPU-s, 200 pids — under Docker, or Podman when Docker cannot run the sandbox | `sandbox_docker_image`, `sandbox_timeout_seconds`, `sandbox_memory_mb`, `sandbox_cpu_seconds`, `sandbox_max_pids` |
 | `allow_insecure_sandbox_fallback` / `auto_approve_sandbox_fallback` | `false` / `false` | Enable, then de-prompt, the weak host-subprocess fallback |
 | `redact_tool_outputs` | `true` | Master switch for output redaction. Never affects input refusals, the depth-cap bound, or the log formatter's own guard |
 | `tool_compute_timeout_s` | 20 | Wall clock per maths-tool subprocess |
@@ -846,7 +846,7 @@ Deliberately not settings.json keys: editing these means editing the harness's o
 | `AGENT_OUTPUT_DIR` | `./output` | Research artifacts root |
 | `AGENT_WORKSPACE` | `./workspace` | File-tools and sandbox workspace root. **When you set it, it is also the project**: workspace trust, `.venastine/`, `/init`'s destination, `output/` and project-scoped memories all follow it rather than the directory you launched from |
 | `AGENT_SHELL` | auto-detect | Host shell binary for the `shell` tool |
-| `AGENT_SANDBOX_IMAGE` | `python:3.13-slim` | Sandbox container image |
+| `AGENT_SANDBOX_IMAGE` | `docker.io/library/python:3.13-slim` | Sandbox container image, under Docker or Podman |
 | `AGENT_LOG_LEVEL` | `INFO` | Log verbosity — name or numeric level |
 | `AGENT_LOG_FILE` | `logs/app.log` | Rotating log location |
 | `VENASTINE_REDACT_OFF` | unset | Truthy value disables tool-output pattern redaction for one run. The environment can only ever weaken redaction, never restore it past the constant — and input refusals, the depth-cap bound and the log formatter's guard stay on regardless |
@@ -886,7 +886,7 @@ note that shell approval is governed solely by `shell_approval_mode` -- `tool_ap
 deliberately has no `shell` key, so an old file carrying one is refused at startup
 naming the key — see `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 4679 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+Run the test suite with `pytest` — 4700 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
 ## Documentation
 
@@ -894,7 +894,7 @@ This file is the user-facing one. For working on the code:
 
 - **[AGENTS.md](./AGENTS.md)** — the agent-context file, and the place to start. `CLAUDE.md` and `QWEN.md` are pointers to it so a tool looking for a particular filename finds one without the guidance being duplicated.
 - **[ARCHITECTURE.md](./docs/ARCHITECTURE.md)** — file-by-file contracts, what belongs where, and the known gotchas. Read before changing anything non-trivial, especially around persistence (`database.py` / `storage.py` / `core/memory.py` are three distinct and easily confused responsibilities).
-- **[ROADMAP.md](./docs/ROADMAP.md)** and **[ROADMAP_v2.md](./docs/ROADMAP_v2.md)** — implementation specs plus the locked Design Decisions Record that most of the reasoning above traces back to.
+- **[ROADMAP.md](./docs/ROADMAP.md)**, **[ROADMAP_v2.md](./docs/ROADMAP_v2.md)** and **[ROADMAP_v3.md](./docs/ROADMAP_v3.md)** — implementation specs plus the locked Design Decisions Record that most of the reasoning above traces back to. Section numbers run on across the three: v3 opens at §49.
 - **[DEVLOG.md](./docs/DEVLOG.md)** — what was followed, what was deviated from, and why.
 
 ### Contributing and policies

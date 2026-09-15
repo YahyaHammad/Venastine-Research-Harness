@@ -567,7 +567,7 @@ class TestUnsafeReasons:
         one = Posture("tiered", True, False, True, False).unsafe_reasons()
         both = Posture("tiered", True, True, True, False).unsafe_reasons()
         assert len(one) == len(both) == 1
-        assert "if Docker is" in one[0][1]
+        assert "if no container runtime" in one[0][1]
         assert "unprompted" in both[0][1]
 
     def test_every_label_fits_the_sidebar(self):
@@ -611,7 +611,7 @@ class TestUnsafeReasons:
         reasons = Posture("always", True, True, True, False).unsafe_reasons()
         assert [label for label, _ in reasons] == ["host shell fallback"]
         assert "unprompted" not in reasons[0][1]
-        assert "if Docker is" in reasons[0][1]
+        assert "if no container runtime" in reasons[0][1]
 
     @pytest.mark.parametrize("mode", ["tiered", "contained", "never"])
     def test_the_pair_is_no_ask_wherever_the_mode_honours_it(self, mode):

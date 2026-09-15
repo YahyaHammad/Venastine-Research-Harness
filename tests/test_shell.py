@@ -101,21 +101,20 @@ class TestDetectShell:
 # ===========================================================================
 
 class TestDockerAvailable:
-    """is_docker_available() is lru_cached for the process (review f41),
-    so each case has to clear it -- otherwise the first test's answer
-    would be the only one any of them measured."""
+    """is_docker_available() answers from a probe memoised for the process
+    (review f41), so each case has to reset it -- otherwise the first
+    test's answer would be the only one any of them measured.
+
+    ROADMAP_v3 §49 (SS22) moved the memo from an lru_cache on this function
+    to `sandbox._runtime_probe`, which remembers WHICH runtime answered and
+    why none did, so the reset is that module's."""
 
     @pytest.fixture(autouse=True)
     def _clear_probe_cache(self):
-        # getattr, so removing the cache makes the COUNT test fail with
-        # its own message rather than erroring every case in this class
-        # on a missing attribute -- an error that masks the assertion is
-        # the same "environment could not manifest the failure" shape the
-        # revert-check discipline exists to catch.
-        clear = getattr(is_docker_available, "cache_clear", lambda: None)
-        clear()
+        from security import sandbox
+        sandbox._reset_runtime_probe()
         yield
-        clear()
+        sandbox._reset_runtime_probe()
 
     def test_docker_found(self):
         with patch("security.sandbox.subprocess.run") as mock_run:
@@ -144,6 +143,233 @@ class TestDockerAvailable:
             is_docker_available()
             is_docker_available()
             assert mock_run.call_count == 1
+
+
+class TestTheContainerRuntime:
+    """ROADMAP_v3 §49 (SS22-SS24). Docker first; Podman when Docker is not
+    installed or does not answer; a Podman that cannot enforce the limits
+    is not a runtime at all; and the CLI a route invokes is the one the
+    probe found."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_probe(self):
+        from security import sandbox
+        sandbox._reset_runtime_probe()
+        yield
+        sandbox._reset_runtime_probe()
+
+    @staticmethod
+    def _info_json(rootless=True, cgroups="v2",
+                   controllers=("cpu", "memory", "pids")):
+        import json
+        return json.dumps({"host": {
+            "cgroupVersion": cgroups,
+            "cgroupControllers": list(controllers),
+            "security": {"rootless": rootless}}})
+
+    @staticmethod
+    def _runner(answers):
+        """A subprocess.run stand-in that answers by (cli, plain|json).
+
+        A key that is absent raises FileNotFoundError, which is what a CLI
+        that is not installed does. The shape of the real outputs is from
+        batch 93's measurement: Podman's plain `info` carries
+        `buildahVersion`, Docker's does not.
+        """
+        calls = []
+
+        def run(argv, **_kwargs):
+            calls.append(list(argv))
+            key = (argv[0], "json" if "--format" in argv else "plain")
+            if key not in answers:
+                raise FileNotFoundError(argv[0])
+            returncode, stdout = answers[key]
+            return subprocess.CompletedProcess(argv, returncode, stdout, "")
+
+        run.calls = calls
+        return run
+
+    _PODMAN_PLAIN = (0, "host:\n  arch: amd64\n  buildahVersion: 1.42.0\n")
+    _DOCKER_PLAIN = (0, "Client:\n Version: 28.0\nServer:\n Containers: 0\n")
+
+    def _probe_with(self, answers):
+        from security import sandbox
+        run = self._runner(answers)
+        with patch("security.sandbox.subprocess.run", side_effect=run):
+            name = sandbox.container_runtime()
+        return name, run.calls
+
+    def test_docker_wins_whenever_it_answers(self):
+        name, calls = self._probe_with({
+            ("docker", "plain"): self._DOCKER_PLAIN,
+            ("podman", "plain"): self._PODMAN_PLAIN,
+            ("podman", "json"): (0, self._info_json())})
+        assert name == "docker"
+        assert not [c for c in calls if c[0] == "podman"], (
+            "Podman is asked only when Docker cannot run a container")
+
+    def test_podman_runs_the_sandbox_when_docker_is_not_installed(self):
+        name, _ = self._probe_with({
+            ("podman", "plain"): self._PODMAN_PLAIN,
+            ("podman", "json"): (0, self._info_json())})
+        assert name == "podman"
+
+    def test_podman_runs_the_sandbox_when_dockers_daemon_does_not_answer(self):
+        name, _ = self._probe_with({
+            ("docker", "plain"): (1, "Cannot connect to the Docker daemon"),
+            ("podman", "plain"): self._PODMAN_PLAIN,
+            ("podman", "json"): (0, self._info_json())})
+        assert name == "podman"
+
+    def test_with_neither_there_is_no_runtime_and_the_reason_names_both(self):
+        from security import sandbox
+        name, _ = self._probe_with({})
+        assert name is None
+        with patch("security.sandbox.subprocess.run",
+                   side_effect=AssertionError("must not probe again")):
+            assert sandbox.is_docker_available() is False
+        reason = sandbox._known_unavailable_reason()
+        assert "Docker" in reason and "Podman" in reason
+
+    @pytest.mark.parametrize("json_answer, said", [
+        ((0, _info_json.__func__(cgroups="v1")), "cgroups v1"),
+        ((0, _info_json.__func__(controllers=("cpu", "memory"))), "pids"),
+        ((0, "not json at all"), "could not be read"),
+        ((125, ""), "would not report"),
+    ])
+    def test_a_podman_that_cannot_enforce_the_limits_is_refused(
+            self, json_answer, said, caplog):
+        """SS24. Rootless Podman on cgroups v1 accepts `--memory` and
+        ignores it, and one with a controller missing cannot bind that
+        flag -- and a Podman whose setup cannot be READ is refused too,
+        because not knowing whether the limits bind is not a reason to
+        assume they do."""
+        from security import sandbox
+        with caplog.at_level("WARNING", logger="security.sandbox"):
+            name, _ = self._probe_with({
+                ("podman", "plain"): self._PODMAN_PLAIN,
+                ("podman", "json"): json_answer})
+            sandbox.container_runtime()
+        assert name is None
+        assert said in sandbox._known_unavailable_reason()
+        warned = [r for r in caplog.records
+                  if "No container runtime can run the sandbox" in r.message]
+        assert len(warned) == 1, "a refusal is said once per process"
+
+    def test_a_rootful_podman_is_trusted_on_either_cgroup_version(self):
+        """Only ROOTLESS can fail: a rootful runtime owns the cgroup tree."""
+        name, _ = self._probe_with({
+            ("podman", "plain"): self._PODMAN_PLAIN,
+            ("podman", "json"): (0, self._info_json(rootless=False,
+                                                     cgroups="v1"))})
+        assert name == "podman"
+
+    @pytest.mark.parametrize("rootless_v1, expected", [(True, None),
+                                                       (False, "docker")])
+    def test_a_docker_that_is_really_podman_is_checked_as_podman(
+            self, rootless_v1, expected):
+        """The podman-docker shim answers `docker info` with Podman's own
+        output. Without this the limit check would be skipped by NAME."""
+        info = (self._info_json(cgroups="v1") if rootless_v1
+                else self._info_json())
+        name, _ = self._probe_with({
+            ("docker", "plain"): self._PODMAN_PLAIN,
+            ("docker", "json"): (0, info)})
+        assert name == expected
+
+    def test_the_podman_path_probes_once_per_process(self):
+        from security import sandbox
+        run = self._runner({("podman", "plain"): self._PODMAN_PLAIN,
+                            ("podman", "json"): (0, self._info_json())})
+        with patch("security.sandbox.subprocess.run", side_effect=run):
+            for _ in range(3):
+                assert sandbox.is_docker_available() is True
+        assert [c[:2] for c in run.calls] == [
+            ["docker", "info"], ["podman", "info"], ["podman", "info"]]
+
+    def test_known_runtime_reads_the_probe_and_never_runs_it(self):
+        """The route reads this, and a test that patched availability must
+        not have real `docker`/`podman` subprocesses run under it -- CI's
+        runners ship Podman, so the argv would change there."""
+        from security import sandbox
+        with patch("security.sandbox.subprocess.run",
+                   side_effect=AssertionError("known_runtime probed")):
+            assert sandbox.known_runtime() == "docker"
+        self._probe_with({("podman", "plain"): self._PODMAN_PLAIN,
+                          ("podman", "json"): (0, self._info_json())})
+        assert sandbox.known_runtime() == "podman"
+
+    def test_the_route_invokes_the_runtime_the_probe_found(
+            self, monkeypatch, tmp_path):
+        from security import sandbox
+        monkeypatch.setattr(config, "INERT_COMMANDS", ["ls"])
+        monkeypatch.setattr(sandbox, "_runtime_probe",
+                            sandbox.RuntimeProbe("podman"))
+        monkeypatch.setattr(sandbox, "_log_image_identity",
+                            lambda runtime="docker": None)
+        with patch("security.sandbox.subprocess.Popen") as popen:
+            popen.return_value.communicate.return_value = ("", "")
+            popen.return_value.returncode = 0
+            result = run_sandboxed("python x.py", str(tmp_path),
+                                   docker_available=True)
+        assert popen.call_args[0][0][:2] == ["podman", "run"]
+        assert result["ran_on"] == "container"
+
+    def test_a_timed_out_podman_container_is_killed_by_podman(self):
+        with patch("security.sandbox.subprocess.Popen") as popen, \
+             patch("security.sandbox.subprocess.run") as run:
+            popen.return_value.communicate.side_effect = (
+                subprocess.TimeoutExpired(cmd="podman", timeout=60))
+            run.return_value = MagicMock(returncode=0)
+            _run_docker("sleep 999", "/tmp/ws", runtime="podman")
+        kills = [c[0][0][:2] for c in run.call_args_list]
+        assert kills == [["podman", "kill"]]
+
+    def test_the_image_is_inspected_by_the_runtime_that_runs_it(self):
+        """Docker and Podman keep separate image stores, so EP7's line has
+        to ask the one that will run the container."""
+        from security import sandbox
+        sandbox._resolved_image_id.cache_clear()
+        with patch("security.sandbox.subprocess.run") as run:
+            run.return_value = MagicMock(returncode=0, stdout="sha256:1\n")
+            sandbox._resolved_image_id("img", "podman")
+        sandbox._resolved_image_id.cache_clear()
+        assert run.call_args[0][0][:3] == ["podman", "image", "inspect"]
+
+    def test_the_unavailable_message_carries_the_probes_reason(
+            self, monkeypatch, tmp_path):
+        from security import sandbox
+        monkeypatch.setattr(config, "INERT_COMMANDS", ["ls"])
+        set_posture(monkeypatch, allow_insecure_fallback=False)
+        monkeypatch.setattr(sandbox, "_runtime_probe", sandbox.RuntimeProbe(
+            None, "rootless Podman on cgroups v1 cannot enforce the "
+                  "sandbox's memory, CPU and process limits", refused=True))
+        with pytest.raises(SandboxUnavailable, match="cgroups v1"):
+            run_sandboxed("python x.py", str(tmp_path),
+                          docker_available=False)
+
+    def test_the_approval_notice_names_the_runtime(self, monkeypatch):
+        """Podman and Docker are different products, and the person
+        approving a command is told which one isolates it."""
+        from security import sandbox
+        from tools.builtin import shell as shell_tool
+        monkeypatch.setattr(sandbox, "_runtime_probe",
+                            sandbox.RuntimeProbe("podman"))
+        with patch("tools.builtin.shell.is_docker_available",
+                   return_value=True):
+            notice = shell_tool._shell_approval_notice(
+                {"command": "python x.py"})
+        assert "Runs in a Podman container" in notice
+
+    def test_the_shipped_image_is_fully_qualified(self):
+        """SS23. Measured: stock Ubuntu Podman resolved `python:3.13-slim`
+        only through a `shortnames.conf` alias, with no search registries
+        configured -- an alias another distro need not ship."""
+        import yaml
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "config.yaml"), encoding="utf-8") as f:
+            image = yaml.safe_load(f)["sandbox_docker_image"]
+        assert image.startswith("docker.io/"), image
 
 
 # ===========================================================================
@@ -465,7 +691,7 @@ class TestRunSandboxedRouting:
         monkeypatch.setattr(config, "INERT_COMMANDS", ["ls"])
         set_posture(monkeypatch, allow_insecure_fallback=False)
         with patch("security.sandbox.is_docker_available", return_value=False):
-            with pytest.raises(SandboxUnavailable, match="Docker is not available"):
+            with pytest.raises(SandboxUnavailable, match="No container runtime"):
                 run_sandboxed("python script.py", ws)
 
     def test_docker_available_param_overrides_probe(self, monkeypatch, ws):

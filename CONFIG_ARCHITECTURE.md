@@ -774,6 +774,23 @@ could have disagreed and only the unenforced one would have been wrong.
 
 ### `sandbox_docker_image`
 
+The image both runtimes run: Docker, or Podman when Docker cannot run a
+container (ROADMAP_v3 §49, SS22). The key kept its name when Podman
+arrived, because config_update.py carries a user's own value across an
+npm update BY KEY, and a renamed key would silently drop it.
+
+FULLY QUALIFIED since batch 93 (SS23), and the reason is Podman's: an
+unqualified name is resolved through `registries.conf`, and with no
+search registries and no short-name alias -- measured on a stock Ubuntu
+Podman, whose `shortnames.conf` happens to alias `python` -- a name it
+cannot resolve fails without a terminal to ask on. `docker.io/library/`
+is where Docker resolves the short name anyway. A value you set yourself
+is carried as written.
+
+A TAG, NOT AN IDENTITY (ROADMAP_v2 §46, EP7): the resolved image ID is
+logged once per process, and two machines -- or two runtimes on one --
+pulling the same tag on different days get different images.
+
 ### `sandbox_timeout_seconds`
 
 ### `sandbox_memory_mb`
@@ -843,7 +860,7 @@ WARNING: a word added here is a promise that the program neither writes
 nor runs code -- under `tiered` it is the ONLY tier that runs unasked
 (§48, CE1), so an entry that can execute its arguments or a file (`find
 -exec`, `sort --compress-program`, `tar --to-command`) is an unprompted
-code path. An inert command runs in the container when Docker is up and
+code path. An inert command runs in the container when Docker or Podman is up and
 on the host when it is not (§46, EP5); one whose argument reaches outside
 the workspace is HOST_READ, runs on the host, and always asks. The risk of
 the host path is information disclosure, not modification.

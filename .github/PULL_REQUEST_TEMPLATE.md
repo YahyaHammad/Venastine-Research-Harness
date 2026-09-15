@@ -20,7 +20,7 @@ core/client.py, tools/registry.py or the security/ boundaries. See docs/CONTRIBU
 - [ ] A test covers the change — a new one for a bugfix, or an existing one that would have caught it
 - [ ] If this pins a new behavior, `tests/BREAKING_CHANGES.md` has a row saying what breaks, the symptom, and the fix
 - [ ] Docs updated in the **one** file that owns the fact (see the table in `docs/CONTRIBUTING.md`), not in two
-- [ ] If this deviates from a locked decision in `docs/ROADMAP.md` / `docs/ROADMAP_v2.md`, `docs/DEVLOG.md` records the deviation and why — those specs are append-only
+- [ ] If this deviates from a locked decision in `docs/ROADMAP.md` / `docs/ROADMAP_v2.md` / `docs/ROADMAP_v3.md`, `docs/DEVLOG.md` records the deviation and why — those specs are append-only
 
 ## Notes for the reviewer
 

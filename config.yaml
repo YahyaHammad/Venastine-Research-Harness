@@ -564,8 +564,11 @@ auto_approve_sandbox_fallback: false
 # no `shell` key, so there is no second switch that can disagree with this.
 shell_approval_mode: tiered
 
-# The image sandboxed commands run in. AGENT_SANDBOX_IMAGE overrides.
-sandbox_docker_image: python:3.13-slim
+# The image sandboxed commands run in, under Docker or Podman (whichever
+# runs the sandbox -- ROADMAP_v3 §49, SS22). Fully qualified so Podman
+# resolves it without a short-name alias (SS23). AGENT_SANDBOX_IMAGE
+# overrides.
+sandbox_docker_image: docker.io/library/python:3.13-slim
 
 # Wall-clock ceiling for one sandboxed command.
 sandbox_timeout_seconds: 120
