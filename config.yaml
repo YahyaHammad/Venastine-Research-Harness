@@ -52,6 +52,18 @@ max_tokens: 16000
 # agent whose frontmatter names no max_steps or names an invalid one.
 max_iterations: 50
 
+# How many more times ONE model call is attempted when the provider fails in
+# a way that can pass: a dropped connection, a 408/409/429/5xx, or an error
+# sent inside a stream that had already opened. Total attempts per call is
+# this plus one. The openai and anthropic SDKs still retry a request that
+# fails before its stream opens, inside each attempt. 0 turns this off.
+model_call_max_retries: 2
+
+# Seconds before the first of those retries. Each later retry waits twice as
+# long, with up to 25% jitter either way; a server's retry-after can make a
+# wait longer, never shorter, capped at 60s.
+model_call_retry_base_delay_s: 3.0
+
 # ======================================================================
 # Subagents
 # ======================================================================
@@ -531,13 +543,19 @@ shell_binary: ''
 allow_insecure_sandbox_fallback: false
 
 # AUTHORITY -- runs that fallback with no per-run prompt. The pair above and
-# here reads as worse than either alone.
+# here reads as worse than either alone. Honoured under `tiered` and
+# `contained`; under `always` every command still asks, this one included.
 auto_approve_sandbox_fallback: false
 
 # AUTHORITY -- THE gate for shell approval, and part of the frozen posture.
-#   always -- every command asks
-#   tiered -- inert read-only commands run unprompted, the rest ask
-#   never  -- nothing asks
+#   always    -- every command asks
+#   tiered    -- read-only commands from inert_commands, every argument
+#                inside the workspace, run unprompted; every other command
+#                asks, including anything that can run code
+#   contained -- anything that runs in the container without network runs
+#                unprompted, code included; reads outside the workspace and
+#                network commands still ask
+#   never     -- nothing asks
 # An unknown value raises at startup rather than falling back, because one
 # direction of a fallback asks about everything and the other about
 # nothing, and a typo cannot pick. Rejected by name from settings.json at

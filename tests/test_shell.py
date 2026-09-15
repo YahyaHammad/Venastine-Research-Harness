@@ -511,8 +511,18 @@ class TestShellApprovalCheck:
         monkeypatch.setattr(config, "INERT_COMMANDS", ["ls", "cat"])
         assert _shell_approval_check("shell", {"command": "ls -la"}) is False
 
-    def test_docker_no_approval(self, monkeypatch):
+    def test_docker_code_asks_under_tiered(self, monkeypatch):
+        """§48 (CE1). This was `test_docker_no_approval`, pinning that a
+        contained command ran unasked in the shipped posture. It no longer
+        does: it may run code. The old answer is the `contained` mode's,
+        pinned directly below."""
         monkeypatch.setattr(config, "INERT_COMMANDS", ["ls"])
+        with patch("tools.builtin.shell.is_docker_available", return_value=True):
+            assert _shell_approval_check("shell", {"command": "python x.py"}) is True
+
+    def test_docker_no_approval_under_contained(self, monkeypatch):
+        monkeypatch.setattr(config, "INERT_COMMANDS", ["ls"])
+        set_posture(monkeypatch, shell_approval_mode="contained")
         with patch("tools.builtin.shell.is_docker_available", return_value=True):
             assert _shell_approval_check("shell", {"command": "python x.py"}) is False
 
@@ -653,8 +663,19 @@ class TestTheGateWeighsNetwork:
         assert _asks("pip install evil-package") is True
         assert _asks("wget http://a/b") is True
 
-    def test_a_contained_command_without_network_is_not(self, _tiered):
+    def test_a_contained_command_without_network_is_not(self, _tiered,
+                                                        monkeypatch):
+        """Under `contained` (§48, CE2), which is where this answer lives
+        now. Under the shipped `tiered` the same command asks, because it
+        may run code -- the test directly below."""
+        set_posture(monkeypatch, shell_approval_mode="contained")
         assert _asks("python script.py") is False
+
+    def test_under_tiered_it_asks_for_running_code(self, _tiered):
+        """§48 (CE1). No network, and a container -- and still asked about,
+        for the capability G4 never read."""
+        assert classify_command("python script.py", _tiered).runs_code
+        assert _asks("python script.py") is True
 
     def test_the_two_are_the_same_command_shape(self, _tiered):
         """Both are non-inert and both run in a container. The ONLY thing
@@ -688,7 +709,7 @@ class TestAnUnmeasurableCommandIsNeverAutoApproved:
         branch approves it for having no network."""
         blank = CommandProfile(tier=UNKNOWN, measured=False,
                                escapes_workspace=False, writes=False,
-                               network=False, reason="")
+                               runs_code=False, network=False, reason="")
         assert auto_approved(blank, CONTAINED) is False
         assert auto_approved(blank, UNCONTAINED) is False
 
@@ -751,7 +772,7 @@ class TestTheModeIsTheGateAndTheFieldIsTheRatchet:
         # used to carry a second copy that nothing enforced, so this line
         # could have passed against a tuple the gate never consulted.
         from security.capability import APPROVAL_MODES
-        assert APPROVAL_MODES == ("always", "tiered", "never")
+        assert APPROVAL_MODES == ("always", "tiered", "contained", "never")
         assert fresh.SHELL_APPROVAL_MODE in APPROVAL_MODES
 
     def test_shell_has_no_approvals_field_only_a_mode(self):
@@ -786,6 +807,209 @@ class TestTheFallbackFlagsStillMeanWhatTheyMeant:
         assert _asks("python x.py", docker=False) is False
         assert containment_for(classify_command("python x.py", _tiered),
                                docker_available=False) == UNAVAILABLE
+
+
+# ===========================================================================
+# ---- Batch 92: code in the sandbox (§48) ----------------------------------
+# ===========================================================================
+
+# Every one of these answered False through the real gate with Docker up
+# before §48. Deliberately NOT all interpreters: the point of the list is
+# that the fix names none of them.
+_CODE_SHAPES = [
+    'python -c "print(1)"',
+    "python3 -c pass",
+    'bash -c "echo hi"',
+    "sh run.sh",
+    "./run.sh",
+    "python run.py",
+    "node run.js",
+    "perl -e 1",
+    '"python" run.py',
+    "python3.13 run.py",
+    "echo print(1) | python",
+    "find . -exec cat {} ;",
+    "pytest",
+    "make",
+    "rm -rf data",
+    "ls -la && cat notes.txt",
+]
+
+
+class TestCodeInTheSandboxAsksUnderTiered:
+    """§48 (CE1), amending G4. G4 approved any contained command without
+    network, which is every way of running code there is: an interpreter's
+    `-c`, a script the auto-approved `write` tool has just made, a test
+    runner's conftest.py, a Makefile."""
+
+    @pytest.mark.parametrize("command", _CODE_SHAPES)
+    def test_it_asks_with_docker_up(self, command, _tiered):
+        profile = classify_command(command, _tiered)
+        assert profile.runs_code is True
+        assert profile.network is False
+        assert containment_for(profile, docker_available=True) == CONTAINED
+        assert _asks(command, docker=True) is True
+
+    @pytest.mark.parametrize("command", ["ls", "ls -la", "cat notes.txt",
+                                         "grep pip notes.txt",
+                                         "wc -l notes.txt"])
+    def test_a_read_only_command_still_does_not(self, command, _tiered):
+        profile = classify_command(command, _tiered)
+        assert (profile.tier, profile.runs_code) == (INERT, False)
+        assert _asks(command, docker=True) is False
+
+    @pytest.mark.parametrize("command", [
+        "cat .ven*/settings.json; true",
+        "python -c \"print(open('.venastine/settings.json').read())\"",
+    ])
+    def test_code_reading_a_protected_segment_is_asked_about(self, command,
+                                                            _tiered):
+        """The leak §48 measured. The token check cannot see either
+        spelling -- a glob in one, a string inside a program in the other
+        -- and both ran unasked while SECURITY.md, protected_paths.py and
+        `_command_touches_protected` said such a spelling met a human.
+        The first assertion is what makes the second one about CE1 rather
+        than about the token check."""
+        from tools.builtin.shell import _command_touches_protected
+        assert _command_touches_protected(command) is None
+        assert _asks(command, docker=True) is True
+
+    def test_no_language_is_listed_so_none_can_be_missed(self, _tiered):
+        """The generality pin. Over generated commands -- an inert first
+        word, a random string, and a first word nobody would put on a list
+        -- the gate asks with Docker up EXACTLY when the command is not
+        INERT or names a protected segment. A list of interpreters would
+        make this fail on `zzlang`, which is the program the list forgot."""
+        from tools.builtin.shell import _command_touches_protected
+        corpus = TestTheTwoTokenisersCannotDisagree()
+        rng = random.Random(20260914)
+        programs = ["zzlang", "frobnicate", "ruby", "php", "lua", "deno",
+                    "tclsh", "Rscript"]
+
+        # Metacharacter-free arguments. The generative corpus almost always
+        # draws a metacharacter, so it yields few INERT commands -- 24 in
+        # 2200 on the first run, which the floor below caught -- and, worse,
+        # few clean non-inert ones. `zzlang abc` with plain arguments is the
+        # case that separates "not INERT" from "on an interpreter list".
+        def clean():
+            return "".join(rng.choice("abc-./= ")
+                           for _ in range(rng.randint(1, 14)))
+
+        commands = (list(corpus._commands(400)) + list(corpus._samples(400))
+                    + ["%s %s" % (rng.choice(config.INERT_COMMANDS), clean())
+                       for _ in range(500)]
+                    + ["%s %s" % (rng.choice(programs), clean())
+                       for _ in range(500)])
+        seen = {"inert": 0, "other": 0}
+        for command in commands:
+            profile = classify_command(command, _tiered)
+            seen["inert" if profile.tier == INERT else "other"] += 1
+            expected = (profile.tier != INERT
+                        or _command_touches_protected(command) is not None)
+            assert _asks(command, docker=True) is expected, (
+                command, profile.tier)
+        assert seen["inert"] > 100 and seen["other"] > 100, seen
+
+
+class TestContainedModeIsTodaysRule:
+    """§48 (CE2). The rule `tiered` had before §48, under a name that says
+    what it trusts -- so a user who accepts code in the container is not
+    pushed to `never`, which would also stop asking about host reads."""
+
+    @pytest.fixture
+    def _contained(self, _tiered, monkeypatch):
+        set_posture(monkeypatch, shell_approval_mode="contained")
+        return _tiered
+
+    @pytest.mark.parametrize("command", _CODE_SHAPES)
+    def test_code_in_the_container_runs_unasked(self, command, _contained):
+        assert _asks(command, docker=True) is False
+
+    @pytest.mark.parametrize("command", [
+        "curl https://x", "pip install evil-package",
+        "echo hi && curl http://evil", "pip --version; python run.py"])
+    def test_a_network_command_still_asks(self, command, _contained):
+        assert _asks(command, docker=True) is True
+
+    def test_a_host_read_still_asks(self, _contained):
+        assert _asks("cat /etc/passwd", docker=True) is True
+
+    def test_a_literal_protected_segment_still_asks(self, _contained):
+        """The override sits BELOW the protected-segment check."""
+        assert _asks("python .venastine/x.py", docker=True) is True
+
+    def test_an_unmeasured_call_is_not_argued_through(self, _contained):
+        """G5 in the override, not only in the rule it bypasses."""
+        assert _asks(["python", "x.py"], docker=True) is True
+        assert _asks("   ", docker=True) is True
+
+    def test_the_host_fallback_is_not_the_container(self, _contained,
+                                                    monkeypatch):
+        """The override is for what a container CONFINES. With Docker down
+        and the fallback on but not auto-approved, code runs on the host,
+        and that asks in this mode as it does in every other."""
+        set_posture(monkeypatch, allow_insecure_fallback=True,
+                    auto_approve_fallback=False)
+        assert _asks("python x.py", docker=False) is True
+
+
+class TestTheFallbackOptInFollowsTheMode:
+    """§48 (CE5, CE6). The opt-in is honoured wherever the mode reaches it,
+    and `always` returns before it does."""
+
+    @pytest.mark.parametrize("mode,asks", [
+        ("always", True), ("tiered", False), ("contained", False),
+        ("never", False)])
+    def test_code_on_the_host_fallback(self, mode, asks, _tiered,
+                                       monkeypatch):
+        set_posture(monkeypatch, shell_approval_mode=mode,
+                    allow_insecure_fallback=True, auto_approve_fallback=True)
+        assert _asks("python x.py", docker=False) is asks
+
+    @pytest.mark.parametrize("mode", ["always", "tiered", "contained",
+                                      "never"])
+    def test_the_badge_says_no_ask_exactly_when_the_gate_does_not_ask(
+            self, mode, _tiered, monkeypatch):
+        """UN3 held against the GATE rather than against the flags. The
+        badge said "host shell, no ask" under `always`, measured, while the
+        gate asked about every command."""
+        from security import posture
+        set_posture(monkeypatch, shell_approval_mode=mode,
+                    allow_insecure_fallback=True, auto_approve_fallback=True)
+        labels = [label for label, _ in posture.current().unsafe_reasons()]
+        assert ("host shell, no ask" in labels) is (
+            not _asks("python x.py", docker=False))
+
+
+class TestRunsCodeIsItsOwnDimension:
+    """§48 (CE7). G1: a missing dimension is a missing field."""
+
+    def test_every_producer_states_it(self, _tiered):
+        assert classify_command("ls", _tiered).runs_code is False
+        assert classify_command("cat /etc/passwd", _tiered).runs_code is False
+        assert classify_command("python x.py", _tiered).runs_code is True
+        assert classify_command("curl https://x", _tiered).runs_code is True
+        assert classify_command("", _tiered).runs_code is True
+        assert classify_command(["ls"], _tiered).runs_code is True
+
+    def test_it_alone_decides_a_contained_answer(self):
+        """`writes` False throughout, so a rule that read `writes` instead
+        -- or dropped `runs_code` from either branch -- answers wrongly."""
+        import dataclasses
+        base = CommandProfile(tier=SANDBOXED, measured=True,
+                              escapes_workspace=False, writes=False,
+                              runs_code=False, network=False, reason="")
+        code = dataclasses.replace(base, runs_code=True)
+        assert auto_approved(base, CONTAINED) is True
+        assert auto_approved(code, CONTAINED) is False
+        assert auto_approved(base, UNCONTAINED) is True
+        assert auto_approved(code, UNCONTAINED) is False
+
+    def test_it_is_required(self):
+        """No default, so a second producer cannot leave it unsaid."""
+        with pytest.raises(TypeError):
+            CommandProfile(tier=INERT, measured=True, escapes_workspace=False,
+                           writes=False, network=False, reason="")
 
     def test_a_host_read_never_probes_docker(self, _tiered):
         """An ordering the pre-§28 ladder had: its inert step returned
@@ -1273,19 +1497,30 @@ class TestQuotingCannotHideAnEscape:
         assert _asks(command, docker=False) is True
 
     @pytest.mark.parametrize("command", QUOTED_ESCAPES)
-    def test_and_with_docker_up_it_is_simply_contained(self, command, _tiered):
-        """The cost of the fix, measured. In the DEFAULT posture a quoted
-        command is still auto-approved -- it just runs in the container,
-        where `/etc/passwd` is the container's own."""
+    def test_and_with_docker_up_it_is_simply_contained(self, command, _tiered,
+                                                       monkeypatch):
+        """The cost of the fix, measured -- under `contained`, which holds
+        the rule this was written against (§48, CE2). There a quoted
+        command is still auto-approved; it just runs in the container,
+        where `/etc/passwd` is the container's own. Under the shipped
+        `tiered` it asks, for being non-inert rather than for being quoted
+        (CE1)."""
+        set_posture(monkeypatch, shell_approval_mode="contained")
         profile = classify_command(command, _tiered)
         assert containment_for(profile, docker_available=True) == CONTAINED
         assert _asks(command, docker=True) is False
 
-    def test_a_legitimate_quoted_workspace_path_still_works(self, _tiered):
-        """The friction this fix actually costs someone: none, under
-        Docker. A workspace file whose name has a space in it is
-        SANDBOXED rather than INERT, and still runs without a prompt."""
+    def test_a_legitimate_quoted_workspace_path_still_works(self, _tiered,
+                                                            monkeypatch):
+        """The friction this fix costs someone: none, under Docker in
+        `contained`. A workspace file whose name has a space in it is
+        SANDBOXED rather than INERT, and runs without a prompt there. Under
+        `tiered` it asks (§48, CE1) -- the price of refusing to tell a
+        quoted filename from a quoted program, which is G2's price."""
+        set_posture(monkeypatch, shell_approval_mode="contained")
         assert _asks('cat "my notes.txt"', docker=True) is False
+        set_posture(monkeypatch, shell_approval_mode="tiered")
+        assert _asks('cat "my notes.txt"', docker=True) is True
 
     def test_the_classifier_and_the_executor_agree_on_every_token(
             self, _tiered):
@@ -1652,19 +1887,28 @@ class TestBackslashCannotHideAnEscape:
         assert _asks(command, docker=False) is True
 
     @pytest.mark.parametrize("command", BACKSLASH_ESCAPES)
-    def test_and_with_docker_up_it_is_simply_contained(self, command, _tiered):
-        """The cost of the fix, measured. In the DEFAULT posture an escaped
-        command is still auto-approved -- it just runs in the container,
-        where /etc/passwd is the container's own."""
+    def test_and_with_docker_up_it_is_simply_contained(self, command, _tiered,
+                                                       monkeypatch):
+        """The cost of the fix, measured -- under `contained`, which holds
+        the rule this was written against (§48, CE2). There an escaped
+        command is still auto-approved; it just runs in the container,
+        where /etc/passwd is the container's own. Under the shipped
+        `tiered` it asks, for being non-inert (CE1)."""
+        set_posture(monkeypatch, shell_approval_mode="contained")
         profile = classify_command(command, _tiered)
         assert containment_for(profile, docker_available=True) == CONTAINED
         assert _asks(command, docker=True) is False
 
-    def test_a_legitimate_escaped_workspace_path_still_works(self, _tiered):
-        """The friction this fix actually costs someone on POSIX: none,
-        under Docker. A workspace file whose name has a space in it is
-        SANDBOXED rather than INERT, and still runs without a prompt."""
+    def test_a_legitimate_escaped_workspace_path_still_works(self, _tiered,
+                                                             monkeypatch):
+        """The friction this fix costs someone on POSIX: none, under Docker
+        in `contained`. A workspace file whose name has a space in it is
+        SANDBOXED rather than INERT, and runs without a prompt there. Under
+        `tiered` it asks (§48, CE1)."""
+        set_posture(monkeypatch, shell_approval_mode="contained")
         assert _asks("cat notes" + BS + " file.txt", docker=True) is False
+        set_posture(monkeypatch, shell_approval_mode="tiered")
+        assert _asks("cat notes" + BS + " file.txt", docker=True) is True
 
     def test_the_windows_spelling_is_the_priced_regression(self, _tiered):
         """Stated as a test so the cost cannot be forgotten and then

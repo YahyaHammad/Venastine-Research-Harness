@@ -546,6 +546,7 @@ class TestUnsafeReasons:
 
     @pytest.mark.parametrize("field,value", [
         ("shell_approval_mode", "never"),
+        ("shell_approval_mode", "contained"),
         ("allow_insecure_fallback", True),
         ("redact_tool_outputs", False),
         ("redact_off_env", True),
@@ -586,6 +587,40 @@ class TestUnsafeReasons:
         for a non-inert tier unless the fallback is on. Reporting it would
         be a warning a user cannot act on."""
         assert Posture("tiered", False, True, True, False).unsafe_reasons() == []
+
+    def test_contained_is_reported_and_says_what_still_asks(self):
+        """§48 (CE4). `contained` runs code in the container unasked, so it
+        is a weakening of the shipped posture -- but not of the network or
+        the host, and a badge that let a reader believe otherwise would be
+        the wrong-surface failure UN3 exists for."""
+        reasons = Posture("contained", False, False, True,
+                          False).unsafe_reasons()
+        assert [label for label, _ in reasons] == ["shell: contained"]
+        label, detail = reasons[0]
+        assert len(label) + 2 <= 20, (label, len(label))
+        assert "without asking" in detail
+        assert "code the agent wrote" in detail
+        assert "network commands still ask" in detail
+
+    def test_under_always_the_fallback_pair_is_not_no_ask(self):
+        """§48 (CE6). Measured before this was written: with both fallback
+        flags on and Docker down, `always` asks about every command -- the
+        mode check returns before the opt-in is read -- while the badge
+        said "host shell, no ask". Under `always` the pair is what the
+        fallback alone is."""
+        reasons = Posture("always", True, True, True, False).unsafe_reasons()
+        assert [label for label, _ in reasons] == ["host shell fallback"]
+        assert "unprompted" not in reasons[0][1]
+        assert "if Docker is" in reasons[0][1]
+
+    @pytest.mark.parametrize("mode", ["tiered", "contained", "never"])
+    def test_the_pair_is_no_ask_wherever_the_mode_honours_it(self, mode):
+        """The other side of CE6, so the exception cannot quietly widen to
+        every mode: CE5 honours the opt-in under `tiered` and `contained`,
+        and under `never` nothing asks anyway."""
+        labels = [label for label, _ in
+                  Posture(mode, True, True, True, False).unsafe_reasons()]
+        assert "host shell, no ask" in labels
 
 
 # ===========================================================================

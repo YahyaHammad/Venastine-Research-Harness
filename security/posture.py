@@ -101,7 +101,7 @@ class Posture:
     legal statement anywhere in the process.
     """
 
-    # "always" / "tiered" / "never" -- validated at bind time, so a typo
+    # "always" / "tiered" / "contained" / "never" -- validated at bind time, so a typo
     # is a startup failure and never a policy that quietly means
     # something else (the argument capability.validate_mode makes).
     shell_approval_mode: str
@@ -158,7 +158,24 @@ class Posture:
                 "SHELL_APPROVAL_MODE is 'never' -- no shell command is "
                 "ever asked about, including one that reads outside the "
                 "workspace on the host"))
-        if self.allow_insecure_fallback and self.auto_approve_fallback:
+        elif self.shell_approval_mode == "contained":
+            # §48 (CE4). Not a network or host-read weakening -- both still
+            # ask -- but anything the container confines runs unasked,
+            # including code the agent wrote itself, and in a workspace that
+            # holds a `.venastine/` that code can read it.
+            reasons.append((
+                "shell: contained",
+                "SHELL_APPROVAL_MODE is 'contained' -- a command that runs "
+                "in the container without network runs without asking, "
+                "including code the agent wrote itself; host reads and "
+                "network commands still ask"))
+        # §48 (CE6). Under "always" the pair is NOT "no ask": the mode check
+        # returns before the fallback opt-in is ever read, so every command
+        # asks, the host fallback included. Measured, and the badge said
+        # otherwise -- so under "always" the pair reports as the fallback
+        # alone, which is what it actually is.
+        if (self.allow_insecure_fallback and self.auto_approve_fallback
+                and self.shell_approval_mode != "always"):
             reasons.append((
                 "host shell, no ask",
                 "ALLOW_INSECURE_SANDBOX_FALLBACK and "

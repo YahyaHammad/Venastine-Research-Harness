@@ -285,8 +285,13 @@ def readonly_mounts(workspace_real: str) -> list[str]:
 # parser whose bugs auto-approve (G2), and an approval prompt leaves the
 # whole command text in front of a human instead. The auto-approved INERT
 # tier executes argv with no shell (§46 EP5), so its tokens ARE its
-# arguments and a token check is sound there; every tier that could
-# expand a glob or a variable into the segment is asked about anyway.
+# arguments and a token check is sound there; under `tiered` every tier
+# that could expand a glob or a variable into the segment is asked about
+# anyway. That sentence was FALSE until §48 (CE1): a contained command was
+# auto-approved, and `cat .ven*/settings.json; true` read the file unasked.
+# Under `contained` and `never` it is still not true -- such a spelling,
+# or code that opens the file, runs unasked; the ro mount stops a write,
+# and the read is recorded in SECURITY.md as documented risk.
 # MCP servers exposing their own file tools are a separate surface this
 # list does not reach, and the user-tier `~/.config/venastine` stays
 # where it always was -- outside a default workspace it is prompt-gated

@@ -335,6 +335,33 @@ class TestWhatIsReplayed:
             ("assistant", "A quorum read is …", (), ""),
         ]
 
+    def test_a_failed_run_ends_with_why(self, mocker):
+        """Batch 91. A subagent whose first model call failed left only its
+        task behind, so it replayed as a request and nothing else -- which
+        reads exactly like a run still thinking."""
+        mocker.patch("core.replay.archive_history", return_value=[
+            {"role": "user", "content": "Dummy task only: calculate 17 + 25.",
+             "error": "APIError: The service is temporarily unavailable."},
+        ])
+
+        assert replay_entries(uuid4()) == [
+            ("user", "Dummy task only: calculate 17 + 25.", (), ""),
+            ("error", "This run failed: APIError: The service is temporarily "
+                      "unavailable.", (), ""),
+        ]
+
+    def test_a_failure_sits_under_the_turn_it_belongs_to(self, mocker):
+        """A chat can fail one turn and answer the next; the line has to say
+        WHICH turn, which is why the failure lives on the user row."""
+        mocker.patch("core.replay.archive_history", return_value=[
+            {"role": "user", "content": "first", "error": "APIError: x"},
+            {"role": "user", "content": "second"},
+            {"role": "assistant", "text": "answered", "tool_calls": []},
+        ])
+
+        assert [role for role, _t, _l, _c in replay_entries(uuid4())] == \
+            ["user", "error", "user", "assistant"]
+
     def test_a_tool_call_is_one_line_and_its_result_is_skipped(self, mocker):
         """T4. A grounding-heavy thread carries hundreds of kilobytes of
         fetched page text in its tool_result rows; replaying those buries

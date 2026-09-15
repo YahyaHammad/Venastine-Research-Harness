@@ -151,7 +151,7 @@ class TestTheDescriptionsComeFromTheSchema:
 
     def test_a_closed_vocabulary_lists_its_words(self):
         assert config_edit.find("shell_approval_mode").values == (
-            "always | tiered | never")
+            "always | tiered | contained | never")
         assert config_edit.find("compaction_strategy").values == (
             "rederive | chain")
 
@@ -251,7 +251,9 @@ class TestTheRoundTripIsLossless:
             else:
                 tree[row.name] = tree[row.name]
             touched += 1
-        assert touched == 113, f"{touched} settable scalars, expected 113"
+        # 115 since batch 91: `model_call_max_retries` and
+        # `model_call_retry_base_delay_s`.
+        assert touched == 115, f"{touched} settable scalars, expected 115"
         assert config_edit._dump(tree) == text
 
     def test_a_one_value_change_is_a_one_line_diff(self, tmp_path,

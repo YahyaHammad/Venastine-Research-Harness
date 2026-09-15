@@ -155,8 +155,12 @@ class AgentActivity:
         span id it was given at `enter`.
 
         Called at most once per span, and not at all for a run that
-        never gets that far -- a spawn refused before it starts, or a
-        provider that fails at the first call.
+        never gets that far -- a spawn refused before it starts. A run
+        whose provider fails at the FIRST CALL is bound all the same:
+        `run_agent_conversation` binds as soon as the thread exists, before
+        its user message and before any model call, which is what lets a
+        failed child still be opened from its spawn line. (This docstring
+        said the opposite until batch 91.)
         """
 
     @contextmanager

@@ -141,11 +141,12 @@ PositiveNumber = Annotated[float, BeforeValidator(_number_only),
 NonNegativeNumber = Annotated[float, BeforeValidator(_number_only),
                               Field(ge=0.0, allow_inf_nan=False)]
 
-#: "always" / "tiered" / "never". A closed vocabulary rather than a plain
-#: string, so an unknown mode is a startup failure and never a policy that
-#: quietly means something else -- one direction of a fallback asks about
-#: everything and the other about nothing, and a typo cannot pick.
-ShellApprovalMode = Literal["always", "tiered", "never"]
+#: "always" / "tiered" / "contained" / "never" (§48 CE2 added the third).
+#: A closed vocabulary rather than a plain string, so an unknown mode is a
+#: startup failure and never a policy that quietly means something else --
+#: one direction of a fallback asks about everything and the other about
+#: nothing, and a typo cannot pick.
+ShellApprovalMode = Literal["always", "tiered", "contained", "never"]
 
 #: "rederive" / "chain". Validated here AND in
 #: `config_loader.effective_compaction`, which checks the value a
@@ -220,7 +221,7 @@ class ToolApprovalsModel(_Model):
     Approval ORs across every layer, so a `True` here is a one-way ratchet
     that can only ever add prompts. `shell` is deliberately absent: its
     approval is governed solely by `shell_approval_mode` (always / tiered /
-    never), and a second switch here could only force `always` -- exactly
+    contained / never), and a second switch here could only force `always` -- exactly
     what the mode already says. An agent's `approval_overrides` keeps its
     own one-way power over shell through the context layer.
     """
@@ -277,6 +278,9 @@ class HarnessConfig(_Model):
     model_name: str
     max_tokens: PositiveInt
     max_iterations: PositiveInt
+    # Batch 91. Zero is a real answer for both: no retry, and no wait.
+    model_call_max_retries: NonNegativeInt
+    model_call_retry_base_delay_s: NonNegativeNumber
 
     # -- Subagents ---------------------------------------------------------
     # Zero is a real answer here: `subagent_depth >= this` then refuses

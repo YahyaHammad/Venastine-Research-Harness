@@ -50,6 +50,7 @@ from storage import (
     get_session_history,
     get_thread,
     latest_checkpoint,
+    mark_turn_failed,
     message_ids_from,
     pinned_through,
     save_message,
@@ -323,6 +324,24 @@ class ConversationMemory:
             self._extra.pop(key, None)
         else:
             self._extra[key] = value
+
+    def mark_turn_failed(self, error: str) -> None:
+        """Batch 91. Record that the run this thread's newest user message
+        started FAILED, and why -- write-through, like every add_* method.
+
+        On the user row because that is what names the turn; see
+        storage.MessageLog.error for why it is a column and not a row. The
+        in-memory entry carries it too, for §44's reason on `thinking`: a
+        live turn and a resumed one must hand every reader the same shape,
+        and a resumed thread gets the key from storage._to_neutral. Nothing
+        that builds a request reads it -- _messages_for_provider takes a user
+        row's `content` alone.
+        """
+        mark_turn_failed(self.thread_id, error)
+        for entry in reversed(self._messages):
+            if entry.get("role") == "user":
+                entry["error"] = error
+                break
 
     def add_user_message(self, text: str) -> None:
         entry = {"role": "user", "content": text}

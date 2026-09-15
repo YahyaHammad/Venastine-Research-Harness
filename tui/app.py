@@ -72,6 +72,7 @@ from core.memory import ConversationMemory
 # Module scope, not inside _cmd_research: _split_research_flags needs the
 # sentinel too, and two shells comparing against two different object()
 # instances would look identical and behave differently.
+from core.provider_errors import describe
 from core.reasoning.authorization import GRANT_PICKER, NOTHING_TO_GRANT
 from core.replay import replay_entries
 from memories.tui_commands import register_memory_commands
@@ -205,8 +206,24 @@ class TranscriptLogHandler(logging.Handler):
             # getMessage(), not self.format(): the file handler owns
             # timestamps and logger names, and repeating them eats a
             # narrow transcript for no gain.
+            text = f"[{record.levelname.lower()}] {record.getMessage()}"
+            # Batch 91. The REASON, when the record carries an exception.
+            # `logger.exception("Tool %s raised; ...")` puts the cause in
+            # exc_info alone, so the transcript said a spawn had failed
+            # and never why -- the why was "The service is temporarily
+            # unavailable", which would have answered the question at once.
+            # One line, not the traceback: the log file keeps that.
+            failure = record.exc_info[1] if record.exc_info else None
+            if failure is not None:
+                text = f"{text} ({describe(failure)})"
+            # Redacted, which this line never was: the log FILE has been
+            # redacted at its formatter since #132, and this handler posted
+            # the raw message beside it -- a warning interpolating a URL or
+            # an exception reached the screen with its key intact. The same
+            # rule as the file (owner decision), so the two places the
+            # harness's own diagnostics go cannot disagree about a secret.
             self._app.post_message(LogRecordMessage(
-                f"[{record.levelname.lower()}] {record.getMessage()}",
+                redact_secrets(text),
                 "error" if record.levelno >= logging.ERROR else "warning",
             ))
         except Exception:  # noqa: BLE001 -- see the docstring
@@ -1789,10 +1806,13 @@ class VenastineApp(App):
         self._paint_entries(view, entries)
         if not entries:
             # A run that has not written anything yet -- which is the
-            # ordinary state for the first instant of a live one, and a
-            # real state for one that failed at its first call. Re-said on
-            # every repaint, not only on the first: the poll used to
-            # repaint without it and leave the pane blank.
+            # ordinary state for the first instant of a live one. NOT a run
+            # that failed at its first call, whatever this comment used to
+            # say: its task message is already one entry, so it never
+            # reaches here -- since batch 91 its replay ends with the
+            # failure instead. Re-said on every repaint, not only on the
+            # first: the poll used to repaint without it and leave the pane
+            # blank.
             view.write_system("This run has not written anything yet.")
         # WHAT THE ARCHIVE HELD, not what the widget drew. See the poll.
         self._viewed_entries = len(entries)

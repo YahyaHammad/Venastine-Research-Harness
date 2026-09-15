@@ -371,14 +371,15 @@ def classify_command(command: str, workspace_dir: str) -> CommandProfile:
     if not isinstance(command, str):
         return CommandProfile(
             tier=UNKNOWN, measured=False, escapes_workspace=True,
-            writes=True, network=False,
+            writes=True, runs_code=True, network=False,
             reason=f"command is {type(command).__name__}, not a string")
 
     stripped = command.strip()
     if not stripped:
         return CommandProfile(
             tier=UNKNOWN, measured=False, escapes_workspace=True,
-            writes=True, network=False, reason="empty command")
+            writes=True, runs_code=True, network=False,
+            reason="empty command")
 
     # Order matters, and only for Q2: `_needs_network` reads every command
     # position of a compound command and the FIRST WORD ONLY of an inert
@@ -392,17 +393,22 @@ def classify_command(command: str, workspace_dir: str) -> CommandProfile:
         # the entries that have a writing mode, so writes=False here is a
         # claim about the COMMAND. It says nothing about the arguments,
         # which is what the next line is for.
+        #
+        # runs_code=False is the same kind of claim (§48, CE7): nothing on
+        # the list executes its arguments or a file, and an inert command
+        # carries no metacharacters, so there is no second command position
+        # for code to arrive through.
         if _escapes_workspace(stripped, workspace_dir):
             return CommandProfile(
                 tier=HOST_READ, measured=True, escapes_workspace=True,
-                writes=False,
+                writes=False, runs_code=False,
                 network=network,
                 reason=(f"reads {stripped.split()[0]!r} with an argument "
                         f"outside the workspace, which no container "
                         f"can see"))
         return CommandProfile(
             tier=INERT, measured=True, escapes_workspace=False,
-            writes=False,
+            writes=False, runs_code=False,
             network=network,
             reason=(f"read-only {stripped.split()[0]!r}, every argument "
                     f"inside the workspace"))
@@ -416,9 +422,17 @@ def classify_command(command: str, workspace_dir: str) -> CommandProfile:
         # rather than assumed True so the record says something real.
         escapes_workspace=_escapes_workspace(stripped, workspace_dir),
         writes=True,
+        # §48 (CE1). NOT a list of interpreters, and it must not become
+        # one: `python -c` is the obvious case, but `pytest` runs a
+        # conftest.py, `make` runs a Makefile, and `"python"`, `pyth?n`,
+        # `python3.13` and `echo x | python` are all the same call to a
+        # shell. Everything that is not INERT may run code, which is the
+        # only answer this classifier can give without parsing (G2).
+        runs_code=True,
         network=network,
-        reason=("needs network and a sandbox" if network
-                else "not a read-only command, so it needs a sandbox"))
+        reason=("can run code, and needs network and a sandbox" if network
+                else "not a read-only command -- it can run code, so it "
+                     "runs in a sandbox"))
 
 
 def containment_for(

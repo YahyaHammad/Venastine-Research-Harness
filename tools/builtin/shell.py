@@ -31,17 +31,25 @@ SANDBOX MODEL (ROADMAP_v2 §46 moved one tier of this):
   told where a command would run; the model never was, and it is the
   one that writes the user an answer about the output.
 
-APPROVAL MODEL (ROADMAP_v2 §28):
-  config.SHELL_APPROVAL_MODE is the gate -- "always", "tiered" or
-  "never" -- and it is the ONLY gate: there is no second switch that can
-  disagree with it (D14's one-way tightening for shell lives in the
-  agent's `approval_overrides`, which reach the same OR below).
+APPROVAL MODEL (ROADMAP_v2 §28, amended by §48):
+  config.SHELL_APPROVAL_MODE is the gate -- "always", "tiered",
+  "contained" or "never" -- and it is the ONLY gate: there is no second
+  switch that can disagree with it (D14's one-way tightening for shell
+  lives in the agent's `approval_overrides`, which reach the same OR
+  below).
 
-  Under "tiered", the command is classified ONCE
+  Under "tiered" and "contained", the command is classified ONCE
   (security/sandbox.classify_command) into a capability set, and the
   generic rule in security/capability.auto_approved decides. The same
   profile is then handed to run_sandboxed, so the thing that was
   approved is the thing that runs.
+
+  The two differ in one capability (§48, CE1/CE2). "tiered" asks about
+  anything that may run code, contained or not, so only INERT runs
+  unasked. "contained" is the rule "tiered" had before §48: a command
+  the container confines runs unasked unless it gets network. There is
+  no interpreter list behind either, and there must not be one -- see
+  classify_command's `runs_code`.
 
   What this replaced: a five-step ladder whose bottom four steps could
   only return False on the shipped config flags, making the whole check
@@ -239,9 +247,16 @@ def _command_touches_protected(command: str) -> str | None:
     parse. A token like ``.ven*/settings.json`` carries no literal
     segment and reaches no answer here (G2 -- a classifier that learned
     shell syntax would be a parser whose bugs auto-approve). That is why
-    the consumer is an always-ASK trigger and never a deny: what slips
-    past a token check still lands in front of a human with the full
-    command text.
+    the consumer is an always-ASK trigger and never a deny: under
+    `tiered`, what slips past a token check still lands in front of a
+    human with the full command text, because a spelling that could
+    expand into the segment is not INERT and so asks anyway.
+
+    That last clause was FALSE until §48 (CE1). A contained command was
+    auto-approved, so `cat .ven*/settings.json; true` and a `python -c`
+    that opens the file read it unasked, while this docstring said they
+    met a human. Under `contained` and `never` they still do not: the
+    ro mount stops a write there, and the read is documented risk.
     """
     if not isinstance(command, str):
         return None
@@ -284,8 +299,18 @@ def _shell_approval_check(tool_name: str, params: dict) -> bool:
          It is the user's own opt-in to an isolation level the harness
          has already told them is weak -- and it sits BELOW the
          protected-segment check, so one opt-in cannot cover the
-         directory the ro-mount exists to keep commands out of.
-      4. Otherwise the capability rule decides.
+         directory the ro-mount exists to keep commands out of. Honoured
+         under `tiered` and `contained` alike (§48, CE5): it is written on
+         purpose and already flagged. Under `always` it is never reached,
+         because step 1 returned (CE6).
+      4. The `contained` mode (§48, CE2) is the second visible opt-in, and
+         applied here for the same reason: a command the container
+         confines and that gets no network runs unasked. Below the
+         protected-segment check, so a literal `.venastine` token still
+         asks in that mode, and read off capabilities rather than the tier
+         label (G1), with `measured` first (G5).
+      5. Otherwise the capability rule decides -- which, since §48 (CE1),
+         asks about anything that may run code, contained or not.
 
     The return is `not auto_approved(...)` -- this function answers "must
     someone be asked", the rule answers "is this covered". Two names for
@@ -331,6 +356,15 @@ def _shell_approval_check(tool_name: str, params: dict) -> bool:
     if (profile.tier not in (INERT, HOST_READ)
             and containment == UNCONTAINED
             and active.auto_approve_fallback):
+        return False
+
+    # Step 4, §48 (CE2): the rule `tiered` had before §48, under the name
+    # that says what it trusts. `measured` first, for G5's reason -- the
+    # container must not argue an uncharacterised call through.
+    if (mode == capability.CONTAINED_MODE
+            and containment == capability.CONTAINED
+            and profile.measured
+            and not profile.network):
         return False
 
     return not auto_approved(profile, containment)

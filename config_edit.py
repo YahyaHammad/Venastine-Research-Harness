@@ -87,9 +87,11 @@ TABLES = ("tool_permissions", "tool_approvals")
 #: `tests/test_config_edit.py` holds this against HARNESS_AUTHORITY_KEYS.
 AUTHORITY_EFFECT = {
     "shell_approval_mode": (
-        "how often a shell command stops to ask you. `never` runs every "
-        "command the agent writes without asking, including in a session "
-        "where untrusted content is already in the context window."),
+        "how often a shell command stops to ask you. `contained` runs any "
+        "code the agent writes inside the container without asking, and "
+        "`never` runs every command the agent writes without asking, "
+        "including in a session where untrusted content is already in the "
+        "context window."),
     "allow_insecure_sandbox_fallback": (
         "whether a shell command may run WITHOUT the container when Docker "
         "is unavailable -- on the host, with your files."),

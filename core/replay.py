@@ -104,6 +104,16 @@ def replay_entries(thread_id: UUID) -> list[ReplayEntry]:
             text = _as_text(message.get("content"))
             if text:
                 entries.append(("user", text, (), ""))
+            # Batch 91. The run this message started FAILED, and why. Right
+            # after it, because nothing else from that run was ever written:
+            # without this a subagent whose first call failed replays as its
+            # task and nothing else, which is indistinguishable from a run
+            # still thinking. `error` is a harness voice (META_ROLES), so
+            # /copy conversation leaves it out as it leaves out the live
+            # `[error: ...]` line.
+            failure = message.get("error")
+            if failure:
+                entries.append(("error", f"This run failed: {failure}", (), ""))
         elif role == "assistant":
             # BEFORE the answer, because that is the order it happened in
             # and the order the live transcript drew it in (§43 RM1 puts

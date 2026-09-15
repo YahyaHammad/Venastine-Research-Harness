@@ -795,9 +795,14 @@ class FakeMemory:
         # persisted), so growth tests can assert the thread total.
         self.billed_tokens = 0
         self.checkpoints_applied = 0
+        # Batch 91. What the loop recorded as this run's failure, in order.
+        self.failures = []
 
     def add_user_message(self, text):
         self.user_messages.append(text)
+
+    def mark_turn_failed(self, error):
+        self.failures.append(error)
 
     def add_assistant_message(self, response):
         self.assistant_messages.append(response)
@@ -1020,6 +1025,8 @@ class FakeStorage:
             # round trip is identity, and what has to mirror production
             # for real is the RECONSTRUCTION below.
             "thinking": thinking,
+            # Batch 91. Set later, by mark_turn_failed, never at save time.
+            "error": None,
         })
         # (#32) Mirrors production: any archived row stamps the thread,
         # in the same write.
@@ -1111,6 +1118,15 @@ class FakeStorage:
                     row["pinned"] = pinned
                     changed += 1
         return changed
+
+    def mark_turn_failed(self, thread_id, error):
+        """Mirrors storage.mark_turn_failed (batch 91): the thread's NEWEST
+        user row, and False when it has none."""
+        for row in reversed(self._messages_by_thread.get(thread_id, [])):
+            if row["role"] == "user":
+                row["error"] = error
+                return True
+        return False
 
     # -- ROADMAP_v2 §21b durable memory ------------------------------------
 
@@ -1223,6 +1239,10 @@ class FakeStorage:
                 payload = {"role": role, "content": content}
                 if row.get("tool_call_id"):
                     payload["tool_call_id"] = row["tool_call_id"]
+                # Batch 91, mirroring storage._to_neutral: present only when
+                # the row records a failed run.
+                if row.get("error"):
+                    payload["error"] = row["error"]
 
             if row.get("name"):
                 payload["name"] = row["name"]
@@ -1249,6 +1269,8 @@ MEMORY_STORAGE_SYMBOLS = (
     # ROADMAP_v2 §21
     "latest_checkpoint", "pinned_through", "turn_start_ids",
     "message_ids_from", "set_pinned",
+    # Batch 91.
+    "mark_turn_failed",
 )
 
 # Everything FakeStorage stands in for, including the reads only

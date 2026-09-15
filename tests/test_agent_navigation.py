@@ -2094,3 +2094,34 @@ class TestTheLiveTranscriptWritesAtTheOnScreenWidth:
 
             assert live_width
             assert live_width == view_width
+
+
+# ---------------------------------------------------------------------------
+# ---- a failed run says so --------------------------------------------------
+# ---------------------------------------------------------------------------
+
+class TestAFailedRunSaysSo:
+    """Batch 91. A subagent whose first model call failed left only its task
+    in its thread, so the viewer drew the request and nothing else -- which
+    reads exactly like a run still thinking. The replay now ends with why."""
+
+    @pytest.mark.asyncio
+    async def test_the_viewer_draws_why_a_run_failed(self, lineage, mocker):
+        failure = ("This run failed: APIError: The service is temporarily "
+                   "unavailable.")
+        mocker.patch("tui.app.replay_entries", return_value=[
+            ("user", "Dummy task only: calculate 17 + 25.", (), ""),
+            ("error", failure, (), ""),
+        ])
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(160, 40)) as pilot:
+            await pilot.pause()
+            app.open_agent_thread(str(lineage.child))
+            await pilot.pause()
+
+            view = app.query_one("#thread-view", Transcript)
+            drawn = " ".join(" ".join(line.text.split())
+                             for line in view.lines)
+            assert failure in drawn
+            assert "has not written anything yet" not in drawn
+            assert ("error", failure) in view._entries

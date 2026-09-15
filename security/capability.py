@@ -40,9 +40,20 @@ UNAVAILABLE = "unavailable"  # no backend can run it
 
 ALWAYS = "always"
 TIERED = "tiered"
+# §48 (CE2). The pre-§48 `tiered` rule, kept under its own name: anything
+# the container confines and that gets no network runs unasked.
+#
+# NOT called CONTAINED, and the reason is a hazard rather than a style
+# point: `CONTAINED = "contained"` above is a CONTAINMENT value, and the
+# two vocabularies share a spelling. A mode compared against the
+# containment constant would read as correct and match, so the Python
+# names must differ even though the strings cannot.
+CONTAINED_MODE = "contained"
 NEVER = "never"
 
-APPROVAL_MODES = (ALWAYS, TIERED, NEVER)
+# Strictest first. The order is what validate_mode's message lists, so a
+# reader of the error sees the modes the way config.yaml describes them.
+APPROVAL_MODES = (ALWAYS, TIERED, CONTAINED_MODE, NEVER)
 
 
 def validate_mode(value: str, setting_name: str) -> str:
@@ -115,6 +126,15 @@ class CommandProfile:
     escapes_workspace: bool
     # Not known to be read-only.
     writes: bool
+    # Not known to be free of code execution: the call may run code its own
+    # tokens do not show -- an interpreter's `-c`, a script on disk, a
+    # Makefile, a test runner's conftest.py (§48, CE7). An UPPER BOUND like
+    # every field here, and its own dimension although every shell profile
+    # today sets it alike with `writes`: changing a file and running a
+    # program are different harms, and a future write/edit profile changes
+    # a file without running anything. Required, with no default, so a
+    # producer cannot leave it unsaid.
+    runs_code: bool
     # The sandbox will GRANT this call network access. One fact for both
     # consumers, deliberately: the executor uses it to decide whether to
     # pass `--network`, and the gate uses it to decide whether to ask.
@@ -144,6 +164,13 @@ def auto_approved(profile: CommandProfile, containment: str) -> bool:
                    in a container reads the container's. What the
                    container does NOT bound is egress, and that is the
                    half the pre-§28 gate never looked at (#157 hole 2).
+                   Nor does it make running code harmless (§48, CE1,
+                   amending G4, which approved anything contained without
+                   network): the classifier cannot see what a `-c`, a
+                   script or a Makefile will do, a protected segment read
+                   through one carries no token to catch, and code is
+                   where a way out of the container starts. So
+                   `runs_code` asks here too.
 
       UNCONTAINED  nothing is bounded, so everything must be clear: no
                    argument leaving the workspace (#157 hole 1), nothing
@@ -163,15 +190,18 @@ def auto_approved(profile: CommandProfile, containment: str) -> bool:
     knows nothing.
 
     This function reads no config and knows about no tool. A caller with
-    an explicit documented override (`AUTO_APPROVE_SANDBOX_FALLBACK` is
-    the only one today) applies it before calling here, where it is
-    visible, rather than passing a flag in to be honoured out of sight.
+    an explicit documented override applies it before calling here, where
+    it is visible, rather than passing a flag in to be honoured out of
+    sight. There are two today, both in shell's `_shell_approval_check`:
+    `AUTO_APPROVE_SANDBOX_FALLBACK`, and the `contained` approval mode
+    (§48, CE2), which is this rule's CONTAINED branch as it read before
+    `runs_code` joined it.
     """
     if not profile.measured:
         return False
     if containment == CONTAINED:
-        return not profile.network
+        return not (profile.network or profile.runs_code)
     if containment == UNCONTAINED:
         return not (profile.escapes_workspace or profile.writes
-                    or profile.network)
+                    or profile.runs_code or profile.network)
     return False

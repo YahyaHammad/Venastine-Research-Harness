@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 4535 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 4679 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -148,7 +148,7 @@ made the move free: no import changed, and `tests/test_docs_consistency.py` is t
 opens any of these files (its `DOCS` constant is where the path now comes from).
 
 - **docs/ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§47, all built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A15 from §32, W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46 and NA1–NA18 from §47). Section and D-numbers are stable and cross-referenced everywhere.
+- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A15 from §32, W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47 and CE1–CE7 from §48). Section and D-numbers are stable and cross-referenced everywhere.
 
 **Six namespaces use the same `LETTER+NUMBER` shape, and only the first is the
 record.** An id that resolves to two places is a cross-reference that fails
@@ -199,6 +199,7 @@ That qualifier is load-bearing, not pedantry (audit #128). This file used to say
 | `core/session.py` | The ephemeral `/trigger` override, and what clears it | Resolving that number; persisting anything, ever |
 | `core/model_windows.py` | The remembered context window per `(provider, model)` | Deciding whether a number is a sensible window |
 | `core/client.py` | One call + provider format translation | Looping, retry, tool dispatch, bookkeeping |
+| `core/provider_errors.py` | Which provider failures are transient, the retry backoff, the one-line description of a failure | The attempt itself (`core/loop.py`); importing any SDK |
 | `core/loop.py` | Call-dispatch-repeat control flow | Provider formats, tool policy, pipeline state |
 | `security/permissions.py` | Policy (`is_tool_allowed`, `requires_approval`) | Dispatch mechanics |
 | `safety/policy_enforcement.py` | Post-call content policy (secret redaction, blocked domains) | Access control |
@@ -219,6 +220,10 @@ Three stop conditions, all in `_run()`: no tool calls (`complete`), `max_steps` 
 **D20 — persist before branch.** `memory.add_assistant_message(response)` runs immediately after the call returns, *before* any stop-condition branching. Moving it into a conditional silently drops plain-text final answers and budget-truncated responses from the persisted thread, and breaks the §3 JSON-retry path. This has been reintroduced once already; `test_streaming_loop.py` AC6 fails if it happens again.
 
 **Persist before EMIT, too (#42).** `memory.add_tool_result()` runs *before* the `tool_result` event is yielded — the same rule §22 gives `_Progress.checkpoint()`, and for the same reason: a generator only advances while someone iterates it, so emitting first makes durability depend on a UI continuing to read. It shipped the other way round. Because D20 has already written the assistant turn carrying the `tool_use` block, an abandoned generator left a `tool_use` with no matching `tool_result` — M4's pairing broken from the other side, and a thread that cannot be resumed. The tool *ran*; only the record was lost. `tool_call_start` stays before its dispatch, correctly: nothing is persisted there.
+
+**A model call is retried, and the boundary is the SCREEN, not the error** (batch 91). The attempt loop in `_run_steps` re-sends one step's call when `core/provider_errors.is_transient` says the failure can pass: a connection error, a 408/409/429/5xx, or an error event inside a stream that opened with 200 — which both the openai and anthropic SDKs raise unretried, and which is how OpenRouter reports an overloaded upstream. Up to `model_call_max_retries` more attempts, `model_call_retry_base_delay_s` doubling with jitter; the SDKs' own pre-stream retries stay on inside each attempt. A **drained** run (`drained=True`, passed only by `run_agent_conversation` and `continue_conversation`, whose deltas `run_to_completion` discards) is retried whatever it had streamed; a **drawn** run — the TUI turn, a research pass — only while the failing attempt has yielded no delta, because a transcript row cannot be taken back (TECHNICAL_DEBT 25). The loop sits below the wrappers that write the user row, so a retry never writes it twice, and above the accounting, so only the attempt that succeeded is billed or persisted (D20).
+
+**`_run` is a thin frame; the loop is `_run_steps`** (batch 91). On an `Exception` escaping it, the frame stores `redact_secrets(describe(e))` on the thread's newest user row (`MessageLog.error`, via `mark_turn_failed`) and re-raises unchanged — `core/events.py` still has no error variant. Not on `GeneratorExit`: an abandoned generator (#42) is not a failed run. **A column, not an `error` ROLE, is the decision:** provider translation and the compactor's `_as_text` read a user row's `content` alone, so the failure reaches `replay_entries` (an `error` entry right after its user entry) and nothing that sends or summarizes the conversation — a role would have been M8's mistake. `test_grants.py` walks `core.loop`'s AST for exactly one function named `_run` with no `authorized_call` in it; the frame satisfies both, so do not "simplify" it back into the body without re-reading that test.
 
 **"Headless" means unable to ask, not "not a TUI."** `_run()` hides approval-gated tools when there is neither a `permission_channel` nor an `approval_provider` (§25 broadened this from the channel alone). A research pass in attended mode can ask, so its gated tools are advertised.
 
@@ -294,6 +299,8 @@ not optional hygiene: the mount path READS the store, so without it
 the person running the suite had ever typed `/theme`.
 
 **Logging and Textual cannot share the terminal.** `main.py` calls `configure_logging(stderr=False)` immediately before `run_tui()` — not at the top of `main()`, because pre-mount messages (db creation, the trust prompt, MCP connections) genuinely want stderr. `TranscriptLogHandler` routes WARNING+ into the transcript so dropping stderr does not just make warnings invisible; it is attached in `on_mount` and **removed in `on_unmount`**, or it keeps a dead app alive and stacks one handler per instance across the test suite. Anything written to stderr while Textual is up paints over the rendered screen and disappears on the next repaint.
+
+**The routed line carries the exception's reason and is redacted** (batch 91). `emit` appends `describe(exc)` when a record has `exc_info` — `logger.exception("Tool %s raised; ...")` otherwise showed a failure with no cause — and passes the whole line through `redact_secrets`, the log file's rule. Before this the handler redacted nothing: the file had been redacted at its formatter since #132 while the screen got `record.getMessage()` raw.
 
 **The transcript renders progressively, and it computes its own line boundaries** (§38, O7).
 `Transcript.stream_delta` used to do nothing but `self._pending += delta`, so a plain answer
@@ -1642,7 +1649,7 @@ assert what the user was asked and whether it carried a deadline.
 A mutation that strands a reader **hangs** the suite rather than failing it, since two read paths now
 have no deadline. The mutation harness reports HANG as its own outcome.
 
-### The shell gate (`§28`, G1–G7; routing and disclosure amended by `§46`, EP4–EP8)
+### The shell gate (`§28`, G1–G7; routing and disclosure amended by `§46`, EP4–EP8; what `tiered` approves amended by `§48`, CE1–CE7)
 
 Read §28's record before touching `security/sandbox.py`, `security/capability.py` or
 `_shell_approval_check`, and §46's before touching where a command RUNS. The four things most
@@ -1678,6 +1685,24 @@ likely to be re-derived wrongly:
 - **`SANDBOX_DOCKER_IMAGE` is a tag, not an identity** (EP7). The resolved image ID is logged once
   per process and containers carry `--label venastine.sandbox=1`. Digest-pinning was considered
   and deferred.
+
+And from §48, which amended what `tiered` approves (CE1–CE7):
+
+- **`tiered` asks about anything that may run code, contained or not** (CE1, amending G4). G4
+  approved every contained command without network, so `python -c`, a script the auto-approved
+  `write` tool had just made, `pytest` (a `conftest.py`) and `make` all ran unasked — and code read a
+  workspace's `.venastine/` straight past the token check, which three documents said could not
+  happen. The capability is `CommandProfile.runs_code` (CE7), True for every non-INERT profile.
+  **Do not add an interpreter list.** `"python"`, `pyth?n`, `python3.13`, `echo x | python` and
+  `find -exec` are the same call to a shell; a list is G2's parser whose misses auto-approve.
+- **`contained` is the old rule under its own name** (CE2), applied in `_shell_approval_check` as a
+  visible override below the protected-segment check, beside the fallback opt-in. Its constant is
+  `capability.CONTAINED_MODE`, **never `CONTAINED`** — that name is a *containment* value with the
+  same spelling, so a mode compared against it matches and reads as correct.
+- **The fallback opt-in is honoured under `tiered` and `contained`; `always` beats it** (CE5, CE6).
+  `unsafe_reasons()` has to follow the gate rather than the flags: under `always` the pair is not
+  "no ask", and the badge said it was. A test holds the badge against the gate in every mode.
+  `contained` itself is on the badge (CE4).
 
 And the four from §28 itself:
 

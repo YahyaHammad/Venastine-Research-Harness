@@ -111,6 +111,22 @@ class MessageLog(SQLModel, table=True):
     # an existing database exactly as it added `pinned` -- see the note on
     # that field's migration in _ordered_rows.
     thinking: Optional[str] = None
+    # Batch 91. Why the run this row STARTED failed, or None -- user rows
+    # only, written by mark_turn_failed when an exception escapes the loop.
+    #
+    # A column on the user row rather than a row of its own, and that is
+    # the whole design. A failed run leaves no assistant turn behind (D20
+    # persists one only when a call returns), so without this a thread
+    # whose first call failed read as a request nobody answered. An `error`
+    # ROLE would have been a harness notice stored as conversation -- the
+    # compactor's `_as_text` and /summary render every role, so it would
+    # have been summarized into what the model later reads, which is M8's
+    # mistake. A column is read by nothing that measures the conversation:
+    # provider translation and the compactor take `content` alone. On the
+    # user row because that is what says WHICH turn failed, which a
+    # thread-level field could not for a chat. Nullable and additive, so
+    # database.ensure_columns() adds it like `thinking`.
+    error: Optional[str] = None
 
 
 class CompactionCheckpoint(SQLModel, table=True):
@@ -611,6 +627,13 @@ def _to_neutral(msg: dict) -> dict:
         payload = {"role": role, "content": decoded}
         if msg["tool_call_id"]:
             payload["tool_call_id"] = msg["tool_call_id"]
+        # Batch 91, on §44's terms for `thinking`: present ONLY when the row
+        # records a failed run, so every message written before reconstructs
+        # to exactly the shape it did. Nothing that builds a request reads
+        # it -- _messages_for_provider takes a user row's `content` alone,
+        # and so does the compactor's _as_text.
+        if msg.get("error"):
+            payload["error"] = msg["error"]
 
     if msg["name"]:
         payload["name"] = msg["name"]
@@ -652,6 +675,8 @@ def _ordered_rows(thread_id: UUID) -> list[dict]:
                 # Not coerced, unlike `pinned`: NULL is the ordinary state
                 # of this column and _decode_thinking answers None for it.
                 "thinking": m.thinking,
+                # Batch 91, and NULL is ordinary here too: a run failed.
+                "error": m.error,
             }
             for m in session.exec(statement).all()
         ]
@@ -835,6 +860,36 @@ def set_pinned(message_ids: list[UUID], pinned: bool = True) -> int:
             changed += 1
         session.commit()
     return changed
+
+
+def mark_turn_failed(thread_id: UUID, error: str) -> bool:
+    """Record on the thread's NEWEST user row why the run it started failed.
+
+    Batch 91; see MessageLog.error for why this is a column. The newest user
+    row is always the right one: every entry point writes the message that
+    starts a run BEFORE the loop begins -- run_agent_conversation,
+    continue_conversation, stream_deep_research_mode and the TUI turn -- so
+    by the time a failure escapes the loop, the row that started it is the
+    last user row there is. Ordered by (created_at, id), `_ordered_rows`'
+    own order, so the two can never disagree about which row is newest.
+
+    Returns False for a thread with no user row. Does not stamp
+    last_activity_at the way save_message does: a failure is not a message.
+    """
+    with Session(engine) as session:
+        statement = (
+            select(MessageLog)
+            .where(MessageLog.thread_id == thread_id)
+            .where(MessageLog.role == "user")
+            .order_by(MessageLog.created_at.desc(), MessageLog.id.desc())
+        )
+        row = session.exec(statement).first()
+        if row is None:
+            return False
+        row.error = error
+        session.add(row)
+        session.commit()
+    return True
 
 
 def _current_watermark(thread_id: UUID) -> Optional[UUID]:

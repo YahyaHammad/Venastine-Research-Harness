@@ -13828,3 +13828,286 @@ passed, 20 skipped, 1 deselected.
   counts.
 - `docs/TECHNICAL_DEBT.md` -- items 23 and 24.
 - `tests/BREAKING_CHANGES.md` -- the batch 90 section.
+
+## Batch 91 -- the provider that failed, the reason nobody was shown, and a retry (2026-09-14)
+
+### What was reported, and what it turned out to be
+
+A nested spawn test -- two subagents, each spawning two leaves -- showed four
+bare `[error] Tool spawn_subagent raised; returning it as an error result.`
+lines. The four leaf threads held only their task, and the parent retried by
+hand until a third attempt worked. The question was whether the harness, the
+provider or the model was at fault.
+
+**The provider.** Verified from `logs/app.log` and `app.db` rather than argued:
+
+- **The tracebacks.** All four end in `call_model_stream` with an
+  `openai.APIError` raised from an error event INSIDE a stream that had opened
+  `200 OK`. The provider's messages were "The service is temporarily
+  unavailable" (twice), "A Timeout Occurred" and "Upstream idle timeout
+  exceeded", all from OpenRouter on a free model. Two plain 503s just before
+  had been retried by the SDK itself.
+- **The database.** The failed children held one row each, `['user']`, and the
+  parent's tool results held exactly those four messages.
+- **Why the threads were empty.** Each child died on its first model call, and
+  D20 persists a turn only once a call returns.
+- **Where the lines came from.** The four red lines were the nested subagent's
+  own failed spawns reaching the screen through the root logger. A child's
+  events never reach its parent's transcript (§18/D6).
+
+**Three harness gaps made it undiagnosable from the screen, and the owner chose
+to fix all three with every decision agreed first:**
+
+- the red line carried no reason;
+- a failed run left no trace in its thread;
+- nothing retried a model call.
+
+### Decisions (owner)
+
+| Gap | Decision |
+|---|---|
+| Reason on screen | `TranscriptLogHandler` appends `describe(exc)` whenever a record carries `exc_info` -- every reason-less ERROR site at once |
+| Redaction | That line goes through `redact_secrets`, the log file's rule |
+| Failure record | A nullable `MessageLog.error` on the user row whose run failed |
+| Scope | Subagent runs and chat turns; the frame covers research-pass threads too |
+| When to retry | Until output reaches a screen: a drained run whatever it streamed, a drawn run only before its first delta |
+| What to retry | Temporary provider errors only |
+| How often | 2 retries with the SDK retries kept; waits deliberately longer than the SDKs' own (3s then 6s, ±25%), a retry-after lengthening but never shortening |
+| Visibility | One WARNING per retry, which reaches the transcript |
+
+### What was built
+
+- **`core/provider_errors.py`:** `is_transient`, `retry_after_s`,
+  `backoff_delay`, `wait` and `describe`. It imports no SDK: client.py loads
+  them lazily and the suite fakes them, so an exception is read by its MRO
+  class names and the attributes the SDKs define.
+- **`core/loop.py`:**
+  - The attempt loop in `_run_steps`, below the wrappers that write the user
+    row and above the accounting.
+  - `drained=True` from the two wrappers that drain.
+  - `_run` becomes a thin frame that records `redact_secrets(describe(e))` on
+    `Exception` (not on `GeneratorExit`) and re-raises unchanged.
+- **Storage and replay:**
+  - `MessageLog.error`, `mark_turn_failed` (newest user row) and
+    `ConversationMemory.mark_turn_failed`.
+  - `_to_neutral` carries the key only when set.
+  - `replay_entries` ends a failed turn with `This run failed: ...`.
+- **`tui/app.py`:** the reason and the redaction in `TranscriptLogHandler.emit`.
+
+### What the work found that nobody had asked about
+
+- **The transcript's log handler had never redacted anything.** The log FILE
+  has been redacted at its formatter since #132. The handler beside it posted
+  `record.getMessage()` raw, so `fetch_url failed for <url>: <e>` reached the
+  screen with its key intact. Adding exception text would have widened that,
+  which is why redaction came with it.
+- **Two comments were false:**
+  - `AgentActivity.bind`'s docstring said bind is not called for a provider
+    that fails at the first call. It is -- `run_agent_conversation` binds
+    before the user message, which is why a failed child was still openable.
+  - `_paint_thread_view`'s placeholder comment claimed a first-call failure
+    shows "This run has not written anything yet". The task row is one entry,
+    so it never did; the owner's screenshot showed the bare task.
+- **The first draft cited "G1/G2/G3" in a production docstring.** `G1`–`G7` are
+  §28's decisions, so the citation check would have resolved them to the wrong
+  record. They were removed before any run.
+
+### Verification
+
+- **The classifier against the REAL SDK classes, outside pytest.** openai 2.45,
+  anthropic 0.116, google-genai 1.0, httpx and requests: 25 of 25 classified as
+  intended. That covers OpenRouter's in-stream shape, anthropic's 200-status
+  `overloaded_error` vs `invalid_request_error`, google's `ServerError` 503 and
+  `ClientError` 429/400, raw httpx and requests transport errors, and D21's
+  `RuntimeError`. `retry_after_s` read a real 429's header.
+- **The pins were written with the code**, not first against an unfixed tree,
+  so the evidence that they discriminate is the mutation pass (`mutate91.py`).
+  - It restored from in-memory bytes, since the fix was uncommitted.
+  - The control was green, and 18 of 18 mutations were killed, each by the pin
+    written for it. They covered the classifier's status and body branches,
+    `code` trusted too widely, the backoff and retry-after, retrying a
+    permanent failure or a drawn run after output, one attempt too few, a
+    wrapper forgetting `drained`, recording a `GeneratorExit`, storing
+    unredacted, leaking `error` onto the wire, the handler's redaction and
+    reason, the replay entry, and three storage shapes.
+  - The first pass scored M13 and M14 as ERRORED although each had failed
+    exactly its pin: the runner flagged any line beginning "ERROR ", which
+    captured log output does. It was fixed to match pytest's `ERROR tests/`
+    summary lines, and the re-run killed both.
+- **`test_config_edit.py`'s pinned count of settable scalars moved from 113 to
+  115**, for the two new keys.
+- **A focused run that listed `test_storage_e2e.py` before
+  `test_config_edit.py` failed four `db_path` pins.** That is an ordering
+  artefact of the command line, confirmed by running the latter alone; it is
+  recorded in BREAKING_CHANGES.
+- **Full suite:** 4592 passed, 20 skipped, 1 deselected -- 4612 collected,
+  the count now quoted in README, AGENTS and ARCHITECTURE.
+
+### Deliberately not done
+
+- **Retrying after visible output** -- TECHNICAL_DEBT item 25. It needs a
+  discard event and transcript retraction.
+- **A status column for threads, and a failed-run mark in the sidebar.** The
+  sidebar still cannot tell a failed span from a finished one. The owner scoped
+  this batch to the thread record and the replay.
+
+### Files touched
+
+- `core/provider_errors.py` (new), `core/loop.py`, `core/memory.py`,
+  `core/replay.py`, `core/agent_activity.py`, `storage.py`, `tui/app.py`.
+- `config.yaml`, `config_schema.py`, `CONFIG_ARCHITECTURE.md` -- the two keys.
+- Tests:
+  - new: `tests/test_provider_errors.py`, `tests/test_model_call_retry.py`
+  - `tests/conftest.py` -- `FakeMemory`, `FakeStorage`, the symbol list
+  - `tests/test_tui.py`, `tests/test_storage_e2e.py`,
+    `tests/test_thread_legibility.py`, `tests/test_agent_navigation.py`,
+    `tests/test_config_edit.py`
+- `AGENTS.md` -- the ownership row, the retry and frame paragraphs, the count.
+- `docs/ARCHITECTURE.md` -- the new module, two new test files, counts.
+- `README.md` -- the count.
+- `docs/TECHNICAL_DEBT.md` -- item 25.
+- `tests/BREAKING_CHANGES.md` -- the batch 91 section.
+
+## Batch 92 -- code in the sandbox, what `tiered` approves, and a fourth mode (2026-09-14)
+
+### What was reported, and what it turned out to be
+
+The owner pointed out that `python -c` and `bash -c` can run arbitrary code,
+and that a script written with the auto-approved `write` tool and then run with
+`python run.py` does the same. They asked for both cases to be closed across
+languages rather than for Python alone, leaving `never` as the opt-out for
+anyone who does not mind.
+
+**Measured through the real `_shell_approval_check`, before any change:
+the gap was G4 itself, not a missing flag.** With Docker up, every one of
+`python -c "print(1)"`, `bash -c "echo hi"`, `sh run.sh`, `./run.sh`,
+`node run.js`, `python run.py`, `pytest`, `make`, `rm -rf data` and
+`ls -la && cat notes.txt` answered "do not ask". `curl https://x` asked, and so
+did `cat /etc/passwd`. §28 G4 auto-approved any contained command without
+network, so a blocklist of `-c` flags or interpreters would have closed
+nothing: `pytest` runs a conftest.py, `make` runs a Makefile, and `"python"`,
+`python3.13` and `echo x | python` are the same call to a shell.
+
+- **What the container already bounded.** `bash -c "curl https://x"` was
+  unasked but classified without network, so it ran under `--network none`:
+  one flag, two consumers (Q2). The read-only binds stopped writes to protected
+  paths.
+- **What it did not.** `cat .venastine/settings.json` asked, while
+  `cat .ven*/settings.json; true` and a `python -c` that opens the file did
+  not. The owner's configured workspace contains a `.venastine/` with
+  `settings.json` and `mcp.json`, so this was live. `SECURITY.md`,
+  `protected_paths.py` and `_command_touches_protected`'s docstring all said
+  such a spelling was "asked about anyway".
+- **`never` as the opt-out also removes the host-read prompt**, so
+  `cat ~/.aws/credentials` becomes an unprompted host read again (#157). A user
+  who accepts code in the container would have had no setting between.
+
+### Decisions (owner) -- ROADMAP_v2 §48, CE1-CE7
+
+| # | Decision |
+|---|---|
+| CE1 | `tiered` approves INERT alone; every other command asks, contained or not. Amends G4 |
+| CE2 | A `contained` mode keeps G4's rule under its own name |
+| CE3 | `tiered` stays the shipped default |
+| CE4 | `contained` is on the banner and badge |
+| CE5 | `auto_approve_sandbox_fallback` is honoured under `tiered` and `contained` |
+| CE6 | `always` beats that opt-in, and the badge now says so |
+| CE7 | The capability is its own required field, `CommandProfile.runs_code` |
+
+**Two exchanges during the design are worth keeping:**
+
+- **The owner's first reason for flagging `contained` did not hold.** They
+  reasoned that a script could reach the network there. It cannot: the flag
+  that withholds network also withholds `--network`, for the whole line. They
+  were told, and kept the flag on the grounds that do hold -- unprompted code
+  in the container, and reads of a `.venastine/` inside the workspace.
+- **The owner asked what `always` does with `auto_approve_sandbox_fallback`
+  on.** Measured, with both fallback flags on and Docker down: `always` asks
+  about every command, because the mode check returns before the opt-in is
+  read, but the badge said "host shell, no ask". The owner chose to keep the
+  behaviour and fix the badge, which is CE6.
+
+### What was built
+
+- **`security/capability.py`:**
+  - `CONTAINED_MODE` and the four-word `APPROVAL_MODES`. It is not named
+    `CONTAINED`, because that constant is a containment value with the same
+    spelling.
+  - `CommandProfile.runs_code`, required.
+  - `auto_approved` reads `runs_code` in both the CONTAINED and UNCONTAINED
+    branches.
+- **`security/sandbox.py`:** `runs_code` at all five construction sites --
+  False for INERT and HOST_READ, True otherwise. The SANDBOXED reason now says
+  the command can run code.
+- **`tools/builtin/shell.py`:** the `contained` override is step 4 of
+  `_shell_approval_check`, below the protected-segment check and the fallback
+  opt-in. It reads `measured`, containment and `network` rather than the tier
+  label. The module docstring and `_command_touches_protected` are corrected.
+- **`security/posture.py`:** `unsafe_reasons()` reports `contained`, and
+  reports the fallback pair as "no ask" only when the mode is not `always`.
+- **`config_schema.py`, `config.yaml`, `config_edit.py`:** the Literal, the
+  mode comment with CE5/CE6, and the `/config` confirmation sentence.
+
+### Verification
+
+- **The probe, re-run after the change** through the real gate for every mode
+  x Docker up/down x fallback flags:
+  - `tiered`, Docker up: every code shape asks; `ls` does not; `.venastine`
+    reads ask.
+  - `contained`, Docker up: code runs unasked; `curl`, `cat /etc/passwd` and
+    `cat .venastine/settings.json` ask.
+  - `always`: every command asks in every state, and the badge shows "host
+    shell fallback", not "no ask".
+  - `tiered` or `contained` with both fallback flags and Docker down: code runs
+    on the host unasked (CE5), and host reads and `.venastine` still ask.
+- **The pins were written with the code**, so the evidence that they
+  discriminate is the mutation pass (`mutate92.py`, restoring from in-memory
+  bytes):
+  - The control was green, and 14 of 14 mutations were killed, each by the pin
+    written for it.
+  - Rows: `runs_code` dropped from either branch or set False on SANDBOXED; the
+    override applied in every mode, blind to network, above the
+    protected-segment check, over an unmeasured call, or over any containment;
+    the badge leaving `contained` off or saying "no ask" under `always`; the
+    fallback opt-in restricted to `contained`; `contained` missing from
+    `APPROVAL_MODES` or the Literal; and `runs_code` replaced by an interpreter
+    list.
+  - That last row is what the generative pin exists for.
+  - The override-over-any-containment row also failed
+    `test_a_host_read_still_asks`, since it let a HOST_READ through in
+    `contained`, which is a second guard on the same line.
+- **The generality pin's own floor caught a vacuous corpus on its first run.**
+  The generated commands yielded 24 INERT samples in 2200, because random
+  arguments almost always draw a metacharacter. It now adds
+  metacharacter-free arguments behind inert words and behind unlisted
+  programs. `zzlang abc` is the sample that tells "not INERT" apart from "on a
+  list".
+- **`tests/test_docs_consistency.py` on its own** caught the missing §48 index
+  row, then passed: 32 passed, 1 skipped.
+- **The first full run failed two `/config` panel pins** in `test_tui.py` that
+  hard-coded the three-word vocabulary; the focused runs had not reached them.
+  They are fixed and recorded in BREAKING_CHANGES.
+- **Full suite:** 4659 passed, 20 skipped, 1 deselected -- 4679 collected,
+  the count now quoted in README, AGENTS and ARCHITECTURE.
+
+### Deliberately not done
+
+- **Hiding `.venastine/` from code under `contained` and `never`.** It stays
+  documented risk in SECURITY.md. A read-only bind stops writes, not reads, and
+  a bind that masks the directory would be a G6 decision.
+- **Telling the model in `TOOL_SCHEMA` that code asks.** The schema is built
+  at import, and reading the posture there is what UN2 forbids.
+
+### Files touched
+
+- `security/capability.py`, `security/sandbox.py`, `security/posture.py`,
+  `security/protected_paths.py`, `tools/builtin/shell.py`.
+- `config_schema.py`, `config.yaml`, `config_edit.py`.
+- Tests: `tests/test_shell.py` (five new classes, eight moved pins),
+  `tests/test_posture.py`, `tests/test_config_edit.py`, `tests/test_tui.py`
+  (the notice constant and two panel pins).
+- `docs/ROADMAP_v2.md` -- §48, its index row, and G4's amendment note.
+- `AGENTS.md` -- the shell gate section, the decision map, the count.
+- `README.md` -- the mode and tier tables, the quoting paragraph, the count.
+- `docs/SECURITY.md`, `CONFIG_ARCHITECTURE.md`, `docs/ARCHITECTURE.md`.
+- `tests/BREAKING_CHANGES.md` -- the batch 92 section.

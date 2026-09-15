@@ -1321,6 +1321,64 @@ async def test_an_error_renders_as_an_error():
 
 
 @pytest.mark.asyncio
+async def test_a_routed_error_carries_its_exceptions_reason():
+    """Batch 91. `logger.exception("Tool %s raised; returning it as an error
+    result.", name)` puts the cause in exc_info ALONE, so the transcript said
+    a spawn had failed and never why -- and the why was "The service is
+    temporarily unavailable", which would have answered the question on
+    sight. One line of it, not the traceback: the log file keeps that."""
+    import logging
+
+    errors = []
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        app._transcript.write_role = \
+            lambda role, text: errors.append((role, text))
+        try:
+            raise RuntimeError("The service is temporarily unavailable.")
+        except RuntimeError:
+            logging.getLogger("tools.registry").exception(
+                "Tool spawn_subagent raised; returning it as an error result.")
+        assert await settle(
+            pilot, lambda: any("spawn_subagent" in t for _r, t in errors))
+
+    role, text = next((r, t) for r, t in errors if "spawn_subagent" in t)
+    assert role == "error"
+    assert text.endswith(
+        "(RuntimeError: The service is temporarily unavailable.)"), text
+    assert "Traceback" not in text
+
+
+@pytest.mark.asyncio
+async def test_a_routed_line_is_redacted_like_the_log_file():
+    """Batch 91. The log FILE has been redacted at its formatter since #132,
+    and this handler posted the raw message beside it -- so a warning
+    interpolating a URL or an exception reached the screen with its key
+    intact. Both routes a secret can take are covered: the message's own
+    arguments, and the exception text the handler now appends."""
+    import logging
+
+    key = "sk-ant-api03-" + "b" * 32
+    written = []
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        app._transcript.write_role = \
+            lambda role, text: written.append((role, text))
+        logging.getLogger("tools.builtin.fetch_url").warning(
+            "fetch_url failed for https://x.test/?key=%s", key)
+        try:
+            raise RuntimeError(f"rejected {key}")
+        except RuntimeError:
+            logging.getLogger("tools.registry").exception(
+                "Tool fetch_url raised; returning it as an error result.")
+        assert await settle(
+            pilot,
+            lambda: sum("[REDACTED]" in t for _r, t in written) >= 2)
+
+    assert not any(key in text for _role, text in written)
+
+
+@pytest.mark.asyncio
 async def test_the_handler_is_detached_when_the_app_unmounts():
     """The handler holds a reference to the app. Leaving it on the root
     logger keeps a dead app alive and, across this suite, stacks one
@@ -3450,8 +3508,9 @@ async def test_every_modal_actually_draws_its_body(
 
 _LONG_OPTION = ("Create `/workspace/.venv` and leave it in place after the "
                 "task so the next run does not have to build it again")
-_NOTICE = ("SANDBOXED: not a read-only command, so it needs a sandbox. Runs "
-           "in a Docker container, workspace mounted at /workspace.")
+_NOTICE = ("SANDBOXED: not a read-only command -- it can run code, so it runs "
+           "in a sandbox. Runs in a Docker container, workspace mounted at "
+           "/workspace.")
 _REASON = ("Checking the sandbox mount table to answer the user question "
            "about whether the host workspace path is visible from inside "
            "the container.")
@@ -7669,6 +7728,7 @@ class TestTheConfigPanelIsTheCommandPanel:
         assert [row.name for row in rows] == [
             "config shell_approval_mode always",
             "config shell_approval_mode tiered",
+            "config shell_approval_mode contained",
             "config shell_approval_mode never"]
         rows = commands.matching("/config shell_approval_mode n")
         assert [row.name for row in rows] == [
@@ -7726,6 +7786,7 @@ class TestTheConfigPanelIsTheCommandPanel:
                 lambda: [c.name for c in panel._matches] == [
                     "config shell_approval_mode always",
                     "config shell_approval_mode tiered",
+                    "config shell_approval_mode contained",
                     "config shell_approval_mode never"])
 
 

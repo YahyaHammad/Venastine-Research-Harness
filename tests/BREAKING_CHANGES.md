@@ -4439,3 +4439,109 @@ until it read `line.text.rstrip()`.
 
 `test_the_width_override_does_not_survive_the_paint` is retired: it asserted
 `_paint_width is None` after a paint, and the attribute no longer exists.
+
+---
+
+## A provider failure: retried, recorded, and shown with its reason (batch 91)
+
+**A model call is retried inside `_run_steps`, and the boundary is the
+screen.** `core/provider_errors.is_transient` decides which failures qualify.
+The loop retries a DRAINED run (`drained=True`, passed by
+`run_agent_conversation` and `continue_conversation`) whatever it had
+streamed, and a drawn run only before its first delta. Every retry test
+patches `core.provider_errors.sleep` -- never the global `time`, AGENTS.md's
+`monotonic` rule -- and `core.provider_errors.random` to 0.5, the centre of the
+jitter, so a delay is exact.
+
+**The suite cannot build a real SDK exception.** The root conftest replaces
+openai, anthropic, google.genai and httpx in `sys.modules`, so
+`tests/test_provider_errors.py` uses LOOKALIKES: a class named as the SDK names
+it, carrying the attributes the SDK sets. The classifier reads exactly that --
+MRO names, `status_code`, `code`, `body` -- and the real classes were checked
+outside pytest (DEVLOG batch 91). An `isinstance` against an imported SDK class
+would match nothing here and would import what `core/client.py` deliberately
+does not.
+
+**`_run` is a frame around `_run_steps`.** A test driving `_run` still drives
+the loop, and `test_grants.py`'s AST walk still finds exactly one `_run`. A
+memory double must now answer `mark_turn_failed`: `FakeMemory` does, and a
+hand-rolled double without it logs "Could not record this run's failure" while
+the original exception still propagates.
+
+**`MessageLog.error` rides the neutral shape ONLY when set**, on §44's terms
+for `thinking`. `FakeStorage._reconstruct` mirrors it, and
+`MEMORY_STORAGE_SYMBOLS` names `mark_turn_failed`.
+
+| Change | Test | Fix |
+|---|---|---|
+| Classify by HTTP status alone, ignoring an open stream's error body | `test_not_retried[...]` in `test_provider_errors.py` | A mid-stream `APIError` naming a 4xx, and anthropic's 200-status error types, are read from `body` |
+| Trust an int `code` on any exception | `test_not_retried[an unrelated exception with an int code]` | Only on something named `APIError` (google-genai) |
+| Let a retry-after shorten the wait | `test_a_retry_after_cannot_shorten_it` | `max(delay, retry_after)` -- the owner asked for longer waits, not shorter |
+| Retry a permanent failure | `test_a_permanent_failure_raises_at_once` | Keep `is_transient` in the retry condition |
+| Retry a drawn run after it showed output | `test_a_drawn_run_that_already_showed_output_is_not_retried` | A transcript row cannot be taken back (TECHNICAL_DEBT 25) |
+| Drop `drained=True` from a draining wrapper | `test_the_two_draining_wrappers_say_so` | A subagent failing mid-reasoning would never be retried |
+| Record a failure on `BaseException` | `test_an_abandoned_generator_is_not_a_failure` | `GeneratorExit` is #42's quit, not a failed run |
+| Store `describe(e)` unredacted | `test_a_secret_in_the_failure_is_redacted_before_it_is_stored` | `redact_secrets` before `mark_turn_failed` |
+| Hand a user message dict to the wire whole | `test_the_wire_shape_is_identical_with_or_without_it` | Build a user row's request from `content` alone |
+| Mark the oldest user row, always emit `error`, or drop it from `_ordered_rows` | `test_a_failed_run_is_recorded_on_the_user_row_that_started_it` (real SQLite) | Newest by `(created_at, id)`; present in the neutral shape only when set |
+| Drop the replay entry | `test_a_failed_run_ends_with_why`, `test_a_failure_sits_under_the_turn_it_belongs_to` | An `error` entry right after its user entry |
+| Post the handler's line unredacted, or without the exception | `test_a_routed_line_is_redacted_like_the_log_file`, `test_a_routed_error_carries_its_exceptions_reason` in `test_tui.py` | `redact_secrets` over the whole line; the reason appended from `exc_info` |
+| Add a `config.yaml` key | `test_setting_every_leaf_to_its_own_value_changes_nothing` | Update its pinned count (115 since this batch) |
+
+**A focused run can fail for order alone.** `test_storage_e2e.py`'s
+module-scoped `real_storage` re-imports `config` against a throwaway database,
+so naming it BEFORE `test_config_edit.py` on one command line fails four
+`db_path` pins there. The full suite's alphabetical order does not; it is an
+artefact of the command line, not a regression.
+
+---
+
+## Code in the sandbox asks under `tiered`; the old rule is `contained` (batch 92)
+
+**`tiered` now approves INERT alone** (ROADMAP_v2 §48, CE1). Any test that
+asserted `_asks(<non-inert command>, docker=True) is False` under the shipped
+posture pinned G4's rule, and that rule is now the `contained` mode's. Those
+tests were MOVED, not deleted: they set
+`set_posture(monkeypatch, shell_approval_mode="contained")`, and where the
+friction they measured changed, they assert the `tiered` answer beside it.
+That is the pattern for any future test of the same shape -- decide which mode
+the claim is about and say so, rather than relying on the conftest default.
+
+**`CommandProfile` has a required `runs_code` field** (CE7), with no default.
+A test constructing one must pass it, or it raises `TypeError` -- which
+`test_it_is_required` pins on purpose.
+
+**The mode vocabulary is four words.** `APPROVAL_MODES`, `ShellApprovalMode`
+and the `/config` completer's `always | tiered | contained | never` all moved
+together; a test pinning the old three-word tuple is pinning the wrong set.
+The full suite found two more copies the focused runs did not reach, both in
+`tests/test_tui.py::TestTheConfigPanelIsTheCommandPanel`
+(`test_a_closed_vocabulary_is_offered_as_values` and
+`test_tab_completes_a_key_and_then_offers_its_values`): the panel offers the
+Literal's words in schema order, so `contained` sits between `tiered` and
+`never` there too.
+
+**The SANDBOXED reason string changed**, and `tests/test_tui.py`'s `_NOTICE`
+sizing constant moved with it: it sizes modals from what the gate actually
+says, so a stale copy would size them from a string that no longer exists.
+
+| Change | Test | Fix |
+|---|---|---|
+| Name an interpreter list instead of `runs_code` | `test_no_language_is_listed_so_none_can_be_missed` | Everything not INERT runs code; `zzlang abc` must ask |
+| Drop `runs_code` from `auto_approved`'s CONTAINED branch | `test_it_asks_with_docker_up`, `test_it_alone_decides_a_contained_answer` | `not (network or runs_code)` |
+| Set `runs_code=False` on a SANDBOXED profile | `test_every_producer_states_it`, `test_it_asks_with_docker_up` | Only INERT and HOST_READ are False |
+| Apply the `contained` override in every mode | `test_it_asks_with_docker_up` | Guard on `mode == CONTAINED_MODE` |
+| Let the override ignore `network` | `test_a_network_command_still_asks` | `not profile.network` in the override |
+| Put the override above the protected-segment check | `test_a_literal_protected_segment_still_asks` | Step 4 sits below step 2 |
+| Let the override cover an unmeasured call, or the host fallback | `test_an_unmeasured_call_is_not_argued_through`, `test_the_host_fallback_is_not_the_container` | `profile.measured` and `containment == CONTAINED` |
+| Restrict the fallback opt-in to one mode | `test_code_on_the_host_fallback[tiered-False]` | CE5: honoured under `tiered` and `contained` |
+| Report "host shell, no ask" under `always` | `test_under_always_the_fallback_pair_is_not_no_ask`, `test_the_badge_says_no_ask_exactly_when_the_gate_does_not_ask` | CE6: the badge follows the gate |
+| Leave `contained` off the badge | `test_contained_is_reported_and_says_what_still_asks` | CE4 |
+| Drop `contained` from the vocabulary | `test_the_shipped_default_is_tiered`, `test_a_closed_vocabulary_lists_its_words` | All three spellings of the set move together |
+
+**Moved to `contained`:** `test_docker_no_approval` (now
+`test_docker_code_asks_under_tiered` beside `test_docker_no_approval_under_contained`),
+`test_a_contained_command_without_network_is_not`, and in both
+`TestQuotingCannotHideAnEscape` and `TestBackslashCannotHideAnEscape`:
+`test_and_with_docker_up_it_is_simply_contained` and
+`test_a_legitimate_*_workspace_path_still_works`.

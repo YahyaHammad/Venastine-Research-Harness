@@ -774,3 +774,21 @@ blank one, on both paths. The answer path's single-trailing-newline and
 blank-line-between-paragraphs rules are pinned, and getting this wrong
 swallows a real paragraph break, so it wants its own cases in both
 row-equality classes rather than riding along with a width fix.
+
+## 25. A model call is not retried once its output is on screen (open, 2026-09-14)
+
+Batch 91 retries a model call that fails transiently -- a dropped connection,
+a 429 or 5xx, an error sent inside a stream that had already opened -- but a
+run someone is WATCHING (a TUI chat turn, a research pass) only while the
+failing attempt has streamed nothing. A drained run (a subagent, a one-shot,
+a JSON-retry continuation) is retried whatever it had streamed, because
+run_to_completion discards its deltas. So the TUI turn that fails mid-answer
+still fails exactly as it did before the batch, with the half-answer on
+screen and `[error: ...]` under it.
+
+**Deliberately not done in batch 91** (owner decision). Retrying after
+visible output means taking the partial answer back: a LoopEvent telling the
+shells to discard the span (core/events.py has no error variant, on purpose
+-- consumers rely on a real exception propagating), and a transcript able to
+retract rows RichLog has already stored as Strips, plus the entry log and
+the label that span opened. Both are real designs of their own.

@@ -377,8 +377,46 @@ def test_the_migration_runs_against_a_real_database(real_storage):
         connection.close()
 
     assert "pinned" in columns
+    # Batch 91. The failure column, added to existing databases the same way.
+    assert "error" in columns
     assert database.ensure_columns(
         database.engine.raw_connection(), database._declared_columns()) == []
+
+
+def test_a_failed_run_is_recorded_on_the_user_row_that_started_it(
+        real_storage):
+    """Batch 91, on real SQLite: the claim is about a COLUMN, which is what
+    this file is for.
+
+    The NEWEST user row, because every entry point writes the message that
+    starts a run before the loop begins. Present in the neutral shape only
+    on that row, so every other message reconstructs exactly as it did --
+    and a resumed memory carries it the way a live one does."""
+    import storage
+    from core.memory import ConversationMemory
+
+    failure = "APIError: The service is temporarily unavailable."
+    memory = ConversationMemory()
+    memory.add_user_message("first")
+    memory.add_user_message("second")
+    memory.mark_turn_failed(failure)
+
+    history = storage.archive_history(memory.thread_id)
+    assert history == [
+        {"role": "user", "content": "first"},
+        {"role": "user", "content": "second", "error": failure},
+    ]
+    assert memory.messages[-1]["error"] == failure
+    resumed = ConversationMemory(thread_id=memory.thread_id)
+    assert resumed.messages == history
+
+
+def test_marking_a_thread_with_no_user_row_changes_nothing(real_storage):
+    from uuid import uuid4
+
+    import storage
+
+    assert storage.mark_turn_failed(uuid4(), "x") is False
 
 
 def test_a_migrated_column_matches_the_fresh_schema_exactly(real_storage,

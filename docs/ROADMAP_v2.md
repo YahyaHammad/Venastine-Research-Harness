@@ -175,6 +175,7 @@ the namespace list in `AGENTS.md`.
 - **§45. What a source is worth, and how close it actually is** — **(BUILT: both slices)** (the two scores per cited source were model self-reports that nothing checked and nothing consumed; no source text survived the pass, so nothing could have)
 - **§46. Where a command runs, and whether anyone can see it** — BUILT (the INERT tier executed on the host against its own definition, and the model was never told where anything ran)
 - **§47. Navigable agents — the subagent thread you can open** — BUILT (a child's output drained internally where no shell could see it; parallel spawns raced the panel)
+- **§48. Code in the sandbox — what `tiered` approves, and the mode that keeps the old answer** — BUILT (G4 auto-approved any contained command without network, so `python -c`, scripts, `pytest` and `make` ran unasked, and code read `.venastine/` past the token check)
 - **Open Questions — None Remaining** (Rev. 3 — all decisions locked; verification items only)
 - **Why these calls, not just what they are** (Rev. 3 — the reasoning patterns behind several decisions above)
 
@@ -1944,7 +1945,7 @@ sharing the policy.**
 | G1 | What a classification produces | A capability **set** (`CommandProfile`), not a trust level. `tier` survives only as a label for the prompt and the record; policy branches on capabilities and never on the tier name | Linear tiers order harms that are not comparable — `rm -rf /workspace` (writes, no network) and `curl https://x` (no writes, network) are different harms, not more and less of one thing. Ranking them answers a question nobody asked, and a new dimension later renumbers every tier. A set lets policy read exactly the dimension it cares about. If you find yourself writing `if profile.tier == …` in policy, the field you actually wanted is missing. |
 | G2 | How arguments are checked | Every token after the first is read as a path and required to resolve inside the workspace; for a token containing `=`, the tail after the first `=` as well. **Nothing parses.** | `_is_inert` is sound *because* it never parses — it rejects every metacharacter rather than understanding one. A classifier that starts interpreting shell syntax is a shell parser, and a parser that is wrong auto-approves. So the rule does not know a flag from an operand: `-la` passes only because it is relative and therefore lands inside the workspace. False positives are the designed error direction — `grep /etc/passwd notes.txt` searches for a string that looks like a path and costs one prompt. The `=` clause is the single exception, because `--file=/etc/x` reads as inside the workspace taken whole while the path it names is not. |
 | G3 | Which setting is the gate | `SHELL_APPROVAL_MODE` (`always` / `tiered` / `never`), shipping **`tiered`**, with `ToolApprovals.shell` flipped to `False` and kept as the **ratchet** — `True` still forces `always` | These move together or neither means anything. `approval_needed` ORs the tool's own check with `requires_approval`, and **both** read `ToolApprovals.shell`, so while it was `True` the check could never lower the answer and `tiered` was unreachable dead code. The field stays because D24 requires it and because D14's one-way ratchet needs somewhere to live: config or an agent override can still only tighten. Exactly one thing gets looser than the pre-§28 default — read-only commands whose every argument is inside the workspace — and `ToolApprovals.read` is already `False`, so `read` on a workspace file was unprompted while `cat` on the same file prompted. That inconsistency goes away; everything else is unchanged or tighter. |
-| G4 | What `tiered` auto-approves | INERT (read-only, workspace-scoped) and CONTAINED (Docker confirmed up, no network). HOST_READ, CONTAINED_NET and UNKNOWN ask | CONTAINED's damage ceiling is "corrupt the workspace", which `write` and `edit` already have unprompted (`ToolApprovals.write = False`), capped at 1 CPU / 1 GB / 200 pids / 60 s / no network / no host filesystem. Auto-approving only INERT would make `tiered` behave like `always` for real work, so users would set `never` and lose the whole benefit. Auto-approving CONTAINED_NET would be hole 2 renamed rather than closed — `_needs_network` matches the first word only, so `curl … \| sh` qualifies. |
+| G4 | What `tiered` auto-approves *(amended by §48 CE1: `tiered` now approves INERT alone, and the rule below is the `contained` mode, CE2)* | INERT (read-only, workspace-scoped) and CONTAINED (Docker confirmed up, no network). HOST_READ, CONTAINED_NET and UNKNOWN ask | CONTAINED's damage ceiling is "corrupt the workspace", which `write` and `edit` already have unprompted (`ToolApprovals.write = False`), capped at 1 CPU / 1 GB / 200 pids / 60 s / no network / no host filesystem. Auto-approving only INERT would make `tiered` behave like `always` for real work, so users would set `never` and lose the whole benefit. Auto-approving CONTAINED_NET would be hole 2 renamed rather than closed — `_needs_network` matches the first word only, so `curl … \| sh` qualifies. |
 | G5 | Where "we could not tell" lands | A separate `measured` field on the profile, gating all three containment branches | The `tier` label was standing in for this and could not carry it. Without the field, a call the classifier could not characterise is auto-approved *by the containment argument*, because every capability test passes vacuously on a profile that knows nothing — the exact vacuity class this audit keeps finding. It is also where batch 9's "the model is not sure" has to land, somewhere containment cannot argue it away. |
 | G6 | Protecting `.venastine/` | A nested `:ro` bind mount, conditional on `.venastine` resolving **inside** the workspace **and** already existing | Both halves are load-bearing and both were measured. `.venastine/` resolves from the project path while the sandbox mounts `AGENT_WORKSPACE` (default `./workspace`), so in the default layout they are siblings and Docker cannot reach it at all — the mount matters only when someone points the workspace at a directory containing one. And Docker **creates** a missing bind source as a root-owned directory on the host: an empty `.venastine/` flips `is_trusted()` from `True` to `False` by itself, so an unconditional mount would conjure a directory and then make the harness prompt the user to trust it. Verified in a real container: `/workspace` writable, the subtree `EROFS`, `rm` and `mv` on the mountpoint refused with `EROFS` and `EBUSY`, reads unaffected. **Known limits:** writes on the Docker path only — not reads, not the subprocess fallback (which mounts nothing), not `agents/builtin` when the workspace is the harness repo. |
 | G7 | `settings.json` | `shell_approval_mode` is rejected **by name**, with an explanatory message | R12's rule applied to a third kind of key, for R12's reason: the generic "unknown key" message reads as an oversight someone should fix by adding support. A project's `settings.json` beats the user's (D29) and arrives with a directory you cloned; this key decides whether shell commands are asked about at all. D17's trust prompt is not a substitute — the same prompt covers a README-shaped `CONTEXT.md`, and nobody reading it is deciding about their shell gate. Every value is rejected, including the tightening ones: the key is refused for where it can come from, not for what it says. |
@@ -3962,3 +3963,76 @@ model rather than draw a wrong picture.
 the walk's column rather than `AgentRow.depth`, because a research pass adds a display level without
 adding a spawn level. Bumping the pass's context so the two numbers agree would have spent one level
 of `SUBAGENT_MAX_DEPTH` on a rendering fix. NA17 is amended to that extent and nothing else.
+
+## §48. Code in the sandbox -- what `tiered` approves, and the mode that keeps the old answer
+
+**Added in batch 92, from the owner reading the gate against how an agent actually works.**
+`python -c`, `bash -c`, and a script written a moment earlier with the auto-approved `write` tool
+all ran without a prompt under the shipped `tiered` mode. The owner asked for those two cases to be
+closed and generalised across languages. Measured through the real `_shell_approval_check`, Docker
+up, before anything changed -- and the gap was G4 itself rather than a missing flag:
+
+```
+command                                        tier           net    asked?
+python -c "print(1)"                           SANDBOXED      False  False
+bash -c "echo hi"                              SANDBOXED      False  False
+sh run.sh  |  ./run.sh  |  node run.js         SANDBOXED      False  False
+python run.py                                  SANDBOXED      False  False
+pytest  |  make  |  rm -rf data                SANDBOXED      False  False
+ls -la && cat notes.txt                        SANDBOXED      False  False
+bash -c "curl https://x"                       SANDBOXED      False  False   (runs --network none)
+cat .ven*/settings.json; true                  SANDBOXED      False  False
+python -c "print(open('.venastine/...').read())"  SANDBOXED   False  False
+curl https://x                                 SANDBOXED_NET  True   True
+cat /etc/passwd                                HOST_READ      False  True
+ls                                             INERT          False  False
+```
+
+**What the container already bounded, and still does.** `network` is one fact with two consumers
+(Q2), so a network call hidden inside code is given `--network none`, not egress -- a script cannot
+reach the network without a network command on its line, and that asks. The read-only binds (G6,
+`security/protected_paths.py`) stop a write to a protected path.
+
+**What it did not bound.** Code reads whatever the workspace holds, a `.venastine/` directory
+included when the workspace contains one -- the owner's configured workspace did. The token check
+that forces a prompt for that segment cannot see a glob or a string inside a program, while
+`SECURITY.md`, `protected_paths.py` and `_command_touches_protected` all said such a spelling was
+"asked about anyway". And code is where an attempt on the container boundary starts, which `cat`
+is not.
+
+**Why not a list of interpreters.** The first design anyone reaches for, and G2 already says why
+not. `pytest` runs a `conftest.py`, `make` runs a Makefile, `find -exec` runs anything, and
+`"python"`, `pyth?n`, `python3.13` and `echo x | python` are the same call to a shell. A list is a
+parser whose misses auto-approve.
+
+### Decisions
+
+| # | Decision |
+|---|---|
+| **CE1** | **`tiered` auto-approves INERT alone**, plus the unchanged Docker-down host path for INERT. Every other command asks, contained or not -- compound shell, quoted arguments and file operations included. Nothing enumerates a language, so an interpreter nobody listed is covered the day it is installed. **Amends G4**, whose argument ("CONTAINED's damage ceiling is corrupt the workspace") priced writes and never priced code |
+| **CE2** | **`contained` is G4's rule under its own name**: a command the container confines runs unasked unless it gets network. Host reads, network commands and a literal protected-segment token still ask. Applied in `_shell_approval_check` as a visible override below the protected-segment check, beside the fallback opt-in, rather than as a flag passed into `auto_approved`. Its constant is `CONTAINED_MODE`, because `CONTAINED` is already a containment value with the same spelling. Without it the only step down from CE1 is `never`, which also stops asking about host reads -- #157 |
+| **CE3** | **`tiered` stays the shipped default**, with CE1's rule |
+| **CE4** | **`contained` is on the badge.** `unsafe_reasons()` reports it -- banner, launch WARNING and TUI badge -- and the detail says what still asks, so a reader of the badge alone does not conclude that the network is open |
+| **CE5** | **`auto_approve_sandbox_fallback` is honoured under `tiered` and `contained`.** It is written on purpose, already flagged, and would do nothing under the default mode otherwise. It is the one documented exception to "code asks" under `tiered` |
+| **CE6** | **`always` beats the fallback opt-in.** Behaviour unchanged -- the mode check returns before the opt-in is read -- and now stated. MEASURED alongside it: the badge said "host shell, no ask" under `always` with both flags on, while every command asked. Under `always` the pair now reports as the fallback alone, and a test holds the badge against the gate for every mode |
+| **CE7** | **The capability is its own field, `CommandProfile.runs_code`**, required with no default. For every shell profile today it equals `writes`; it is kept apart because G1 says a missing dimension is a missing field, and changing a file and running a program are different harms -- a future `write`/`edit` profile changes a file and runs nothing |
+
+### Rejected
+
+- **A blocklist of interpreters, `-c`/`-e` flags and script paths.** Fewest prompts, and bypassable
+  by every spelling in the paragraph above. It would also contradict G2 in the module written to
+  keep it.
+- **INERT plus a curated list of file operations** (`mkdir`, `touch`, `cp`, `mv`, `rm`, `rmdir`).
+  Fewer prompts for housekeeping, but each entry is a promise that the program cannot run code, and
+  everyday tools break that promise (GNU `sort --compress-program`, `tar --to-command`). `write` and
+  `edit` already create and change files without a shell.
+- **Telling users who accept code in the container to set `never`.** It removes the host-read
+  prompt as well, which is the harm §28 was written for. CE2 exists so that is not the only step.
+
+### What it costs, stated
+
+Under `tiered` every compound command, quoted argument and file operation asks -- including a
+subagent's, whose prompt reaches its parent. `test_a_legitimate_quoted_workspace_path_still_works`
+records that price where it was first measured as free. Research passes are unaffected: a per-call
+gate was never grantable (R2), and a headless run's empty probe classifies UNKNOWN and hides `shell`
+exactly as before.

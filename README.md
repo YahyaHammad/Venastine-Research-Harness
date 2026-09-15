@@ -350,26 +350,27 @@ Every registered tool appears in that table, and a test asserts it (audit #125):
 | mode | behaviour |
 |---|---|
 | `always` | every command is asked about, whatever it does |
-| `tiered` | **shipped.** The classifier decides — see below |
+| `tiered` | **shipped.** The classifier decides — see below. Only a read-only command runs unasked; anything that can run code asks, even inside the container |
+| `contained` | anything the container confines runs unasked unless it needs network, code included; reads outside the workspace and network commands still ask. Flagged on the startup banner and the TUI badge |
 | `never` | nothing is ever asked about |
 
 There is deliberately no second switch: `tool_approvals` has no `shell` key, so nothing here can disagree with the mode. An agent's `approval_overrides` still reaches shell with the same one-way power -- an agent can demand approval for a command the mode would auto-approve, and can never wave one past a gate the mode set. An unknown mode string raises at startup rather than falling back to a default — one direction of that default asks about everything and the other about nothing, and a typo cannot pick.
 
-Under `tiered`, each command is classified **once** into what it can do, and the same answer is read by the approval check and by the sandbox that runs it:
+Under `tiered` and `contained`, each command is classified **once** into what it can do, and the same answer is read by the approval check and by the sandbox that runs it:
 
-| tier | what it is | where it runs | asked? |
-|---|---|---|---|
-| `INERT` | read-only command, every argument inside the workspace | host | no |
-| `HOST_READ` | read-only, but an argument reaches outside the workspace | host | **yes** |
-| `SANDBOXED` | anything else, no network | container | no, if Docker is confirmed up |
-| `SANDBOXED_NET` | **any** word is on the network allowlist (`curl`, `pip`, `git`, …) — first word only for an INERT command, which cannot chain | container, with network | **yes** |
-| `UNKNOWN` | could not be characterised at all | — | **yes** |
+| tier | what it is | where it runs | asked under `tiered`? | under `contained`? |
+|---|---|---|---|---|
+| `INERT` | read-only command, every argument inside the workspace | container (host when Docker is down) | no | no |
+| `HOST_READ` | read-only, but an argument reaches outside the workspace | host | **yes** | **yes** |
+| `SANDBOXED` | anything else, no network — it may run code | container | **yes** | no, if Docker is confirmed up |
+| `SANDBOXED_NET` | **any** word is on the network allowlist (`curl`, `pip`, `git`, …) — first word only for an INERT command, which cannot chain | container, with network | **yes** | **yes** |
+| `UNKNOWN` | could not be characterised at all | — | **yes** | **yes** |
 
-The auto-approved set is narrower than the `read` tool's, which is already unprompted inside the workspace. A `SANDBOXED` command can do what `write` and `edit` can already do without asking — corrupt the workspace — bounded to 1 CPU, 2 GB, 200 processes, 120 seconds, no network and no host filesystem.
+Under `tiered` the auto-approved set is narrower than the `read` tool's, which is already unprompted inside the workspace. There is **no list of interpreters** behind that: `python -c` is the obvious case, but `pytest` runs a `conftest.py`, `make` runs a Makefile, and `"python"`, `python3.13` and `echo x | python` are all the same call to a shell, so every command that is not `INERT` is treated as able to run code. Under `contained` a `SANDBOXED` command runs unasked and can do anything code can do inside the container — corrupt the workspace, as `write` and `edit` already can, or read a `.venastine/` directory the workspace contains — bounded to 1 CPU, 2 GB, 200 processes, 120 seconds, no network and no host filesystem.
 
 **The argument rule does not parse, deliberately.** Every token after the first is read as a path and required to stay inside the workspace; a flag like `-la` passes only because it is *relative*, not because anything recognised it as a flag. Refusing to interpret shell syntax is what makes the check trustworthy — a classifier that parses is a shell parser, and a parser that is wrong auto-approves something dangerous. The cost is occasional false positives: `grep /etc/passwd notes.txt` searches for a string that looks like a path, and costs one prompt.
 
-**Quoted arguments are never inert.** The corollary of not parsing: the raw tokens have to be the real tokens. A quoted command is classified `SANDBOXED` and goes to a container, because the classifier splits on whitespace while the executor splits with `shlex` — and `shlex` strips quotes, so `cat "/etc/passwd"` read as one token *inside* the workspace and then ran as two tokens naming the host's file. Under Docker this costs nothing: `cat "my notes.txt"` is still auto-approved, it simply runs in the container. Fixed in batch 37; `'single quotes'` and `--file="/etc/x"` did it too.
+**Quoted arguments are never inert.** The corollary of not parsing: the raw tokens have to be the real tokens. A quoted command is classified `SANDBOXED` and goes to a container, because the classifier splits on whitespace while the executor splits with `shlex` — and `shlex` strips quotes, so `cat "/etc/passwd"` read as one token *inside* the workspace and then ran as two tokens naming the host's file. Under `contained` with Docker this costs nothing: `cat "my notes.txt"` is still auto-approved, it simply runs in the container. Under `tiered` it asks, as every command that is not `INERT` does. Fixed in batch 37; `'single quotes'` and `--file="/etc/x"` did it too.
 
 **Escaped arguments are never inert either.** The same corollary, one character further, and it
 took a second batch to find: `shlex` consumes `\` exactly as it consumes quotes, so
@@ -885,7 +886,7 @@ note that shell approval is governed solely by `shell_approval_mode` -- `tool_ap
 deliberately has no `shell` key, so an old file carrying one is refused at startup
 naming the key — see `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 4535 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+Run the test suite with `pytest` — 4679 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
 ## Documentation
 

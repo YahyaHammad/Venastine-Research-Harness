@@ -217,6 +217,38 @@ Raised from 20 in batch 16 (#45): this is THE default step ceiling -- the
 value an invalid `max_steps:` frontmatter field is repaired to, and the
 ceiling of every chat turn and research pass that does not name its own.
 
+### `model_call_max_retries`
+
+Batch 91. Nothing retried a model call before this, and the SDKs cover less
+than they appear to: openai and anthropic retry a request that fails BEFORE
+its stream opens (408/409/429/5xx, connection errors, twice each), but an
+error sent inside a stream that opened with 200 is raised straight up by
+both, and google-genai 1.0 retries nothing at all. OpenRouter reports an
+overloaded upstream exactly that way -- "The service is temporarily
+unavailable", "Upstream idle timeout exceeded" -- which failed four nested
+subagents in the run that prompted this.
+
+Two, so a call gets three attempts. The SDK retries are KEPT (owner
+decision) and happen inside each attempt, so the worst case is nine HTTP
+requests for one call; turning the SDKs' off would lose their retry-after
+handling for the statuses they already cover well. `core/provider_errors.py`
+decides what qualifies -- temporary provider errors only, never a bad
+request, an auth failure or a harness bug -- and `core/loop.py` decides
+WHEN: a run whose output reaches no screen is retried whatever it had
+streamed, a run someone is watching only before its first delta, because a
+transcript row cannot be taken back.
+
+### `model_call_retry_base_delay_s`
+
+Batch 91. Three seconds, then six, with a quarter either way of jitter.
+Deliberately slower than the SDKs' half-second start (owner decision): these
+retries sit ABOVE the SDK's own, so by the time one fires the provider has
+already refused several requests in quick succession, and a rate limit met
+with more of the same only extends itself. The jitter is for siblings: the
+failures that prompted this came in pairs from one parallel spawn batch, and
+without it they would retry in the same instant. A server's retry-after can
+lengthen a wait, never shorten it, up to 60 seconds.
+
 ## Subagents (ROADMAP_v2 §18)
 
 ### `subagent_max_depth`
@@ -697,12 +729,30 @@ auto-approve fallback runs (no per-run prompt)
 ROADMAP_v2 §28 (G3). WHICH shell commands need a human to say yes.
 
 ```text
-  "always"  every command is asked about, whatever it does.
-  "tiered"  the classifier decides -- see security/capability.py for the
-            one rule, and security/sandbox.py:classify_command for how a
-            command is measured against it.
-  "never"   nothing is ever asked about.
+  "always"     every command is asked about, whatever it does.
+  "tiered"     the classifier decides -- see security/capability.py for
+               the one rule, and security/sandbox.py:classify_command for
+               how a command is measured against it. Since §48 (CE1) only
+               a read-only INERT command runs unasked: anything that may
+               run code asks, contained or not.
+  "contained"  §48 (CE2): the rule "tiered" had before §48. A command the
+               container confines runs unasked unless it gets network,
+               code included; reads outside the workspace and network
+               commands still ask.
+  "never"      nothing is ever asked about.
 ```
+
+`auto_approve_sandbox_fallback` is honoured under "tiered" and
+"contained" (§48, CE5) -- the one written exception to "code asks" under
+"tiered" -- and never under "always", whose check returns before the
+opt-in is read (CE6).
+
+There is no list of interpreters behind "tiered", deliberately. `python
+-c` is the obvious case, but `pytest` runs a conftest.py, `make` runs a
+Makefile, and `"python"`, `python3.13` and `echo x | python` are the same
+call to a shell -- a list would be a parser whose misses auto-approve
+(G2). Every command that is not INERT may run code, and that is the
+answer the classifier gives.
 
 This is the gate. Before §28 the gate was ToolApprovals.shell, and
 `_shell_approval_check` looked like a five-layer policy underneath it --
@@ -789,10 +839,14 @@ download payloads. Only add commands you trust.
 
 ### `inert_commands`
 
-WARNING: inert commands run WITHOUT filesystem isolation — they can
-read files outside the workspace (e.g. cat /etc/passwd). They are
-read-only inspection commands; the risk is information disclosure,
-not modification.
+WARNING: a word added here is a promise that the program neither writes
+nor runs code -- under `tiered` it is the ONLY tier that runs unasked
+(§48, CE1), so an entry that can execute its arguments or a file (`find
+-exec`, `sort --compress-program`, `tar --to-command`) is an unprompted
+code path. An inert command runs in the container when Docker is up and
+on the host when it is not (§46, EP5); one whose argument reaches outside
+the workspace is HOST_READ, runs on the host, and always asks. The risk of
+the host path is information disclosure, not modification.
 
 ### `max_granted_tool_calls`
 

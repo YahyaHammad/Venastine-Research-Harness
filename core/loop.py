@@ -44,7 +44,7 @@ from uuid import UUID
 
 import config
 import prompts.system_prompts as system_prompts
-from core import agent_activity, interaction
+from core import agent_activity, interaction, provider_errors
 from core.client import (
     ModelResponse,
     api_initialization,
@@ -63,6 +63,7 @@ from storage import (
     THREAD_KIND_RESEARCH_PASS,
     THREAD_KIND_SUBAGENT,
 )
+from safety.policy_enforcement import redact_secrets
 from tools.base import GRANT_NEVER
 from tools.context import RunInfo, ToolContext
 from tools.registry import ToolCallDenied, registry
@@ -1292,7 +1293,42 @@ def _settle_one(call, outcome, memory, granted_calls, notices):
 class RunAgentLoop:
 
     @staticmethod
-    def _run(
+    def _run(memory: ConversationMemory, *args, **kwargs):
+        """The loop, recording on the thread why a run that raised failed.
+
+        Batch 91. A thin frame around `_run_steps`, which IS the loop and
+        whose docstring documents every argument. `yield from` forwards each
+        event and the return value unchanged, so nothing driving `_run` can
+        tell the frame is there -- and nothing about the exception changes
+        either: core/events.py has no error variant on purpose, and it still
+        propagates to whoever drains this, exactly as it did.
+
+        Without it a run that failed left nothing behind in its thread --
+        D20 persists an assistant turn only once a call returns -- so a
+        subagent whose first call failed replayed as its task and nothing
+        else. One frame covers every caller: a TUI turn, a CLI turn, a
+        spawned subagent, a one-shot, a research pass.
+
+        `Exception`, not `BaseException`: a GeneratorExit is an ABANDONED
+        generator (#42, a TUI quitting mid-turn), not a failed run, and
+        recording it would stamp a failure on a turn nobody saw fail.
+        Recording must never replace the error it records, so its own
+        failure is warned and swallowed.
+        """
+        try:
+            return (yield from RunAgentLoop._run_steps(memory, *args, **kwargs))
+        except Exception as error:
+            try:
+                memory.mark_turn_failed(
+                    redact_secrets(provider_errors.describe(error)))
+            except Exception:  # noqa: BLE001 -- see the docstring
+                logger.warning(
+                    "Could not record this run's failure on its thread.",
+                    exc_info=True)
+            raise
+
+    @staticmethod
+    def _run_steps(
         memory: ConversationMemory,
         system_prompt: str,
         provider_name: str,
@@ -1307,6 +1343,12 @@ class RunAgentLoop:
         grant_budget=None,
         compaction_mode: Optional[str] = None,
         activity=None,
+        # Batch 91. True when nothing this run streams reaches a screen --
+        # the two wrappers that drain through run_to_completion pass it --
+        # which lets a failed model call be retried even after it had
+        # started streaming. A drawn run (the TUI turn, a research pass)
+        # keeps the default: see the retry below.
+        drained: bool = False,
     ):
         """Generator yielding LoopEvent objects as the loop progresses.
 
@@ -1472,16 +1514,57 @@ class RunAgentLoop:
         response = None
         for _ in range(max_steps):
             response = None
-            for token in call_model_stream(
-                client, provider_name, model, memory.messages,
-                system_prompt, tool_schemas, temperature, effort,
-            ):
-                if token.text_delta:
-                    yield LoopEvent(token_delta=token.text_delta)
-                if token.thinking_delta:
-                    yield LoopEvent(thinking_delta=token.thinking_delta)
-                if token.final_response is not None:
-                    response = token.final_response
+            # Batch 91. ONE model call, attempted up to
+            # 1 + MODEL_CALL_MAX_RETRIES times. The SDKs retry a request that
+            # fails before its stream opens; an error sent INSIDE a stream
+            # that opened with 200 is raised straight up by both, and that is
+            # how OpenRouter reports an overloaded upstream. Which failures
+            # qualify is core/provider_errors.py's question.
+            #
+            # `shown` is the boundary the owner drew: a retry must not draw
+            # the same text twice, and a RichLog row cannot be taken back. A
+            # DRAINED run's deltas reach no screen -- run_to_completion
+            # discards them -- so it is retried whatever it had streamed; a
+            # drawn run (a TUI turn, a research pass) only while this attempt
+            # has shown nothing.
+            #
+            # Below the wrappers that write the user message, so a retry
+            # never writes it twice; and before the accounting, so only the
+            # attempt that succeeded is counted or persisted (D20). A failed
+            # stream reports no usage to count in any case.
+            retry = 0
+            while True:
+                shown = False
+                try:
+                    for token in call_model_stream(
+                        client, provider_name, model, memory.messages,
+                        system_prompt, tool_schemas, temperature, effort,
+                    ):
+                        if token.text_delta:
+                            shown = True
+                            yield LoopEvent(token_delta=token.text_delta)
+                        if token.thinking_delta:
+                            shown = True
+                            yield LoopEvent(thinking_delta=token.thinking_delta)
+                        if token.final_response is not None:
+                            response = token.final_response
+                    break
+                except Exception as e:  # noqa: BLE001 -- re-raised unless it qualifies
+                    retry += 1
+                    if (retry > config.MODEL_CALL_MAX_RETRIES
+                            or (shown and not drained)
+                            or not provider_errors.is_transient(e)):
+                        raise
+                    response = None
+                    delay = provider_errors.backoff_delay(
+                        retry, config.MODEL_CALL_RETRY_BASE_DELAY_S,
+                        provider_errors.retry_after_s(e))
+                    logger.warning(
+                        "Model call to %s/%s failed (%s); retrying in %.0fs, "
+                        "attempt %d of %d.",
+                        provider_name, model, provider_errors.describe(e),
+                        delay, retry + 1, config.MODEL_CALL_MAX_RETRIES + 1)
+                    provider_errors.wait(delay)
 
             if response is None:
                 raise RuntimeError(
@@ -1732,6 +1815,9 @@ class RunAgentLoop:
             max_steps, _resolve_spend_cap(max_total_tokens),
             temperature=temperature, effort=effort,
             response_channel=response_channel, activity=activity,
+            # Batch 91. Drained: nothing this streams reaches a screen, so a
+            # failed model call may be retried whatever it had streamed.
+            drained=True,
             **auth_kwargs,
         ))
         response.thread_id = memory.thread_id
@@ -1886,6 +1972,9 @@ class RunAgentLoop:
             memory, system_prompt, provider_name, model, context,
             max_steps, _resolve_spend_cap(max_total_tokens),
             temperature=temperature, effort=effort, activity=activity,
+            # Batch 91. Drained, like run_agent_conversation: a failed model
+            # call may be retried whatever it had streamed.
+            drained=True,
             **_authorization_kwargs(authorization),
         ))
         response.thread_id = thread_id
