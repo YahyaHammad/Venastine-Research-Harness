@@ -45,6 +45,9 @@ STANDALONE_NAMES = [
 
 EXPECTED_ROLE_KEYS = {
     "user", "user_label", "assistant_label", "assistant", "system",
+    # ROADMAP_v3 §49 (SS5): the harness opening a turn with a background
+    # session's result.
+    "wake",
     "thinking", "pass", "pass_done", "tool", "tool_error", "warning",
     "error", "success", "HIGH", "MEDIUM", "LOW", "UNVERIFIED",
     "UNVERIFIED_COVERAGE",
@@ -341,6 +344,9 @@ def test_the_fallback_memo_cannot_serve_a_stale_palette():
 MESSAGE_ROLES = [
     "system", "thinking", "tool", "tool_error", "warning", "error",
     "user", "assistant_label", "pass", "pass_done", "success",
+    # ROADMAP_v3 §49 (SS5): a background session's result, written by the
+    # harness to start a turn.
+    "wake",
 ]
 
 

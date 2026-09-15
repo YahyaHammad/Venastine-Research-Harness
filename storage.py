@@ -127,6 +127,27 @@ class MessageLog(SQLModel, table=True):
     # thread-level field could not for a chat. Nullable and additive, so
     # database.ensure_columns() adds it like `thinking`.
     error: Optional[str] = None
+    # ROADMAP_v3 §49 (SS5). What wrote this row when the HARNESS did, as a
+    # JSON object -- {"kind": "session_wake" | "session_killed_at_quit" |
+    # "session_held", "sessions": [{"id", "call_id", "shape"}, ...]} -- or
+    # None for everything a person or the model wrote.
+    #
+    # A column on a USER row, for batch 91's reason one field over. A
+    # finished background session has to reach the model as a message that
+    # starts a turn, and a tool result cannot carry it: every tool_use is
+    # answered in the step that made it (D20, NA11), long before the session
+    # ends. A user-role row is the one shape every provider accepts there,
+    # and a compacted thread already sends one the person never wrote (M8's
+    # summary). A `harness` ROLE would need translating and summarizing as
+    # something new; a column is read by nothing that builds a request, so
+    # the row goes out as the plain user message it is, while replay and
+    # the compactor can still tell it was not the person.
+    #
+    # NEVER beside a tool_call_id. `pinned_through` treats any kept row's
+    # tool_call_id as an answered call, so a wake row carrying its session's
+    # start call id would hide the real tool_result -- the HTTP 400 M4
+    # exists to prevent. The call id lives inside this JSON instead.
+    harness: Optional[str] = None
 
 
 class CompactionCheckpoint(SQLModel, table=True):
@@ -397,6 +418,7 @@ def save_message(
     name: Optional[str] = None,
     tool_call_id: Optional[str] = None,
     thinking: Optional[dict] = None,
+    harness: Optional[dict] = None,
 ) -> None:
     """Append one archived row and stamp the thread's activity (#32).
 
@@ -419,6 +441,9 @@ def save_message(
             # absent, so "this turn did no reasoning" costs no bytes and
             # reads back as None rather than as an empty structure.
             thinking=json.dumps(thinking) if thinking else None,
+            # ROADMAP_v3 §49 (SS5), on `thinking`'s terms: NULL for every
+            # row a person or the model wrote, which is nearly all of them.
+            harness=json.dumps(harness) if harness else None,
         )
         session.add(new_message)
         thread = session.get(ConversationThread, thread_id)
@@ -586,6 +611,19 @@ def _decode_thinking(raw):
     return value if isinstance(value, dict) and value.get("blocks") else None
 
 
+def _decode_harness(raw):
+    """A stored harness record (ROADMAP_v3 §49, SS5), or None for anything
+    unusable -- `_decode_thinking`'s rule for `_decode_thinking`'s reason: a
+    mark that cannot be read costs the mark, never the thread."""
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if isinstance(value, dict) and value.get("kind") else None
+
+
 def _to_neutral(msg: dict) -> dict:
     """Reconstructs the exact neutral shape core/memory.py's add_* methods
     write, per msg.role -- this is the counterpart to memory.py only ever
@@ -634,6 +672,12 @@ def _to_neutral(msg: dict) -> dict:
         # and so does the compactor's _as_text.
         if msg.get("error"):
             payload["error"] = msg["error"]
+        # ROADMAP_v3 §49 (SS5), on the same terms: present ONLY when the HARNESS
+        # wrote the row, so every other message reconstructs exactly as it did.
+        # Read by replay and the compactor's labelling; never by translation.
+        harness = _decode_harness(msg.get("harness"))
+        if harness is not None:
+            payload["harness"] = harness
 
     if msg["name"]:
         payload["name"] = msg["name"]
@@ -677,6 +721,9 @@ def _ordered_rows(thread_id: UUID) -> list[dict]:
                 "thinking": m.thinking,
                 # Batch 91, and NULL is ordinary here too: a run failed.
                 "error": m.error,
+                # ROADMAP_v3 §49 (SS5). NULL for every row a person or the
+                # model wrote.
+                "harness": m.harness,
             }
             for m in session.exec(statement).all()
         ]

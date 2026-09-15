@@ -42,6 +42,7 @@ import os
 import platform
 import re
 import shlex
+import signal
 import subprocess
 import threading
 import uuid
@@ -683,6 +684,23 @@ def _scrubbed_env() -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _inert_argv(command: str) -> list[str]:
+    """The argv a host-side inert command executes -- one copy, for the
+    one-shot light path and for a background session on the host
+    (ROADMAP_v3 §49).
+
+    ONE copy because this tokenisation is load-bearing: `_is_inert` rejects
+    every character shlex consumes, which is what makes `command.split()`
+    and this list provably the same (Q1/Q5). Two copies of the rule would be
+    two tokenisers free to drift, and the gap between two of them is where
+    #157 arrived, twice.
+    """
+    try:
+        return shlex.split(command, posix=(platform.system() != "Windows"))
+    except ValueError:
+        return command.split()
+
+
 def _run_inert(
     command: str,
     workspace_dir: str,
@@ -694,10 +712,7 @@ def _run_inert(
     _shell_binary is accepted for signature compatibility with the
     other backends but is not used (inert commands don't need a shell).
     """
-    try:
-        args = shlex.split(command, posix=(platform.system() != "Windows"))
-    except ValueError:
-        args = command.split()
+    args = _inert_argv(command)
 
     try:
         result = subprocess.run(
@@ -876,25 +891,27 @@ def _venastine_readonly_mount(workspace_real: str) -> list[str]:
     return ["-v", f"{venastine}:/workspace/.venastine:ro"]
 
 
-def _run_docker(
+def _docker_argv(
     command: str,
     workspace_dir: str,
-    _shell_binary: str = "",
-    network: bool = False,
-    argv: bool = False,
-    runtime: str = DOCKER,
-) -> dict:
-    """Run a command inside a container with the workspace mounted as a
-    volume. On timeout, the container is explicitly killed via
-    ``<runtime> kill`` to prevent orphaned containers from continuing to
-    write to the host via the volume mount.
+    network: bool,
+    argv: bool,
+    runtime: str,
+    name: str,
+    *,
+    session_timeout_s: Optional[int] = None,
+) -> list[str]:
+    """The container command line, for a one-shot run and for a session.
 
-    *runtime* is the CLI -- "docker" or "podman" (ROADMAP_v3 §49, SS22) --
-    and nothing else in the argv changes with it: every flag here was
-    measured to mean the same thing under rootless Podman 5.7, the nested
-    `:ro` bind and `--network none` included. The default is Docker's so a
-    caller that never probed builds the argv every test asserts; the
-    production route passes `known_runtime()`.
+    ONE builder (ROADMAP_v3 §49), so a background session cannot come to
+    run in a laxer container than a one-shot command: a `--network none`
+    or a `:ro` bind present on one path and missing from the other is the
+    drift EP6 names for routing, one layer down.
+
+    *runtime* is the CLI -- "docker" or "podman" (SS22) -- and nothing else
+    in the argv changes with it: every flag here was measured to mean the
+    same thing under rootless Podman 5.7, the nested `:ro` bind and
+    `--network none` included.
 
     *argv* runs the command as a pre-split argument vector instead of
     through ``bash -c`` (§46, EP5). Only INERT commands set it, and
@@ -904,24 +921,44 @@ def _run_docker(
     Handing those to bash anyway would insert a third tokeniser between
     the classifier and the executor, and the gap between two of them is
     where #157 arrived, twice.
+
+    *session_timeout_s* makes it a SESSION's argv, which differs in two
+    places and no others:
+
+      --sig-proxy=false  a console Ctrl+C reaches every process attached to
+                         the terminal, and `docker run` forwards signals
+                         into the container by default -- so a session
+                         would die of the user's keystroke and report
+                         `exited` where it was `killed`.
+      timeout -k 10 N    coreutils `timeout` as the container's first
+                         process, so a container orphaned by a harness that
+                         crashed still ends at its own cap. Measured: exit
+                         124 after 3.6 s over two children, and a child
+                         ignoring TERM KILLed at 5.5 s, the container
+                         removed both times.
     """
     workspace_real = os.path.realpath(workspace_dir)
-    container_name = f"sandbox-{uuid.uuid4().hex[:12]}"
 
     docker_args = [
         runtime, "run", "--rm",
-        "--name", container_name,
+        "--name", name,
         # §46 (EP7). Ours, and findable as ours. The name is a uuid, so
         # `docker ps` could not tell a container of ours from any other
         # tool's -- which matters when you are trying to work out
         # whether something on your machine is this harness.
         "--label", "venastine.sandbox=1",
+        # ROADMAP_v3 §49. Which harness PROCESS started it. Two instances
+        # may run at once, so cleaning up "our" containers by the label
+        # above would kill the other's sessions; this one scopes it.
+        "--label", f"venastine.process={PROCESS_TOKEN}",
         "-v", f"{workspace_real}:/workspace",
         "-w", "/workspace",
         "--memory", f"{config.SANDBOX_MEMORY_MB}m",
         "--cpus", "1",
         "--pids-limit", str(config.SANDBOX_MAX_PIDS),
     ]
+    if session_timeout_s is not None:
+        docker_args.append("--sig-proxy=false")
 
     if not network:
         docker_args.append("--network")
@@ -937,10 +974,35 @@ def _run_docker(
 
     docker_args.extend(["-e", "PATH=/usr/bin:/bin:/usr/local/bin"])
     docker_args.append(config.SANDBOX_DOCKER_IMAGE)
+    if session_timeout_s is not None:
+        docker_args.extend(["timeout", "-k", "10", str(session_timeout_s)])
     if argv:
         docker_args.extend(shlex.split(command))
     else:
         docker_args.extend(["bash", "-c", command])
+    return docker_args
+
+
+def _run_docker(
+    command: str,
+    workspace_dir: str,
+    _shell_binary: str = "",
+    network: bool = False,
+    argv: bool = False,
+    runtime: str = DOCKER,
+) -> dict:
+    """Run a command inside a container with the workspace mounted as a
+    volume. On timeout, the container is explicitly killed via
+    ``<runtime> kill`` to prevent orphaned containers from continuing to
+    write to the host via the volume mount.
+
+    The argv is `_docker_argv`'s. The default runtime is Docker's so a
+    caller that never probed builds the argv every test asserts; the
+    production route passes `known_runtime()`.
+    """
+    container_name = f"sandbox-{uuid.uuid4().hex[:12]}"
+    docker_args = _docker_argv(command, workspace_dir, network, argv,
+                               runtime, container_name)
 
     proc = None
     try:
@@ -991,19 +1053,26 @@ def _run_docker(
 # ---------------------------------------------------------------------------
 
 
-def _unix_resource_limits() -> Optional[Callable[[], None]]:
+def _unix_resource_limits(
+    cpu_seconds: Optional[int] = None,
+) -> Optional[Callable[[], None]]:
     """Return a preexec_fn that sets CPU and memory limits via rlimit.
-    Returns None on Windows (rlimit not available)."""
+    Returns None on Windows (rlimit not available).
+
+    *cpu_seconds* defaults to `config.SANDBOX_CPU_SECONDS`, a one-shot
+    command's budget. A background session passes its own effective
+    timeout (ROADMAP_v3 §49, SS15): 30 CPU-seconds would end a CPU-bound
+    session long before a cap of an hour, and report it as the program
+    dying rather than as the harness stopping it."""
     if platform.system() == "Windows":
         return None
 
     import resource
 
+    cpu = config.SANDBOX_CPU_SECONDS if cpu_seconds is None else int(cpu_seconds)
+
     def _set_limits():
-        resource.setrlimit(
-            resource.RLIMIT_CPU,
-            (config.SANDBOX_CPU_SECONDS, config.SANDBOX_CPU_SECONDS),
-        )
+        resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu))
         mem_bytes = config.SANDBOX_MEMORY_MB * 1024 * 1024
         resource.setrlimit(resource.RLIMIT_AS, (mem_bytes, mem_bytes))
 
@@ -1120,19 +1189,25 @@ def run_sandboxed(
     if profile is None:
         profile = classify_command(command, workspace_dir)
 
+    # Use pre-computed Docker status if provided (fixes TOCTOU), otherwise
+    # probe now. HOST_READ never needs the answer, so it does not pay for
+    # the probe, which is how this function always behaved.
+    if docker_available is None and profile.tier != HOST_READ:
+        docker_available = is_docker_available()
+    # ROADMAP_v3 §49. The branch ladder below is `_route`'s, shared with
+    # `start_sandboxed`, so a background session is routed by the same
+    # decision a one-shot command is (EP6 keeps it agreeing with
+    # containment_for).
+    route = _route(profile, bool(docker_available))
+
     # HOST_READ names a file the container cannot see, so it has exactly
     # one backend and takes it before Docker is even considered.
-    if profile.tier == HOST_READ:
+    if route == ROUTE_HOST_READ:
         logger.debug("Host read, using light path: %s", command[:80])
         return _annotate(_run_inert(command, workspace_dir, shell_binary),
                          profile, "host")
 
-    # Use pre-computed Docker status if provided (fixes TOCTOU),
-    # otherwise probe now.
-    if docker_available is None:
-        docker_available = is_docker_available()
-
-    if docker_available:
+    if route == ROUTE_CONTAINER:
         network = profile.network
         # ROADMAP_v3 §49 (SS22). Docker's CLI or Podman's, as the probe that
         # produced `docker_available` found -- read, never re-probed.
@@ -1165,7 +1240,7 @@ def run_sandboxed(
     # approval answer is the same under either containment (see
     # containment_for). What the model is told changes, and that is the
     # point of saying it: `ran_on` reports "host" here.
-    if profile.tier == INERT:
+    if route == ROUTE_INERT_HOST:
         logger.debug(
             "Docker unavailable, inert command on the host: %s",
             command[:80],
@@ -1173,7 +1248,7 @@ def run_sandboxed(
         return _annotate(_run_inert(command, workspace_dir, shell_binary),
                          profile, "host")
 
-    if posture.current().allow_insecure_fallback:
+    if route == ROUTE_FALLBACK:
         logger.warning(
             "Using INSECURE subprocess fallback: %s", command[:80],
         )
@@ -1181,12 +1256,19 @@ def run_sandboxed(
             _run_subprocess_fallback(command, workspace_dir, shell_binary),
             profile, "host")
 
-    # The probe's reason goes in the message because the case it exists for
-    # is otherwise baffling: Podman IS installed and answering, and was
-    # refused for limits it cannot enforce (SS24). A user told only "no
-    # runtime" would reinstall the one they have.
+    raise SandboxUnavailable(_unavailable_message())
+
+
+def _unavailable_message() -> str:
+    """What a caller is told when no backend can run a command.
+
+    The probe's reason goes in because the case it exists for is otherwise
+    baffling: Podman IS installed and answering, and was refused for limits
+    it cannot enforce (SS24). A user told only "no runtime" would reinstall
+    the one they have. One copy, for `run_sandboxed` and `start_sandboxed`.
+    """
     reason = _known_unavailable_reason()
-    raise SandboxUnavailable(
+    return (
         "No container runtime can run the sandbox"
         + (f" ({reason})" if reason else "")
         + " and ALLOW_INSECURE_SANDBOX_FALLBACK is False. Install Docker or "
@@ -1195,3 +1277,301 @@ def run_sandboxed(
         "weaker subprocess fallback (no filesystem isolation, no network "
         "restriction)."
     )
+
+
+# ---------------------------------------------------------------------------
+# ---- Routes and background sessions (ROADMAP_v3 §49, slice 1) --------------
+# ---------------------------------------------------------------------------
+
+# Which harness process started a container: `<pid>-<uuid>`, because a pid
+# alone is reused by the OS and a later process could inherit an earlier
+# one's orphans. Minted once, at import.
+PROCESS_TOKEN = f"{os.getpid()}-{uuid.uuid4().hex[:12]}"
+
+ROUTE_HOST_READ = "host_read"
+ROUTE_CONTAINER = "container"
+ROUTE_INERT_HOST = "inert_host"
+ROUTE_FALLBACK = "fallback"
+ROUTE_UNAVAILABLE = "unavailable"
+
+# How long past a session's own timeout the in-container `timeout` waits
+# before ending it. The harness kills at the timeout and owns the
+# `timed_out` answer; this is the backstop for a harness that is no longer
+# there to kill anything.
+SESSION_TIMEOUT_MARGIN_S = 30
+_KILL_GRACE_S = 5
+_SIGKILL = getattr(signal, "SIGKILL", 9)
+_CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP",
+                                    0x00000200)
+
+
+def _route(profile: CommandProfile, docker_available: bool) -> str:
+    """Which backend runs *profile*: the executor's half of EP6.
+
+    `run_sandboxed` and `start_sandboxed` both route through here, so a
+    background session cannot be routed by a different decision from a
+    one-shot command. `containment_for` is still the gate's half, written
+    separately on purpose (§46, EP6), and tests/test_session_backends.py
+    holds the two against each other for every tier, runtime answer and
+    fallback posture.
+    """
+    if profile.tier == HOST_READ:
+        return ROUTE_HOST_READ
+    if docker_available:
+        return ROUTE_CONTAINER
+    if profile.tier == INERT:
+        return ROUTE_INERT_HOST
+    if posture.current().allow_insecure_fallback:
+        return ROUTE_FALLBACK
+    return ROUTE_UNAVAILABLE
+
+
+def _isolation_kwargs() -> dict:
+    """Popen arguments that take a session out of the console's signal group.
+
+    A console Ctrl+C is delivered to every process attached to the terminal.
+    The CLI kills sessions on Ctrl+C on purpose, through `kill()`; without
+    this the keystroke would reach them first and they would report
+    `exited` instead of `killed`. It also makes a host session its own
+    process group, which is what lets `kill()` end a shell's children and
+    not only the shell.
+    """
+    if platform.system() == "Windows":
+        return {"creationflags": _CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
+
+
+def _popen_session(args: list[str], *, cwd: Optional[str] = None,
+                   env: Optional[dict] = None,
+                   preexec_fn: Optional[Callable[[], None]] = None):
+    """Start a session's process: no stdin, one merged output stream.
+
+    NO STDIN, because a long-lived child reading the terminal is a second
+    reader beside the CLI's one (§29 N1). stderr MERGED into stdout, because
+    a monitor has to see lines in the order the program wrote them, and two
+    pipes read on two threads do not preserve that.
+    """
+    return subprocess.Popen(
+        args, cwd=cwd, env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        preexec_fn=preexec_fn,
+        **_isolation_kwargs(),
+    )
+
+
+class SessionProcess:
+    """A sandboxed command running in the background.
+
+    What the session manager holds: a binary `stdout` to read lines from,
+    `wait`, and `kill`. `kill` is idempotent and BOUNDED -- a polite stop,
+    a grace period, then a forced one -- because H7 says an IO bound that
+    reports a timeout must have stopped the work, and a kill that can hang
+    stops nothing.
+    """
+
+    ran_on = ""
+
+    def __init__(self, proc, *, tier: str) -> None:
+        self._proc = proc
+        self.tier = tier
+        self._kill_lock = threading.Lock()
+        self._kill_started = False
+
+    @property
+    def stdout(self):
+        return self._proc.stdout
+
+    @property
+    def pid(self) -> int:
+        return self._proc.pid
+
+    @property
+    def returncode(self) -> Optional[int]:
+        return self._proc.returncode
+
+    def poll(self) -> Optional[int]:
+        return self._proc.poll()
+
+    def wait(self, timeout: Optional[float] = None) -> Optional[int]:
+        """The exit code, or None if the process is still running when
+        *timeout* runs out."""
+        try:
+            return self._proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return None
+
+    def kill(self) -> None:
+        with self._kill_lock:
+            if self._kill_started or self._proc.poll() is not None:
+                self._kill_started = True
+                return
+            self._kill_started = True
+        self._terminate()
+        try:
+            self._proc.wait(timeout=_KILL_GRACE_S)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+        self._force()
+        try:
+            self._proc.wait(timeout=_KILL_GRACE_S)
+        except subprocess.TimeoutExpired:
+            logger.warning("Session process %s outlived a forced kill",
+                           self._proc.pid)
+
+    def _terminate(self) -> None:
+        self._proc.terminate()
+
+    def _force(self) -> None:
+        self._proc.kill()
+
+
+class DockerSessionProcess(SessionProcess):
+    """A session in a container, killed through its runtime by name."""
+
+    ran_on = "container"
+
+    def __init__(self, proc, *, runtime: str, name: str, tier: str) -> None:
+        super().__init__(proc, tier=tier)
+        self.runtime = runtime
+        self.name = name
+
+    def _terminate(self) -> None:
+        # The container, not the CLI client: killing the client does NOT
+        # stop the container under the daemon, which is `_run_docker`'s own
+        # lesson on its timeout path.
+        try:
+            subprocess.run([self.runtime, "kill", self.name],
+                           capture_output=True, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+
+class HostSessionProcess(SessionProcess):
+    """A session on the host -- a host read, an inert command with no
+    runtime, or the insecure fallback -- killed as a process GROUP, since a
+    shell's children are what actually do the work (SS15)."""
+
+    ran_on = "host"
+
+    def _terminate(self) -> None:
+        if platform.system() == "Windows":
+            try:
+                subprocess.run(
+                    ["taskkill", "/T", "/F", "/PID", str(self._proc.pid)],
+                    capture_output=True, timeout=10)
+            except (OSError, subprocess.TimeoutExpired):
+                self._proc.kill()
+            return
+        self._signal_group(signal.SIGTERM)
+
+    def _force(self) -> None:
+        if platform.system() == "Windows":
+            self._proc.kill()
+            return
+        self._signal_group(_SIGKILL)
+
+    def _signal_group(self, sig) -> None:
+        try:
+            os.killpg(self._proc.pid, sig)
+        except (OSError, AttributeError):
+            self._proc.kill()
+
+
+def start_sandboxed(
+    command: str,
+    workspace_dir: str,
+    *,
+    profile: CommandProfile,
+    docker_available: bool,
+    timeout_s: int,
+    shell_binary: Optional[str] = None,
+) -> SessionProcess:
+    """Start *command* as a background session and return at once.
+
+    `run_sandboxed`'s twin for a process that outlives the call: the same
+    workspace refusal first, the same route, the same container argv. What
+    differs is what a long-lived process needs -- no stdin, merged output,
+    its own signal group, `--sig-proxy=false` and an in-container `timeout`
+    on the container route, and a CPU limit equal to its own timeout on the
+    host fallback, where a one-shot command's 30 CPU-seconds would kill a
+    session long before its cap (SS15).
+
+    *timeout_s* is the EFFECTIVE timeout, already clamped by the caller.
+    """
+    refusal = protected_paths.check_workspace(workspace_dir)
+    if refusal:
+        raise SandboxUnavailable(refusal)
+    os.makedirs(workspace_dir, exist_ok=True)
+    route = _route(profile, bool(docker_available))
+    try:
+        if route == ROUTE_CONTAINER:
+            runtime = known_runtime()
+            _log_image_identity(runtime)
+            name = f"session-{uuid.uuid4().hex[:12]}"
+            args = _docker_argv(
+                command, workspace_dir, profile.network,
+                profile.tier == INERT, runtime, name,
+                session_timeout_s=int(timeout_s) + SESSION_TIMEOUT_MARGIN_S)
+            try:
+                proc = _popen_session(args)
+            except FileNotFoundError:
+                raise SandboxUnavailable(
+                    f"The {runtime} CLI was not found. Install Docker or "
+                    "Podman, or set allow_insecure_sandbox_fallback: true in "
+                    "config.yaml.") from None
+            return DockerSessionProcess(proc, runtime=runtime, name=name,
+                                        tier=profile.tier)
+        if route in (ROUTE_HOST_READ, ROUTE_INERT_HOST):
+            proc = _popen_session(_inert_argv(command), cwd=workspace_dir,
+                                  env=_scrubbed_env())
+            return HostSessionProcess(proc, tier=profile.tier)
+        if route == ROUTE_FALLBACK:
+            logger.warning("Using INSECURE subprocess fallback for a "
+                           "session: %s", command[:80])
+            proc = _popen_session(
+                [shell_binary or detect_shell(), "-c", command],
+                cwd=workspace_dir, env=_scrubbed_env(),
+                preexec_fn=_unix_resource_limits(cpu_seconds=timeout_s))
+            return HostSessionProcess(proc, tier=profile.tier)
+    except SandboxUnavailable:
+        raise
+    except OSError as e:
+        raise SandboxUnavailable(f"Could not start the command: {e}") from None
+    raise SandboxUnavailable(_unavailable_message())
+
+
+def kill_labelled_containers() -> list[str]:
+    """Kill every container THIS process started that is still running.
+
+    Scoped by `PROCESS_TOKEN`, never by `venastine.sandbox=1`: two harness
+    instances may run at once, and one quitting must not end the other's
+    sessions. A process that never found a runtime started no container,
+    so it asks nothing. Bounded, and failure is logged rather than raised --
+    this runs on the way out.
+    """
+    probe = _runtime_probe
+    if probe is None or probe.name is None:
+        return []
+    runtime = probe.name
+    try:
+        listed = subprocess.run(
+            [runtime, "ps", "-q", "--filter",
+             f"label=venastine.process={PROCESS_TOKEN}"],
+            capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if listed.returncode != 0:
+        return []
+    ids = [line.strip() for line in (listed.stdout or "").splitlines()
+           if line.strip()]
+    if ids:
+        try:
+            subprocess.run([runtime, "kill", *ids], capture_output=True,
+                           timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            logger.warning("Could not kill this process's containers %s",
+                           ", ".join(ids))
+    return ids

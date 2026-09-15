@@ -359,6 +359,13 @@ def role_styles(theme: Theme) -> dict[str, str]:
         "assistant": "",
         # The harness talking about itself.
         "system": "dim italic",
+        # ROADMAP_v3 §49 (SS5): the harness starting a turn with a
+        # background session's result. In the tool call's hue, since it is
+        # the far end of one, and bold italic so it is neither that call
+        # (plain accent) nor the reply's label (bold accent). Not `dim`:
+        # this line opens a turn the reader did not ask for, and `system`
+        # alone is dimmed (test_dim_is_the_system_role_alone).
+        "wake": f"bold italic {palette['accent']}",
         # §38: the model's reasoning, when tui.show_thinking renders it
         # inline. `secondary` because thinking is the answer's quieter
         # sibling rather than a severity or an identity -- it already

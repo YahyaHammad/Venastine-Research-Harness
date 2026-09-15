@@ -379,8 +379,43 @@ def test_the_migration_runs_against_a_real_database(real_storage):
     assert "pinned" in columns
     # Batch 91. The failure column, added to existing databases the same way.
     assert "error" in columns
+    # ROADMAP_v3 §49 (SS5). The harness-written mark, the same way again.
+    assert "harness" in columns
     assert database.ensure_columns(
         database.engine.raw_connection(), database._declared_columns()) == []
+
+
+def test_a_harness_row_survives_a_write_and_a_read(real_storage):
+    """ROADMAP_v3 §49 (SS5), on real SQLite, because the claim is about a
+    COLUMN. A background session's result reaches the model as a user-role
+    row the HARNESS wrote: it must come back marked, carry no tool_call_id
+    (pinned_through reads one as an answered call), resume into the same
+    shape a live memory holds, and count as a turn -- it starts one."""
+    import storage
+    from core.memory import ConversationMemory, append_harness_row
+
+    wake = {"kind": "session_wake",
+            "sessions": [{"id": "s1", "call_id": "call_9", "shape": "exited"}]}
+    killed = {"kind": "session_killed_at_quit",
+              "sessions": [{"id": "s2", "call_id": "call_10",
+                            "shape": "killed"}]}
+    memory = ConversationMemory()
+    memory.add_user_message("run the suite in the background")
+    memory.add_harness_message("[harness] s1 exited with code 0.", wake)
+    append_harness_row(memory.thread_id, "[harness] s2 was killed at quit.",
+                       killed)
+
+    history = storage.archive_history(memory.thread_id)
+    assert history == [
+        {"role": "user", "content": "run the suite in the background"},
+        {"role": "user", "content": "[harness] s1 exited with code 0.",
+         "harness": wake},
+        {"role": "user", "content": "[harness] s2 was killed at quit.",
+         "harness": killed},
+    ]
+    resumed = ConversationMemory(thread_id=memory.thread_id)
+    assert resumed.messages == history
+    assert resumed.completed_turns() == 2
 
 
 def test_a_failed_run_is_recorded_on_the_user_row_that_started_it(

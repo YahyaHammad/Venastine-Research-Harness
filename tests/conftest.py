@@ -1002,7 +1002,7 @@ class FakeStorage:
         return self._first_user_message(thread_id)
 
     def save_message(self, thread_id, role, content, name=None,
-                     tool_call_id=None, thinking=None):
+                     tool_call_id=None, thinking=None, harness=None):
         # Stores content exactly as given -- production's save_message
         # json.dumps'es it and get_session_history json.loads'es it back,
         # and round-trip is identity for any JSON-encodable value, so the
@@ -1027,6 +1027,10 @@ class FakeStorage:
             "thinking": thinking,
             # Batch 91. Set later, by mark_turn_failed, never at save time.
             "error": None,
+            # ROADMAP_v3 §49 (SS5). The dict, as `thinking` holds its dict:
+            # the round trip is identity, and the reconstruction is what
+            # has to mirror production.
+            "harness": harness,
         })
         # (#32) Mirrors production: any archived row stamps the thread,
         # in the same write.
@@ -1243,6 +1247,12 @@ class FakeStorage:
                 # the row records a failed run.
                 if row.get("error"):
                     payload["error"] = row["error"]
+                # ROADMAP_v3 §49 (SS5), mirroring storage._decode_harness
+                # against the dict this fake holds: present only for a
+                # readable record, one that names its kind.
+                harness = row.get("harness")
+                if isinstance(harness, dict) and harness.get("kind"):
+                    payload["harness"] = harness
 
             if row.get("name"):
                 payload["name"] = row["name"]
@@ -1393,6 +1403,81 @@ def http(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# ---- Background sessions (ROADMAP_v3 §49) ---------------------------------
+
+
+class FakeSessionProcess:
+    """Stands in for security.sandbox.SessionProcess: a background session's
+    process, driven by the test instead of by a container.
+
+    `write()` feeds output the reader thread will see, `exit()` ends it, and
+    `kill()` records the kill and ends it with 137 the way a container does.
+    `stdout.read1` blocks until there is output or the process has exited,
+    which is what the real pipe does -- a fake that returned b"" early would
+    let a reader finish before the program had said anything.
+    """
+
+    def __init__(self, *, ran_on="container", tier="SANDBOXED"):
+        import queue
+        import threading as _threading
+        self.ran_on = ran_on
+        self.tier = tier
+        self.pid = 4242
+        self.kills = 0
+        self._chunks = queue.Queue()
+        self._exited = _threading.Event()
+        self._code = None
+        self.stdout = self
+
+    def write(self, data):
+        self._chunks.put(data.encode("utf-8") if isinstance(data, str) else data)
+
+    def exit(self, code=0):
+        if not self._exited.is_set():
+            self._code = code
+            self._exited.set()
+            self._chunks.put(None)
+
+    def read1(self, _size=-1):
+        item = self._chunks.get()
+        if item is None:
+            self._chunks.put(None)
+            return b""
+        return item
+
+    def wait(self, timeout=None):
+        return self._code if self._exited.wait(timeout) else None
+
+    def poll(self):
+        return self._code if self._exited.is_set() else None
+
+    @property
+    def returncode(self):
+        return self.poll()
+
+    def kill(self):
+        self.kills += 1
+        self.exit(137)
+
+
+@pytest.fixture
+def session_starter():
+    """A starter for core.shell_sessions.SessionManager that hands back a
+    FakeSessionProcess and records what it was asked to start."""
+    started = []
+
+    def starter(command, workspace_dir, *, profile, docker_available,
+                timeout_s, shell_binary=None):
+        process = FakeSessionProcess(tier=getattr(profile, "tier", "SANDBOXED"))
+        started.append({"command": command, "timeout_s": timeout_s,
+                        "docker_available": docker_available,
+                        "process": process})
+        return process
+
+    starter.started = started
+    return starter
+
+
 # ---- Security posture (ROADMAP_v2 §40) ------------------------------------
 # ---------------------------------------------------------------------------
 

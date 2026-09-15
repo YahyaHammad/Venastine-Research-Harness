@@ -468,6 +468,12 @@ def _as_text(messages) -> str:
                 body = f"{body}\n[called: {', '.join(c.get('name', '?') for c in calls)}]"
         else:
             body = str(message.get("content", ""))
+            # ROADMAP_v3 §49 (SS5). A user-role row the HARNESS wrote -- a
+            # background session's result -- is not something the user said,
+            # and a summary that attributed program output to them would be
+            # M8's mistake one layer down.
+            if message.get("harness"):
+                role = "harness"
         lines.append(f"{role}: {body}")
     return "\n\n".join(lines)
 

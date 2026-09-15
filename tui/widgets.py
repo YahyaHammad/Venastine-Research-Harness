@@ -206,7 +206,12 @@ CONVERSATION_ROLES = frozenset({
 # call now can -- and it classifies as CONVERSATION so batch 48's copy
 # shape survives the rename unchanged.
 META_ROLES = frozenset({
-    "system", "warning", "error", "pass", "pass_done", "success"})
+    "system", "warning", "error", "pass", "pass_done", "success",
+    # ROADMAP_v3 §49 (SS5). A background session's result, written by the
+    # harness to start a turn. The model reads it, but nobody in the
+    # conversation SAID it, so /copy conversation leaves it out as it leaves
+    # out a routed warning -- and the answer it prompted still copies.
+    "wake"})
 
 # Batch 65 (TECHNICAL_DEBT 16). The lines whose URLs are armed for
 # ctrl+click, beside the two sets above for their reason: which roles a
@@ -2090,6 +2095,14 @@ class Transcript(RichLog):
             self.write(Text.assemble(
                 ("\nyou ›  ", self._style("user_label")),
                 (text, self._style("user"))))
+        elif role == "wake":
+            # ROADMAP_v3 §49 (SS5). The harness opening a turn with a
+            # background session's result. It retires the label exactly as a
+            # `user` row does, for §43's reason: the answer it prompts is a
+            # new turn with its own `venastine ›`, and where labels land stays
+            # a pure function of the role sequence, so rerender() agrees.
+            self._label_in_force = False
+            self.write(Text(f"\n{text}", self._style("wake")))
         elif role == "assistant":
             self._open_label()
             # One trailing newline is dropped, exactly as a committed

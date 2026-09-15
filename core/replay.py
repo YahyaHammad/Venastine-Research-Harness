@@ -102,7 +102,17 @@ def replay_entries(thread_id: UUID) -> list[ReplayEntry]:
         role = message.get("role")
         if role == "user":
             text = _as_text(message.get("content"))
-            if text:
+            if message.get("harness"):
+                # ROADMAP_v3 §49 (SS5). The HARNESS wrote this row -- a
+                # background session's result -- so it must not replay under
+                # `you ›`, which is M8's mistake for the compaction summary.
+                # Its first line only, for T4's reason: the rest is program
+                # output the model was given, which can run to thousands of
+                # lines and would bury the conversation it interrupted.
+                header = text.split("\n", 1)[0].strip()
+                if header:
+                    entries.append(("wake", header, (), ""))
+            elif text:
                 entries.append(("user", text, (), ""))
             # Batch 91. The run this message started FAILED, and why. Right
             # after it, because nothing else from that run was ever written:

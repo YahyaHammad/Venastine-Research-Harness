@@ -818,6 +818,7 @@ Deliberately not settings.json keys: editing these means editing the harness's o
 | `network_allowed_commands` | pip, curl, git, npm, … | Binaries granted network access inside the sandbox. Matched against **every** word of a command that needs a sandbox, so `cd x && pip install .` is recognised and asked about — and against the **first word only** of an inert one, which cannot chain, so `grep pip notes.txt` still runs unprompted |
 | `inert_commands` | ls, cat, grep, wc, … | Read-only commands eligible to run unprompted under `tiered` — as a plain argument list in the container, or on the host only when no container runtime is available |
 | Sandbox bounds | image `docker.io/library/python:3.13-slim`; 120 s, 2048 MB, 30 CPU-s, 200 pids — under Docker, or Podman when Docker cannot run the sandbox | `sandbox_docker_image`, `sandbox_timeout_seconds`, `sandbox_memory_mb`, `sandbox_cpu_seconds`, `sandbox_max_pids` |
+| Background sessions | 3600 s cap; 4 live; 10 consecutive wakes; first 10,000 + last 190,000 characters of output kept, in memory only | `shell_session_timeout_cap_s`, `shell_session_max_live`, `shell_session_max_consecutive_wakes`, `shell_session_output_head_chars`, `shell_session_output_tail_chars` |
 | `allow_insecure_sandbox_fallback` / `auto_approve_sandbox_fallback` | `false` / `false` | Enable, then de-prompt, the weak host-subprocess fallback |
 | `redact_tool_outputs` | `true` | Master switch for output redaction. Never affects input refusals, the depth-cap bound, or the log formatter's own guard |
 | `tool_compute_timeout_s` | 20 | Wall clock per maths-tool subprocess |
@@ -886,7 +887,7 @@ note that shell approval is governed solely by `shell_approval_mode` -- `tool_ap
 deliberately has no `shell` key, so an old file carrying one is refused at startup
 naming the key — see `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 4700 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+Run the test suite with `pytest` — 4827 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
 ## Documentation
 

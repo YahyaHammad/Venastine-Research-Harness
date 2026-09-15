@@ -22,7 +22,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 
 ## Index
 
-- **§49. Shell sessions, the container runtime, and where a command can run** — **(IN PROGRESS: slice 0, Podman, BUILT in batch 93; slice 1 next)** (the shell was one-shot and blocking, so a test suite could not outlive a turn and nothing could wake the agent; a machine with Podman and no working Docker had no sandbox at all)
+- **§49. Shell sessions, the container runtime, and where a command can run** — **(IN PROGRESS: slice 0, Podman, BUILT in batch 93; slice 1's foundations -- pattern engine, wake row, session backends, manager, wake builder -- BUILT in batch 94; its tools, subagents, CLI and TUI next)** (the shell was one-shot and blocking, so a test suite could not outlive a turn and nothing could wake the agent; a machine with Podman and no working Docker had no sandbox at all)
 
 ---
 
@@ -117,8 +117,11 @@ slices. The owner added Podman (slice 0) after the plan was approved.
   turn start or resume, so it never lands between a `tool_use` and its `tool_result`.
 - Wake rows are a `wake` transcript role in `META_ROLES`, retire the `venastine ›` label like `user`, replay
   as their header line, and are labelled `harness:` for the compactor.
-- Adjacent user-role messages are merged into one above the provider branch split, one rule for every
-  provider: Google's translator batches only consecutive tool results.
+- **Adjacent user-role messages are NOT merged** (amended in batch 94). The plan adopted a merge above the
+  provider branch split. Measured against `core/memory.py`, a compacted thread already sends two
+  consecutive user messages to every provider -- M8's summary, then the first turn of the kept tail -- so
+  a wake row beside a user message is not a new shape on the wire, and a merge would have changed the
+  request of every compacted thread for no case that needed it.
 - After the wake limit, `/new`, `/threads` and `/resume` stay refused while sessions live; CLI EOF with live
   sessions kills and exits without asking.
 - Session stderr is merged into stdout; a wake carries a shared tail up to `MAX_READ_CHARS` and up to 50
@@ -139,6 +142,8 @@ slices. The owner added Podman (slice 0) after the plan was approved.
 
 0. **Podman** (SS22–SS24) -- BUILT, batch 93.
 1. **Background and monitor sessions** on the container route and the host fallback (SS2, SS5–SS20).
+   Foundations BUILT, batch 94: the RE2 pattern engine, the wake row, the session backends, the manager
+   and the wake builder. Next: the tools, subagents, the CLI and the TUI.
 2. **Interactive sessions.**
 3. **WSL.**
 4. **SSH and the secrets it needs.**

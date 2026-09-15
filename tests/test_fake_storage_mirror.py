@@ -82,17 +82,26 @@ def _logical_rows():
         # exercising both .get() defaults
         {"role": "assistant", "content": {},
          "name": None, "tool_call_id": None},
+        # ROADMAP_v3 §49 (SS5): a user row the HARNESS wrote -- the mark
+        # travels in its own column, and only when present
+        {"role": "user", "content": "[harness] s1 exited with code 0.",
+         "name": None, "tool_call_id": None,
+         "harness": {"kind": "session_wake",
+                     "sessions": [{"id": "s1", "call_id": "c1",
+                                   "shape": "exited"}]}},
     ]
 
 
 def _for_production(logical):
     """storage._to_neutral's input: content is the JSON string the column
     holds, and every key is present (SQL columns are never absent)."""
+    harness = logical.get("harness")
     return {
         "role": logical["role"],
         "content": json.dumps(logical["content"]),
         "name": logical["name"],
         "tool_call_id": logical["tool_call_id"],
+        "harness": json.dumps(harness) if harness else None,
     }
 
 
@@ -106,6 +115,7 @@ def _for_fake(logical, row_id=None, pinned=False):
         "name": logical["name"],
         "tool_call_id": logical["tool_call_id"],
         "pinned": pinned,
+        "harness": logical.get("harness"),
     }
 
 

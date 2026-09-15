@@ -366,6 +366,14 @@ class HarnessConfig(_Model):
     sandbox_memory_mb: PositiveInt
     sandbox_cpu_seconds: PositiveInt
     sandbox_max_pids: PositiveInt
+    # ROADMAP_v3 §49 (SS12, SS13): background and monitor sessions. Resource
+    # limits, like the four above -- NOT authority keys and not in the
+    # frozen posture: none of them decides whether a command is asked about.
+    shell_session_timeout_cap_s: PositiveInt
+    shell_session_max_live: PositiveInt
+    shell_session_max_consecutive_wakes: PositiveInt
+    shell_session_output_head_chars: PositiveInt
+    shell_session_output_tail_chars: PositiveInt
 
     # -- Output redaction / tool isolation --------------------------------
     redact_tool_outputs: StrictBool

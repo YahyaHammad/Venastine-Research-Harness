@@ -29,6 +29,9 @@ The dependencies listed below are **not** part of the project's own source but a
 | textual | `==8.2.8` | MIT | Yes | https://pypi.org/project/textual/ |
 | rich | `>=14.2,<16` | MIT | Yes | https://pypi.org/project/rich/ |
 | mcp | `==2.0.0` | MIT | Yes | https://pypi.org/project/mcp/ |
+| google-re2 | `==1.1.20251105` | BSD-3-Clause | Yes | https://pypi.org/project/google-re2/ |
+
+`google-re2` (added 2026-09-15, ROADMAP_v3 §49) is the only dependency above that ships **compiled native code**: its wheels carry the RE2 C++ library (BSD-3-Clause) and, as RE2 depends on it, Abseil (Apache-2.0). The paragraph under *What this means* holds for it unchanged — pip fetches the wheel onto the user's machine and this project redistributes nothing — so no inbound `NOTICE` obligation arises. Where no wheel exists (musl/Alpine, glibc older than 2.28), pip builds the source distribution locally, which is the user's build rather than a distribution by this project.
 
 ## Test dependencies (not used by end users during runtime, only for CI and developer testing)
 

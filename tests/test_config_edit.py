@@ -252,8 +252,9 @@ class TestTheRoundTripIsLossless:
                 tree[row.name] = tree[row.name]
             touched += 1
         # 115 since batch 91: `model_call_max_retries` and
-        # `model_call_retry_base_delay_s`.
-        assert touched == 115, f"{touched} settable scalars, expected 115"
+        # `model_call_retry_base_delay_s`. 120 since batch 94: the five
+        # background-session limits (ROADMAP_v3 §49, SS12).
+        assert touched == 120, f"{touched} settable scalars, expected 120"
         assert config_edit._dump(tree) == text
 
     def test_a_one_value_change_is_a_one_line_diff(self, tmp_path,

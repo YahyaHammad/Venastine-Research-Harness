@@ -4600,3 +4600,69 @@ table keyed `F1`… would define a family the map does not name.
 | Name Docker in the notice whatever runs | `test_the_approval_notice_names_the_runtime` | `known_runtime().capitalize()` |
 | Ship the short image name | `test_the_shipped_image_is_fully_qualified` | SS23 |
 | Add a §N to ROADMAP_v3 without an index row, or a row without a marker | `test_the_roadmap_v3_index_covers_every_section`, `test_every_roadmap_v3_index_entry_carries_a_status_marker` | One marked row per section |
+
+---
+
+## Background sessions, the foundations: pattern engine, wake row, backends, manager, wake builder (batch 94)
+
+ROADMAP_v3 §49, slice 1, commits 1-5. Nothing here is reachable from a tool yet; the pins move because
+shared shapes did.
+
+**`MessageLog` has a `harness` column, and `save_message` a `harness=` argument.** FakeStorage's
+`save_message` and `_reconstruct` mirror both (`tests/test_fake_storage_mirror.py` holds them to
+`storage._to_neutral`), and its rows carry a `"harness"` key. A test building a FakeStorage row by hand
+does not need the key -- `_reconstruct` reads it with `.get` -- but a test comparing a reconstructed
+harness row must expect `"harness"` in the neutral shape.
+
+**`wake` is a transcript role.** It is in `META_ROLES`, so `/copy conversation` leaves it out, and in
+both inventories in `tests/test_themes.py`: `MESSAGE_ROLES` (the distinctness and `dim` checks) and
+`EXPECTED_ROLE_KEYS` (every theme fills every slot). A theme test pinning the old role set is pinning
+the wrong set.
+
+**Five config keys** (`shell_session_*`) sit after `sandbox_max_pids`, in the schema and in
+`config.yaml` in the same order. `test_setting_every_leaf_to_its_own_value_changes_nothing` counts 120
+settable scalars now, where it counted 115.
+
+**`_run_docker` builds its argv through `_docker_argv`, and every container carries
+`--label venastine.process=<PROCESS_TOKEN>`** -- one-shot runs too. A test asserting the FIRST label is
+unaffected; a test asserting the whole argv must include the process label, and
+`test_the_golden_one_shot_argv` is the one that does.
+
+**`run_sandboxed` routes through `_route`.** A test that patches `_run_docker`, `_run_inert` or
+`_run_subprocess_fallback` and asserts which was called is unchanged; `_route` is what decides, and
+`TestTheRouteIsTheContainmentTheGateAssumed` holds it to `containment_for`.
+
+**`_unix_resource_limits` takes `cpu_seconds=`**, defaulting to `SANDBOX_CPU_SECONDS`, and `_run_inert`
+splits its argv with `_inert_argv`, which a host session shares.
+
+**`run_agent_conversation`'s prompt is built by `RunAgentLoop._conversation_prompt`**, unchanged, and
+shared with `wake_conversation`. A test patching `with_goal`, `with_memories`, `with_refs` or
+`with_todos` in `core.loop` still reaches them.
+
+**The session tests that start threads bound every wait.** A mutation that strands a waiter fails
+rather than hanging -- but `pytest-timeout` is not installed, so a wait written without a bound would
+hang the suite. `tests/test_shell_sessions.py`'s `_until` and `WAIT` are the pattern.
+
+| Change | Test | Fix |
+|---|---|---|
+| Compile monitor patterns with RE2's error logging on | `test_a_refused_pattern_writes_nothing_to_stderr` | `options.log_errors = False` |
+| Accept a `re2` from another distribution or path | `test_a_re2_module_from_another_distribution_is_refused`, `test_a_re2_module_at_another_path_is_refused` | Locate google-re2's own `re2/__init__.py` |
+| Import `re2` anywhere but `core/line_pattern.py` | `test_only_this_module_imports_re2` | One importer, three guards |
+| Drop the harness mark on write or read | `test_a_harness_row_survives_a_write_and_a_read`, `test_the_mark_comes_back_only_when_the_row_has_one`, the mirror test | `save_message(harness=)` and `_decode_harness` |
+| Put a `tool_call_id` on a harness row | `test_a_harness_row_survives_a_write_and_a_read` | Never -- `pinned_through` reads it as answered |
+| Replay a harness row under `you ›`, or summarise it as `user:` | `test_a_harness_row_replays_as_a_wake_header`, `test_a_harness_row_is_labelled_harness` | M8's rule |
+| Let a wake line keep the reply label | `test_a_wake_line_retires_the_reply_label` | It opens a turn, like `user` |
+| Give a session a container without `--sig-proxy=false`, the in-container timeout or the process label | `test_the_session_argv`, `test_the_golden_one_shot_argv` | `_docker_argv(session_timeout_s=)` |
+| Let a session inherit stdin, or share the console's signal group | `test_no_stdin_and_one_merged_output_stream`, `test_the_process_is_out_of_the_consoles_signal_group` | `_popen_session` |
+| Route a session differently from `containment_for` | `test_route_and_containment_for_agree` | One `_route` |
+| Kill a host session's shell but not its group | `test_a_host_session_on_posix_gets_term_then_kill_as_a_group` | `os.killpg` |
+| Clean up containers by `venastine.sandbox=1` | `test_only_this_processs_containers_are_killed` | The process label |
+| Count the session cap per owner | `test_the_cap_is_shared_across_owners` | Process-wide |
+| Reserve a slot outside the lock | `test_concurrent_starts_at_the_last_slot_admit_exactly_one` | Check again under the lock |
+| Skip the clamp, or refuse above the cap | `test_a_timeout_above_the_cap_is_clamped_and_said` | SS13 |
+| Start a session where nothing can be woken | `test_nothing_starts_where_nothing_can_be_woken` | `consuming()` |
+| Wake on the first match only, or once per match | `test_every_match_wakes_and_matches_before_a_take_coalesce` | Every match, coalesced per take |
+| Reset the wake count on a wake | `test_waking_stops_at_the_limit_and_the_results_are_held`, `test_only_a_user_message_resets_the_count` | Only `note_user_input` resets |
+| Wake the main conversation on the user's own kill | `test_a_users_kill_waits_for_their_next_message` | SS19 |
+| Build the wake text without the real output policy | `test_the_real_output_policy_redacts_with_the_originating_tool` | `check_output_policy`, named for the tool |
+| Write a wake as a plain user message, or run it without the run's channel and grant | `test_wake_conversation_writes_the_row_then_runs_the_loop` | `add_harness_message`, forwarded channel and grant |

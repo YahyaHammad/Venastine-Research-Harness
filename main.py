@@ -102,6 +102,10 @@ def _print_replay(thread_id: UUID) -> None:
             print(f"\nAgent: {text}\n")
         elif role == "thinking":
             print(f"\nThinking: {text}")
+        elif role == "wake":
+            # ROADMAP_v3 §49 (SS5): written by the harness, not the person,
+            # so it does not take the "You:" label the TUI also withholds.
+            print(f"Harness: {text}")
         else:
             print(f"     {text}")
     noun = "entry" if len(entries) == 1 else "entries"

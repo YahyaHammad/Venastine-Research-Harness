@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 4700 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 4827 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -1721,6 +1721,31 @@ And from §49 (`docs/ROADMAP_v3.md`), slice 0 -- Podman (SS22–SS24):
 - **The shipped image is fully qualified** (SS23). Podman resolves a short name through
   `registries.conf`, and `python:3.13-slim` resolved on the machine it was measured on only because that
   distro's `shortnames.conf` aliases `python`.
+
+And slice 1's foundations (batch 94) -- the pieces under the session tools, not yet reachable from any tool:
+
+- **A wake is a harness-written USER row, marked by `MessageLog.harness`** (SS5). A column, never a role
+  (batch 91's rule): nothing that builds a request reads it, replay shows its first line as a `wake`
+  entry, and the compactor labels it `harness:`. **It must never carry a `tool_call_id`**:
+  `pinned_through` reads any kept row's id as an answered call, so a wake row carrying its session's
+  start call would hide the real result -- M4's HTTP 400. Consecutive user messages were already normal
+  on every compacted thread (M8's summary followed by the tail's first turn), so no merge was added.
+- **`re2` is imported by `core/line_pattern.py` and nothing else** (SS8, AST-pinned). `re` holds the GIL
+  for a whole backtracking match, and every thread froze (measured). That module refuses a `re2` from any
+  distribution but google-re2 and keeps RE2's compile errors off stderr, where they paint over Textual.
+- **`_route` is both `run_sandboxed`'s ladder and `start_sandboxed`'s**, held against `containment_for`
+  over every tier, runtime answer and fallback posture (EP6). **`_docker_argv` is the one container
+  argv**: a session adds only `--sig-proxy=false` and an in-container `timeout -k`, and every container
+  carries `venastine.process=<PROCESS_TOKEN>` so exit cleanup cannot touch another instance's. A session
+  process gets `stdin=DEVNULL` (§29 N1 -- a second stdin reader), merged stderr, and its own signal
+  group, so a console Ctrl+C reaches it only through `kill()`.
+- **The manager lives in `core/shell_sessions.py`** (D12) and refuses a start outside `consuming()`
+  (SS17): under `never` a research pass is offered shell tools, and would otherwise start a session no
+  shell ever reports. **The wake text is built in `core/session_wake.py` through the real
+  `check_output_policy`**, because that text never passes through dispatch.
+- **`RunAgentLoop.wake_conversation` is a wrapper, not a second `_run`** (`test_grants.py` walks for
+  exactly one), and it shares `_conversation_prompt` with `run_agent_conversation`, so a wake turn cannot
+  run under a prompt missing the goal, the references or the checklist.
 
 And the four from §28 itself:
 

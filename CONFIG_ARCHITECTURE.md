@@ -799,6 +799,60 @@ pulling the same tag on different days get different images.
 
 ### `sandbox_max_pids`
 
+### `shell_session_timeout_cap_s`
+
+ROADMAP_v3 §49 (SS12, SS13). The longest a background or monitor session
+may run, whatever the agent asks for. 3600 because the owner's own example
+was an hour, and it is also the ceiling on how long a misbehaving agent can
+hold the input block (SS2) with one session.
+
+A value above the cap is CLAMPED, not refused, and the started result says
+so. Refusing would make the agent guess numbers until one fits, and the cap
+is not a secret. The clamp happens in one place, the session manager, and
+is enforced twice: the harness kills at the timeout, and coreutils `timeout`
+inside the container ends it `SESSION_TIMEOUT_MARGIN_S` later if the harness
+is no longer there to.
+
+### `shell_session_max_live`
+
+ROADMAP_v3 §49 (SS12). Live background and monitor sessions, counted
+process-wide across the main agent and every subagent -- a subagent does not
+get a quota of its own, or three parallel children could each fill one. The
+classic one-shot `shell` is not counted: it holds no slot past its own call.
+
+4, because each is a container under `sandbox_memory_mb` (2048), so the
+ceiling this implies is 8 GB of container memory. At the cap a start is
+refused with the list of live sessions, never queued: a queued session would
+start at a time nobody chose.
+
+### `shell_session_max_consecutive_wakes`
+
+ROADMAP_v3 §49 (SS2). How many wake turns may run in a row with no message
+from the user. Every wake is a model call nobody typed, and while sessions
+are live the prompt is blocked, so an agent that starts a new session on
+every wake would otherwise hold the session and spend tokens indefinitely.
+Past the limit, waking stops, the plain prompt unblocks, and the results are
+delivered with the user's next message; a user message resets the count.
+
+10 is a ceiling on an unattended loop, not an estimate of a normal one. A
+subagent has no user to reset it, so it gets one final wake and returns
+(SS20).
+
+### `shell_session_output_head_chars`
+
+### `shell_session_output_tail_chars`
+
+ROADMAP_v3 §49 (SS12). How much of a session's output is kept: the first
+10 000 characters and the most recent 190 000, IN MEMORY ONLY. Never on disk,
+because program output can hold secrets and redaction is pattern-based, so a
+file would be a durable copy of whatever the patterns miss. The dropped
+middle is reported as a gap when the agent pages through the output.
+
+The head is what shows how a run STARTED -- the command's own banner, the
+first error of a cascade -- which a tail-only buffer loses on exactly the long
+runs sessions exist for. The split is uneven because the end of a run is what
+is usually asked about.
+
 ## Output redaction (#167/#49, batch 20)
 
 ### `redact_tool_outputs`

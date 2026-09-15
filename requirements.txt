@@ -116,6 +116,31 @@ rich>=14.2,<16
 # to hold on both versions.
 mcp==2.0.0
 
+# ROADMAP_v3 §49 (SS8). The engine for a monitor session's pattern -- a
+# regex the MODEL wrote, matched against program output nobody controls,
+# inside the harness's own process. Imported by core/line_pattern.py and
+# nowhere else.
+#
+# NOT the stdlib `re`, and the reason was measured: `re` holds the GIL for
+# the whole match, so `(a+)+$` against 25 a's and a `b` froze EVERY thread
+# for 1.9 s -- the TUI's included -- and each extra character doubles it.
+# RE2 matches in linear time, releases the GIL, and refuses backreferences
+# and lookaround at compile time, so the agent is told instead of the
+# harness hanging.
+#
+# EXACT, for the reason textual and mcp are exact. BSD-3-Clause; wheels
+# for cp310-cp314 on Windows (x64, x86, arm64), macOS 13-15 (arm64,
+# x86_64) and manylinux_2_28 (x86_64, aarch64). There is NO wheel for musl
+# (Alpine) or glibc older than 2.28, where pip builds the sdist and needs a
+# C++ toolchain and Abseil. Another package ships a module named `re2`
+# that falls back to `re`, which is why core/line_pattern.py refuses a
+# `re2` from any other distribution. What to re-measure when this moves:
+# `re2.Options` still has `log_errors` and `max_mem`; a compile error is
+# still `re2.error` and still silent with `log_errors = False` (it writes
+# to stderr through Abseil otherwise, which paints over Textual); and the
+# wheel list above.
+google-re2==1.1.20251105
+
 # --- Test dependencies -------------------------------------------------
 # Previously absent, which the docs recorded as a known open item since
 # §14: the suite has always needed pytest and pytest-mock, and §16's TUI

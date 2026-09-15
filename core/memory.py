@@ -79,6 +79,26 @@ SUMMARY_PREFIX = (
 )
 
 
+def _require_harness_record(harness) -> None:
+    if not isinstance(harness, dict) or not harness.get("kind"):
+        raise ValueError(
+            "a harness message needs its record -- a dict with a `kind` -- "
+            "or it is indistinguishable from something the person wrote")
+
+
+def append_harness_row(thread_id: UUID, text: str, harness: dict) -> None:
+    """ROADMAP_v3 §49 (SS6). The same row `add_harness_message` writes, for a
+    thread no ConversationMemory in this process holds.
+
+    The quit path needs it: a session belongs to the thread that STARTED it,
+    which need not be the one on screen, and building a ConversationMemory
+    just to append one row would load and derive that thread's whole view to
+    throw it away. Like every writer here, it knows no SQL.
+    """
+    _require_harness_record(harness)
+    save_message(thread_id, role="user", content=text, harness=harness)
+
+
 class ConversationMemory:
     def __init__(self, thread_id: Optional[UUID] = None,
                  kind: str = THREAD_KIND_CHAT, *,
@@ -347,6 +367,26 @@ class ConversationMemory:
         entry = {"role": "user", "content": text}
         self._messages.append(entry)
         save_message(self.thread_id, role="user", content=text)
+
+    def add_harness_message(self, text: str, harness: dict) -> None:
+        """ROADMAP_v3 §49 (SS5). A message the HARNESS wrote to start a turn --
+        a background session's result, or the record that one was killed --
+        write-through like every add_* method.
+
+        A user-role entry, because that is the only shape the model can be
+        handed between turns (storage.MessageLog.harness says why), marked so
+        replay and the compactor can tell it from the person. Nothing that
+        builds a request reads the mark, and it never carries a tool_call_id.
+
+        The record is REQUIRED. A harness message without one would be a
+        user message the harness wrote and nobody could tell apart -- the
+        exact confusion M8 names for the compaction summary.
+        """
+        _require_harness_record(harness)
+        entry = {"role": "user", "content": text, "harness": harness}
+        self._messages.append(entry)
+        save_message(self.thread_id, role="user", content=text,
+                     harness=harness)
 
     def add_assistant_message(self, response) -> None:
         """

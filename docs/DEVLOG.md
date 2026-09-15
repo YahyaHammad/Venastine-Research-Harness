@@ -14232,3 +14232,110 @@ SS1-SS20 are the sessions design (slices 1-5 and background subagents), recorded
 - `docs/ROADMAP_v3.md` (new), `AGENTS.md`, `CLAUDE.md`, `QWEN.md`, `README.md`, `CONFIG_ARCHITECTURE.md`,
   `docs/SECURITY.md`, `docs/ARCHITECTURE.md`, `docs/CONTRIBUTING.md`, `.github/PULL_REQUEST_TEMPLATE.md`,
   `tests/BREAKING_CHANGES.md`.
+
+## Batch 94 -- slice 1's foundations: the pattern engine, the wake row, the session backends, the manager and the wake builder (2026-09-15)
+
+### What this batch is
+
+ROADMAP_v3 §49, slice 1 (background and monitor sessions), commits 1-5 of the plan: everything a session
+needs underneath the tools. Nothing here is reachable from a tool yet -- the five session tools, the
+sleeping subagent, the CLI wait loop and the TUI are the next batches -- so the batch changes no behaviour
+a user can see, and it stops here so the owner can commit a coherent unit.
+
+### Measured before building
+
+- **google-re2 1.1.20251105, against the installed wheel** (D22's rule):
+  - a compile error raises `re2.error` with the reason as bytes, and **writes to stderr through Abseil
+    unless `Options.log_errors` is False** -- 0 bytes with it off;
+  - a backreference and a lookahead are refused at compile time; `(a+)+$` over 200 000 characters
+    returned in under a millisecond;
+  - `Options.max_mem` defaults to 8 MiB, and `"(" + "a|" * 5000 + "b){1000}"` is refused as too large
+    (the `{50}` form the first test used is not -- the test was wrong, measured);
+  - checking the module's provenance through `packages_distributions()` took **593 ms**, on a path every
+    launch takes; locating google-re2's own `re2/__init__.py` took **0.6 ms**.
+- **Sessions against the real container runtime** (a scratch probe, HOME redirected, Docker Desktop):
+  - output streamed line by line (0.3 / 1.3 / 2.3 / 3.3 s), stderr merged in order, the real exit code 3;
+  - `kill()` ended a 300 s session in 0.1 s (137) and the container was removed;
+  - **killing only the CLI client left the container running** -- the case a crash produces, and the reason
+    exit cleanup exists; `kill_labelled_containers()` found and ended exactly that one;
+  - an orphaned container with a 3 s timeout and a 2 s margin ended on its own about 6 s after starting.
+- **Consecutive user messages already reach every provider.** A compacted thread's view is M8's summary as a
+  user message followed by the kept tail, which starts at a user turn (M4). So the adjacent-user merge the
+  plan had adopted as a default was not needed, and would have changed the request of every compacted
+  thread. It was dropped, and ROADMAP_v3's adopted defaults say so.
+
+### What was built
+
+- **`core/line_pattern.py`** -- the only importer of `re2`: provenance, `log_errors` off, `max_mem` explicit,
+  `compile_pattern` / `validate` / `LinePattern.search`. **`requirements.txt`** pins google-re2 with its
+  reasoning, and **`docs/THIRD_PARTY_NOTICES.md`** carries its row and the compiled-code note.
+- **The wake row** (SS5): `MessageLog.harness` (nullable JSON, migrated additively); `save_message(harness=)`;
+  `_decode_harness` and `_to_neutral`; FakeStorage mirrors both; `ConversationMemory.add_harness_message`
+  and `append_harness_row`, which REQUIRE a record with a kind; replay shows the row's first line as a `wake`
+  entry and the CLI labels it `Harness:`; the transcript's `wake` role is in `META_ROLES`, styled bold
+  italic accent, and retires the reply label; the compactor labels it `harness:`.
+- **Session backends in `security/sandbox.py`**: `_docker_argv`, the one container argv, which gives every
+  container `venastine.process=<PROCESS_TOKEN>` and a session `--sig-proxy=false` plus an in-container
+  `timeout -k 10 <T+30>`; `_route`, shared by `run_sandboxed` and the new `start_sandboxed`;
+  `SessionProcess` with `DockerSessionProcess` (killed by name) and `HostSessionProcess` (a Windows process
+  tree, a POSIX group TERM then KILL); `stdin=DEVNULL`, merged output and its own signal group for every
+  session; `kill_labelled_containers`; `_inert_argv` shared with `_run_inert`; `_unix_resource_limits(cpu_seconds=)`.
+- **`core/shell_sessions.py`** -- the `SessionManager`, with five new config keys (`shell_session_*`,
+  SS12): the atomic process-wide cap, the one clamp (SS13), supervisor and reader threads, head + tail output
+  in memory, re2 matching on the stream with lines coalesced per take, per-thread inboxes with the
+  consecutive-wake limit and held results (SS2), the user's own kill held for the main conversation but
+  waking a subagent (SS19), `consuming()` (SS17), and a bounded `close`.
+- **`core/session_wake.py`** -- the wake, held and killed-at-quit texts and records, redacted by the real
+  `check_output_policy` under the originating tool's name. **`RunAgentLoop.wake_conversation`** and
+  **`_conversation_prompt`**, which `run_agent_conversation` now shares.
+
+### Corrected while there
+
+- The citation check read "RE2" in production prose as a decision id. The engine is written `re2` -- its
+  module's own spelling -- in comments and docstrings; the agent-facing refusal string keeps "RE2".
+
+### Verification
+
+- Focused runs green at each commit: line pattern 18; harness rows, mirror, storage e2e, themes, legibility,
+  translation, compaction and CLI 722; sandbox 396 (backends, shell, rationale, posture); manager 34, three
+  runs in a row; config 182; wake builder and harness rows 32; loop-touching files 363.
+- The real-runtime probe above.
+- `tests/test_docs_consistency.py` alone: 34 passed, 1 skipped.
+- **Mutation pass (`mutate94.py`, 35 rows, per-row nodes, restoring from in-memory bytes): control green,
+  35 of 35 killed**, every target restored byte for byte -- after one fix. The first pass scored 34: **M22,
+  removing the capacity re-check under the lock, SURVIVED** `test_concurrent_starts_at_the_last_slot_admit_exactly_one`.
+  That test slowed the BACKEND, which runs after the slot is reserved; the window that races is between
+  `start_refusal`'s unlocked answer and the reservation, and it fits in one GIL quantum, so four threads
+  took turns and the test passed without the guard it exists for. It now widens that window (the span
+  lookup inside it sleeps), passed three runs in a row on the real code, and kills M22.
+  The rows: re2's stderr, provenance and memory bound; the harness mark dropped on write or read, read
+  without a kind, carrying a tool_call_id, or required of nothing; replay, the compactor and the transcript
+  treating a harness row as the user's; a session's container losing `--sig-proxy=false`, the in-container
+  timeout or the process label; stdin inherited or the console's signal group shared; the route disagreeing
+  with `containment_for`; a host group not killed; exit cleanup by the shared label; the one-shot CPU budget
+  on a session; the cap per owner or re-checked outside the lock; no clamp; no consumer check; first-match
+  or uncoalesced monitors; the wake count reset by a wake; the user's own kill waking; untaken matches not
+  folded; uncapped lines; the wake text unredacted or redacted under the wrong tool; a quit row's raw
+  command; and a wake turn as a plain user message or without its run's channel and grant.
+- **Full suite:** 4807 passed, 20 skipped, 1 deselected in 398 s, pytest exit 0 -- 4827 selected, the count
+  now quoted in README, AGENTS and ARCHITECTURE.
+
+### Not done yet, and why it is safe to stop here
+
+- No tool can start a session: the tools are commit 6, and they ship with their permission flags false.
+- No consumer exists outside tests, so `consuming()` is never set in production and a start would be
+  refused anyway (SS17).
+
+### Files touched
+
+- New: `core/line_pattern.py`, `core/shell_sessions.py`, `core/session_wake.py`;
+  `tests/test_line_pattern.py`, `tests/test_harness_rows.py`, `tests/test_session_backends.py`,
+  `tests/test_shell_sessions.py`, `tests/test_session_wake.py`.
+- Changed: `storage.py`, `core/memory.py`, `core/replay.py`, `core/compaction.py`, `core/loop.py`, `main.py`,
+  `security/sandbox.py`, `tui/widgets.py`, `tui/themes.py`, `config_schema.py`, `config.yaml`,
+  `requirements.txt`.
+- Tests: `tests/conftest.py` (FakeStorage's harness key, `FakeSessionProcess`, `session_starter`),
+  `tests/test_fake_storage_mirror.py`, `tests/test_storage_e2e.py`, `tests/test_themes.py`,
+  `tests/test_config_edit.py`.
+- Docs: `docs/ROADMAP_v3.md`, `AGENTS.md`, `README.md`, `CONFIG_ARCHITECTURE.md`, `docs/ARCHITECTURE.md`,
+  `docs/THIRD_PARTY_NOTICES.md`, `tests/BREAKING_CHANGES.md`.

@@ -1766,30 +1766,11 @@ class RunAgentLoop:
         # top-level conversation, so this needs no branch.
         agent_activity.bind(activity, memory.thread_id)
         memory.add_user_message(user_goal)
-        # #68, and this branch is the one an unattended CLI run takes.
-        _callable_only, _granted = advertisement_facts(
-            authorization, response_channel, granted_tools)
-        prompt = with_goal(
-            system_prompt
-            if system_prompt is not None
-            else system_prompts.with_catalogs(
-                DEFAULT_SYSTEM_PROMPT, callable_only=_callable_only,
-                granted=_granted),
-            memory,
-        )
-        # §21b (M13). Only when there is no agent-built prompt: an agent
-        # run got its memories inside system_prompt_for(), and appending
-        # again here would duplicate them. `agent=None` is what makes a
-        # plain chat turn count as opted in -- see memories.manager.
-        if system_prompt is None:
-            prompt = with_memories(prompt)
-        # §21c. UNCONDITIONAL, unlike memories above: a reference belongs to
-        # the thread, not to an agent, so an agent-built prompt needs it too --
-        # and system_prompt_for() has no memory to read it from.
-        prompt = with_refs(prompt, memory)
-        # §23 slice 2. Unconditional too, and for with_refs' reason: a
-        # checklist is thread state, so an agent-built prompt needs it.
-        prompt = with_todos(prompt, memory)
+        # ROADMAP_v3 §49: shared with wake_conversation, so a turn a
+        # background session starts runs under the same prompt tiers.
+        prompt = RunAgentLoop._conversation_prompt(
+            memory, system_prompt, authorization=authorization,
+            response_channel=response_channel, granted_tools=granted_tools)
         auth_kwargs = (
             _authorization_kwargs(authorization) if authorization is not None
             else {"granted_tools": granted_tools}
@@ -1978,4 +1959,89 @@ class RunAgentLoop:
             **_authorization_kwargs(authorization),
         ))
         response.thread_id = thread_id
+        return response
+
+    @staticmethod
+    def _conversation_prompt(memory, system_prompt, *, authorization=None,
+                             response_channel=None, granted_tools=None) -> str:
+        """The system prompt a conversation turn runs under -- ONE copy, for a
+        turn the user started and a turn a background session's result
+        started (ROADMAP_v3 §49), so a wake turn cannot run under a prompt
+        missing the goal, the references or the checklist a user's turn has.
+
+        Moved out of run_agent_conversation unchanged; its comments there
+        record why each tier is conditional or not.
+        """
+        # #68, and this branch is the one an unattended CLI run takes.
+        _callable_only, _granted = advertisement_facts(
+            authorization, response_channel, granted_tools)
+        prompt = with_goal(
+            system_prompt
+            if system_prompt is not None
+            else system_prompts.with_catalogs(
+                DEFAULT_SYSTEM_PROMPT, callable_only=_callable_only,
+                granted=_granted),
+            memory,
+        )
+        # §21b (M13). Only when there is no agent-built prompt: an agent
+        # run got its memories inside system_prompt_for(), and appending
+        # again here would duplicate them. `agent=None` is what makes a
+        # plain chat turn count as opted in -- see memories.manager.
+        if system_prompt is None:
+            prompt = with_memories(prompt)
+        # §21c. UNCONDITIONAL, unlike memories above: a reference belongs to
+        # the thread, not to an agent, so an agent-built prompt needs it too --
+        # and system_prompt_for() has no memory to read it from.
+        prompt = with_refs(prompt, memory)
+        # §23 slice 2. Unconditional too, and for with_refs' reason: a
+        # checklist is thread state, so an agent-built prompt needs it.
+        return with_todos(prompt, memory)
+
+    @staticmethod
+    def wake_conversation(
+        thread_id: UUID,
+        text: str,
+        harness: dict,
+        model: str,
+        provider_name: str = DEFAULT_PROVIDER,
+        max_steps: int = config.MAX_ITERATIONS,
+        max_total_tokens: Optional[int] = _SPEND_UNSET,
+        temperature: Optional[float] = None,
+        effort: Optional[str] = None,
+        context: Optional[ToolContext] = None,
+        system_prompt: Optional[str] = None,
+        response_channel=None,
+        granted_tools: Optional[set] = None,
+        activity=None,
+    ) -> ModelResponse:
+        """A turn started by the HARNESS in an existing thread: a background
+        session's result, delivered as a harness-written user row
+        (ROADMAP_v3 §49, SS5). Drained, like the two wrappers above -- the
+        subagent asleep in its spawn and the CLI's wait loop call it; the
+        TUI builds its own generator, as it does for a user's turn.
+
+        `run_agent_conversation`'s arguments, less what only a NEW thread
+        needs (kind, lineage) and plus the row: a wake runs with the same
+        channel, grant and activity as the run whose session it reports,
+        because it IS that run continuing.
+
+        NOT a second `_run`. tests/test_grants.py walks this module for
+        exactly one function by that name, and this is a wrapper over it.
+        """
+        memory = ConversationMemory(thread_id=thread_id)
+        agent_activity.bind(activity, memory.thread_id)
+        memory.add_harness_message(text, harness)
+        prompt = RunAgentLoop._conversation_prompt(
+            memory, system_prompt, response_channel=response_channel,
+            granted_tools=granted_tools)
+        response = run_to_completion(RunAgentLoop._run(
+            memory, prompt,
+            provider_name, model, context,
+            max_steps, _resolve_spend_cap(max_total_tokens),
+            temperature=temperature, effort=effort,
+            response_channel=response_channel, activity=activity,
+            drained=True,
+            granted_tools=granted_tools,
+        ))
+        response.thread_id = memory.thread_id
         return response

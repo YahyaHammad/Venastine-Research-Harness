@@ -582,6 +582,28 @@ sandbox_cpu_seconds: 30
 # Process ceiling for the sandbox.
 sandbox_max_pids: 200
 
+# Background and monitor shell sessions (ROADMAP_v3 §49, SS12-SS13).
+#
+# The longest a session may run. An agent asking for more is started with
+# this and told so -- never refused.
+shell_session_timeout_cap_s: 3600
+
+# How many background and monitor sessions may be live at once, counted
+# across the main agent and every subagent. Each is its own container
+# under the memory ceiling above.
+shell_session_max_live: 4
+
+# How many times in a row finished sessions may wake the agent with no
+# message from you. Past it, waking stops, the prompt unblocks, and the
+# results wait for your next message.
+shell_session_max_consecutive_wakes: 10
+
+# How much of a session's output is kept, in memory only and never on
+# disk: its first characters and its most recent ones. The middle is
+# dropped, and the agent is told where.
+shell_session_output_head_chars: 10000
+shell_session_output_tail_chars: 190000
+
 # ======================================================================
 # Output redaction and tool isolation
 # ======================================================================
