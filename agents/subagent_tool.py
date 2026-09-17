@@ -226,56 +226,135 @@ def run(params: dict, parent_context=None, parent_run=None,
     #
     # `child.subagent_depth` and not a local count: C3 already maintains
     # that number and a second one would be free to disagree with it.
+    from core import shell_sessions
+
+    # ROADMAP_v3 §49 (SS9). Everything the child's first turn and any wake
+    # turn after it share. A wake IS that run continuing -- the same
+    # prompt, context, channel, grant and sink -- so the two calls take one
+    # dict rather than two argument lists that could drift apart.
+    common = dict(
+        model=model,
+        provider_name=provider,
+        max_steps=agent.max_steps or config.MAX_ITERATIONS,
+        context=child,
+        effort=effort,
+        # `child`, not the agent's own context: C6 intersects with
+        # the parent, so a parent that excluded spawn_subagent must not
+        # have the catalog re-invite its child to spawn one (review
+        # f19).
+        # #68: the child's own facts, not the parent's. A subagent
+        # spawned from a headless run inherits no channel, so its
+        # catalogs must be decided by what IT can call -- the same
+        # values handed to run_agent_conversation below.
+        system_prompt=manager.system_prompt_for(
+            agent, DEFAULT_SYSTEM_PROMPT, context=child,
+            callable_only=response_channel is None,
+            granted=granted),
+        response_channel=response_channel,
+        granted_tools=granted if (response_channel is not None
+                                  and granted) else None,
+        # The recursion. Inherited exactly as response_channel is, and
+        # for the same reason: the child is a run in its own right and
+        # whatever is watching this stack is watching that one too.
+        activity=activity,
+    )
     with agent_activity.span(activity, agent.name, child.subagent_depth,
-                             call_id):
-        response = RunAgentLoop.run_agent_conversation(
-            user_goal=task,
-            model=model,
-            provider_name=provider,
-            max_steps=agent.max_steps or config.MAX_ITERATIONS,
-            context=child,
-            effort=effort,
-            # `child`, not the agent's own context: C6 intersects with
-            # the parent, so a parent that excluded spawn_subagent must not
-            # have the catalog re-invite its child to spawn one (review
-            # f19).
-            # #68: the child's own facts, not the parent's. A subagent
-            # spawned from a headless run inherits no channel, so its
-            # catalogs must be decided by what IT can call -- the same
-            # values handed to run_agent_conversation two lines below.
-            system_prompt=manager.system_prompt_for(
-                agent, DEFAULT_SYSTEM_PROMPT, context=child,
-                callable_only=response_channel is None,
-                granted=granted),
-            response_channel=response_channel,
-            granted_tools=granted if (response_channel is not None
-                                      and granted) else None,
-            # §27 AC1. A spawned agent's thread is not a conversation
-            # anyone will resume, and one goal-mode turn can spawn several.
-            thread_kind=THREAD_KIND_SUBAGENT,
-            # The recursion. Inherited exactly as response_channel is, and
-            # for the same reason: the child is a run in its own right and
-            # whatever is watching this stack is watching that one too.
-            activity=activity,
-            # §47. WHO spawned this thread, stored on the child's own row.
-            #
-            # `memory` and `call_id` are injected by dispatch() the same
-            # way the four values above it are -- the parent's live
-            # ConversationMemory, and the model's id for THIS call. Both
-            # are None on a path that reaches run() directly (every test
-            # that calls it by hand), and the child is then simply a
-            # thread with no recorded parent, which is what it was before
-            # this batch.
-            #
-            # THE CALL ID IS WHAT MAKES THE EDGE SPECIFIC. One turn can
-            # spawn `explore` three times, so the agent name identifies
-            # the roster entry and not the run; the call id is the only
-            # thing that ties one child to one `▸ spawn_subagent` line.
-            thread_parent=getattr(memory, "thread_id", None),
-            thread_parent_call=call_id,
-            thread_agent=agent.name,
-        )
+                             call_id) as span:
+        # ROADMAP_v3 §49 (SS17). The child is a wake CONSUMER: a session it
+        # starts is reported inside this call and nowhere else, which is
+        # what makes starting one allowed at all in this run.
+        with shell_sessions.consuming():
+            try:
+                response = RunAgentLoop.run_agent_conversation(
+                    user_goal=task,
+                    # §27 AC1. A spawned agent's thread is not a
+                    # conversation anyone will resume, and one goal-mode
+                    # turn can spawn several.
+                    thread_kind=THREAD_KIND_SUBAGENT,
+                    # §47. WHO spawned this thread, stored on the child's
+                    # own row.
+                    #
+                    # `memory` and `call_id` are injected by dispatch() the
+                    # same way the values in `common` are -- the parent's
+                    # live ConversationMemory, and the model's id for THIS
+                    # call. Both are None on a path that reaches run()
+                    # directly (every test that calls it by hand), and the
+                    # child is then simply a thread with no recorded
+                    # parent, which is what it was before that batch.
+                    #
+                    # THE CALL ID IS WHAT MAKES THE EDGE SPECIFIC. One turn
+                    # can spawn `explore` three times, so the agent name
+                    # identifies the roster entry and not the run; the call
+                    # id is the only thing that ties one child to one
+                    # `▸ spawn_subagent` line.
+                    thread_parent=getattr(memory, "thread_id", None),
+                    thread_parent_call=call_id,
+                    thread_agent=agent.name,
+                    **common,
+                )
+                # SS9. The child does not answer its parent while its own
+                # background sessions are still running: it sleeps HERE, is
+                # woken here, and returns once there is nothing left to
+                # report. D6 is untouched -- what crosses back is still one
+                # distilled answer.
+                response = _sleep_for_sessions(response, common)
+            except BaseException:
+                # A child that RAISED has no thread to report to, and its
+                # sessions would outlive the run that started them --
+                # holding slots against the process-wide cap for as long
+                # as their timeouts. The SPAN is the handle: it is frozen
+                # and carries no address, so the child's thread id may
+                # never have reached this frame, while every session
+                # records the span it was started inside.
+                shell_sessions.sessions.kill_by_span(
+                    span.id, shell_sessions.KILL_OWNER_FAILED)
+                raise
     return {
         "result": response.text,
         "subagent_thread_id": str(response.thread_id),
     }
+
+
+def _sleep_for_sessions(response, common: dict):
+    """Stay inside the spawn while the child's sessions report (SS9, SS20).
+
+    Returns the response the child ends on: its first answer when it
+    started no sessions, or the answer to the last wake it was given.
+
+    THE LIMIT IS WHY THIS TERMINATES. A subagent has no user to type a
+    message, so the consecutive-wake count it shares with every other
+    owner can never be reset from outside -- past it the manager stops
+    handing out batches and holds them instead. SS20 makes that the end of
+    the run rather than a wait for something that cannot happen: the
+    remaining sessions are stopped, and the results of stopping them are
+    what the one final wake carries.
+    """
+    from core import shell_sessions
+
+    sessions = shell_sessions.sessions
+    thread_id = response.thread_id
+    while True:
+        batch = sessions.wait_for_wake(thread_id)
+        if batch:
+            response = _wake(response, thread_id, batch, common)
+            continue
+        if not sessions.suspended(thread_id):
+            return response
+        sessions.kill_owned(thread_id, shell_sessions.KILL_WAKE_LIMIT)
+        held = sessions.take_held(thread_id)
+        if held:
+            response = _wake(response, thread_id, held, common)
+        # Anything that last turn started has nobody left to report to,
+        # and nothing after this point will ever wake this thread again.
+        sessions.kill_owned(thread_id, shell_sessions.KILL_WAKE_LIMIT)
+        return response
+
+
+def _wake(response, thread_id, events, common: dict):
+    """One wake turn in the child's own thread, under its own run."""
+    from core.loop import RunAgentLoop
+    from core.session_wake import build_wake
+
+    text, record = build_wake(events)
+    return RunAgentLoop.wake_conversation(
+        thread_id=thread_id, text=text, harness=record, **common)

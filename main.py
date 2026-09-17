@@ -43,7 +43,7 @@ import core.reasoning.pipeline_storage  # noqa: F401 -- registers PipelineRunRec
 # already run, so a FRESH database never got a pipelinerunrecord table and the
 # first research run died on "no such table". Do not "tidy" these away.
 import storage  # noqa: F401 -- registers ConversationThread, MessageLog
-from core import config_loader, workspace_trust
+from core import config_loader, shell_sessions, workspace_trust
 from core.loop import DEFAULT_PROVIDER, RunAgentLoop
 from core.reasoning.authorization import GRANT_PICKER
 from core.replay import replay_entries
@@ -140,6 +140,138 @@ def _announce_posture() -> None:
     print("", file=sys.stderr)
 
 
+# ROADMAP_v3 §49 (SS2, SS5, SS6, SS19). The CLI's half of background
+# sessions. D12 keeps this shell a permanent fallback, so waiting on a
+# session, running the turn its result starts, stopping one and confirming
+# a quit all have to work here and not only in the TUI -- a session the CLI
+# could start and never report would be exactly the wired-up-but-invisible
+# gap D12 exists to prevent.
+sessions = shell_sessions.sessions
+"""The process's one session manager, bound once at import.
+
+A module-level name rather than a lookup per call, because in production it
+is a singleton that never changes. The consequence, named rather than
+discovered: a test that replaces the manager has to patch THIS name as well
+as `core.shell_sessions.sessions`.
+"""
+
+
+def _quit_confirmed() -> bool:
+    """SS6: quitting with sessions still running confirms first.
+
+    They are killed on the way out and their output is not kept, so leaving
+    is a decision rather than a default. NOBODY TO ASK COUNTS AS YES --
+    Ctrl+D, a piped run, a closed terminal -- because a harness that cannot
+    be exited is the worse failure, and `ask` returns None on exactly those.
+    """
+    live = len(sessions.live_rows())
+    if not live:
+        return True
+    answer = _stdin_reader().ask(
+        f"{live} background session(s) are still running and will be "
+        f"stopped. Quit? [y/N]: ")
+    return answer is None or answer.strip().lower().startswith("y")
+
+
+def _deliver_held(thread_id) -> None:
+    """Results held for the user's next message (SS2, SS19).
+
+    Written into the thread as a harness row BEFORE the turn that answers
+    the message, so the model reads them beside what the user just typed
+    rather than as a turn of their own -- which is the whole point of
+    holding them: a kill the user made is not worth a model call on its own.
+    """
+    from core.memory import append_harness_row
+    from core.session_wake import build_held
+
+    held = sessions.take_held(thread_id)
+    if not held:
+        return
+    text, record = build_held(held)
+    append_harness_row(thread_id, text, record)
+    print(f"— {text.splitlines()[0]} —")
+
+
+def _await_sessions(thread_id, *, model, provider_name, effort,
+                    authorization) -> None:
+    """Between turns, wait on this conversation's live sessions and run a
+    wake turn for each batch (SS2, SS5).
+
+    Ctrl+C here stops the SESSIONS and returns to the prompt: the interrupt
+    is aimed at what is running, not at the conversation. Their results are
+    then held for the next message (SS19), so nothing is printed about them
+    beyond the count.
+
+    The wake turn carries the run's own `authorization`, because it is that
+    run continuing -- without it every gated call inside a wake would be
+    denied for a reason about the harness rather than the request.
+    """
+    from core.session_wake import build_wake
+
+    if thread_id is None:
+        return
+    announced = False
+    try:
+        while True:
+            live = sessions.live_for(thread_id)
+            if not live and not sessions.pending(thread_id):
+                return
+            if not announced:
+                print(f"[waiting on {live} background session(s) — "
+                      f"Ctrl+C stops them]")
+                announced = True
+            batch = sessions.wait_for_wake(thread_id, timeout=1.0)
+            if batch is None:
+                if sessions.suspended(thread_id):
+                    print("[no further automatic replies until you say "
+                          "something — results will arrive with your next "
+                          "message]")
+                    return
+                continue
+            text, record = build_wake(batch)
+            try:
+                # A wake turn may start sessions of its own, and something
+                # is still here to report them: this loop.
+                with shell_sessions.consuming():
+                    response = RunAgentLoop.wake_conversation(
+                        thread_id=thread_id, text=text, harness=record,
+                        model=model, provider_name=provider_name,
+                        effort=effort, authorization=authorization)
+            except Exception as e:
+                logger.exception("Wake turn failed")
+                print(f"\n[Error: {e}]")
+                return
+            for notice in getattr(response, "notices", ()):
+                print(f"— {notice['text']} —")
+            print(f"\nAgent: {response.text}\n")
+    except KeyboardInterrupt:
+        killed = sessions.kill_owned(thread_id, shell_sessions.KILL_USER)
+        print(f"\n[stopped {len(killed)} background session(s)]")
+
+
+def _close_sessions() -> None:
+    """Kill every live session on the way out and record what became of
+    them (SS6), then sweep any container this process left behind.
+
+    Contained on both halves: this runs while the process is already
+    leaving, and a failure to tidy up must not replace whatever the user
+    was actually told.
+    """
+    from core.session_wake import record_killed_at_quit
+    from security.sandbox import kill_labelled_containers
+
+    try:
+        closed = sessions.close()
+        if closed:
+            record_killed_at_quit(closed)
+    except Exception:              # noqa: BLE001 -- on the way out
+        logger.exception("Could not close background sessions cleanly")
+    try:
+        kill_labelled_containers()
+    except Exception:              # noqa: BLE001 -- on the way out
+        logger.exception("Could not clean up this process's containers")
+
+
 def run_chat(
     thread_id: UUID | None,
     provider_name: str,
@@ -192,21 +324,39 @@ def run_chat(
                 # readline() raises it on Ctrl+D exactly as input() did.
                 user_input = _stdin_reader().readline("You: ").strip()
             except (KeyboardInterrupt, EOFError):
+                # ROADMAP_v3 §49 (SS6). Quitting with sessions still
+                # running confirms first -- they are killed on the way out
+                # and their output is not kept, so leaving is a decision.
+                # Nobody to ask (Ctrl+D, a piped run) counts as yes: a
+                # harness that cannot be exited is the worse failure.
+                if not _quit_confirmed():
+                    continue
                 print("\nExiting.")
                 break
 
         if not user_input:
             continue
 
+        if current_thread_id is not None:
+            # SS2/SS19: what was held because nothing was waking this
+            # conversation arrives WITH the user's next message, in the
+            # same thread, before the turn that answers them both.
+            _deliver_held(current_thread_id)
+            sessions.note_user_input(current_thread_id)
+
         try:
-            response = RunAgentLoop.run_agent_conversation(
-                user_goal=user_input,
-                model=model,
-                provider_name=provider_name,
-                thread_id=current_thread_id,
-                authorization=authorization,
-                effort=effort,
-            )
+            # SS17. The CLI chat turn is a wake consumer: a session started
+            # here is reported by the loop below, which is what makes
+            # starting one allowed at all.
+            with shell_sessions.consuming():
+                response = RunAgentLoop.run_agent_conversation(
+                    user_goal=user_input,
+                    model=model,
+                    provider_name=provider_name,
+                    thread_id=current_thread_id,
+                    authorization=authorization,
+                    effort=effort,
+                )
         except Exception as e:
             logger.exception("Chat turn failed")
             print(f"\n[Error: {e}]")
@@ -244,6 +394,13 @@ def run_chat(
                 if billed is not None else ""
             print(f"[stopped early: {response.stop_reason}{figures}]")
         print()
+
+        # SS2/SS5. The turn is over, but this conversation may not be: a
+        # session it started reports later, and that report starts a turn
+        # of its own. Nothing is read from the user until they are done.
+        _await_sessions(current_thread_id, model=model,
+                        provider_name=provider_name, effort=effort,
+                        authorization=authorization)
 
 
 def build_research_authorization(grant_spec, attended: bool = False):
@@ -2098,6 +2255,11 @@ def main(argv=None) -> int:
         # finally, not "at the end": run_research raises SystemExit(1) on a
         # failed pipeline, and Ctrl+C reaches here as KeyboardInterrupt.
         # Both are ordinary exits that must still reap child processes.
+        #
+        # ROADMAP_v3 §49 (SS6). Sessions first: killing them writes a row
+        # into each owning thread saying what became of them, and that
+        # write needs the database this process has not closed yet.
+        _close_sessions()
         from tools.registry import registry
         teardown_mcp(mcp, registry)
     if isinstance(restart, config_edit.RestartRequest):

@@ -34,6 +34,22 @@ if TYPE_CHECKING:  # pragma: no cover - typing only, never imported at runtime
     from tools.context import ToolContext
 
 
+# The tools whose approval is decided by `shell_approval_mode` and nothing
+# else, so they have a `tool_permissions` field and no `tool_approvals` one.
+# `shell` since §28 (G3): a field there was the ratchet, and every answer it
+# could give is one the mode already names. The two background-session start
+# tools since ROADMAP_v3 §49 (SS16), because they run a command through the
+# same gate -- a second switch over it would be G3's ratchet again.
+#
+# A set named here rather than `name == "shell"` inline, so the exemption
+# has one spelling that tests can hold against the registry: an import-time
+# check in tools/registry.py requires every name here to be registered with
+# shell's own approval check, so the exemption cannot outlive the gate it is
+# an exemption FOR.
+APPROVAL_BY_SHELL_MODE = frozenset({"shell", "shell_background",
+                                    "shell_monitor"})
+
+
 def _default_for_unknown_tool(tool_name: str) -> bool:
     """Explicit, named default for tools with no declared field, rather
     than letting getattr's fallback decide by omission.
@@ -172,10 +188,12 @@ def assert_permissions_declared(tool_names: Iterable[str]) -> None:
     _default_for_unknown_tool) is exactly what makes it important that
     omission is never accidental for built-in ones.
 
-    The exception is `shell` in approvals: its approval is governed solely
-    by `shell_approval_mode`, and a second switch there could only force
-    `always` -- exactly what the mode already says. A test pins this as
-    the SOLE exemption, so a future omission cannot ride in on it.
+    The exception is APPROVAL_BY_SHELL_MODE in approvals: those tools'
+    approval is governed solely by `shell_approval_mode`, and a second
+    switch there could only force `always` -- exactly what the mode already
+    says. A test pins the set as the SOLE exemption, and tools/registry.py
+    requires each name in it to carry shell's own approval check, so a
+    future omission cannot ride in on it.
 
     Dynamically-named `mcp__*` tools are exempt by design; they can never
     have a declared field. Call this after static registration only.
@@ -187,15 +205,16 @@ def assert_permissions_declared(tool_names: Iterable[str]) -> None:
         for name in tool_names
         if not name.startswith("mcp__")
         and not (hasattr(permissions, name)
-                 and (name == "shell" or hasattr(approvals, name)))
+                 and (name in APPROVAL_BY_SHELL_MODE
+                      or hasattr(approvals, name)))
     ]
     if missing:
         raise RuntimeError(
             "Tools are registered with no declared permission/approval "
             f"field, so they would be silently denied forever: {sorted(missing)}. "
             "Add a bool field for each to ToolPermissionsModel and -- "
-            "except `shell`, whose approval lives solely in "
-            "shell_approval_mode -- to ToolApprovalsModel in "
+            f"except {sorted(APPROVAL_BY_SHELL_MODE)}, whose approval lives "
+            "solely in shell_approval_mode -- to ToolApprovalsModel in "
             "config_schema.py, and a key for each to tool_permissions "
             "(and, with the same exception, tool_approvals) in config.yaml "
             "(ROADMAP_v2 §15, D24). The field names live in Python so this "

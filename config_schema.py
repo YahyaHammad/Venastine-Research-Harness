@@ -204,6 +204,11 @@ class ToolPermissionsModel(_Model):
     write: StrictBool
     edit: StrictBool
     shell: StrictBool
+    shell_background: StrictBool
+    shell_monitor: StrictBool
+    shell_sessions: StrictBool
+    shell_output: StrictBool
+    shell_kill: StrictBool
     load_skill: StrictBool
     spawn_subagent: StrictBool
     pin: StrictBool
@@ -219,11 +224,13 @@ class ToolApprovalsModel(_Model):
     """Whether each tool needs a human yes before it runs.
 
     Approval ORs across every layer, so a `True` here is a one-way ratchet
-    that can only ever add prompts. `shell` is deliberately absent: its
-    approval is governed solely by `shell_approval_mode` (always / tiered /
-    contained / never), and a second switch here could only force `always` -- exactly
-    what the mode already says. An agent's `approval_overrides` keeps its
-    own one-way power over shell through the context layer.
+    that can only ever add prompts. `shell`, `shell_background` and
+    `shell_monitor` are deliberately absent (security/permissions.py's
+    APPROVAL_BY_SHELL_MODE): their approval is governed solely by
+    `shell_approval_mode` (always / tiered / contained / never), and a
+    second switch here could only force `always` -- exactly what the mode
+    already says. An agent's `approval_overrides` keeps its own one-way
+    power over them through the context layer.
     """
 
     web_search: StrictBool
@@ -239,6 +246,9 @@ class ToolApprovalsModel(_Model):
     read: StrictBool
     write: StrictBool
     edit: StrictBool
+    shell_sessions: StrictBool
+    shell_output: StrictBool
+    shell_kill: StrictBool
     load_skill: StrictBool
     spawn_subagent: StrictBool
     pin: StrictBool

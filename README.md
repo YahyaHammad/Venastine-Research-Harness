@@ -333,9 +333,9 @@ Because approval ORs, an override can only ever *add* a prompt. There is no way 
 
 | | |
 |---|---|
-| No approval | `web_search`, `fetch_url`, `arxiv_search`, `get_time`, the six maths tools (`symbolic_math`, `linear_algebra`, `probability_stats`, `discrete_math`, `logic`, `geometry`), `load_skill`, `pin`, `unpin`, `ask_user`, `todo_write`, `read_project_doc` |
+| No approval | `web_search`, `fetch_url`, `arxiv_search`, `get_time`, the six maths tools (`symbolic_math`, `linear_algebra`, `probability_stats`, `discrete_math`, `logic`, `geometry`), `load_skill`, `pin`, `unpin`, `ask_user`, `todo_write`, `read_project_doc`, and the three that act on this conversation's own background sessions (`shell_sessions`, `shell_output`, `shell_kill`) |
 | Depends on the call | `read`, `write`, `edit` — decided per path, and all three are denied by default anyway |
-| Always | `shell`, `spawn_subagent`, `remember`, `write_project_doc`, and **every MCP tool** |
+| Always | `shell` and the two that start a background session (`shell_background`, `shell_monitor`), `spawn_subagent`, `remember`, `write_project_doc`, and **every MCP tool** |
 
 Every registered tool appears in that table, and a test asserts it (audit #125): `ToolPermissions` and `ToolApprovals` are plain dataclasses, so "did the table keep up with the registry" is a question the suite can answer instead of a reader. `write_project_doc` is the one the omission mattered for — it is what `/init` uses to write documents into a repository, and §24's I1 gives it a fixed allowlist of document *names* with no path parameter precisely because it is dangerous enough to constrain.
 
@@ -887,7 +887,7 @@ note that shell approval is governed solely by `shell_approval_mode` -- `tool_ap
 deliberately has no `shell` key, so an old file carrying one is refused at startup
 naming the key — see `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 4827 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+Run the test suite with `pytest` — 4896 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
 ## Documentation
 

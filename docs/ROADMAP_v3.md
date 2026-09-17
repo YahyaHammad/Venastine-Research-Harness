@@ -22,7 +22,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 
 ## Index
 
-- **§49. Shell sessions, the container runtime, and where a command can run** — **(IN PROGRESS: slice 0, Podman, BUILT in batch 93; slice 1's foundations -- pattern engine, wake row, session backends, manager, wake builder -- BUILT in batch 94; its tools, subagents, CLI and TUI next)** (the shell was one-shot and blocking, so a test suite could not outlive a turn and nothing could wake the agent; a machine with Podman and no working Docker had no sandbox at all)
+- **§49. Shell sessions, the container runtime, and where a command can run** — **(IN PROGRESS: slice 0, Podman, BUILT in batch 93; slice 1's foundations -- pattern engine, wake row, session backends, manager, wake builder -- BUILT in batch 94; its five tools, the subagent asleep in its spawn and the CLI's wait loop BUILT in batch 95; the TUI next)** (the shell was one-shot and blocking, so a test suite could not outlive a turn and nothing could wake the agent; a machine with Podman and no working Docker had no sandbox at all)
 
 ---
 
@@ -143,7 +143,9 @@ slices. The owner added Podman (slice 0) after the plan was approved.
 0. **Podman** (SS22–SS24) -- BUILT, batch 93.
 1. **Background and monitor sessions** on the container route and the host fallback (SS2, SS5–SS20).
    Foundations BUILT, batch 94: the RE2 pattern engine, the wake row, the session backends, the manager
-   and the wake builder. Next: the tools, subagents, the CLI and the TUI.
+   and the wake builder. The five tools, the subagent asleep in its spawn and the CLI's wait loop BUILT,
+   batch 95. Next: the TUI -- the session panel, the input block and its refusal funnel, `/kill` and its
+   key, the session view and what a finished session shows after a restart (SS14, SS18).
 2. **Interactive sessions.**
 3. **WSL.**
 4. **SSH and the secrets it needs.**

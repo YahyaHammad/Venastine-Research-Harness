@@ -444,6 +444,32 @@ def _resolved_binary(command) -> str:
 # ---------------------------------------------------------------------------
 
 
+def fallback_changed_refusal(command: str, docker_up: bool) -> str | None:
+    """The TOCTOU safety net, or None: why a command approved while a
+    container runtime answered must not now run on the fallback.
+
+    If the approval check auto-approved because the runtime was available
+    at that time, but it is now down and the command would take the
+    fallback, the fallback would have required approval that was never
+    given. One copy for `run` and for the background-session start tools
+    (ROADMAP_v3 §49), which pass the same gate and the same probe.
+    """
+    if docker_up or _is_inert(command):
+        return None
+    # Read here rather than passed in from the approval check: §40 makes the
+    # two reads the SAME object for the life of the process, so re-reading
+    # cannot reintroduce the TOCTOU gap this exists to close. Before §40 it
+    # could have.
+    active = posture.current()
+    if active.allow_insecure_fallback and not active.auto_approve_fallback:
+        return ("Docker became unavailable after the approval check. "
+                "The insecure subprocess fallback requires explicit "
+                "per-run approval (AUTO_APPROVE_SANDBOX_FALLBACK is "
+                "False). Please retry — the approval prompt will "
+                "appear this time.")
+    return None
+
+
 def run(params: dict) -> dict:
     # `parsed.rationale` is deliberately never read below. It is shown
     # to a person and archived with the call; it has no part in what
@@ -455,29 +481,9 @@ def run(params: dict) -> dict:
     # status changes between the approval check and execution.
     docker_up = is_docker_available()
 
-    # TOCTOU safety net: if the approval check auto-approved because
-    # Docker was available at that time, but Docker is now down and
-    # we'd use the fallback, check whether the fallback would have
-    # required approval that was never given.
-    if not docker_up and not _is_inert(parsed.command):
-        # Read here rather than passed in from the approval check: §40
-        # makes the two reads the SAME object for the life of the process,
-        # so re-reading cannot reintroduce the TOCTOU gap this block
-        # exists to close. Before §40 it could have.
-        active = posture.current()
-        if (
-            active.allow_insecure_fallback
-            and not active.auto_approve_fallback
-        ):
-            return {
-                "error": (
-                    "Docker became unavailable after the approval check. "
-                    "The insecure subprocess fallback requires explicit "
-                    "per-run approval (AUTO_APPROVE_SANDBOX_FALLBACK is "
-                    "False). Please retry — the approval prompt will "
-                    "appear this time."
-                ),
-            }
+    refusal = fallback_changed_refusal(parsed.command, docker_up)
+    if refusal is not None:
+        return {"error": refusal}
 
     try:
         return run_sandboxed(

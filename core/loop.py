@@ -2012,6 +2012,7 @@ class RunAgentLoop:
         system_prompt: Optional[str] = None,
         response_channel=None,
         granted_tools: Optional[set] = None,
+        authorization=None,
         activity=None,
     ) -> ModelResponse:
         """A turn started by the HARNESS in an existing thread: a background
@@ -2022,18 +2023,36 @@ class RunAgentLoop:
 
         `run_agent_conversation`'s arguments, less what only a NEW thread
         needs (kind, lineage) and plus the row: a wake runs with the same
-        channel, grant and activity as the run whose session it reports,
-        because it IS that run continuing.
+        channel, grant, authorization and activity as the run whose session
+        it reports, because it IS that run continuing. `authorization` is
+        what the CLI's chat loop carries -- without it a wake turn would
+        run with no way to ask a human, so every gated call in it would be
+        denied for a reason that is about the harness rather than the
+        request, which is the silent-stripping failure §25 records.
 
         NOT a second `_run`. tests/test_grants.py walks this module for
         exactly one function by that name, and this is a wrapper over it.
         """
+        if authorization is not None and granted_tools is not None:
+            raise ValueError(
+                "wake_conversation: pass authorization= or granted_tools=, "
+                "not both -- they set the same underlying argument, so one "
+                "would silently win."
+            )
         memory = ConversationMemory(thread_id=thread_id)
         agent_activity.bind(activity, memory.thread_id)
         memory.add_harness_message(text, harness)
         prompt = RunAgentLoop._conversation_prompt(
-            memory, system_prompt, response_channel=response_channel,
-            granted_tools=granted_tools)
+            memory, system_prompt, authorization=authorization,
+            response_channel=response_channel, granted_tools=granted_tools)
+        auth_kwargs = (
+            _authorization_kwargs(authorization) if authorization is not None
+            else {"granted_tools": granted_tools}
+        )
+        # The explicit argument wins, and the key is popped unconditionally
+        # -- run_agent_conversation's reasoning, unchanged.
+        bundled_channel = auth_kwargs.pop("response_channel", None)
+        response_channel = response_channel or bundled_channel
         response = run_to_completion(RunAgentLoop._run(
             memory, prompt,
             provider_name, model, context,
@@ -2041,7 +2060,7 @@ class RunAgentLoop:
             temperature=temperature, effort=effort,
             response_channel=response_channel, activity=activity,
             drained=True,
-            granted_tools=granted_tools,
+            **auth_kwargs,
         ))
         response.thread_id = memory.thread_id
         return response

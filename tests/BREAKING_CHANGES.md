@@ -4666,3 +4666,46 @@ hang the suite. `tests/test_shell_sessions.py`'s `_until` and `WAIT` are the pat
 | Wake the main conversation on the user's own kill | `test_a_users_kill_waits_for_their_next_message` | SS19 |
 | Build the wake text without the real output policy | `test_the_real_output_policy_redacts_with_the_originating_tool` | `check_output_policy`, named for the tool |
 | Write a wake as a plain user message, or run it without the run's channel and grant | `test_wake_conversation_writes_the_row_then_runs_the_loop` | `add_harness_message`, forwarded channel and grant |
+
+## Batch 95 -- slice 1's tools, the sleeping subagent and the CLI (ROADMAP_v3 §49)
+
+**`security/permissions.APPROVAL_BY_SHELL_MODE` replaces `name == "shell"`** in
+`assert_permissions_declared`. A test asserting that `shell` is the SOLE approvals exemption now asserts
+the SET; `test_permission_context.py::test_ac6_the_shell_mode_tools_are_the_sole_approvals_exemption` is
+the one that does.
+
+**`config.yaml` gained five `tool_permissions` keys and three `tool_approvals` keys**, so the tool tables
+hold 28 and 25. `test_config_edit.py` counts 28 tools, 53 authority leaves and 128 settable scalars;
+`test_config_loader.py` asserts `permissions - approvals == APPROVAL_BY_SHELL_MODE`; ARCHITECTURE's
+registry paragraph states 16 of 28 advertised and 13 callable headless.
+
+**`RunAgentLoop.wake_conversation` takes `authorization=`**, mutually exclusive with `granted_tools=`
+exactly as `run_agent_conversation`'s is -- a caller passing both now raises rather than one silently
+winning.
+
+**`main.sessions` is a module-level alias for the manager, bound at import.** A test that replaces the
+process's manager has to patch `main.sessions` as well as `core.shell_sessions.sessions`;
+`test_session_cli.py`'s `manager` fixture is the pattern.
+
+**`main.run_chat` waits on sessions between turns.** A CLI test whose stubbed turn starts a session does
+not reach the next prompt until that session reports, and the same is true of a spawn: a test stubbing
+`run_agent_conversation` and starting a session inside it must let that session finish, or the call
+sleeps until the session's own timeout. Both new test files finish theirs deterministically, and their
+`_start` helpers pass a short timeout so a mistake fails in seconds instead of blocking on the real cap.
+
+| Change | Test | Fix |
+|---|---|---|
+| Register a start tool without shell's own approval check | `test_an_exempt_tool_that_lost_the_gate_is_refused_at_import` | `_assert_shell_mode_exemption`, by identity |
+| Give `shell_background` or `shell_monitor` a `tool_approvals` field | `test_only_the_start_tools_skip_the_approvals_table` | SS16 -- the mode is the gate |
+| Advertise a start tool where nothing can be woken | `test_hidden_where_nothing_would_wake_the_run` | `available_check=shell_sessions.available` |
+| Ask a human about a start that will be refused | `test_the_loop_never_asks_about_a_refused_start` | `refusal_check` before the gate (A7) |
+| Take the owning thread from params instead of the injected memory | `test_a_conversation_sees_only_its_own_sessions` | `memory.thread_id` |
+| Wake the agent for a session it stopped itself | `test_the_agents_own_kill_is_its_own_report_and_wakes_nobody` | The kill claims the report |
+| Keep that claim when the kill wait expires | `test_a_session_that_outlives_the_kill_wait_still_wakes` | Release it under the lock |
+| Return from a spawn with the child's sessions live | `test_a_started_session_is_reported_before_the_parent_hears_back` | `_sleep_for_sessions` |
+| Leave a failed child's sessions running | `test_its_sessions_are_stopped_and_the_error_still_propagates` | `kill_by_span` |
+| Wait forever for a subagent nobody can reset | `test_past_the_limit_what_is_waiting_arrives_in_one_last_wake` | SS20's final wake |
+| Run a CLI wake turn without the run's authorization | `test_a_wake_turn_carries_the_runs_authorization` | Forward the bundle |
+| Let Ctrl+C during the wait kill the harness | `test_ctrl_c_stops_the_sessions_and_keeps_the_harness` | Kill the sessions, keep the prompt |
+| Start a turn for a kill the USER made | `test_a_user_kill_is_delivered_with_the_next_message` | Held, written with the next message |
+| Quit with sessions live without asking | `test_quitting_with_a_live_session_asks_first` | SS6 |

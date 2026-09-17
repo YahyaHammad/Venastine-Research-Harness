@@ -242,12 +242,50 @@ class TestLifecycle:
         assert [e.shape for e in batch] == [ss.TIMED_OUT]
         assert _process(session_starter).kills == 1
 
-    def test_a_kill_is_reported_as_killed_not_exited(
+    def test_the_agents_own_kill_is_its_own_report_and_wakes_nobody(
             self, manager, session_starter):
-        _start(manager)
+        """A wake turn telling the agent about a session it stopped itself
+        is a model call nobody needed, so the kill CARRIES what that wake
+        would have said -- including matches nobody had taken yet."""
+        _start(manager, kind=ss.KIND_MONITOR, pattern="ERROR")
+        process = _process(session_starter)
+        process.write("ERROR one\nstill going\n")
+        assert _until(lambda: manager.row("s1").match_count == 1)
+
         result = manager.kill("s1", owner_thread="t1", reason=ss.KILL_MODEL)
+
         assert result["status"] == ss.KILLED
+        assert "still going" in result["output_tail"]
+        assert result["unreported_matches"] == {"count": 1,
+                                                "lines": ["ERROR one"]}
+        assert not manager.pending("t1")
+        assert manager.take_held("t1") == []
+
+    def test_a_session_that_outlives_the_kill_wait_still_wakes(
+            self, manager, session_starter, monkeypatch):
+        """The claim is given back when the session does not die while the
+        kill waits: an unreported finish is worse than a redundant wake."""
+        monkeypatch.setattr(ss, "_KILL_SETTLE_S", 0.05)
+        _start(manager)
+        process = _process(session_starter)
+        monkeypatch.setattr(process, "kill", lambda: None)
+
+        result = manager.kill("s1", owner_thread="t1", reason=ss.KILL_MODEL)
+        assert result["status"] == ss.RUNNING
+
+        process.exit(0)
         assert _wait_batch(manager, "t1")[0].shape == ss.KILLED
+
+    def test_a_kill_by_anyone_else_is_reported_as_killed(
+            self, manager, session_starter):
+        """Only the MODEL's own kill takes the report. A user's kill and a
+        quit still reach the agent the ordinary way."""
+        _start(manager, owner="child")
+
+        result = manager.kill("s1", reason=ss.KILL_USER)
+
+        assert result["status"] == ss.KILLED
+        assert [e.shape for e in manager.take_held("child")] == [ss.KILLED]
 
     def test_killing_a_finished_session_is_not_an_error(
             self, manager, session_starter):

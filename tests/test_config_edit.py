@@ -50,11 +50,12 @@ class TestTheCatalogueCoversTheFile:
             "the catalogue and the schema disagree about the top-level keys")
 
     def test_the_two_tool_tables_are_expanded_AND_listed(self):
-        """The 23 tool names appear in `tool_permissions`; all but `shell`
-        appear in `tool_approvals`, which is the whole reason the rows are
-        prefixed. `shell` alone would be ambiguous in a way nothing
-        downstream could resolve -- and `shell`'s approval lives solely in
-        `shell_approval_mode`, so it has no approvals leaf at all.
+        """The 28 tool names appear in `tool_permissions`; all but the
+        three shell-mode ones appear in `tool_approvals`, which is the
+        whole reason the rows are prefixed. `shell` alone would be
+        ambiguous in a way nothing downstream could resolve -- and its
+        approval, like `shell_background`'s and `shell_monitor`'s, lives
+        solely in `shell_approval_mode`, so it has no approvals leaf.
 
         Batch 87 gave the tables a row of their own as well. Expanding them
         and emitting nothing for the table meant `/config tool_permissions`
@@ -67,12 +68,14 @@ class TestTheCatalogueCoversTheFile:
             assert rows[table].kind == "container"
             assert not rows[table].settable, "a whole table is not settable"
             assert rows[table].authority
+        from security.permissions import APPROVAL_BY_SHELL_MODE
+
         names = set(rows)
         tools = list(config_schema.ToolPermissionsModel.model_fields)
-        assert len(tools) == 23
+        assert len(tools) == 28
         for tool in tools:
             assert f"tool_permissions.{tool}" in names
-            if tool == "shell":
+            if tool in APPROVAL_BY_SHELL_MODE:
                 assert f"tool_approvals.{tool}" not in names
             else:
                 assert f"tool_approvals.{tool}" in names
@@ -99,9 +102,9 @@ class TestTheCatalogueCoversTheFile:
         marked = {row.name for row in config_edit.catalogue() if row.authority}
         expected = set(config_schema.HARNESS_AUTHORITY_KEYS)
         leaves = {name for name in marked if "." in name}
-        assert len(leaves) == 45, (
-            "tool_permissions holds all 23 tools and tool_approvals holds "
-            "all but shell, whose approval lives solely in "
+        assert len(leaves) == 53, (
+            "tool_permissions holds all 28 tools and tool_approvals holds "
+            "all but the three whose approval lives solely in "
             "shell_approval_mode")
         assert marked - leaves == expected
 
@@ -254,7 +257,10 @@ class TestTheRoundTripIsLossless:
         # 115 since batch 91: `model_call_max_retries` and
         # `model_call_retry_base_delay_s`. 120 since batch 94: the five
         # background-session limits (ROADMAP_v3 §49, SS12).
-        assert touched == 120, f"{touched} settable scalars, expected 120"
+        # 128 since batch 95: the five session tools' permission flags, and
+        # approvals fields for the three of them the shell mode does not
+        # gate (SS11, SS16).
+        assert touched == 128, f"{touched} settable scalars, expected 128"
         assert config_edit._dump(tree) == text
 
     def test_a_one_value_change_is_a_one_line_diff(self, tmp_path,
@@ -368,7 +374,7 @@ class TestTheTablesCanBeAskedAbout:
     def test_a_table_is_found_and_explained(self):
         row = config_edit.find("tool_permissions")
         assert row is not None
-        assert "23 tools" in row.values
+        assert "28 tools" in row.values
         lines = " ".join(config_edit.explain("tool_permissions"))
         assert "not a key" not in lines
         assert "AUTHORITY" in lines

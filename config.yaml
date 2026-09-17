@@ -827,7 +827,10 @@ default_context_window: 256000
 # is_tool_allowed() reads this before any context or approval logic and a
 # tool context can never widen it, so a false here cannot be re-enabled at
 # runtime by an agent, a skill or a settings file -- only by editing this
-# file. read / write / edit / shell ship false for that reason.
+# file. read / write / edit / shell ship false for that reason, and so do
+# the five background-session tools after shell: a session is a shell
+# command that keeps running, and enabling one without the others is
+# allowed but rarely useful.
 # Every registered tool must appear in BOTH tables or the harness refuses
 # to start (D24).
 tool_permissions:
@@ -845,6 +848,11 @@ tool_permissions:
   write: false
   edit: false
   shell: false
+  shell_background: false
+  shell_monitor: false
+  shell_sessions: false
+  shell_output: false
+  shell_kill: false
   load_skill: true
   spawn_subagent: true
   pin: true
@@ -857,9 +865,11 @@ tool_permissions:
 
 # AUTHORITY -- whether each tool needs a human yes before it runs. Approval ORs
 # across every layer, so a true here is a one-way ratchet that can only
-# add prompts. `shell` is deliberately absent: shell approval is governed
-# solely by `shell_approval_mode` above -- there is no second switch, so
-# there is nothing here that can disagree with it.
+# add prompts. `shell`, `shell_background` and `shell_monitor` are
+# deliberately absent: their approval is governed solely by
+# `shell_approval_mode` above -- there is no second switch, so there is
+# nothing here that can disagree with it. Listing, reading and stopping a
+# session ask nothing: they act only on this conversation's own sessions.
 # A tool gated here is not merely denied where nothing can ask -- it stops
 # being advertised at all, which is why ask_user, pin and todo_write are
 # ungated.
@@ -877,6 +887,9 @@ tool_approvals:
   read: false
   write: false
   edit: false
+  shell_sessions: false
+  shell_output: false
+  shell_kill: false
   load_skill: false
   spawn_subagent: true
   pin: false

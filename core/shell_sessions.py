@@ -290,6 +290,11 @@ class _Session:
     kill_reason: str = ""
     timed_out: bool = False
     match_count: int = 0
+    # The agent's own kill takes the finish as its RESULT instead of a wake
+    # (`kill`). Claimed and released under the manager lock, which `_finish`
+    # also holds when it reads the claim.
+    kill_report_claimed: bool = False
+    final_event: Optional[WakeEvent] = None
 
     def row(self) -> SessionRow:
         return SessionRow(
@@ -396,11 +401,19 @@ class SessionManager:
         live = [s for s in self._sessions.values() if s.state in LIVE_STATES]
         if len(live) < cap:
             return None
+        # With no owner -- the tools' pre-approval check, which is handed
+        # params and a context and never learns the thread -- say only what
+        # is true of every caller.
         yours = [s.id for s in live if s.owner_thread == str(owner_thread)]
-        mine = (f" Yours: {', '.join(yours)}; stop one with shell_kill, or "
-                f"wait for one to finish." if yours else
-                " None of them is this conversation's, so wait for one to "
-                "finish.")
+        if owner_thread is None:
+            mine = (" List yours with shell_sessions and stop one with "
+                    "shell_kill, or wait for one to finish.")
+        elif yours:
+            mine = (f" Yours: {', '.join(yours)}; stop one with shell_kill, "
+                    f"or wait for one to finish.")
+        else:
+            mine = (" None of them is this conversation's, so wait for one "
+                    "to finish.")
         return (f"{len(live)} background sessions are already running, which "
                 f"is the limit, shared with any subagents.{mine}")
 
@@ -589,14 +602,25 @@ class SessionManager:
             # conversation -- it arrives with their next message. A
             # subagent's session still wakes the subagent, which has no next
             # message.
-            hold = (inbox.suspended
-                    or (session.kill_reason == KILL_USER
-                        and session.owner_depth == 0))
-            (inbox.held if hold else inbox.events).append(event)
+            # The agent's own kill takes this event as its RESULT, so it is
+            # queued for nobody: `kill` is still waiting for it, and a wake
+            # turn telling the agent about a session it just stopped is a
+            # model call nobody needed. Read under the lock `kill` releases
+            # the claim under, so a session that outlives the wait is
+            # reported the ordinary way instead of not at all.
+            claimed = session.kill_report_claimed
+            hold = not claimed and (
+                inbox.suspended
+                or (session.kill_reason == KILL_USER
+                    and session.owner_depth == 0))
+            if claimed:
+                session.final_event = event
+            else:
+                (inbox.held if hold else inbox.events).append(event)
             self._prune_locked()
             self._changed.notify_all()
             rows = self._rows_locked()
-        self._post(rows, None if hold else session.owner_thread)
+        self._post(rows, None if (hold or claimed) else session.owner_thread)
 
     def _event_locked(self, session: _Session, shape: str) -> WakeEvent:
         return WakeEvent(
@@ -760,7 +784,16 @@ class SessionManager:
     def kill(self, session_id: str, *, owner_thread=None,
              reason: str = KILL_MODEL) -> dict:
         """Stop a session and report its terminal state. *owner_thread* None
-        is the user's kill, which may name any session."""
+        is the user's kill, which may name any session.
+
+        A kill the MODEL makes is its own report: this returns what the wake
+        would have said -- the final state, the end of the output, and any
+        matched lines nobody had taken yet -- and no wake follows, because
+        the agent is the one that asked. The claim belongs to the call that
+        SET the reason, so a second killer of the same session does not take
+        a report out from under the first, and it is given back if the
+        session outlives the wait, which puts the finish back on the
+        ordinary wake path rather than dropping it."""
         with self._lock:
             session = self._owned_locked(session_id, owner_thread)
             if session is None:
@@ -770,23 +803,64 @@ class SessionManager:
                 return {"session": session.id, "status": session.state,
                         "return_code": session.return_code,
                         "note": "already finished"}
+            claimed = False
             if not session.kill_reason:
                 session.kill_reason = reason
+                claimed = reason == KILL_MODEL
+                session.kill_report_claimed = claimed
             process = session.process
         if process is not None:
             process.kill()
         with self._changed:
             self._changed.wait_for(lambda: session.state not in LIVE_STATES,
                                    timeout=_KILL_SETTLE_S)
+            if claimed and session.state in LIVE_STATES:
+                session.kill_report_claimed = False
+            elif claimed and session.final_event is not None:
+                return self._kill_report(session.final_event)
             return {"session": session.id, "status": session.state,
                     "return_code": session.return_code}
 
+    @staticmethod
+    def _kill_report(event: WakeEvent) -> dict:
+        """What the agent is told about the session it just stopped."""
+        report = {"session": event.session_id, "status": event.shape,
+                  "return_code": event.return_code,
+                  "elapsed_s": event.elapsed_s, "ran_on": event.ran_on,
+                  "output_tail": event.output_tail,
+                  "output_truncated": event.output_truncated,
+                  "note": "Stopped. This is its final report; you will not "
+                          "be woken for it."}
+        if event.match_count:
+            report["unreported_matches"] = {"count": event.match_count,
+                                            "lines": list(event.lines)}
+        return report
+
     def kill_owned(self, owner_thread, reason: str) -> list[str]:
-        """Kill every live session this thread owns -- a subagent that raised
-        (KILL_OWNER_FAILED) or ran out of wakes (KILL_WAKE_LIMIT)."""
+        """Kill every live session this thread owns -- a subagent that ran
+        out of wakes (KILL_WAKE_LIMIT)."""
         with self._lock:
             ids = [s.id for s in self._sessions.values()
                    if s.owner_thread == str(owner_thread)
+                   and s.state in LIVE_STATES]
+        for session_id in ids:
+            self.kill(session_id, reason=reason)
+        return ids
+
+    def kill_by_span(self, owner_span_id: str, reason: str) -> list[str]:
+        """Kill every live session started inside one agent-shaped run.
+
+        The failure path's answer to a question the thread id cannot be
+        asked: a subagent whose run RAISES never returns its thread, and
+        `agent_activity`'s span is frozen and carries no address (the
+        binding belongs to the sink). The span id is on the session from
+        the moment it started, so what a failed run left behind is
+        identifiable even though its conversation is not."""
+        if not owner_span_id:
+            return []
+        with self._lock:
+            ids = [s.id for s in self._sessions.values()
+                   if s.owner_span_id == owner_span_id
                    and s.state in LIVE_STATES]
         for session_id in ids:
             self.kill(session_id, reason=reason)

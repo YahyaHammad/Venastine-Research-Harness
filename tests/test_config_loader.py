@@ -1147,18 +1147,19 @@ def test_the_shipped_config_yaml_covers_the_whole_schema():
 
 
 def test_the_two_permission_tables_declare_the_same_tools():
-    """The tables agree, up to the one deliberate asymmetry: `shell` needs
-    a permissions field like every tool, but its approval lives solely in
-    `shell_approval_mode`, so `tool_approvals` has no `shell` key. Checked
-    against the SHIPPED file rather than against the registry, so a key
-    added to one table and forgotten in the other is caught without
-    importing the tool layer."""
+    """The tables agree, up to the one deliberate asymmetry: the
+    shell-mode tools need a permissions field like every tool, but their
+    approval lives solely in `shell_approval_mode`, so `tool_approvals`
+    has no key for them. Checked against the SHIPPED file rather than
+    against the registry, so a key added to one table and forgotten in the
+    other is caught without importing the tool layer."""
     import config_schema
+    from security.permissions import APPROVAL_BY_SHELL_MODE
 
     document = config_schema.read_document()
     permissions = set(document["tool_permissions"])
     approvals = set(document["tool_approvals"])
-    assert permissions - approvals == {"shell"}, (
+    assert permissions - approvals == set(APPROVAL_BY_SHELL_MODE), (
         f"only in tool_permissions: {sorted(permissions - approvals)}; "
         f"only in tool_approvals: {sorted(approvals - permissions)}")
     assert approvals - permissions == set()

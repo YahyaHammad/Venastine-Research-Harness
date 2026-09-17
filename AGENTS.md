@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 4827 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 4896 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -1745,7 +1745,42 @@ And slice 1's foundations (batch 94) -- the pieces under the session tools, not 
   `check_output_policy`**, because that text never passes through dispatch.
 - **`RunAgentLoop.wake_conversation` is a wrapper, not a second `_run`** (`test_grants.py` walks for
   exactly one), and it shares `_conversation_prompt` with `run_agent_conversation`, so a wake turn cannot
-  run under a prompt missing the goal, the references or the checklist.
+  run under a prompt missing the goal, the references or the checklist. It takes the run's
+  `authorization` too (batch 95), mutually exclusive with `granted_tools` like its sibling: a wake turn
+  without the route to a human would deny every gated call inside it for a reason about the harness
+  rather than about the request.
+
+And slice 1's tools, the sleeping subagent and the CLI (batch 95):
+
+- **The five session tools are `shell` with a lifetime** (SS11, SS16). `shell_background` and
+  `shell_monitor` are registered with `shell._shell_approval_check` ITSELF, and
+  `security/permissions.py`'s `APPROVAL_BY_SHELL_MODE` is the set exempt from `tool_approvals`;
+  `_assert_shell_mode_exemption` holds those two facts against each other at import, so the exemption
+  cannot outlive the gate that justifies it. Listing, reading and stopping need no approval -- they act
+  only on this conversation's own sessions, each already approved as a command.
+- **All five are hidden wherever nothing would wake the run** (SS17), through `available_check`, and a
+  start is refused there as well. Under `shell_approval_mode: never` the gate answers "no approval", so
+  a research pass would otherwise be offered a tool whose sessions nobody could ever report.
+- **The owning thread is the injected `memory`'s, never a parameter.** A model that could name a thread
+  could reach another conversation's sessions.
+- **A kill the AGENT makes is its own report and wakes nobody.** `SessionManager.kill` returns what the
+  wake would have said -- final state, the end of the output, matches nobody had taken yet -- because a
+  turn spent telling the agent about a session it just stopped is a model call nobody needed. The claim
+  belongs to the call that SET the reason, and is given back if the session outlives the wait, so a slow
+  death is reported the ordinary way rather than dropped.
+- **A subagent SLEEPS INSIDE ITS SPAWN** (SS9). `agents/subagent_tool.py` marks the child as a consumer,
+  runs it, then stays in `_sleep_for_sessions` until nothing is live: each batch is a wake turn in the
+  child's own thread under the SAME prompt, context, channel and grant. D6 is untouched -- one distilled
+  answer still crosses to the parent. Past the wake limit the remaining sessions are killed and one final
+  wake carries them (SS20), because a subagent has no user whose message could reset the count. A child
+  that RAISES has its sessions killed by SPAN id: a span is frozen and carries no thread, so a run that
+  failed before returning one is identifiable anyway.
+- **The CLI waits between turns** (`main._await_sessions`) and runs a wake turn per batch. Ctrl+C there is
+  aimed at the SESSIONS, not at the conversation: they are stopped and the prompt comes back, with their
+  results held for the next message (SS19). Held results are written into the thread before the turn that
+  answers that message, so the model reads them beside it. Quitting with sessions live confirms (SS6),
+  and nobody to ask counts as yes. `main._close_sessions` kills, records a row in each owning thread and
+  sweeps this process's containers -- before `teardown_mcp`, because that row needs the database.
 
 And the four from §28 itself:
 
@@ -2306,7 +2341,7 @@ That example is deliberately a *current* divergence. This paragraph used to cite
 
 **Never name a top-level file after a stdlib or installed package.** A root `logging.py` once silently shadowed stdlib `logging`; hence `logging_setup.py`.
 
-**Registering a tool is four steps**: import the module, `registry.register(ToolSpec(...))`, add a boolean to `config.ToolPermissions` and -- with one deliberate exception -- to `config.ToolApprovals`, and `assert_permissions_declared()` at the bottom of `tools/registry.py` enforces the third at import time (D24). The exception is `shell`, whose approval lives solely in `shell_approval_mode`; a test pins it as the sole exemption. Skipping the declaration used to fail silently — `fetch_url` was registered, documented as working, and denied on every call for its entire life, with the schema still advertised so the model kept choosing it. It now raises `RuntimeError` on import instead. `mcp__*` names are exempt (they get `_default_for_unknown_tool`'s named default).
+**Registering a tool is four steps**: import the module, `registry.register(ToolSpec(...))`, add a boolean to `config.ToolPermissions` and -- with one deliberate exception -- to `config.ToolApprovals`, and `assert_permissions_declared()` at the bottom of `tools/registry.py` enforces the third at import time (D24). The exception is `security/permissions.py`'s `APPROVAL_BY_SHELL_MODE` -- `shell` and the two session tools that start a command -- whose approval lives solely in `shell_approval_mode`; a test pins that set as the sole exemption, and `_assert_shell_mode_exemption` requires each of them to carry shell's own approval check by identity, so the hole cannot outlive the gate that justifies it (§49, SS16). Skipping the declaration used to fail silently — `fetch_url` was registered, documented as working, and denied on every call for its entire life, with the schema still advertised so the model kept choosing it. It now raises `RuntimeError` on import instead. `mcp__*` names are exempt (they get `_default_for_unknown_tool`'s named default).
 
 **A raising tool must not kill the run.** `dispatch()` wraps the handler call and turns any exception into `{"error": ...}`, logged at ERROR with the traceback so a real bug stays findable. `ToolCallDenied` and the unknown-tool `ValueError` are raised *above* the handler and deliberately still propagate. The error result goes through `check_output_policy` like any other — an exception message often carries the request that produced it, and for an HTTP client that means a URL with an API key in it. This is a backstop: `web_search` and `arxiv_search` return their own error dicts after exhausting retries (`fetch_url` always did), so the model gets something specific. The bug that forced this: `arxiv_search` requested `http://export.arxiv.org`, arXiv now 301-redirects it, httpx does **not** follow redirects by default, `raise_for_status()` ignores 3xx, and `ET.fromstring("")` on the empty redirect body raised — three retries, then an exception that flipped a finished ten-pass research run to `status='failed'`.
 

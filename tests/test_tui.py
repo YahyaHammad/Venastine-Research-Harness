@@ -7714,9 +7714,9 @@ class TestTheConfigPanelIsTheCommandPanel:
         assert names == ["config max_iterations"]
 
     def test_both_tool_tables_are_reachable_and_distinct(self):
-        """The user's own example. All 23 tool names live in permissions;
-        all but `shell` -- governed solely by `shell_approval_mode` -- live
-        in approvals, so an unprefixed `shell` could not say which one was
+        """The user's own example. All 28 tool names live in permissions;
+        all but the three governed solely by `shell_approval_mode` live in
+        approvals, so an unprefixed `shell` could not say which one was
         meant."""
         names = [row.name for row in commands.matching("/config tool_")]
         assert "config tool_permissions.shell" in names

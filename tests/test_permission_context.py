@@ -271,16 +271,20 @@ def test_ac5_check_output_policy_still_runs_on_dispatched_results(reg, monkeypat
 def test_ac6_every_registered_tool_declared_in_both_dataclasses():
     """Walks the real registry. Fails on `fetch_url` before §15 -- which
     had been registered, documented as working, and denied on every call
-    for its entire life because the field was never added. `shell` is the
-    deliberate exception: it needs the permissions field like every tool,
-    but its approval lives solely in `shell_approval_mode`."""
+    for its entire life because the field was never added.
+    APPROVAL_BY_SHELL_MODE is the deliberate exception: those tools need
+    the permissions field like every tool, but their approval lives solely
+    in `shell_approval_mode`."""
+    from security.permissions import APPROVAL_BY_SHELL_MODE
+
     permissions = config.ToolPermissions()
     approvals = config.ToolApprovals()
 
     missing = [
         name for name in registry._tools
         if not (hasattr(permissions, name)
-                and (name == "shell" or hasattr(approvals, name)))
+                and (name in APPROVAL_BY_SHELL_MODE
+                     or hasattr(approvals, name)))
     ]
     assert missing == []
 
@@ -307,15 +311,40 @@ def test_ac6_assert_permissions_declared_exempts_mcp_tools():
     assert_permissions_declared(["web_search", "mcp__server__tool"])  # must not raise
 
 
-def test_ac6_shell_is_the_sole_approvals_exemption():
-    """`shell` needs a permissions field like every tool, but no approvals
-    field: its approval lives solely in `shell_approval_mode`, and a
-    second switch there could only force `always`. The exemption is
-    pinned to exactly this one name so a future omission cannot ride in
-    on its precedent -- that is the `fetch_url` defect by another door."""
-    assert_permissions_declared(["web_search", "shell"])  # must not raise
+def test_ac6_the_shell_mode_tools_are_the_sole_approvals_exemption():
+    """`shell` and the two session tools that start a command need a
+    permissions field like every tool, but no approvals field: their
+    approval lives solely in `shell_approval_mode`, and a second switch
+    there could only force `always`. The exemption is pinned to exactly
+    that set so a future omission cannot ride in on its precedent -- that
+    is the `fetch_url` defect by another door."""
+    from security.permissions import APPROVAL_BY_SHELL_MODE
+
+    assert APPROVAL_BY_SHELL_MODE == {"shell", "shell_background",
+                                      "shell_monitor"}
+    # must not raise
+    assert_permissions_declared(["web_search", *sorted(APPROVAL_BY_SHELL_MODE)])
     with pytest.raises(RuntimeError, match="no_such_tool"):
         assert_permissions_declared(["web_search", "shell", "no_such_tool"])
+
+
+def test_ac6_the_exemption_is_what_lets_the_shell_mode_tools_through(
+        monkeypatch):
+    """The narrowness of that hole, asserted from the other side.
+
+    Every other tool carries BOTH fields and every unknown name carries
+    neither, so nothing else in this suite distinguishes "an approvals
+    field is required unless the tool is exempt" from "an approvals field
+    is not required at all" -- and the mutation that made the exemption
+    cover every tool survived the batch 95 pass for exactly that reason.
+    With the set emptied, `shell` must be refused like any other omission.
+    """
+    from security import permissions
+
+    monkeypatch.setattr(permissions, "APPROVAL_BY_SHELL_MODE", frozenset())
+
+    with pytest.raises(RuntimeError, match="shell"):
+        assert_permissions_declared(["web_search", "shell"])
 
 
 # ---------------------------------------------------------------------------

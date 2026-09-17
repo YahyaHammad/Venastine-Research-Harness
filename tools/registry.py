@@ -32,6 +32,7 @@ from safety.policy_enforcement import (
     redacted_values,
 )
 from security.permissions import (
+    APPROVAL_BY_SHELL_MODE,
     assert_permissions_declared,
     is_tool_allowed,
     requires_approval,
@@ -64,6 +65,7 @@ from tools.builtin import (
     project_docs,
     remember,
     shell,
+    shell_sessions,
     symbolic_math,
     todo,
     web_search,
@@ -856,6 +858,26 @@ registry.register(ToolSpec("edit", file_ops.EDIT_TOOL_SCHEMA, file_ops.edit_run,
 # The command text is already in the params; what it does not show is
 # WHERE it runs, and "cat /etc/shadow" does not look like a host read.
 registry.register(ToolSpec("shell", shell.TOOL_SCHEMA, shell.run, approval_check=shell._shell_approval_check, approval_notice=shell._shell_approval_notice, grant_policy=GRANT_NEVER, budget=BUDGET_IO, rationale_param="rationale", headline_param="command"))
+# ROADMAP_v3 §49 (SS11, SS16, SS17). Five tools over background and monitor
+# sessions, and the two that START one are `shell` with a lifetime: the same
+# approval_check OBJECT, because a session runs a command and a second gate
+# over it would be the ratchet G3 removed -- _assert_shell_mode_exemption
+# below requires that identity, which is what ties the missing
+# `tool_approvals` field to the gate that replaces it.
+#
+# available_check rather than a permission: all five are hidden wherever
+# nothing will wake the run when a session reports (a research pass, any run
+# outside a chat turn or a subagent). A start is refused there too, by
+# refusal_check before any approval prompt and again in the handler -- but
+# advertising a tool that can only be refused is the D24 defect, and under
+# `shell_approval_mode: never` nothing else would stop a pass calling it.
+registry.register(ToolSpec("shell_background", shell_sessions.BACKGROUND_TOOL_SCHEMA, shell_sessions.background_run, approval_check=shell._shell_approval_check, approval_notice=shell_sessions.background_notice, refusal_check=shell_sessions.background_refusal, available_check=shell_sessions.available, grant_policy=GRANT_NEVER, budget=BUDGET_IO, rationale_param="rationale", headline_param="command"))
+registry.register(ToolSpec("shell_monitor", shell_sessions.MONITOR_TOOL_SCHEMA, shell_sessions.monitor_run, approval_check=shell._shell_approval_check, approval_notice=shell_sessions.monitor_notice, refusal_check=shell_sessions.monitor_refusal, available_check=shell_sessions.available, grant_policy=GRANT_NEVER, budget=BUDGET_IO, rationale_param="rationale", headline_param="command"))
+# Reading and stopping need no approval (SS11): they act only on sessions
+# this conversation started, which someone already approved.
+registry.register(ToolSpec("shell_sessions", shell_sessions.SESSIONS_TOOL_SCHEMA, shell_sessions.sessions_run, available_check=shell_sessions.available, grant_policy=GRANT_ANYWHERE, budget=BUDGET_IO))
+registry.register(ToolSpec("shell_output", shell_sessions.OUTPUT_TOOL_SCHEMA, shell_sessions.output_run, available_check=shell_sessions.available, grant_policy=GRANT_ANYWHERE, budget=BUDGET_IO))
+registry.register(ToolSpec("shell_kill", shell_sessions.KILL_TOOL_SCHEMA, shell_sessions.kill_run, available_check=shell_sessions.available, grant_policy=GRANT_ANYWHERE, budget=BUDGET_IO))
 registry.register(ToolSpec("load_skill", load_skill.TOOL_SCHEMA, load_skill.run, available_check=load_skill.has_skills, grant_policy=GRANT_ANYWHERE, budget=BUDGET_IO))
 registry.register(ToolSpec("pin", pin.TOOL_SCHEMA, pin.run, available_check=pin.available, grant_policy=GRANT_ANYWHERE, budget=BUDGET_IO))
 # §21/D26 restored (#89): the mirror of pin. Same gating posture (ungated,
@@ -977,6 +999,39 @@ registry.register(ToolSpec(
     parallel=True,
 ))
 
+def _assert_shell_mode_exemption(tools: dict) -> None:
+    """SS16: every tool exempt from `tool_approvals` carries the shell gate.
+
+    `security.permissions.APPROVAL_BY_SHELL_MODE` is a HOLE in D24's
+    import-time check -- the names in it may omit an approvals field -- and
+    the whole argument for the hole is that `shell_approval_mode` decides
+    their approval instead. That argument is true only while they actually
+    go through that gate, so the exemption is tied to it by IDENTITY here
+    rather than by trusting the registration to have done it: a tool that
+    lost its approval_check, or was given one of its own, would otherwise
+    be a command-running tool with no approval question anywhere and
+    nothing to say so. Raises for D24's reason -- the failure it guards
+    against is invisible at runtime.
+    """
+    broken = []
+    for name in sorted(APPROVAL_BY_SHELL_MODE):
+        spec = tools.get(name)
+        if spec is None:
+            broken.append(f"{name} is not registered")
+        elif spec.approval_check is not shell._shell_approval_check:
+            broken.append(f"{name} does not use shell's own approval check")
+    if broken:
+        raise RuntimeError(
+            "These tools are exempt from tool_approvals because "
+            "shell_approval_mode is supposed to gate them, and it does not: "
+            f"{broken}. Either register them with "
+            "shell._shell_approval_check, or take them out of "
+            "security.permissions.APPROVAL_BY_SHELL_MODE and give them a "
+            "tool_approvals field (ROADMAP_v3 §49, SS16)."
+        )
+
+
+_assert_shell_mode_exemption(registry._tools)
 # D24: fail loudly at import if any statically registered tool has no
 # declared permission/approval field. Runs here rather than in
 # security/permissions.py because that file must not import the registry

@@ -1339,6 +1339,24 @@ the tool was added. Allowed by default, matching web_search -- it is
 already constrained by policy_enforcement's blocked-domain list and
 its output goes through secret redaction like every other tool's.
 
+#### `tool_permissions.shell_background` / `shell_monitor` / `shell_sessions` / `shell_output` / `shell_kill`  -- ship `false`
+
+ROADMAP_v3 §49 (SS11). The five background-session tools, shipped disabled
+for `shell`'s reason and not a weaker one: a session IS a shell command, and
+one that keeps running after the call that started it has been answered.
+Enabling them without `shell` is allowed and coherent -- a session is
+classified, approved and routed by exactly the same rules -- but a session
+also holds a container for as long as its timeout, blocks the user's prompt
+while it runs, and can wake the agent, so it is more authority rather than
+less.
+
+The two that START one are approval-gated by `shell_approval_mode` alone
+(SS16) and have no `tool_approvals` key, exactly like `shell`; the three
+that list, read and stop need no approval, because they act only on sessions
+this conversation already had approved. All five are additionally hidden
+wherever nothing would ever wake the run -- a research pass, or any run
+outside a chat turn or a subagent (SS17).
+
 #### `tool_permissions.spawn_subagent`  -- ships `true`
 
 §18: spawning is allowed by default (model autonomy, D6) and needs no
@@ -1411,6 +1429,27 @@ only the global duplicate. An old file still carrying the key is refused
 at startup naming it (unknown keys are refused, always), and the npm-update
 merge drops it as "not a setting in this version" while keeping every
 other edit.
+
+#### `tool_approvals.shell_background` / `shell_monitor`  -- removed, not shipped
+
+ROADMAP_v3 §49 (SS16). There are deliberately no such keys, for the reason
+`tool_approvals.shell` has none: a start tool runs a shell command, so
+`shell_approval_mode` above decides it, and a second switch here could only
+agree with the gate or surprise whoever set the two differently. They are
+registered with shell's own approval check -- by object identity, asserted
+at import in `tools/registry.py` -- so the exemption cannot outlive the gate
+that justifies it.
+
+#### `tool_approvals.shell_sessions` / `shell_output` / `shell_kill`  -- ship `false`
+
+ROADMAP_v3 §49 (SS11): UNGATED, on the axis that separates `pin` from
+`remember`. Listing sessions, reading one's output and stopping one act
+only on sessions this conversation started, each of which was already
+approved as a command; none of them starts anything or reaches outside the
+thread. Gating them would also make them invisible exactly where they are
+needed, since an approval-gated tool is not advertised where nothing can
+ask (§13) -- an agent able to start a session but not to read or stop it is
+the worse failure.
 
 #### `tool_approvals.spawn_subagent`  -- ships `true`
 

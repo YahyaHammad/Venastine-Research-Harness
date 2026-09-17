@@ -14339,3 +14339,127 @@ a user can see, and it stops here so the owner can commit a coherent unit.
   `tests/test_config_edit.py`.
 - Docs: `docs/ROADMAP_v3.md`, `AGENTS.md`, `README.md`, `CONFIG_ARCHITECTURE.md`, `docs/ARCHITECTURE.md`,
   `docs/THIRD_PARTY_NOTICES.md`, `tests/BREAKING_CHANGES.md`.
+
+## Batch 95 -- slice 1's tools, the subagent that sleeps in its spawn, and the CLI (2026-09-17)
+
+### What this batch is
+
+ROADMAP_v3 §49, slice 1, commits 6-8 of the plan: the five session tools, a subagent that stays inside
+its spawn while its sessions run, and the CLI's wait loop. Batch 94 built everything underneath and
+left it unreachable; this is what reaches it. The tools still ship with their permission flags FALSE,
+so a stock install behaves exactly as before -- what changed is that an operator who enables them now
+has something to enable. The TUI is the next batch and the last of the slice.
+
+### Decided before building (owner, three questions)
+
+- **The agent's own kill is its own report.** `shell_kill` returns what the wake would have said --
+  final state, the end of the output, and any matched lines nobody had taken yet -- and no wake
+  follows. A turn spent telling the agent about a session it just stopped is a model call nobody
+  needed. The claim belongs to the call that SET the kill reason, and is given back if the session
+  outlives the wait, so a slow death is still reported the ordinary way rather than dropped.
+- **A start tool is HIDDEN where nothing would wake the run, not merely refused** (SS17 widened).
+  Under `shell_approval_mode: never` the gate answers "no approval", so the headless filter would have
+  advertised a start tool to a research pass -- the one run that can never be woken (F9). All five
+  tools now carry `available_check`, and the refusal stays as the backstop.
+- **The timeout is REQUIRED**, a whole number of at least 1, clamped once by the manager.
+
+### What was built
+
+- **`tools/builtin/shell_sessions.py`** -- the five tools. The two that START one are `shell` with a
+  lifetime: registered with `shell._shell_approval_check` ITSELF, classified by the same
+  `classify_command`, and sharing shell's TOCTOU guard, which was extracted as
+  `shell.fallback_changed_refusal` rather than copied. Arguments are validated in the `refusal_check`,
+  so a call that cannot run never reaches a human (§32 A7). The owning thread is the injected
+  `memory`'s -- never a param, because a model that could name a thread could reach another
+  conversation's sessions.
+- **`security/permissions.APPROVAL_BY_SHELL_MODE`** replaces `name == "shell"` as the set exempt from
+  `tool_approvals`, and `tools/registry._assert_shell_mode_exemption` ties that exemption to the gate
+  BY IDENTITY at import: a start tool that lost shell's approval check would be a command-running tool
+  with no approval question anywhere, and nothing would have said so. Five `tool_permissions` keys and
+  three `tool_approvals` keys, all false.
+- **The subagent sleeps inside its spawn** (SS9). `agents/subagent_tool.py` marks the child as a wake
+  consumer, runs it, then stays in `_sleep_for_sessions` until nothing is live -- each batch a wake
+  turn in the child's own thread under the SAME prompt, context, channel and grant, hoisted into one
+  `common` dict so the two calls cannot drift. Past the wake limit the remaining sessions are killed
+  and ONE final wake carries them (SS20), because a subagent has no user whose message could reset the
+  count. A child that RAISES has its sessions killed by SPAN id -- `SessionManager.kill_by_span`, new
+  this batch -- because a span is frozen and carries no thread, so a run that failed before returning
+  one is identifiable anyway.
+- **The CLI waits between turns** (`main._await_sessions`), runs a wake turn per batch, and treats
+  Ctrl+C there as aimed at the SESSIONS rather than the conversation: they are stopped and the prompt
+  comes back, with their results held for the next message (SS19). `_deliver_held` writes those into
+  the thread before the turn that answers that message; `_quit_confirmed` asks before leaving with
+  sessions live (SS6) and treats nobody-to-ask as yes; `_close_sessions` kills, records a row per
+  owning thread and sweeps this process's containers, before `teardown_mcp` because that row needs the
+  database.
+- **`RunAgentLoop.wake_conversation` takes `authorization=`**, mutually exclusive with `granted_tools`
+  exactly as its sibling's is. Without it a CLI wake turn would run with no route to a human, and every
+  gated call inside it would be denied for a reason about the harness rather than about the request.
+
+### Corrected while there
+
+- **The mutation pass found two defects in this batch's own tests, and one in the pass itself.**
+  `test_a_limit_above_the_cap_is_capped` wrote 200 characters and asserted `<= MAX_READ_CHARS`, which
+  is true of any short page: it SURVIVED the mutation that removed the cap outright. The second draft
+  wrote past the cap but read from offset 0, where a page stops at the head buffer's own bound (10 000)
+  and is shorter than the 50 000 cap either way. It now reads from the TAIL of output longer than the
+  cap and asserts the exact truncation. A second row matched its needle twice (`owner_thread=
+  memory.thread_id` appears in the start handler and in the kill handler) and was SKIPPED rather than
+  run, which is the harness reporting honestly rather than a pass.
+- **A real hole in D24's check, found by the row that survived.** Nothing tested that a tool with a
+  permissions field and NO approvals field raises: every other tool carries both, and every unknown
+  name carries neither, so `assert_permissions_declared` could have stopped requiring an approvals
+  field at all with the whole suite still green. `test_ac6_the_exemption_is_what_lets_the_shell_mode_
+  tools_through` empties `APPROVAL_BY_SHELL_MODE` and requires `shell` to be refused like any other
+  omission. Note for the next pass: the SET itself cannot be mutated into a passing suite -- every
+  spelling of it trips a guard at IMPORT, which the harness reports as ERRORED rather than KILLED, so
+  what a row must mutate is the check that READS it.
+
+### Verification
+
+- Focused runs green at each commit: the tools, the manager and the config tables (731 passed); the
+  subagent (9); the CLI, e2e and harness rows (131). Then the broad set -- every suite this batch could
+  reach, 24 files: **1660 passed, 11 skipped**.
+- **Mutation pass (`mutate95.py`, 26 rows, restoring from in-memory bytes): control green, 26 of 26
+  killed**, every target restored byte for byte -- after the three corrections above. The first pass
+  scored 23: one survivor (the approvals exemption), one skipped needle, and one row whose subject is
+  guarded at import. The rows: the exemption untied from the gate or widened to every tool; a start
+  tool advertised where nothing can wake; a start not refused before approval, or reached with
+  unusable arguments; the owning thread taken from anywhere but the caller's memory; shell's TOCTOU
+  guard skipped; an uncapped output page; the agent's own kill waking it anyway, its claim never
+  released, or claimed by a kill that was not the model's; `kill_by_span` reaching another run's
+  sessions; a subagent returning without waiting, not marked as a consumer, abandoning its leftovers
+  at the limit, dropping the final wake, or waking under a plainer prompt; a failed child's sessions
+  left running; the CLI not waiting, Ctrl+C stopping nothing, held results never reaching the thread,
+  a quit that asks nothing or exits after being declined, and an exit that records nothing, sweeps no
+  containers, or lets its own failure replace the exit.
+- **Full suite: 4874 passed, 2 failed, 20 skipped, 1 deselected in 312 s** -- 4896 selected, the count
+  now quoted in README, AGENTS and ARCHITECTURE. The run's only two failures were the count pins
+  themselves, which is what they are for: `test_the_documented_count_is_the_real_one` against the stale
+  4827, and `test_the_tree_states_a_correct_count_for_every_collected_test_file` against
+  `test_permission_context.py`, whose entry said 22 and whose new pin makes 23. Both corrected, and
+  `tests/test_docs_consistency.py` re-run -- twice, because the first correction read the selected
+  count off passed + skipped and left the two failures out of its own arithmetic.
+- `tests/test_docs_consistency.py` alone: 34 passed, 1 skipped.
+
+### Not done yet, and why it is safe to stop here
+
+- The five tools ship with `tool_permissions` false, like `shell`, so nothing here is reachable on a
+  stock install.
+- The TUI half of slice 1 is the next batch: the session panel, the input block and its refusal funnel,
+  `/kill` and its key, the session view, and what a finished session shows after a restart (SS14,
+  SS18). Until it lands, sessions are a CLI and subagent feature; the TUI can neither start one (its
+  chat turn is not yet marked as a consumer) nor show one.
+
+### Files touched
+
+- New: `tools/builtin/shell_sessions.py`; `tests/test_session_tools.py`, `tests/test_session_subagent.py`,
+  `tests/test_session_cli.py`.
+- Changed: `core/shell_sessions.py` (the kill report and `kill_by_span`), `core/loop.py`
+  (`wake_conversation(authorization=)`), `agents/subagent_tool.py`, `main.py`,
+  `security/permissions.py`, `tools/registry.py`, `tools/builtin/shell.py`, `config_schema.py`,
+  `config.yaml`.
+- Tests: `tests/test_permission_context.py`, `tests/test_shell_sessions.py`, `tests/test_config_edit.py`,
+  `tests/test_config_loader.py`, `tests/test_tui.py`.
+- Docs: `AGENTS.md`, `README.md`, `CONFIG_ARCHITECTURE.md`, `docs/ARCHITECTURE.md`, `docs/ROADMAP_v3.md`,
+  `docs/SECURITY.md`, `tests/BREAKING_CHANGES.md`.
