@@ -4709,3 +4709,26 @@ sleeps until the session's own timeout. Both new test files finish theirs determ
 | Let Ctrl+C during the wait kill the harness | `test_ctrl_c_stops_the_sessions_and_keeps_the_harness` | Kill the sessions, keep the prompt |
 | Start a turn for a kill the USER made | `test_a_user_kill_is_delivered_with_the_next_message` | Held, written with the next message |
 | Quit with sessions live without asking | `test_quitting_with_a_live_session_asks_first` | SS6 |
+
+## Batch 96 -- the digest draws one line and a whole URL; the research panel belongs to its thread
+
+Three defects reported against the shipped TUI, two of them in one producer.
+`safety/policy_enforcement.param_digest` is the single source of the transcript's `▸ name  digest`
+line, `core/replay.py`'s replayed copy and the research pass trace, so both of its defects were
+drawn three times: a multi-line command kept its newlines (measured at three rows, only the first
+indented), and a URL was capped at 60 characters, which left the drawn text a *valid shorter URL*
+that a terminal's own link detector would open instead of the one the harness resolved. The third
+is a call site: `ResearchProgress` was the last piece of per-thread state that survived
+`switch_to_thread` and `/new`.
+
+| Change | Test | Fix |
+|---|---|---|
+| Drop the whitespace collapse from `param_digest` | `test_a_multi_line_command_collapses_to_one_row` | A digest is drawn as ONE row and nothing downstream re-flows it, so every newline it carries is a row at column 0, outside the indent and outside the tool's own line |
+| Collapse whitespace AFTER truncating | `test_the_collapse_happens_before_the_truncation` | Sixty characters has to mean sixty VISIBLE ones. Truncating first spends the budget on whitespace, so the cap cuts a different amount of real text depending on how the command happened to be indented |
+| Widen the per-value URL cap without widening the total | `test_the_total_cap_does_not_re_truncate_a_whole_url` | A value kept whole at 200 and then cut by the 140-character TOTAL is the same visible-text/target mismatch one line further down. Both caps move or neither does |
+| Widen every value instead of only URL-bearing ones | `test_a_digest_with_no_url_keeps_its_old_width` | A `write` digest would start pasting 240 characters of file content into the transcript, which is the thing the general cap exists to stop |
+| Assume a long URL is no longer elided | `TestTheDigestBoundary`, `TestALongURLIsArmedBehindItsTruncation` | Batch 65's elision is UNCHANGED past the wider cap; only where it begins moved. Both suites sweep the new boundary, so a URL past 200 still draws a prefix and resolves through `call_links` |
+| Make `ResearchProgress.reset()` hide the panel | `test_it_starts_hidden_and_a_run_reveals_it`, and `test_todo.py`'s one-way-reveal pins | The reveal is one-way WITHIN a thread on purpose -- a finished run stays readable beside its report. `clear_for_thread()` is a separate method because the argument stops at the thread boundary, not because hiding is generally wanted |
+| Clear the panel in `switch_to_thread` only | `test_new_clears_the_research_panel` | `/new` carries its own copy of that teardown list, so a fix applied to one site leaves the other wrong -- which is how the panel came to be missing from both |
+| Pin `clear_for_thread()` instead of the transitions that call it | — (it is an absence) | The defect was a missing CALL SITE, not a missing method. A widget-level test stays green with both call sites deleted, which is the vacuous version of this assertion |
+| Regenerate the bandit baseline to clear a new finding | — | `bandit.yml` names the procedure and its precondition; batch 96 hand-added two triaged entries instead. On Windows a local run matches NOTHING, because bandit records `.\x.py` where the checked-in baseline has `./x.py` — so a baseline regenerated here would be committed unmatchable in CI. See `TECHNICAL_DEBT.md` 22 |

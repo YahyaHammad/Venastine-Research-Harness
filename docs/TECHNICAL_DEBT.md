@@ -551,6 +551,17 @@ origin is where it goes**. And the work turned up a live defect in batch 58 itse
 carrying userinfo (`https://accounts.google.com@phish.example/x`) was armed and opened
 `phish.example`. See DEVLOG batch 65.
 
+**Reopened and closed again in batch 96, one layer out.** The resolution above was measured
+working — the click opens the whole URL — and the report was still true: ctrl+click went to a
+*truncated* address. The cause is not in the harness at all. `https://host/a/b…` minus its
+ellipsis is itself a valid URL, so the TERMINAL's own link detector reads a shorter address out
+of the drawn text, and it never sees `_links`. Nothing the harness stores can fix a decision
+another program makes from the pixels. So batch 96 stopped producing the mismatch: a value
+carrying a URL is capped at 200 rather than 60, the visible text is the target again for an
+ordinary URL, and the elision above still governs everything past the wider cap. The lesson is
+the one this file keeps recording — *the fix belongs where the divergence is produced* — with a
+twist worth keeping: here the producer was ours and the consumer was not.
+
 ## 17. Block quotes render as written (open, deferred batch 58)
 
 `> quoted text` gets no treatment: the marker is drawn and a wrapped row returns to column 0,
@@ -718,6 +729,20 @@ hide both. Whoever takes it should first establish whether the baseline is
 merely stale or was generated under a different bandit, since a version
 mismatch unmatches findings wholesale and looks identical.
 
+**Measured in batch 96: it is neither stale nor a version mismatch. It is the path
+separator.** Bandit records `os.path.join(".", f)`, which is `./x.py` on Linux and `.\x.py` on
+Windows, and it matches a baseline entry on the filename among other fields. The checked-in
+baseline is the Linux form CI produces, so on this machine *nothing* matches and a local run
+reports the whole tree as new — which is exactly the "~250 unmatched findings" above, and why
+the same baseline is green in CI on the same commit. So the local exit 1 is a platform
+artifact and not evidence about the baseline's freshness.
+
+Two consequences for whoever picks this up. A local `bandit` run is **not** a check of the
+baseline here; convert the filenames to the Windows form first (batch 96 did this against a
+scratch copy to verify two new entries actually matched). And a baseline regenerated on
+Windows would be checked in with `.\` filenames and would silently match nothing in CI, which
+is the more expensive half of this to learn by accident.
+
 ## 23. The transcript does not reflow on a terminal resize (open, 2026-09-14)
 
 Rows already drawn keep the width they were drawn at when the terminal is
@@ -792,3 +817,35 @@ shells to discard the span (core/events.py has no error variant, on purpose
 -- consumers rely on a real exception propagating), and a transcript able to
 retract rows RichLog has already stored as Strips, plus the entry log and
 the label that span opened. Both are real designs of their own.
+
+## 26. An unset `AGENT_WORKSPACE` makes the harness its own project (open, 2026-09-17)
+
+Measured in batch 96, from an owner report after launching a fresh install on a new machine:
+the harness asked to trust its **own** `AGENTS.md`.
+
+With `AGENT_WORKSPACE` unset and the harness launched from its install tree, `WORKSPACE_DIR`
+defaults to `./workspace`, which resolves inside the harness — and `check_workspace` *exempts*
+it, deliberately, via `WRITABLE_INSIDE_HARNESS` (`workspace`, `output`), which is what keeps
+the shipped layout usable. Launch therefore proceeds, and `main.py` then resolves
+`project_path` to `os.getcwd()` because `WORKSPACE_DIR_EXPLICIT` is False. That is the install
+tree. So D17 trust, `.venastine/`, `/init`'s destination and project-scoped memories all point
+at the harness, and the trust prompt lists the harness's own `AGENTS.md` (measured:
+`content_files` returns `['AGENTS.md']`, `is_trusted` False).
+
+**The disparity is the defect.** Naming the same directory explicitly is already REFUSED
+(`AGENT_WORKSPACE=<harness root>`, measured), as is any non-exempt subfolder. Only the
+implicit path gets through, so the guard's own rule is enforced when you say it and skipped
+when you don't.
+
+**Owner decision (2026-09-17): refuse to launch and say `AGENT_WORKSPACE` has to be set** —
+"this way there is no disparity once the harness is running." Recorded rather than built,
+because batch 96 was scoped to CI and the transcript defects; it lands after §49 slice 1.
+
+Prescription for the implementing batch. Guard in `main.py` **after** `project_path` is
+resolved (it is currently computed right below `check_workspace`), returning 2 like the
+existing refusal and naming the variable in the message. Scope it to `project_path ==
+harness_root()` — equality, not containment — so an explicitly chosen `<harness>/workspace`
+keeps working and only the install tree itself is refused. **Budget for the blast radius:**
+about thirty `main.main([])` calls in `tests/test_cli.py` run from the repo root and would hit
+the new refusal; extend the shared `startup` fixture rather than editing thirty tests, taking
+the seam from the existing `check_workspace` monkeypatch in that file.

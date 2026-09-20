@@ -43,9 +43,10 @@ import logging
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Optional
 
 import config
 from core import agent_activity

@@ -29,7 +29,8 @@ Pure apart from `record_killed_at_quit`, which writes through core.memory.
 
 from __future__ import annotations
 
-from typing import Callable, Iterable, Optional
+from collections.abc import Callable, Iterable
+from typing import Optional
 
 import config
 from core.shell_sessions import (
@@ -41,7 +42,6 @@ from core.shell_sessions import (
     KILL_USER,
     KILL_WAKE_LIMIT,
     KILLED,
-    KIND_MONITOR,
     SHAPE_MATCHED,
     TIMED_OUT,
     SessionRow,

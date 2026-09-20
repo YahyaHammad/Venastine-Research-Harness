@@ -54,6 +54,7 @@ from core.client import (
 )
 from core.events import LoopEvent
 from core.memory import ConversationMemory
+from safety.policy_enforcement import redact_secrets
 
 # §27 (T1). The loop is where a thread's kind is DECIDED -- it knows which
 # of its three entry points is running -- and storage.create_thread is
@@ -63,7 +64,6 @@ from storage import (
     THREAD_KIND_RESEARCH_PASS,
     THREAD_KIND_SUBAGENT,
 )
-from safety.policy_enforcement import redact_secrets
 from tools.base import GRANT_NEVER
 from tools.context import RunInfo, ToolContext
 from tools.registry import ToolCallDenied, registry

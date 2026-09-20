@@ -3523,6 +3523,11 @@ class VenastineApp(App):
         # transcript's entry log, which `reset()` below drops.
         self._last_run = None
         self._live_claims = {}
+        # Batch 96, and it belongs to the two lines above rather than
+        # beside them: the panel IS the visible half of `_last_run`, and
+        # clearing the fact while leaving the drawing of it on screen is
+        # the stale-panel bug this comment block already argues against.
+        self._research_progress.clear_for_thread()
         self._tool_names.clear()
         self._file_calls.clear()
         # §47. Keyed by the call ids of the thread being left, so a map
@@ -4246,6 +4251,10 @@ def _cmd_new(app: VenastineApp, args: str) -> None:
     # log it reads.
     app._last_run = None
     app._live_claims = {}
+    # switch_to_thread's list gains the research panel for switch_to_thread's
+    # reason (batch 96): /new left the previous thread's run drawn in the
+    # sidebar, failed or finished alike, under a thread that never ran it.
+    app._research_progress.clear_for_thread()
     app._tool_names.clear()
     app._file_calls.clear()
     # §47, on that list for that reason: these keys belong to the

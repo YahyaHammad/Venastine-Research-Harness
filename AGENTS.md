@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 4896 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 4912 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -148,7 +148,7 @@ made the move free: no import changed, and `tests/test_docs_consistency.py` is t
 opens any of these files (its `DOCS` constant is where the path now comes from).
 
 - **docs/ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49 onward, in progress) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A15 from §32, W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 and SS1–SS24 from §49). Section and D-numbers are stable and cross-referenced everywhere.
+- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49 onward, in progress) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A15 from §32, W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 SS1–SS24 from §49, NW1–NW5 from §50 and PG1–PG4 from §51). Section and D-numbers are stable and cross-referenced everywhere.
 
 **Six namespaces use the same `LETTER+NUMBER` shape, and only the first is the
 record.** An id that resolves to two places is a cross-reference that fails
@@ -451,6 +451,18 @@ exactly ONE candidate has the visible part as its prefix, and when the whole aut
 visible — a run cut off inside its host stays literal. Targets are stored in `_links`
 beside `_entries` (a rendering fact, not part of what was said), which is why `rerender()`
 and `reset()` both have to touch it, and why `ReplayEntry` grew a third element.
+
+**A value carrying a URL is capped at 200, not 60 (batch 96), because the mismatch was
+never ours to keep.** The resolution above works — measured end to end, the click opens the
+whole URL — but the drawn text `https://host/a/b…` minus its ellipsis is *itself* a valid
+URL, and a terminal's own link detector reads exactly that. So ctrl+click offered a
+**shorter address than the harness had resolved**, reported as the link going somewhere
+wrong. Nothing in the harness could fix it, since the terminal never sees `_links`: the fix
+is to stop producing a visible-text/target mismatch for ordinary URLs at all. `_DIGEST_URL_CHARS`
+and `_DIGEST_URL_TOTAL` move **together** — a value kept whole at 200 and then cut by the
+140-character *total* is the same mismatch one line down — and the total widens only for a
+digest that actually holds a URL, so a `write` digest keeps the width it always had. Past
+200 the batch 65 machinery above is unchanged and is still what arms the span.
 
 **A URL the harness REWROTE is not a link.** Two refusals added in batch 65, both found
 by measurement rather than by reasoning. `clickable` now rejects **userinfo**: 
@@ -2372,6 +2384,7 @@ All tests run offline: zero network, zero real API keys. The **root** `conftest.
 ### Before calling a change done
 
 - Did you run (or `py_compile`) every file you touched, and run `pytest`?
+- Did you run `ruff check .` and bandit with the CI job's own flags? Neither runs under `pytest` and both gate every push, so a batch that skips them arrives red — which is how the push carrying batch 94 landed six lint errors and two new bandit findings, every one of them mechanical.
 - Did you grep for every other call site sharing the root cause of what you just fixed?
 - Did you trace the fix against the real module, not the fake?
 - Does the new test fail if the fix is reverted, asserting the field/shape that was actually wrong?

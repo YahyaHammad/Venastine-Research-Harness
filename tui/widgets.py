@@ -1119,6 +1119,36 @@ class ResearchProgress(Static):
         self.display = True
         self._redraw()
 
+    def clear_for_thread(self) -> None:
+        """Drop the run and hide, because the session changed threads.
+
+        THE ONE-WAY REVEAL ABOVE IS DELIBERATE and stays (TodoPanel is the
+        panel that hides again, for the reason its own tests record): a
+        finished run's shape is worth reading while its report is on
+        screen. That argument is about the thread the run belongs to, and
+        it stops at the thread boundary.
+
+        This panel was the last piece of per-thread state that survived a
+        switch. `switch_to_thread` and `/new` already clear `_last_run`,
+        `_live_claims` and the transcript on the stated rule that a stale
+        panel pointing at the wrong thread is WRONG where a blank one is
+        merely unhelpful -- and the research panel, which is the most
+        panel-shaped thing in the sidebar, was missed at both sites. A
+        failed run stayed on screen under a thread that never ran it, and
+        so did a successful one; nothing distinguished them, because
+        nothing cleared either.
+
+        CLEARED rather than reloaded, and that is forced rather than
+        chosen: a `PipelineRun` records its own pass threads and has no
+        column naming the chat thread that launched it, so "this thread's
+        run" is not a question the database can answer. Clearing is also
+        what makes the sidebar agree with `/claims`, which already answers
+        "No research run in this session yet" after a switch.
+        """
+        self.reset()
+        self.display = False
+        self._redraw()
+
     def pass_started(self, pass_id: str) -> None:
         self._passes.append([pass_id, False, False, False, 0, 0])
         self._redraw()

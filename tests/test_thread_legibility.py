@@ -947,7 +947,13 @@ async def test_a_replayed_tool_call_is_as_clickable_as_a_live_one(mocker):
     """
     from tui.app import VenastineApp
 
-    url = "https://example.com/a/very/long/path/that/keeps/going/and/on?page=2"
+    # PAST THE URL CAP (batch 96). A digest now draws a URL whole up to
+    # `_DIGEST_URL_CHARS`, so the 67-character original stopped being
+    # elided at all -- and the ELIDED case is this test's premise and its
+    # whole subject: it is where the target has to ride beside the text,
+    # which is why `ReplayEntry` grew a third element.
+    url = ("https://example.com/a/very/long/path/that/keeps/going/"
+           "and/on?page=2&pad=" + "a" * 160)
     mocker.patch("core.replay.archive_history", return_value=[
         {"role": "assistant", "text": "Looking that up.", "tool_calls": [
             {"id": "t1", "name": "fetch_url", "input": {"url": url}}]},

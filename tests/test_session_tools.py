@@ -21,7 +21,6 @@ from security.permissions import APPROVAL_BY_SHELL_MODE
 from tests.conftest import set_posture
 from tools.base import ToolSpec
 from tools.builtin import shell
-from tools.builtin import shell_sessions as tool
 from tools.registry import _assert_shell_mode_exemption, registry
 
 NAMES = ("shell_background", "shell_monitor", "shell_sessions",

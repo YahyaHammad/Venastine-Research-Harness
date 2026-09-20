@@ -309,6 +309,122 @@ class TestTheParamDigestIsRedacted:
         assert "1" in policy_enforcement.param_digest({"n": [1, 2]})
 
 
+class TestTheDigestIsOneLine:
+    """Batch 96. A digest is drawn as ONE row -- `▸ shell  <digest>` --
+    and nothing downstream re-flows it, so every newline it carries is a
+    row drawn at column 0, outside the indent and outside the tool's own
+    line. Measured before the fix: a heredoc command drew three rows."""
+
+    def test_a_multi_line_command_collapses_to_one_row(self):
+        command = "python3 - <<EOF\nimport socket\nprint(1)\nEOF"
+
+        digest = policy_enforcement.param_digest({"command": command})
+
+        assert "\n" not in digest, f"{digest!r} would draw more than one row"
+        assert "python3 - <<EOF import socket" in digest
+
+    def test_every_kind_of_whitespace_collapses(self):
+        """Tabs and carriage returns are the same defect wearing different
+        bytes -- a CRLF heredoc is the ordinary case on this platform."""
+        digest = policy_enforcement.param_digest(
+            {"command": "a\r\nb\tc   d"})
+
+        assert digest == "a b c d"
+
+    def test_the_collapse_happens_before_the_truncation(self):
+        """Sixty characters has to mean sixty VISIBLE ones. Truncating
+        first would spend the budget on whitespace and then collapse the
+        survivors, so the cap would cut a different amount of real text
+        depending on how the command happened to be indented."""
+        command = "x" * 30 + "\n" * 40 + "y" * 30
+
+        digest = policy_enforcement.param_digest({"command": command})
+
+        assert "y" in digest, \
+            "the newlines were counted against the cap and ate the tail"
+
+
+class TestADigestDrawsAWholeURL:
+    """Batch 96, and the reason is a layer this code does not own.
+
+    Batch 65 made a truncated URL clickable by carrying the untruncated
+    one alongside, so the harness has always opened the right page. The
+    TERMINAL does not know that: `https://host/a/b…` minus the ellipsis
+    is itself a valid URL, so its own link detector offers a SHORTER
+    address than the harness resolved, and ctrl+click opens that one.
+    Drawing the whole URL is what stops the two layers disagreeing.
+    """
+
+    URL = ("https://api.github.com/repos/an-owner/a-repository/contents/"
+           "docs?ref=main")
+
+    def test_an_ordinary_url_is_drawn_whole(self):
+        assert len(self.URL) > policy_enforcement._DIGEST_VALUE_CHARS, \
+            "the premise: this URL is past the GENERAL cap"
+
+        digest = policy_enforcement.param_digest({"url": self.URL})
+
+        assert digest == self.URL, (
+            f"the line draws {digest!r}, so a terminal reading the visible "
+            f"text would open something other than what was fetched")
+
+    def test_a_url_past_the_wider_cap_is_still_elided(self):
+        """The elision did not go away, it moved. Past this cap the batch
+        65 machinery is still what makes the span clickable."""
+        url = self.URL + "&pad=" + "a" * 300
+
+        digest = policy_enforcement.param_digest({"url": url})
+
+        assert digest.endswith("…")
+        assert len(digest) <= policy_enforcement._DIGEST_URL_CHARS
+
+    def test_the_total_cap_does_not_re_truncate_a_whole_url(self):
+        """BOTH caps or neither: a value kept whole at 200 and then cut by
+        a 140-character TOTAL is the same mismatch one line further down.
+
+        THE PREMISES ARE ASSERTED, because the first version of this test
+        was vacuous and the mutation pass is what said so. It used a
+        73-character URL and a short rationale -- about 97 characters
+        together, which never reaches the old 140 total, so it passed with
+        the widened total removed. A pair that does not exceed the OLD cap
+        cannot detect whether the NEW one is applied.
+        """
+        url = self.URL + "&filter=" + "b" * 80
+        rationale = "checking whether the docs tree moved"
+
+        assert len(url) <= policy_enforcement._DIGEST_URL_CHARS, \
+            "premise: this URL is within the per-value URL cap"
+        assert (len(url) + len(rationale)
+                > policy_enforcement._DIGEST_CHARS), \
+            "premise: the pair must exceed the OLD total, or the widened " \
+            "total is never the thing under test"
+
+        digest = policy_enforcement.param_digest(
+            {"url": url, "rationale": rationale})
+
+        assert url in digest, \
+            f"the total cap cut the whole URL back up: {digest!r}"
+
+    def test_a_digest_with_no_url_keeps_its_old_width(self):
+        """The widening is scoped to the values that need it. A `write`
+        call must not start pasting 240 characters of file into the
+        transcript because a URL-shaped cap exists somewhere.
+
+        ASSERTED ON THE VALUE, not on the total, and that is the whole
+        force of it: the mutation that widens EVERY value survived a
+        `len(digest) <= _DIGEST_CHARS` assertion, because the 140-character
+        total re-cut the over-wide value and hid the change. The per-value
+        cap has to be read directly -- one value is truncated to exactly
+        the cap, 59 characters and an ellipsis.
+        """
+        digest = policy_enforcement.param_digest({"content": "z" * 5000})
+
+        assert len(digest) == policy_enforcement._DIGEST_VALUE_CHARS, (
+            "a value carrying no URL must be cut at the GENERAL cap rather "
+            f"than the URL one -- drew {len(digest)} characters")
+        assert digest.endswith("…")
+
+
 # ===========================================================================
 # ---- Every zero-LLM stage is announced ------------------------------------
 # ===========================================================================

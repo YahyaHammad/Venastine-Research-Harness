@@ -21,8 +21,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import config
-from security import capability, protected_paths
-from security import sandbox
+from security import capability, protected_paths, sandbox
 from security.capability import CommandProfile
 from security.sandbox import (
     HOST_READ,

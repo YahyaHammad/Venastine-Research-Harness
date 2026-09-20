@@ -23,6 +23,8 @@ decision record is append-only, and a deviation is recorded as an owner decision
 ## Index
 
 - **§49. Shell sessions, the container runtime, and where a command can run** — **(IN PROGRESS: slice 0, Podman, BUILT in batch 93; slice 1's foundations -- pattern engine, wake row, session backends, manager, wake builder -- BUILT in batch 94; its five tools, the subagent asleep in its spawn and the CLI's wait loop BUILT in batch 95; the TUI next)** (the shell was one-shot and blocking, so a test suite could not outlive a turn and nothing could wake the agent; a machine with Podman and no working Docker had no sandbox at all)
+- **§50. Declared network for a shell command** — **(RECORDED in batch 96, not built)** (the network detector reads command TEXT against a fourteen-word list, so a command it cannot see is auto-approved into `--network none` and fails with no way for the user to have allowed it)
+- **§51. Paging for network tool results** — **(RECORDED in batch 96, not built)** (`fetch_url` and `arxiv_search` truncate with no offset, so the agent cannot reach past the first page without shelling out to a raw HTTP request)
 
 ---
 
@@ -195,3 +197,75 @@ Then background subagents as their own section (SS10).
   container route until its cgroups are fixed.
 - Unmeasured: Podman on Windows (`podman machine` and `C:\` bind paths), rootless cgroups v1, and SELinux
   relabelling of bind mounts.
+
+---
+
+## §50. Declared network for a shell command
+
+**Added in batch 96, from an owner report**, and recorded rather than built: the batch was scoped to CI and
+two transcript defects. It is the first §49-adjacent section because it is the same subject -- where a
+command runs and what it is allowed to reach -- and because it must cover the session tools §49 just built.
+
+### What was measured (2026-09-17)
+
+- `_needs_network` is a **lexical** test: it reads the command's tokens against
+  `config.network_allowed_commands` (14 words -- `pip`, `curl`, `wget`, `git`, `npm`, `apt`, `cargo` and so
+  on) and answers from the words alone. It refuses to parse, deliberately (G2).
+- A command it DOES recognise is never auto-approved: `network=True` makes the tier `SANDBOXED_NET`, and
+  `auto_approved` returns False under `contained` and `tiered` alike. That half works.
+- A command it cannot see -- `python3 - <<EOF ... urllib.request ...`, an inline `node` fetch, a script that
+  opens a socket -- profiles `network=False`, is **auto-approved** under `contained`, and then runs under
+  `--network none`. The user is never asked, so there is no answer they could have given.
+- The model is never told. `shell`'s schema describes where a command runs and says nothing about egress, so
+  a failed connection reads to the agent as a broken network rather than a withheld one.
+
+### Decisions (NW1-NW5)
+
+| # | Decision |
+|---|---|
+| **NW1** | **The agent declares intent with a `requires_network` boolean**, beside `rationale`: a thing it states, not a thing the harness infers from text it has refused to parse |
+| **NW2** | **The flag is OR'd into the existing single `network` fact, never an override.** `network = _needs_network(...) or requires_network`. It can only ADD egress, so a model cannot clear the flag on `curl` to dodge a prompt, and the one fact keeps its two consumers (the gate and the runner) reading the same value -- the property #157 cost us when they drifted |
+| **NW3** | **Nothing new gates it.** Once the fact is true the existing ladder does the work: tier `SANDBOXED_NET`, `auto_approved` False under `tiered` and `contained`, so a modal appears exactly where the settings allow one. Under `never` nothing asks and under `always` everything does, which is the owner's "only force a modal where the user's settings would have produced one" |
+| **NW4** | **The session tools take it too** (owner's addition). `shell_background` and `shell_monitor` classify through the same `classify_command` and `start_sandboxed` already passes `profile.network` into the container argv, so the flag reaches a session unchanged. Interactive inherits it in slice 2, where network is fixed when the session opens |
+| **NW5** | **The schema says what the flag means**, because a parameter the model cannot see the point of is one it will not set: that a command needing the network must say so, and that without it the command runs with networking off |
+
+### Gap register
+
+- Threads through `classify_command` and its three production callers (`shell.run`, `shell._shell_approval_check`
+  and the session start handler), which must agree or the gate and the runner diverge again.
+- The approval notice should say that egress was REQUESTED, not merely that the tier needs it.
+- Open: whether a declared-network command that the detector also recognises should read any differently on
+  the prompt (probably not -- one fact, one sentence).
+
+---
+
+## §51. Paging for network tool results
+
+**Added in batch 96, from an owner report**, recorded rather than built.
+
+### What was measured (2026-09-17)
+
+- `fetch_url` returns `body[:5000]` with a `truncated` flag and **no offset**, so there is no second page to
+  ask for. A second bound sits under it: `MAX_CONTENT_BYTES = 65_536` stops the read, so even with an offset
+  nothing past 64 KB exists to page into without fetching again.
+- `arxiv_search` **hardcodes `"start": 0`** -- the arXiv API's own paging parameter -- and caps each abstract
+  at `MAX_SUMMARY_CHARS = 600`.
+- `web_search` caps each snippet at `MAX_SNIPPET_CHARS = 300`.
+- The workaround the agent is left with is a raw HTTP request through `shell`, which is the surface §50 is
+  about: it converts a reading task into a code-execution one.
+
+### Decisions (PG1-PG4)
+
+| # | Decision |
+|---|---|
+| **PG1** | **Mirror the `read` tool's shape**, which already solved this for files: an `offset`, a count clamped to a maximum with a NOTE rather than an error, and a message naming the offset to use next. One paging vocabulary across the tools that have one |
+| **PG2** | **`fetch_url` gains `offset`**, and `MAX_CONTENT_BYTES` rises with the reachable window so the byte bound cannot silently cap the page count. The cost is stated to the model: a page is a re-fetch, not a seek into something already held |
+| **PG3** | **`arxiv_search` exposes `start`**, which the provider already implements, so paging results costs nothing but the parameter |
+| **PG4** | **A truncated value says how to get the rest.** The present `truncated: true` tells the model something was lost and nothing about how to recover it, which is what sends it to the shell |
+
+### Gap register
+
+- `fetch_url`'s result shape is consumed by the grounding passes and by `output_writer`'s sources directory;
+  added keys are safe, changed ones are not.
+- Open: whether a page should be cached for the length of a run so a second page is not a second fetch of
+  the same body, and what that would cost in memory for a 64 KB-per-URL window.

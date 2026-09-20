@@ -312,7 +312,7 @@ class TestLifecycle:
     def test_utf8_split_across_reads_decodes_whole(
             self, manager, session_starter):
         _start(manager)
-        encoded = "café ✓\n".encode("utf-8")
+        encoded = "café ✓\n".encode()
         process = _process(session_starter)
         for byte in encoded:
             process.write(bytes([byte]))

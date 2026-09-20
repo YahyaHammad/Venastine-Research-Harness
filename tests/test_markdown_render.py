@@ -1043,7 +1043,16 @@ class TestAnElidedURLResolvesToWhatItWasCutFrom:
 class TestTheDigestBoundary:
     """Swept where the cap actually bites rather than at a comfortable
     middle, which is batch 62's lesson: away from the edge every one of
-    these renders the same and proves nothing."""
+    these renders the same and proves nothing.
+
+    THE EDGE MOVED IN BATCH 96 and the sweep moved with it. A value
+    carrying a URL is capped at `_DIGEST_URL_CHARS` rather than the
+    60-character general cap, so that the drawn text is the whole URL and
+    a terminal's own link detector cannot read a shorter address out of
+    the line than the harness resolved. Past the wider cap the elision is
+    exactly as it was, which is what the last two rows below still pin --
+    the point was never that URLs stop being elided, only that an
+    ordinary one no longer is."""
 
     HOST = "https://example.com/"
 
@@ -1058,7 +1067,8 @@ class TestTheDigestBoundary:
         return redacted_values({"url": url})
 
     @pytest.mark.parametrize("length, elided", [
-        (59, False), (60, False), (61, True), (200, True),
+        (59, False), (60, False), (61, False), (200, False),
+        (201, True), (400, True),
     ])
     def test_the_url_is_armed_at_every_length(self, length, elided):
         url = self.HOST + "a" * (length - len(self.HOST))

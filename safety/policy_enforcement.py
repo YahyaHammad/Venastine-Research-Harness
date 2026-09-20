@@ -391,6 +391,28 @@ def redact_output_text(text: str) -> str:
 _DIGEST_VALUE_CHARS = 60
 _DIGEST_CHARS = 140
 
+# A VALUE CARRYING A URL GETS ITS OWN, WIDER CAP, and the digest a wider
+# total to hold one (batch 96).
+#
+# Batch 65 made a truncated URL clickable by carrying the whole one
+# alongside the line, so the click has always opened the right page. What
+# it could not fix is the TERMINAL: `https://host/a/b…` minus the ellipsis
+# is itself a syntactically valid URL, so a terminal's own link detector
+# sees a shorter address than the harness resolved and ctrl+click opens
+# THAT -- measured, and reported as the click going somewhere wrong.
+#
+# The honest fix is to stop producing the mismatch: draw the whole URL, so
+# the visible text is the target again and the two layers cannot disagree.
+# `markdown.link_spans`' elision stays for anything past this cap, where
+# the invariant is still "the visible text tells you the origin".
+#
+# BOTH CAPS MOVE OR NEITHER DOES. A 200-character value cut at a
+# 140-character TOTAL is the same mismatch one line further down, which is
+# why the total is raised only for a digest that actually holds a URL --
+# every other digest keeps the width it has always had.
+_DIGEST_URL_CHARS = 200
+_DIGEST_URL_TOTAL = 240
+
 
 def param_digest(params, omit=()) -> str:
     """A short, REDACTED description of what a tool was called with.
@@ -435,6 +457,7 @@ def param_digest(params, omit=()) -> str:
     if not isinstance(params, dict) or not params:
         return ""
     parts = []
+    widened = False
     for key, value in params.items():
         if key in omit:
             continue
@@ -446,12 +469,34 @@ def param_digest(params, omit=()) -> str:
         # like every other pattern substitution; it stays display-only
         # and never logs, whatever the switch reads.
         text = redact_output_text(text)
-        if len(text) > _DIGEST_VALUE_CHARS:
-            text = text[:_DIGEST_VALUE_CHARS - 1] + "…"
+        # ONE LINE, and the collapse happens BEFORE the truncation so that
+        # sixty characters means sixty VISIBLE ones (batch 96). A digest is
+        # drawn as a single row -- `▸ shell  <digest>` -- and nothing
+        # downstream re-flows it, so a multi-line command (a heredoc, an
+        # inline `python3 - <<EOF`) drew its remaining lines at column 0
+        # underneath, outside the indent and outside the tool's line. The
+        # transcript, `core/replay.py` and the research pass trace all read
+        # this one producer, so all three drew it.
+        #
+        # AFTER the redaction, which is the ordering this function exists
+        # to hold: the redactor works on whole strings, and collapsing
+        # first would not change what it matches, but doing it after keeps
+        # the rule "redact, THEN shorten" true of every step below it.
+        text = " ".join(text.split())
+        # `http` is a FILTER, not a grammar: which substrings are URLs is
+        # `tui/markdown.py`'s question, asked there against one definition.
+        # This only declines to widen a value that cannot contain one --
+        # the same test, and the same reasoning, as `redacted_values`.
+        has_url = "http" in text
+        widened = widened or has_url
+        cap = _DIGEST_URL_CHARS if has_url else _DIGEST_VALUE_CHARS
+        if len(text) > cap:
+            text = text[:cap - 1] + "…"
         parts.append(text)
     digest = "  ".join(p for p in parts if p)
-    if len(digest) > _DIGEST_CHARS:
-        digest = digest[:_DIGEST_CHARS - 1] + "…"
+    total = _DIGEST_URL_TOTAL if widened else _DIGEST_CHARS
+    if len(digest) > total:
+        digest = digest[:total - 1] + "…"
     return digest
 
 

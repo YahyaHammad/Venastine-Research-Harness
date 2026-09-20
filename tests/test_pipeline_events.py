@@ -371,6 +371,56 @@ class TestTheProgressPanel:
         panel.start_run()
         assert panel.display is True
 
+    def test_a_thread_change_empties_it_and_hides_it_again(self):
+        """Batch 96. The reveal above is one-way WITHIN a thread -- a
+        finished run stays readable beside the report it produced -- and
+        that argument stops at the thread boundary, where the run belongs
+        to a conversation the session has left."""
+        panel = self._panel()
+        panel.pass_started("Pass 0")
+        panel.pass_completed("Pass 0", ok=False)
+        panel.claim_tiered("C1", "HIGH")
+
+        panel.clear_for_thread()
+
+        assert panel.display is False, \
+            "the panel stayed on screen under a thread that never ran it"
+        text = str(panel.content)
+        assert "Pass 0" not in text, \
+            f"the previous thread's run survived the change: {text!r}"
+        assert "high" not in text, \
+            f"the previous thread's claim tiers survived it: {text!r}"
+
+    def test_a_finished_run_is_cleared_exactly_like_a_failed_one(self):
+        """Asked directly, so pinned directly: success is NOT a different
+        case. None of on_research_finished's three branches touches the
+        panel, so a reader who saw only the failed-run test would
+        reasonably assume the failure was what made it stick."""
+        panel = self._panel()
+        panel.pass_started("Pass 0")
+        panel.pass_completed("Pass 0", ok=True)
+
+        panel.clear_for_thread()
+
+        assert panel.display is False
+        assert "Pass 0" not in str(panel.content)
+
+    def test_a_run_started_after_a_thread_change_shows_normally(self):
+        """Hiding is not disabling. A clear that left the panel unable to
+        reveal itself again would trade a stale panel for a missing one,
+        and the second failure is quieter than the first."""
+        from tui.widgets import MARK_RUNNING
+
+        panel = self._panel()
+        panel.pass_started("Pass 0")
+        panel.clear_for_thread()
+
+        panel.start_run()
+        panel.pass_started("Pass 1")
+
+        assert panel.display is True
+        assert f"{MARK_RUNNING} Pass 1" in str(panel.content)
+
 
 @pytest.mark.asyncio
 async def test_ac2_the_tui_renders_pass_boundaries_and_tiers_as_they_happen(mocker):
@@ -416,6 +466,94 @@ async def test_ac2_the_tui_renders_pass_boundaries_and_tiers_as_they_happen(mock
         # the run.
         from tui.widgets import MARK_DONE
         assert f"{MARK_DONE} Pass 3a" in str(panel.content)
+
+
+# ===========================================================================
+# ---- Batch 96: the panel belongs to its thread ----------------------------
+# ===========================================================================
+
+# THESE DRIVE THE REAL TRANSITIONS, and that is the whole point of them.
+# The defect was a MISSING CALL SITE rather than a missing method: the
+# widget had always been able to clear itself, and `switch_to_thread` and
+# `/new` -- which already cleared `_last_run`, `_live_claims` and the
+# transcript on the stated rule that a stale panel is WRONG where a blank
+# one is merely unhelpful -- simply never asked it to. A test against
+# `clear_for_thread()` alone stays green with both call sites deleted,
+# which is the vacuous version of this assertion.
+
+
+def _stub_memory(mocker):
+    """The switch_to_thread harness `test_agent_navigation.py` uses: a
+    thread id is all the panel path needs, and a real ConversationMemory
+    would put this test in the database for no reason."""
+    from uuid import uuid4
+
+    mocker.patch("tui.app.replay_entries", return_value=[])
+    mocker.patch("tui.app.storage.child_threads", return_value=[])
+    mocker.patch("tui.app.ConversationMemory",
+                 lambda thread_id=None, kind="chat", **kw: type(
+                     "M", (), {"thread_id": thread_id or uuid4(),
+                               "extra": {}, "messages": []})())
+
+
+async def _panel_with_a_run(app, pilot, *, ok):
+    from tui.widgets import ResearchProgress
+
+    panel = app.query_one("#research-progress", ResearchProgress)
+    panel.start_run()
+    panel.pass_started("Pass 0")
+    panel.pass_completed("Pass 0", ok=ok)
+    await pilot.pause()
+    assert panel.display is True, "the premise: a run is drawn in the sidebar"
+    return panel
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ok", [False, True])
+async def test_a_thread_switch_clears_the_research_panel(mocker, ok):
+    """Reported for a FAILED run; parametrised because success was never
+    different. Nothing in on_research_finished's three branches touches
+    the panel, so both outcomes stuck for one reason."""
+    from uuid import uuid4
+
+    from tui.app import VenastineApp
+
+    _stub_memory(mocker)
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        panel = await _panel_with_a_run(app, pilot, ok=ok)
+
+        app.switch_to_thread(uuid4())
+        await pilot.pause()
+
+        assert panel.display is False, (
+            "the previous thread's run stayed in the sidebar under a "
+            "thread that never ran it")
+        assert "Pass 0" not in str(panel.content)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ok", [False, True])
+async def test_new_clears_the_research_panel(mocker, ok):
+    """`/new` is the other half. It carries its own copy of
+    switch_to_thread's teardown list, so a fix applied to one site leaves
+    the other one wrong -- which is how the panel came to be missing from
+    both."""
+    from tui.app import VenastineApp, _cmd_new
+
+    _stub_memory(mocker)
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        panel = await _panel_with_a_run(app, pilot, ok=ok)
+
+        _cmd_new(app, "")
+        await pilot.pause()
+
+        assert panel.display is False, (
+            "/new left the previous thread's run drawn in the sidebar")
+        assert "Pass 0" not in str(panel.content)
 
 
 @pytest.mark.asyncio

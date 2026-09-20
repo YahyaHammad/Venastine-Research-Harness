@@ -14463,3 +14463,120 @@ has something to enable. The TUI is the next batch and the last of the slice.
   `tests/test_config_loader.py`, `tests/test_tui.py`.
 - Docs: `AGENTS.md`, `README.md`, `CONFIG_ARCHITECTURE.md`, `docs/ARCHITECTURE.md`, `docs/ROADMAP_v3.md`,
   `docs/SECURITY.md`, `tests/BREAKING_CHANGES.md`.
+
+## Batch 96 -- CI back to green, a digest that draws one line and a whole URL, and a panel that belongs to its thread (2026-09-17)
+
+### What this batch is
+
+Nine items the owner raised between slice 1's tools and slice 1's TUI: two red CI checks and seven
+suspected defects. Every one was checked against the code before anything was written, and the
+measurements moved four of them -- two were not what they looked like, one was already built, and one
+was broader than reported. Scope was the owner's call: CI and the transcript defects now, the three real
+features recorded for after slice 1.
+
+### What measuring changed
+
+- **The ctrl+click defect was real and was not ours.** Batch 65's elision was measured working end to
+  end -- `param_digest` cuts at 60, `redacted_values` carries the whole URL, `link_spans` resolves the
+  span, and the click opens the right page. But `https://host/a/b…` MINUS its ellipsis is itself a valid
+  URL, and the terminal's own link detector reads exactly that out of the drawn text. It never sees
+  `_links`, so nothing the harness stores could fix it. The fix is to stop producing the mismatch.
+- **Networked commands are not "auto-approved and then denied".** A command `_needs_network` RECOGNISES
+  is never auto-approved -- it tiers `SANDBOXED_NET` and `auto_approved` refuses it under `contained` and
+  `tiered` alike. The hole is that the detector is LEXICAL over fourteen words, so `python3 - <<EOF ...
+  urllib.request ...` profiles `network=False`, is auto-approved, and runs under `--network none`. The
+  user is never asked, so there is no answer they could have given. Recorded as §50.
+- **MCP auto-approval already exists.** Per-server `autoApprove` in both tiers, registered through
+  `permissions.set_dynamic_approval_default`, with the project tier behind D17 trust and the v2
+  known-servers store that re-asks once with `autoApprove` named in the prompt. Nothing to build.
+- **The research panel was worse than reported.** Reported for a FAILED run; measured, a finished run
+  behaves identically, because none of `on_research_finished`'s three branches touches the panel. And
+  two threads with failed runs never swap: the panel is fed only by live events and never read back from
+  storage, so it shows the most recent run of the PROCESS. It cannot show a thread's own run at all --
+  a `PipelineRun` records its pass threads and has no column naming the chat thread that launched it.
+
+### What was built
+
+- **CI is green again, and both failures were already committed.** Ruff: seven errors locally (CI saw
+  six; batch 95 added the seventh), all mechanical -- `typing`->`collections.abc`, two genuinely unused
+  imports, an import re-sort, `.encode("utf-8")`->`.encode()`. The `core/loop.py` re-sort was read rather
+  than trusted: it moved the `safety` import above the `§27 (T1)` comment block while leaving that comment
+  attached to the `storage` import it describes, and touched no deferred import.
+- **Two triaged entries hand-added to the bandit baseline** (B311, the retry jitter; B404, a test's
+  `subprocess` import -- which is what the other fourteen baselined B404 entries are). NOT regenerated:
+  `bandit.yml` argues against it and debt item 22 was waiting behind it.
+- **`param_digest` collapses whitespace, before truncating.** A digest is drawn as ONE row and nothing
+  downstream re-flows it, so a heredoc command drew three rows with only the first indented -- measured.
+  Collapsing BEFORE the cut is what makes sixty characters mean sixty visible ones. One producer, so the
+  transcript, `core/replay.py` and the research pass trace were all fixed at once, and the session tools'
+  lines with them.
+- **A URL-bearing value is capped at 200, and the total at 240 with it.** Both or neither: a value kept
+  whole at 200 and then cut by a 140-character TOTAL is the same mismatch one line down. The total widens
+  only for a digest that holds a URL, so a `write` digest keeps the width it always had.
+- **`ResearchProgress.clear_for_thread()`, called from both thread transitions.** The one-way reveal is
+  deliberate WITHIN a thread and stays; the clear belongs at the boundary. `switch_to_thread` and `/new`
+  already cleared `_last_run`, `_live_claims` and the transcript on the stated rule that a stale panel is
+  WRONG where a blank one is merely unhelpful -- and the most panel-shaped thing in the sidebar was
+  missing from both lists. Clearing rather than reloading is forced, not chosen, and it is what makes the
+  sidebar agree with `/claims`, which already answered "no research run in this session" after a switch.
+
+### Corrected while there
+
+- **The mutation pass scored 0/10 on its first run, and the harness was right.** Every row reported
+  SKIPPED (needle matched 0 times) rather than silently patching the wrong place. The cause was this
+  project's recorded trap: the worktree is CRLF (measured -- all three target files are pure CRLF), and
+  needles written with `\n` match nothing. The runner now translates each needle to the file's own
+  endings rather than normalising the file, so the restore stays byte-for-byte.
+- **Two of this batch's own tests were vacuous, and the pass is what said so.** The second run scored
+  8/10. `test_a_digest_with_no_url_keeps_its_old_width` asserted `len(digest) <= _DIGEST_CHARS` and
+  SURVIVED the mutation that widens every value -- the 140 total re-cut the over-wide value and hid the
+  change, so the per-value cap has to be read directly. And `test_the_total_cap_does_not_re_truncate_a_
+  whole_url` used a 73-character URL and a short rationale, about 97 characters together, which never
+  reaches the old total at all: it was killed by the boundary sweep instead and scored RED-UNEXPECTED.
+  Both now assert their PREMISES, so neither can quietly go vacuous again. Third run: 10 of 10.
+
+### Recorded, not built
+
+- **§50, declared network** (NW1-NW5): a `requires_network` boolean OR'd into the existing single
+  `network` fact -- never an override, so it can only add egress and a model cannot clear it off `curl`.
+  Nothing new gates it; the existing ladder does the work. Per the owner's addition it covers
+  `shell_background` and `shell_monitor` now (`start_sandboxed` already passes `profile.network`) and
+  interactive in slice 2.
+- **§51, paging for network tool results** (PG1-PG4): mirror `read`'s `offset` + clamped count + a note
+  naming the next offset. `fetch_url` gains an offset and `MAX_CONTENT_BYTES` rises with it;
+  `arxiv_search` exposes the `start` the provider already implements.
+- **`TECHNICAL_DEBT.md` 26, the workspace defaults to the harness root.** Measured: with
+  `AGENT_WORKSPACE` unset and the harness launched from its install tree, `check_workspace` EXEMPTS
+  `<harness>/workspace` and `project_path` then falls back to `os.getcwd()` -- the install tree -- so the
+  trust prompt lists the harness's own `AGENTS.md`. Naming the same directory explicitly is already
+  refused, which is the disparity. Owner decision: refuse to launch and say the variable has to be set.
+- **`TECHNICAL_DEBT.md` 22 is answered, not just aged.** The baseline is neither stale nor a version
+  mismatch: bandit records `./x.py` on Linux and `.\x.py` on Windows and matches on the filename, so a
+  local run here matches NOTHING and reports the whole tree as new. That is the "~250 unmatched findings",
+  and it is why the same baseline is green in CI on the same commit.
+
+### Verification
+
+- Focused: the three digest files **352 passed**; the five panel/TUI files **930 passed** (no existing
+  test pinned the stale panel, which is why it survived); `test_pipeline_events.py` 31 and
+  `test_research_legibility.py` 54 after the additions.
+- `ruff check .` clean. Bandit with the CI flags against a Windows-form copy of the baseline: **exit 0,
+  zero unsuppressed findings** -- the two new entries match on every field bandit compares.
+- **Mutation pass `mutate96.py`, 10 rows, 10 of 10 killed**, control green, every target restored
+  byte-for-byte. The rows: the collapse removed or moved after the truncation; no value ever treated as
+  carrying a URL; the URL cap back to 60; the value cap widened without the total; EVERY value widened;
+  `clear_for_thread` leaving the panel visible or not dropping the run; and each of the two call sites
+  deleted in turn -- the last two being the original defect, and the reason the panel tests drive the
+  real transitions rather than the widget.
+
+### Files touched
+
+- Changed: `safety/policy_enforcement.py` (the collapse and the two URL caps), `tui/widgets.py`
+  (`clear_for_thread`), `tui/app.py` (both transition sites), `.github/bandit-baseline.json` (+2 entries),
+  and the ruff sweep over `core/loop.py`, `core/session_wake.py`, `core/shell_sessions.py`.
+- Tests: `tests/test_research_legibility.py` (+7), `tests/test_pipeline_events.py` (+7),
+  `tests/test_markdown_render.py` (boundary sweep moved, +2), `tests/test_live_output.py`,
+  `tests/test_session_backends.py`, `tests/test_session_tools.py`, `tests/test_shell_sessions.py`.
+- Docs: `AGENTS.md` (the link contract, the record map, and a lint/SAST line in the batch checklist),
+  `docs/ARCHITECTURE.md`, `docs/ROADMAP_v3.md` (§50, §51), `docs/TECHNICAL_DEBT.md` (16, 22, new 26),
+  `tests/BREAKING_CHANGES.md`.

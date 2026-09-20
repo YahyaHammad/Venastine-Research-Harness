@@ -1628,16 +1628,19 @@ class TestACandidateComesFromWhatTheLineSHOWS:
 class TestALongURLIsArmedBehindItsTruncation:
     """Batch 65's trade, through the real producer.
 
-    `param_digest` caps a value at 60 characters, so the line draws a
-    prefix and an ellipsis while the click opens the whole URL. The
-    invariant that replaces `the visible text is the target` is that the
-    visible text still tells you the ORIGIN -- so the two tests below are
-    one rule read from both sides.
+    `param_digest` caps a URL-bearing value at `_DIGEST_URL_CHARS` (batch
+    96 widened it from the general 60, so an ordinary URL is now drawn
+    whole). Past that the line still draws a prefix and an ellipsis while
+    the click opens the whole URL, and the invariant that replaces `the
+    visible text is the target` is that the visible text still tells you
+    the ORIGIN -- so the two tests below are one rule read from both
+    sides. Both need a URL past the WIDER cap to reach that path at all.
     """
 
     @pytest.mark.asyncio
     async def test_the_click_opens_the_whole_url(self):
-        url = "https://example.com/a/very/long/path/that/keeps/going/and/on?page=2"
+        url = ("https://example.com/a/very/long/path/that/keeps/going/"
+               "and/on?page=2&pad=" + "a" * 160)
         line, links = _call("fetch_url", {"url": url})
         cells, rows = await _harness_line("tool", line, links)
 
@@ -1654,7 +1657,10 @@ class TestALongURLIsArmedBehindItsTruncation:
     async def test_a_host_that_did_not_fit_arms_nothing(self):
         """The pin on the invariant. Nothing on screen would say where
         this goes, so nothing offers to take you there."""
-        url = "https://" + "a" * 70 + ".example.com/x"
+        # Long enough that the cut lands INSIDE the host, which is the
+        # condition being pinned -- so it has to exceed the widened
+        # URL cap, not the old 60-character one.
+        url = "https://" + "a" * 210 + ".example.com/x"
         line, links = _call("fetch_url", {"url": url})
         cells, _rows = await _harness_line("tool", line, links)
 
@@ -1685,7 +1691,12 @@ class TestTheTargetsSurviveWhatTheEntriesDo:
     """The side table is the only thing that can lose them, so both of
     its lifetimes get a pin."""
 
-    URL = "https://example.com/a/very/long/path/that/keeps/going/and/on?page=2"
+    # PAST THE URL CAP, deliberately (batch 96). A URL the digest draws
+    # whole is armed as itself and needs no candidate at all, so a short
+    # one would leave both tests below passing while proving nothing
+    # about the side table they are actually about.
+    URL = ("https://example.com/a/very/long/path/that/keeps/going/"
+           "and/on?page=2&pad=" + "a" * 160)
 
     @pytest.mark.asyncio
     async def test_a_theme_switch_arms_the_same_cells(self):
