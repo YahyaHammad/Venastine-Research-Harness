@@ -598,6 +598,7 @@ The first connection to a **user-level** server asks once, showing the resolved 
 | `/threads` | Conversations-only picker — research runs' internal threads excluded — most recently active first, capped at 200 with a notice (**ctrl+t**) |
 | `/resume <thread-id>` | Open any thread by id, however old |
 | `/new` | Start a fresh thread; created lazily on your next message, so `/new` twice leaves nothing behind |
+| `/kill [session-id]` | Stop a background session. Bare, it opens the picker **ctrl+b** opens; with an id it stops that one. Deliberately usable *while* sessions are blocking the prompt — it is the way out of that block, so it is the one command that never refuses for being busy |
 | `/agent [name\|default]` | Make an agent active for subsequent turns; `default` clears. Active skills are re-checked against the new agent's tool policy |
 | `/goal [text\|clear]` | Persistent objective for this thread — injected into every turn in either shell, mirrored in a banner |
 | `/grill-me` | One turn under the grill-me agent inside the current thread, reading the live history rather than a digest of it |
@@ -609,7 +610,7 @@ The first connection to a **user-level** server asks once, showing the resolved 
 | `/init [--software\|--research] [--config]` | Scaffold the project documentation set; `--config` adds `.venastine/settings.json` and `mcp.json` with default values, and on its own is the whole command |
 | `/quit` | Leave the harness, on one invocation — a typed command is already deliberate. `/exit` and `/bye` are the same command under other names; type toward either and the suggestion list says so |
 
-Keys: **ctrl+c** twice quits — the first press arms it and the footer changes to say so, and it goes back to `Quit` after a couple of seconds; a **ctrl+c** over selected text copies instead and arms nothing, so nothing you copy can end the session. **ctrl+q** quits on a single press, from anywhere, including under a dialog · **ctrl+t** thread picker · **ctrl+l** claims view · **ctrl+j** (or **shift+enter**) newline in the prompt · **up/down** and **enter**/**tab** to pick a slash command, **escape** to dismiss the list · **ctrl+click** a URL in an answer — or in a tool line — to open it, or the name on a `spawn_subagent` line to read what that agent did; **ctrl+g** lists the runs going on right now and opens one from the keyboard.
+Keys: **ctrl+c** twice quits — the first press arms it and the footer changes to say so, and it goes back to `Quit` after a couple of seconds; a **ctrl+c** over selected text copies instead and arms nothing, so nothing you copy can end the session. **ctrl+q** quits on a single press, from anywhere, including under a dialog · **ctrl+t** thread picker · **ctrl+l** claims view · **ctrl+j** (or **shift+enter**) newline in the prompt · **up/down** and **enter**/**tab** to pick a slash command, **escape** to dismiss the list · **ctrl+click** a URL in an answer — or in a tool line — to open it, or the name on a `spawn_subagent` line to read what that agent did; **ctrl+g** lists the runs going on right now and opens one from the keyboard · **ctrl+b** stops a background session, and always asks which one rather than killing on a single press. While background sessions are running the prompt and most commands are refused — `ctrl+b`, `/kill`, answering a dialog and quitting stay usable, because they are the ways out.
 
 Answers are rendered rather than printed as their source: tables become grids, headings and `**bold**` take weight, `*emphasis*` and `~~strike~~` take their own marks, code fences are highlighted, and a list item that runs past the edge wraps **under its own text** instead of back to the margin. A line indented four spaces or more is left exactly as written, so a code sample keeps its operators and its `#` comments. What is deliberately not rendered: block quotes, horizontal rules, heading *levels* (a `#` and a `######` look the same), and anything at all inside a reasoning block. `/copy` always hands back the markdown the model wrote — the rendering is what the screen does, never what is stored.
 
@@ -887,7 +888,7 @@ note that shell approval is governed solely by `shell_approval_mode` -- `tool_ap
 deliberately has no `shell` key, so an old file carrying one is refused at startup
 naming the key — see `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 4912 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+Run the test suite with `pytest` — 4961 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
 ## Documentation
 

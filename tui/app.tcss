@@ -511,6 +511,33 @@ AgentPickerScreen {
     align: center middle;
 }
 
+/* ROADMAP_v3 §49 (SS2): the kill picker. Wider than the run picker
+   because its rows carry a command as well as a name, and a command cut
+   at 48 columns is exactly the "which one is this?" the picker exists to
+   answer. */
+#session-kill-dialog {
+    width: 72;
+    height: auto;
+    max-height: 20;
+    padding: 1 2;
+    border: thick $accent;
+    background: $surface;
+}
+
+#session-kill-title {
+    text-style: bold;
+    padding-bottom: 1;
+}
+
+#session-kill-list {
+    height: auto;
+    max-height: 14;
+}
+
+SessionKillScreen {
+    align: center middle;
+}
+
 #thread-dialog {
     width: 70;
     height: auto;

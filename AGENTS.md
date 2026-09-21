@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 4912 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 4961 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -1166,8 +1166,20 @@ stays openable, and the picker answers what can be READ while the panel keeps sa
 RUNNING — the two differ on purpose past the live half.
 **The letter was chosen by elimination and the test MEASURES it** against
 `screen.active_bindings` with the prompt focused, which is the only state where the answer means
-anything: `TextArea` claims a/c/d/e/f/k/u/v/w/x/y/z, `App` claims ctrl+c and ctrl+q, textual claims
-ctrl+p, and this app already held ctrl+t, ctrl+l and ctrl+up/down.
+anything: `TextArea` claims a/c/d/e/k/u/v/w/x/y/z, `App` claims ctrl+c and ctrl+q, textual claims
+ctrl+p, and this app already held ctrl+t, ctrl+l and ctrl+up/down. (That list said **f** as well
+until batch 97, which re-measured it across the whole MRO on the current pin: `ctrl+f` is not bound
+by `TextArea` on 8.2.8. The letter is still not worth taking — "find" is what a reader expects of
+it — but a list presented as a measurement should be one.)
+
+**ctrl+b stops a background session** (ROADMAP_v3 §49, SS2, batch 97), by the same elimination and
+re-measured the same way. What narrows it past the free letters is the TERMINAL rather than
+textual: ctrl+h/i/j/m ARE backspace, tab, LF and CR, and ctrl+s/ctrl+q are software flow control,
+which leaves b, n, o and r. It is the one control SS2 keeps usable while sessions are blocking
+input, which is why it is a key at all — `/kill` is typed into the prompt, and the prompt is where
+the block is felt — and why `check_action` returns **None** rather than False while nothing is
+running: False drops the footer entry and reflows, None greys it, and a control a blocked user
+needs has to stay visible.
 
 **The permission modal names the asking run, and the harness fact is written LAST.** A subagent's
 approvals have always surfaced on the parent's screen — the channel is inherited — and the modal

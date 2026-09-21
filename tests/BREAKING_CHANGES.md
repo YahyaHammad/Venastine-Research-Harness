@@ -4732,3 +4732,37 @@ is a call site: `ResearchProgress` was the last piece of per-thread state that s
 | Clear the panel in `switch_to_thread` only | `test_new_clears_the_research_panel` | `/new` carries its own copy of that teardown list, so a fix applied to one site leaves the other wrong -- which is how the panel came to be missing from both |
 | Pin `clear_for_thread()` instead of the transitions that call it | — (it is an absence) | The defect was a missing CALL SITE, not a missing method. A widget-level test stays green with both call sites deleted, which is the vacuous version of this assertion |
 | Regenerate the bandit baseline to clear a new finding | — | `bandit.yml` names the procedure and its precondition; batch 96 hand-added two triaged entries instead. On Windows a local run matches NOTHING, because bandit records `.\x.py` where the checked-in baseline has `./x.py` — so a baseline regenerated here would be committed unmatchable in CI. See `TECHNICAL_DEBT.md` 22 |
+
+## Batch 97 -- the TUI becomes a wake consumer (ROADMAP_v3 §49, slice 1's behaviour half)
+
+Until this batch a background session could not be started from the TUI at all, and nothing said so.
+SS17 refuses a start unless a wake consumer is registered for the run, `shell_sessions.consuming()` is
+the mark it checks, and nothing under `tui/` had ever entered it -- so the five tools built in batch 95
+were reachable from the CLI and inert in the shell most people use. The fix is one `with` block on the
+turn worker, and everything else in this section follows from the turn now outliving its own generator.
+
+The other half is SS2: a shell can now be occupied for two different reasons. `_busy` was checked at
+eight sites with the same three lines copied between them, and live sessions block the same set of
+actions for a different reason and with a different remedy. `refuse_if_occupied` is the one place the
+question is asked.
+
+| Change | Test | Fix |
+|---|---|---|
+| Enter `consuming()` at the call site instead of inside `_consume` | `test_the_drain_runs_inside_consuming` | It is a ContextVar, and a thread does not inherit its parent's context. The generator runs on the worker, so the mark has to be set there or SS17 refuses every start the turn makes |
+| Give a refusal site its own `_busy` check back | `test_no_handler_still_writes_the_busy_refusal_itself` | Eight sites growing a second clause each is how the two halves of one question drift apart -- and only one of them would learn about sessions. The AST walk asserts the string is written in exactly one place |
+| Ask `_busy` before sessions in the funnel | `test_the_session_message_wins_over_the_busy_one` | While the wait loop runs, `_busy` is true BECAUSE sessions are live. "Still working" is then accurate and useless: it names no way out, and the session message is the only thing telling a blocked user which key un-blocks them |
+| Read `self.memory` in `_session_thread` | `test_a_shell_with_no_thread_does_not_make_one` | The public property constructs a ConversationMemory and writes a thread row on first touch. Asking "is anything running?" must not be what starts a conversation |
+| Drop the `sessions.closing` guard from the wait loop | `test_a_closing_harness_stops_the_loop` (hangs, rather than fails) | `wait_for_wake` returns None instantly once that flag is up, so the loop spins at full speed through teardown. Nothing is left to wake either: the row saying what became of the sessions is written by the quit path |
+| Draw the whole wake row rather than its first line | `test_the_wake_line_is_the_first_line_only` | `core/replay.py` draws the first line only for the same row, so the live line and the replayed one would disagree -- and the rest is program output that can run to thousands of lines |
+| Post the harness line after the turn's events | `test_the_harness_line_precedes_the_turn_it_prompted` | The answer would land above the row that prompted it. One thread posts both, and Textual's queue is FIFO, so ordering is the post order |
+| Call `wake_conversation` from the TUI | — (it is a shape, not a failure) | It drains. Its own docstring says the TUI builds its own generator, as it does for a user's turn, or a wake turn's tool calls and thinking arrive as one blob with no `▸` lines |
+| Write held results with `append_harness_row` | `test_held_results_are_written_through_the_live_memory` | main.py uses it because the CLI holds no ConversationMemory between turns. The TUI always does, and writing straight to storage leaves the live memory one row short of what was persisted -- so the turn about to run sends a history missing the results it is being handed |
+| Deliver held results after `add_user_message` | `test_the_turn_delivers_them_before_the_users_own_message` | They would reach the model as a turn that happened later than the message they were meant to arrive beside (SS19) |
+| Kill from the message pump | `test_killing_happens_off_the_ui_thread` | `SessionManager.kill` waits up to `_KILL_SETTLE_S` (15 s) for the process to die, so the shell would freeze for as long as the thing being killed took to notice |
+| Assert a kill's state to tell a user kill from a model kill | `test_the_kill_is_the_users_and_not_the_models` | Both end at `KILLED`. What distinguishes them is where the event goes: the agent's own kill takes it as its RESULT, the user's is HELD for their next message |
+| Kill outright when exactly one session is live | `test_one_session_still_opens_the_picker` | §49's adopted default, overturned by the owner in batch 97. It made one key mean two things and put the destructive one on the case with no confirmation |
+| Scope the kill picker to the current thread | `test_the_picker_offers_another_threads_sessions_too` | SS11 scopes the TOOLS, because an agent has no business naming a session it did not start. This is the user's kill, and what is blocking them may be owned by a subagent's thread (SS9) |
+| Put `/kill` behind `refuse_if_occupied` | `test_the_command_is_not_behind_the_funnel` | SS2 keeps a kill usable precisely while sessions block everything else. A funnel that refused it would refuse the only way out of the block it enforces |
+| Return False from `check_action("kill_session")` while idle | `test_the_footer_greys_the_key_when_nothing_runs` | False drops the entry and reflows the footer; None greys it. The control a blocked user needs has to stay visible |
+| Put the quit confirmation in `exit()` | `test_an_idle_shell_quits_without_asking` | Every exit route funnels through `exit()` -- a config restart, a programmatic close, the pump unwinding -- and a modal on that path is a shell that cannot be closed. The deliberate routes ask; `exit()` stays unconditional |
+| Leave `_quit_asking` set after a decline | `test_declining_re_arms_the_question` | The shell could never ask again, so the next quit would go straight out past the confirmation SS6 requires |

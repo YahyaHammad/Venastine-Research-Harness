@@ -1053,6 +1053,54 @@ class AgentPickerScreen(ModalScreen[object]):
         self.dismiss(None)
 
 
+class SessionKillScreen(ModalScreen[object]):
+    """Pick a background session to stop. Dismisses with a session id, or
+    None to cancel (ROADMAP_v3 §49, SS2).
+
+    ALWAYS A PICKER, including for a single session, and that is a
+    decision rather than a simplification. §49's adopted default killed
+    outright when exactly one was live and showed this list only for
+    several, which made one key mean two things -- and the destructive
+    one was the case that needed no confirmation. A one-row list costs a
+    keypress and removes the mistyped-ctrl+b case entirely.
+
+    It is also the only thing on screen that says what is running until
+    the sidebar panel lands, which is why the rows carry the command and
+    not just an id.
+
+    The rows arrive already rendered and already REDACTED: the command
+    goes through the same output policy the model's own view of it does,
+    because a modal is a display surface like any other and a secret does
+    not become safe by being shown to the person who typed it.
+    """
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, rows: list[dict]):
+        super().__init__()
+        self._rows = rows
+
+    def compose(self) -> ComposeResult:
+        items = [ListItem(Label(Text(row["label"]))) for row in self._rows]
+        children = [Label("Stop which session?", id="session-kill-title")]
+        if items:
+            children.append(ListView(*items, id="session-kill-list"))
+        else:
+            children.append(Static("Nothing is running.",
+                                   id="session-kill-empty"))
+        yield Vertical(*children, id="session-kill-dialog")
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        index = event.list_view.index
+        if index is not None and 0 <= index < len(self._rows):
+            self.dismiss(self._rows[index]["id"])
+        else:
+            self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class ThreadPickerScreen(ModalScreen[object]):
     """Pick a thread to resume. Dismisses with a UUID, or None to cancel.
 

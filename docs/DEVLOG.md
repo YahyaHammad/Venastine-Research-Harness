@@ -14580,3 +14580,113 @@ features recorded for after slice 1.
 - Docs: `AGENTS.md` (the link contract, the record map, and a lint/SAST line in the batch checklist),
   `docs/ARCHITECTURE.md`, `docs/ROADMAP_v3.md` (§50, §51), `docs/TECHNICAL_DEBT.md` (16, 22, new 26),
   `tests/BREAKING_CHANGES.md`.
+
+## Batch 97 -- the TUI becomes a wake consumer: the wait loop, one refusal funnel, a kill switch and a quit that asks (2026-09-20)
+
+### What this batch is
+
+Slice 1's behaviour half in the TUI (ROADMAP_v3 §49: SS2, SS5, SS6, SS17, SS19). The owner chose the
+seam: behaviour first, display next -- so the sidebar panel, the ctrl+click arming and the session view
+are batch 98, and a blocked user is told what is running by a transcript line and the kill picker until
+then.
+
+### What the survey found before anything was written
+
+- **A session could not be started from the TUI at all, and nothing said so.** SS17 refuses a start
+  unless a wake consumer is registered, `shell_sessions.consuming()` is the mark it checks, and grep put
+  the only `consuming()` in the process in `main.py`. The five tools built in batch 95 were reachable
+  from the CLI and inert in the shell most people use. That single fact set the seam: the display half
+  would have had nothing real to draw.
+- **The manager needed nothing.** `SessionActivity`, `blocks`, `suspended`, `pending`, `take_held`,
+  `live_rows` and `kill` were all already there and already tested. This batch adds no core file.
+- **The sink is not needed yet either.** The CLI's `wait_for_wake(timeout=...)` poll works unchanged on
+  the turn worker, so `SessionActivity` stays a display concern for batch 98 -- one fewer moving part in
+  a batch that did not need it.
+- **`wake_conversation` is the wrong entry point here, and said so itself.** It drains; its docstring
+  already records that the TUI builds its own generator, as it does for a user's turn. Calling it would
+  have delivered a wake turn's tool calls, thinking and answer as one blob with no `▸` lines.
+
+### What was built
+
+- **`consuming()` wraps the drain, inside `_consume`.** It has to be entered on the worker rather than
+  at the call site: it is a ContextVar, a thread does not inherit its parent's context, and the generator
+  runs on that thread. One `with` block is the whole of SS17 for the TUI.
+- **The wait loop lives on the turn worker, before `TurnFinished`.** That is what keeps `_busy` true
+  across the wait, which is not a side effect but the mechanism -- SS2 wants input blocked while sessions
+  are live, and `_busy` already blocks it everywhere the funnel asks. A wake turn is built from the SAME
+  closure as the user's turn, so it runs with the same prompt, model, channel and activity: it is that
+  turn continuing (SS5), and assembling the facts twice is how two turns in one thread come to disagree.
+- **`refuse_if_occupied`, replacing eight copies of one check.** A shell can now be occupied for two
+  reasons, and the second has a different remedy. Sessions are asked FIRST: while the loop runs `_busy`
+  is true BECAUSE sessions are live, so "Still working" would be accurate and useless -- it names no way
+  out, and this message is the only thing telling a blocked user which key un-blocks them.
+- **Held results arrive with the user's next message** (SS19), written through the live
+  `ConversationMemory` rather than main.py's `append_harness_row`: the TUI holds a memory for the thread
+  and writing straight to storage would leave it one row short of what was persisted, so the turn about
+  to run would send a history missing the very results it is being handed.
+- **`/kill` and ctrl+b, always opening a picker.** The key was chosen by elimination against the
+  installed textual (8.2.8, D22) and measured rather than assumed: of what `TextArea`, `App`, textual's
+  palette, `PromptInput` and this app leave free, ctrl+h/i/j/m ARE backspace, tab, LF and CR at the
+  terminal and ctrl+s/ctrl+q are flow control, which leaves b, n, o and r -- and b is the only one that
+  also says what it does. The kill runs on a worker because `SessionManager.kill` waits up to 15 s for
+  the process to die. `/kill` is deliberately NOT behind the funnel: SS2 keeps a kill usable precisely
+  while sessions block everything else.
+- **Quitting with sessions live asks first** (SS6), on the deliberate routes only. `exit()` stays
+  unconditional because every exit funnels through it -- a config restart, a programmatic close, the pump
+  unwinding -- and a modal on that path is a shell that cannot be closed. SS6's other half needed nothing:
+  main.py's `finally` already calls `_close_sessions`, and the TUI runs inside that try.
+
+### Decisions the owner took
+
+- **Behaviour before display**, with the gap named: until batch 98 the only things saying what is running
+  are a transcript line and the kill picker.
+- **The kill key always opens a picker, including for one session** -- overturning §49's adopted default,
+  which killed outright when exactly one was live. That made one key mean two things and put the
+  destructive one on the case with no confirmation. Recorded in §49's adopted defaults, amended in place.
+
+### Corrected while there
+
+- **The mutation pass found a gap no test covered: the hand-off itself.** Disabling the wait-loop call
+  inside `_consume` SURVIVED, because every wait-loop test drove `_wait_for_sessions` directly. The one
+  line joining the turn to the wait was pinned nowhere, so the whole feature could have been dead with a
+  green suite. `test_the_drain_hands_over_to_the_wait_loop` is the positive half of the negative pin that
+  was already there.
+- **A test of mine asserted the wrong contract, and the code was right.** `a killed session is still
+  reported` assumed a user's kill wakes a turn. It does not: `_finish` HOLDS a `KILL_USER` event at
+  `owner_depth == 0` (SS19), because a session the user stopped is not worth a model call of its own --
+  a subagent's still wakes the subagent, which has no next message. The test now pins the real rule.
+- **A vacuous test, caught before the pass ran.** The wake-line cross-check compared one expression to
+  itself, so both halves would have moved together under any change -- batch 96's shape exactly. It now
+  drives a real session through `build_wake` and the same row through `replay_entries`.
+- **`SessionManager.kill` cannot tell a user kill from a model kill by state**: both end at `KILLED`.
+  What distinguishes them is where the event goes, so the test asserts `take_held` rather than the state.
+
+### Verification
+
+- **Mutation pass `mutate97.py`, 19 rows, 19 of 19 killed**, control green, every target restored
+  byte-for-byte. It gained a TIMEOUT this batch: the row removing the `sessions.closing` guard exposes a
+  HANG rather than a failure, so a bound was needed and the verdict is recorded distinctly as
+  KILLED-HUNG -- a hang is real evidence, but not the same evidence as a red test.
+- **Full suite 4941 passed, 20 skipped, 1 deselected** -- 4961 selected, the figure written into
+  `README.md`, `AGENTS.md` and `docs/ARCHITECTURE.md`. A FULL invocation, deliberately: the count pins
+  skip under a filtered one ("filtered invocation collects less than the full suite"), so a targeted
+  re-run proves nothing about the number it is supposed to be checking.
+- `ruff check .` clean -- after it caught three `io.open` calls in this batch's own new tests, which is
+  the checklist line batch 96 added doing its job on the batch straight after. Bandit with the CI flags
+  against a Windows-form copy of the baseline: **exit 0, no unsuppressed findings** (debt 22).
+- **The advertisement claim was measured, not traced.** `available()` returns `has_consumer()`, so the
+  five tools hide themselves where nothing could wake them -- which is why the TUI's inability to start
+  one was silent rather than an error. The mark is entered on the worker and the tool list is built
+  inside `_run_steps`; both are generators, so the list is assembled lazily on that thread, after the
+  mark. That chain reads correctly off the code, and reading is not measuring: without `consuming()`
+  `shell_background` is absent from `registry.schemas(None)` and with it present, so the new pin fails
+  if the mark ever moves to where the generator is CREATED rather than drained.
+
+### Files touched
+
+- Changed: `tui/app.py` (the funnel, the wait loop, held delivery, the kill switch, the quit
+  confirmation, the binding and its `check_action`), `tui/screens.py` (`SessionKillScreen`),
+  `tui/app.tcss` (its styles).
+- Tests: `tests/test_session_tui.py`, new.
+- Docs: `docs/ROADMAP_v3.md` (§49's slice 1 line and the amended adopted default), `docs/DEVLOG.md`,
+  `docs/ARCHITECTURE.md`, `tests/BREAKING_CHANGES.md`, `README.md`, `AGENTS.md`.

@@ -128,8 +128,12 @@ slices. The owner added Podman (slice 0) after the plan was approved.
   sessions kills and exits without asking.
 - Session stderr is merged into stdout; a wake carries a shared tail up to `MAX_READ_CHARS` and up to 50
   matched lines per session with a count; the host-fallback session's `RLIMIT_CPU` is its effective
-  timeout; the kill key is chosen by elimination against the live bindings and opens a picker when more
-  than one session is live; the session view is redacted for display; `_viewing` widens to hold a session;
+  timeout; the kill key is chosen by elimination against the live bindings and **always opens a picker,
+  including for a single session** (amended in batch 97 -- this said "when more than one session is live",
+  which made one key mean two things and put the destructive one on the case that needed no confirmation;
+  a one-row list costs a keypress and removes the mistyped-key case, and until the panel lands it is also
+  the only thing on screen that says what is running); the session view is redacted for display;
+  `_viewing` widens to hold a session;
   the last 20 finished sessions are kept in memory; the listing, output and kill tools see only the caller's
   own thread's sessions; session containers carry a per-process label, `--sig-proxy=false` and
   `stdin=DEVNULL`.
@@ -146,8 +150,13 @@ slices. The owner added Podman (slice 0) after the plan was approved.
 1. **Background and monitor sessions** on the container route and the host fallback (SS2, SS5–SS20).
    Foundations BUILT, batch 94: the RE2 pattern engine, the wake row, the session backends, the manager
    and the wake builder. The five tools, the subagent asleep in its spawn and the CLI's wait loop BUILT,
-   batch 95. Next: the TUI -- the session panel, the input block and its refusal funnel, `/kill` and its
-   key, the session view and what a finished session shows after a restart (SS14, SS18).
+   batch 95. The TUI's BEHAVIOUR half BUILT, batch 97: the turn is a wake consumer (`consuming()` around
+   the drain, the wait loop on the turn worker, held results delivered with the user's next message), the
+   input block and its one refusal funnel, `/kill` and ctrl+b, and the quit confirmation (SS2, SS6, SS19).
+   Until batch 97 a session could not be started from the TUI at all -- SS17 refuses a start with no wake
+   consumer, and nothing under `tui/` had ever entered `consuming()`.
+   Next: the TUI's DISPLAY half -- the session panel fed by `SessionActivity`, the ctrl+click arming on a
+   finished session's tool-call line, the session view and what it shows after a restart (SS14, SS18).
 2. **Interactive sessions.**
 3. **WSL.**
 4. **SSH and the secrets it needs.**

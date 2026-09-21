@@ -35,7 +35,7 @@ import queue
 import threading
 from dataclasses import replace
 from pathlib import Path
-from time import monotonic
+from time import monotonic, time
 from uuid import UUID
 
 from textual.app import App, ComposeResult
@@ -53,7 +53,7 @@ import config_update
 import storage
 from agents.manager import manager
 from agents.tui_commands import register_agent_commands
-from core import config_loader
+from core import config_loader, shell_sessions
 from core.agent_activity import AgentActivity
 from core.approval import RunAuthorization
 from core.client import api_initialization, effort_levels_for_model
@@ -78,7 +78,11 @@ from core.replay import replay_entries
 from memories.tui_commands import register_memory_commands
 from project_init.tui_commands import register_init_commands
 from prompts import system_prompts
-from safety.policy_enforcement import redact_output_text, redact_secrets
+from safety.policy_enforcement import (
+    check_output_policy,
+    redact_output_text,
+    redact_secrets,
+)
 from security import posture
 from skills.manager import manager as skills
 from skills.tui_commands import register_skill_commands
@@ -96,6 +100,7 @@ from tui.screens import (
     ProjectKindScreen,
     QuestionScreen,
     ReviewScreen,
+    SessionKillScreen,
     SubagentSignoffScreen,
     ThreadPickerScreen,
 )
@@ -275,6 +280,22 @@ class TurnFinished(Message):
 
     def __init__(self, error: BaseException | None = None) -> None:
         self.error = error
+        super().__init__()
+
+
+class SessionNote(Message):
+    """A line the background-session wait loop needs written (§49, SS5).
+
+    The loop runs on the turn worker, so it owns no widget; this is the
+    same post-rather-than-touch split `TuiActivity` keeps. It carries a
+    palette role rather than a rendered line because the two it writes
+    are different voices: `wake` is the harness opening a turn, and
+    `system` is the shell explaining that it has stopped waking.
+    """
+
+    def __init__(self, role: str, text: str) -> None:
+        self.role = role
+        self.text = text
         super().__init__()
 
 
@@ -464,6 +485,36 @@ class TuiActivity(AgentActivity):
         """
         self._app.post_message(AgentStackChanged(snapshot))
 
+
+def _kill_rows(rows) -> list[dict]:
+    """`SessionRow`s as the kill picker's `{id, label}` pairs (§49, SS2).
+
+    REDACTED THROUGH THE REAL POLICY, named for the tool that started the
+    session, exactly as core/session_wake.py renders the same command for
+    the model. A modal is a display surface like any other, and a command
+    carrying a secret does not become safe by being shown to the person
+    who typed it.
+
+    Module-level so a test can build the labels without an app, and so the
+    screen stays a screen: tui/screens.py imports no core module, and
+    teaching it to redact would be the first.
+    """
+    out = []
+    for row in rows:
+        tool = ("shell_monitor" if row.kind == "monitor"
+                else "shell_background")
+        command = check_output_policy(tool, {"command": row.command})["command"]
+        elapsed = max(0, int(time() - row.started_wall))
+        out.append({
+            "id": row.id,
+            # The id leads: it is what `/kill <id>` and the model's own
+            # `shell_kill` both take, so the picker teaches the name of
+            # the thing it is stopping.
+            "label": f"{row.id}  {row.kind}  {elapsed}s  {command}",
+        })
+    return out
+
+
 class VenastineApp(App):
     """Chat + research shell."""
 
@@ -510,6 +561,23 @@ class VenastineApp(App):
         # already holds ctrl+t, ctrl+l and ctrl+up/down. Measured off
         # the installed version, not assumed (D22).
         ("ctrl+g", "pick_agent", "Runs"),
+        # §49 (SS2). The one control that stays usable while background
+        # sessions are blocking input, so it has to be a KEY rather than
+        # only a command: `/kill` is typed into the prompt, and the prompt
+        # is where the block is felt.
+        #
+        # ctrl+b, chosen by ELIMINATION like ctrl+g and ctrl+l before it,
+        # measured against the installed textual (8.2.8, D22) rather than
+        # assumed. `TextArea` claims a/c/d/e/k/u/v/w/x/y/z and the prompt
+        # holds focus almost always; `App` claims ctrl+c and ctrl+q;
+        # textual claims ctrl+p for the palette; `PromptInput` claims
+        # ctrl+j for its newline; this app already holds ctrl+t, ctrl+l,
+        # ctrl+g and ctrl+up/down. Of what is left, ctrl+h/i/j/m ARE
+        # backspace, tab, LF and CR at the terminal and can never be
+        # bound, and ctrl+s/ctrl+q are software flow control. That leaves
+        # b, n, o and r -- and b is the only one that also says what it
+        # does.
+        ("ctrl+b", "kill_session", "Stop"),
         # §47. Escape leaves the read-only thread view, and check_action
         # keeps it OFF at every other moment -- the prompt binds escape
         # to dismissing the slash panel, and a live app binding would
@@ -556,6 +624,13 @@ class VenastineApp(App):
     # footer is composing -- before anything of ours has run.
     _quit_armed = False
     _quit_timer = None
+
+    # §49 (SS6). Whether the "stop what is running?" prompt is already up,
+    # so a second confirm-quit goes rather than stacking another copy of
+    # it. A CLASS attribute for the reason the two above are: bare-built
+    # apps across the suite reach `quit_with_sessions` without __init__
+    # having run the way a mounted app's does.
+    _quit_asking = False
 
     # Batch 84. The config key whose write is waiting for this turn to end
     # before the harness relaunches, or None. A CLASS attribute for
@@ -1154,6 +1229,57 @@ class VenastineApp(App):
         self._sync_meter_timer()
         self._refresh_meter()
 
+    # -- what is occupying the shell (ROADMAP_v3 §49, SS2) ------------------
+
+    @property
+    def _session_thread(self):
+        """The thread the session manager knows this shell by, or None.
+
+        `_memory`, NEVER `memory`: the public property constructs a
+        ConversationMemory and writes a ConversationThread row on first
+        touch, and asking "is anything running?" must not be what creates
+        a conversation. A shell with no thread yet owns no sessions, which
+        is what None means to every caller here.
+        """
+        return getattr(self._memory, "thread_id", None)
+
+    def refuse_if_occupied(self, action: str) -> bool:
+        """Whether `action` must be refused right now, saying why.
+
+        SS2 gives the shell a SECOND way to be occupied. Before this, one
+        condition (`_busy`) was checked at eight sites with the same three
+        lines copied between them; live background sessions add a
+        condition that blocks the same set of actions for a different
+        reason and with a different remedy. Eight sites growing a second
+        clause each is how the two halves of one question drift apart --
+        the ratchet G3 removed, reached from the other side -- so the
+        question is asked in one place and the sites ask it.
+
+        SESSIONS FIRST, because that message is the actionable one. While
+        the wake loop runs, `_busy` is True *because* sessions are live, so
+        "Still working" would be true and useless: it names no way out.
+        The session message names the key that ends the wait. Once nothing
+        is live, `_busy` answers for an ordinary turn as it always did.
+
+        Deliberately NOT a gate on the prompt widget. The box stays
+        editable (`_set_prompt_enabled` is the viewer's affordance, not
+        this one) because the commands SS2 keeps usable -- `/kill`, quit --
+        are typed into it.
+        """
+        thread_id = self._session_thread
+        if thread_id is not None and shell_sessions.sessions.blocks(thread_id):
+            live = shell_sessions.sessions.live_for(thread_id)
+            plural = "" if live == 1 else "s"
+            self._transcript.write_error(
+                f"{live} background session{plural} still running — "
+                f"{action} once they finish, or press ctrl+b to stop them.")
+            return True
+        if self._busy:
+            self._transcript.write_error(
+                "Still working — wait for this turn to finish.")
+            return True
+        return False
+
     def _sync_meter_timer(self) -> None:
         """Tick only while a turn is running (ThinkingIndicator's rule).
 
@@ -1541,6 +1667,56 @@ class VenastineApp(App):
                 continue
             fringe = [(g, level + 1) for g in grandchildren] + fringe
         return found
+
+    def action_kill_session(self) -> None:
+        """ctrl+b: stop a background session (§49, SS2).
+
+        PROCESS-WIDE, not this thread's. SS11 scopes the *tools* to the
+        caller's own thread, because an agent has no business naming a
+        session it did not start -- but this is the user's kill, and the
+        thing blocking their input may be owned by a subagent's thread
+        rather than their own (SS9: a subagent with live sessions sleeps
+        inside its spawn, and its parent's turn is what stalls). A picker
+        that hid those would offer no way out of the block they cause.
+        `SessionManager.kill` says the same thing from its side: an
+        `owner_thread` of None is the user's kill and may name any
+        session.
+        """
+        rows = shell_sessions.sessions.live_rows()
+        if not rows:
+            # Reachable despite check_action: the last session can finish
+            # between the footer's repaint and the press.
+            self._visible_transcript.write_system(
+                "Nothing is running in the background.")
+            return
+
+        def _stopped(session_id) -> None:
+            if session_id:
+                self._kill_session(str(session_id))
+
+        self.push_screen(SessionKillScreen(_kill_rows(rows)), _stopped)
+
+    def _kill_session(self, session_id: str) -> None:
+        """Stop one session, off the UI thread.
+
+        ON A WORKER, and that is not caution: `SessionManager.kill` waits
+        up to `_KILL_SETTLE_S` (15 s) for the process to actually die, so
+        killing from the message pump would freeze the shell for as long
+        as the thing being killed took to notice.
+
+        Nothing is reported here beyond the request. The kill produces a
+        `killed` event like any other, which either wakes the turn that
+        started it or is held for the user's next message (SS19) -- and
+        the result of what they stopped is worth more than an
+        acknowledgement that they stopped it.
+        """
+        def _work() -> None:
+            shell_sessions.sessions.kill(
+                session_id, reason=shell_sessions.KILL_USER)
+
+        self._visible_transcript.write_system(f"Stopping {session_id}…")
+        self.run_worker(_work, thread=True, exit_on_error=False,
+                        name=f"kill-{session_id}")
 
     def action_pick_agent(self) -> None:
         """ctrl+g: choose a run to read, from the keyboard (§47).
@@ -1999,8 +2175,8 @@ class VenastineApp(App):
         # Clear AFTER the busy check, not before. /research holds _busy
         # for a whole ten-pass pipeline, so a follow-up typed during one
         # was wiped and had to be retyped from memory.
-        if not text.startswith("/") and self._busy:
-            self._transcript.write_error("Still working — wait for this turn to finish.")
+        if not text.startswith("/") and self.refuse_if_occupied(
+                "send a message"):
             return
         event.prompt.value = ""
         # Batch 63. AFTER the busy refusal above, which returns without
@@ -2042,6 +2218,14 @@ class VenastineApp(App):
         # every later turn with "Still working" for a turn that never
         # started.
         try:
+            # §49 (SS2/SS19). BEFORE the user's own message, so the model
+            # reads what it missed beside what was just said rather than
+            # as a turn of its own -- which is the whole point of holding
+            # it: a session the user stopped themselves is not worth a
+            # model call on its own. `note_user_input` then resumes waking
+            # for whatever is still live.
+            self._deliver_held(self.memory.thread_id)
+            shell_sessions.sessions.note_user_input(self.memory.thread_id)
             self.memory.add_user_message(user_input)
         except Exception as e:                              # noqa: BLE001
             self._busy = False
@@ -2097,52 +2281,171 @@ class VenastineApp(App):
         # the event-driven one could not carry a question with more than
         # two answers. The worker now blocks inside the channel's `ask`,
         # exactly as an attended research pass already did.
-        generator = RunAgentLoop._run(
-            self.memory,
-            prompt,
-            provider,
-            model,
-            context,
-            max_steps,
-            # #4: the TUI turn runs on the configured spend cap, same as
-            # every other path. _SPEND_UNSET would resolve it too; passing
-            # the resolved value explicitly keeps this direct-_run call
-            # honest about what it is doing.
-            config_loader.spend_cap(),
-            effort=self.effort,
-            response_channel=self.response_channel(),
-            # Batch 59. Rides beside the response channel because it is the
-            # same kind of thing: an out-of-band object handed down to a
-            # run that happens inside a tool call, where a LoopEvent cannot
-            # reach. This is the route by which a spawn -- and a spawn
-            # inside that spawn -- becomes a row in the sidebar.
-            activity=self._activity,
-        )
+        channel = self.response_channel()
+        memory = self.memory
+
+        # A FACTORY, not a generator, since §49. A wake turn is this turn
+        # continuing (SS5), so it has to run with the same prompt, model,
+        # channel and activity -- and the only way to guarantee that is to
+        # build both from one closure instead of assembling the facts a
+        # second time somewhere else. `wake_conversation` is deliberately
+        # not called here: it drains, and its own docstring says the TUI
+        # builds its own generator, as it does for a user's turn.
+        def _turn():
+            return RunAgentLoop._run(
+                memory,
+                prompt,
+                provider,
+                model,
+                context,
+                max_steps,
+                # #4: the TUI turn runs on the configured spend cap, same as
+                # every other path. _SPEND_UNSET would resolve it too; passing
+                # the resolved value explicitly keeps this direct-_run call
+                # honest about what it is doing.
+                config_loader.spend_cap(),
+                effort=self.effort,
+                response_channel=channel,
+                # Batch 59. Rides beside the response channel because it is the
+                # same kind of thing: an out-of-band object handed down to a
+                # run that happens inside a tool call, where a LoopEvent cannot
+                # reach. This is the route by which a spawn -- and a spawn
+                # inside that spawn -- becomes a row in the sidebar.
+                activity=self._activity,
+            )
+
+        def _wake(text: str, record: dict):
+            """The harness row, then a turn that answers it."""
+            memory.add_harness_message(text, record)
+            return _turn()
+
+        thread_id = getattr(memory, "thread_id", None)
         self.run_worker(
-            lambda: self._consume(generator),
+            lambda: self._consume(_turn(), thread_id=thread_id, wake=_wake),
             thread=True,
             exit_on_error=False,       # §16 AC3 — see the module docstring
             name="agent-turn",
         )
 
-    def _consume(self, generator) -> None:
-        """Drain the generator on the worker thread, forwarding every event.
+    def _consume(self, generator, thread_id=None, wake=None) -> None:
+        """Drain the generator on the worker thread, forwarding every event,
+        then stay for whatever background sessions the turn started.
 
         The try/except is not redundant with on_worker_state_changed: an
         exception here leaves the UI mid-turn (busy flag set, raven stuck on
         whatever it was doing), and only this frame knows the turn is over.
         The handler below still fires and is what surfaces the message.
+
+        `consuming()` WRAPS THE WHOLE THING, and it has to be entered here
+        rather than at the call site: it is a ContextVar, threads do not
+        inherit their parent's context, and the generator runs on this
+        thread. That mark is what SS17 checks -- without it a session
+        started from the TUI is refused, which is exactly what the TUI did
+        until this batch, because nothing in `tui/` had ever entered it.
+
+        The wait is INSIDE the worker and before `TurnFinished`, which is
+        what keeps `_busy` true across it. That is not a side effect but
+        the mechanism: SS2 wants input blocked while sessions are live, and
+        `_busy` already blocks it everywhere `refuse_if_occupied` asks.
         """
         error = None
         try:
-            for event in generator:
-                self.post_message(LoopEventMessage(event))
+            with shell_sessions.consuming():
+                for event in generator:
+                    self.post_message(LoopEventMessage(event))
+                if wake is not None and thread_id is not None:
+                    self._wait_for_sessions(thread_id, wake)
         except BaseException as e:   # noqa: BLE001 — re-raised below
             error = e
         finally:
             self.post_message(TurnFinished(error))
         if error is not None:
             raise error
+
+    def _wait_for_sessions(self, thread_id, wake) -> None:
+        """Hold the worker until this thread's sessions are done, running a
+        turn for each batch of results (§49, SS2/SS5).
+
+        main.py's `_wait_for_sessions` is the same loop for the CLI, and
+        the two are deliberately not shared: that one owns a REPL and
+        prints, this one owns a worker and posts. What they DO share is
+        the manager -- `wait_for_wake`, `suspended`, `pending` -- which is
+        where the policy actually lives, so neither can drift on the part
+        that matters.
+
+        A KILL DOES NOT END THE WAIT. Killing a session produces a `killed`
+        event like any other, and the loop keeps going until nothing is
+        live and nothing is pending, so the results of what the user
+        stopped are still delivered rather than dropped on the floor.
+        """
+        from core.session_wake import build_wake
+
+        sessions = shell_sessions.sessions
+        while True:
+            if not sessions.live_for(thread_id) and not sessions.pending(thread_id):
+                return
+            if sessions.closing:
+                # The harness is on its way out and `_close_sessions` is
+                # killing these. `wait_for_wake` returns None instantly
+                # once that flag is up, so without this the loop spins at
+                # full speed through teardown -- and there is nothing left
+                # to wake, since the row saying what became of them is
+                # written by the quit path rather than by a turn.
+                return
+            batch = sessions.wait_for_wake(thread_id, timeout=1.0)
+            if batch is None:
+                if sessions.suspended(thread_id):
+                    # SS2's consecutive-wake limit. The block lifts here,
+                    # so this message has to name what happens next: the
+                    # results are not lost, they are held for the next
+                    # thing the user says.
+                    self.post_message(SessionNote(
+                        "system",
+                        "— no further automatic replies until you say "
+                        "something; results will arrive with your next "
+                        "message —"))
+                    return
+                continue
+            text, record = build_wake(batch)
+            # ITS FIRST LINE, matching core/replay.py's rule for the same
+            # row: the rest is program output the model was given, which
+            # can run to thousands of lines and would bury the
+            # conversation it interrupted. Posted BEFORE the turn's own
+            # events, and the queue is FIFO from one thread, so the
+            # harness line cannot land under the answer it prompted.
+            self.post_message(SessionNote(
+                "wake", text.split("\n", 1)[0].strip()))
+            for event in wake(text, record):
+                self.post_message(LoopEventMessage(event))
+
+    def on_session_note(self, message: SessionNote) -> None:
+        self._transcript.write_role(message.role, message.text)
+
+    def _deliver_held(self, thread_id) -> None:
+        """Results held for the user's next message (§49, SS2/SS19): past
+        the consecutive-wake limit, or from a kill the user made between
+        turns.
+
+        `add_harness_message`, NOT main.py's `append_harness_row`. The two
+        write the same row, and the difference is whether this process
+        holds a ConversationMemory for the thread -- the CLI does not
+        between turns, and the TUI always does. Writing through storage
+        here would leave the live memory one row short of what was
+        persisted, so the turn about to run would send the model a history
+        missing the very results it is being handed.
+
+        On the UI thread, with run_agent_turn's storage guard around it:
+        this is a database write, and a failure has to fail the turn
+        rather than reach the message pump.
+        """
+        from core.session_wake import build_held
+
+        held = shell_sessions.sessions.take_held(thread_id)
+        if not held:
+            return
+        text, record = build_held(held)
+        self.memory.add_harness_message(text, record)
+        self._transcript.write_role("wake", text.split("\n", 1)[0].strip())
 
     def run_one_shot(self, agent, message: str) -> None:
         """Run ONE turn in the CURRENT thread under a different agent's
@@ -2693,6 +2996,14 @@ class VenastineApp(App):
             # declines the press, so the key is inert on a fresh
             # session. One return value buys both halves.
             return True if self._history else None
+        if action == "kill_session":
+            # §49 (SS2). None rather than False, for `recall_previous`'s
+            # reason: the footer greys the entry instead of dropping it
+            # and reflowing, while the press is still declined when
+            # nothing is running. This key is what SS2 keeps usable while
+            # input is blocked, so it has to stay VISIBLE while blocked --
+            # a control that vanishes is one nobody knows to reach for.
+            return True if shell_sessions.sessions.live_rows() else None
         if action == "close_thread_view":
             # §47. FALSE when the viewer is closed, and False rather than
             # None for the ctrl+c reason rather than the recall one: this
@@ -2788,7 +3099,53 @@ class VenastineApp(App):
         if self._quit_timer is not None:
             self._quit_timer.stop()
             self._quit_timer = None
-        self.exit()
+        self.quit_with_sessions()
+
+    def quit_with_sessions(self) -> None:
+        """Quit, asking first when background sessions would be killed
+        (§49, SS6).
+
+        The DELIBERATE quit routes only -- the second ctrl+c and `/quit`.
+        `exit()` stays unconditional because every other exit funnels
+        through it (a config restart, a programmatic close, the message
+        pump unwinding), and a modal on that path is a shell that cannot
+        be closed. SS6's other half is already done and lives elsewhere:
+        main.py's `finally` calls `_close_sessions`, which kills what is
+        live and writes a row into each owning thread, and that covers the
+        TUI because the app runs inside that try.
+
+        ASKING AGAIN MEANS GOING. If the prompt is already up, a further
+        confirm-quit exits rather than stacking a second copy of it --
+        ctrl+c twice is how someone insists, and a gesture that answers
+        insistence with another dialog is the hang it was meant to avoid.
+        """
+        if self._quit_asking:
+            self.exit()
+            return
+        rows = shell_sessions.sessions.live_rows()
+        if not rows:
+            self.exit()
+            return
+        plural = "" if len(rows) == 1 else "s"
+        self._quit_asking = True
+
+        def _decided(confirmed) -> None:
+            self._quit_asking = False
+            if confirmed:
+                self.exit()
+                return
+            self._visible_transcript.write_system(
+                f"Still here. {len(rows)} session{plural} still running.")
+
+        self.push_screen(
+            ConfirmScreen(
+                "Quit and stop what is running?",
+                f"{len(rows)} background session{plural} would be stopped. "
+                f"Each one's conversation gets a line saying so, but the "
+                f"output is not kept past this process and there is no way "
+                f"to re-attach.",
+                "Quit"),
+            _decided)
 
     # -- restarting to apply a config change (batch 84) ----------------------
 
@@ -3442,9 +3799,7 @@ class VenastineApp(App):
         # into the abandoned thread while rendering under the new one, so
         # transcript and stored history diverge. Plain chat, /research and
         # /grill-me all enforce this guard already.
-        if self._busy:
-            self._transcript.write_error(
-                "Still working — wait for this turn to finish.")
+        if self.refuse_if_occupied("read another run"):
             return
         # #104. Every storage read from here down runs on the UI THREAD,
         # inside a screen-dismiss callback, so an uncaught exception does
@@ -3490,9 +3845,7 @@ class VenastineApp(App):
         separated by a failure. A second copy of this sequence would have
         to re-learn each comment the hard way."""
         resolved = thread_id if isinstance(thread_id, UUID) else UUID(str(thread_id))
-        if self._busy:
-            self._transcript.write_error(
-                "Still working — wait for this turn to finish.")
+        if self.refuse_if_occupied("switch threads"):
             return
         # BEFORE anything is torn down, deliberately. A failure here means
         # the switch does not happen at all and the session continues on
@@ -3794,9 +4147,7 @@ def _cmd_model(app: VenastineApp, args: str) -> None:
             "Usage: /model <name>, or /model <PROVIDER> <name>.")
         return
 
-    if app._busy:
-        app._transcript.write_error(
-            "Still working — wait for this turn to finish.")
+    if app.refuse_if_occupied("change the model"):
         return
 
     parts = args.split()
@@ -3943,8 +4294,7 @@ def _cmd_research(app: VenastineApp, args: str) -> None:
             "Usage: /research [--attended] [--review|--no-review] "
             "[--grant[=a,b]] <query>")
         return
-    if app._busy:
-        app._transcript.write_error("Still working — wait for this turn to finish.")
+    if app.refuse_if_occupied("start a research run"):
         return
 
     offered = candidates()
@@ -4192,6 +4542,36 @@ def _cmd_threads(app: VenastineApp, args: str) -> None:
     app.action_pick_thread()
 
 
+def _cmd_kill(app: VenastineApp, args: str) -> None:
+    """Stop a background session (§49, SS2).
+
+    NOT behind `refuse_if_occupied`, and it is the one command that must
+    not be: SS2 keeps a kill usable precisely while sessions are blocking
+    everything else. A funnel that refused this would refuse the only way
+    out of the block it enforces.
+
+    With an id, it kills that one; bare, it opens the same picker ctrl+b
+    does. Both routes land on `_kill_session`, so the wait-off-the-UI-
+    thread rule holds however the user got here.
+    """
+    named = args.strip()
+    if not named:
+        app.action_kill_session()
+        return
+    row = shell_sessions.sessions.row(named)
+    if row is None:
+        app._visible_transcript.write_error(
+            f"No session {named}. /kill on its own lists what is running.")
+        return
+    if row.state not in shell_sessions.LIVE_STATES:
+        # SAID rather than ignored, for on_spawn_selected's reason: a
+        # deliberate kill that produces silence reads as broken.
+        app._visible_transcript.write_system(
+            f"Session {named} already finished ({row.state}).")
+        return
+    app._kill_session(row.id)
+
+
 def _cmd_resume(app: VenastineApp, args: str) -> None:
     """#30/#32's other half. The picker caps at PICKER_THREAD_LIMIT, so
     "older conversations stay reachable" needs a by-id path in THIS shell
@@ -4235,9 +4615,7 @@ def _cmd_new(app: VenastineApp, args: str) -> None:
     use, which after a switch is not the pair the app launched with.
     The /ref attachments are thread state and leave with the thread.
     """
-    if app._busy:
-        app._transcript.write_error(
-            "Still working — wait for this turn to finish.")
+    if app.refuse_if_occupied("start a new thread"):
         return
     # None, not a fresh ConversationMemory: /new followed by /new should
     # not leave two empty threads behind. The next turn creates it.
@@ -4560,9 +4938,7 @@ def _cmd_compact(app: VenastineApp, args: str) -> None:
     automatic one does, since "summarize this conversation" and "throw
     away what I just said" are different requests.
     """
-    if app._busy:
-        app._transcript.write_error(
-            "Still working — wait for this turn to finish.")
+    if app.refuse_if_occupied("compact this thread"):
         return
     if app._memory is None:
         app._transcript.write_error("Nothing to compact — this thread is empty.")
@@ -4795,7 +5171,7 @@ def _cmd_thinking(app: VenastineApp, args: str) -> None:
 
 
 def _cmd_quit(app: VenastineApp, args: str) -> None:
-    app.exit()
+    app.quit_with_sessions()
 
 
 # ---------------------------------------------------------------------------
@@ -4912,9 +5288,7 @@ def _cmd_critic(app: VenastineApp, args: str) -> None:
             "/critic off.")
         return
 
-    if app._busy:
-        app._transcript.write_error(
-            "Still working — wait for this turn to finish.")
+    if app.refuse_if_occupied("change the critic model"):
         return
 
     if args.strip().lower() in ("off", "clear", "auto", "none"):
@@ -4978,9 +5352,7 @@ def _cmd_embedder(app: VenastineApp, args: str) -> None:
             "/embedder off.")
         return
 
-    if app._busy:
-        app._transcript.write_error(
-            "Still working — wait for this turn to finish.")
+    if app.refuse_if_occupied("change the embedder"):
         return
 
     if args.strip().lower() in ("off", "clear", "auto", "none"):
@@ -5344,6 +5716,8 @@ def register_builtin_commands() -> None:
         SlashCommand("resume", "resume a thread by id, even an old one",
                      _cmd_resume, "<thread-id>"),
         SlashCommand("new", "start a new thread", _cmd_new),
+        SlashCommand("kill", "stop a background session", _cmd_kill,
+                     "[session-id]"),
         SlashCommand("quit", "exit the harness", _cmd_quit,
                      aliases=("exit", "bye")),
     ):
