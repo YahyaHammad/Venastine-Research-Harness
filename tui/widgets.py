@@ -195,7 +195,14 @@ MARK_STAGE = "·"
 # one target or the other by accident.
 CONVERSATION_ROLES = frozenset({
     "user", "assistant", "thinking", "tool", "tool_error", "diff",
-    "pipeline_tool"})
+    "pipeline_tool",
+    # ROADMAP_v3 §49 (SS14): a line of a background session's own output,
+    # in a session view. CONVERSATION rather than META for `tool_error`'s
+    # reason -- it is the far end of a tool call, which is part of the
+    # exchange, and the harness is quoting it rather than saying it. Its
+    # only home today is the session-view pane, which `/copy` does not
+    # read; the classification is what a copy of one WOULD do.
+    "output"})
 
 # `pass` and `pass_done` are here rather than above deliberately: a
 # ten-pass run's boundaries are progress reporting about the harness,
@@ -583,6 +590,21 @@ THREAD_VIEW_POLL_S = 1.0
 CRUMB_SEPARATOR = "  \u203a  "
 
 
+def meta_style(style, key: str, value):
+    """`style`, carrying `value` under `key` as click metadata.
+
+    The mechanism half of `armed_style`, split out by ROADMAP_v3 §49
+    (SS14) when the session panel needed the same thing with a different
+    key. Two keys rather than one, because the click handlers on the
+    other side ask different questions of the answer -- see
+    `Transcript.on_click`, which has kept `url` and a pane target apart
+    since batch 58 for exactly this reason.
+    """
+    if value is None:
+        return style
+    return Style.parse(style or "") + Style(meta={key: str(value)})
+
+
 def armed_style(style, thread_id):
     """`style`, carrying `thread_id` as click metadata (§47).
 
@@ -599,24 +621,49 @@ def armed_style(style, thread_id):
     `str()` because a thread id is a UUID and metadata crosses into a
     handler that looks it up as text.
     """
-    if thread_id is None:
-        return style
-    return (Style.parse(style or "")
-            + Style(meta={"agent_thread": str(thread_id)}))
+    return meta_style(style, "agent_thread", thread_id)
 
 
-class SpawnSelected(Message):
-    """Someone ctrl+clicked a `▸ spawn_subagent` line (§47).
+class CallSelected(Message):
+    """Someone ctrl+clicked a tool line that opens something (§47,
+    widened by ROADMAP_v3 §49 SS14).
 
-    Carries the CALL id, not a thread id, because the transcript does
-    not have one: the line is drawn when the call starts, and the
-    child's thread does not exist yet. Resolution happens at PRESS
-    time in the app, which is what lets a line drawn before its run
-    existed still open it.
+    Carries the CALL id, not a thread or a session id, because the
+    transcript does not have one: the line is drawn when the call
+    starts, and neither the child's thread nor the session's final
+    state exists yet. Resolution happens at PRESS time in the app,
+    which is what lets a line drawn before its run existed still open
+    it.
+
+    `kind` is `OPENS_THREAD` or `OPENS_SESSION`, as the registry
+    answered at draw time. IT TRAVELS WITH THE ID rather than being
+    re-derived from the tool name here, because the transcript does not
+    keep the tool name either -- a line is text and metadata by the
+    time anyone can click it -- and asking again on the other side
+    would be the second copy §47 spent a declaration to avoid.
+
+    This was `SpawnSelected` until batch 98, when a second kind of
+    target made the name a lie.
     """
 
-    def __init__(self, call_id: str) -> None:
+    def __init__(self, kind: str, call_id: str) -> None:
+        self.kind = kind
         self.call_id = call_id
+        super().__init__()
+
+
+class SessionSelected(Message):
+    """Someone clicked a row of the session panel (ROADMAP_v3 §49,
+    SS14).
+
+    Carries the SESSION id directly, and that is the difference from
+    `CallSelected`: the panel draws only sessions that exist, so there
+    is nothing to resolve later. The same split `ThreadSelected` and
+    `SpawnSelected` have had since §47, one subject over.
+    """
+
+    def __init__(self, session_id: str) -> None:
+        self.session_id = session_id
         super().__init__()
 
 
@@ -638,8 +685,8 @@ class ThreadSelected(Message):
         super().__init__()
 
 
-def _clicked_thread(widget, event):
-    """The thread id under a click, or None (§47).
+def _clicked_meta(widget, event, key: str):
+    """The value stored under `key` at a click's position, or None.
 
     METADATA, NEVER ARITHMETIC. Computing a row index from `event.y`
     would need a second copy of the widget's layout, and that copy
@@ -648,7 +695,12 @@ def _clicked_thread(widget, event):
     that drew the row, which cannot disagree with itself.
     """
     style = widget.get_style_at(event.x, event.y)
-    return (getattr(style, "meta", None) or {}).get("agent_thread")
+    return (getattr(style, "meta", None) or {}).get(key)
+
+
+def _clicked_thread(widget, event):
+    """The thread id under a click, or None (§47)."""
+    return _clicked_meta(widget, event, "agent_thread")
 
 
 @dataclass(frozen=True)
@@ -894,8 +946,11 @@ class AgentPanel(Static):
         """Re-render under the current theme (#183), like ResearchProgress."""
         self._redraw()
 
-    @classmethod
-    def _fit(cls, text: str, width: int) -> str:
+    #: Shared with SessionPanel, which fits the same box to the same
+    #: width -- a staticmethod on the class that measured the box,
+    #: rather than a second copy of the ellipsis rule.
+    @staticmethod
+    def _fit(text: str, width: int) -> str:
         """Truncate to `width` cells, with an ellipsis when it bites.
 
         Appended by hand rather than through `Text.truncate()`, which
@@ -985,6 +1040,99 @@ class AgentPanel(Static):
         # afford a reflow. See `as_content`.
         self.display = True
         self.update(as_content(body))
+
+class SessionPanel(Static):
+    """What is running in the background, and nothing else (§49, SS14).
+
+    LIVE SESSIONS ONLY, which is the decision rather than a consequence
+    of how it is fed. A finished session is still readable -- SS14 puts
+    that on the tool-call line that started it, resolved at press time
+    the way §47 resolves a spawn -- so listing finished ones here would
+    spend contested sidebar rows on a second route to the same pane,
+    and would grow without bound in a session that starts many.
+
+    PROCESS-WIDE, like AgentPanel above it and like ctrl+b's picker.
+    SS11 scopes the five TOOLS to the caller's own thread, which is a
+    rule about what the model may touch; what the person may SEE is a
+    different question, and a panel that hid a subagent's sessions
+    would disagree with the kill picker about what is running.
+
+    Fed from core/shell_sessions.py's SessionActivity through app.py,
+    never polled -- TodoPanel's split, and AgentPanel's: the sink says
+    when, and this widget holds no authoritative copy of anything. It
+    is handed ROWS ALREADY REDACTED AND ALREADY FITTED TO A LABEL, for
+    SessionKillScreen's reason (batch 97): a command reaches a display
+    surface only through check_output_policy, and keeping that call in
+    app.py means this file never holds an unredacted one.
+
+    Hidden when nothing is running, GoalBanner-style, which is almost
+    always -- the sidebar is twenty columns wide and its rows are
+    contested.
+    """
+
+    #: AgentPanel's, measured the same way and for the same box.
+    WIDTH = 18
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._rows: list = []
+        # TodoPanel's reason: a widget that renders nothing yet must not
+        # be a visible empty box before its first update.
+        self.display = False
+
+    def _styles(self) -> dict:
+        try:
+            app = self.app
+        except Exception:  # noqa: BLE001 -- see Transcript._styles
+            return {}
+        return themes.styles_for(app)
+
+    def show(self, rows) -> None:
+        """Draw the live sessions. `rows` is [{"id", "label"}], already
+        redacted, in the order they started.
+
+        An empty list hides the widget, which is how the panel closes
+        without a second method meaning the same thing (ThreadCrumb's
+        rule).
+        """
+        self._rows = list(rows)
+        self._redraw()
+
+    def restyle(self) -> None:
+        """Re-render under the current theme (#183), like AgentPanel."""
+        self._redraw()
+
+    def on_click(self, event) -> None:
+        """Open the session this row is about.
+
+        A PLAIN CLICK, for AgentPanel's reason: a sidebar row is a
+        control, and dragging across it selects nothing, so there is no
+        text-selection gesture to dodge here the way the transcript's
+        ctrl+click dodges one.
+        """
+        session_id = _clicked_meta(self, event, "session")
+        if session_id:
+            self.post_message(SessionSelected(session_id))
+
+    def _redraw(self) -> None:
+        if not self._rows:
+            self.display = False
+            self.update("")
+            return
+
+        styles = self._styles()
+        body = Text()
+        body.append("sessions\n\n")
+        for row in self._rows:
+            label = AgentPanel._fit(row.get("label", ""), self.WIDTH - 2)
+            body.append(
+                f"{MARK_RUNNING} {label}\n",
+                meta_style(styles.get("tool", ""), "session", row.get("id")))
+        # AgentPanel's note: the nowrap/clip rule lives on the widget in
+        # app.tcss, because `Content` carries neither flag.
+        self.display = True
+        self.update(as_content(body))
+
 
 class ThreadCrumb(Static):
     """Where you are, and every step back out (§47).
@@ -1972,8 +2120,10 @@ class Transcript(RichLog):
         # rather than part of what was said. Keyed by INDEX, which
         # rerender() already walks.
         self._links: dict[int, tuple] = {}
-        # §47. entry index -> the spawn call that drew that line.
-        self._agents: dict = {}
+        # §47, widened by §49 (SS14). entry index -> (kind, call id) for
+        # the call that drew that line, where kind says whether clicking
+        # it opens a thread or a session.
+        self._opens: dict = {}
         # §38. An assistant span with rows already on screen: its label is
         # drawn and its single entry is open at _entries[-1].
         self._stream_open = False
@@ -2091,7 +2241,7 @@ class Transcript(RichLog):
     # -- writing -----------------------------------------------------------
 
     def _emit(self, role: str, text: str, record: bool = True,
-              links=(), agent_call: str = "") -> None:
+              links=(), opens: tuple = ()) -> None:
         """Render one entry and remember it. THE single write path.
 
         `links` are batch 65's click targets, remembered beside the
@@ -2099,23 +2249,28 @@ class Transcript(RichLog):
         entry with none -- every role outside LINKED_ROLES, and most
         tool lines -- stores nothing.
 
-        `agent_call` is §47's, and it is kept in a SECOND side table
-        rather than folded into `_links`. They are different kinds of
-        target: a link opens a browser and a spawn opens a pane, and
-        the click handler has to tell them apart anyway. Same keying,
-        same two lifetimes -- `reset()` drops it, `rerender()` replays
-        it -- because it is the same kind of fact ABOUT a line.
+        `opens` is §47's `(kind, call id)`, and it is kept in a SECOND
+        side table rather than folded into `_links`. They are different
+        kinds of target: a link opens a browser and a call opens a
+        pane, and the click handler has to tell them apart anyway. Same
+        keying, same two lifetimes -- `reset()` drops it, `rerender()`
+        replays it -- because it is the same kind of fact ABOUT a line.
+
+        ONE TABLE FOR BOTH KINDS since batch 98, because a thread and a
+        session are the same fact about a line -- what clicking it
+        opens -- and a second dict keyed by the same index would have
+        been a third lifetime to keep in step with the other two.
         """
         if record:
             self._entries.append((role, text))
             if links:
                 self._links[len(self._entries) - 1] = tuple(links)
-            if agent_call:
-                self._agents[len(self._entries) - 1] = agent_call
-        self._render_entry(role, text, links, agent_call)
+            if opens:
+                self._opens[len(self._entries) - 1] = tuple(opens)
+        self._render_entry(role, text, links, opens)
 
     def _render_entry(self, role: str, text: str, links=(),
-                      agent_call: str = "") -> None:
+                      opens: tuple = ()) -> None:
         if role == "user":
             # §43 (RM1). The turn's label is retired HERE and nowhere
             # else, so where the labels land is a pure function of the
@@ -2156,8 +2311,7 @@ class Transcript(RichLog):
             # §43 sentence true: a tool line INSIDE the turn, after
             # reasoning or text has already opened the label, is a no-op.
             self._open_label()
-            self.write(self._linked_line(text, "tool", links,
-                                         agent_call))
+            self.write(self._linked_line(text, "tool", links, opens))
         elif role == "pipeline_tool":
             # The research pipeline's tool lines. Same kind of line and
             # the same style, deliberately NOT an opener: the run's label
@@ -2183,7 +2337,7 @@ class Transcript(RichLog):
             self.write(Text(f"     {text}", self._style(role)))
 
     def _linked_line(self, text: str, role: str, targets=(),
-                     agent_call: str = "") -> Text:
+                     opens: tuple = ()) -> Text:
         """One harness-drawn line, with its URLs armed (batch 65).
 
         The five-space indent every one of these lines carries is inside
@@ -2195,18 +2349,25 @@ class Transcript(RichLog):
         out = Text(style=self._style(role))
         self._append_spans(out, f"     {text}", self._styles(),
                            block=False, links_only=True, targets=targets)
-        if agent_call:
-            self._arm_spawn(out, agent_call)
+        if opens:
+            self._arm_call(out, opens)
         return out
 
-    def _arm_spawn(self, out: Text, call_id: str) -> None:
-        """Make the TOOL NAME on a spawn line open its run (§47).
+    def _arm_call(self, out: Text, opens: tuple) -> None:
+        """Make the TOOL NAME on a line open what the call opened (§47,
+        widened by §49 SS14).
 
         THE NAME, not the whole line. A tool line is `▸ name  digest`,
         and the digest is the task text -- which for a spawn is a
-        sentence a reader wants to select and read, not a control.
-        Arming the name keeps the clickable region exactly as wide as
-        the thing it is about.
+        sentence a reader wants to select and read, and for a session
+        is the command, not a control. Arming the name keeps the
+        clickable region exactly as wide as the thing it is about.
+
+        ONE LOCATOR for both kinds. This was `_arm_spawn` and the shape
+        it finds is the same either way, so a second copy for sessions
+        would have been two implementations of "where does the tool
+        name start" -- and the one that drifted would disarm a line
+        rather than fail visibly.
 
         Applied AFTER the URL scan and over its own columns only, so a
         URL in the task text keeps its own target: the two never
@@ -2231,7 +2392,12 @@ class Transcript(RichLog):
             end = len(plain.rstrip())
         if end <= start:
             return
-        out.stylize(Style(meta={"agent_call": str(call_id)}), start, end)
+        # A TUPLE in the metadata, which rich marshals and hands back
+        # as one. The kind has to survive the round trip: the click
+        # handler is the only thing that reads it, and by then the tool
+        # name that decided it is long gone.
+        out.stylize(Style(meta={"opens": (str(opens[0]), str(opens[1]))}),
+                    start, end)
 
     def _open_label(self) -> None:
         """Draw this turn's `venastine ›`, once (§43, RM1).
@@ -2536,16 +2702,22 @@ class Transcript(RichLog):
             self.open_url(url)
             return
         # §47. The same gesture, a different kind of target: a URL
-        # leaves for a browser, a spawn opens a pane. One key each
+        # leaves for a browser, a call opens a pane. One key each
         # rather than one key with two meanings, so the branch here
         # reads as what it is.
         #
+        # THE TWO PANE TARGETS SHARE A KEY, and that is not the same
+        # compromise: a thread and a session are both "open this in the
+        # viewer", the gesture is identical, and the kind rides in the
+        # value where the app can branch on it once. What the paragraph
+        # above refuses is a key that sometimes means a browser.
+        #
         # POSTED rather than resolved: the transcript knows which CALL
-        # drew the line and nothing about which thread it made -- the
-        # line is drawn before the child exists.
-        call_id = meta.get("agent_call")
-        if call_id:
-            self.post_message(SpawnSelected(call_id))
+        # drew the line and nothing about what it made -- the line is
+        # drawn before the child thread or the session's result exists.
+        opens = meta.get("opens")
+        if opens:
+            self.post_message(CallSelected(str(opens[0]), str(opens[1])))
 
     def open_url(self, url) -> None:
         """Hand `url` to the platform's browser, off the UI thread.
@@ -2589,7 +2761,7 @@ class Transcript(RichLog):
         self._emit("error", text)
 
     def write_role(self, role: str, text: str, links=(),
-                   agent_call: str = "") -> None:
+                   opens: tuple = ()) -> None:
         """Write a line in an arbitrary palette role (§26).
 
         Exists so the research view can style a pass boundary, a tool call
@@ -2599,12 +2771,12 @@ class Transcript(RichLog):
 
         `links` is batch 65's, and it is ignored for every role outside
         LINKED_ROLES rather than refused: a caller that has candidates
-        should not have to know which roles use them. `agent_call` is
-        §47's and follows the same rule -- only a `tool` line arms it,
-        because only a tool call opens a run.
+        should not have to know which roles use them. `opens` is §47's
+        and follows the same rule -- only a `tool` line arms it,
+        because only a tool call opens a run or a session.
         """
         self.flush_stream()
-        self._emit(role, text, links=links, agent_call=agent_call)
+        self._emit(role, text, links=links, opens=opens)
 
     def write_answer(self, text: str) -> None:
         """A model answer that did not arrive as a stream (a one-shot turn,
@@ -2943,17 +3115,18 @@ class Transcript(RichLog):
         # §47, on `_links`' list for its reason: keyed by entry index,
         # so a table that outlived its entries would arm the NEXT
         # thread's Nth line with the previous thread's run.
-        self._agents.clear()
+        self._opens.clear()
         self.clear()
 
-    def spawn_at(self, index: int) -> str:
-        """The spawn call recorded for entry `index`, or "" (§47).
+    def opens_at(self, index: int) -> tuple:
+        """The `(kind, call id)` recorded for entry `index`, or `()`
+        (§47, widened by §49 SS14).
 
         An accessor because the app resolves at press time and has no
-        business reading a private table -- and because `_agents` is
+        business reading a private table -- and because `_opens` is
         keyed by entry index, which is this widget's own bookkeeping.
         """
-        return self._agents.get(index, "")
+        return self._opens.get(index, ())
 
     def rerender(self) -> None:
         """Redraw every entry under the current theme.
@@ -2978,7 +3151,7 @@ class Transcript(RichLog):
             # over: a /theme that dropped it would leave every spawn
             # line looking identical and silently unopenable.
             self._render_entry(role, text, self._links.get(index, ()),
-                               self._agents.get(index, ""))
+                               self._opens.get(index, ()))
 
     def last_answer(self) -> str:
         """The most recent answer in this session, or "" (for /copy last).

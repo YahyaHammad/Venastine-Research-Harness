@@ -17,6 +17,17 @@ GRANT_NEVER = "never"
 GRANT_POLICIES = frozenset({GRANT_ANYWHERE, GRANT_SIGNOFF_ONLY, GRANT_NEVER})
 
 
+# ROADMAP_v2 §47, extended by ROADMAP_v3 §49 (SS14). What a tool call's
+# line in the transcript OPENS, as `registry.opens()` answers it.
+#
+# Named here beside the flags they are derived from, so the two consumers
+# that carry the answer -- core/replay.py into a stored line, tui/ into a
+# live one -- compare against a constant rather than against a literal
+# each spelled in its own file.
+OPENS_THREAD = "thread"
+OPENS_SESSION = "session"
+
+
 # ROADMAP_v2 §31 (H1). What a call to this tool is allowed to COST, and
 # therefore which mechanism bounds it. Asked once, at registration, for
 # the same reason grant_policy is: the answer is a property of the tool,
@@ -154,6 +165,16 @@ class ToolSpec:
     # grant_policy, because the safe answer here is "this line opens
     # nothing" and a tool that forgot to say so simply is not clickable.
     opens_thread: bool = False
+    # ROADMAP_v3 §49 (SS14). Whether a call to this tool starts a background
+    # SESSION, which is the other thing a tool-call line can open.
+    #
+    # A SECOND FLAG rather than a widened `opens_thread`, because the two
+    # answer different questions at press time: a thread is replayed from
+    # the archive and a session is read from the manager or rebuilt from
+    # the wake rows it wrote. `registry.opens()` is what consumers ask --
+    # one question, one answer, so no reader has to know that two flags
+    # exist. Defaulted False for `opens_thread`'s reason.
+    opens_session: bool = False
     # ROADMAP_v2 §47 slice 8 (NA9). Whether several calls to this tool in
     # ONE model response may run at the same time.
     #

@@ -137,6 +137,28 @@ slices. The owner added Podman (slice 0) after the plan was approved.
   the last 20 finished sessions are kept in memory; the listing, output and kill tools see only the caller's
   own thread's sessions; session containers carry a per-process label, `--sig-proxy=false` and
   `stdin=DEVNULL`.
+- **The session panel is process-wide** (owner, batch 98), like the agent panel it sits under and like
+  ctrl+b's picker. SS11 scopes the five TOOLS to the caller's own thread, which is a rule about what the
+  model may touch; what the person may SEE is a different question, and a panel that hid a subagent's
+  sessions would disagree with the kill picker about what is running.
+- **A live session view polls its buffer on a timer** (owner, batch 98), under `_sync_view_poll`'s existing
+  discipline: while the session is live and not one tick afterwards. Measured: the sink fires when a session
+  MOVES -- starts, matches, finishes -- and not when it prints, so a background session's view would sit
+  frozen between its first line and its last. Compared by the buffer's own character count, not by the length
+  of the tail drawn, because a session past the tail bound has a tail that stops changing length while its
+  content goes on moving.
+- **A rebuilt view takes its command and rationale from the stored tool CALL** (owner, batch 98), and is keyed
+  by call id rather than session id. Measured: the saved wake record carries only `{id, call_id, shape}` and
+  the row's text carries the command but never the rationale, so the call -- the exact params the model sent
+  -- is the only honest source for both, and it needs no widening of what is persisted. It also covers a
+  session pruned from memory in the SAME process (SS12's twenty), so the in-process and after-restart routes
+  are one route. Keyed by call id because a session id is a per-process counter: last week's `s1` is not this
+  process's `s1`, and looking one up by id across a restart would draw a different session with confidence.
+- **`ReplayEntry`'s fourth slot carries `(kind, call id)`** (batch 98), where it carried a bare id armed only
+  for threads. A `▸ shell_background` line opens a session, which is read from the manager or rebuilt from
+  the archive rather than replayed -- so the kind has to survive to the click, and deriving it there from the
+  tool name would be the second copy the slot exists to prevent. `registry.opens()` is the one question both
+  readers ask.
 - **A `docker` command that is really Podman** (the podman-docker shim) is checked as Podman: its `info`
   output is Podman's, and SS24 would otherwise be skipped under the Docker name.
 - **`sandbox_docker_image`, `AGENT_SANDBOX_IMAGE`, `is_docker_available` and `_run_docker` keep their
@@ -155,8 +177,13 @@ slices. The owner added Podman (slice 0) after the plan was approved.
    input block and its one refusal funnel, `/kill` and ctrl+b, and the quit confirmation (SS2, SS6, SS19).
    Until batch 97 a session could not be started from the TUI at all -- SS17 refuses a start with no wake
    consumer, and nothing under `tui/` had ever entered `consuming()`.
-   Next: the TUI's DISPLAY half -- the session panel fed by `SessionActivity`, the ctrl+click arming on a
-   finished session's tool-call line, the session view and what it shows after a restart (SS14, SS18).
+   The TUI's DISPLAY half BUILT, batch 98 (SS14, SS18): the sidebar panel fed by a `SessionActivity` sink,
+   the tool-call line that opens the session it started, the live view polled from the manager's buffer, and
+   the rebuilt view for a session this process no longer holds. **Slice 1 is complete.**
+   It cost one widening below the TUI: `ReplayEntry` carries `(kind, call id)` where it carried a bare id,
+   and `registry.opens()` is the one question both readers ask -- a `▸ shell_background` line could not
+   otherwise be armed in a REPLAY, so a session opened until you restarted and then went quiet.
+   Next: slice 2, interactive sessions.
 2. **Interactive sessions.**
 3. **WSL.**
 4. **SSH and the secrets it needs.**

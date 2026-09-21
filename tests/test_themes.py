@@ -45,6 +45,8 @@ STANDALONE_NAMES = [
 
 EXPECTED_ROLE_KEYS = {
     "user", "user_label", "assistant_label", "assistant", "system",
+    # ROADMAP_v3 §49 (SS14): a line of a background session's output.
+    "output",
     # ROADMAP_v3 §49 (SS5): the harness opening a turn with a background
     # session's result.
     "wake",
@@ -347,6 +349,12 @@ MESSAGE_ROLES = [
     # ROADMAP_v3 §49 (SS5): a background session's result, written by the
     # harness to start a turn.
     "wake",
+    # ROADMAP_v3 §49 (SS14): a line of a session's own output in a
+    # session view. Here rather than left out because the frame around
+    # it is `system` and the command above it is `tool`: those three
+    # share a pane, so "can a reader tell them apart" is exactly the
+    # question this list is asked.
+    "output",
 ]
 
 

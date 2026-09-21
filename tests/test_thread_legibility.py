@@ -331,8 +331,8 @@ class TestWhatIsReplayed:
         ])
 
         assert replay_entries(uuid4()) == [
-            ("user", "explain quorum reads", (), ""),
-            ("assistant", "A quorum read is …", (), ""),
+            ("user", "explain quorum reads", (), ()),
+            ("assistant", "A quorum read is …", (), ()),
         ]
 
     def test_a_failed_run_ends_with_why(self, mocker):
@@ -345,9 +345,9 @@ class TestWhatIsReplayed:
         ])
 
         assert replay_entries(uuid4()) == [
-            ("user", "Dummy task only: calculate 17 + 25.", (), ""),
+            ("user", "Dummy task only: calculate 17 + 25.", (), ()),
             ("error", "This run failed: APIError: The service is temporarily "
-                      "unavailable.", (), ""),
+                      "unavailable.", (), ()),
         ]
 
     def test_a_failure_sits_under_the_turn_it_belongs_to(self, mocker):
@@ -420,9 +420,9 @@ class TestWhatIsReplayed:
         ])
 
         assert replay_entries(uuid4()) == [
-            ("user", "why?", (), ""),
-            ("thinking", "Let me think.", (), ""),
-            ("assistant", "Because.", (), ""),
+            ("user", "why?", (), ()),
+            ("thinking", "Let me think.", (), ()),
+            ("assistant", "Because.", (), ()),
         ]
 
     def test_several_blocks_replay_as_paragraphs(self, mocker):
@@ -433,7 +433,7 @@ class TestWhatIsReplayed:
         ])
 
         assert replay_entries(uuid4())[0] == (
-            "thinking", "One.\n\nTwo.", (), "")
+            "thinking", "One.\n\nTwo.", (), ())
 
     def test_the_v1_shape_replays_by_field_name_not_by_provider(self, mocker):
         """Two spellings reach _reasoning_text -- Anthropic's `thinking`
@@ -446,7 +446,7 @@ class TestWhatIsReplayed:
                                       "text": "Hmm."}]}},
         ])
 
-        assert ("thinking", "Hmm.", (), "") in replay_entries(uuid4())
+        assert ("thinking", "Hmm.", (), ()) in replay_entries(uuid4())
 
     def test_redacted_blocks_travel_but_are_not_drawn(self, mocker):
         """Opaque ciphertext meaningful only to the model. It is stored --
@@ -458,7 +458,7 @@ class TestWhatIsReplayed:
                                       "data": "Blob=="}]}},
         ])
 
-        assert replay_entries(uuid4()) == [("assistant", "a", (), "")]
+        assert replay_entries(uuid4()) == [("assistant", "a", (), ())]
 
     def test_a_turn_without_reasoning_replays_exactly_as_before(self, mocker):
         """The property that makes §44 safe on an existing database: a row
@@ -467,7 +467,7 @@ class TestWhatIsReplayed:
             {"role": "assistant", "text": "a", "tool_calls": []},
         ])
 
-        assert replay_entries(uuid4()) == [("assistant", "a", (), "")]
+        assert replay_entries(uuid4()) == [("assistant", "a", (), ())]
 
     def test_an_empty_thread_replays_to_nothing(self, mocker):
         mocker.patch("core.replay.archive_history", return_value=[])
@@ -502,8 +502,8 @@ async def test_resuming_clears_the_screen_and_replays(mocker):
                      "M", (), {"thread_id": thread_id or uuid4(),
                                "extra": {}, "messages": []})())
     mocker.patch("tui.app.replay_entries", return_value=[
-        ("user", "what did we decide about quorum", (), ""),
-        ("assistant", "we decided on 3 of 5", (), ""),
+        ("user", "what did we decide about quorum", (), ()),
+        ("assistant", "we decided on 3 of 5", (), ()),
     ])
 
     app = VenastineApp("ANTHROPIC", "test-model", {})
@@ -568,9 +568,9 @@ async def test_a_reopened_thread_draws_its_reasoning_when_thinking_is_on(
                      "M", (), {"thread_id": thread_id or uuid4(),
                                "extra": {}, "messages": []})())
     mocker.patch("tui.app.replay_entries", return_value=[
-        ("user", "why 3 of 5", (), ""),
-        ("thinking", "A quorum has to survive one failure.", (), ""),
-        ("assistant", "we decided on 3 of 5", (), ""),
+        ("user", "why 3 of 5", (), ()),
+        ("thinking", "A quorum has to survive one failure.", (), ()),
+        ("assistant", "we decided on 3 of 5", (), ()),
     ])
 
     app = VenastineApp("ANTHROPIC", "test-model",
@@ -605,10 +605,10 @@ def test_the_cli_replays_a_resumed_thread(mocker, capsys):
     import main
 
     mocker.patch.object(main, "replay_entries", return_value=[
-        ("user", "what did we decide", (), ""),
-        ("assistant", "3 of 5", (), ""),
-        ("thinking", "A quorum has to survive one failure.", (), ""),
-        ("tool", "⟩ read  notes.md", (), "")])
+        ("user", "what did we decide", (), ()),
+        ("assistant", "3 of 5", (), ()),
+        ("thinking", "A quorum has to survive one failure.", (), ()),
+        ("tool", "⟩ read  notes.md", (), ())])
 
     main._print_replay(uuid4())
 

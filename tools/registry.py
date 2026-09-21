@@ -45,6 +45,8 @@ from tools.base import (
     GRANT_ANYWHERE,
     GRANT_NEVER,
     GRANT_SIGNOFF_ONLY,
+    OPENS_SESSION,
+    OPENS_THREAD,
     ToolSpec,
     assert_budget_declared,
     assert_grant_policy_declared,
@@ -560,6 +562,34 @@ class ToolRegistry:
         spec = self._tools.get(tool_name)
         return bool(spec is not None and spec.opens_thread)
 
+    def opens_session(self, tool_name: str) -> bool:
+        """Whether a call to this tool starts a background session (§49,
+        SS14). `opens_thread`'s sibling, and False for an unknown tool for
+        the same reason."""
+        spec = self._tools.get(tool_name)
+        return bool(spec is not None and spec.opens_session)
+
+    def opens(self, tool_name: str) -> tuple:
+        """What a call to this tool OPENS: `("thread",)`, `("session",)`, or
+        `()` for a line that opens nothing (§47, extended by §49 SS14).
+
+        THE ONE QUESTION A CONSUMER ASKS, and the reason the two flags above
+        are not read directly outside this class. core/replay.py and the TUI
+        each decide what a tool line carries; before this they asked
+        `opens_thread` and would each have had to grow the same second
+        branch, which is how the live line and the replayed one come to
+        disagree about what is clickable -- the exact divergence
+        `opens_thread`'s own docstring exists to prevent, one kind over.
+
+        A tuple rather than a string so the empty answer is falsy and the
+        caller pairs it with a call id without a sentinel.
+        """
+        if self.opens_thread(tool_name):
+            return (OPENS_THREAD,)
+        if self.opens_session(tool_name):
+            return (OPENS_SESSION,)
+        return ()
+
     def parallel(self, tool_name: str) -> bool:
         """Whether several calls to this tool in one response may run at
         the same time (§47 slice 8, NA9).
@@ -871,8 +901,12 @@ registry.register(ToolSpec("shell", shell.TOOL_SCHEMA, shell.run, approval_check
 # refusal_check before any approval prompt and again in the handler -- but
 # advertising a tool that can only be refused is the D24 defect, and under
 # `shell_approval_mode: never` nothing else would stop a pass calling it.
-registry.register(ToolSpec("shell_background", shell_sessions.BACKGROUND_TOOL_SCHEMA, shell_sessions.background_run, approval_check=shell._shell_approval_check, approval_notice=shell_sessions.background_notice, refusal_check=shell_sessions.background_refusal, available_check=shell_sessions.available, grant_policy=GRANT_NEVER, budget=BUDGET_IO, rationale_param="rationale", headline_param="command"))
-registry.register(ToolSpec("shell_monitor", shell_sessions.MONITOR_TOOL_SCHEMA, shell_sessions.monitor_run, approval_check=shell._shell_approval_check, approval_notice=shell_sessions.monitor_notice, refusal_check=shell_sessions.monitor_refusal, available_check=shell_sessions.available, grant_policy=GRANT_NEVER, budget=BUDGET_IO, rationale_param="rationale", headline_param="command"))
+# SS14: the two START tools open a session, so their lines are the ones a
+# reader can click. `shell_output` and `shell_kill` name a session they did
+# not create -- arming those would put the same target on three lines and
+# make "the line that started it" stop meaning anything.
+registry.register(ToolSpec("shell_background", shell_sessions.BACKGROUND_TOOL_SCHEMA, shell_sessions.background_run, approval_check=shell._shell_approval_check, approval_notice=shell_sessions.background_notice, refusal_check=shell_sessions.background_refusal, available_check=shell_sessions.available, grant_policy=GRANT_NEVER, budget=BUDGET_IO, rationale_param="rationale", headline_param="command", opens_session=True))
+registry.register(ToolSpec("shell_monitor", shell_sessions.MONITOR_TOOL_SCHEMA, shell_sessions.monitor_run, approval_check=shell._shell_approval_check, approval_notice=shell_sessions.monitor_notice, refusal_check=shell_sessions.monitor_refusal, available_check=shell_sessions.available, grant_policy=GRANT_NEVER, budget=BUDGET_IO, rationale_param="rationale", headline_param="command", opens_session=True))
 # Reading and stopping need no approval (SS11): they act only on sessions
 # this conversation started, which someone already approved.
 registry.register(ToolSpec("shell_sessions", shell_sessions.SESSIONS_TOOL_SCHEMA, shell_sessions.sessions_run, available_check=shell_sessions.available, grant_policy=GRANT_ANYWHERE, budget=BUDGET_IO))

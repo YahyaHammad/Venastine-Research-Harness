@@ -14690,3 +14690,111 @@ then.
 - Tests: `tests/test_session_tui.py`, new.
 - Docs: `docs/ROADMAP_v3.md` (§49's slice 1 line and the amended adopted default), `docs/DEVLOG.md`,
   `docs/ARCHITECTURE.md`, `tests/BREAKING_CHANGES.md`, `README.md`, `AGENTS.md`.
+
+## Batch 98 -- the display half: a session panel, an openable tool line, and two views (2026-09-21)
+
+### What this batch is
+
+Slice 1's display half in the TUI (ROADMAP_v3 §49: SS14, SS18), which **completes slice 1**. Batch 97
+made the turn a wake consumer so a session could be started at all; nothing on screen said one was
+running, and a finished session could only be read by the model. This batch draws it: a sidebar panel
+fed by a `SessionActivity` sink, a `▸ shell_background` line that opens the session it started, a live
+view polled from the manager's buffer, and a rebuilt view for a session this process no longer holds.
+
+### What the survey found before anything was written
+
+- **A stored session line could never have been clickable.** `ReplayEntry`'s fourth slot carried a bare
+  call id, armed only where `registry.opens_thread(name)` said the tool made a thread. A
+  `▸ shell_background` line would therefore have opened until you restarted and then gone quiet, with
+  no error -- the exact divergence §44 removed for thinking spans and batch 65 for a truncated URL,
+  reached through a third door. That is why this batch touches `core/replay.py` and the registry at all.
+- **SS18 promises a rationale that nothing persists.** The saved wake record is
+  `{"kind", "sessions": [{"id", "call_id", "shape"}]}` and the row's text carries the command but never
+  the rationale. The owner took the measurement's conclusion: read the stored tool CALL, which has the
+  exact params the model sent, and widen nothing that is written.
+- **The sink fires when a session MOVES, not when it prints.** `_post` is called from start, each
+  monitor match, finish, the wake-limit suspension and `note_user_input` -- and from nothing in the
+  output path. So a background session's view, fed only by the sink, would sit frozen between its first
+  line and its last.
+- **The manager needed one accessor.** `set_sink` had no reader, so an app could not drop its own
+  registration without dropping a later one's -- which the suite does every time it mounts a second app.
+
+### Decisions the owner took
+
+- **The panel is process-wide**, like the agent panel above it and like ctrl+b's picker. SS11 scopes the
+  five tools to the caller's own thread; that is a rule about what the model may touch, and what the
+  person may see is a different question.
+- **A live view polls the buffer on a timer**, under `_sync_view_poll`'s existing discipline: while the
+  session is live and not one tick afterwards.
+- **A rebuilt view reads the stored tool call**, keyed by call id rather than session id.
+- **All four pieces in one batch**, because they share one seam -- the row-to-display translation and
+  the redaction -- and splitting would have built it twice or shipped a panel with nothing to open.
+
+### What was built
+
+- **`registry.opens(name)`** -- one question, three answers (`("thread",)`, `("session",)`, `()`),
+  derived from two declared flags. `ReplayEntry`'s fourth slot and the transcript's side table both
+  carry `(kind, call id)` end to end, so the kind survives to the click, where the tool name no longer
+  exists. `SpawnSelected` became `CallSelected`; `_arm_spawn` became `_arm_call`, one locator for both.
+- **`SessionPanel`**, AgentPanel's box at AgentPanel's width, hidden when nothing runs, rows pre-redacted
+  by the app so `tui/widgets.py` never holds an unredacted command (batch 97's `SessionKillScreen` rule).
+- **`TuiSessions`**, the sink. It holds nothing -- the manager hands over the whole set every time -- and
+  posts rather than touching a widget, since it is called on the supervisor and reader threads.
+- **`core/session_view.py`**, what a session view shows. In `core/` for `core/replay.py`'s reason: D12
+  makes the CLI a permanent fallback, so what may be shown is a policy decision neither shell owns. Two
+  sources, one `(role, text)` shape, both through the real `check_output_policy`.
+- **A third pane**, `#session-view`, in the same switcher and the same box -- a hidden pane borrows the
+  on-screen one's width, so three panes that are not the same box would each write at another's width.
+- **`_viewing` widened** to hold a thread or a session, as §49's adopted default said, with
+  `_viewing_thread` and `_viewing_live_session` as the two accessors so nothing else type-sniffs.
+- **One new palette role, `output`**, for a line of a session's own output. Explicitly the theme's
+  foreground rather than the empty style: `assistant` is the one deliberately unstyled slot and
+  tests/test_themes.py says so, and an inherited colour is wrong for a block quoted inside a frame.
+
+### Corrected while there
+
+- **`AgentPanel._fit` became a staticmethod** shared with the session panel. It was a classmethod using
+  nothing from the class, and the alternative was a second copy of the ellipsis rule in the same sidebar.
+- **Two vacuous tests of my own, caught before the mutation pass.** One asserted that a dict it had just
+  written contained what it wrote; another joined a generator of empty strings and asserted the result
+  was empty. Both replaced with the assertion they were standing in front of -- the armed run's width,
+  and the live loop-event path actually filling the map.
+
+### Verification
+
+- **Full suite: 5026 selected** (5006 passed, 20 skipped, 1 deselected), up 65 from batch 97's 4961.
+  A full invocation, so the count pin actually ran rather than skipping.
+- **Mutation pass: 33 of 34 rows killed**, control green, every target restored byte-for-byte and
+  re-verified afterwards. Rows across all five changed files: the declaration, the replay slot, the
+  arming and its side table, the panel, the sink, both views and the widened `_viewing`.
+- **The one survivor is an equivalent mutant, and it should be.** D2 reordered the two branches of
+  `registry.opens()`. Nothing declares both flags, `test_no_tool_claims_both` asserts that, and the
+  order is unobservable while the state that would make it matter cannot exist. Pinning an arbitrary
+  resolution of an impossible case would be a test of nothing; forbidding the case is the better guard
+  and is already there. D3 was added to ask what D2 was reaching for -- whether the session branch does
+  any work at all -- and killed.
+- **The pass was killed twice by the machine's memory guard before it completed**, once mid-row, which
+  left `tui/app.py` carrying row X5's mutation on disk: a hard kill skips the `finally` that restores
+  it. Caught by grepping for the needles rather than by a red suite -- which is the point, because the
+  tests that row was aimed at are exactly the ones that would have failed, and a leftover mutation reads
+  as a real defect. The harness now writes a `.bak` beside each target before mutating, logs
+  incrementally, resumes from the log and takes a `--max=N` chunk budget, so a kill can cost at most one
+  row and the tree is verifiable between chunks. Six rows also moved off the navigation suite: the
+  display suite alone kills every one of them, and eight runs of a suite that mounts 84 Textual apps was
+  what made the pass expensive enough to be killed.
+- `ruff check .` clean (it caught an unsorted import block in the new test file first). Bandit exit 0
+  with no unsuppressed findings, against a Windows-form baseline copy -- and run a second time over the
+  two NEW files directly, because the CI command reads `git ls-files` and an uncommitted file is invisible
+  to it. Worth knowing for any batch that adds one.
+
+### Files touched
+
+`tools/base.py` (`opens_session`, the two kind constants), `tools/registry.py` (`opens_session`,
+`opens()`, the two start tools' declarations), `core/replay.py` (the widened slot),
+`core/session_view.py` (new), `core/shell_sessions.py` (a `sink` reader, so a shell can drop its own
+registration without dropping a later one's), `tui/widgets.py` (`meta_style`, `CallSelected`,
+`SessionSelected`, `SessionPanel`, `_arm_call`, the `_opens` table), `tui/app.py` (the sink, the panel,
+the arming, the session views, the widened `_viewing`), `tui/app.tcss`, `tui/themes.py` (the `output`
+role), `tests/test_session_display.py` (new, 65 tests), and the four suites whose expectations moved
+with the slot (`test_agent_navigation.py`, `test_thread_legibility.py`, `test_themes.py`,
+`test_docs_consistency.py`).

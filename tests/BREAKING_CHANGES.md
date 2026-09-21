@@ -4766,3 +4766,45 @@ question is asked.
 | Return False from `check_action("kill_session")` while idle | `test_the_footer_greys_the_key_when_nothing_runs` | False drops the entry and reflows the footer; None greys it. The control a blocked user needs has to stay visible |
 | Put the quit confirmation in `exit()` | `test_an_idle_shell_quits_without_asking` | Every exit route funnels through `exit()` -- a config restart, a programmatic close, the pump unwinding -- and a modal on that path is a shell that cannot be closed. The deliberate routes ask; `exit()` stays unconditional |
 | Leave `_quit_asking` set after a decline | `test_declining_re_arms_the_question` | The shell could never ask again, so the next quit would go straight out past the confirmation SS6 requires |
+
+## Batch 98 -- the display half: a panel, an openable line and two views (ROADMAP_v3 §49, SS14/SS18)
+
+Batch 97 made the turn a wake consumer, so a session could be started; nothing on screen said one was
+running, and a finished one could only be read by the model. This section is the other half, and most of
+it is ordinary. One thing is not: the §47 mechanism that makes a tool line clickable had to widen, because
+`ReplayEntry`'s fourth slot carried a bare call id armed only where the tool opened a THREAD. A
+`▸ shell_background` line therefore could not be armed in a replay at all -- so a session would have opened
+until you restarted, and then gone quiet with no error. The fix is one declaration (`registry.opens()`)
+and one slot carrying `(kind, call id)` end to end.
+
+SS18's other measurement: the saved wake record carries `{id, call_id, shape}` and nothing else, and the
+row's text carries the command but never the rationale. So a rebuilt view reads the stored tool CALL --
+the exact params the model sent -- rather than anything being duplicated into what is persisted.
+
+| Change | Test | Fix |
+|---|---|---|
+| Carry a bare call id in `ReplayEntry`'s fourth slot | `test_a_stored_session_line_replays_armed` | A session line and a spawn line open different panes from different sources. Deriving the kind at the click would need the tool name, which a drawn line no longer has -- it is text and metadata by then |
+| Ask `opens_thread` at a reader instead of `registry.opens()` | `test_replay_asks_the_registry_rather_than_naming_the_tool` | Two readers each growing the same second branch is how the live line and the replayed one come to disagree about what is clickable. §47 spent a declaration on that; a second kind must not spend it twice |
+| Test `opens_session` before `opens_thread` in `opens()` | `test_one_question_with_three_answers` | A tool declaring both would silently open the wrong pane. Nothing declares both, and `test_no_tool_claims_both` is what keeps that true rather than assumed |
+| Add a second side table for session calls beside `_agents` | `test_the_transcript_remembers_which_kind` | It is the same fact about a line -- what clicking it opens -- keyed by the same index with the same two lifetimes. A third dict is a third thing `reset()` and `rerender()` have to keep in step |
+| Give the session panel its own `_fit` | — (it is a shape, not a failure) | It is the same box at the same width as the agent panel. Two copies of the ellipsis rule is how one of them starts shearing the sidebar |
+| Draw the panel from `SessionRow`s directly | `test_the_command_goes_through_the_output_policy` | A sidebar is a display surface like any other. The rows reach the widget already redacted, so `tui/widgets.py` never holds an unredacted command -- `SessionKillScreen`'s rule from batch 97 |
+| Show finished sessions in the panel | `test_the_panel_shows_live_sessions_only` | SS14. A finished session is reachable from the line that started it, so listing it spends contested sidebar rows on a second route to one pane -- and grows without bound in a session that starts many |
+| Filter to live rows inside the sink | `test_the_message_carries_everything_and_the_handler_filters` | The message would stop being a faithful copy of what the manager said, and the next reader would inherit the first one's filter |
+| Call `set_sink(None)` unconditionally at unmount | `test_it_drops_only_its_own` | The manager is a module singleton and a shell is not. An app tearing down would silence whatever mounted after it -- which the suite does every time it mounts a second one |
+| Register the sink at construction rather than at mount | — (it is an ordering, not a failure) | The first thing a sink does is post, and a message posted before the widgets exist is a handler querying a panel that is not there |
+| Skip the mount-time seed | `test_a_shell_that_mounts_with_sessions_live_sees_them` | The sink only speaks on a CHANGE, so a shell that mounted while sessions were live would show a blank panel until the next one moved |
+| Refresh the panel without refreshing bindings | `test_the_footer_follows_the_sessions` | SS2's kill key is bound only while something runs, so the footer entry has to appear and go with the sessions themselves |
+| Add a second flag beside `_viewing` for sessions | `test_a_session_view_is_not_a_thread_view` | Two flags can both be true, and every derived fact -- the switcher, the crumb, the prompt, whether escape is bound -- reads one. §49's adopted default said to widen it, and this is why |
+| Draw a session into `#thread-view` | `test_closing_resets_both_panes` | The thread poll repaints that pane from the archive, so a session drawn there is wiped by the next tick of a timer meant for something else |
+| Poll a rebuilt view | `test_a_rebuilt_view_is_not_polled` | It has nothing to re-read. `_sync_view_poll`'s whole discipline is that the timer exists only while its subject is live |
+| Compare the drawn tail's length in the session poll | `test_the_count_is_the_buffers_not_the_drawn_tail` | A session past the tail bound has a tail that stops changing LENGTH while its content goes on moving, so the view would freeze exactly when it gets interesting |
+| Redraw a live view only on sink events | `test_it_repaints_only_when_the_output_moved` (the other direction) | The sink fires when a session MOVES, not when it prints. A background session's view would sit frozen between its first line and its last |
+| Leave the view alone when a session finishes | `test_a_session_finishing_repaints_the_view_once` | The poll stops the moment the session stops being live, so the view would keep the last tick's `running` header for good |
+| Key a rebuilt view by session id | `test_it_is_keyed_by_call_id_not_session_id` | A session id is a per-process counter. Last week's `s1` is not this process's `s1`, and the lookup would draw a different session with complete confidence |
+| Trust `_session_calls` as the only route | `test_a_stale_map_entry_falls_through_to_the_archive` | A session pruned past the twenty kept (SS12) leaves the entry behind. The map is an optimisation for the common case; the manager and the archive are the two real sources |
+| Ask the live thread for a session clicked inside the viewer | `test_the_thread_asked_is_the_one_on_screen` | A session line inside the thread VIEWER belongs to the run being read. The live conversation would answer "no such call" with complete confidence |
+| Report a `matched` shape with the state words | `test_a_matched_monitor_is_not_reported_as_finished` | It is the one shape the two vocabularies do not share, and it means STILL RUNNING -- which a reader has to be told rather than left to infer from a word that sounds final |
+| Return the output as one entry holding newlines | `test_output_is_one_entry_per_line` | A transcript indents the entry it is handed and draws an embedded block at column zero, so the quoted output would shear its own left edge |
+| Give `output` the empty style like `assistant` | `test_every_theme_fills_every_role_slot` | The empty slot means "inherit", which is right for a pane's body text and wrong for a block quoted inside a frame of `system` lines. `assistant` is the one deliberately unstyled slot, and the suite says so |
+| Draw session output in the `system` role | — (it is a reading, not a failure) | Dimmed italic is the worst possible treatment for forty lines of output, and it would claim the harness said them |

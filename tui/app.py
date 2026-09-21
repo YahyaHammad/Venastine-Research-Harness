@@ -75,6 +75,7 @@ from core.memory import ConversationMemory
 from core.provider_errors import describe
 from core.reasoning.authorization import GRANT_PICKER, NOTHING_TO_GRANT
 from core.replay import replay_entries
+from core.session_view import live_entries, stored_entries, tail_chars
 from memories.tui_commands import register_memory_commands
 from project_init.tui_commands import register_init_commands
 from prompts import system_prompts
@@ -86,6 +87,7 @@ from safety.policy_enforcement import (
 from security import posture
 from skills.manager import manager as skills
 from skills.tui_commands import register_skill_commands
+from tools.base import OPENS_SESSION
 from tools.builtin import file_ops
 from tools.registry import registry as tool_registry
 from tui import diffs, history, meters, preferences, ravens, themes
@@ -110,14 +112,16 @@ from tui.widgets import (
     THREAD_VIEW_POLL_S,
     AgentPanel,
     AgentRow,
+    CallSelected,
     EffortRaven,
     GoalBanner,
     PostureBadge,
     PromptInput,
     RavenPanel,
     ResearchProgress,
+    SessionPanel,
+    SessionSelected,
     SlashSuggest,
-    SpawnSelected,
     ThinkingIndicator,
     ThreadCrumb,
     ThreadSelected,
@@ -134,6 +138,13 @@ logger = logging.getLogger(__name__)
 #: `read` is deliberately absent: it changes nothing, so there is no diff
 #: to draw, and its one-line `▸ read  path` already says what happened.
 DIFFED_TOOLS = ("write", "edit")
+
+#: ROADMAP_v3 §49 (SS14). Which of the two session views `_viewing` is
+#: holding. A live one is read from the manager and re-read on a timer;
+#: a stored one is rebuilt once from the archive and never changes
+#: again, so the tag is what keeps the poll off it.
+_VIEW_LIVE = "live"
+_VIEW_STORED = "stored"
 
 #: How much of a file the TUI will hold in order to diff it. NOT
 #: `config.MAX_FILE_SIZE_BYTES`, which is 25 MB -- that is the bound on
@@ -378,6 +389,58 @@ class AgentStackChanged(Message):
         self.stack = list(stack)
 
 
+class SessionRowsChanged(Message):
+    """The set of background sessions moved (§49, SS14).
+
+    Carries every row, live and finished, exactly as the manager posted
+    them -- `AgentStackChanged`'s snapshot rule, and for its reason: the
+    sink runs on the manager's threads and the handler on the UI thread,
+    so a delta would have the panel reassembling an order it never saw.
+
+    FILTERED ON THE UI SIDE, not here. The panel shows live sessions
+    only (SS14), and doing that in the handler keeps this message a
+    faithful copy of what the manager said rather than a view of it --
+    which is what lets a second reader be added without the first one's
+    filter being in the way.
+    """
+
+    def __init__(self, rows) -> None:
+        super().__init__()
+        self.rows = list(rows)
+
+
+class TuiSessions(shell_sessions.SessionActivity):
+    """core/shell_sessions.py's sink, wired to the sidebar (§49, SS14).
+
+    CALLED ON THE MANAGER'S OWN THREADS -- a supervisor thread finishing
+    a session, a reader thread matching a line, the turn worker starting
+    one -- so it touches no widget and posts instead, exactly as
+    `TuiActivity` above and `_consume` do. `post_message` is the
+    thread-safe half of the API.
+
+    HOLDS NOTHING. `TuiActivity` keeps a stack because it is told about
+    enter and exit separately and has to assemble the answer; the
+    session manager hands over the whole set every time, so keeping a
+    copy here would be a second writer of something already authoritative
+    somewhere else.
+
+    A RAISE HERE IS ALREADY CONTAINED by the manager (`_post` logs and
+    carries on), which is why this can be plain: display machinery must
+    not fail the session it describes.
+    """
+
+    def __init__(self, app) -> None:
+        self._app = app
+
+    def changed(self, rows) -> None:
+        self._app.post_message(SessionRowsChanged(rows))
+
+    def wake_ready(self, thread_id: str) -> None:
+        """Nothing to draw. The turn worker's own `wait_for_wake` is what
+        answers a ready batch (batch 97), and a panel that redrew here
+        would be redrawing what `changed` already said."""
+
+
 class TuiActivity(AgentActivity):
     """core/agent_activity.py's sink, wired to the sidebar.
 
@@ -486,14 +549,45 @@ class TuiActivity(AgentActivity):
         self._app.post_message(AgentStackChanged(snapshot))
 
 
-def _kill_rows(rows) -> list[dict]:
-    """`SessionRow`s as the kill picker's `{id, label}` pairs (§49, SS2).
+def _redacted_command(row) -> str:
+    """One session's command, through the real output policy (§49).
 
     REDACTED THROUGH THE REAL POLICY, named for the tool that started the
     session, exactly as core/session_wake.py renders the same command for
-    the model. A modal is a display surface like any other, and a command
-    carrying a secret does not become safe by being shown to the person
-    who typed it.
+    the model. A modal and a sidebar are display surfaces like any other,
+    and a command carrying a secret does not become safe by being shown
+    to the person who typed it.
+
+    ONE PRODUCER for the picker and the panel, because they draw the same
+    command at two widths and a second call site is how one of them comes
+    to skip the policy.
+    """
+    tool = ("shell_monitor" if row.kind == "monitor" else "shell_background")
+    return check_output_policy(tool, {"command": row.command})["command"]
+
+
+def _panel_rows(rows) -> list[dict]:
+    """`SessionRow`s as the session panel's `{id, label}` pairs (SS14).
+
+    EIGHTEEN COLUMNS, so the label is the id and as much of the command
+    as fits -- the widget elides, and what it elides from has to be the
+    part that identifies the session rather than a prefix of `docker`.
+    A monitor's match count rides along when there is one, because "it
+    has matched something" is the whole reason a monitor is on screen.
+
+    Module-level beside `_kill_rows`, for its reason.
+    """
+    out = []
+    for row in rows:
+        matches = (f" {row.match_count}✓"
+                   if row.kind == "monitor" and row.match_count else "")
+        out.append({"id": row.id,
+                    "label": f"{row.id}{matches} {_redacted_command(row)}"})
+    return out
+
+
+def _kill_rows(rows) -> list[dict]:
+    """`SessionRow`s as the kill picker's `{id, label}` pairs (§49, SS2).
 
     Module-level so a test can build the labels without an app, and so the
     screen stays a screen: tui/screens.py imports no core module, and
@@ -501,9 +595,7 @@ def _kill_rows(rows) -> list[dict]:
     """
     out = []
     for row in rows:
-        tool = ("shell_monitor" if row.kind == "monitor"
-                else "shell_background")
-        command = check_output_policy(tool, {"command": row.command})["command"]
+        command = _redacted_command(row)
         elapsed = max(0, int(time() - row.started_wall))
         out.append({
             "id": row.id,
@@ -751,6 +843,7 @@ class VenastineApp(App):
         # fire while a modal is up, and `query_one` searches the ACTIVE
         # screen. None until mounted.
         self._thread_view_widget: Transcript | None = None
+        self._session_view_widget: Transcript | None = None
         self._crumb_widget: ThreadCrumb | None = None
         self._pane_widget = None
         # The sidebar usage line and the raven, held for the transcript's
@@ -770,11 +863,23 @@ class VenastineApp(App):
         self._goal_widget: GoalBanner | None = None
         self._todo_widget: TodoPanel | None = None
         self._progress_widget: ResearchProgress | None = None
-        # The thread the viewer is showing, or None when it is closed.
+        # What the viewer is showing, or None when it is closed.
         # THE ONE FACT that says whether the viewer is open; everything
         # else -- the switcher's `current`, the crumb's rows, the
         # prompt's disabled flag, whether escape is bound -- is derived
         # from it, so they cannot drift into disagreeing.
+        #
+        # §49 (SS14) WIDENED IT to hold a background session as well as
+        # a stored thread, which is what the roadmap's adopted default
+        # said to do and is worth saying why: a second flag beside it
+        # would be a second answer to "is the viewer open", and the two
+        # could be true at once -- the exact drift the paragraph above
+        # exists to prevent, reached by adding a fact rather than by
+        # letting one get stale. A UUID is a thread; a tuple is a
+        # session, `(_VIEW_LIVE, session id)` while this process still
+        # holds it and `(_VIEW_STORED, call id)` when it is rebuilt from
+        # the archive. `_viewing_thread` and `_viewing_live_session` are
+        # the two accessors that ask, so nothing else type-sniffs.
         self._viewing = None
         self._view_timer = None
         # How many ARCHIVE entries the viewer last drew, which is what the
@@ -800,6 +905,22 @@ class VenastineApp(App):
         # Per-thread state: `reset()`'s list, since the keys are call
         # ids of one conversation's calls.
         self._spawn_threads: dict = {}
+        # §49 (SS14). Start-call id -> the session that call created, as
+        # TEXT both sides, for `_spawn_threads`' reason.
+        #
+        # ONE SOURCE, not three, and the asymmetry is the point: the
+        # tool result names the session in the same step the call was
+        # made (D20), so there is no window like a spawn's where the
+        # line exists and the target does not. What a spawn needs the
+        # other two sources for -- a run still going, and a replay --
+        # a session answers differently: the manager holds the live one
+        # and the archive rebuilds the finished one, both keyed by the
+        # call id the LINE already carries. So this map is an
+        # optimisation for the common case, never the only route, and
+        # `open_session_call` works with it empty.
+        #
+        # Per-thread state: `reset()`'s list, beside `_spawn_threads`.
+        self._session_calls: dict = {}
         self._permission_channel: queue.Queue | None = None
         # Batch 61. BEFORE the `_busy` assignment below, which is a
         # property setter now and drives this object.
@@ -864,6 +985,14 @@ class VenastineApp(App):
         # keeps its own copy on the worker side. One writer each.
         self._agent_stack: list = []
         self._activity = TuiActivity(self)
+        # §49 (SS14). The session manager's sink. Registered at
+        # mount and dropped at unmount, because it is PROCESS-wide
+        # state (`shell_sessions.sessions` is a module singleton)
+        # while this object is one app: a sink left behind would
+        # post into a dead app, which is what the suite does every
+        # time it mounts a second one.
+        self._session_sink = TuiSessions(self)
+        self._session_panel_widget: SessionPanel | None = None
 
     # -- layout --------------------------------------------------------------
 
@@ -901,6 +1030,12 @@ class VenastineApp(App):
                 with ContentSwitcher(initial="transcript", id="pane"):
                     yield Transcript(id="transcript")
                     yield Transcript(id="thread-view")
+                    # ROADMAP_v3 §49 (SS14). A third child of the same
+                    # switcher: a session is read the way a stored run
+                    # is, so it belongs beside it rather than in a
+                    # modal that would hide the sidebar saying what
+                    # else is running.
+                    yield Transcript(id="session-view")
                 # §38. Between the transcript and the prompt, so the
                 # collapsed thinking line reads as the bottom of the
                 # conversation. Hidden until a span starts, TodoPanel-style,
@@ -933,6 +1068,13 @@ class VenastineApp(App):
                 # rather than among the figures. Hidden until there is an
                 # agent or a spawn, PostureBadge-style.
                 yield AgentPanel(id="agent-panel")
+                # ROADMAP_v3 §49 (SS14). Directly under the agent
+                # panel, because the two answer one question between
+                # them -- who is working, and what is running for
+                # them -- and a session almost always belongs to the
+                # run named above it. Hidden until something is live,
+                # AgentPanel-style.
+                yield SessionPanel(id="session-panel")
                 # #4: billed-since-resume and current context size, one
                 # line. Hidden until a turn produces figures.
                 yield UsageLine(id="usage-line")
@@ -955,8 +1097,22 @@ class VenastineApp(App):
         self._progress_widget = self.query_one(
             "#research-progress", ResearchProgress)
         self._thread_view_widget = self.query_one("#thread-view", Transcript)
+        self._session_view_widget = self.query_one(
+            "#session-view", Transcript)
         self._crumb_widget = self.query_one("#thread-crumb", ThreadCrumb)
         self._pane_widget = self.query_one("#pane", ContentSwitcher)
+        self._session_panel_widget = self.query_one(
+            "#session-panel", SessionPanel)
+        # §49 (SS14). Registered here rather than at construction
+        # because the first thing the sink does is post, and a
+        # message posted before the widgets exist is a message
+        # whose handler queries a panel that is not there yet.
+        shell_sessions.sessions.set_sink(self._session_sink)
+        # What is already running, for a shell that mounted while
+        # sessions were live -- the sink only speaks on a CHANGE,
+        # so without this the panel would stay blank until the
+        # next one moved.
+        self.refresh_session_panel(shell_sessions.sessions.rows())
         # Attached before anything else can log. Removed in on_unmount --
         # the handler holds a reference to this app, so leaving it on the
         # root logger would keep a dead app alive and, in the test suite,
@@ -1138,6 +1294,11 @@ class VenastineApp(App):
         if handler is not None:
             logging.getLogger().removeHandler(handler)
             self._log_handler = None
+        # §49 (SS14), beside the log handler and for its reason:
+        # both are process-wide registrations this app made, and
+        # one left behind outlives the widgets it posts to.
+        if shell_sessions.sessions.sink is self._session_sink:
+            shell_sessions.sessions.set_sink(None)
 
     def on_log_record_message(self, message: LogRecordMessage) -> None:
         """Render a routed log record in the role the handler chose.
@@ -1782,19 +1943,28 @@ class VenastineApp(App):
         """A panel row or a crumb segment was clicked."""
         self.open_agent_thread(message.thread_id)
 
-    def on_spawn_selected(self, message: SpawnSelected) -> None:
-        """A `▸ spawn_subagent` line in the transcript was ctrl+clicked.
+    def on_call_selected(self, message: CallSelected) -> None:
+        """A tool line in the transcript was ctrl+clicked (§47, widened
+        by §49 SS14).
 
         RESOLVED HERE, at press time, which is the whole reason the
-        line carries a call id rather than a thread: it is drawn before
-        the child exists, and a target baked in at draw time would have
-        to be nothing.
+        line carries a call id rather than a thread or a session: it is
+        drawn before either exists, and a target baked in at draw time
+        would have to be nothing.
+
+        ONE HANDLER, branching on the kind the line carried, rather than
+        a message type per kind. What a click does is this app's
+        question either way, and the two answers differ only in which
+        pane they open.
 
         A call with no thread is SAID rather than ignored. It is a real
         state -- a spawn refused for an unknown agent or a depth limit
         never made one -- and a deliberate ctrl+click that produces
         silence reads as a broken feature rather than as an answer.
         """
+        if message.kind == OPENS_SESSION:
+            self.open_session_call(str(message.call_id))
+            return
         thread_id = self._spawn_threads.get(str(message.call_id))
         if thread_id:
             self.open_agent_thread(thread_id)
@@ -1871,6 +2041,13 @@ class VenastineApp(App):
         anything that changes which conversation the session is in --
         `/new` and a thread switch both, because a trail pointing into
         the thread you just left is worse than no trail.
+
+        CLOSES WHATEVER IS OPEN since §49 (SS14), thread or session, and
+        keeps the name: every caller means "put the live conversation
+        back", and a second closer per kind would be two places that
+        have to agree about the crumb, the prompt and the timer. Both
+        panes are reset, not the one that was up -- resetting the other
+        costs nothing and removes the branch that could get it wrong.
         """
         if self._viewing is None:
             return
@@ -1880,8 +2057,133 @@ class VenastineApp(App):
         self._crumb.show(())
         self._pane.current = "transcript"
         self._thread_view.reset()
+        self._session_view.reset()
         self._set_prompt_enabled(True)
         self.refresh_bindings()
+
+    # -- sessions (§49, SS14/SS18) -------------------------------------------
+
+    def on_session_selected(self, message: SessionSelected) -> None:
+        """A row of the session panel was clicked."""
+        self.open_session(str(message.session_id))
+
+    def open_session(self, session_id: str) -> None:
+        """Show a LIVE session, read-only (SS14).
+
+        The panel's route, and the only one that starts from a session
+        id: the panel draws what the manager holds, so by definition
+        this process has the session. A row that has finished between
+        the draw and the click is the one race, and it is answered the
+        way a missing thread is -- said, not ignored.
+        """
+        row = shell_sessions.sessions.row(session_id)
+        if row is None:
+            self._visible_transcript.write_system(
+                f"Session {session_id} is no longer here — it finished and "
+                f"aged out. Its result is on the line that started it.")
+            return
+        self._paint_session_view(row)
+        self._viewing = (_VIEW_LIVE, str(session_id))
+        self._crumb.show(self._session_chain(f"session {session_id}"))
+        self._pane.current = "session-view"
+        self._set_prompt_enabled(False)
+        self._sync_view_poll()
+        self.refresh_bindings()
+
+    def open_session_call(self, call_id: str) -> None:
+        """Show the session a tool-call line started (SS14, SS18).
+
+        THE TRANSCRIPT'S ROUTE, and it starts from a CALL id because
+        that is all the line has -- the same press-time resolution §47
+        does for a spawn, and for the same reason: the line is drawn
+        before the session has a result.
+
+        TWO SOURCES, TRIED IN THAT ORDER. A session this process still
+        holds is read from the manager, which has its live output. One
+        it does not -- aged out past the twenty kept (SS12), or started
+        before a restart -- is rebuilt from the archive, which is SS18's
+        promise and says so in its own header.
+
+        The thread asked is the one whose transcript was clicked, not
+        the live conversation: a session line inside the thread VIEWER
+        belongs to the run being read, and asking the live thread for it
+        would answer "no such call" with complete confidence.
+        """
+        session_id = self._session_calls.get(str(call_id))
+        if session_id:
+            row = shell_sessions.sessions.row(session_id)
+            if row is not None:
+                self.open_session(session_id)
+                return
+        thread_id = self._viewing_thread or getattr(
+            self._memory, "thread_id", None)
+        entries = []
+        if thread_id is not None:
+            try:
+                entries = stored_entries(thread_id, str(call_id))
+            except Exception as e:                          # noqa: BLE001
+                # THE PANE ON SCREEN, `open_agent_thread`'s rule: this
+                # click can come from inside the viewer, where a line
+                # written to the live transcript is invisible rather
+                # than merely quiet.
+                self._visible_transcript.write_error(
+                    f"Could not open that session: {e}")
+                return
+        if not entries:
+            self._visible_transcript.write_system(
+                "That session has nothing to show — it was refused, or it "
+                "has not started yet.")
+            return
+        self._paint_session_entries(entries)
+        self._viewing = (_VIEW_STORED, str(call_id))
+        self._crumb.show(self._session_chain("session"))
+        self._pane.current = "session-view"
+        self._set_prompt_enabled(False)
+        self._sync_view_poll()
+        self.refresh_bindings()
+
+    def _session_chain(self, label: str) -> list:
+        """The crumb for a session view: where you are, and the way back.
+
+        The live conversation's own segment is armed and this one is
+        not, which is ThreadCrumb's existing rule -- the last segment is
+        where you already are. Built from the chat thread rather than
+        from `_thread_chain`, because a session hangs off the run that
+        started it and has no lineage of its own to walk.
+        """
+        thread_id = self._viewing_thread or getattr(
+            self._memory, "thread_id", None)
+        chain = (self._thread_chain(thread_id) if thread_id is not None
+                 else [("chat", None)])
+        return list(chain) + [(label, None)]
+
+    def _paint_session_view(self, row) -> None:
+        """Draw a live session, and remember how much output was drawn.
+
+        The tail and the truncation flag come from the manager's buffer
+        in one call, and the redaction is core/session_view.py's -- this
+        function reads a buffer and paints, and never sees an
+        unredacted command.
+        """
+        buffer = shell_sessions.sessions.buffer(row.id)
+        tail, truncated = (buffer.last(tail_chars()) if buffer is not None
+                           else ("", False))
+        self._paint_session_entries(live_entries(row, tail, truncated))
+        # THE BUFFER'S OWN COUNT, which is what the poll compares
+        # against -- see `_poll_session_view` for why the drawn length
+        # is the wrong number.
+        self._viewed_entries = row.output_chars
+
+    def _paint_session_entries(self, entries) -> None:
+        """Draw `(role, text)` entries into the session pane.
+
+        IT RESETS, `_paint_thread_view`'s rule: the poll repaints, so
+        anything written into this pane by hand does not survive.
+        """
+        view = self._session_view
+        view.reset()
+        for role, text in entries:
+            view.write_role(role, text)
 
     def action_close_thread_view(self) -> None:
         self.close_thread_view()
@@ -1934,7 +2236,8 @@ class VenastineApp(App):
         return chain
 
     def _sync_view_poll(self) -> None:
-        """Run the re-read timer exactly while the viewed run is LIVE.
+        """Run the re-read timer exactly while what the viewer shows is
+        still being written.
 
         A run's own events are drained internally (§18/D6), so the only
         honest source for "what has it written since" is the archive it
@@ -1944,13 +2247,27 @@ class VenastineApp(App):
         The timer exists only while the viewed thread is one the sidebar
         says is running, so a finished thread is read once and an idle
         session pays nothing.
+
+        §49 (SS14) PUTS A SECOND SUBJECT ON THE SAME TIMER. A live
+        session's output is in memory and nowhere else -- the sink fires
+        when a session MOVES (starts, matches, finishes), not when it
+        prints, so a background session's view would sit frozen between
+        its first line and its last. It polls the buffer instead, under
+        this function's own discipline: while the session is live, and
+        not one tick afterwards. One timer for both, because the two are
+        never open at once -- `_viewing` holds one thing.
         """
         live = {str(row.thread_id) for row in self._agent_stack
                 if row.thread_id is not None}
-        wanted = self._viewing is not None and str(self._viewing) in live
+        viewing = self._viewing_thread
+        wanted = viewing is not None and str(viewing) in live
+        session_id = self._viewing_live_session
+        if session_id is not None:
+            row = shell_sessions.sessions.row(session_id)
+            wanted = row is not None and row.state in shell_sessions.LIVE_STATES
         if wanted and self._view_timer is None:
             self._view_timer = self.set_interval(
-                THREAD_VIEW_POLL_S, self._poll_thread_view)
+                THREAD_VIEW_POLL_S, self._poll_view)
         elif not wanted and self._view_timer is not None:
             self._view_timer.stop()
             self._view_timer = None
@@ -1993,6 +2310,44 @@ class VenastineApp(App):
         # WHAT THE ARCHIVE HELD, not what the widget drew. See the poll.
         self._viewed_entries = len(entries)
 
+    def _poll_view(self) -> None:
+        """The timer's one tick: whichever of the two views is open.
+
+        A SINGLE ENTRY POINT rather than two timers, because `_viewing`
+        holds one thing and two timers would be two answers to which
+        one that is.
+        """
+        if self._viewing_live_session is not None:
+            self._poll_session_view()
+            return
+        self._poll_thread_view()
+
+    def _poll_session_view(self) -> None:
+        """Redraw the viewed session if it has written anything new.
+
+        Compared by the buffer's own CHARACTER COUNT, which is
+        `_poll_thread_view`'s entry-count rule in the units this source
+        has: a session's output only grows, and repainting every tick
+        would fight the reader's scroll for nothing. The count is the
+        buffer's `total`, not the length of the tail drawn -- a session
+        past the tail bound has a tail that stops changing length while
+        its content goes on moving, and comparing the drawn length would
+        freeze the view exactly when it gets interesting.
+
+        Best-effort, for `_poll_thread_view`'s reason: a timer can fire
+        while a modal is up or while the app is being torn down.
+        """
+        session_id = self._viewing_live_session
+        try:
+            row = shell_sessions.sessions.row(session_id)
+            if row is None:
+                return
+            if row.output_chars == self._viewed_entries:
+                return
+            self._paint_session_view(row)
+        except Exception:                                   # noqa: BLE001
+            logger.exception("Could not refresh the session view.")
+
     def _poll_thread_view(self) -> None:
         """Redraw the viewed run if it has written anything new.
 
@@ -2018,10 +2373,11 @@ class VenastineApp(App):
         being torn down. A failure to redraw must not take the session
         with it.
         """
-        if self._viewing is None:
+        viewing = self._viewing_thread
+        if viewing is None:
             return
         try:
-            entries = replay_entries(self._viewing)
+            entries = replay_entries(viewing)
             if len(entries) == self._viewed_entries:
                 return
             self._paint_thread_view(entries)
@@ -2034,6 +2390,20 @@ class VenastineApp(App):
         if self._thread_view_widget is not None:
             return self._thread_view_widget
         return self.query_one("#thread-view", Transcript)
+
+    @property
+    def _session_view(self) -> Transcript:
+        """The session pane (§49, SS14). HELD, for `_transcript`'s reason.
+
+        A THIRD PANE rather than a second use of `#thread-view`. The
+        thread poll repaints that one from the archive, so a session
+        drawn into it would be wiped by the next tick of a timer meant
+        for something else -- and both panes being reset on close is
+        then a statement rather than a hope.
+        """
+        if self._session_view_widget is not None:
+            return self._session_view_widget
+        return self.query_one("#session-view", Transcript)
 
     @property
     def _visible_transcript(self) -> Transcript:
@@ -2049,8 +2419,33 @@ class VenastineApp(App):
         crumb's rows and the prompt's `disabled` flag, so it cannot drift
         into disagreeing with them about which pane is up.
         """
-        return (self._thread_view if self._viewing is not None
-                else self._transcript)
+        if self._viewing is None:
+            return self._transcript
+        return (self._thread_view if self._viewing_thread is not None
+                else self._session_view)
+
+    @property
+    def _viewing_thread(self):
+        """The stored THREAD the viewer is showing, or None (§49, SS14).
+
+        For the sites that mean a thread specifically -- the replay
+        poll, the crumb chain -- as opposed to the sites that mean "the
+        viewer is open". Both read `_viewing`, so there is still one
+        fact; this is the question, not a second copy of the answer.
+        """
+        return self._viewing if isinstance(self._viewing, UUID) else None
+
+    @property
+    def _viewing_live_session(self):
+        """The id of the LIVE session the viewer is showing, or None.
+
+        Only a live one: a rebuilt view has nothing to re-read, so the
+        poll must not run for it, and this is the predicate that says
+        so (`_sync_view_poll`).
+        """
+        seen = self._viewing
+        return (seen[1] if isinstance(seen, tuple) and seen[0] == _VIEW_LIVE
+                else None)
 
     @property
     def _crumb(self) -> ThreadCrumb:
@@ -2633,6 +3028,48 @@ class VenastineApp(App):
         # go on re-reading a thread nothing is writing to any more.
         self._sync_view_poll()
 
+    def on_session_rows_changed(self, message: SessionRowsChanged) -> None:
+        """The session sink spoke. Runs on the UI thread (§49, SS14)."""
+        self.refresh_session_panel(message.rows)
+        # SS14: the panel shows live sessions only, so a session that
+        # just finished leaves it -- and the view of it, if one is open,
+        # is now showing a state that has moved. Repainted here because
+        # this is the only signal: the poll stops the moment the session
+        # stops being live, so without this the view would keep the last
+        # tick's "running" header for good.
+        session_id = self._viewing_live_session
+        if session_id is not None:
+            for row in message.rows:
+                if row.id == session_id:
+                    self._paint_session_view(row)
+                    break
+        self._sync_view_poll()
+        # §49 (SS2). ctrl+b is bound only while something is running, so
+        # the footer entry appears and goes with the sessions themselves.
+        self.refresh_bindings()
+
+    def refresh_session_panel(self, rows) -> None:
+        """Redraw the session panel from a set of rows.
+
+        ONE function for the sink's handler and the mount-time seed, for
+        `refresh_agent_panel`'s reason: two writers of one widget is how
+        the two come to draw it differently.
+
+        THE FILTER IS HERE, which is SS14's "live sessions only" -- the
+        message carries everything the manager holds, so this is the one
+        place that decides what a reader sees.
+        """
+        live = [row for row in rows
+                if row.state in shell_sessions.LIVE_STATES]
+        self._session_panel.show(_panel_rows(live))
+
+    @property
+    def _session_panel(self) -> SessionPanel:
+        """The sidebar's session panel. HELD, for `_transcript`'s reason."""
+        if self._session_panel_widget is not None:
+            return self._session_panel_widget
+        return self.query_one("#session-panel", SessionPanel)
+
     def refresh_agent_panel(self) -> None:
         """Redraw the panel from the two facts that make it up: the
         session's active agent (an /agent switch) and the spans open right
@@ -2680,6 +3117,11 @@ class VenastineApp(App):
         # it needs the same poke -- tcss reaches the panel's box and not
         # the styles inside its Text.
         self.query_one("#agent-panel", AgentPanel).restyle()
+        # §49 (SS14). Its neighbour, with its neighbour's problem: the
+        # armed row styles are Rich's, so a /theme would leave the panel
+        # in the old palette and -- worse -- the arming is carried in the
+        # same Style, so a redraw is also what keeps the rows clickable.
+        self.query_one("#session-panel", SessionPanel).restyle()
         # §47. In #main rather than the sidebar, but the same kind of
         # surface and the same problem: Rich styles resolved per draw,
         # which tcss cannot reach inside.
@@ -2772,18 +3214,19 @@ class VenastineApp(App):
                 # cut-off span to resolve against. Redacted at the
                 # producer, and a value the redactor rewrote is not
                 # among them -- see `redacted_values`.
-                # §47. The call id rides along for a tool that opens a
-                # thread of its own, so the line becomes openable once
-                # the run it started has one. The REGISTRY is asked
-                # rather than the name compared, for the same reason
-                # core/replay.py asks: one declaration, and the live
-                # line and the replayed one cannot disagree about
-                # which lines are openable.
-                opens = (call_id if tool_registry.opens_thread(name)
-                         else "")
+                # §47, widened by §49 (SS14). The call id rides along
+                # for a tool that opens a thread or a session of its
+                # own, so the line becomes openable once the thing it
+                # started exists. The REGISTRY is asked rather than the
+                # name compared, for the same reason core/replay.py
+                # asks: one declaration, and the live line and the
+                # replayed one cannot disagree about which lines are
+                # openable.
+                kind = tool_registry.opens(name)
+                opens = (kind[0], str(call_id)) if kind and call_id else ()
                 transcript.write_role(
                     "tool", f"▸ {name}{detail}",
-                    tool_registry.call_links(name, params), opens or "")
+                    tool_registry.call_links(name, params), opens)
 
         if event.tool_result:
             result = event.tool_result["result"]
@@ -2798,6 +3241,12 @@ class VenastineApp(App):
                 spawned = result.get("subagent_thread_id")
                 if spawned:
                     self._spawn_threads[str(call_id)] = str(spawned)
+                # §49 (SS14), the session half of the line above. The
+                # start tools have said the id in their result since
+                # batch 95 (`_started_result`); this is what reads it.
+                started = result.get("session")
+                if started:
+                    self._session_calls[str(call_id)] = str(started)
             failed = isinstance(result, dict) and "error" in result
             if failed:
                 tool_name = self._tool_names.get(call_id) if call_id else None
@@ -3887,6 +4336,9 @@ class VenastineApp(App):
         # that survived would answer the next conversation's clicks
         # with the previous one's runs.
         self._spawn_threads.clear()
+        # §49 (SS14), on that same list: a start call belongs to the
+        # conversation that made it.
+        self._session_calls.clear()
         # §47. A trail pointing into the thread the session just left is
         # worse than no trail, and the pane underneath it would be
         # showing a run belonging to a conversation that is no longer
@@ -3967,7 +4419,7 @@ class VenastineApp(App):
         Takes the target rather than reaching for `self._transcript`,
         which is what makes it reusable at all.
         """
-        for role, text, links, call_id in entries:
+        for role, text, links, opens in entries:
             if role == "user":
                 transcript.write_user(text)
             elif role == "assistant":
@@ -3987,7 +4439,7 @@ class VenastineApp(App):
                 if self._show_thinking:
                     transcript.write_role(role, text)
             else:
-                transcript.write_role(role, text, links, call_id)
+                transcript.write_role(role, text, links, opens)
 
     def action_show_claims(self) -> None:
         self.show_claims("")
@@ -4638,6 +5090,7 @@ def _cmd_new(app: VenastineApp, args: str) -> None:
     # §47, on that list for that reason: these keys belong to the
     # conversation being left.
     app._spawn_threads.clear()
+    app._session_calls.clear()
     # State first, then the screen, then anything written -- so a
     # failure cannot leave the transcript cleared while the panels still
     # describe the previous thread.

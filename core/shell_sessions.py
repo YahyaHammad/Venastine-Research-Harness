@@ -369,6 +369,14 @@ class SessionManager:
     def set_sink(self, sink: Optional[SessionActivity]) -> None:
         self._sink = sink or NULL_SINK
 
+    @property
+    def sink(self) -> SessionActivity:
+        """Who is being told, so a shell can drop ITS OWN registration
+        without dropping a later one's. The manager is a module
+        singleton and a shell is not: an app tearing down unconditionally
+        would silence whatever mounted after it."""
+        return self._sink
+
     @staticmethod
     def effective_timeout(requested: int) -> tuple[int, bool]:
         """(the timeout a session runs with, whether the cap applied) --

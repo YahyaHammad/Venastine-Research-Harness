@@ -59,6 +59,19 @@
 /* The lineage trail. `height: auto` and hidden until the viewer opens, so
    the live conversation costs no row for a trail it does not need -- the
    GoalBanner rule, which every conditional row in #main follows. */
+/* ROADMAP_v3 §49 (SS14). THE SAME BOX as #transcript and #thread-view --
+   `border: solid` and `padding: 0 1` -- and that is load-bearing rather
+   than tidy: a hidden pane measures 0 and borrows the on-screen pane's
+   width (Transcript._region_width), so three panes that are not the same
+   box would each write at another one's width. The accent border is
+   #thread-view's affordance, for #thread-view's reason: at a glance this
+   is not the conversation you are having. */
+#session-view {
+    height: 1fr;
+    border: solid $accent;
+    padding: 0 1;
+}
+
 #thread-crumb {
     height: auto;
     padding: 0 1;
@@ -168,6 +181,17 @@
        anything when the textual pin moved -- a Content carries
        neither flag and the conversion drops both. See
        `widgets.as_content`. */
+    text-wrap: nowrap;
+    text-overflow: clip;
+}
+
+/* ROADMAP_v3 §49 (SS14). The same box as #agent-panel above, because it is
+   the same kind of widget in the same twenty columns: rows sized by the
+   widget (SessionPanel.WIDTH, which is AgentPanel.WIDTH) and clipped rather
+   than reflowed, for that block's reason. */
+#session-panel {
+    height: auto;
+    padding-top: 1;
     text-wrap: nowrap;
     text-overflow: clip;
 }

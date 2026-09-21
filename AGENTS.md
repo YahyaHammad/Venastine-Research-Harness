@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 4961 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 5026 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -1217,10 +1217,25 @@ which live line to arm. A tool name written in both is how they come to disagree
 are clickable — R13's argument, one field over. Defaulted to False, unlike `grant_policy`, because
 the safe answer is "this line opens nothing".
 
-**Two side tables on the transcript, one rule.** `_links` (batch 65) and `_agents` (§47) are both
-keyed by entry index, both dropped by `reset()`, both replayed by `rerender()`. They stay separate
-because a link opens a browser and a spawn opens a pane, and the click handler tells them apart
-anyway. **Testing a `reset()` on either needs two things that are easy to get wrong**: the test
+**A SESSION line is armed the same way, and the slot carries WHICH KIND** (ROADMAP_v3 §49, SS14,
+batch 98). `shell_background` and `shell_monitor` declare `opens_session`, and consumers ask one
+question — `registry.opens(name)` → `("thread",)`, `("session",)` or `()`. The fourth slot of a
+`ReplayEntry`, and the transcript's side table, carry `(kind, call id)` rather than a bare id, and
+that is load-bearing rather than tidy: a drawn line is text and metadata by the time anyone can
+click it, so the tool name that decided the kind is gone. Before batch 98 the slot was armed only
+for threads, which meant a `▸ shell_background` line could not be armed in a REPLAY at all — a
+session opened until you restarted and then went quiet with no error. **`app._session_calls` has
+ONE source**, not a spawn's three, and the asymmetry is the point: the tool result names the session
+in the same step the call was made (D20), so there is no window where the line exists and the target
+does not. It is an optimisation for the common case — the manager answers a live session and
+`core/session_view.stored_entries` rebuilds a finished one from the archive, both keyed by the call
+id the line already carries, so `open_session_call` works with the map empty.
+
+**Two side tables on the transcript, one rule.** `_links` (batch 65) and `_opens` (§47, renamed and
+widened in batch 98) are both keyed by entry index, both dropped by `reset()`, both replayed by
+`rerender()`. They stay separate because a link opens a BROWSER and a call opens a PANE, and the
+click handler tells them apart anyway — but a thread and a session share `_opens`, because they
+are one fact about a line and a third dict would be a third lifetime to keep in step. **Testing a `reset()` on either needs two things that are easy to get wrong**: the test
 has to REDRAW before asserting, because on the live path a write is handed its targets as an
 argument and a stale table is invisible; and the new thread's lines have to reach the same INDEX
 the old entry held, or the assertion passes against a `reset()` that clears nothing. Both mistakes
@@ -1253,6 +1268,32 @@ be told from the floor: set `app.console.size` in any width pin.
 **`_viewing` is the one fact; everything else is derived from it.** The switcher's `current`, the
 crumb's rows, the prompt's `disabled` flag and whether escape is bound all follow from it, so they
 cannot drift into disagreeing about whether the viewer is open.
+
+It **widened in batch 98** (ROADMAP_v3 §49, SS14) to hold a background session as well as a stored
+thread: a UUID is a thread, a tuple is a session. A second flag beside it was the alternative and is
+the failure the paragraph above describes, reached by ADDING a fact rather than by letting one go
+stale — two flags can both be true. `_viewing_thread` and `_viewing_live_session` are the two
+accessors, so nothing else type-sniffs, and the session gets its own pane (`#session-view`) in the
+same switcher: the thread poll repaints `#thread-view` from the archive, so a session drawn there
+would be wiped by the next tick of a timer meant for something else.
+
+**A session view polls the BUFFER, and by character count** (SS14). There is no archive to read: a
+session's output lives in memory and nowhere else. And the sink cannot stand in for the poll — it
+fires when a session MOVES (start, each monitor match, finish, the wake-limit suspension) and never
+when it prints, so a background session's view would sit frozen between its first line and its last.
+The comparison is the buffer's own `total`, not the length of the tail drawn: a session past the tail
+bound has a tail that stops changing LENGTH while its content goes on moving, so the drawn length
+freezes the view exactly when it gets interesting. The handler repaints once more when the session
+finishes, because the poll stops the tick it stops being live.
+
+**A rebuilt view is keyed by CALL id, and takes its command and rationale from the stored call**
+(SS18). Two measurements behind one sentence. A session id is a per-process counter (`s1`, `s2`), so
+looking one up across a restart draws a different session with complete confidence. And the saved
+wake record is `{id, call_id, shape}` — the row's text carries the command but never the rationale —
+so the tool CALL, which has the exact params the model sent, is the only honest source for both and
+nothing had to be duplicated into what is persisted. The same route covers a session pruned from
+memory in this process (SS12 keeps twenty), so `app._session_calls` is an optimisation rather than a
+dependency.
 
 **The trail is read from STORAGE, never from where the reader walked.** Open a sub-subagent
 directly and the crumb still says `chat › explore › review`, because the parent link is a column.
@@ -1767,6 +1808,12 @@ And slice 1's foundations (batch 94) -- the pieces under the session tools, not 
   (SS17): under `never` a research pass is offered shell tools, and would otherwise start a session no
   shell ever reports. **The wake text is built in `core/session_wake.py` through the real
   `check_output_policy`**, because that text never passes through dispatch.
+- **What a session's VIEW shows lives in `core/session_view.py`** (SS14, SS18, batch 98), for
+  `core/replay.py`'s reason: D12 makes the CLI a permanent fallback, so what may be shown is a policy
+  decision neither shell owns, and the entries are the same `(role, text)` shape a replay produces.
+  Both routes -- the manager's live row and the archive's rebuilt one -- go through the real
+  `check_output_policy` under the originating tool's name, which is the adopted default that the
+  session view is redacted for display.
 - **`RunAgentLoop.wake_conversation` is a wrapper, not a second `_run`** (`test_grants.py` walks for
   exactly one), and it shares `_conversation_prompt` with `run_agent_conversation`, so a wake turn cannot
   run under a prompt missing the goal, the references or the checklist. It takes the run's
@@ -2110,9 +2157,13 @@ independent bugs, both found by using the app.
    stderr. In a pilot test, holding the widget before opening a modal still works and is
    still the clearer spelling; `#thinking-indicator` and `#prompt` are still queries, so
    their `NoMatches` guards are still load-bearing.
-- **The held set is nine now, and the two that forced it were on the crash
+- **The held set is eleven now, and the two that forced it were on the crash
   path** (batch 76; §47's thread viewer added three more: the read-only
-  `Transcript`, the `ThreadCrumb` and the `#pane` switcher, same pattern).
+  `Transcript`, the `ThreadCrumb` and the `#pane` switcher, and ROADMAP_v3
+  §49's SS14 two more in batch 98: the `#session-view` pane and the
+  `SessionPanel`. Both follow the same pattern and both have the occasion
+  this bullet is about -- the panel is redrawn from a sink called on the
+  session manager's own threads, which can speak while a modal is up).
   A `permission_request` event is posted BEFORE the worker
   pushes the modal it announces (`post_message` only enqueues for a later
   pump; the push is a direct loop callback), so the first gated call of a

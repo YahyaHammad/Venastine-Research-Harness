@@ -719,9 +719,13 @@ def _spawn_cells(app):
     for y in range(app.size.height):
         for x in range(app.size.width):
             style = app.screen.get_style_at(x, y)
-            call = style and (style.meta or {}).get("agent_call")
-            if call:
-                out.append((x, y, call))
+            # §49 (SS14) renamed the key and widened the value to
+            # (kind, call id). The id is what this scan is about, and
+            # a session line carries one too -- so the kind is checked,
+            # or a `shell_background` line would read as a spawn.
+            opens = style and (style.meta or {}).get("opens")
+            if opens and opens[0] == "thread":
+                out.append((x, y, opens[1]))
     return out
 
 
@@ -751,11 +755,11 @@ def _spawn_start(app):
 def _tool_entry(call_id, name="spawn_subagent", digest="agent_name=review"):
     """A replayed tool line in ReplayEntry shape, armed with its call.
 
-    The shape matters: `Transcript._arm_spawn` locates the name
+    The shape matters: `Transcript._arm_call` locates the name
     structurally (indent, marker, space, name, two spaces, digest)
     rather than by matching the marker glyph.
     """
-    return ("tool", f"▸ {name}  {digest}", (), call_id)
+    return ("tool", f"▸ {name}  {digest}", (), ("thread", call_id))
 
 
 def _spawn_event(app, name="spawn_subagent", call_id="call_7"):
@@ -1162,7 +1166,7 @@ class TestTheArmingSurvivesWhatTheEntriesDo:
             await pilot.pause()
             await pilot.pause()
             armed_index = len(transcript._entries) - 1
-            assert transcript.spawn_at(armed_index) == "call_7"
+            assert transcript.opens_at(armed_index) == ("thread", "call_7")
 
             transcript.reset()
             for _ in range(armed_index + 1):
@@ -1212,9 +1216,9 @@ class TestTheRegistryIsWhatDecides:
         calls = [entry[3] for entry in replay_entries(uuid4())
                  if entry[0] == "tool"]
 
-        assert calls == ["t1", ""], (
-            f"replay carried {calls}; only a tool that opens a thread has "
-            "an id worth carrying")
+        assert calls == [("thread", "t1"), ()], (
+            f"replay carried {calls}; only a tool that opens something "
+            "has an id worth carrying, and it carries WHICH")
 
 # ---------------------------------------------------------------------------
 # ---- the keyboard route ----------------------------------------------------

@@ -357,6 +357,21 @@ def role_styles(theme: Theme) -> dict[str, str]:
         # longest text on screen and the thing most often actually read;
         # tinting it costs contrast to say something the label already said.
         "assistant": "",
+        # ROADMAP_v3 §49 (SS14): a line of a background session's own
+        # output, quoted into a session view. PLAIN, for `assistant`'s
+        # reason and one better: it is not the harness's voice and not
+        # the model's, it is what a program printed, and a view of a
+        # failing test run is read line by line rather than skimmed.
+        # `system` was the alternative and is wrong twice -- dimmed and
+        # italic is the worst possible treatment for forty lines of
+        # output, and it would claim the harness said them.
+        #
+        # `foreground` EXPLICITLY, not `""` like `assistant`. The empty
+        # slot means "inherit", which is right for the body text of a
+        # pane that has no other colour in force and wrong for a block
+        # quoted inside a frame of `system` lines. It is also the one
+        # deliberately unstyled slot, and tests/test_themes.py says so.
+        "output": palette["foreground"],
         # The harness talking about itself.
         "system": "dim italic",
         # ROADMAP_v3 §49 (SS5): the harness starting a turn with a
