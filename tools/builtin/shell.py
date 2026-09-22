@@ -77,7 +77,7 @@ import os
 import re
 import shutil
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 
 import config
 from security import capability, posture
@@ -90,6 +90,7 @@ from security.sandbox import (
     _is_inert,
     classify_command,
     containment_for,
+    declared_network,
     detect_shell,
     is_docker_available,
     known_runtime,
@@ -162,6 +163,19 @@ class ShellParams(BaseModel):
             "the command is allowed or how it runs."
         ),
     )
+    requires_network: StrictBool = Field(
+        default=False,
+        description=(
+            "Whether this command needs to reach the network. Say true "
+            "for anything that downloads, installs, clones, publishes or "
+            "calls an API. WITHOUT IT THE COMMAND RUNS WITH NETWORKING "
+            "OFF and the connection simply fails -- the harness reads "
+            "your command as text and cannot tell that an inline script "
+            "or an interpreter you invoke wants egress, so it assumes "
+            "not. Saying true does not bypass approval; it tells the "
+            "user what they are being asked to allow."
+        ),
+    )
 
 
 TOOL_SCHEMA = {
@@ -197,7 +211,14 @@ TOOL_SCHEMA = {
 # So an omission costs nothing and is VISIBLE: the prompt says
 # "(none given)", which is itself the observation. A silent gap would
 # not be.
-TOOL_SCHEMA["input_schema"]["required"] = ["command", "rationale"]
+#
+# `requires_network` (ROADMAP_v3 §50, NW1) is listed on the same terms
+# and for the same reason: it is a thing the agent STATES, and a flag
+# it is never asked for is one it will not set -- but it defaults to
+# False, so a call that omits it runs with no network rather than
+# failing validation after a human has already said yes.
+TOOL_SCHEMA["input_schema"]["required"] = [
+    "command", "rationale", "requires_network"]
 
 
 # ---------------------------------------------------------------------------
@@ -205,14 +226,20 @@ TOOL_SCHEMA["input_schema"]["required"] = ["command", "rationale"]
 # ---------------------------------------------------------------------------
 
 
-def _profile_and_containment(command: str):
+def _profile_and_containment(command: str, requires_network: bool = False):
     """Classify *command* and work out what will contain it.
 
     One helper for both the gate and the prompt so they cannot describe
     the same call differently -- which is the failure #157 came from,
     with `_is_inert` consulted twice for two different questions.
+
+    *requires_network* is the agent's declaration (§50), already coerced
+    by `declared_network`. It reaches the classifier rather than being
+    applied afterwards, so the gate and the prompt read the one network
+    fact instead of each OR-ing the flag in for itself.
     """
-    profile = classify_command(command, config.WORKSPACE_DIR)
+    profile = classify_command(command, config.WORKSPACE_DIR,
+                               requires_network=requires_network)
     # Docker is probed only when the answer depends on it. HOST_READ is
     # UNCONTAINED whatever Docker is doing -- it names a file outside
     # the workspace, which no container can show it -- so it still
@@ -331,7 +358,8 @@ def _shell_approval_check(tool_name: str, params: dict) -> bool:
         return False
 
     command = params.get("command", "")
-    profile, containment = _profile_and_containment(command)
+    profile, containment = _profile_and_containment(
+        command, declared_network(params))
 
     # No backend can run this, so there is nothing to approve. NOT the
     # same as auto_approved() answering False, which means ASK -- the two
@@ -384,7 +412,8 @@ def _shell_approval_notice(params: dict, _context=None) -> str:
     someone tells you the inert path is a host subprocess.
     """
     command = params.get("command", "")
-    profile, containment = _profile_and_containment(command)
+    profile, containment = _profile_and_containment(
+        command, declared_network(params))
     # The runtime is read from the probe `_profile_and_containment` just
     # ran, never re-probed: the person answering should see WHICH runtime
     # isolates the command, since Podman and Docker are not the same
@@ -491,8 +520,12 @@ def run(params: dict) -> dict:
             workspace_dir=config.WORKSPACE_DIR,
             docker_available=docker_up,
             # §28: the SAME classification the approval check made, so
-            # routing cannot disagree with the decision to allow it.
-            profile=classify_command(parsed.command, config.WORKSPACE_DIR),
+            # routing cannot disagree with the decision to allow it --
+            # the declaration included (§50), read off the validated
+            # params here and off the raw ones at the gate, which is why
+            # `declared_network` accepts only literal True.
+            profile=classify_command(parsed.command, config.WORKSPACE_DIR,
+                                     requires_network=parsed.requires_network),
         )
     except SandboxUnavailable as e:
         return {"error": str(e)}

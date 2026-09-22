@@ -4808,3 +4808,25 @@ the exact params the model sent -- rather than anything being duplicated into wh
 | Return the output as one entry holding newlines | `test_output_is_one_entry_per_line` | A transcript indents the entry it is handed and draws an embedded block at column zero, so the quoted output would shear its own left edge |
 | Give `output` the empty style like `assistant` | `test_every_theme_fills_every_role_slot` | The empty slot means "inherit", which is right for a pane's body text and wrong for a block quoted inside a frame of `system` lines. `assistant` is the one deliberately unstyled slot, and the suite says so |
 | Draw session output in the `system` role | — (it is a reading, not a failure) | Dimmed italic is the worst possible treatment for forty lines of output, and it would claim the harness said them |
+
+
+## Batch 99 -- the agent declares that a command needs the network (ROADMAP_v3 §50, NW1-NW5)
+
+The network detector reads command TEXT against fourteen words. What it recognises it handles correctly;
+what it cannot see was auto-approved under `contained` and then run under `--network none`, so the user
+was never asked and the model was never told. §50's answer is a declaration rather than a better parser,
+and the whole of it is one boolean OR'd into a fact that already existed.
+
+The one thing worth reading twice: the gate reads the model's tool-call input BEFORE Pydantic validates
+it, so `requires_network` can arrive as any JSON. `declared_network` is the single coercion both
+consumers use, and it accepts only literal `True`.
+
+| Change | Test | Fix |
+|---|---|---|
+| Let the flag OVERRIDE the network fact rather than OR into it | `test_a_recognised_command_keeps_its_network_when_the_flag_is_false` | An override lets a model clear the flag on `curl` to dodge a prompt. The flag can only add egress, which is what makes it safe to expose to the model at all |
+| Coerce `requires_network` with `bool()` at the gate | `test_a_string_is_refused_by_the_model_not_silently_coerced` | Pydantic's plain `bool` would accept the string `"true"` while a gate using `is True` refused it -- the command approved as no-network and executed with it. `StrictBool` plus one shared coercion is what keeps the two readings identical |
+| Skip the flag on an unmeasured profile | `test_an_unmeasurable_command_still_takes_the_flag` | NW2 says the flag only adds, with no exception. A carve-out is a second rule to remember, for two profiles that always ask a human anyway |
+| Give the flag its own approval branch | `test_never_and_always_are_untouched` | NW3: once the fact is true the existing ladder does the work. A new branch would force a modal where the user's settings say there are none |
+| Repeat the declaration in the prompt when the detector already saw it | `test_a_recognised_command_reads_as_one_fact` | One fact, one sentence. The extra clause exists to say the call ASKED for egress, which is only news when the detector did not already say so |
+| Write the description separately for each of the three tools | `test_both_session_start_tools_take_it` | Three copies of a parameter's meaning is three chances to drift. `shell.ShellParams`' description is the one copy the session tools read |
+| Assert the flag's effect through `tiered` | `test_contained_is_where_the_flag_changes_the_answer` | Under `tiered` a non-inert command already asks because `runs_code` is true (CE1), so such a test passes without the flag doing anything. `contained` is the mode where the declaration is the deciding fact |

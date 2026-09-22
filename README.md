@@ -816,7 +816,7 @@ Deliberately not settings.json keys: editing these means editing the harness's o
 | `models_rejecting_sampling_params` | current Anthropic models | These 400 on temperature/top_p/top_k; such parameters are dropped with a WARNING rather than sent |
 | `model_context_windows` / `default_context_window` | 256k fallback | The **fallback** for the window, not the only source: Anthropic and Google report it on their model endpoints, and the OpenAI-compatible providers that carry it (Groq, Mistral, Together, OpenRouter) are read through one alias sniff. This table answers for the ones that report nothing (OpenAI, DeepSeek, Perplexity). Feeds the research-pass compaction backstop **and** the summarizer's one-call input budget; an unknown model warns once and assumes the default. Keys are stored normalized — no date suffix, no `vendor/` prefix |
 | `shell_approval_mode` | `tiered` | The shell gate: `always` / `tiered` / `never`; a bad value raises at import. Rejected in settings.json by name, see above |
-| `network_allowed_commands` | pip, curl, git, npm, … | Binaries granted network access inside the sandbox. Matched against **every** word of a command that needs a sandbox, so `cd x && pip install .` is recognised and asked about — and against the **first word only** of an inert one, which cannot chain, so `grep pip notes.txt` still runs unprompted |
+| `network_allowed_commands` | pip, curl, git, npm, … | Binaries granted network access inside the sandbox. Matched against **every** word of a command that needs a sandbox, so `cd x && pip install .` is recognised and asked about — and against the **first word only** of an inert one, which cannot chain, so `grep pip notes.txt` still runs unprompted. This list is a *lexical* test, so since ROADMAP_v3 §50 the agent can also declare `requires_network: true` on `shell`, `shell_background` and `shell_monitor` for anything the word list cannot see — an inline script that opens a socket, say. The declaration only ever ADDS network access, and the command is then asked about wherever your approval mode would allow a prompt |
 | `inert_commands` | ls, cat, grep, wc, … | Read-only commands eligible to run unprompted under `tiered` — as a plain argument list in the container, or on the host only when no container runtime is available |
 | Sandbox bounds | image `docker.io/library/python:3.13-slim`; 120 s, 2048 MB, 30 CPU-s, 200 pids — under Docker, or Podman when Docker cannot run the sandbox | `sandbox_docker_image`, `sandbox_timeout_seconds`, `sandbox_memory_mb`, `sandbox_cpu_seconds`, `sandbox_max_pids` |
 | Background sessions | 3600 s cap; 4 live; 10 consecutive wakes; first 10,000 + last 190,000 characters of output kept, in memory only | `shell_session_timeout_cap_s`, `shell_session_max_live`, `shell_session_max_consecutive_wakes`, `shell_session_output_head_chars`, `shell_session_output_tail_chars` |
@@ -888,7 +888,7 @@ note that shell approval is governed solely by `shell_approval_mode` -- `tool_ap
 deliberately has no `shell` key, so an old file carrying one is refused at startup
 naming the key — see `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 5026 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+Run the test suite with `pytest` — 5061 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
 ## Documentation
 

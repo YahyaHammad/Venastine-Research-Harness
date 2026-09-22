@@ -14798,3 +14798,94 @@ the arming, the session views, the widened `_viewing`), `tui/app.tcss`, `tui/the
 role), `tests/test_session_display.py` (new, 65 tests), and the four suites whose expectations moved
 with the slot (`test_agent_navigation.py`, `test_thread_legibility.py`, `test_themes.py`,
 `test_docs_consistency.py`).
+
+
+---
+
+## Batch 99 -- the agent declares that a command needs the network (2026-09-22)
+
+### What this batch is
+
+ROADMAP_v3 §50, recorded in batch 96 and built here. It is a prerequisite rather than a detour: network
+is fixed when a shell session opens, and NW4 already recorded that slice 2's interactive sessions inherit
+this flag. Building it on the one-shot path first means slice 2 inherits it with no extra work, and the
+flag is tested where its effects are easiest to measure.
+
+### The hole it closes
+
+`_needs_network` is lexical over fourteen words and refuses to parse (G2). A command it *recognises* was
+never auto-approved -- that half worked. A command it could not see -- an interpreter handed an inline
+script that opens a socket -- profiled `network=False`, was auto-approved under `contained`, and then ran
+under `--network none`. The user was never asked, so there was no answer they could have given; and the
+model was never told, so a refused connection read as a broken network rather than a withheld one.
+
+### What was built
+
+- **`requires_network` on `shell`, `shell_background` and `shell_monitor`** (NW1, NW4), one shared
+  description string so three tools cannot come to describe the same flag differently. Advertised
+  required and tolerated when absent, which is `rationale`'s own rule (§42, RA4) and what NW1 means by
+  "beside `rationale`".
+- **`classify_command(..., requires_network=False)`**, OR'd into the single `network` fact (NW2). It can
+  only ADD egress, so a model cannot clear it on `curl` to dodge a prompt, and the one fact keeps its two
+  consumers -- the gate and the runner -- reading the same value.
+- **`declared_network(params)` as the one coercion.** The gate runs before Pydantic validates, so the
+  value can be any JSON at all; only literal `True` counts. The param models use `StrictBool`, so the
+  string `"true"` is False at the gate and a `ValidationError` at run time -- the call never executes, and
+  the two paths never disagree about what ran. A lenient coercion in either place would be #157's shape
+  in the module written to close it.
+- **Nothing new gates it** (NW3). The existing ladder does the work: tier `SANDBOXED_NET`, `auto_approved`
+  False under `tiered` and `contained`, `--network none` dropped from the argv.
+
+### Measured, not assumed
+
+- **`contained` is the mode where the flag changes the approval answer.** Under `tiered` a non-inert
+  command already asks, because `runs_code` is true since §48 (CE1) -- so there the declaration changes
+  the tier, the argv and the prompt, and not whether a human is asked. Under `never` nothing asks and
+  under `always` everything does. That is exactly the owner's "only force a modal where the user's
+  settings would have produced one".
+- **`run_sandboxed` has one production caller and it always passes a profile.** §50's gap register named
+  three call sites; `grep` finds a fourth, the `if profile is None` fallback inside `run_sandboxed`. It
+  never sees a tool's params and nothing in production reaches it, so it stays conservative rather than
+  growing a parameter it could not be given honestly.
+- **An INERT command can declare network.** `cat notes.txt` with the flag keeps tier INERT -- the tier is
+  defined by its arguments, not by egress -- and gains the fact, so it asks and it gets a network
+  container. The flag is OR'd in on an unmeasured profile too, because NW2 has no exception and a
+  carve-out would be a rule to remember for profiles that always ask anyway.
+
+### Corrected while there
+
+Two tests in `tests/test_rationale.py` failed on premises this batch changed, and both were repaired to
+keep pinning what they were written to pin rather than loosened: the schema test asserts the exact
+advertised `required` list, which `requires_network` joined; and a spy over `classify_command` fixed its
+two-argument signature, so it now takes `**kwargs` and cannot fail again for a reason unrelated to its
+subject.
+
+### What the mutation pass found
+
+18 rows, **17 killed**, and the three that mattered were found while WRITING the table rather than by
+running it: nothing pinned `shell.run`'s classification (only the session path and the gate), and
+nothing covered the INERT branch's reason clause. Three tests were added before the pass ran, and the
+rows aimed at those gaps then killed.
+
+The one survivor, N14, is an **equivalent mutant** and is recorded as one rather than patched around.
+It drops `and not detected` from the clause's condition. `detected` implies non-inert -- the two word
+lists are disjoint, measured this session (14 network words, 23 inert commands, empty intersection) and
+already pinned by `test_shell.py` -- and the non-inert reason never appends the clause on its detected
+arm. So the guard cannot change any reachable answer. N18 is what N14 was reaching for: whether the
+clause does any work on the branch that CAN see it. It killed.
+
+### Verification
+
+`tests/test_declared_network.py` (35 tests). Full suite, `ruff check .` clean, bandit exit 0 -- against a
+Windows-form copy of the baseline, because the committed one stores `./core/x.py` (the Linux runner's
+form) while bandit locally reports `.\core/x.py`, so every baseline entry misses and every pre-existing
+finding reads as new. The baseline itself is correct for the job that reads it and was not touched.
+
+### Files touched
+
+`security/sandbox.py` (`declared_network`, the classifier's parameter and the OR),
+`tools/builtin/shell.py` (the field, the schema, `_profile_and_containment`, the gate, the prompt, the
+run), `tools/builtin/shell_sessions.py` (the field on both start tools and the classification),
+`tests/test_declared_network.py` (new), `tests/test_rationale.py` (two premises),
+`docs/ROADMAP_v3.md`, `docs/ARCHITECTURE.md`, `AGENTS.md`, `README.md`,
+`tests/BREAKING_CHANGES.md`.

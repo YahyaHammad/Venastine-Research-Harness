@@ -520,7 +520,28 @@ def _escapes_workspace(command: str, workspace_dir: str) -> bool:
     return False
 
 
-def classify_command(command: str, workspace_dir: str) -> CommandProfile:
+def declared_network(params) -> bool:
+    """Whether a tool call DECLARED that it needs the network (§50, NW1).
+
+    THE coercion, and the reason it is a function rather than a `.get()`
+    at each site. The gate runs before Pydantic validates -- `params` is
+    the model's tool-call input verbatim -- so this value can be a string,
+    a number, or absent. If the gate and the runner coerced it
+    differently, one would ask about a networked command and the other
+    would run a non-networked one, which is #157's shape exactly, in the
+    module written to close it.
+
+    Only literal `True` is true, because the flag can only ADD egress
+    (NW2): a lenient coercion would let `"false"` or `0` grant network
+    that nobody asked about. A model that sends `"true"` is refused by
+    `StrictBool` at run time with an error naming the field, and nothing
+    executes -- so the two paths never disagree about what ran.
+    """
+    return isinstance(params, dict) and params.get("requires_network") is True
+
+
+def classify_command(command: str, workspace_dir: str,
+                     requires_network: bool = False) -> CommandProfile:
     """Measure *command* into a capability set (ROADMAP_v2 §28, G1).
 
     One classification, two consumers: `_shell_approval_check` reads it to
@@ -528,6 +549,14 @@ def classify_command(command: str, workspace_dir: str) -> CommandProfile:
     decide how to run it. Before §28 those two asked `_is_inert`
     separately and never compared answers, which is how a command could be
     auto-approved as harmless and then executed on the host (#157).
+
+    *requires_network* is the agent's declaration (§50, NW1), already
+    coerced by `declared_network`. It is OR'd into the network fact and
+    can only ADD egress (NW2) -- a model cannot clear it on `curl` to
+    dodge a prompt, and the single fact keeps its two consumers reading
+    the same value. Nothing new gates it (NW3): a true `network` makes
+    the tier `SANDBOXED_NET`, which `auto_approved` already refuses to
+    cover under `tiered` and `contained` alike.
     """
     # Totality is a REQUIREMENT here, not defensiveness. This runs inside
     # registry.approval_needed(), which is handed the model's tool-call
@@ -541,17 +570,23 @@ def classify_command(command: str, workspace_dir: str) -> CommandProfile:
     #
     # UNKNOWN rather than a raise: the gate's job is to answer, and
     # `measured=False` already means nobody may skip the human.
+    #
+    # The declaration is OR'd in here too, on a profile the classifier
+    # could not characterise. NW2 says the flag can only ADD egress, with
+    # no exception -- and an exception here would be one more rule to
+    # remember for two profiles that always ask a human anyway.
+    declared = bool(requires_network)
     if not isinstance(command, str):
         return CommandProfile(
             tier=UNKNOWN, measured=False, escapes_workspace=True,
-            writes=True, runs_code=True, network=False,
+            writes=True, runs_code=True, network=declared,
             reason=f"command is {type(command).__name__}, not a string")
 
     stripped = command.strip()
     if not stripped:
         return CommandProfile(
             tier=UNKNOWN, measured=False, escapes_workspace=True,
-            writes=True, runs_code=True, network=False,
+            writes=True, runs_code=True, network=declared,
             reason="empty command")
 
     # Order matters, and only for Q2: `_needs_network` reads every command
@@ -559,7 +594,15 @@ def classify_command(command: str, workspace_dir: str) -> CommandProfile:
     # one, and `_is_inert` is what tells those apart. One call, read twice
     # -- not two calls, which is the shape #157 came from.
     inert = _is_inert(stripped)
-    network = _needs_network(stripped, first_word_only=inert)
+    detected = _needs_network(stripped, first_word_only=inert)
+    network = detected or declared
+    # §50's gap register: the prompt should say egress was REQUESTED, not
+    # merely that the tier needs it -- so the reason distinguishes the two
+    # ways the fact became true. Only when the detector did NOT already
+    # recognise the command: when both are true there is one fact and one
+    # sentence, which is what that register's open question settled on.
+    asked_for = ", and the call declared it needs the network" \
+        if declared and not detected else ""
 
     if inert:
         # INERT_COMMANDS is a read-only list and _DANGEROUS_FLAGS guards
@@ -578,13 +621,13 @@ def classify_command(command: str, workspace_dir: str) -> CommandProfile:
                 network=network,
                 reason=(f"reads {stripped.split()[0]!r} with an argument "
                         f"outside the workspace, which no container "
-                        f"can see"))
+                        f"can see" + asked_for))
         return CommandProfile(
             tier=INERT, measured=True, escapes_workspace=False,
             writes=False, runs_code=False,
             network=network,
             reason=(f"read-only {stripped.split()[0]!r}, every argument "
-                    f"inside the workspace"))
+                    f"inside the workspace" + asked_for))
 
     tier = SANDBOXED_NET if network else SANDBOXED
     return CommandProfile(
@@ -603,9 +646,9 @@ def classify_command(command: str, workspace_dir: str) -> CommandProfile:
         # only answer this classifier can give without parsing (G2).
         runs_code=True,
         network=network,
-        reason=("can run code, and needs network and a sandbox" if network
+        reason=("can run code, and needs network and a sandbox" if detected
                 else "not a read-only command -- it can run code, so it "
-                     "runs in a sandbox"))
+                     "runs in a sandbox" + asked_for))
 
 
 def containment_for(

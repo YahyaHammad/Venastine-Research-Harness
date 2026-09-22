@@ -43,7 +43,11 @@ def test_the_schema_asks_for_a_rationale():
 
     schema = registry._tools["shell"].schema["input_schema"]
     assert "rationale" in schema["properties"]
-    assert schema["required"] == ["command", "rationale"]
+    # `requires_network` joined the list in batch 99 (ROADMAP_v3 §50,
+    # NW1: the flag sits "beside rationale"), advertised required and
+    # tolerated when absent -- §42/RA4, the same rule as rationale.
+    assert schema["required"] == [
+        "command", "rationale", "requires_network"]
 
 
 def test_the_schema_description_asks_for_a_reason_not_a_restatement():
@@ -127,9 +131,13 @@ def test_the_rationale_cannot_change_the_decision(rationale, monkeypatch,
     seen = []
     real = shell.classify_command
 
-    def spy(command, workspace):
+    def spy(command, workspace, **kwargs):
+        # **kwargs so the spy keeps matching `classify_command` as it
+        # grows: §50 added `requires_network`, and a spy that pins the
+        # signature fails on the next argument for a reason that has
+        # nothing to do with what this test asserts.
         seen.append(command)
-        return real(command, workspace)
+        return real(command, workspace, **kwargs)
 
     monkeypatch.setattr(shell, "classify_command", spy)
 

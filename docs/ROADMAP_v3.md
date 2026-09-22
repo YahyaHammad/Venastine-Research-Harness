@@ -22,8 +22,8 @@ decision record is append-only, and a deviation is recorded as an owner decision
 
 ## Index
 
-- **§49. Shell sessions, the container runtime, and where a command can run** — **(IN PROGRESS: slice 0, Podman, BUILT in batch 93; slice 1's foundations -- pattern engine, wake row, session backends, manager, wake builder -- BUILT in batch 94; its five tools, the subagent asleep in its spawn and the CLI's wait loop BUILT in batch 95; the TUI next)** (the shell was one-shot and blocking, so a test suite could not outlive a turn and nothing could wake the agent; a machine with Podman and no working Docker had no sandbox at all)
-- **§50. Declared network for a shell command** — **(RECORDED in batch 96, not built)** (the network detector reads command TEXT against a fourteen-word list, so a command it cannot see is auto-approved into `--network none` and fails with no way for the user to have allowed it)
+- **§49. Shell sessions, the container runtime, and where a command can run** — **(IN PROGRESS: slice 0, Podman, BUILT in batch 93; slice 1 COMPLETE -- its foundations in batch 94, its five tools, the sleeping subagent and the CLI wait loop in batch 95, the TUI's behaviour half in batch 97 and its display half in batch 98; slice 2, interactive sessions, next)** (the shell was one-shot and blocking, so a test suite could not outlive a turn and nothing could wake the agent; a machine with Podman and no working Docker had no sandbox at all)
+- **§50. Declared network for a shell command** — **(BUILT in batch 99)** (the network detector reads command TEXT against a fourteen-word list, so a command it cannot see is auto-approved into `--network none` and fails with no way for the user to have allowed it)
 - **§51. Paging for network tool results** — **(RECORDED in batch 96, not built)** (`fetch_url` and `arxiv_search` truncate with no offset, so the agent cannot reach past the first page without shelling out to a raw HTTP request)
 
 ---
@@ -265,13 +265,35 @@ command runs and what it is allowed to reach -- and because it must cover the se
 | **NW4** | **The session tools take it too** (owner's addition). `shell_background` and `shell_monitor` classify through the same `classify_command` and `start_sandboxed` already passes `profile.network` into the container argv, so the flag reaches a session unchanged. Interactive inherits it in slice 2, where network is fixed when the session opens |
 | **NW5** | **The schema says what the flag means**, because a parameter the model cannot see the point of is one it will not set: that a command needing the network must say so, and that without it the command runs with networking off |
 
-### Gap register
+### Gap register -- closed in batch 99
 
 - Threads through `classify_command` and its three production callers (`shell.run`, `shell._shell_approval_check`
-  and the session start handler), which must agree or the gate and the runner diverge again.
-- The approval notice should say that egress was REQUESTED, not merely that the tier needs it.
+  and the session start handler), which must agree or the gate and the runner diverge again. **Done**, and
+  measured: `run_sandboxed`'s `if profile is None` fallback is a fourth site, but it has no production
+  caller (`shell.run` is the only one and it always passes a profile) and it never sees a tool's params,
+  so it stays the conservative answer.
+- The approval notice should say that egress was REQUESTED, not merely that the tier needs it. **Done**:
+  the reason gains "and the call declared it needs the network".
 - Open: whether a declared-network command that the detector also recognises should read any differently on
-  the prompt (probably not -- one fact, one sentence).
+  the prompt (probably not -- one fact, one sentence). **Settled as written** -- when the detector already
+  recognised the command the prompt reads as one sentence, and the extra clause appears only where the
+  declaration is the reason the fact is true.
+
+### What was built (batch 99)
+
+- **`declared_network(params)` is THE coercion**, and a function rather than a `.get()` at each site. The
+  gate reads the model's tool-call input before Pydantic has validated anything, so the value may be any
+  JSON; only literal `True` counts, because the flag can only ADD egress and a lenient coercion would let
+  `"false"` grant network. The param models use `StrictBool`, so a string is refused at run time with an
+  error naming the field and nothing executes -- the gate and the runner cannot end up disagreeing about
+  what ran, which is the property this section exists to keep.
+- **The declaration is OR'd in on an UNMEASURED profile too.** NW2 says the flag can only add, with no
+  exception, and an exception would be one more rule to remember for two profiles that always ask a human
+  anyway.
+- **Measured through the real gate: `contained` is the mode where the flag changes the approval answer.**
+  Under `tiered` a non-inert command already asks because `runs_code` is true (§48, CE1), so there the
+  declaration changes the tier, the argv and the prompt but not whether a human is asked. Under `never`
+  and `always` the mode still decides, which is NW3's whole claim.
 
 ---
 

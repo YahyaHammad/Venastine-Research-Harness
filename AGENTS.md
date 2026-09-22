@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 5026 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 5061 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -1714,7 +1714,7 @@ assert what the user was asked and whether it carried a deadline.
 A mutation that strands a reader **hangs** the suite rather than failing it, since two read paths now
 have no deadline. The mutation harness reports HANG as its own outcome.
 
-### The shell gate (`§28`, G1–G7; routing and disclosure amended by `§46`, EP4–EP8; what `tiered` approves amended by `§48`, CE1–CE7; the container runtime amended by ROADMAP_v3 `§49`, SS22–SS24)
+### The shell gate (`§28`, G1–G7; routing and disclosure amended by `§46`, EP4–EP8; what `tiered` approves amended by `§48`, CE1–CE7; the container runtime amended by ROADMAP_v3 `§49`, SS22–SS24; declared network added by ROADMAP_v3 `§50`, NW1–NW5)
 
 Read §28's record before touching `security/sandbox.py`, `security/capability.py` or
 `_shell_approval_check`, and §46's before touching where a command RUNS. The four things most
@@ -1786,6 +1786,24 @@ And from §49 (`docs/ROADMAP_v3.md`), slice 0 -- Podman (SS22–SS24):
 - **The shipped image is fully qualified** (SS23). Podman resolves a short name through
   `registries.conf`, and `python:3.13-slim` resolved on the machine it was measured on only because that
   distro's `shortnames.conf` aliases `python`.
+
+And from §50 (batch 99) -- the agent declares that a command needs the network (NW1–NW5):
+
+- **`requires_network` is OR'd into the one `network` fact, never an override** (NW2). It can only ADD
+  egress, so a model cannot clear it on `curl` to dodge a prompt, and the single fact keeps its two
+  consumers -- the gate and the runner -- reading the same value. **Nothing new gates it** (NW3): the
+  existing ladder does the work, and `never`/`always` still decide for themselves.
+- **`security.sandbox.declared_network(params)` is THE coercion, and only literal `True` counts.** The
+  gate reads the model's tool-call input BEFORE Pydantic validates it, so the value can be any JSON at
+  all. The param models use `StrictBool`, so `"true"` is False at the gate and a `ValidationError` at run
+  time -- nothing executes, and the two readings never disagree. **Do not "helpfully" widen either half**:
+  a lenient runner with a strict gate is a command approved as no-network and executed with it, which is
+  #157's shape in the module written to close it.
+- **`contained` is the mode where the flag changes the approval answer** (measured). Under `tiered` a
+  non-inert command already asks because `runs_code` is true (CE1), so a test asserting the flag's effect
+  through `tiered` passes without the flag doing anything.
+- **The three tools share ONE description string** for the field (NW4, NW5): `shell.ShellParams`' is the
+  copy `shell_background` and `shell_monitor` read.
 
 And slice 1's foundations (batch 94) -- the pieces under the session tools, not yet reachable from any tool:
 

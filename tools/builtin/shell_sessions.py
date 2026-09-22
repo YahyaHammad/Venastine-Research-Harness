@@ -30,7 +30,13 @@ from __future__ import annotations
 
 from typing import Optional
 
-from pydantic import BaseModel, Field, StrictInt, ValidationError
+from pydantic import (
+    BaseModel,
+    Field,
+    StrictBool,
+    StrictInt,
+    ValidationError,
+)
 
 import config
 from core import shell_sessions as core_sessions
@@ -72,6 +78,10 @@ class _StartParams(BaseModel):
         default="",
         description=shell.ShellParams.model_fields["rationale"].description)
     timeout_s: StrictInt = Field(..., ge=1, description=_TIMEOUT_DESCRIPTION)
+    requires_network: StrictBool = Field(
+        default=False,
+        description=shell.ShellParams.model_fields[
+            "requires_network"].description)
 
 
 class BackgroundParams(_StartParams):
@@ -129,7 +139,8 @@ BACKGROUND_TOOL_SCHEMA = _schema(
     "returns at once with a session id; when the command finishes or reaches "
     "its timeout you are woken with its exit code and the end of its output, "
     "so do not poll it. " + _SHARED,
-    BackgroundParams, ("command", "rationale", "timeout_s"))
+    BackgroundParams,
+    ("command", "rationale", "timeout_s", "requires_network"))
 
 MONITOR_TOOL_SCHEMA = _schema(
     MONITOR,
@@ -137,7 +148,8 @@ MONITOR_TOOL_SCHEMA = _schema(
     "its output matches `pattern` -- when a log says ERROR, a server says it "
     "is listening, a test fails -- and again when it finishes. Matches that "
     "arrive while you are working are delivered together. " + _SHARED,
-    MonitorParams, ("command", "pattern", "rationale", "timeout_s"))
+    MonitorParams,
+    ("command", "pattern", "rationale", "timeout_s", "requires_network"))
 
 SESSIONS_TOOL_SCHEMA = {
     "name": "shell_sessions",
@@ -252,9 +264,13 @@ def _start(name: str, model, params: dict, memory, call_id) -> dict:
     try:
         return core_sessions.sessions.start(
             kind=_KINDS[name], command=parsed.command,
-            # §28: the SAME classification the approval check made.
-            profile=shell.classify_command(parsed.command,
-                                           config.WORKSPACE_DIR),
+            # §28: the SAME classification the approval check made --
+            # the §50 declaration included, which `start_sandboxed`
+            # already passes into the container argv as `profile.network`
+            # (NW4), so the flag reaches a session with no other change.
+            profile=shell.classify_command(
+                parsed.command, config.WORKSPACE_DIR,
+                requires_network=parsed.requires_network),
             docker_available=docker_up,
             requested_timeout_s=parsed.timeout_s,
             owner_thread=memory.thread_id,
