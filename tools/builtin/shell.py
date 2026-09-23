@@ -76,6 +76,7 @@ import logging
 import os
 import re
 import shutil
+from typing import Literal
 
 from pydantic import BaseModel, Field, StrictBool
 
@@ -89,6 +90,8 @@ from security.capability import (
 )
 from security.protected_paths import PROTECTED_SEGMENTS, protected_segment
 from security.sandbox import (
+    BACKEND_CONTAINER,
+    BACKEND_WSL,
     HOST_READ,
     INERT,
     SANDBOXED,
@@ -97,11 +100,15 @@ from security.sandbox import (
     _is_inert,
     classify_command,
     containment_for,
+    declared_backend,
     declared_network,
     detect_shell,
     is_docker_available,
     known_runtime,
     run_sandboxed,
+    wsl_distro,
+    wsl_enabled,
+    wsl_unavailable_reason,
 )
 
 logger = logging.getLogger(__name__)
@@ -183,6 +190,25 @@ class ShellParams(BaseModel):
             "user what they are being asked to allow."
         ),
     )
+    backend: Literal["container", "wsl"] = Field(
+        default="container",
+        description=(
+            "Where to run it. 'container' is the sandbox: a pinned Linux "
+            "image with only the workspace visible, no network unless you "
+            "ask, and memory, CPU and process limits. 'wsl' is the USER'S "
+            "OWN Windows machine with a Linux userland on it -- their real "
+            "home directory, their installed tools, the network always on, "
+            "no resource limits, and no isolation from this harness's own "
+            "files. Ask for it only when the work genuinely needs the "
+            "user's machine or a Linux toolchain the image does not have, "
+            "say so in the rationale, and expect to be asked: only a "
+            "read-only command whose arguments are all inside the "
+            "workspace runs there without a prompt. It may be turned off, "
+            "in which case the call is refused and says so. Use paths "
+            "RELATIVE to the workspace -- an absolute POSIX path is read "
+            "as leaving the workspace and always asks."
+        ),
+    )
 
 
 TOOL_SCHEMA = {
@@ -224,6 +250,15 @@ TOOL_SCHEMA = {
 # it is never asked for is one it will not set -- but it defaults to
 # False, so a call that omits it runs with no network rather than
 # failing validation after a human has already said yes.
+#
+# `backend` (ROADMAP_v3 §49, SS35) is NOT on the list, and the difference
+# from `requires_network` is the direction its default fails in. An
+# unstated `requires_network` runs a command that needed egress without
+# it, so the command fails for a reason the model cannot see and the
+# field has to be asked for. An unstated `backend` runs in the container,
+# which is both the safe answer and the right one for almost every call --
+# requiring it would make every command state the obvious in order to
+# surface a field that matters for a handful.
 TOOL_SCHEMA["input_schema"]["required"] = [
     "command", "rationale", "requires_network"]
 
@@ -233,7 +268,8 @@ TOOL_SCHEMA["input_schema"]["required"] = [
 # ---------------------------------------------------------------------------
 
 
-def _profile_and_containment(command: str, requires_network: bool = False):
+def _profile_and_containment(command: str, requires_network: bool = False,
+                             backend: str = BACKEND_CONTAINER):
     """Classify *command* and work out what will contain it.
 
     One helper for both the gate and the prompt so they cannot describe
@@ -244,9 +280,22 @@ def _profile_and_containment(command: str, requires_network: bool = False):
     by `declared_network`. It reaches the classifier rather than being
     applied afterwards, so the gate and the prompt read the one network
     fact instead of each OR-ing the flag in for itself.
+
+    *backend* is the agent's other declaration (§49, SS35), coerced by
+    `declared_backend`. It does NOT reach the classifier: what a command
+    is ABLE to do is a fact about the command, and the same text has the
+    same capabilities wherever it runs. It reaches `containment_for`,
+    which is the half of the question that is about the machine -- and
+    the answer there is UNCONTAINED for every tier (SS1).
     """
     profile = classify_command(command, config.WORKSPACE_DIR,
                                requires_network=requires_network)
+    # SS35. Asked first, because on this backend the runtime's answer is
+    # not part of the question: WSL is uncontained whether or not a
+    # container could have run the command, and probing Docker to decide
+    # that would be paying for an answer nobody reads.
+    if backend == BACKEND_WSL:
+        return profile, containment_for(profile, False, backend)
     # Docker is probed only when the answer depends on it. HOST_READ is
     # UNCONTAINED whatever Docker is doing -- it names a file outside
     # the workspace, which no container can show it -- so it still
@@ -332,6 +381,14 @@ def _shell_approval_check(tool_name: str, params: dict) -> bool:
          meets a human. Behind step 1 deliberately: mode "never" is a
          documented opt-out of ALL approval, and it already answers
          "auto-approve" for a host read of /etc/shadow.
+      2b. A call that will be REFUSED answers "no" rather than
+         "ask" (ROADMAP_v3 §49, SS37/SS40) -- the WSL backend turned
+         off, or a WSL command naming a protected segment. It reads
+         beside the UNAVAILABLE branch above and means the same
+         thing: there is nothing to approve, and asking would spend
+         a human decision on an outcome already fixed. `run` and the
+         session start handler refuse the same call, through the one
+         `wsl_refusal`.
       3. AUTO_APPROVE_SANDBOX_FALLBACK is applied HERE, visibly, rather
          than passed into the generic rule to be honoured out of sight.
          It is the user's own opt-in to an isolation level the harness
@@ -365,8 +422,9 @@ def _shell_approval_check(tool_name: str, params: dict) -> bool:
         return False
 
     command = params.get("command", "")
+    backend = declared_backend(params)
     profile, containment = _profile_and_containment(
-        command, declared_network(params))
+        command, declared_network(params), backend)
 
     # No backend can run this, so there is nothing to approve. NOT the
     # same as auto_approved() answering False, which means ASK -- the two
@@ -380,6 +438,16 @@ def _shell_approval_check(tool_name: str, params: dict) -> bool:
     # changes nothing there and lets the protected-segment check sit
     # before both.
     if containment == UNAVAILABLE:
+        return False
+
+    # SS40, and read beside the UNAVAILABLE branch above rather than with
+    # the protected-segment step below, because it is the same KIND of
+    # answer: this call is refused before it runs, so there is nothing to
+    # approve, and asking would spend a human decision on an outcome that
+    # is already fixed. Below the mode switch for the same reason
+    # UNAVAILABLE is -- `always` asks about everything, including calls
+    # that will not run, and that wart is one the gate already has.
+    if wsl_refusal(command, backend) is not None:
         return False
 
     # Step 2: a protected segment always asks, whatever the sandbox says.
@@ -419,8 +487,9 @@ def _shell_approval_notice(params: dict, _context=None) -> str:
     someone tells you the inert path is a host subprocess.
     """
     command = params.get("command", "")
+    backend = declared_backend(params)
     profile, containment = _profile_and_containment(
-        command, declared_network(params))
+        command, declared_network(params), backend)
     # The runtime is read from the probe `_profile_and_containment` just
     # ran, never re-probed: the person answering should see WHICH runtime
     # isolates the command, since Podman and Docker are not the same
@@ -431,6 +500,18 @@ def _shell_approval_notice(params: dict, _context=None) -> str:
         "uncontained": "on the HOST, with your own file access",
         "unavailable": "nowhere -- no sandbox backend is available",
     }.get(containment, containment)
+    # SS41. "uncontained" is true of WSL and nowhere near enough: the
+    # person answering has to know it is not a weaker container but their
+    # own machine, and that the two protections they may be picturing --
+    # the read-only mount over this harness's own files, and the memory
+    # and process limits -- are simply not there. Said here rather than
+    # only in the docs, because this prompt is where the decision is made.
+    if backend == BACKEND_WSL:
+        where = (f"in WSL ({wsl_distro() or 'default distribution'}) -- "
+                 f"YOUR machine, not a sandbox: your own files, the "
+                 f"network on, no memory or process limit, no read-only "
+                 f"mount over this harness's own config, and it can start "
+                 f"Windows programs with your full authority")
     notice = f"{profile.tier}: {profile.reason}. Runs {where}."
     binary = _resolved_binary(command) if containment == UNCONTAINED else ""
     if binary:
@@ -569,6 +650,53 @@ def _resolved_binary(command) -> str:
 # ---------------------------------------------------------------------------
 
 
+def wsl_refusal(command: str, backend: str) -> str | None:
+    """Why this WSL call must not run at all, or None (ROADMAP_v3 §49).
+
+    `fallback_changed_refusal`'s shape, and ONE copy for the same reason:
+    the gate reads it to answer "there is nothing to approve", and `run`
+    and the session start handler read it to stop the call. Three sites
+    deciding this separately is the drift #157 came from.
+
+    Two refusals, and they say different things on purpose.
+
+    THE BACKEND IS OFF (SS35). Not "unavailable" -- a machine that has WSL
+    and is not allowed to use it, which a model told "no distro found"
+    would try to fix by asking the user to install one.
+
+    A PROTECTED SEGMENT (SS40). In the container `.venastine/` is mounted
+    read-only, so a write there fails with EROFS and a read is documented
+    risk; on WSL there is no mount at all, a write SUCCEEDS, and D17's
+    hash notices only at the next launch. So the shell's usual answer for
+    a protected segment -- always ask -- is the wrong one here, and this
+    is the file tools' answer instead: deny.
+
+    The token check is exactly sound where it bites. An INERT command
+    carries no metacharacters by construction, so `command.split()` IS the
+    argv that will run and a literal segment cannot hide behind quoting or
+    expansion. A non-inert command can hide one, and still meets a human
+    on top of this -- `runs_code` is True for every non-inert profile
+    (CE1), so it asks under `tiered` and, being UNCONTAINED here, under
+    `contained` too.
+    """
+    if backend != BACKEND_WSL:
+        return None
+    if not wsl_enabled():
+        return wsl_unavailable_reason()
+    segment = _command_touches_protected(command)
+    if segment is not None:
+        return (
+            f"This command names {segment}/, and a command in WSL is "
+            f"refused rather than asked about when it does. In the "
+            f"container that directory is mounted read-only, so a write "
+            f"fails and a read is a documented risk you can accept. WSL "
+            f"mounts nothing: a write there would succeed against this "
+            f"harness's own authority files and would only be noticed at "
+            f"the next launch. Run it in the container, or do the work "
+            f"somewhere inside the workspace.")
+    return None
+
+
 def fallback_changed_refusal(command: str, docker_up: bool) -> str | None:
     """The TOCTOU safety net, or None: why a command approved while a
     container runtime answered must not now run on the fallback.
@@ -604,17 +732,33 @@ def run(params: dict) -> dict:
     # Probe Docker once for this execution — the result is threaded
     # into run_sandboxed to eliminate the TOCTOU gap where Docker
     # status changes between the approval check and execution.
-    docker_up = is_docker_available()
-
-    refusal = fallback_changed_refusal(parsed.command, docker_up)
+    # SS37/SS40, above the container probe: a call that asked for WSL and
+    # cannot have it is refused by name, and is never quietly served by a
+    # backend it did not ask for.
+    refusal = wsl_refusal(parsed.command, parsed.backend)
     if refusal is not None:
         return {"error": refusal}
+
+    # Not probed for a WSL call, and not merely to save the 0.43s: the
+    # TOCTOU guard below is about a container runtime disappearing between
+    # the gate and the run and the command then taking the INSECURE
+    # FALLBACK. A WSL call cannot take it -- `_route` answers ROUTE_WSL or
+    # refuses (SS37) -- so running that guard here would refuse a call for
+    # a backend it was never going to touch.
+    docker_up = True if parsed.backend == BACKEND_WSL \
+        else is_docker_available()
+
+    if parsed.backend != BACKEND_WSL:
+        refusal = fallback_changed_refusal(parsed.command, docker_up)
+        if refusal is not None:
+            return {"error": refusal}
 
     try:
         return run_sandboxed(
             command=parsed.command,
             workspace_dir=config.WORKSPACE_DIR,
             docker_available=docker_up,
+            backend=parsed.backend,
             # §28: the SAME classification the approval check made, so
             # routing cannot disagree with the decision to allow it --
             # the declaration included (§50), read off the validated

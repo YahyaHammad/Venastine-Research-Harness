@@ -15,6 +15,16 @@ Cross-platform command sandboxing with two backends:
    workspace). Network cannot be restricted. CPU/memory limits are
    Unix-only (rlimit); Windows relies on wall-clock timeout only.
 
+3. **WSL** (ROADMAP_v3 §49, slice 3) — a real Linux userland, and NO
+   isolation at all. Requires explicit opt-in via
+   config.ALLOW_WSL_BACKEND, and the agent asks for it per call. It is
+   not a weaker container; it is the user's own machine with a POSIX
+   front on it: the harness's own config.yaml is writable from there,
+   `~/.config` is writable, and Windows interop survives an emptied
+   environment (measured), so a command can start `cmd.exe` with the
+   user's full authority. `containment_for` answers UNCONTAINED for
+   every tier on this backend (SS1).
+
 Inert commands (read-only inspection from config.INERT_COMMANDS with
 no shell metacharacters and no path-qualified binary) run in the
 container as an argv with no shell, and on the host only when no
@@ -297,6 +307,249 @@ def is_docker_available() -> bool:
 
 
 # ---------------------------------------------------------------------------
+# ---- The WSL backend (ROADMAP_v3 §49, slice 3, SS35-SS45) ------------------
+# ---------------------------------------------------------------------------
+
+BACKEND_CONTAINER = "container"
+BACKEND_WSL = "wsl"
+BACKENDS = (BACKEND_CONTAINER, BACKEND_WSL)
+
+WSL = "wsl.exe"
+
+# `wsl.exe -l -q` answers in UTF-16LE with CRLF line endings -- measured,
+# and the reason this constant exists rather than a bare `.decode()`. Read
+# as UTF-8 the output is a NUL-riddled string that splits into garbage and
+# matches no distro name, so the probe would report "no distro installed"
+# on a machine with three.
+_WSL_LIST_ENCODING = "utf-16-le"
+
+
+@dataclass(frozen=True)
+class WslProbe:
+    """What the one WSL probe per process found.
+
+    `distro` is the name every WSL argv will carry, or None. It is always a
+    NAME, never the empty string that means "whatever the default is":
+    resolving it once here is what lets a refusal say which distro it tried,
+    and what stops a default that changes mid-run from moving where a
+    command lands. `reason` says why it is None.
+    """
+
+    distro: Optional[str]
+    reason: str = ""
+
+
+_wsl_probe: Optional[WslProbe] = None
+_wsl_lock = threading.Lock()
+
+
+def _wsl_distros() -> Optional[list[str]]:
+    """Every installed distro's name, or None if WSL would not answer."""
+    try:
+        result = subprocess.run([WSL, "-l", "-q"], capture_output=True,
+                                timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        text = result.stdout.decode(_WSL_LIST_ENCODING)
+    except (UnicodeDecodeError, AttributeError):
+        return None
+    return [name.strip() for name in text.splitlines() if name.strip()]
+
+
+def _probe_wsl() -> WslProbe:
+    """Which distro the WSL backend runs in, or why it cannot. Uncached.
+
+    A NAME is always resolved, even when `wsl_distro` is empty and WSL's
+    own default would do, because a name is what the rest of this module
+    needs: `wsl.exe -d NoSuchDistro` exits 4294967295 and writes its
+    complaint to STDOUT in UTF-16 (measured), so an unvalidated name fails
+    in a way that reads as the command failing rather than the backend
+    being misconfigured.
+
+    The default is taken as the first name `-l -q` lists, which is the
+    order `wsl.exe` itself prints and the one `--status` names as the
+    default.
+    """
+    if platform.system() != "Windows":
+        return WslProbe(None, "WSL exists only on Windows")
+    names = _wsl_distros()
+    if names is None:
+        return WslProbe(None, "`wsl.exe -l -q` did not answer, so WSL is not "
+                              "installed or its service is not running")
+    if not names:
+        return WslProbe(None, "WSL is installed but no distribution is, so "
+                              "there is nothing to run a command in")
+    configured = (config.WSL_DISTRO or "").strip()
+    if not configured:
+        return WslProbe(names[0])
+    for name in names:
+        if name.lower() == configured.lower():
+            return WslProbe(name)
+    return WslProbe(None, f"wsl_distro is {configured!r} and no such "
+                          f"distribution is installed (found: "
+                          f"{', '.join(names)})")
+
+
+def _wsl() -> WslProbe:
+    """The WSL probe, run at most once per process and LAZILY.
+
+    Lazy is the point, not an optimisation: a user who never turns the
+    backend on must not pay `wsl.exe -l -q` at launch on a machine where
+    WSL's service has to start to answer it. The container probe is eager
+    because every shell call needs its answer; this one is reached only
+    from a call that asked for WSL.
+
+    A lock rather than lru_cache for `_probe()`'s reason: two subagents
+    calling at once must get one probe, and the memo carries the reason
+    beside the answer.
+    """
+    global _wsl_probe
+    with _wsl_lock:
+        if _wsl_probe is None:
+            _wsl_probe = _probe_wsl()
+            if _wsl_probe.distro is None:
+                logger.info("WSL backend unavailable: %s", _wsl_probe.reason)
+            else:
+                logger.info("WSL backend distribution: %s", _wsl_probe.distro)
+        return _wsl_probe
+
+
+def _reset_wsl_probe() -> None:
+    """Forget the WSL probe's answer and the workspace translation it
+    produced. Tests only -- and BOTH, because the translation names the
+    distro that resolved it."""
+    global _wsl_probe
+    with _wsl_lock:
+        _wsl_probe = None
+    _wsl_workspace.cache_clear()
+
+
+def wsl_enabled() -> bool:
+    """Whether the USER has turned the WSL backend on (SS35).
+
+    Separate from `wsl_available()` and asked first everywhere, because the
+    two refusals say different things: one is "this machine does not allow
+    it" and the other is "this machine cannot do it", and a user who sees
+    the second when the first is true goes looking for a missing distro.
+    Read off the frozen posture, never `config` (UN1).
+    """
+    return posture.current().allow_wsl_backend
+
+
+def wsl_available() -> bool:
+    """Whether a WSL command could run: enabled AND a distro resolved."""
+    return wsl_enabled() and _wsl().distro is not None
+
+
+def wsl_distro() -> str:
+    """The distro a WSL argv names, read WITHOUT probing.
+
+    `known_runtime()`'s rule, for `known_runtime()`'s reason: a test that
+    patches availability must not make the argv builder start a real WSL
+    service, and the argv every test asserts is the one with the configured
+    name in it.
+    """
+    probe = _wsl_probe
+    if probe is not None and probe.distro:
+        return probe.distro
+    return (config.WSL_DISTRO or "").strip()
+
+
+def wsl_unavailable_reason() -> str:
+    """Why a WSL call cannot run, as a whole sentence for the model.
+
+    One copy, for the gate and the two run paths -- `containment_for` and
+    `_route` must not describe the same refusal differently (EP6).
+    """
+    if not wsl_enabled():
+        return ("The WSL backend is turned off. A command can only run in "
+                "WSL when allow_wsl_backend is true in config.yaml, which "
+                "ships false because WSL is not an isolation boundary: a "
+                "command there reaches this harness's own files and can "
+                "start Windows programs with the user's full authority.")
+    reason = _wsl().reason
+    return (f"The WSL backend is on, but no command can run: {reason}."
+            if reason else "")
+
+
+@functools.lru_cache(maxsize=8)
+def _wsl_workspace(workspace_dir: str) -> str:
+    """*workspace_dir* as the distro sees it, or "" when it cannot see it.
+
+    `wsl.exe --cd` takes a Windows path and translates it -- and when it
+    CANNOT, it does not fail. Measured: `--cd \\\\127.0.0.1\\C$` exits 0,
+    warns on stderr, and runs the command in the user's Linux HOME. A
+    command that was approved against one working directory then runs in
+    another and reports success, which is the drift EP6 is about, arriving
+    through a flag rather than through a branch.
+
+    So the translation is done HERE, by `wslpath`, whose failure is an exit
+    code, and the POSIX path is what `--cd` is given -- measured working,
+    `--cd /tmp` runs in /tmp. An empty answer means the route refuses.
+
+    Cached, because otherwise every WSL command pays a second `wsl.exe`
+    round trip for an answer that cannot change: a workspace is bound once
+    per process, and the mount that makes it visible is a property of the
+    machine. `_reset_wsl_probe` clears it, so a test that moves the
+    workspace is not answered from the last one's translation.
+    """
+    try:
+        result = subprocess.run(
+            [WSL, "-d", wsl_distro(), "-e", "wslpath", "-a", "-u",
+             workspace_dir],
+            capture_output=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if result.returncode != 0:
+        return ""
+    return result.stdout.decode("utf-8", "replace").strip()
+
+
+def _wsl_argv(
+    command: str,
+    workspace_posix: str,
+    *,
+    argv_mode: bool,
+    session_timeout_s: Optional[int] = None,
+) -> list[str]:
+    """The argv that runs *command* in the distro (SS43).
+
+    `_docker_argv`'s opposite number, and deliberately the same shape: a
+    prefix that says WHERE, then either the inert argv or a shell with the
+    command as one argument.
+
+    ARGV MODE IS NOT AN OPTIMISATION (SS39, SS43). An INERT command runs as
+    a bare argv with no shell because SS39 -- the classifier learns nothing
+    about WSL path forms -- rests on it. `_SHELL_METACHARACTERS` rejects
+    `~` and `$`, so those cannot reach an inert command; but `execve` also
+    does not expand them, and a shell between the classifier and the
+    executor would be a third tokeniser in the gap #157 came through twice.
+
+    `--norc --noprofile` for the other route, so what runs does not depend
+    on a user's `.bashrc` -- the container's property, kept. Measured: the
+    shell reports NOT_LOGIN, zero aliases and no BASH_ENV.
+
+    *workspace_posix* is already translated by `_wsl_workspace`; see there
+    for why `--cd` is never handed a Windows path.
+    """
+    args = [WSL, "--cd", workspace_posix, "-d", wsl_distro(), "-e"]
+    inner = (_inert_argv(command) if argv_mode
+             else ["bash", "--norc", "--noprofile", "-c", command])
+    if session_timeout_s is not None:
+        # The container route's backstop, unchanged in purpose: the harness
+        # kills at the timeout and owns the `timed_out` answer, and this is
+        # for a harness that is no longer there to kill anything. Measured
+        # in the distro: `timeout -k 5 3` over a `sleep 60` exited 124 after
+        # 3.2s.
+        inner = ["timeout", "-k", str(_KILL_GRACE_S),
+                 str(session_timeout_s)] + inner
+    return args + inner
+
+
+# ---------------------------------------------------------------------------
 # ---- Command classification -----------------------------------------------
 # ---------------------------------------------------------------------------
 
@@ -470,13 +723,61 @@ def _within(root: str, token: str) -> bool:
     generative corpus in TestTheTwoTokenisersCannotDisagree, which is what
     a generative corpus is for -- no enumerated list of spellings anyone
     would write was going to contain `\\;`.
+
+    SS45 extends that same sentence from a path this cannot resolve to a
+    LINK this platform cannot follow, which the text of a token can never
+    reveal. See `_unfollowable_link`.
     """
     try:
         root = os.path.realpath(root)
         resolved = os.path.realpath(os.path.join(root, token))
     except (OSError, ValueError):
         return False
-    return resolved == root or resolved.startswith(root + os.sep)
+    if not (resolved == root or resolved.startswith(root + os.sep)):
+        return False
+    return not _unfollowable_link(root, resolved)
+
+
+def _unfollowable_link(root: str, resolved: str) -> bool:
+    """Whether a component of *resolved* below *root* is a link THIS
+    platform cannot follow but another one can (ROADMAP_v3 §49, SS45).
+
+    The hole, measured in batch 101. A symlink created inside the workspace
+    from WSL is stored on an NTFS drive as an LX reparse point
+    (`0xa000001d`), and Windows does not understand it: `os.path.exists` is
+    False, `os.path.islink` is False, and `os.path.realpath` returns the
+    path UNCHANGED rather than following it or raising. So `_within`
+    answered True for a name that reads `/etc/passwd` in the distro --
+    `cat escape` classified INERT, was AUTO-APPROVED, and returned the
+    host's real password file. No amount of analysis of the token's TEXT
+    can see that, because the token is `escape`.
+
+    The rule is the platform's own admission rather than a list of tags:
+    a component that `lexists` and does not `exist` is one whose lstat
+    succeeded and whose stat did not, which for a path means exactly a link
+    that could not be followed. It is deliberately NOT "is a reparse
+    point", because a OneDrive placeholder is a reparse point whose path
+    means precisely what it says, and blocking those would make every
+    INERT command in a synced workspace ask.
+
+    Cheap where it matters: only components BELOW the root are walked, and
+    only after the resolved path has already been found to be inside it, so
+    a token heading somewhere else has returned before this is called.
+
+    On POSIX the case this closes cannot arise -- `realpath` follows a
+    symlink there, so a link out of the workspace has already resolved out
+    of it -- and what remains is a dangling link, where answering "ask"
+    costs a prompt on a command that was going to fail anyway.
+    """
+    rest = resolved[len(root):].strip("\\/")
+    if not rest:
+        return False
+    path = root
+    for part in re.split(r"[\\/]", rest):
+        path = os.path.join(path, part)
+        if os.path.lexists(path) and not os.path.exists(path):
+            return True
+    return False
 
 
 def _escapes_workspace(command: str, workspace_dir: str) -> bool:
@@ -538,6 +839,28 @@ def declared_network(params) -> bool:
     executes -- so the two paths never disagree about what ran.
     """
     return isinstance(params, dict) and params.get("requires_network") is True
+
+
+def declared_backend(params) -> str:
+    """Which backend a tool call ASKED for (ROADMAP_v3 §49, SS35).
+
+    `declared_network`'s sibling, and a function for the same reason: the
+    gate reads the model's tool-call input BEFORE Pydantic has seen it, so
+    this value can be any JSON at all, and a gate and a runner that coerced
+    it differently would ask about a contained command and run an
+    uncontained one -- #157's shape, in the module written to close it.
+
+    ONLY the exact string `"wsl"` selects WSL. Everything else -- a
+    misspelling, a list, `True`, absent -- is the container, which is the
+    safe direction: the failure mode of a lenient reading is a command
+    running outside the sandbox because the model typed `"WSL "`, and the
+    failure mode of a strict one is a refusal the model can see and fix.
+    `Literal["container", "wsl"]` on the param model then refuses anything
+    else at run time, so nothing executes on a disagreement.
+    """
+    if isinstance(params, dict) and params.get("backend") == BACKEND_WSL:
+        return BACKEND_WSL
+    return BACKEND_CONTAINER
 
 
 def classify_command(command: str, workspace_dir: str,
@@ -653,6 +976,7 @@ def classify_command(command: str, workspace_dir: str,
 
 def containment_for(
     profile: CommandProfile, docker_available: bool,
+    backend: str = BACKEND_CONTAINER,
 ) -> str:
     """Which containment the backend that will actually run *profile*
     provides -- the second half of what the gate needs.
@@ -689,7 +1013,16 @@ def containment_for(
     put subprocess IO inside a predicate, and it would move the probe out
     from under the callers that pre-compute it for the TOCTOU thread --
     the same reason run_sandboxed takes it instead of asking.
+
+    *backend* is what the CALL asked for (SS35). WSL is UNCONTAINED for
+    every tier (SS1) and is answered FIRST, above HOST_READ and above the
+    runtime: a call that asked for WSL is never described by the
+    containment of a backend it did not ask for. When it cannot have WSL
+    the answer is UNAVAILABLE, never another backend's containment -- SS37,
+    and the same shape `_route` uses one function down.
     """
+    if backend == BACKEND_WSL:
+        return UNCONTAINED if wsl_available() else UNAVAILABLE
     if profile.tier == HOST_READ:
         return UNCONTAINED
     if docker_available:
@@ -1171,6 +1504,76 @@ def _run_docker(
         )
 
 
+def _run_wsl(command: str, workspace_dir: str, argv: bool = False) -> dict:
+    """Run a command in the distro (ROADMAP_v3 §49, slice 3).
+
+    `_run_docker`'s opposite number, and shorter for one measured reason:
+    killing the Windows process kills the Linux side. `sleep 987 &` plus a
+    foreground `sleep 986`, then `Popen.kill()`, left neither behind -- so
+    there is no `wsl kill <name>` step, no label, and no orphan to reap.
+    The container needs one because the CLI client is not the container.
+
+    No resource limits (SS44). They belong to the whole WSL VM, and a
+    `ulimit` inside the shell is removable by the command it is meant to
+    bound -- a control that reads as safety without being one, which is the
+    failure SECURITY.md already names for the insecure fallback.
+    """
+    workspace_posix = _wsl_workspace(workspace_dir)
+    if not workspace_posix:
+        raise SandboxUnavailable(_wsl_workspace_refusal(workspace_dir))
+    args = _wsl_argv(command, workspace_posix, argv_mode=argv)
+
+    proc = None
+    try:
+        proc = subprocess.Popen(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            # SS42, and the only thing between a `WSLENV` naming an API key
+            # and the distro reading it. Measured: with `WSLENV` set to a
+            # secret's name the unscrubbed run printed the secret inside
+            # the distro; with this it printed ABSENT, and `id`/`pwd` still
+            # worked, so wsl.exe does not need what is being taken away.
+            env=_scrubbed_env(),
+        )
+        stdout, stderr = proc.communicate(
+            timeout=config.SANDBOX_TIMEOUT_SECONDS,
+        )
+        return {
+            "stdout": stdout[:config.MAX_READ_CHARS],
+            "stderr": stderr[:config.MAX_READ_CHARS],
+            "return_code": proc.returncode,
+        }
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        return {
+            "stdout": "",
+            "stderr": f"Command timed out after "
+                      f"{config.SANDBOX_TIMEOUT_SECONDS}s",
+            "return_code": -1,
+        }
+    except FileNotFoundError:
+        if proc is not None:
+            proc.kill()
+            proc.wait()
+        raise SandboxUnavailable(
+            "wsl.exe was not found, so the WSL backend cannot run "
+            "anything.") from None
+
+
+def _wsl_workspace_refusal(workspace_dir: str) -> str:
+    """Why a workspace the distro cannot see stops the route. One copy for
+    the one-shot path and the session path."""
+    return (f"WSL cannot see the workspace {workspace_dir!r}. `wslpath` "
+            f"could not translate it, which happens for a UNC path or a "
+            f"drive WSL does not mount. The command is refused rather than "
+            f"run somewhere else: `wsl.exe --cd` answers an untranslatable "
+            f"path by exiting 0 and running in your Linux home directory, "
+            f"so it would have reported success from the wrong place.")
+
+
 # ---------------------------------------------------------------------------
 # ---- Subprocess fallback path ---------------------------------------------
 # ---------------------------------------------------------------------------
@@ -1265,10 +1668,12 @@ def run_sandboxed(
     shell_binary: Optional[str] = None,
     docker_available: Optional[bool] = None,
     profile: Optional[CommandProfile] = None,
+    backend: str = BACKEND_CONTAINER,
 ) -> dict:
     """Execute *command* through the appropriate sandbox backend.
 
     Routing:
+      0. The call asked for WSL → the distro, or a refusal (SS37)
       1. Inert command → lightweight subprocess (no Docker/fallback needed)
       2. Docker available → container with volume mount
       3. Fallback enabled → subprocess with shell interpretation
@@ -1297,7 +1702,12 @@ def run_sandboxed(
     if refusal:
         raise SandboxUnavailable(refusal)
 
-    if shell_binary is None:
+    # Not on the WSL route, which runs `bash` IN THE DISTRO and never reads
+    # this. `detect_shell()` probes pwsh and then powershell with a 5s
+    # timeout each, so a WSL call was paying for a Windows shell it does
+    # not use -- and asking the host what shell it has, in order to run a
+    # command somewhere else, is the wrong question as well as a slow one.
+    if shell_binary is None and backend != BACKEND_WSL:
         shell_binary = detect_shell()
 
     # Audit #50: nothing else in the codebase ever created WORKSPACE_DIR,
@@ -1321,7 +1731,15 @@ def run_sandboxed(
     # `start_sandboxed`, so a background session is routed by the same
     # decision a one-shot command is (EP6 keeps it agreeing with
     # containment_for).
-    route = _route(profile, bool(docker_available))
+    route = _route(profile, bool(docker_available), backend)
+
+    # ROADMAP_v3 §49 slice 3 (SS38). Above HOST_READ, because a call that
+    # asked for WSL must not be handed to the Windows host by a tier.
+    if route == ROUTE_WSL:
+        logger.debug("WSL path (%s): %s", wsl_distro(), command[:80])
+        return _annotate(
+            _run_wsl(command, workspace_dir, argv=(profile.tier == INERT)),
+            profile, "wsl")
 
     # HOST_READ names a file the container cannot see, so it has exactly
     # one backend and takes it before Docker is even considered.
@@ -1379,17 +1797,25 @@ def run_sandboxed(
             _run_subprocess_fallback(command, workspace_dir, shell_binary),
             profile, "host")
 
-    raise SandboxUnavailable(_unavailable_message())
+    raise SandboxUnavailable(_unavailable_message(backend))
 
 
-def _unavailable_message() -> str:
+def _unavailable_message(backend: str = BACKEND_CONTAINER) -> str:
     """What a caller is told when no backend can run a command.
 
     The probe's reason goes in because the case it exists for is otherwise
     baffling: Podman IS installed and answering, and was refused for limits
     it cannot enforce (SS24). A user told only "no runtime" would reinstall
     the one they have. One copy, for `run_sandboxed` and `start_sandboxed`.
+
+    A call that asked for WSL is told about WSL and nothing else (SS37).
+    Offering it the container's install instructions would be answering a
+    question it did not ask, and it is the shape that makes a model retry
+    the same call with the same result.
     """
+    if backend == BACKEND_WSL:
+        return wsl_unavailable_reason() or (
+            "The WSL backend cannot run this command.")
     reason = _known_unavailable_reason()
     return (
         "No container runtime can run the sandbox"
@@ -1413,6 +1839,7 @@ PROCESS_TOKEN = f"{os.getpid()}-{uuid.uuid4().hex[:12]}"
 
 ROUTE_HOST_READ = "host_read"
 ROUTE_CONTAINER = "container"
+ROUTE_WSL = "wsl"
 ROUTE_INERT_HOST = "inert_host"
 ROUTE_FALLBACK = "fallback"
 ROUTE_UNAVAILABLE = "unavailable"
@@ -1428,16 +1855,29 @@ _CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP",
                                     0x00000200)
 
 
-def _route(profile: CommandProfile, docker_available: bool) -> str:
+def _route(profile: CommandProfile, docker_available: bool,
+           backend: str = BACKEND_CONTAINER) -> str:
     """Which backend runs *profile*: the executor's half of EP6.
 
     `run_sandboxed` and `start_sandboxed` both route through here, so a
     background session cannot be routed by a different decision from a
     one-shot command. `containment_for` is still the gate's half, written
     separately on purpose (§46, EP6), and tests/test_session_backends.py
-    holds the two against each other for every tier, runtime answer and
-    fallback posture.
+    holds the two against each other for every tier, runtime answer,
+    backend and fallback posture.
+
+    THE WSL BRANCH IS FIRST, ABOVE HOST_READ (SS38), and that order is the
+    decision rather than a consequence of one. `cat /etc/passwd` asked for
+    on WSL classifies HOST_READ -- the argument is outside the workspace,
+    which is true on either machine -- and the old ladder would have run it
+    through `_run_inert` on WINDOWS, against `C:\\etc\\passwd`, with
+    whichever `cat` is first on the user's PATH. The tier keeps its whole
+    meaning (`escapes_workspace` still forces a prompt in every mode but
+    `never`); what it must not do is choose a machine the call did not ask
+    for and the prompt did not name.
     """
+    if backend == BACKEND_WSL:
+        return ROUTE_WSL if wsl_available() else ROUTE_UNAVAILABLE
     if profile.tier == HOST_READ:
         return ROUTE_HOST_READ
     if docker_available:
@@ -1618,6 +2058,26 @@ class HostSessionProcess(SessionProcess):
             self._proc.kill()
 
 
+class WslSessionProcess(SessionProcess):
+    """A session in the distro (ROADMAP_v3 §49, slice 3).
+
+    It inherits `SessionProcess`'s plain terminate/kill and adds NOTHING,
+    which is the measured fact rather than an omission: ending the Windows
+    `wsl.exe` process ends its Linux children, a backgrounded grandchild
+    included. `sleep 987 &` plus a foreground `sleep 986` were both gone two
+    seconds after `Popen.kill()`, checked with `pgrep -a sleep` run as a
+    bare argv -- an earlier attempt asked through `bash -c` and matched its
+    own parent's command line, which reported a survivor that was the
+    question.
+
+    So there is no process group to signal as `HostSessionProcess` must,
+    and no `kill <name>` to send as `DockerSessionProcess` must. Anything
+    added here would be machinery for a case that does not exist.
+    """
+
+    ran_on = "wsl"
+
+
 def start_sandboxed(
     command: str,
     workspace_dir: str,
@@ -1626,6 +2086,7 @@ def start_sandboxed(
     docker_available: bool,
     timeout_s: int,
     shell_binary: Optional[str] = None,
+    backend: str = BACKEND_CONTAINER,
 ) -> SessionProcess:
     """Start *command* as a background session and return at once.
 
@@ -1643,8 +2104,23 @@ def start_sandboxed(
     if refusal:
         raise SandboxUnavailable(refusal)
     os.makedirs(workspace_dir, exist_ok=True)
-    route = _route(profile, bool(docker_available))
+    route = _route(profile, bool(docker_available), backend)
     try:
+        if route == ROUTE_WSL:
+            workspace_posix = _wsl_workspace(workspace_dir)
+            if not workspace_posix:
+                raise SandboxUnavailable(
+                    _wsl_workspace_refusal(workspace_dir))
+            args = _wsl_argv(
+                command, workspace_posix, argv_mode=(profile.tier == INERT),
+                session_timeout_s=int(timeout_s) + SESSION_TIMEOUT_MARGIN_S)
+            try:
+                proc = _popen_session(args, env=_scrubbed_env())
+            except FileNotFoundError:
+                raise SandboxUnavailable(
+                    "wsl.exe was not found, so the WSL backend cannot run "
+                    "anything.") from None
+            return WslSessionProcess(proc, tier=profile.tier)
         if route == ROUTE_CONTAINER:
             runtime = known_runtime()
             _log_image_identity(runtime)
@@ -1678,7 +2154,7 @@ def start_sandboxed(
         raise
     except OSError as e:
         raise SandboxUnavailable(f"Could not start the command: {e}") from None
-    raise SandboxUnavailable(_unavailable_message())
+    raise SandboxUnavailable(_unavailable_message(backend))
 
 
 
@@ -1689,6 +2165,7 @@ def start_interactive(
     docker_available: bool,
     timeout_s: int,
     prompt_token: str,
+    backend: str = BACKEND_CONTAINER,
 ) -> SessionProcess:
     """Open a shell with a pty inside the container and return it at once.
 
@@ -1703,7 +2180,16 @@ def start_interactive(
     until a program exits, and `isatty` sends half the programs worth opening
     down another path. That gap between what was approved and what runs is
     the drift class §46 (EP6) and #157 are about, so it is closed by refusing
-    rather than by documenting. WSL joins in slice 3, where it was measured.
+    rather than by documenting.
+
+    SLICE 3 DOES NOT CHANGE THAT. WSL was measured holding a pty in §49 and
+    carries `script`, `stty` and the rest, so the wrapper would very likely
+    work -- and "very likely" is the word that made batch 100 expensive. Two
+    of that batch's assumptions about a pty it had NOT measured through the
+    real argv were false, and neither would have been caught by the tests,
+    because both were in what the tests would have been written against. So
+    an interactive session on WSL waits for the batch that measures its
+    stream, and until then asking for one is refused by name.
 
     There is no *command* argument on purpose: the agent's text is typed into
     the shell once it is up, so this function's answer does not depend on it.
@@ -1711,6 +2197,15 @@ def start_interactive(
     refusal = protected_paths.check_workspace(workspace_dir)
     if refusal:
         raise SandboxUnavailable(refusal)
+    if backend == BACKEND_WSL:
+        raise SandboxUnavailable(
+            "An interactive shell cannot run in WSL yet. Its stream shape "
+            "there -- the prompt, the echo and the pty's size -- has not "
+            "been measured, and a shell that answers differently in ways "
+            "you cannot see is worse than one you cannot open. Use "
+            "shell_background with backend 'wsl' for a command that does "
+            "not need to be typed into, or open an interactive shell "
+            "without asking for WSL.")
     os.makedirs(workspace_dir, exist_ok=True)
     route = _route(profile, bool(docker_available))
     if route != ROUTE_CONTAINER:

@@ -260,7 +260,7 @@ class TestTheRoundTripIsLossless:
         # 128 since batch 95: the five session tools' permission flags, and
         # approvals fields for the three of them the shell mode does not
         # gate (SS11, SS16).
-        assert touched == 132, f"{touched} settable scalars, expected 132"
+        assert touched == 134, f"{touched} settable scalars, expected 134"
         assert config_edit._dump(tree) == text
 
     def test_a_one_value_change_is_a_one_line_diff(self, tmp_path,

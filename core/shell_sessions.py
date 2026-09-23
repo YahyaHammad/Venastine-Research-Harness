@@ -519,7 +519,8 @@ class SessionManager:
               requested_timeout_s: int, owner_thread, workspace_dir: str,
               call_id: str = "", rationale: str = "",
               pattern: Optional[str] = None,
-              open_wait_s: float = 10.0) -> dict:
+              open_wait_s: float = 10.0,
+              backend: str = "container") -> dict:
         """Start a session and return what the agent is told. Raises
         SessionRefused with the reason, or the backend's SandboxUnavailable."""
         refusal = self.start_refusal(kind, pattern, owner_thread)
@@ -552,7 +553,21 @@ class SessionManager:
                 pty=PtyStream(token) if interactive else None,
                 last_input_mono=self._clock())
             self._sessions[session.id] = session
+        # ROADMAP_v3 §49 slice 3. Passed to the backend, not stored on the
+        # session: what the session RECORDS about where it ran is
+        # `ran_on`, read back off the process below, so a request and an
+        # outcome cannot disagree in the record. Interactive never carries
+        # one -- `start_interactive` takes no backend from this layer.
+        #
+        # Passed ONLY when it is not the default, which is `prompt_token`'s
+        # rule and keeps its property: a starter written against slice 1 --
+        # every fake in the suite -- sees the call it has always seen, and
+        # one that wants to observe the backend opts in by accepting it.
+        # "container" and "no backend given" are the same request, so there
+        # is nothing a caller can express that this drops.
         extra = {"prompt_token": token} if interactive else {}
+        if not interactive and backend != "container":
+            extra["backend"] = backend
         try:
             process = self._starter(command, workspace_dir, profile=profile,
                                     docker_available=docker_available,

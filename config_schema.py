@@ -374,6 +374,12 @@ class HarnessConfig(_Model):
     shell_binary: str
     allow_insecure_sandbox_fallback: StrictBool
     auto_approve_sandbox_fallback: StrictBool
+    # ROADMAP_v3 §49 slice 3 (SS35). An AUTHORITY key: it decides
+    # whether a command may leave the container at all. `wsl_distro`
+    # below is not -- it names WHICH distro, which only matters once
+    # this one is true.
+    allow_wsl_backend: StrictBool
+    wsl_distro: str
     shell_approval_mode: ShellApprovalMode
     sandbox_docker_image: str
     sandbox_timeout_seconds: PositiveInt
@@ -583,6 +589,7 @@ HARNESS_AUTHORITY_KEYS = frozenset({
     "shell_approval_mode",
     "allow_insecure_sandbox_fallback",
     "auto_approve_sandbox_fallback",
+    "allow_wsl_backend",
     "redact_tool_outputs",
     "ensemble_models",
     "critic_model",

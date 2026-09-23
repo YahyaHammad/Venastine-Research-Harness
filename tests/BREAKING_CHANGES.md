@@ -4847,3 +4847,22 @@ decoration. `_wait_after_input` requires the prompt to be followed by `_INPUT_QU
 with a FROZEN clock that can never elapse -- which is why the lifetime tests set it to zero and the send
 tests use a real clock. Removing the settle makes a prompt passed through on the way to a queued line
 read as the answer to the line just sent.
+
+## Batch 101 -- the WSL backend (ROADMAP_v3 §49 slice 3)
+
+| What broke | Why | The repair |
+|---|---|---|
+| `tests/test_posture.py`, fourteen tests at once | `Posture` gained `allow_wsl_backend`, and every test in `TestUnsafeReasons` built one from five POSITIONAL booleans | A `_shipped(**overrides)` helper. None of the fourteen breaks was about what its test asserted, which is the argument for the helper rather than for renumbering the arguments: the next posture field costs one function |
+| `test_config_edit.py::test_setting_every_leaf_to_its_own_value_changes_nothing` | `config.yaml` gained `allow_wsl_backend` and `wsl_distro` | 132 settable scalars -> 134 |
+| `test_posture.py::test_the_config_command_gates_every_posture_key` | `HARNESS_AUTHORITY_KEYS` gained `allow_wsl_backend`, and the test pins the count exactly so an omission cannot ride in | 9 -> 10, plus the effect sentence `/config`'s gate requires |
+| `test_session_backends.py::test_route_and_containment_for_agree` | EP6's matrix gained a backend dimension | Widened in place to 80 cells, NOT copied. A second matrix would be a second place for the two halves of one decision to be held together, which is the shape EP6 exists to prevent |
+| `test_docs_consistency.py::test_a_claimed_range_covers_its_whole_family` | The record defines SS35-SS45 | AGENTS.md's map says SS1-SS45 |
+| Nothing in `core/shell_sessions.py`'s starter contract | `backend` is passed to the starter ONLY when it is not the default | Every slice-1 fake -- none of which accepts the keyword -- works unchanged. `prompt_token`'s rule, for `prompt_token`'s reason |
+
+**If you are here because a `_within` test started asking where it used to auto-approve:** that is
+SS45, and it is deliberate. A path component that `lexists` and does not `exist` is a link this
+platform cannot follow, and `_within` now answers False for it -- on every route, not only WSL. A
+missing file is unchanged (`lexists` is False for it, so it is still INERT); a real file is unchanged;
+a link the distro made into `/etc` now classifies HOST_READ and asks. If you want the old answer back,
+read SS45 first: the behaviour it replaced returned the host's `/etc/passwd` through an auto-approved
+`cat`.

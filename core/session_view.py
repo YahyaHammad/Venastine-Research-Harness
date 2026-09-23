@@ -41,7 +41,7 @@ from typing import Optional
 from uuid import UUID
 
 import config
-from core.session_wake import KIND_FOR_TOOL, TOOL_FOR_KIND
+from core.session_wake import KIND_FOR_TOOL, TOOL_FOR_KIND, where_ran
 from core.shell_sessions import (
     EXITED,
     FAILED,
@@ -116,8 +116,7 @@ def live_entries(row: SessionRow, tail: str = "",
     tool = TOOL_FOR_KIND.get(row.kind, "shell_background")
     clean = _clean(tool, row.command, row.rationale, tail)
     state = _STATE_WORDS.get(row.state, row.state)
-    where = (f" in the {row.ran_on}" if row.ran_on == "container"
-             else f" on the {row.ran_on}" if row.ran_on else "")
+    where = where_ran(row.ran_on)
     head = f"Session {row.id} ({row.kind}) — {state}{where}"
     if row.state in LIVE_STATES:
         head += f", {row.timeout_s}s timeout"

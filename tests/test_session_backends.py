@@ -96,24 +96,37 @@ class TestTheRouteIsTheContainmentTheGateAssumed:
         sandbox.ROUTE_INERT_HOST: capability.UNCONTAINED,
         sandbox.ROUTE_FALLBACK: capability.UNCONTAINED,
         sandbox.ROUTE_UNAVAILABLE: capability.UNAVAILABLE,
+        sandbox.ROUTE_WSL: capability.UNCONTAINED,
     }
 
+    @pytest.mark.parametrize("wsl_up", [False, True])
+    @pytest.mark.parametrize("backend", ["container", "wsl"])
     @pytest.mark.parametrize("fallback", [False, True])
     @pytest.mark.parametrize("docker", [False, True])
     @pytest.mark.parametrize("tier", [INERT, HOST_READ, SANDBOXED,
                                       SANDBOXED_NET, UNKNOWN])
     def test_route_and_containment_for_agree(self, monkeypatch, tier,
-                                             docker, fallback):
+                                             docker, fallback, backend,
+                                             wsl_up):
         """EP6: the executor's routing and the gate's containment are one
         decision written twice. `_route` now serves `run_sandboxed` AND
         `start_sandboxed`, so this matrix is what keeps a session from
-        being approved as one containment and run in another."""
-        set_posture(monkeypatch, allow_insecure_fallback=fallback)
+        being approved as one containment and run in another.
+
+        WIDENED in batch 101 rather than copied: a second matrix for the
+        WSL backend would be a second place for the two halves to be
+        held together, and the property is one property. 80 cells.
+        """
+        set_posture(monkeypatch, allow_insecure_fallback=fallback,
+                    allow_wsl_backend=wsl_up)
+        monkeypatch.setattr(sandbox, "_wsl_probe",
+                            sandbox.WslProbe("Ubuntu" if wsl_up else None,
+                                             "" if wsl_up else "no distro"))
         profile = _profile(tier, network=(tier == SANDBOXED_NET),
                            measured=(tier != UNKNOWN))
-        route = sandbox._route(profile, docker)
+        route = sandbox._route(profile, docker, backend)
         assert self._CONTAINMENT[route] == sandbox.containment_for(
-            profile, docker)
+            profile, docker, backend)
 
 
 class TestASessionGetsTheSameContainerAndTwoFlagsMore:

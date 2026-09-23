@@ -724,6 +724,61 @@ explicitly enable subprocess fallback
 
 auto-approve fallback runs (no per-run prompt)
 
+### `allow_wsl_backend`
+
+ROADMAP_v3 §49, slice 3 (SS35). Whether the agent may ask for a command
+to run in a WSL distribution instead of the container. Ships `false`, and
+is part of the frozen posture -- so no tool call, `settings.json` at
+either tier, environment variable or slash command can move it.
+
+It is off by default because WSL is not a weaker container, it is no
+container at all. Measured on the machine this was built on:
+
+```text
+  the harness's own config.yaml       writable from the distribution
+  ~/.config (and .config/venastine)   writable
+  memory / CPU / process limits       none -- they belong to the WSL VM
+  network                             always on, not withholdable
+  Windows interop                     survives `env -i`; it is binfmt_misc,
+                                      not PATH, so a command there can run
+                                      cmd.exe with the user's authority
+```
+
+So the harness treats it as UNCONTAINED for every tier (SS1): under
+`tiered` and `contained` only a read-only command whose every argument is
+inside the workspace runs unasked, and a command naming a protected path
+segment is REFUSED rather than asked about (SS40) -- because the
+read-only bind over `.venastine/` that makes "ask" tolerable on the
+container route does not exist here, and a write would succeed and be
+noticed only at the next launch.
+
+Two questions, two owners, which is why this is a config key and the
+backend choice is a tool parameter: whether this machine may run agent
+commands outside a container is the user's decision, and which command
+needs a Linux userland is the agent's. A process-wide switch would answer
+both at once and give up the container for every command in order to
+serve one.
+
+### `wsl_distro`
+
+Which distribution the backend runs in. Empty means the first name
+`wsl.exe -l -q` lists, which is WSL's own default.
+
+Never settable by the agent (SS36): a distribution is a fact about the
+machine rather than about a command, and the list on a typical developer
+box includes `docker-desktop`, which is Docker's own internal
+distribution and not a place to run anything. A configured name is
+matched case-insensitively against the installed list and refused with
+that list if it is absent -- rather than passed through, because
+`wsl.exe -d NoSuchDistro` exits `4294967295` and writes its complaint to
+*stdout* in UTF-16, so an unvalidated name fails in a way that reads as
+the command failing rather than the configuration being wrong.
+
+The listing itself is decoded as UTF-16LE for the same measured reason:
+read as UTF-8 it is a NUL-riddled string that matches no name at all, so
+a probe that guessed the encoding would report "no distribution
+installed" on a machine with three.
+
 ### `shell_approval_mode`
 
 ROADMAP_v2 §28 (G3). WHICH shell commands need a human to say yes.

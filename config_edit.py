@@ -98,6 +98,12 @@ AUTHORITY_EFFECT = {
     "auto_approve_sandbox_fallback": (
         "whether that fallback to the host happens without asking you "
         "first."),
+    "allow_wsl_backend": (
+        "whether the agent may ask for a command to run in WSL instead "
+        "of the container. WSL is not a sandbox: it reaches this "
+        "harness's own config and authority files, has no memory or "
+        "process limits, and can start Windows programs with your full "
+        "authority."),
     "redact_tool_outputs": (
         "whether secrets are stripped from tool output before it reaches "
         "the model and the transcript."),

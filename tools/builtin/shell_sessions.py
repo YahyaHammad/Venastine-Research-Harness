@@ -97,8 +97,22 @@ class _StartParams(BaseModel):
             "requires_network"].description)
 
 
+def _backend_field():
+    """The `backend` field, on the two start tools that take one.
+
+    NOT on `_StartParams`, which `InteractiveParams` also inherits:
+    `start_interactive` refuses WSL by name (its stream shape there is
+    unmeasured), and a parameter whose only legal value is the default
+    is one the model will spend a call discovering. A tool advertises
+    what it can do.
+    """
+    return Field(
+        default="container",
+        description=shell.ShellParams.model_fields["backend"].description)
+
+
 class BackgroundParams(_StartParams):
-    pass
+    backend: Literal["container", "wsl"] = _backend_field()
 
 
 class MonitorParams(_StartParams):
@@ -108,6 +122,7 @@ class MonitorParams(_StartParams):
                      "output; not anchored, so use ^ and $ to anchor. No "
                      "backreferences or lookaround. It is matched against the "
                      "raw output, and what you are shown is redacted."))
+    backend: Literal["container", "wsl"] = _backend_field()
 
 
 _WAIT_DESCRIPTION = (
@@ -416,7 +431,19 @@ def _start(name: str, model, params: dict, memory, call_id) -> dict:
     parsed = model(**params)
     # ONE probe, read through `shell` so the approval check and this call
     # see the same answer (§40 keeps the posture fixed; the probe is cached).
-    docker_up = shell.is_docker_available()
+    # SS37/SS40, before the probe and before anything is classified: a
+    # session that asked for WSL and cannot have it is refused by name.
+    # `shell_interactive` has no `backend` field, so this is None for it
+    # and the refusal that DOES apply to it comes from
+    # `start_interactive` -- which is the one that knows why.
+    backend = getattr(parsed, "backend", shell.BACKEND_CONTAINER)
+    refusal = shell.wsl_refusal(parsed.command, backend)
+    if refusal is not None:
+        return {"error": refusal}
+    # See `shell.run` for why a WSL call does not probe: the guard the
+    # probe feeds is about the insecure fallback, which it cannot take.
+    docker_up = (True if backend == shell.BACKEND_WSL
+                 else shell.is_docker_available())
     if name == INTERACTIVE:
         # SS32: what is approved is a SHELL, not the first line, so the
         # profile that routes it says so rather than being read off text
@@ -434,9 +461,11 @@ def _start(name: str, model, params: dict, memory, call_id) -> dict:
         profile = shell.classify_command(
             parsed.command, config.WORKSPACE_DIR,
             requires_network=parsed.requires_network)
-        refusal = shell.fallback_changed_refusal(parsed.command, docker_up)
-        if refusal is not None:
-            return {"error": refusal}
+        if backend != shell.BACKEND_WSL:
+            refusal = shell.fallback_changed_refusal(
+                parsed.command, docker_up)
+            if refusal is not None:
+                return {"error": refusal}
     try:
         return core_sessions.sessions.start(
             kind=_KINDS[name], command=parsed.command,
@@ -446,6 +475,7 @@ def _start(name: str, model, params: dict, memory, call_id) -> dict:
             # flag reaches a session with no other change.
             profile=profile,
             docker_available=docker_up,
+            backend=backend,
             requested_timeout_s=parsed.timeout_s,
             owner_thread=memory.thread_id,
             workspace_dir=config.WORKSPACE_DIR,

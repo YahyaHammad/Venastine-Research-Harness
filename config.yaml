@@ -547,6 +547,26 @@ allow_insecure_sandbox_fallback: false
 # `contained`; under `always` every command still asks, this one included.
 auto_approve_sandbox_fallback: false
 
+# AUTHORITY -- part of the frozen security posture. Lets the agent ask
+# for a command to run in WSL (ROADMAP_v3 §49, slice 3). It is NOT a
+# weaker container: a command there reaches this harness's own
+# config.yaml and ~/.config, gets no memory, CPU or process limit, and
+# can start Windows programs with your full authority -- Windows
+# interop is a kernel feature there and survives an emptied
+# environment. Only a read-only command whose every argument is inside
+# the workspace runs there without asking; everything else meets a
+# prompt under `tiered` and `contained` alike. Shown on the startup
+# banner and the TUI badge whenever it is on.
+allow_wsl_backend: false
+
+# Which WSL distribution the backend runs in. EMPTY means the first one
+# `wsl.exe -l -q` lists, which is WSL's own default. A name that is not
+# installed is refused with the installed names, rather than passed to
+# `wsl.exe` -- which answers an unknown distro by exiting 4294967295
+# and writing its complaint to stdout in UTF-16, so the failure would
+# read as the command's rather than the configuration's.
+wsl_distro: ''
+
 # AUTHORITY -- THE gate for shell approval, and part of the frozen posture.
 #   always    -- every command asks
 #   tiered    -- read-only commands from inert_commands, every argument

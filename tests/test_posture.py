@@ -301,7 +301,7 @@ class TestNothingReachableChangesIt:
         import config_schema
 
         keys = config_schema.HARNESS_AUTHORITY_KEYS
-        assert len(keys) == 9
+        assert len(keys) == 10
         for key in keys:
             assert config_edit.authority_key(key) == key, (
                 f"{key} does not resolve through the gate, so /config "
@@ -532,17 +532,29 @@ class TestNothingReachableChangesIt:
 # ===========================================================================
 
 
+def _shipped(**overrides) -> Posture:
+    """The shipped posture, with named weakenings applied.
+
+    Every test below used to build a `Posture` from five positional
+    booleans, so adding `allow_wsl_backend` broke fourteen of them at once
+    and none of the breaks was about what the test asserted. One
+    constructor, and a new field costs this function and nothing else.
+    """
+    return Posture(**{"shell_approval_mode": "tiered",
+                      "allow_insecure_fallback": False,
+                      "auto_approve_fallback": False,
+                      "allow_wsl_backend": False,
+                      "redact_tool_outputs": True,
+                      "redact_off_env": False,
+                      **overrides})
+
+
 class TestUnsafeReasons:
     """UN3. The banner, the launch WARNING and the TUI badge all read this
     one method, so they cannot describe the same state differently."""
 
     def test_the_shipped_posture_says_nothing(self):
-        shipped = Posture(shell_approval_mode="tiered",
-                          allow_insecure_fallback=False,
-                          auto_approve_fallback=False,
-                          redact_tool_outputs=True,
-                          redact_off_env=False)
-        assert shipped.unsafe_reasons() == []
+        assert _shipped().unsafe_reasons() == []
 
     @pytest.mark.parametrize("field,value", [
         ("shell_approval_mode", "never"),
@@ -550,22 +562,19 @@ class TestUnsafeReasons:
         ("allow_insecure_fallback", True),
         ("redact_tool_outputs", False),
         ("redact_off_env", True),
+        ("allow_wsl_backend", True),
     ])
     def test_each_weakening_is_reported(self, field, value):
-        shipped = Posture(shell_approval_mode="tiered",
-                          allow_insecure_fallback=False,
-                          auto_approve_fallback=False,
-                          redact_tool_outputs=True,
-                          redact_off_env=False)
-        weakened = dataclasses.replace(shipped, **{field: value})
+        weakened = dataclasses.replace(_shipped(), **{field: value})
         assert weakened.unsafe_reasons(), f"{field}={value!r} reported nothing"
 
     def test_the_fallback_pair_reads_as_worse_than_either(self):
         """SECURITY.md singles this pair out: together they are unprompted
         arbitrary code on the host. The wording has to say so, because a
         user who reads only the badge should still learn the right thing."""
-        one = Posture("tiered", True, False, True, False).unsafe_reasons()
-        both = Posture("tiered", True, True, True, False).unsafe_reasons()
+        one = _shipped(allow_insecure_fallback=True).unsafe_reasons()
+        both = _shipped(allow_insecure_fallback=True,
+                        auto_approve_fallback=True).unsafe_reasons()
         assert len(one) == len(both) == 1
         assert "if no container runtime" in one[0][1]
         assert "unprompted" in both[0][1]
@@ -575,7 +584,11 @@ class TestUnsafeReasons:
         twenty-column sidebar. `ALLOW_INSECURE_SANDBOX_FALLBACK` is 31
         characters, which is what forced the split -- so the width is part
         of the contract, not a coincidence to be rediscovered."""
-        weakened = Posture("never", True, True, False, True)
+        weakened = _shipped(shell_approval_mode="never",
+                            allow_insecure_fallback=True,
+                            auto_approve_fallback=True,
+                            allow_wsl_backend=True,
+                            redact_tool_outputs=False, redact_off_env=True)
         for label, detail in weakened.unsafe_reasons():
             assert len(label) + 2 <= 20, (label, len(label))
             assert len(detail) > len(label), \
@@ -586,15 +599,14 @@ class TestUnsafeReasons:
         cannot do anything -- `containment_for` never returns UNCONTAINED
         for a non-inert tier unless the fallback is on. Reporting it would
         be a warning a user cannot act on."""
-        assert Posture("tiered", False, True, True, False).unsafe_reasons() == []
+        assert _shipped(auto_approve_fallback=True).unsafe_reasons() == []
 
     def test_contained_is_reported_and_says_what_still_asks(self):
         """§48 (CE4). `contained` runs code in the container unasked, so it
         is a weakening of the shipped posture -- but not of the network or
         the host, and a badge that let a reader believe otherwise would be
         the wrong-surface failure UN3 exists for."""
-        reasons = Posture("contained", False, False, True,
-                          False).unsafe_reasons()
+        reasons = _shipped(shell_approval_mode="contained").unsafe_reasons()
         assert [label for label, _ in reasons] == ["shell: contained"]
         label, detail = reasons[0]
         assert len(label) + 2 <= 20, (label, len(label))
@@ -608,7 +620,9 @@ class TestUnsafeReasons:
         mode check returns before the opt-in is read -- while the badge
         said "host shell, no ask". Under `always` the pair is what the
         fallback alone is."""
-        reasons = Posture("always", True, True, True, False).unsafe_reasons()
+        reasons = _shipped(shell_approval_mode="always",
+                           allow_insecure_fallback=True,
+                           auto_approve_fallback=True).unsafe_reasons()
         assert [label for label, _ in reasons] == ["host shell fallback"]
         assert "unprompted" not in reasons[0][1]
         assert "if no container runtime" in reasons[0][1]
@@ -619,8 +633,31 @@ class TestUnsafeReasons:
         every mode: CE5 honours the opt-in under `tiered` and `contained`,
         and under `never` nothing asks anyway."""
         labels = [label for label, _ in
-                  Posture(mode, True, True, True, False).unsafe_reasons()]
+                  _shipped(shell_approval_mode=mode,
+                           allow_insecure_fallback=True,
+                           auto_approve_fallback=True).unsafe_reasons()]
         assert "host shell, no ask" in labels
+
+    def test_the_wsl_backend_is_on_the_badge(self):
+        """SS41. Reported when it is ENABLED rather than when it is used:
+        a user who reads the badge after a WSL command has already run has
+        read it too late. Its own pair, not folded into the fallback's --
+        the fallback is the host when there is no container, and this is a
+        Linux userland the agent can ask for while one is running."""
+        reasons = _shipped(allow_wsl_backend=True).unsafe_reasons()
+        assert [label for label, _ in reasons] == ["wsl backend"]
+        label, detail = reasons[0]
+        assert len(label) + 2 <= 20, (label, len(label))
+        assert "not a sandbox" in detail
+        assert "read-only command inside the workspace" in detail
+
+    def test_the_wsl_pair_is_independent_of_the_fallback(self):
+        """Both on reports BOTH, because they are different weakenings and
+        a user who turned one on has not been told about the other."""
+        labels = [label for label, _ in
+                  _shipped(allow_wsl_backend=True,
+                           allow_insecure_fallback=True).unsafe_reasons()]
+        assert labels == ["host shell fallback", "wsl backend"]
 
 
 # ===========================================================================

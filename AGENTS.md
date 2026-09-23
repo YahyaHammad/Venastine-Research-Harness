@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 5172 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 5359 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -148,7 +148,7 @@ made the move free: no import changed, and `tests/test_docs_consistency.py` is t
 opens any of these files (its `DOCS` constant is where the path now comes from).
 
 - **docs/ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49 onward, in progress) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A15 from §32, W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 SS1–SS34 from §49, NW1–NW5 from §50 and PG1–PG4 from §51). Section and D-numbers are stable and cross-referenced everywhere.
+- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49 onward, in progress) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A15 from §32, W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 SS1–SS45 from §49, NW1–NW5 from §50 and PG1–PG4 from §51). Section and D-numbers are stable and cross-referenced everywhere.
 
 **Six namespaces use the same `LETTER+NUMBER` shape, and only the first is the
 record.** An id that resolves to two places is a cross-reference that fails
@@ -1714,7 +1714,7 @@ assert what the user was asked and whether it carried a deadline.
 A mutation that strands a reader **hangs** the suite rather than failing it, since two read paths now
 have no deadline. The mutation harness reports HANG as its own outcome.
 
-### The shell gate (`§28`, G1–G7; routing and disclosure amended by `§46`, EP4–EP8; what `tiered` approves amended by `§48`, CE1–CE7; the container runtime amended by ROADMAP_v3 `§49`, SS22–SS24; declared network added by ROADMAP_v3 `§50`, NW1–NW5)
+### The shell gate (`§28`, G1–G7; routing and disclosure amended by `§46`, EP4–EP8; what `tiered` approves amended by `§48`, CE1–CE7; the container runtime amended by ROADMAP_v3 `§49`, SS22–SS24; declared network added by ROADMAP_v3 `§50`, NW1–NW5; a third backend added by ROADMAP_v3 `§49` slice 3, SS35–SS45)
 
 Read §28's record before touching `security/sandbox.py`, `security/capability.py` or
 `_shell_approval_check`, and §46's before touching where a command RUNS. The four things most
@@ -1836,6 +1836,62 @@ And slice 2 (batch 100) -- an interactive shell the agent types into (SS25-SS34)
   does not. `_live_locked` takes the kinds, and `wait_for_wake` passes the blocking ones -- load bearing,
   since that loop keeps a turn alive and an idle shell would hold it open exactly as a hung read would.
 - **Its end is HELD, never a wake** (SS31), whoever ended it.
+
+And slice 3 (batch 101) -- WSL, a backend with no isolation at all (SS35-SS45):
+
+- **`_within` answers False for a link THIS platform cannot follow** (SS45), and this one is not
+  about WSL being a backend -- it was already open. A symlink the distro writes into the workspace
+  is an LX reparse point Windows does not understand: `os.path.exists` False, `os.path.islink`
+  False, and **`os.path.realpath` returns the path UNCHANGED** rather than following it or raising.
+  So `_within` vouched for `escape`, `cat escape` classified INERT and was auto-approved under the
+  shipped `tiered`, and in the distro it read the host's real `/etc/passwd` (measured). The rule is
+  the platform's own admission -- a component that `lexists` and does not `exist` is one whose
+  lstat succeeded and whose stat did not -- and it is deliberately **not** "is a reparse point",
+  because a OneDrive placeholder is one and its path means what it says. It applies on **every**
+  route: `_within` answers one question, and a predicate that answered it per backend would be the
+  drift it exists to prevent.
+- **The user enables the backend, the agent picks it per call** (SS35). `allow_wsl_backend` is a
+  frozen-posture key shipped `false`; `backend: "container" | "wsl"` is a field on `shell`,
+  `shell_background` and `shell_monitor`. **`shell_interactive` deliberately has no such field** --
+  its stream shape in WSL is unmeasured, and batch 100 is the evidence that measuring it is a batch
+  rather than a step in one. `security.sandbox.declared_backend` is THE coercion, `declared_network`'s
+  sibling and for its reason: only the exact string `"wsl"` selects WSL, and the `Literal` on the
+  param model refuses anything else at run time, so the gate and the runner never disagree.
+- **The WSL branch is FIRST in `_route` and in `containment_for`, above `HOST_READ`** (SS38). `cat
+  /etc/passwd` asked for on WSL classifies HOST_READ, and the old ladder would have run it through
+  `_run_inert` on **Windows** against `C:\etc\passwd` -- with whichever `cat` is first on the
+  user's PATH, which on this machine is a GnuWin32 one, so it would have run rather than failed. The
+  tier keeps its whole meaning; what it must not do is pick a machine the call did not ask for.
+- **A call that asked for WSL and cannot have it is REFUSED** (SS37), never served by the container
+  or the host, and `_unavailable_message` answers it about WSL alone -- a model told to install
+  Docker when it asked for WSL retries the same call.
+- **A protected segment is REFUSED on this route, not asked about** (SS40), and the gate returns
+  "do not ask" for it beside the `UNAVAILABLE` branch, for that branch's reason: a call that will be
+  refused must not spend a human decision first. In the container `.venastine/` is mounted `:ro`, so
+  a write fails with EROFS and a read is documented risk; here a write SUCCEEDS and D17's hash
+  notices at the next launch.
+- **The classifier learns NOTHING about WSL path forms** (SS39), measured rather than assumed: over a
+  generated corpus resolved both ways -- `_within` on Windows against `realpath -m` in the distro --
+  no token reads as inside the workspace on Windows and outside it in Linux. Every disagreement is
+  the safe way round and costs a prompt. **It rests on INERT running as a bare argv** (SS43): under a
+  shell, `~` and `$HOME` would expand after classification, and `_SHELL_METACHARACTERS` rejecting
+  both is the second lock rather than the first.
+- **`env=_scrubbed_env()` is load-bearing here, not hygiene** (SS42). Windows variables do not cross
+  into the distro by themselves, but the ones named in `WSLENV` do and `WSLENV` is itself inherited
+  -- measured, the unscrubbed run printed a probe secret inside the distro and the scrubbed one
+  printed nothing.
+- **The workspace goes through `wslpath`, never through `wsl.exe --cd`'s own translation** (SS44).
+  `--cd` with an untranslatable Windows path does not fail: it exits 0, warns on stderr, and runs in
+  the user's Linux home -- reporting success from the wrong directory. `wslpath` fails with an exit
+  code instead. **Do not "simplify" this back to passing the Windows path.**
+- **No resource limits, no process group, and both are facts rather than omissions** (SS44). The
+  limits belong to the whole WSL VM and a `ulimit` inside the shell is removable by the command it
+  bounds; killing the Windows process was measured to kill the Linux children, a backgrounded
+  grandchild included, so `WslSessionProcess` adds nothing to the base class and a test asserts the
+  absence.
+- **An enabled backend is on the badge** (SS41), through `unsafe_reasons()` like everything else
+  (UN3), and reported when it is ENABLED rather than when it is used -- a badge describes what the
+  process may do, and a user who reads it afterwards has read it too late.
 
 And slice 1's foundations (batch 94) -- the pieces under the session tools, not yet reachable from any tool:
 

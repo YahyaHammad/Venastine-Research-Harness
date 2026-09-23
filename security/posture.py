@@ -110,6 +110,12 @@ class Posture:
     # records that it is not defended against because it cannot be.
     allow_insecure_fallback: bool
     auto_approve_fallback: bool
+    # ROADMAP_v3 §49 slice 3 (SS35). Whether a command may run in WSL at
+    # all. Frozen here rather than read live for the reason the whole
+    # module exists, and the reason it belongs here rather than beside
+    # `wsl_distro` in plain config: a distro NAME decides where a command
+    # lands, and this decides whether it may leave the container.
+    allow_wsl_backend: bool
     # Master switch for pattern-based redaction of what leaves a tool.
     redact_tool_outputs: bool
     # VENASTINE_REDACT_OFF, the per-run weakening of the line above.
@@ -188,6 +194,22 @@ class Posture:
                 "ALLOW_INSECURE_SANDBOX_FALLBACK is on -- if no container "
                 "runtime (Docker or Podman) can run the sandbox, commands "
                 "run on the host with no filesystem or network isolation"))
+        # ROADMAP_v3 §49 slice 3 (SS41). Reported when it is ENABLED rather
+        # than when it is used: the badge describes what this process may
+        # do, and a user reading it after a WSL command has already run has
+        # read it too late. It is its own pair rather than folded into the
+        # fallback's, because the two are different weakenings -- the
+        # fallback is the host when there is no container, and this is a
+        # Linux userland the agent can ask for while one is running.
+        if self.allow_wsl_backend:
+            reasons.append((
+                "wsl backend",
+                "ALLOW_WSL_BACKEND is on -- the agent can ask for a command "
+                "to run in WSL, which is not a sandbox: it reaches this "
+                "harness's own config and authority files, has no memory or "
+                "process limits, and can start Windows programs with your "
+                "full authority. Only a read-only command inside the "
+                "workspace runs there without asking"))
         if not self.redact_tool_outputs:
             reasons.append((
                 "no redaction",
@@ -220,6 +242,7 @@ def _from_config() -> Posture:
         shell_approval_mode=config.SHELL_APPROVAL_MODE,
         allow_insecure_fallback=bool(config.ALLOW_INSECURE_SANDBOX_FALLBACK),
         auto_approve_fallback=bool(config.AUTO_APPROVE_SANDBOX_FALLBACK),
+        allow_wsl_backend=bool(config.ALLOW_WSL_BACKEND),
         redact_tool_outputs=bool(config.REDACT_TOOL_OUTPUTS),
         redact_off_env=_redact_off_from_env(),
     )

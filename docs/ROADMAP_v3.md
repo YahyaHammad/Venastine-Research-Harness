@@ -84,7 +84,57 @@ slices. The owner added Podman (slice 0) after the plan was approved.
   console Ctrl+C reaches every child.
 - The host fallback applies `RLIMIT_CPU = sandbox_cpu_seconds` (30).
 
-### Decisions (SS1–SS34)
+### What was measured before slice 3 (2026-09-23)
+
+Through the argv this codebase builds, not in the abstract. Two of these
+changed the design and one of them closed a hole that was already open.
+
+- **A symlink the distro makes inside the workspace is invisible to Windows.**
+  It is stored as an LX reparse point (`0xa000001d`): `os.path.exists` False,
+  `os.path.islink` False, `os.path.realpath` returns the path UNCHANGED. So
+  `_within` said "inside the workspace" and `head -1 out_link` in the distro
+  returned `root:x:0:0:root:/root:/bin/bash` -- the host's real
+  `/etc/passwd`, through a command auto-approved as INERT. SS45.
+- **Argv round-trips byte-exactly.** `x "y" z`, `a\\b`, `a\"b`,
+  `pct %PATH% and ^caret`, a trailing backslash, `` dollar $HOME tick `id` ``
+  and `semi ; pipe | amp & sub $(id)` all came back identical through
+  `list2cmdline` -> `wsl.exe -e printf %s`. There is no `cmd.exe` on this
+  route, so batches 37 and 39's quoting-bypass class does not reappear.
+- **`WSLENV` carries a secret across, and the scrubbed environment stops it.**
+  Windows variables do not reach the distro by themselves; the ones named in
+  `WSLENV` do, and `WSLENV` is inherited. With it set to a probe secret's
+  name the unscrubbed run printed the secret in the distro and
+  `env=_scrubbed_env()` printed nothing, while `id` and `pwd` still worked.
+- **`--cd` with an untranslatable path does not fail, it RELOCATES.**
+  `--cd \\127.0.0.1\C$` exits 0, warns on stderr, and runs in the user's
+  Linux home. A nonexistent directory and an unmapped drive DO fail
+  (`4294967295`, `Wsl/ERROR_FILE_NOT_FOUND` and `ERROR_PATH_NOT_FOUND`), so
+  the silent case is exactly the one a guess would miss. `wslpath -a -u`
+  answers with an exit code instead, and `--cd /mnt/c/...` works.
+- **Interop cannot be turned off.** `env -i /mnt/c/Windows/system32/cmd.exe
+  /c echo` printed: it is binfmt_misc, not `PATH`, so no environment or argv
+  choice removes it. Windows `PATH` is also appended to the distro's.
+- **The harness's own authority files are writable from the distro**
+  (`test -w config.yaml`, `test -w ~/.config`, and
+  `/mnt/c/Users/<user>/.config/venastine` present). SECURITY.md's "fixed
+  rather than documented" claim about reaching the install tree holds for
+  the container and not here.
+- **`wsl.exe -l -q` answers in UTF-16LE**, and a bad distro exits
+  `4294967295` writing its complaint to STDOUT in the same encoding. Read as
+  UTF-8 the listing is NUL-riddled and matches no name, so a probe that
+  guessed the encoding would report "no distro" on a machine with three.
+- **`wsl.exe` is always present** at `C:\Windows\system32\wsl.exe`, with
+  or without a distro, so `shutil.which` is not a probe. A stopped distro
+  starts in about 2.3 s and warns on stderr while doing it.
+- **The toolchain is there and the backstop works.** `script`, `timeout`,
+  `setsid`, `stdbuf` and `stty` are all in `/usr/bin`; `timeout -k 5 3` over
+  a `sleep 60` exited 124 after 3.2 s; exit codes propagate exactly (1, 42).
+- **Killing the Windows process kills the Linux side,** a backgrounded
+  grandchild included -- checked with `pgrep -a sleep` as a bare argv. An
+  earlier attempt asked through `bash -c` and matched its own parent's
+  command line, reporting a survivor that was the question itself.
+
+### Decisions (SS1–SS45)
 
 | # | Decision |
 |---|---|
@@ -122,6 +172,17 @@ slices. The owner added Podman (slice 0) after the plan was approved.
 | **SS32** | **Input text is never classified.** `cd`, aliases and a REPL mean the text is not an argv, so `classify_command` is not asked: the profile is synthesized `runs_code=True, writes=True, measured=True` and the session inherits the tier its OPEN call was approved at. Network is fixed when the session opens (NW4) |
 | **SS33** | **The pty echoes nothing, and is sized** -- `stty -echo rows 50 cols 1000` with bash's line editing off. Measured (batch 100): the pty is 0x0, so readline has no width and a 200-character command echoes back as `\r<xxxx`, its horizontal-scroll marker. The plan's rule (strip the echo only when the output starts with exactly what was sent) correctly declines to touch that, which would have delivered the marker to the agent as output. Turning the echo off makes the problem not exist rather than parsing it back out, at any length; the sizing is belt and braces for a program that turns echo back on |
 | **SS34** | **The prompt is a token this process minted,** so "the shell is ready for input" is a fact rather than an inference from silence. Measured: a 3-second command returns after 0.4 s of quiet with only its echo back, so quiet cannot be told from still-running; with a sentinel `PS1`, a finished command's output ends with it, a running one's does not, and a half-typed command sitting at `PS2` shows as quiet-but-NOT-ready, which is a wedge the agent must clear. It counts only at the very END of the buffer, so a command that prints the token is not a false ready. ITS LIMIT, measured and stated rather than papered over: with the echo off there is nothing on the stream when a command STARTS, so a prompt still standing from the last command is indistinguishable from an idle shell. A send therefore waits for the NEXT prompt and requires it to settle, which is right in every case but one -- a line typed while another command is still running is queued by the terminal, and if what it queues behind is silent the prompt between them settles and is reported as the answer. Separating those needs a terminal emulator, which SS27 declines to be, so the tool tells the agent not to send until it has `ready` |
+| **SS35** | **The user enables WSL and the agent chooses it per call.** `allow_wsl_backend` joins the frozen posture, shipped `false`; when it is on, `shell`, `shell_background` and `shell_monitor` take `backend: "container" | "wsl"`. Two different questions with two different owners: whether this machine may run agent commands outside a container is the user's, and which command needs a Linux userland is the agent's. A process-wide switch would answer both at once and give up the container for every command in order to serve one |
+| **SS36** | **The distro comes from config, never from the agent.** `wsl_distro: ''` means the first name `wsl.exe -l -q` lists, which is WSL's own default; a name that is not installed is refused with the installed names. A distro is a fact about the machine, not about a command -- and the list on the machine this was built on contains `docker-desktop`, which is Docker's own internal distro. Validated because `wsl.exe -d NoSuchDistro` exits `4294967295` and writes its complaint to STDOUT in UTF-16 (measured), so an unvalidated name fails in a way that reads as the command failing rather than the configuration being wrong |
+| **SS37** | **A call that asked for WSL and cannot have it is REFUSED, never served by another backend,** and the refusal says which of the two it is -- the backend is turned off, or no distro answered. SS28's argument, on a second backend: the gap between what the approval prompt named and what actually ran is the drift class §46 (EP6) and #157 are about. `_unavailable_message` therefore answers a WSL call about WSL and never offers it the container's install instructions, which is the shape that makes a model retry the same call |
+| **SS38** | **Everything the WSL route runs, runs in WSL -- `HOST_READ` included,** and the branch sits ABOVE `HOST_READ` in `_route` rather than below it. Measured: `cat /etc/passwd` asked for on WSL classifies HOST_READ, and the old ladder would have run it through `_run_inert` on WINDOWS against `C:\etc\passwd`, with whichever `cat` is first on the user's PATH -- which on the machine this was built on is a GnuWin32 one, so it would have run rather than failed. The tier keeps its whole meaning; what it must not do is pick a machine the call did not ask for |
+| **SS39** | **The classifier learns nothing about WSL path forms.** Measured over a generated corpus resolved both ways -- `_within` on Windows against `realpath -m` in the distro -- there is no token that reads as inside the workspace on Windows and outside it in Linux. Every disagreement is the other way (`/mnt/c/<workspace>/notes.md`, `C:/Windows/win.ini`, `\etc\passwd` all read as outside on Windows and inside or outside consistently in Linux), which costs an approval prompt and never skips one. A second path resolver in the one module whose soundness rests on refusing to parse (G2) is what #157 came from. The cost is stated in the tool description, with "use paths relative to the workspace" |
+| **SS40** | **A protected segment on the WSL route is REFUSED, not asked.** In the container `.venastine/` is mounted `:ro`, so a write fails with EROFS and a read is a documented risk a user may accept; on WSL there is no mount at all, a write SUCCEEDS against this harness's own authority files, and D17's hash notices only at the next launch. So the shell's usual answer is the wrong one here and the file tools' answer is the right one. The token check is exactly sound where it bites -- an INERT command carries no metacharacters, so `command.split()` IS the argv -- and a non-inert command meets a human on top. The gate returns "do not ask" for it, beside the `UNAVAILABLE` branch and for that branch's reason: a call that will be refused must not spend a human decision first |
+| **SS41** | **WSL is UNCONTAINED (SS1, unchanged) and an enabled WSL backend is on the badge.** `unsafe_reasons()` gains its own pair, so the banner, the launch WARNING and the sidebar say it from one source (UN3). Its own pair rather than folded into the fallback's, because they are different weakenings: the fallback is the host when there is no container, and this is a Linux userland the agent can ask for while a container is running. Reported when it is ENABLED, not when it is used -- a badge describes what this process may do, and a user who reads it after the fact has read it too late. The approval notice says the same thing in the place the decision is actually made |
+| **SS42** | **The WSL process gets the scrubbed environment, and `WSLENV` is not in it.** Measured, and it is a real leak rather than a theoretical one: Windows environment variables do NOT cross into the distro by themselves, but `WSLENV` names the ones that do and is itself inherited -- with `WSLENV=VEN_PROBE_SECRET` set in the parent, the unscrubbed run printed the secret inside the distro and the scrubbed one printed nothing. `_SAFE_ENV_KEYS` does not name `WSLENV`, so passing `env=_scrubbed_env()` is the whole fix, and `wsl.exe` still works without what it takes away |
+| **SS43** | **INERT runs as an argv through `wsl.exe -e`; everything else through `bash --norc --noprofile -c`.** The argv half is EP5's rule on a new route and SS39 RESTS on it: `execve` does not expand `~` or `$HOME`, and a shell between the classifier and the executor would be the third tokeniser in the gap #157 came through twice. The no-dotfiles half keeps the container's property that what runs does not depend on a user's `.bashrc` -- measured: the shell reports NOT_LOGIN, zero aliases and no `BASH_ENV`. Measured alongside: seven adversarial argv strings (embedded quotes, backslashes, `%PATH%`, a trailing backslash, backticks, `$(id)`) round-trip byte-identically through `list2cmdline` and `wsl.exe`, so the quoting-bypass class of batches 37 and 39 does not reappear on this route |
+| **SS44** | **WSL gets no resource limits, and no working-directory guesswork, and both are stated rather than papered over.** There is no `--memory`, `--cpus` or `--pids-limit` equivalent: they belong to the whole WSL VM, and a `ulimit` inside the shell is removable by the command it is meant to bound -- a control that reads as safety without being one, which is the failure SECURITY.md already names for the insecure fallback. The workspace is translated by `wslpath` and the POSIX path is what `--cd` is given, because `--cd` with an untranslatable Windows path does not fail: measured, `--cd \\127.0.0.1\C$` exits 0, warns on stderr and runs the command in the user's Linux HOME. Kill needs no process-group machinery -- measured, ending the Windows process ended both a foreground child and a backgrounded grandchild |
+| **SS45** | **`_within` answers False for a link this platform cannot follow.** The hole, found by measuring rather than by reading: a symlink created inside the workspace FROM the distro is stored as an LX reparse point (`0xa000001d`) that Windows does not understand -- `os.path.exists` False, `os.path.islink` False, and `os.path.realpath` returns the path UNCHANGED rather than following it or raising. So `_within` answered True for a name that reads `/etc/passwd` in the distro: `cat escape` classified INERT, was AUTO-APPROVED under `tiered`, and returned the host's real password file. No analysis of the token's TEXT can see it, because the token is `escape`. The rule is the platform's own admission rather than a list of tags -- a component that `lexists` and does not `exist` is one whose lstat succeeded and whose stat did not, which for a path means exactly a link that could not be followed. Deliberately NOT "is a reparse point": a OneDrive placeholder is one, and its path means what it says. It applies on EVERY route, not only WSL, because `_within` answers one question and a predicate that answered it per backend would be the drift it exists to prevent |
 
 ### Adopted defaults (implementation-level; the owner may overturn any)
 
@@ -212,8 +273,22 @@ slices. The owner added Podman (slice 0) after the plan was approved.
    the pty is 0x0 so a long command's echo comes back mangled (SS33), and a quiet return cannot be
    told from a command still running (SS34). Neither would have been caught by the tests, because
    both were in what the tests would have been written against.
-   Next: slice 3, WSL.
-3. **WSL.**
+3. **WSL** (SS35-SS45) -- BUILT, batch 101. A command, a background
+   session or a monitor in the user's own Linux userland, asked for per
+   call and refused unless the user turned the backend on. It is the
+   first backend with NO isolation of any kind -- SS1 always said so,
+   and building it is what made the sentence operational: uncontained
+   for every tier, on the badge whenever it is enabled, and a protected
+   segment refused outright rather than asked about, because the
+   read-only mount that made "ask" tolerable does not exist here.
+   Measuring first found a hole that was ALREADY OPEN and had nothing to
+   do with WSL being a backend: a symlink the distro writes into the
+   workspace is invisible to Windows, so `_within` vouched for a name
+   that reads `/etc/passwd` and the command was auto-approved (SS45).
+   `shell_interactive` does NOT reach WSL yet: its stream shape there is
+   unmeasured, and batch 100 is the evidence that measuring it is a
+   batch rather than a step in one.
+   Next: slice 4, SSH.
 4. **SSH and the secrets it needs.**
 5. **Sudo** (SS3).
 
@@ -229,10 +304,16 @@ Then background subagents as their own section (SS10).
   needs no approval (SS30); the live view is slice 1's, unchanged -- read-only, kill the only control,
   because a user typing into the agent's container desynchronizes the agent from a session it is still
   reasoning about.
-- **WSL:** SECURITY.md's "fixed" claim about reaching the install tree and `~/.config/venastine/` holds for
-  the container only; `.venastine/` writes are detected at the next launch by D17's hash, not prevented;
-  `ran_on` gains `wsl`; INERT runs through `wsl.exe -e` as an argv; paths through `wslpath`; open: distro
-  selection, and the backend joining the frozen posture.
+- **WSL: CLOSED in batch 101.** SECURITY.md's claim is narrowed to the container route and the
+  exception stated; `.venastine/` is REFUSED on this route rather than asked about (SS40), which is
+  more than the register asked for and less than D17's hash would have had to catch; `ran_on` gains
+  `wsl` and one `WHERE_RAN` mapping now serves both prose surfaces; INERT runs through `wsl.exe -e`
+  as an argv (SS43); the workspace goes through `wslpath` and never through `--cd`'s own translation,
+  which relocates silently (SS44); distro selection is a config key validated against the installed
+  list (SS36); and the backend joins the frozen posture as `allow_wsl_backend` (SS35), on the badge
+  (SS41). Still open, and recorded rather than decided: WSL1, whose filesystem and process semantics
+  differ and which nothing here has measured; and an interactive session on WSL, which waits for the
+  batch that measures its stream.
 - **SSH:** `write` saves locally while the shell runs remotely; network is always on; "inside the
   workspace" is lexical against a configured remote directory; INERT tokens reach the remote login shell
   single-quoted, which is exact because quotes and backslashes are already rejected; host keys need a

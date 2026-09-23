@@ -14947,3 +14947,106 @@ session rather than its first line.
 `tests/test_interactive_sessions.py` (106 tests), plus repairs to three files whose premises this batch
 changed. Full suite, `ruff check .`, bandit with the CI flags and directly over the new files, and a
 mutation pass.
+
+## Batch 101 -- a command in the user's own Linux (2026-09-23)
+
+ROADMAP_v3 §49 slice 3, decisions SS35-SS45. `shell`, `shell_background` and `shell_monitor` take a
+`backend` field, and `backend: "wsl"` runs the command in a WSL distribution instead of the container.
+It ships off: `allow_wsl_backend` is a frozen-posture key, `false`, and the agent's choice only exists
+once the user has made it available.
+
+### What measuring found before any of it was written
+
+Two of these changed the design. One of them closed a hole that had nothing to do with WSL being a
+backend and had been open for some time.
+
+**A symlink the distro writes into the workspace is invisible to Windows.** It is stored on an NTFS
+drive as an LX reparse point (`0xa000001d`), and Windows does not understand it: `os.path.exists` is
+False, `os.path.islink` is False, and **`os.path.realpath` returns the path UNCHANGED** rather than
+following it or raising. So `_within` answered "inside the workspace" for a name that reads
+`/etc/passwd` in the distro -- `cat escape` classified INERT, was auto-approved under the shipped
+`tiered`, and `head -1 escape` in the distro returned `root:x:0:0:root:/root:/bin/bash`. No analysis of
+the token's TEXT can see it, because the token is `escape`. Two auto-approved steps reach it: `ln -s`
+runs unasked under `contained` in the container, whose mount writes to the real workspace, and the read
+is then INERT.
+
+The owner's call was to fix `_within` for every route rather than for the WSL one, which is right for
+the reason the function exists: it answers one question, and a predicate that answered it per backend
+would be the drift it is there to prevent. The rule is the platform's own admission rather than a list
+of reparse tags -- a component that `lexists` and does not `exist` is one whose lstat succeeded and
+whose stat did not, which for a path means exactly a link that could not be followed. Deliberately NOT
+"is a reparse point": a OneDrive placeholder is one and its path means what it says, and blocking those
+would make every INERT command in a synced workspace ask.
+
+**`wsl.exe --cd` does not fail on a path it cannot translate -- it relocates.** `--cd \\127.0.0.1\C$`
+exits 0, warns on stderr, and runs the command in the user's Linux home. A nonexistent directory and an
+unmapped drive both DO fail loudly (`4294967295`, `Wsl/ERROR_FILE_NOT_FOUND`), so the silent case is
+exactly the one a guess would have missed. The workspace goes through `wslpath`, whose failure is an
+exit code, and `--cd` is handed the POSIX path.
+
+**`WSLENV` carries a secret across.** Windows variables do not reach the distro by themselves; the ones
+named in `WSLENV` do, and `WSLENV` is itself inherited. With it set to a probe secret's name, the
+unscrubbed run printed the secret inside the distro and `env=_scrubbed_env()` printed nothing, while
+`id` and `pwd` still worked. `_SAFE_ENV_KEYS` does not list `WSLENV`, so the scrub is the whole fix --
+which makes it load-bearing rather than hygiene.
+
+**Interop cannot be turned off.** `env -i /mnt/c/Windows/system32/cmd.exe /c echo` printed: it is
+binfmt_misc, not `PATH`. A WSL command can always start a Windows program with the user's full
+authority, and no argv or environment choice prevents it. That is the single strongest argument for the
+flag shipping false, and it is now in SECURITY.md rather than implied.
+
+Also measured, and each one changed a line: `wsl.exe -l -q` answers in UTF-16LE (as UTF-8 it matches no
+name, so a guessing probe reports "no distribution" on a machine with three); an unknown distro exits
+`4294967295` and complains to STDOUT, so a name is validated against the installed list rather than
+passed through; seven adversarial argv strings round-trip byte-identically through `list2cmdline` and
+`wsl.exe`, so batches 37 and 39's quoting-bypass class does not reappear here; killing the Windows
+process kills the Linux children, a backgrounded grandchild included, so `WslSessionProcess` adds
+nothing to its base class.
+
+And one measurement was WRONG on its first pass, which is worth recording because the method was the
+error rather than the machine: `pgrep -f "sleep 30"` run through `bash -c` matched its own parent's
+command line and reported a survivor that was the question itself. Asked again as a bare argv, with a
+distinctive duration, both children were gone.
+
+### The shape of the decision
+
+The gate's two halves stay two halves (EP6). `containment_for` answers UNCONTAINED for WSL and `_route`
+answers ROUTE_WSL, and the agreement between them is held by
+`test_session_backends.py`'s existing matrix -- WIDENED to 80 cells rather than copied, because a second
+matrix would be a second place for one property to be pinned.
+
+**The WSL branch is FIRST in both, above `HOST_READ`,** and that order is the decision rather than a
+consequence of one. `cat /etc/passwd` asked for on WSL classifies HOST_READ, and the old ladder would
+have run it through `_run_inert` on **Windows** against `C:\etc\passwd` -- with whichever `cat` is
+first on the user's PATH, which on this machine is a GnuWin32 one, so it would have run rather than
+failed. The tier keeps its whole meaning; what it must not do is pick a machine the call did not ask
+for.
+
+**A protected segment is refused on this route, not asked about.** In the container `.venastine/` is
+mounted read-only, so a write fails with EROFS and a read is a documented risk a user may accept. Here
+there is no mount: a write succeeds against the harness's own authority files and D17's hash notices at
+the next launch. The gate returns "do not ask" for it, beside the `UNAVAILABLE` branch and for that
+branch's reason -- a call that will be refused must not spend a human decision first.
+
+### The mutation pass, and the two rows that earned their keep
+
+34 rows, all killed -- but two only after the tests were repaired, and both repairs were real gaps
+rather than bookkeeping.
+
+**M12 SURVIVED** because the test written for it never reached the line. With the backend off, the
+`UNAVAILABLE` containment answers one branch earlier, so `test_the_backend_off_refuses_and_does_not_ask`
+proves nothing about the refusal branch below it. The case that reaches it is WSL *enabled* plus a
+protected segment, and nothing asserted it. That is trap 14's shape once more: the test was true, and
+true about something else.
+
+**M22 was SKIPPED with a zero-hit needle,** which turned out to be the right complaint. The session path
+has its own copy of the workspace check at its own indentation, and the one-shot test passes whatever
+the session path does. Both now have a test.
+
+### Verification
+
+`tests/test_wsl_backend.py`, `ruff check .`, bandit with the CI flags and directly over the new file --
+which was red on three counts, all of them because the file is new and has no baseline entry, and all
+three fixed at source (the module reached through `sandbox.subprocess`, and a token that did not need to
+be a temp path) rather than with a `nosec` or a baseline edit. Mutation pass 34/34 with `verify101.py`
+confirming the tree afterwards. Full suite.
