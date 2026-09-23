@@ -104,6 +104,12 @@ AUTHORITY_EFFECT = {
         "harness's own config and authority files, has no memory or "
         "process limits, and can start Windows programs with your full "
         "authority."),
+    "allow_ssh_backend": (
+        "whether the agent may ask for a command to run on the remote "
+        "host you configured, instead of the container. That is another "
+        "machine this harness cannot inspect: no isolation, no memory or "
+        "process limits, and it uses credentials you issued. Nothing "
+        "runs there without asking you first."),
     "redact_tool_outputs": (
         "whether secrets are stripped from tool output before it reaches "
         "the model and the transcript."),

@@ -91,6 +91,7 @@ from security.capability import (
 from security.protected_paths import PROTECTED_SEGMENTS, protected_segment
 from security.sandbox import (
     BACKEND_CONTAINER,
+    BACKEND_SSH,
     BACKEND_WSL,
     HOST_READ,
     INERT,
@@ -106,6 +107,9 @@ from security.sandbox import (
     is_docker_available,
     known_runtime,
     run_sandboxed,
+    ssh_enabled,
+    ssh_target,
+    ssh_unavailable_reason,
     wsl_distro,
     wsl_enabled,
     wsl_unavailable_reason,
@@ -190,7 +194,7 @@ class ShellParams(BaseModel):
             "user what they are being asked to allow."
         ),
     )
-    backend: Literal["container", "wsl"] = Field(
+    backend: Literal["container", "wsl", "ssh"] = Field(
         default="container",
         description=(
             "Where to run it. 'container' is the sandbox: a pinned Linux "
@@ -206,7 +210,15 @@ class ShellParams(BaseModel):
             "workspace runs there without a prompt. It may be turned off, "
             "in which case the call is refused and says so. Use paths "
             "RELATIVE to the workspace -- an absolute POSIX path is read "
-            "as leaving the workspace and always asks."
+            "as leaving the workspace and always asks. "
+            "'ssh' is a DIFFERENT MACHINE -- the remote host the user "
+            "configured. Nothing runs there without asking, not even a "
+            "read-only command, because this harness cannot resolve a "
+            "path on a filesystem it cannot see. Its network is always "
+            "on and `requires_network` means nothing there. Note the "
+            "trap: `write` saves files LOCALLY, so a file you just wrote "
+            "does not exist on the remote -- send it through the command "
+            "itself, or do the work in the container."
         ),
     )
 
@@ -295,6 +307,13 @@ def _profile_and_containment(command: str, requires_network: bool = False,
     # container could have run the command, and probing Docker to decide
     # that would be paying for an answer nobody reads.
     if backend == BACKEND_WSL:
+        return profile, containment_for(profile, False, backend)
+    # SS46/SS48, for SS35's reason and one more: a remote host's
+    # containment does not depend on what this machine's Docker is doing
+    # either, and the classified tier is kept only so the NOTICE can still
+    # describe the command. Nothing downstream may act on it -- see the
+    # SSH step in `_shell_approval_check`.
+    if backend == BACKEND_SSH:
         return profile, containment_for(profile, False, backend)
     # Docker is probed only when the answer depends on it. HOST_READ is
     # UNCONTAINED whatever Docker is doing -- it names a file outside
@@ -388,7 +407,10 @@ def _shell_approval_check(tool_name: str, params: dict) -> bool:
          thing: there is nothing to approve, and asking would spend
          a human decision on an outcome already fixed. `run` and the
          session start handler refuse the same call, through the one
-         `wsl_refusal`.
+         `uncontained_refusal`.
+      2c. An SSH call ALWAYS asks (ROADMAP_v3 §49, SS48), read
+         above every opt-in below so that neither of them can answer
+         for a machine this process cannot inspect.
       3. AUTO_APPROVE_SANDBOX_FALLBACK is applied HERE, visibly, rather
          than passed into the generic rule to be honoured out of sight.
          It is the user's own opt-in to an isolation level the harness
@@ -447,8 +469,29 @@ def _shell_approval_check(tool_name: str, params: dict) -> bool:
     # is already fixed. Below the mode switch for the same reason
     # UNAVAILABLE is -- `always` asks about everything, including calls
     # that will not run, and that wart is one the gate already has.
-    if wsl_refusal(command, backend) is not None:
+    if uncontained_refusal(command, backend) is not None:
         return False
+
+    # SS48. NOTHING on the SSH route is auto-approved, and this is the one
+    # place that is decided -- an explicit step rather than a synthesized
+    # profile that happens to fail `auto_approved`, because the opt-ins
+    # below (the fallback's and `contained`'s) each answer BEFORE that
+    # rule is reached, and a profile tuned to lose the last test would
+    # still have to be tuned to lose those two. One line that cannot be
+    # got wrong beats three that agree today.
+    #
+    # Two independent reasons, either sufficient. `_within` resolves
+    # against the LOCAL filesystem, so on a remote it answers a true
+    # question about the wrong machine -- and SS45, one slice old, is what
+    # a path check that cannot resolve costs: it does not fail open
+    # loudly, it approves confidently. And SS51: ssh has no `execve` path,
+    # so the "argv with no shell" property that EP5 makes the INERT tier
+    # out of does not exist on this route at all.
+    #
+    # Below the mode switch, so `never` still means never (SS1) and
+    # `always` still asks -- this widens neither.
+    if backend == BACKEND_SSH:
+        return True
 
     # Step 2: a protected segment always asks, whatever the sandbox says.
     segment = _command_touches_protected(command)
@@ -512,6 +555,20 @@ def _shell_approval_notice(params: dict, _context=None) -> str:
                  f"network on, no memory or process limit, no read-only "
                  f"mount over this harness's own config, and it can start "
                  f"Windows programs with your full authority")
+    # SS48/SS55. The person answering has to know this is not their
+    # machine at all, and that two things they may be picturing are
+    # absent: any isolation, and any way for this harness to check what
+    # the command will touch. The remote is NAMED, because "uncontained"
+    # is equally true of the host fallback and means something different
+    # here -- and because a prompt that does not say which machine is
+    # about to run something is not a prompt anyone can answer.
+    if backend == BACKEND_SSH:
+        where = (f"on {ssh_target() or 'the configured remote host'} over "
+                 f"SSH -- ANOTHER MACHINE, not a sandbox and not this "
+                 f"one: no isolation, no memory or process limit, the "
+                 f"network on, and nothing here can see its filesystem, "
+                 f"so no argument of this command has been checked "
+                 f"against anything")
     notice = f"{profile.tier}: {profile.reason}. Runs {where}."
     binary = _resolved_binary(command) if containment == UNCONTAINED else ""
     if binary:
@@ -650,8 +707,8 @@ def _resolved_binary(command) -> str:
 # ---------------------------------------------------------------------------
 
 
-def wsl_refusal(command: str, backend: str) -> str | None:
-    """Why this WSL call must not run at all, or None (ROADMAP_v3 §49).
+def uncontained_refusal(command: str, backend: str) -> str | None:
+    """Why this WSL or SSH call must not run at all, or None (§49).
 
     `fallback_changed_refusal`'s shape, and ONE copy for the same reason:
     the gate reads it to answer "there is nothing to approve", and `run`
@@ -679,6 +736,28 @@ def wsl_refusal(command: str, backend: str) -> str | None:
     (CE1), so it asks under `tiered` and, being UNCONTAINED here, under
     `contained` too.
     """
+    if backend == BACKEND_SSH:
+        if not ssh_enabled():
+            return ssh_unavailable_reason()
+        segment = _command_touches_protected(command)
+        if segment is not None:
+            # SS54. SS40's answer, reached by a different road: WSL is
+            # refused because it demonstrably CAN write this harness's own
+            # authority files, and SSH is refused because nothing here can
+            # demonstrate that it cannot. `ssh localhost` is this machine,
+            # and a remote that mounts this one is not visible from here
+            # either -- so the question "is that path this harness's own?"
+            # has no answer, and an unanswerable question is not a yes.
+            return (
+                f"This command names {segment}/, and a command over SSH is "
+                f"refused rather than asked about when it does. This "
+                f"harness cannot tell whether the remote host is a "
+                f"different machine -- `ssh localhost` is this one, and a "
+                f"remote that mounts this one looks the same from here -- "
+                f"so it cannot tell whether that path is its own authority "
+                f"files. Run it in the container, or do the work somewhere "
+                f"inside the workspace.")
+        return None
     if backend != BACKEND_WSL:
         return None
     if not wsl_enabled():
@@ -732,23 +811,23 @@ def run(params: dict) -> dict:
     # Probe Docker once for this execution — the result is threaded
     # into run_sandboxed to eliminate the TOCTOU gap where Docker
     # status changes between the approval check and execution.
-    # SS37/SS40, above the container probe: a call that asked for WSL and
-    # cannot have it is refused by name, and is never quietly served by a
-    # backend it did not ask for.
-    refusal = wsl_refusal(parsed.command, parsed.backend)
+    # SS37/SS40/SS54, above the container probe: a call that asked for WSL
+    # or SSH and cannot have it is refused by name, and is never quietly
+    # served by a backend it did not ask for.
+    refusal = uncontained_refusal(parsed.command, parsed.backend)
     if refusal is not None:
         return {"error": refusal}
 
-    # Not probed for a WSL call, and not merely to save the 0.43s: the
-    # TOCTOU guard below is about a container runtime disappearing between
-    # the gate and the run and the command then taking the INSECURE
-    # FALLBACK. A WSL call cannot take it -- `_route` answers ROUTE_WSL or
-    # refuses (SS37) -- so running that guard here would refuse a call for
-    # a backend it was never going to touch.
-    docker_up = True if parsed.backend == BACKEND_WSL \
+    # Not probed for a WSL or SSH call, and not merely to save the 0.43s:
+    # the TOCTOU guard below is about a container runtime disappearing
+    # between the gate and the run and the command then taking the INSECURE
+    # FALLBACK. Neither can take it -- `_route` answers ROUTE_WSL/ROUTE_SSH
+    # or refuses (SS37) -- so running that guard here would refuse a call
+    # for a backend it was never going to touch.
+    docker_up = True if parsed.backend != BACKEND_CONTAINER \
         else is_docker_available()
 
-    if parsed.backend != BACKEND_WSL:
+    if parsed.backend == BACKEND_CONTAINER:
         refusal = fallback_changed_refusal(parsed.command, docker_up)
         if refusal is not None:
             return {"error": refusal}

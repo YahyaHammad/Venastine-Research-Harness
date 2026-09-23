@@ -380,6 +380,18 @@ class HarnessConfig(_Model):
     # this one is true.
     allow_wsl_backend: StrictBool
     wsl_distro: str
+    # ROADMAP_v3 §49 slice 4 (SS46). One host, flat scalars -- SS36's
+    # shape, because a remote host is a fact about this machine's
+    # situation and not about any one command. The agent says
+    # `backend: "ssh"` and gets THE configured host; it never names one.
+    allow_ssh_backend: StrictBool
+    ssh_host: str
+    ssh_user: str
+    ssh_port: int
+    ssh_identity_file: str
+    ssh_remote_workspace: str
+    ssh_host_key: str
+    ssh_binary: str
     shell_approval_mode: ShellApprovalMode
     sandbox_docker_image: str
     sandbox_timeout_seconds: PositiveInt
@@ -590,6 +602,7 @@ HARNESS_AUTHORITY_KEYS = frozenset({
     "allow_insecure_sandbox_fallback",
     "auto_approve_sandbox_fallback",
     "allow_wsl_backend",
+    "allow_ssh_backend",
     "redact_tool_outputs",
     "ensemble_models",
     "critic_model",

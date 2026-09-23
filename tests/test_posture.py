@@ -288,7 +288,7 @@ class TestNothingReachableChangesIt:
         two things that make the gate real: every authority key resolves
         through the gate, and every one of them has an effect sentence.
 
-        Over all nine rather than over `Posture`'s own fields, because the
+        Over all eleven rather than over `Posture`'s own fields, because the
         two do not share a spelling: the dataclass says
         `allow_insecure_fallback` where `config.yaml` says
         `allow_insecure_sandbox_fallback`, and `redact_off_env` is a fact
@@ -301,7 +301,7 @@ class TestNothingReachableChangesIt:
         import config_schema
 
         keys = config_schema.HARNESS_AUTHORITY_KEYS
-        assert len(keys) == 10
+        assert len(keys) == 11
         for key in keys:
             assert config_edit.authority_key(key) == key, (
                 f"{key} does not resolve through the gate, so /config "
@@ -544,6 +544,7 @@ def _shipped(**overrides) -> Posture:
                       "allow_insecure_fallback": False,
                       "auto_approve_fallback": False,
                       "allow_wsl_backend": False,
+                      "allow_ssh_backend": False,
                       "redact_tool_outputs": True,
                       "redact_off_env": False,
                       **overrides})
@@ -563,6 +564,7 @@ class TestUnsafeReasons:
         ("redact_tool_outputs", False),
         ("redact_off_env", True),
         ("allow_wsl_backend", True),
+        ("allow_ssh_backend", True),
     ])
     def test_each_weakening_is_reported(self, field, value):
         weakened = dataclasses.replace(_shipped(), **{field: value})

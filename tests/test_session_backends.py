@@ -97,31 +97,47 @@ class TestTheRouteIsTheContainmentTheGateAssumed:
         sandbox.ROUTE_FALLBACK: capability.UNCONTAINED,
         sandbox.ROUTE_UNAVAILABLE: capability.UNAVAILABLE,
         sandbox.ROUTE_WSL: capability.UNCONTAINED,
+        sandbox.ROUTE_SSH: capability.UNCONTAINED,
     }
 
-    @pytest.mark.parametrize("wsl_up", [False, True])
-    @pytest.mark.parametrize("backend", ["container", "wsl"])
+    @pytest.mark.parametrize("backend_up", [False, True])
+    @pytest.mark.parametrize("backend", ["container", "wsl", "ssh"])
     @pytest.mark.parametrize("fallback", [False, True])
     @pytest.mark.parametrize("docker", [False, True])
     @pytest.mark.parametrize("tier", [INERT, HOST_READ, SANDBOXED,
                                       SANDBOXED_NET, UNKNOWN])
     def test_route_and_containment_for_agree(self, monkeypatch, tier,
                                              docker, fallback, backend,
-                                             wsl_up):
+                                             backend_up):
         """EP6: the executor's routing and the gate's containment are one
         decision written twice. `_route` now serves `run_sandboxed` AND
         `start_sandboxed`, so this matrix is what keeps a session from
         being approved as one containment and run in another.
 
-        WIDENED in batch 101 rather than copied: a second matrix for the
-        WSL backend would be a second place for the two halves to be
-        held together, and the property is one property. 80 cells.
+        WIDENED IN PLACE rather than copied, in batch 101 for WSL and
+        again in batch 102 for SSH: a second matrix per backend would be a
+        second place for the two halves to be held together, and the
+        property is one property. 120 cells.
+
+        ONE `backend_up` rather than one flag per backend, and that is a
+        claim about the code rather than a shortcut: `_route` and
+        `containment_for` each consult the availability of THE BACKEND
+        THE CALL ASKED FOR and no other, so the cross product of "WSL is
+        down" with "SSH is up" answers nothing that this does not. If
+        either function ever reads another backend's probe, the two will
+        still be compared against each other here -- which is the property
+        this test exists for, and the reason it is safe to say so.
         """
         set_posture(monkeypatch, allow_insecure_fallback=fallback,
-                    allow_wsl_backend=wsl_up)
+                    allow_wsl_backend=backend_up,
+                    allow_ssh_backend=backend_up)
         monkeypatch.setattr(sandbox, "_wsl_probe",
-                            sandbox.WslProbe("Ubuntu" if wsl_up else None,
-                                             "" if wsl_up else "no distro"))
+                            sandbox.WslProbe("Ubuntu" if backend_up else None,
+                                             "" if backend_up else "no distro"))
+        monkeypatch.setattr(
+            sandbox, "_ssh_probe",
+            sandbox.SshProbe("me@host" if backend_up else None,
+                             reason="" if backend_up else "no host"))
         profile = _profile(tier, network=(tier == SANDBOXED_NET),
                            measured=(tier != UNKNOWN))
         route = sandbox._route(profile, docker, backend)

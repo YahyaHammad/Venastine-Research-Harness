@@ -4866,3 +4866,27 @@ missing file is unchanged (`lexists` is False for it, so it is still INERT); a r
 a link the distro made into `/etc` now classifies HOST_READ and asks. If you want the old answer back,
 read SS45 first: the behaviour it replaced returned the host's `/etc/passwd` through an auto-approved
 `cat`.
+
+## Batch 102 -- the SSH backend (ROADMAP_v3 §49 slice 4)
+
+| What broke | Why | The repair |
+|---|---|---|
+| `shell.wsl_refusal` | It now refuses for two uncontained backends, and a function named after one of them reads as a WSL special case rather than the funnel it is | Renamed to `shell.uncontained_refusal`. Signature and every WSL answer unchanged. Call sites: the gate, `shell.run`, `shell_sessions._start`, and five in `tests/test_wsl_backend.py` |
+| `tests/test_posture.py`, eighteen tests | `Posture` gained `allow_ssh_backend` | One line in the `_shipped()` helper batch 101 added for exactly this. The helper paid for itself on its first repeat |
+| `test_config_edit.py::test_setting_every_leaf_to_its_own_value_changes_nothing` | `config.yaml` gained eight keys: the authority flag and seven host scalars | 134 settable scalars -> 142 |
+| `test_posture.py::test_the_config_command_gates_every_posture_key` | `HARNESS_AUTHORITY_KEYS` gained `allow_ssh_backend`, and the count is pinned exactly so an omission cannot ride in | 10 -> 11, plus the effect sentence `/config`'s gate requires |
+| `test_session_backends.py::test_route_and_containment_for_agree` | EP6's matrix gained a third backend | Widened IN PLACE to 120 cells, and the two per-backend availability flags collapsed into ONE `backend_up` -- `_route` and `containment_for` each read only the backend the call asked for, so the cross product answers nothing the single flag does not |
+| `test_docs_consistency.py::test_a_claimed_range_covers_its_whole_family` | The record defines SS46-SS55 | AGENTS.md's map says SS1-SS55 |
+
+**If you are here because an SSH command asked when you expected it not to:** that is SS48, and it is
+the whole point of the route. Every other backend runs a read-only in-workspace command unasked; this
+one asks about everything under `tiered` and `contained` alike, including `ls`. `never` still means
+never, because SS1 already said so and this slice widened no mode. There is no setting that turns the
+asking off, and the reason is in `docs/SECURITY.md`.
+
+**If you are writing a test that calls `_ssh_argv` without probing first:** it works now, and it did
+not before. The builder used to read the probe's `known_hosts` path and fall back to `""`, emitting
+`UserKnownHostsFile=` with no value -- an argv `ssh` rejects outright, surfaced as "the host could not
+be reached". Production never hit it because `_route` probes first; every mocked test handed the
+builder a path and so asserted the assumption. A LIVE test found it, which is the argument for keeping
+the `needs_ssh` half of `test_ssh_backend.py` alive rather than trusting the 124 that run everywhere.

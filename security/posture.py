@@ -116,6 +116,13 @@ class Posture:
     # `wsl_distro` in plain config: a distro NAME decides where a command
     # lands, and this decides whether it may leave the container.
     allow_wsl_backend: bool
+    # ROADMAP_v3 §49 slice 4 (SS46). Whether a command may run on the
+    # configured remote host at all. Here rather than beside `ssh_host` in
+    # plain config for `allow_wsl_backend`'s reason, with one more: the
+    # other SSH keys say WHERE a command would land, and this one says
+    # whether this machine may run agent commands on a machine it cannot
+    # inspect.
+    allow_ssh_backend: bool
     # Master switch for pattern-based redaction of what leaves a tool.
     redact_tool_outputs: bool
     # VENASTINE_REDACT_OFF, the per-run weakening of the line above.
@@ -210,6 +217,20 @@ class Posture:
                 "process limits, and can start Windows programs with your "
                 "full authority. Only a read-only command inside the "
                 "workspace runs there without asking"))
+        # SS55. A THIRD pair, not a widening of the WSL one, because the
+        # three weakenings are different: the fallback is the host when
+        # there is no container, WSL is a Linux userland beside a running
+        # one, and this is a machine that is not this machine at all. A
+        # user who reads "uncontained" has to be able to tell which.
+        if self.allow_ssh_backend:
+            reasons.append((
+                "ssh backend",
+                "ALLOW_SSH_BACKEND is on -- the agent can ask for a command "
+                "to run on the configured remote host, which this harness "
+                "cannot inspect: no isolation, no memory or process limits, "
+                "and credentials it did not issue. Nothing runs there "
+                "without asking you first, and `write` still saves locally "
+                "while the shell runs remotely"))
         if not self.redact_tool_outputs:
             reasons.append((
                 "no redaction",
@@ -243,6 +264,7 @@ def _from_config() -> Posture:
         allow_insecure_fallback=bool(config.ALLOW_INSECURE_SANDBOX_FALLBACK),
         auto_approve_fallback=bool(config.AUTO_APPROVE_SANDBOX_FALLBACK),
         allow_wsl_backend=bool(config.ALLOW_WSL_BACKEND),
+        allow_ssh_backend=bool(config.ALLOW_SSH_BACKEND),
         redact_tool_outputs=bool(config.REDACT_TOOL_OUTPUTS),
         redact_off_env=_redact_off_from_env(),
     )

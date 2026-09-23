@@ -779,6 +779,110 @@ read as UTF-8 it is a NUL-riddled string that matches no name at all, so
 a probe that guessed the encoding would report "no distribution
 installed" on a machine with three.
 
+### `allow_ssh_backend`
+
+ROADMAP_v3 §49, slice 4 (SS46). Whether the agent may ask for a command to
+run on the one remote host configured below, instead of the container.
+Ships `false`, and is part of the frozen posture -- so no tool call,
+`settings.json` at either tier, environment variable or slash command can
+move it.
+
+It is off by default because a remote host is not a weaker sandbox; it is
+a machine this harness cannot look at:
+
+```text
+  isolation                           none
+  memory / CPU / process limits       none -- they belong to the remote
+  network                             the remote's, always on
+  what this harness can inspect       nothing: no path, no file, no mount
+  credentials                         yours, not ones this harness issued
+```
+
+**NOTHING runs there without asking you (SS48)** -- the one rule that
+makes this backend different from the other three. Every other backend
+runs a read-only in-workspace command unasked; this one asks about `ls`.
+The reason is not caution: the check that decides whether a command's
+arguments stay inside the workspace resolves them against the LOCAL
+filesystem, so on a remote it is answering a true question about the wrong
+machine. Slice 3 (SS45) is the evidence for what such a check is worth --
+it did not fail loudly, it approved confidently. A second reason stands on
+its own: `ssh` has no `execve` path, so the shell-free argv that the
+auto-approved tier is defined by does not exist on this route at all.
+
+`never` still means never, because SS1 already said so and this slice
+widened no mode.
+
+### `ssh_host`, `ssh_user`, `ssh_port`
+
+The one host the backend reaches. The agent says `backend: "ssh"` and gets
+THIS host; it never names one. SS35's split, unchanged: which machine this
+harness may reach is the user's question, which command needs it is the
+agent's. A named map of hosts is a later addition that this shape does not
+block.
+
+### `ssh_identity_file`
+
+The private key to authenticate with. Empty offers whatever a running
+`ssh-agent` holds.
+
+**This harness never asks for, holds or stores a passphrase or a password
+(SS47).** If the key is encrypted, load it into an agent with `ssh-add`
+first; the connection is made with `BatchMode=yes` and
+`PreferredAuthentications=publickey`, so `ssh` can never prompt. That flag
+is load-bearing rather than tidy -- measured, without it an encrypted key
+with no agent waits twenty seconds and is still waiting, trying to prompt
+on a terminal this process does not own. With it the same call fails in
+0.12 s and the refusal says `ssh-add`.
+
+`IdentitiesOnly=yes` is passed only WHEN a key is configured: with no key
+it would rule out the agent, which is the one way to use an encrypted key
+without this harness ever seeing the passphrase.
+
+### `ssh_remote_workspace`
+
+Where a command runs on the remote. **Required** when the backend is on,
+and deliberately not defaulted to the login home (SS52): a command that
+runs somewhere nobody named is the failure this backend is most able to
+cause, and nothing here can see where it landed afterwards. `ssh` has no
+`--cd`, so the command is prefixed with `cd -- <dir> ||` and a failure is
+recognised by BOTH a chosen exit code and a marker on stderr -- either
+alone is guessable, since 125 is inside `timeout`'s own vocabulary and a
+marker is a string any command may print.
+
+Note the trap this key names: `write` saves files LOCALLY while the shell
+runs remotely, so a file the agent just wrote is not in this directory.
+
+### `ssh_host_key`
+
+The remote's host key, PINNED. Run `ssh-keyscan -p <port> <host>` and
+paste its output; the `#` banner line it prints above the key is ignored,
+so pasting the whole thing works. The harness writes it to a file it owns
+and passes `UserKnownHostsFile` with `StrictHostKeyChecking=yes`, never
+touching `~/.ssh/known_hosts` -- its trust set is exactly what you pinned.
+
+A key that does not match, or no key at all, REFUSES (SS49). There is no
+trust-on-first-use prompt, for two reasons: a first-use question cannot be
+answered in a headless run, and the case actually worth refusing is a key
+that CHANGES, which a prompt teaches people to click through.
+
+The fingerprint is not configured -- it is a hash, and `known_hosts` needs
+the key. It is DERIVED and shown, so you can verify it out of band once.
+
+### `ssh_binary`
+
+Which `ssh` program to run. Empty prefers the operating system's own
+(`%SYSTEMROOT%\System32\OpenSSH\ssh.exe` on Windows) and falls back to
+`PATH`.
+
+Not `PATH` first, and that is measured rather than defensive: on the
+machine this was built, `PATH` resolves to a git-for-Windows MSYS2 build
+while Windows ships its own, and the two are NOT interchangeable. They
+agree on every happy path and disagree on FAILURES -- a refused connection
+is `ssh: connect to host ... Connection refused` from one and `banner
+exchange: Connection to UNKNOWN port -1: Connection refused` from the
+other -- and a failure message is the half a refusal is built out of. It
+is SS38's GnuWin32 `cat` on a third route.
+
 ### `shell_approval_mode`
 
 ROADMAP_v2 §28 (G3). WHICH shell commands need a human to say yes.

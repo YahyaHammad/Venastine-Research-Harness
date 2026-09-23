@@ -567,6 +567,55 @@ allow_wsl_backend: false
 # read as the command's rather than the configuration's.
 wsl_distro: ''
 
+# AUTHORITY -- part of the frozen security posture. Lets the agent ask
+# for a command to run on the remote host configured below (ROADMAP_v3
+# §49, slice 4). A remote host is not a sandbox and not a weaker one: it
+# is a machine this harness cannot look at. It gets no memory, CPU or
+# process limit -- those belong to the remote -- and the credentials it
+# uses are ones you issued, not ones this harness controls.
+# NOTHING runs there without asking you first, not even a read-only
+# command: "inside the workspace" is a question about a filesystem this
+# process cannot resolve, so it is not asked. Shown on the startup
+# banner and the TUI badge whenever it is on.
+allow_ssh_backend: false
+
+# The one remote host the SSH backend reaches. The agent asks for
+# `backend: "ssh"` and gets THIS host; it never names a host itself,
+# for the reason `wsl_distro` is not the agent's either -- which machine
+# this harness may reach is your question, and which command needs it is
+# the agent's.
+ssh_host: ''
+ssh_user: ''
+ssh_port: 22
+
+# The private key to authenticate with. EMPTY offers whatever a running
+# ssh-agent holds. This harness NEVER asks for, holds or stores a
+# passphrase: if the key is encrypted, load it into an agent with
+# `ssh-add` first. Measured, and the reason the backend passes
+# BatchMode=yes: without it, an encrypted key with no agent makes ssh
+# wait forever for a passphrase on a terminal this process does not own.
+ssh_identity_file: ''
+
+# Where a command runs on the remote. REQUIRED when the backend is on,
+# and deliberately not defaulted to the login home: a command that runs
+# somewhere nobody named is the failure this backend is most able to
+# cause, and nothing here can see where it landed.
+ssh_remote_workspace: ''
+
+# The remote's host key, PINNED. Run `ssh-keyscan -p <port> <host>` and
+# paste its output here (the `#` banner line is ignored). A host whose
+# key does not match this is refused -- not prompted about, because a
+# prompt on first use is a question a headless run has nobody to ask,
+# and because a key that CHANGES is exactly the case worth refusing.
+ssh_host_key: ''
+
+# Which `ssh` program to run. EMPTY prefers the operating system's own
+# (%SYSTEMROOT%\System32\OpenSSH\ssh.exe on Windows) and falls back to
+# PATH. Not PATH first: on the machine this was built, PATH resolves to
+# a git-for-Windows build while the OS ships its own, and the two report
+# different text for the same failure.
+ssh_binary: ''
+
 # AUTHORITY -- THE gate for shell approval, and part of the frozen posture.
 #   always    -- every command asks
 #   tiered    -- read-only commands from inert_commands, every argument

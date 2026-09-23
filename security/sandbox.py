@@ -25,6 +25,17 @@ Cross-platform command sandboxing with two backends:
    user's full authority. `containment_for` answers UNCONTAINED for
    every tier on this backend (SS1).
 
+4. **SSH** (ROADMAP_v3 §49, slice 4) — a command on ANOTHER machine, and
+   the least inspectable backend there is. Requires explicit opt-in via
+   config.ALLOW_SSH_BACKEND, and the agent asks for it per call. What
+   makes it different in kind from WSL rather than in degree: this
+   process cannot `lstat` the remote filesystem, so every local question
+   about a path is being asked about the wrong machine. NOTHING on this
+   route is auto-approved (SS48) — not even a read-only command, which
+   every other backend runs unasked. Authentication is a key or an agent
+   and this harness never holds a secret (SS47); the host key is pinned
+   in config and a changed one is refused (SS49).
+
 Inert commands (read-only inspection from config.INERT_COMMANDS with
 no shell metacharacters and no path-qualified binary) run in the
 container as an argv with no shell, and on the host only when no
@@ -52,8 +63,10 @@ import os
 import platform
 import re
 import shlex
+import shutil
 import signal
 import subprocess
+import tempfile
 import threading
 import uuid
 from collections.abc import Callable
@@ -312,7 +325,8 @@ def is_docker_available() -> bool:
 
 BACKEND_CONTAINER = "container"
 BACKEND_WSL = "wsl"
-BACKENDS = (BACKEND_CONTAINER, BACKEND_WSL)
+BACKEND_SSH = "ssh"
+BACKENDS = (BACKEND_CONTAINER, BACKEND_WSL, BACKEND_SSH)
 
 WSL = "wsl.exe"
 
@@ -547,6 +561,510 @@ def _wsl_argv(
         inner = ["timeout", "-k", str(_KILL_GRACE_S),
                  str(session_timeout_s)] + inner
     return args + inner
+
+
+# ---------------------------------------------------------------------------
+# ---- The SSH backend (ROADMAP_v3 §49, slice 4, SS46-SS55) ------------------
+# ---------------------------------------------------------------------------
+
+# The OS's own OpenSSH, preferred over whatever `PATH` resolves -- SS38's
+# GnuWin32 `cat` on a third route. Measured on the machine this was built
+# on: `shutil.which("ssh")` answers a git-for-Windows MSYS2 build, not this
+# one, and the two are NOT interchangeable. They agree on every happy path
+# (argv, exit codes, streams) and disagree on FAILURES, which is the half a
+# refusal is built out of: a refused connection is `ssh: connect to host
+# ... Connection refused` from the MSYS2 build and `banner exchange:
+# Connection to UNKNOWN port -1: Connection refused` from this one.
+_SSH_SYSTEM_BINARY = os.path.join(
+    os.environ.get("SYSTEMROOT", r"C:\Windows"),
+    "System32", "OpenSSH", "ssh.exe")
+
+# SS52. A remote `cd` that fails must not read as the command failing, so
+# it exits with a code of our choosing and says so on stderr. Both, not
+# either: 125 alone collides with `timeout`'s own vocabulary (124 timed
+# out, 125 timeout itself failed, 126/127 exec problems), and a marker
+# alone could be printed by a command. Measured together over a missing
+# directory and an unreadable one -- rc 125 and the marker, both times.
+_SSH_NO_WORKSPACE_CODE = 125
+_SSH_NO_WORKSPACE_MARKER = "VEN_SSH_NO_WORKSPACE"
+
+# Measured: a refused connection answers in 2.1 s and an unroutable host in
+# whatever ConnectTimeout says. Kept short because a wrong host should cost
+# the user a moment, not a minute.
+_SSH_CONNECT_TIMEOUT_S = 10
+# A dead network must end a session rather than hang it. There is no
+# harness-side read deadline on a session's stream, so this is the only
+# thing that ends one whose remote stopped answering.
+_SSH_ALIVE_INTERVAL_S = 15
+_SSH_ALIVE_COUNT_MAX = 3
+# What the identity question is allowed to cost at startup (SS50).
+_SSH_PROBE_TIMEOUT_S = 20
+
+# SS50. A remote that is not POSIX would be given `bash --norc --noprofile
+# -c` and a `cd --` guard, and neither means anything on, say, a Windows
+# OpenSSH server whose shell is cmd.exe. The check is what the remote SAYS
+# it is, and a remote that will not say is refused rather than guessed at.
+_SSH_POSIX_SYSTEMS = ("linux", "darwin", "freebsd", "openbsd", "netbsd",
+                      "dragonfly", "sunos", "aix")
+
+
+@dataclass(frozen=True)
+class SshProbe:
+    """What the one SSH probe per process found.
+
+    `target` is the `user@host` every SSH argv will carry, or None when no
+    command can run. `reason` says why it is None -- composed HERE rather
+    than quoted from `ssh`, because `ssh`'s own text is either generic or
+    absent: an encrypted key with no agent, an unknown user and no key at
+    all all say `Permission denied (publickey)`, and a refused connection
+    said nothing at all until `LogLevel=ERROR` was removed. SS36 reached
+    the same conclusion about `wsl.exe` exiting 4294967295 in silence.
+
+    `remote` is what the far end answered about itself, kept so the
+    approval notice and the result can DISCLOSE where a command ran
+    instead of implying it (SS50).
+    """
+
+    target: Optional[str]
+    binary: str = ""
+    version: str = ""
+    remote: str = ""
+    known_hosts: str = ""
+    reason: str = ""
+
+
+_ssh_probe: Optional[SshProbe] = None
+_ssh_lock = threading.Lock()
+_ssh_known_hosts_path: Optional[str] = None
+
+
+def ssh_enabled() -> bool:
+    """Whether the USER has turned the SSH backend on (SS46).
+
+    Separate from `ssh_available()` and asked first everywhere, for
+    `wsl_enabled()`'s reason: "this machine does not allow it" and "this
+    machine cannot do it" are different sentences, and a user shown the
+    second when the first is true goes looking for a broken network.
+    Read off the frozen posture, never `config` (UN1).
+    """
+    return posture.current().allow_ssh_backend
+
+
+def _ssh_binary() -> str:
+    """The `ssh` this harness runs, resolved explicitly and never from PATH.
+
+    A configured value wins. Otherwise the OS's own copy, and only if that
+    is absent does `PATH` get a say -- which is also what makes this work
+    on a POSIX host, where `/usr/bin/ssh` is what `shutil.which` finds.
+    """
+    configured = (config.SSH_BINARY or "").strip()
+    if configured:
+        return configured
+    if os.path.exists(_SSH_SYSTEM_BINARY):
+        return _SSH_SYSTEM_BINARY
+    return shutil.which("ssh") or ""
+
+
+def _write_known_hosts(host_key: str) -> str:
+    """Materialise the pinned host key into a file `ssh` will accept (SS49).
+
+    A file of our own, never `~/.ssh/known_hosts`: the harness's trust set
+    is exactly what the user pinned in config, and neither this process nor
+    anything else edits the user's. `ssh-keyscan`'s output carries a `#`
+    banner comment above the key, so a user who pastes the whole thing gets
+    the same result as one who pastes the key line.
+    """
+    global _ssh_known_hosts_path
+    lines = [ln.strip() for ln in host_key.splitlines()]
+    lines = [ln for ln in lines if ln and not ln.startswith("#")]
+    handle, path = tempfile.mkstemp(prefix="venastine_known_hosts_")
+    with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write("\n".join(lines) + "\n")
+    _ssh_known_hosts_path = path
+    return path
+
+
+def _ssh_config_reason() -> str:
+    """The first thing missing from the configured host, or "".
+
+    Answered before any IO, so a machine with nothing configured pays
+    nothing for the answer, and each sentence says what to put where.
+    """
+    if not (config.SSH_HOST or "").strip():
+        return ("no host is configured. Set `ssh_host` (and `ssh_user`) in "
+                "config.yaml")
+    if not (config.SSH_USER or "").strip():
+        return ("no remote user is configured. Set `ssh_user` in config.yaml")
+    if not (config.SSH_REMOTE_WORKSPACE or "").strip():
+        # SS52. Not a default, deliberately: a backend that silently picks
+        # the remote login home would run approved work somewhere nobody
+        # named, and on a machine this process cannot look at.
+        return ("no remote working directory is configured. Set "
+                "`ssh_remote_workspace` in config.yaml to an absolute path "
+                "on the remote host -- it is not defaulted, because a "
+                "command that runs somewhere nobody named is the failure "
+                "this backend is most able to cause")
+    if not (config.SSH_HOST_KEY or "").strip():
+        host = (config.SSH_HOST or "").strip()
+        port = str(config.SSH_PORT or 22).strip()
+        return ("no host key is pinned. Run `ssh-keyscan -p " + port + " "
+                + host + "` and put its output in `ssh_host_key` in "
+                "config.yaml. It is pinned rather than trusted on first "
+                "use so that a host key that CHANGES is refused instead of "
+                "quietly accepted")
+    if not _ssh_binary():
+        return ("no `ssh` program was found. Set `ssh_binary` in "
+                "config.yaml to its full path")
+    return ""
+
+
+def _probe_ssh() -> SshProbe:
+    """Ask the configured host what it is, once (SS50).
+
+    Config first and IO second, so the common case -- nothing configured --
+    costs no round trip. The identity command runs WITHOUT the `cd` guard:
+    a missing remote workspace is a per-command refusal with its own words
+    (SS52), and folding it in here would report "the host is unreachable"
+    for a directory typo.
+    """
+    reason = _ssh_config_reason()
+    if reason:
+        return SshProbe(None, reason=reason)
+
+    binary = _ssh_binary()
+    user = (config.SSH_USER or "").strip()
+    host = (config.SSH_HOST or "").strip()
+    target = f"{user}@{host}"
+    try:
+        known = _write_known_hosts(config.SSH_HOST_KEY or "")
+    except OSError as exc:
+        return SshProbe(None, binary=binary,
+                        reason=f"the pinned host key could not be written "
+                               f"to a temporary file ({exc})")
+
+    version = ""
+    try:
+        shown = subprocess.run([binary, "-V"], capture_output=True,
+                               timeout=_SSH_PROBE_TIMEOUT_S)
+        version = (shown.stderr or shown.stdout).decode(
+            "utf-8", "replace").strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return SshProbe(None, binary=binary,
+                        reason=f"`{binary}` could not be run")
+
+    identity = "uname -s; command -v bash; command -v timeout"
+    argv = _ssh_connection_argv(binary, target, known) + [identity]
+    try:
+        result = subprocess.run(argv, capture_output=True,
+                                stdin=subprocess.DEVNULL,
+                                timeout=_SSH_PROBE_TIMEOUT_S,
+                                env=_ssh_env())
+    except subprocess.TimeoutExpired:
+        return SshProbe(None, binary=binary, version=version, known_hosts=known,
+                        reason=f"{target} did not answer within "
+                               f"{_SSH_PROBE_TIMEOUT_S}s")
+    except OSError as exc:
+        return SshProbe(None, binary=binary, version=version, known_hosts=known,
+                        reason=f"`{binary}` could not be run ({exc})")
+
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", "replace").strip()
+        detail = " ".join(detail.split())[:300]
+        return SshProbe(
+            None, binary=binary, version=version, known_hosts=known,
+            reason=_ssh_connect_failure_reason(target, detail))
+
+    answered = [ln.strip() for ln
+                in result.stdout.decode("utf-8", "replace").splitlines()
+                if ln.strip()]
+    system = answered[0].lower() if answered else ""
+    if not any(system.startswith(name) for name in _SSH_POSIX_SYSTEMS):
+        return SshProbe(
+            None, binary=binary, version=version, known_hosts=known,
+            reason=f"{target} answered `uname -s` with "
+                   f"{answered[0] if answered else '(nothing)'!r}, which "
+                   f"this backend does not support. Every command it sends "
+                   f"is a POSIX shell line -- `bash --norc --noprofile -c` "
+                   f"inside a `cd --` guard -- and none of that means "
+                   f"anything on a remote whose shell is not POSIX. A "
+                   f"Windows OpenSSH server is the known case, and it is "
+                   f"recorded as unmeasured rather than assumed to work")
+    missing = [need for need in ("bash", "timeout")
+               if not any(need in line for line in answered[1:])]
+    if missing:
+        return SshProbe(
+            None, binary=binary, version=version, known_hosts=known,
+            reason=f"{target} is missing {' and '.join(missing)}, which "
+                   f"this backend needs on the remote: `bash` runs the "
+                   f"command without the remote user's dotfiles, and "
+                   f"`timeout` is the only thing that bounds a session "
+                   f"after this harness has stopped watching it")
+
+    return SshProbe(target, binary=binary, version=version,
+                    known_hosts=known, remote=" ".join(answered))
+
+
+def _ssh_connect_failure_reason(target: str, detail: str) -> str:
+    """One sentence for a connection that did not happen, composed here.
+
+    `ssh`'s own text is the wrong thing to hand a model: measured, every
+    authentication failure -- an encrypted key with no agent, an unknown
+    user, no key offered at all -- says exactly `Permission denied
+    (publickey)`, so quoting it would tell the model the same thing about
+    three different fixes. The detail is kept AFTER the interpretation
+    rather than instead of it.
+    """
+    lowered = detail.lower()
+    if "permission denied" in lowered:
+        return (f"{target} refused the key. The backend only ever offers a "
+                f"key (SS47): check `ssh_identity_file`, and if the key is "
+                f"encrypted, load it into an agent with `ssh-add` first -- "
+                f"this harness never asks for a passphrase and never holds "
+                f"one, so an encrypted key with no agent cannot connect. "
+                f"ssh said: {detail}")
+    if "host key verification failed" in lowered or "known_hosts" in lowered:
+        return (f"{target} presented a host key that is not the one pinned "
+                f"in `ssh_host_key`. This is refused rather than accepted: "
+                f"either the host was rebuilt and the pin needs updating, "
+                f"or the connection is not reaching the host you think. "
+                f"ssh said: {detail}")
+    if "connection refused" in lowered:
+        return (f"nothing is listening for SSH at {target}. Check "
+                f"`ssh_host` and `ssh_port`. ssh said: {detail}")
+    if "timed out" in lowered or "timeout" in lowered:
+        return (f"{target} did not answer within {_SSH_CONNECT_TIMEOUT_S}s. "
+                f"ssh said: {detail}")
+    return f"{target} could not be reached. ssh said: {detail or '(nothing)'}"
+
+
+def _ssh() -> SshProbe:
+    """The memoised answer, probed at most once per process.
+
+    LAZY, like the WSL probe and for the same reason: a user with the flag
+    off must not pay a network round trip at launch for a backend they
+    never asked for. Every caller reaches it through `ssh_available()`,
+    which asks `ssh_enabled()` first.
+    """
+    global _ssh_probe
+    if _ssh_probe is None:
+        with _ssh_lock:
+            if _ssh_probe is None:
+                _ssh_probe = _probe_ssh()
+    return _ssh_probe
+
+
+def _reset_ssh_probe() -> None:
+    """Forget the SSH probe's answer and remove the known_hosts it wrote.
+    Tests only -- and both, because the file names the key that resolved."""
+    global _ssh_probe, _ssh_known_hosts_path
+    with _ssh_lock:
+        _ssh_probe = None
+        if _ssh_known_hosts_path:
+            try:
+                os.unlink(_ssh_known_hosts_path)
+            except OSError:
+                pass
+            _ssh_known_hosts_path = None
+
+
+def ssh_available() -> bool:
+    """Whether an SSH command could run: enabled AND a host answered."""
+    return ssh_enabled() and _ssh().target is not None
+
+
+def ssh_target() -> str:
+    """The `user@host` an SSH argv names, read WITHOUT probing.
+
+    `wsl_distro()`'s rule, for `wsl_distro()`'s reason: a test that patches
+    availability must not make the argv builder open a real connection, and
+    the argv every test asserts is the one built from the configured names.
+    """
+    probe = _ssh_probe
+    if probe is not None and probe.target:
+        return probe.target
+    user = (config.SSH_USER or "").strip()
+    host = (config.SSH_HOST or "").strip()
+    return f"{user}@{host}" if (user and host) else host
+
+
+def ssh_unavailable_reason() -> str:
+    """Why an SSH call cannot run, as a whole sentence for the model.
+
+    One copy, for the gate and the two run paths -- `containment_for` and
+    `_route` must not describe the same refusal differently (EP6).
+    """
+    if not ssh_enabled():
+        return ("The SSH backend is turned off. A command can only run on "
+                "a remote host when allow_ssh_backend is true in "
+                "config.yaml, which ships false because a remote host is "
+                "not a sandbox: it is a machine this harness cannot "
+                "inspect, with no isolation, no resource limits, and "
+                "credentials it did not issue.")
+    reason = _ssh().reason
+    return (f"The SSH backend is on, but no command can run: {reason}."
+            if reason else "")
+
+
+def _ssh_env() -> dict:
+    """The environment the local `ssh` PROCESS gets.
+
+    `_scrubbed_env()` plus exactly one name, and the distinction is the
+    point: `_SAFE_ENV_KEYS` says what a sandboxed COMMAND may see, and this
+    says what the CLIENT needs to function. Measured, nothing from here
+    crosses to the remote anyway -- an SSH session's environment is twelve
+    variables and every one is the server's -- so widening the shared
+    allowlist for this would have loosened three other routes to fix one.
+
+    WHY `PROGRAMDATA`, and why this was found by running rather than by
+    reading: with `_scrubbed_env()` alone, Windows OpenSSH exits 255 and
+    writes NOTHING to stderr. That is SS36's shape exactly -- a failure
+    with no reason attached -- and it would have been diagnosed as an
+    unreachable host. Bisected over twelve candidate variables (USERNAME,
+    APPDATA, LOCALAPPDATA, SYSTEMDRIVE, PATHEXT and the rest), this is the
+    only one that changes the answer; it resolves `%PROGRAMDATA%\\ssh`,
+    which the client reads even under `-F none`.
+    """
+    env = _scrubbed_env()
+    for name in ("PROGRAMDATA", "ProgramData"):
+        value = os.environ.get(name)
+        if value:
+            env["PROGRAMDATA"] = value
+            break
+    return env
+
+
+def _ssh_connection_argv(binary: str, target: str, known: str) -> list[str]:
+    """Everything that says WHERE and WHO, with no command on the end.
+
+    Shared by the probe and `_ssh_argv` so the connection the probe
+    measured is the connection a command gets -- one of the two halves
+    EP6's rule is about, on a route where the probe is the only thing that
+    ever proved the host reachable.
+    """
+    argv = [
+        binary,
+        # NO DOTFILES, the same property `bash --norc --noprofile` gives on
+        # the far end (SS51). `ssh` otherwise reads a per-user config whose
+        # location this harness CANNOT redirect -- measured: Windows
+        # OpenSSH resolves the user's profile from the login token, so
+        # setting HOME and USERPROFILE does not move it, and a probe that
+        # tried to test the file's influence by redirecting HOME was
+        # measuring nothing. That file can carry `ProxyCommand`,
+        # `LocalCommand` and `SendEnv`, so without this flag what runs is
+        # not what this argv says.
+        "-F", "none",
+        # SS47, and the measurement that justifies the whole key-only
+        # decision: WITHOUT this, an encrypted key with no agent HANGS --
+        # 20 s and still waiting, because ssh is trying to prompt for a
+        # passphrase on a terminal this process does not own. With it, the
+        # same call fails in 0.12 s.
+        "-o", "BatchMode=yes",
+        "-o", "PreferredAuthentications=publickey",
+        # SS49. The pin is the whole host-key policy: an unknown key and a
+        # CHANGED key both refuse, and neither can be answered by a prompt
+        # that a headless run has nobody to show.
+        "-o", "StrictHostKeyChecking=yes",
+        "-o", f"UserKnownHostsFile={known}",
+        "-o", f"ConnectTimeout={_SSH_CONNECT_TIMEOUT_S}",
+        "-o", f"ServerAliveInterval={_SSH_ALIVE_INTERVAL_S}",
+        "-o", f"ServerAliveCountMax={_SSH_ALIVE_COUNT_MAX}",
+    ]
+    # NOTE what is NOT here: `LogLevel=ERROR`. Measured, it SWALLOWS the
+    # reason a connection failed -- a refused port answered rc 255 with an
+    # empty stderr, which is SS36's "no reason at all" shape exactly. The
+    # default level is silent on success (only the remote's own stderr
+    # arrives) and loud on failure, so it is what a refusal is built from.
+    identity = (config.SSH_IDENTITY_FILE or "").strip()
+    if identity:
+        argv += ["-i", identity]
+        # Only meaningful WITH an identity: it restricts ssh to the keys
+        # this argv named. Omitted when none is configured, because there
+        # it would rule out the agent, which SS47 explicitly allows as the
+        # other way to authenticate without this harness holding a secret.
+        argv += ["-o", "IdentitiesOnly=yes"]
+    argv += ["-p", str(config.SSH_PORT or 22), target]
+    return argv
+
+
+def _ssh_remote_script(command: str, workspace: str,
+                       session_timeout_s: Optional[int] = None) -> str:
+    """The ONE string the remote login shell parses (SS51).
+
+    `ssh` has no `execve` path: it joins its trailing argv with spaces and
+    the remote LOGIN SHELL re-parses the result. So EP5's "argv, no shell"
+    property -- which `_docker_argv` and `_wsl_argv` both keep -- cannot
+    exist here, and pretending otherwise would put a third tokeniser in the
+    gap #157 came through twice. What is possible is exactly one quoting
+    boundary, owned by `shlex.quote`, and that is measured rather than
+    argued: ten adversarial tokens (embedded quotes, backslashes, a
+    trailing backslash, `$(id)`, backticks, a newline, glob characters)
+    round-trip BYTE-IDENTICALLY through `list2cmdline` -> ssh -> the login
+    shell -> `bash -c`.
+
+    It is also the second reason nothing here is auto-approved (SS48): the
+    tier that the other routes may run unasked is the one defined by having
+    no shell between the classifier and the executor, and this route cannot
+    offer that.
+    """
+    runner = ["bash", "--norc", "--noprofile", "-c", command]
+    if session_timeout_s is not None:
+        # The container and WSL backstop, on a route that needs it MORE.
+        # Measured: killing the local `ssh` does NOT kill the remote
+        # command -- a `sleep 400` survived its client by design, because
+        # without a pty there is no hangup to deliver. This is what bounds
+        # a session whose harness has gone away, and it works with no
+        # client alive (rc 124).
+        runner = ["timeout", "-k", str(_KILL_GRACE_S),
+                  str(session_timeout_s)] + runner
+    quoted = " ".join(shlex.quote(part) for part in runner)
+    return (
+        "cd -- %s || { printf '%%s\\n' %s >&2; exit %d; }; exec %s"
+        % (shlex.quote(workspace), shlex.quote(_SSH_NO_WORKSPACE_MARKER),
+           _SSH_NO_WORKSPACE_CODE, quoted)
+    )
+
+
+def _ssh_known_hosts() -> str:
+    """The file `StrictHostKeyChecking` is checked against (SS49).
+
+    SELF-SUFFICIENT, and that is a fix rather than a nicety: this used to
+    read the probe's path and fall back to "", which built
+    `UserKnownHostsFile=` with no value -- an argv `ssh` rejects outright
+    with `no argument after keyword`, reported as "the host could not be
+    reached". In production the probe always ran first, so the broken argv
+    was unreachable by luck rather than by construction, and every mocked
+    test handed the builder a path and so asserted the assumption. A LIVE
+    test found it. An argv builder that is correct only when someone else
+    ran first is the coupling EP6 is about.
+    """
+    probe = _ssh_probe
+    if probe is not None and probe.known_hosts:
+        return probe.known_hosts
+    if _ssh_known_hosts_path:
+        return _ssh_known_hosts_path
+    pinned = (config.SSH_HOST_KEY or "").strip()
+    if not pinned:
+        return ""
+    try:
+        return _write_known_hosts(pinned)
+    except OSError:
+        return ""
+
+
+def _ssh_argv(command: str, *,
+              session_timeout_s: Optional[int] = None) -> list[str]:
+    """The argv that runs *command* on the configured host.
+
+    `_wsl_argv`'s opposite number. There is no `argv_mode` parameter and
+    that absence is the decision: see `_ssh_remote_script`.
+    """
+    probe = _ssh_probe
+    known = _ssh_known_hosts()
+    workspace = (config.SSH_REMOTE_WORKSPACE or "").strip()
+    binary = (probe.binary if probe is not None and probe.binary
+              else _ssh_binary())
+    return _ssh_connection_argv(binary, ssh_target(), known) + [
+        _ssh_remote_script(command, workspace, session_timeout_s)]
 
 
 # ---------------------------------------------------------------------------
@@ -850,16 +1368,27 @@ def declared_backend(params) -> str:
     it differently would ask about a contained command and run an
     uncontained one -- #157's shape, in the module written to close it.
 
-    ONLY the exact string `"wsl"` selects WSL. Everything else -- a
-    misspelling, a list, `True`, absent -- is the container, which is the
-    safe direction: the failure mode of a lenient reading is a command
-    running outside the sandbox because the model typed `"WSL "`, and the
-    failure mode of a strict one is a refusal the model can see and fix.
-    `Literal["container", "wsl"]` on the param model then refuses anything
-    else at run time, so nothing executes on a disagreement.
+    ONLY an exact string selects a backend other than the container --
+    `"wsl"` or `"ssh"`. Everything else -- a misspelling, a list, `True`,
+    absent -- is the container, which is the safe direction: the failure
+    mode of a lenient reading is a command running outside the sandbox
+    because the model typed `"WSL "`, and the failure mode of a strict one
+    is a refusal the model can see and fix.
+    `Literal["container", "wsl", "ssh"]` on the param model then refuses
+    anything else at run time, so nothing executes on a disagreement.
+
+    Membership in a tuple would read better and is deliberately NOT used:
+    the container has to remain the answer for every unrecognised value,
+    and `value if value in BACKENDS else BACKEND_CONTAINER` says that in a
+    way that a later edit widening BACKENDS would silently change.
     """
-    if isinstance(params, dict) and params.get("backend") == BACKEND_WSL:
+    if not isinstance(params, dict):
+        return BACKEND_CONTAINER
+    asked = params.get("backend")
+    if asked == BACKEND_WSL:
         return BACKEND_WSL
+    if asked == BACKEND_SSH:
+        return BACKEND_SSH
     return BACKEND_CONTAINER
 
 
@@ -1023,6 +1552,8 @@ def containment_for(
     """
     if backend == BACKEND_WSL:
         return UNCONTAINED if wsl_available() else UNAVAILABLE
+    if backend == BACKEND_SSH:
+        return UNCONTAINED if ssh_available() else UNAVAILABLE
     if profile.tier == HOST_READ:
         return UNCONTAINED
     if docker_available:
@@ -1574,6 +2105,105 @@ def _wsl_workspace_refusal(workspace_dir: str) -> str:
             f"so it would have reported success from the wrong place.")
 
 
+def _ssh_workspace_refusal(stderr: str) -> str:
+    """Why a remote working directory that is not there stops the command.
+
+    Recognised by BOTH the exit code and the marker the guard prints
+    (SS52), because either alone is guessable: 125 is inside `timeout`'s
+    own vocabulary, and a command is free to print any string it likes.
+    """
+    workspace = (config.SSH_REMOTE_WORKSPACE or "").strip()
+    detail = " ".join(stderr.split())[:200]
+    return (f"The remote working directory {workspace!r} could not be "
+            f"entered on {ssh_target()}, so nothing was run. This is "
+            f"refused rather than run somewhere else -- `ssh_remote_"
+            f"workspace` names where approved work happens, and a command "
+            f"that silently ran in the login home would report success "
+            f"from a place nobody named. The remote said: {detail}")
+
+
+def _ssh_failed_to_start(stderr: str) -> str:
+    """A connection that never carried the command, told apart from one
+    that did. Same composition rule as the probe's (see
+    `_ssh_connect_failure_reason`): ssh's own text is generic, so it is
+    quoted after an interpretation rather than instead of one."""
+    return _ssh_connect_failure_reason(ssh_target(),
+                                       " ".join(stderr.split())[:300])
+
+
+def _run_ssh(command: str, workspace_dir: str) -> dict:
+    """Run a command on the configured remote host (ROADMAP_v3 §49, slice 4).
+
+    *workspace_dir* is the LOCAL workspace and is deliberately unused: the
+    command runs in `ssh_remote_workspace`, on a filesystem this process
+    cannot see. That gap is the trap this backend is most able to set --
+    `write` saves a file locally and a shell here cannot read it -- and it
+    is disclosed in the tool description and the approval notice rather
+    than papered over (SS55).
+
+    No resource limits (SS44's rule on a third route), and here not even a
+    `ulimit` to be theatre about: the remote's memory and CPU belong to the
+    remote. What DOES bound this is the local wall clock below, and for a
+    session the in-guest `timeout -k` that `_ssh_remote_script` wraps in.
+    """
+    args = _ssh_argv(command)
+
+    proc = None
+    try:
+        proc = subprocess.Popen(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            # Measured, and NOT load-bearing the way SS42's is: nothing
+            # local crosses into an SSH session by itself -- the remote
+            # environment is twelve variables and every one is the
+            # server's. The scrub stays because what a client SENDS is
+            # `SendEnv`'s business and `SendEnv` lives in a config file
+            # this harness cannot redirect, which `-F none` closes from
+            # the other side. Two answers to one question is the point.
+            env=_ssh_env(),
+        )
+        stdout, stderr = proc.communicate(
+            timeout=config.SANDBOX_TIMEOUT_SECONDS,
+        )
+        if (proc.returncode == _SSH_NO_WORKSPACE_CODE
+                and _SSH_NO_WORKSPACE_MARKER in stderr):
+            raise SandboxUnavailable(_ssh_workspace_refusal(stderr))
+        # 255 is ssh's own "I never got there", distinct from any exit code
+        # the remote command could return -- a remote exit status is 0-255
+        # but ssh reports 255 only for its own failures, and the command
+        # never ran in that case. Measured across every failure shape:
+        # refused port, unroutable host, unknown user, no key, wrong host
+        # key -- all 255.
+        if proc.returncode == 255 and not stdout:
+            raise SandboxUnavailable(_ssh_failed_to_start(stderr))
+        return {
+            "stdout": stdout[:config.MAX_READ_CHARS],
+            "stderr": stderr[:config.MAX_READ_CHARS],
+            "return_code": proc.returncode,
+        }
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        return {
+            "stdout": "",
+            "stderr": f"Command timed out after "
+                      f"{config.SANDBOX_TIMEOUT_SECONDS}s. The remote "
+                      f"command may still be running: killing the local "
+                      f"ssh process does not end it (SS53).",
+            "return_code": -1,
+        }
+    except FileNotFoundError:
+        if proc is not None:
+            proc.kill()
+            proc.wait()
+        raise SandboxUnavailable(
+            f"{_ssh_binary()!r} was not found, so the SSH backend cannot "
+            f"run anything.") from None
+
+
 # ---------------------------------------------------------------------------
 # ---- Subprocess fallback path ---------------------------------------------
 # ---------------------------------------------------------------------------
@@ -1673,7 +2303,7 @@ def run_sandboxed(
     """Execute *command* through the appropriate sandbox backend.
 
     Routing:
-      0. The call asked for WSL → the distro, or a refusal (SS37)
+      0. The call asked for WSL or SSH → that backend, or a refusal (SS37)
       1. Inert command → lightweight subprocess (no Docker/fallback needed)
       2. Docker available → container with volume mount
       3. Fallback enabled → subprocess with shell interpretation
@@ -1740,6 +2370,14 @@ def run_sandboxed(
         return _annotate(
             _run_wsl(command, workspace_dir, argv=(profile.tier == INERT)),
             profile, "wsl")
+
+    if route == ROUTE_SSH:
+        logger.debug("SSH path (%s): %s", ssh_target(), command[:80])
+        # `ran_on` is "ssh", not the host and not a container. `_annotate`
+        # already takes it as a string, so the disclosure costs nothing
+        # here -- what it buys is that a result can never imply the
+        # command ran on this machine.
+        return _annotate(_run_ssh(command, workspace_dir), profile, "ssh")
 
     # HOST_READ names a file the container cannot see, so it has exactly
     # one backend and takes it before Docker is even considered.
@@ -1816,6 +2454,9 @@ def _unavailable_message(backend: str = BACKEND_CONTAINER) -> str:
     if backend == BACKEND_WSL:
         return wsl_unavailable_reason() or (
             "The WSL backend cannot run this command.")
+    if backend == BACKEND_SSH:
+        return ssh_unavailable_reason() or (
+            "The SSH backend cannot run this command.")
     reason = _known_unavailable_reason()
     return (
         "No container runtime can run the sandbox"
@@ -1840,6 +2481,7 @@ PROCESS_TOKEN = f"{os.getpid()}-{uuid.uuid4().hex[:12]}"
 ROUTE_HOST_READ = "host_read"
 ROUTE_CONTAINER = "container"
 ROUTE_WSL = "wsl"
+ROUTE_SSH = "ssh"
 ROUTE_INERT_HOST = "inert_host"
 ROUTE_FALLBACK = "fallback"
 ROUTE_UNAVAILABLE = "unavailable"
@@ -1878,6 +2520,8 @@ def _route(profile: CommandProfile, docker_available: bool,
     """
     if backend == BACKEND_WSL:
         return ROUTE_WSL if wsl_available() else ROUTE_UNAVAILABLE
+    if backend == BACKEND_SSH:
+        return ROUTE_SSH if ssh_available() else ROUTE_UNAVAILABLE
     if profile.tier == HOST_READ:
         return ROUTE_HOST_READ
     if docker_available:
@@ -2078,6 +2722,35 @@ class WslSessionProcess(SessionProcess):
     ran_on = "wsl"
 
 
+class SshSessionProcess(SessionProcess):
+    """A session on a remote host (ROADMAP_v3 §49, slice 4).
+
+    It inherits the plain terminate/kill and adds nothing -- and unlike
+    `WslSessionProcess`, where that was the measured GOOD news, here it is
+    the measured bad news, recorded rather than hidden.
+
+    MEASURED: killing the local `ssh` process does NOT end the remote
+    command. A `sleep 400` on the far side outlived its client every time,
+    because without a pty there is no hangup to deliver to it. `-tt` DOES
+    end it -- and costs the stream: with a pty the remote's stderr is
+    merged into stdout and every newline becomes CRLF, measured, which
+    would silently change what every session and every one-shot command
+    reports. A session whose output shape depends on an unrelated
+    termination decision is the drift EP6 is about.
+
+    So the remote command is bounded by the in-guest `timeout -k` that
+    `_ssh_remote_script` wraps in (measured working with no client alive,
+    rc 124), and a KILL ends the local process and the output stream while
+    the remote command runs on until that backstop fires. That is stated
+    in the tool description and in the kill result rather than papered
+    over -- and a process-group kill on the remote, which would need a
+    second connection and the remote pid, stays an open item in §49's gap
+    register, where it already was.
+    """
+
+    ran_on = "ssh"
+
+
 def start_sandboxed(
     command: str,
     workspace_dir: str,
@@ -2121,6 +2794,17 @@ def start_sandboxed(
                     "wsl.exe was not found, so the WSL backend cannot run "
                     "anything.") from None
             return WslSessionProcess(proc, tier=profile.tier)
+        if route == ROUTE_SSH:
+            args = _ssh_argv(
+                command,
+                session_timeout_s=int(timeout_s) + SESSION_TIMEOUT_MARGIN_S)
+            try:
+                proc = _popen_session(args, env=_ssh_env())
+            except FileNotFoundError:
+                raise SandboxUnavailable(
+                    f"{_ssh_binary()!r} was not found, so the SSH backend "
+                    f"cannot run anything.") from None
+            return SshSessionProcess(proc, tier=profile.tier)
         if route == ROUTE_CONTAINER:
             runtime = known_runtime()
             _log_image_identity(runtime)
@@ -2197,6 +2881,15 @@ def start_interactive(
     refusal = protected_paths.check_workspace(workspace_dir)
     if refusal:
         raise SandboxUnavailable(refusal)
+    if backend == BACKEND_SSH:
+        raise SandboxUnavailable(
+            "An interactive shell cannot run over SSH. Its stream shape "
+            "there is not the container's: a remote pty is the only way to "
+            "get a prompt back, and a remote pty merges stderr into stdout "
+            "and turns every newline into CRLF -- measured. Use "
+            "shell_background with backend 'ssh' for a command that does "
+            "not need to be typed into, or open an interactive shell "
+            "without asking for SSH.")
     if backend == BACKEND_WSL:
         raise SandboxUnavailable(
             "An interactive shell cannot run in WSL yet. Its stream shape "

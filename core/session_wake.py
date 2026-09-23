@@ -77,7 +77,8 @@ KIND_FOR_TOOL = {tool: kind for kind, tool in TOOL_FOR_KIND.items()}
 # rendered "on the wsl". A phrase per backend, written once.
 WHERE_RAN = {"container": "in the container",
              "host": "on the host",
-             "wsl": "in WSL"}
+             "wsl": "in WSL",
+             "ssh": "on the remote host over SSH"}
 
 
 def where_ran(ran_on: str) -> str:

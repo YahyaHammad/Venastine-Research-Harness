@@ -22,7 +22,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 
 ## Index
 
-- **§49. Shell sessions, the container runtime, and where a command can run** — **(IN PROGRESS: slice 0, Podman, BUILT in batch 93; slice 1 COMPLETE -- its foundations in batch 94, its five tools, the sleeping subagent and the CLI wait loop in batch 95, the TUI's behaviour half in batch 97 and its display half in batch 98; slice 2, interactive sessions, BUILT in batch 100; slice 3, WSL, next)** (the shell was one-shot and blocking, so a test suite could not outlive a turn and nothing could wake the agent; a machine with Podman and no working Docker had no sandbox at all)
+- **§49. Shell sessions, the container runtime, and where a command can run** — **(IN PROGRESS: slice 0, Podman, BUILT in batch 93; slice 1 COMPLETE -- its foundations in batch 94, its five tools, the sleeping subagent and the CLI wait loop in batch 95, the TUI's behaviour half in batch 97 and its display half in batch 98; slice 2, interactive sessions, BUILT in batch 100; slice 3, WSL, BUILT in batch 101; slice 4, SSH, BUILT in batch 102)** (the shell was one-shot and blocking, so a test suite could not outlive a turn and nothing could wake the agent; a machine with Podman and no working Docker had no sandbox at all)
 - **§50. Declared network for a shell command** — **(BUILT in batch 99)** (the network detector reads command TEXT against a fourteen-word list, so a command it cannot see is auto-approved into `--network none` and fails with no way for the user to have allowed it)
 - **§51. Paging for network tool results** — **(RECORDED in batch 96, not built)** (`fetch_url` and `arxiv_search` truncate with no offset, so the agent cannot reach past the first page without shelling out to a raw HTTP request)
 
@@ -134,7 +134,53 @@ changed the design and one of them closed a hole that was already open.
   earlier attempt asked through `bash -c` and matched its own parent's
   command line, reporting a survivor that was the question itself.
 
-### Decisions (SS1–SS45)
+
+### What was measured before slice 4 was designed (2026-09-23)
+
+Against a real `sshd` -- `openssh-server` in the WSL Ubuntu distro on port 2222, stood up for this
+(owner-authorised), with a key-auth identity and a deliberately encrypted one. Every line below was
+run. Three of them changed the argv this slice builds, and one of them changed a decision.
+
+- **`ssh` has no `execve` path, and the quoting still holds.** Ten adversarial tokens -- embedded
+  quotes, backslashes, a trailing backslash, `%PATH%`, backticks, `$(id)`, `; | &`, a newline, glob
+  characters -- round-trip BYTE-IDENTICALLY through `list2cmdline` -> `ssh` -> the remote login shell
+  -> `bash -c`, with one `shlex.quote` boundary. Two tokenisers this process does not own sit between
+  the ends, which is why it was measured rather than argued.
+- **Killing the local `ssh` does NOT kill the remote command.** A `sleep 400` outlived its client
+  every time: with no pty there is no hangup to deliver. `-tt` does end it -- and merges the remote's
+  stderr into stdout and turns every `\n` into `\r\n`, measured, which would silently change what
+  every command and every session reports. So: no pty, and the in-guest `timeout -k` is the bound
+  (it worked with no client alive, rc 124 after 5.3 s).
+- **Without `BatchMode=yes`, an encrypted key with no agent HANGS** -- 20 s and still waiting, because
+  `ssh` is trying to prompt for a passphrase on a terminal this process does not own. With it, the
+  same call fails in 0.12 s. This is the measurement the whole key-only decision rests on.
+- **`_scrubbed_env()` alone breaks Windows OpenSSH: rc 255 with an EMPTY stderr.** SS36's
+  no-reason-at-all shape, and it would have been diagnosed as an unreachable host. Bisected over
+  twelve candidate variables, `PROGRAMDATA` is the only one that changes the answer.
+- **`LogLevel=ERROR` swallows the reason a connection failed.** A refused port answered rc 255 with
+  nothing on stderr; at the default level it says so. The default is silent on success -- only the
+  remote's own stderr arrives -- so it is what a refusal is built from.
+- **Nothing local crosses into the remote by itself.** The remote environment is twelve variables and
+  every one is the server's; not even `LANG` crossed, because the client's default `SendEnv` is empty.
+  Unlike WSL's `WSLENV`, this is not a leak that scrubbing closes -- but what a client sends is
+  `SendEnv`'s business, and `SendEnv` lives in a config file this harness CANNOT redirect: measured,
+  Windows OpenSSH resolves the user's profile from the login token, so setting `HOME` and
+  `USERPROFILE` does not move it. `-F none` closes it from the other side.
+- **Two `ssh.exe` on the machine this was built on**, and PATH picks the one the OS did not ship:
+  `shutil.which("ssh")` answers a git-for-Windows MSYS2 `OpenSSH_10.3p1`, beside Windows'
+  own `OpenSSH_for_Windows_9.5p2`. They agree on every happy path and DISAGREE ON FAILURES, which is
+  the half a refusal is made of: a refused connection is `ssh: connect to host ... Connection
+  refused` from one and `banner exchange: Connection to UNKNOWN port -1: Connection refused` from the
+  other. SS38's GnuWin32 `cat` on a third route.
+- **Every authentication failure says the same thing.** An encrypted key with no agent, an unknown
+  user, and no key offered at all all answer `Permission denied (publickey)`. So the reason a model
+  is given has to be composed here; quoting `ssh` would say one thing about three different fixes.
+- **A `cd` guard is loud both ways.** A missing remote directory and an unreadable one (`/root`) both
+  exit with the chosen code and print the marker; a present one runs normally.
+- **The remote answers what it is.** `uname -s`, `command -v bash timeout` -- bounded, and the basis
+  for refusing a remote that is not POSIX rather than sending it POSIX shell lines.
+
+### Decisions (SS1–SS55)
 
 | # | Decision |
 |---|---|
@@ -183,6 +229,16 @@ changed the design and one of them closed a hole that was already open.
 | **SS43** | **INERT runs as an argv through `wsl.exe -e`; everything else through `bash --norc --noprofile -c`.** The argv half is EP5's rule on a new route and SS39 RESTS on it: `execve` does not expand `~` or `$HOME`, and a shell between the classifier and the executor would be the third tokeniser in the gap #157 came through twice. The no-dotfiles half keeps the container's property that what runs does not depend on a user's `.bashrc` -- measured: the shell reports NOT_LOGIN, zero aliases and no `BASH_ENV`. Measured alongside: seven adversarial argv strings (embedded quotes, backslashes, `%PATH%`, a trailing backslash, backticks, `$(id)`) round-trip byte-identically through `list2cmdline` and `wsl.exe`, so the quoting-bypass class of batches 37 and 39 does not reappear on this route |
 | **SS44** | **WSL gets no resource limits, and no working-directory guesswork, and both are stated rather than papered over.** There is no `--memory`, `--cpus` or `--pids-limit` equivalent: they belong to the whole WSL VM, and a `ulimit` inside the shell is removable by the command it is meant to bound -- a control that reads as safety without being one, which is the failure SECURITY.md already names for the insecure fallback. The workspace is translated by `wslpath` and the POSIX path is what `--cd` is given, because `--cd` with an untranslatable Windows path does not fail: measured, `--cd \\127.0.0.1\C$` exits 0, warns on stderr and runs the command in the user's Linux HOME. Kill needs no process-group machinery -- measured, ending the Windows process ended both a foreground child and a backgrounded grandchild |
 | **SS45** | **`_within` answers False for a link this platform cannot follow.** The hole, found by measuring rather than by reading: a symlink created inside the workspace FROM the distro is stored as an LX reparse point (`0xa000001d`) that Windows does not understand -- `os.path.exists` False, `os.path.islink` False, and `os.path.realpath` returns the path UNCHANGED rather than following it or raising. So `_within` answered True for a name that reads `/etc/passwd` in the distro: `cat escape` classified INERT, was AUTO-APPROVED under `tiered`, and returned the host's real password file. No analysis of the token's TEXT can see it, because the token is `escape`. The rule is the platform's own admission rather than a list of tags -- a component that `lexists` and does not `exist` is one whose lstat succeeded and whose stat did not, which for a path means exactly a link that could not be followed. Deliberately NOT "is a reparse point": a OneDrive placeholder is one, and its path means what it says. It applies on EVERY route, not only WSL, because `_within` answers one question and a predicate that answered it per backend would be the drift it exists to prevent |
+| **SS46** | **The user enables SSH and configures the one host; the agent asks for it per call.** `allow_ssh_backend` joins the frozen posture, shipped `false`, and `backend` widens to `"container" | "wsl" | "ssh"`. The host is flat scalars -- `ssh_host`, `ssh_user`, `ssh_port`, `ssh_identity_file`, `ssh_remote_workspace`, `ssh_host_key`, `ssh_binary` -- every one a `HARNESS_AUTHORITY_KEYS` entry. SS35's split, unchanged: which machine this harness may reach is the user's question, which command needs it is the agent's. A named map of hosts is a later addition this shape does not block |
+| **SS47** | **Authentication is a key file or a running `ssh-agent`, and the harness holds no secret.** `BatchMode=yes` and `PreferredAuthentications=publickey`, so `ssh` can never prompt on a terminal this process does not own -- an encrypted key with no agent FAILS and the refusal names `ssh-add`. Measured, and this is why it is a decision rather than a default: without `BatchMode` the same call hangs for as long as anyone waits. Not holding the secret is better than holding it safely, and the user already has an agent that does. SS3's secret subsystem arrives in slice 5 with sudo, its second consumer, which is also why it is not built here for one |
+| **SS48** | **Nothing on the SSH route is auto-approved,** and it is ONE explicit step in the gate rather than a profile tuned to fail `auto_approved`. Two independent reasons, either sufficient. First, `_within` resolves against the LOCAL filesystem: on a remote it answers a true question about the wrong machine, and SS45 -- one slice old -- is what a path check that cannot resolve actually costs, which is not a loud failure but a confident approval. Second, ssh has no `execve` path (SS51), so the "argv with no shell" property that EP5 builds the INERT tier out of does not exist here at all. One step rather than a synthesized profile because the two opt-ins above the capability rule (`auto_approve_fallback` and `contained`) each answer BEFORE it, so a profile would have had to be tuned to lose three tests instead of one. `never` still means never (SS1): this widens no mode |
+| **SS49** | **The remote's host key is PINNED in config, and an unpinned or changed key is refused.** `ssh_host_key` carries the `ssh-keyscan` line itself rather than a fingerprint, because a fingerprint is a hash and `known_hosts` needs the key; the `#` banner `ssh-keyscan` prints above it is ignored, so pasting the whole output works. The harness writes it to a file it owns and passes `UserKnownHostsFile` plus `StrictHostKeyChecking=yes`, never touching `~/.ssh/known_hosts` -- its trust set is exactly what the user pinned. No trust prompt and no trust store: the user is the enumerator (SS35), and a first-use prompt is a question a headless run has nobody to answer |
+| **SS50** | **The remote is POSIX, disclosed rather than assumed.** The probe asks it what it is -- `uname -s`, `command -v bash timeout` -- once per process and bounded, and a remote that does not answer as POSIX is REFUSED rather than sent POSIX shell lines. This closes the register's "disclosure of the remote binary": the approval notice and the result name the host, so "it ran somewhere" is never the record. A **Windows OpenSSH remote is deferred and recorded** (owner, this round): its shell is not `bash`, there is no `timeout`, and its paths are not POSIX, so every line of this slice would be wrong there. It is a separate measurement, and a machine with no WSL to stand a test server up in is why the note is owed rather than the case being quietly assumed to work |
+| **SS51** | **One quoting boundary, `shlex.quote`, and there is no argv mode on this route.** `ssh` joins its trailing argv with spaces and the remote LOGIN SHELL re-parses, so EP5's "argv, no shell" property -- which `_docker_argv` and `_wsl_argv` both keep -- cannot exist here. Stated rather than papered over, and it is the second reason for SS48. The command is quoted once and run through `bash --norc --noprofile -c`, keeping the other two routes' property that what runs does not depend on the remote user's dotfiles; `-F none` keeps the same property on the LOCAL side, where `ssh` would otherwise read a per-user config carrying `ProxyCommand`, `LocalCommand` or `SendEnv` from a path this harness cannot redirect. Verified with SS43's own corpus on this route, because a tokeniser nobody owns is what #157 was |
+| **SS52** | **The remote working directory is REQUIRED and its failure is loud.** `ssh` has no `--cd`; the command is `cd -- <quoted> || { marker; exit 125; }` inside the one quoted string, and BOTH halves are checked -- 125 alone is inside `timeout`'s vocabulary (124/125/126/127) and a marker alone is a string any command may print. `ssh_remote_workspace` empty REFUSES rather than defaulting to the login home: SS44's `--cd` measurement is the precedent, and here it is worse, because a command that silently ran in the wrong place ran it on a filesystem this process cannot look at afterwards |
+| **SS53** | **Bounds are what SSH actually offers, and what it does not offer is stated.** `ConnectTimeout`, and `ServerAliveInterval`/`ServerAliveCountMax` so a dead network ends a session rather than hanging it. The wall clock is the in-guest `timeout -k` (SS50 verifies `timeout` exists). No memory, CPU or pid limit -- SS44's rule on a third route, and here not even a `ulimit` to be theatre about, since the remote's resources are the remote's. **A kill does not reach the remote command, and that is measured and disclosed rather than fixed with a pty:** ending the local `ssh` leaves the far side running until the backstop fires, and `-tt` would end it at the cost of merging stderr into stdout and CRLF-ing every line. A process-group kill on the remote needs a second connection and the remote pid, and stays an OPEN item in the register below, where it already was |
+| **SS54** | **`requires_network` is ignored on this route, and `.venastine/` is refused.** The network belongs to the remote and no `--network none` reaches it, so the field is a fiction here and the tool description says so instead of implying a control. The protected-segment refusal is SS40's answer reached by a different road: WSL is refused because it demonstrably CAN write this harness's own authority files, and SSH because nothing here can demonstrate that it cannot -- `ssh localhost` is this machine, a remote that mounts this one looks identical from here, and an unanswerable question is not a yes |
+| **SS55** | **SSH is UNCONTAINED (SS1, unchanged) and an enabled SSH backend is on the badge,** with its own `unsafe_reasons()` pair for SS41's reason. Three weakenings now, and they are different in kind, not degree: the fallback is the host when there is no container, WSL is a Linux userland beside a running one, and this is a machine that is not this machine at all. The pair names what that means -- no isolation, no limits, credentials this harness did not issue -- and the one trap a model actually walks into: **`write` saves LOCALLY while the shell runs remotely**, so a file just written is not there |
 
 ### Adopted defaults (implementation-level; the owner may overturn any)
 
@@ -288,9 +344,31 @@ changed the design and one of them closed a hole that was already open.
    `shell_interactive` does NOT reach WSL yet: its stream shape there is
    unmeasured, and batch 100 is the evidence that measuring it is a
    batch rather than a step in one.
-   Next: slice 4, SSH.
-4. **SSH and the secrets it needs.**
-5. **Sudo** (SS3).
+4. **SSH** (SS46-SS55) -- BUILT, batch 102. A command, a background
+   session or a monitor on another machine entirely, asked for per call
+   and refused unless the user turned the backend on and pinned the
+   host's key. It is the first backend where NOTHING runs without asking
+   (SS48) -- every other one runs a read-only in-workspace command
+   unasked, and the reason this one cannot is that "inside the
+   workspace" is a question about a filesystem this process cannot
+   resolve. SS45, one slice old, is the evidence for what a path check
+   that cannot resolve is worth.
+   Measuring first killed one design and corrected three lines: killing
+   the local `ssh` does NOT end the remote command, and the pty that
+   would fix it merges stderr into stdout and CRLFs every line, so the
+   bound is the in-guest `timeout` and the gap is disclosed (SS53);
+   without `BatchMode` an encrypted key with no agent hangs forever
+   (SS47); and the scrubbed environment alone breaks Windows OpenSSH
+   with an EMPTY stderr, which is SS36's shape exactly.
+   The harness-held SECRETS are NOT here (owner, batch 102): this slice
+   authenticates by key or agent and never holds one, and SS3's secret
+   subsystem lands in slice 5, where sudo is its second consumer and it
+   gets built once against two.
+   `shell_interactive` does NOT reach SSH, and here the reason is
+   measured rather than unmeasured: a remote pty is the only way to get
+   a prompt back, and it is exactly what destroys the stream.
+   Next: slice 5, sudo.
+5. **Sudo** (SS3), with the harness-held secrets SS3 needs.
 
 Then background subagents as their own section (SS10).
 
@@ -314,16 +392,33 @@ Then background subagents as their own section (SS10).
   (SS41). Still open, and recorded rather than decided: WSL1, whose filesystem and process semantics
   differ and which nothing here has measured; and an interactive session on WSL, which waits for the
   batch that measures its stream.
-- **SSH:** `write` saves locally while the shell runs remotely; network is always on; "inside the
-  workspace" is lexical against a configured remote directory; INERT tokens reach the remote login shell
-  single-quoted, which is exact because quotes and backslashes are already rejected; host keys need a
-  policy and a trust prompt; `ssh localhost` is the host. Secrets live in process memory only, are fed
-  through stdin or library callbacks, are redacted by value whatever `redact_tool_outputs` says, need a new
-  request kind in both shells, and are cleared at quit. Open: the connection library and its supply-chain
-  review, since Windows OpenSSH does not multiplex; the host configuration's shape; disclosure of the remote
-  binary; process-group kill on the remote.
+- **SSH: CLOSED in batch 102, except where noted.** `write`-saves-locally is disclosed in the tool
+  description, the approval notice and the badge (SS55); network is always on and `requires_network` is
+  stated to be a fiction here (SS54). **The register's own plan for "inside the workspace" was NOT
+  adopted:** a lexical test against a configured remote directory is exactly the shape SS45 had just
+  closed, so nothing is auto-approved at all (SS48), which needs no remote path resolver and is the
+  stronger answer. INERT tokens do NOT reach the remote single-quoted as its own case -- there is no
+  INERT case here -- but the quoting itself is as the register expected, and measured: one
+  `shlex.quote` boundary, ten adversarial tokens byte-identical (SS51). Host keys are PINNED in config
+  rather than trusted at a prompt (SS49), which the register asked for and the owner overturned this
+  round for a reason the register did not have: a first-use prompt cannot be answered headless.
+  `ssh localhost` being the host is why a protected segment is refused (SS54). The connection library
+  question is answered by not taking one -- the system `ssh` as argv, no new dependency, and therefore
+  no change to `THIRD_PARTY_NOTICES.md`; multiplexing turns out not to matter, since a session holds one
+  connection for its life and key/agent auth re-prompts for nothing. The host configuration's shape is
+  one host in flat scalars (SS46). Disclosure of the remote binary is SS50.
+  **Still open, and recorded rather than decided:** process-group kill on the remote, which needs a
+  second connection and the remote pid -- measured, the local kill does not reach it and the in-guest
+  `timeout` is what bounds it (SS53); a Windows OpenSSH REMOTE, whose shell, tools and paths are none
+  of the things this slice sends (SS50); the harness-held secrets, moved to slice 5 with sudo; and an
+  interactive session over SSH, refused on a measured basis rather than an unmeasured one.
 - **Sudo:** `/usr/bin/sudo -k -S -p '' --`, where `-k` stops a cached ticket passing the password line to the
-  command; separate values for WSL and SSH; a badge entry.
+  command; separate values for WSL and SSH; a badge entry. It arrives WITH the harness-held secret
+  subsystem SS3 needs (owner, batch 102), which slice 4 deliberately did not build for one consumer:
+  a request kind through `core/interaction.py`, both shells rendering a masked field, redaction by
+  VALUE whatever `redact_tool_outputs` says, process memory only, cleared at quit. SSH password and
+  key-passphrase auth join it there -- slice 4 ships key-and-agent only (SS47), which needs no secret
+  at all.
 - **Docker rootless on cgroups v1** ignores limits the same way SS24 describes for Podman, and is not checked.
   Recorded, not decided.
 
@@ -335,6 +430,15 @@ Then background subagents as their own section (SS10).
   decision written twice (EP6).
 - **`tool_call_id` on a wake row.**
 - **Treating WSL or an SSH host as contained,** and **auto-filling sudo prompts.**
+- **An SSH connection LIBRARY** (batch 102). `paramiko` is LGPL-2.1 and `asyncssh` EPL-2.0, either of
+  which would be the first copyleft entry in a `THIRD_PARTY_NOTICES.md` that asserts every dependency
+  is permissive, and both put a crypto stack inside this process. The system `ssh` as argv is the same
+  discipline `_docker_argv` and `_wsl_argv` already use. What a library would have bought -- one
+  persistent connection -- is worth less than it sounds: a session holds one connection for its whole
+  life either way, and key/agent auth means a one-shot command's extra handshake prompts for nothing.
+- **A lexical remote-workspace check** to give SSH an auto-approved tier (SS48).
+- **A pty (`-tt`) to make a kill reach the remote** (SS53): measured, it merges stderr into stdout and
+  CRLFs every line, so it would pay for termination with every command's output shape.
 - **Podman as a separate backend.** It serves the same route with the same argv, measured.
 - **Qualifying the image only under Podman,** which is a silent rewrite of a configured value (SS23).
 

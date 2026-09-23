@@ -15050,3 +15050,92 @@ which was red on three counts, all of them because the file is new and has no ba
 three fixed at source (the module reached through `sandbox.subprocess`, and a token that did not need to
 be a temp path) rather than with a `nosec` or a baseline edit. Mutation pass 34/34 with `verify101.py`
 confirming the tree afterwards. Full suite.
+
+## Batch 102 -- a command on a machine this harness cannot see (2026-09-23)
+
+ROADMAP_v3 §49 slice 4, decisions SS46-SS55. `shell`, `shell_background` and `shell_monitor` accept
+`backend: "ssh"`, which runs the command on the one remote host configured in `config.yaml`. It ships
+off behind `allow_ssh_backend`, a frozen-posture key.
+
+**The rule that makes this backend different from the other three: nothing on it is auto-approved.**
+Not a read-only command, not `ls`, not under `contained`, not with the fallback's auto-approval
+turned on. Every other backend runs a read-only in-workspace command unasked, and the reason this one
+cannot is arithmetic rather than caution: the check that decides "inside the workspace" resolves its
+arguments against the LOCAL filesystem, so on a remote it answers a true question about the wrong
+machine. Slice 3 is one week old and is the evidence for what that costs -- SS45's link did not make
+`_within` fail loudly, it made it approve confidently.
+
+It is ONE explicit step in `_shell_approval_check` rather than a synthesized profile that happens to
+fail `auto_approved`, and that is a decision with a reason: the two opt-ins above the capability rule
+(`auto_approve_fallback` and `contained`) each answer BEFORE it, so a profile would have had to be
+tuned to lose three different tests instead of one line saying the thing directly.
+
+### What measuring found before any of it was written
+
+Against a real `sshd` -- `openssh-server` in the WSL Ubuntu distro, port 2222, stood up for this with
+the owner's authorisation. Four of these changed a line, and one killed a design.
+
+* **Killing the local `ssh` does NOT kill the remote command.** A `sleep 400` outlived its client
+  every time; with no pty there is no hangup to deliver. This is the opposite of WSL, where the same
+  measurement in batch 101 was the good news that let `WslSessionProcess` add nothing.
+  `-tt` DOES end it -- and merges the remote's stderr into stdout and turns every `\n` into `\r\n`,
+  measured. So the pty was rejected: it would have paid for termination with the output shape of
+  every command and every session. The bound is the in-guest `timeout -k`, which works with no client
+  alive (rc 124 after 5.3 s), and the gap is DISCLOSED -- in the tool description, in the timeout
+  message, and in SECURITY.md -- rather than papered over.
+* **Without `BatchMode=yes` an encrypted key with no agent HANGS.** Twenty seconds and still waiting,
+  because `ssh` is trying to prompt for a passphrase on a terminal this process does not own; with it,
+  the same call fails in 0.12 s. This is what makes key-and-agent-only a safe decision rather than a
+  limitation: the harness never holds a secret, and the failure when it would have needed one is
+  immediate and says `ssh-add`.
+* **The scrubbed environment alone breaks Windows OpenSSH: rc 255 with an EMPTY stderr.** SS36's
+  no-reason-at-all shape exactly, and it would have been read as an unreachable host. Bisected over
+  twelve candidates, `PROGRAMDATA` is the only one that changes the answer. It goes in an
+  SSH-specific `_ssh_env()` rather than into `_SAFE_ENV_KEYS`, because that list says what a sandboxed
+  COMMAND may see and this is what the CLIENT needs to run -- widening the shared one would have
+  loosened three routes to fix one.
+* **`LogLevel=ERROR` swallows the reason a connection failed.** A refused port answered rc 255 with
+  nothing at all on stderr. The default level is silent on success and loud on failure, so the option
+  was removed; a NOTE in `_ssh_connection_argv` says why, because it is the sort of thing a later
+  reader adds back for tidiness.
+* **The quoting survives, and it had to be measured.** `ssh` has no `execve` path: it joins its
+  trailing argv with spaces and the remote LOGIN SHELL re-parses. Ten adversarial tokens -- embedded
+  quotes, backslashes, a trailing backslash, backticks, `$(id)`, a newline, globs -- round-trip
+  byte-identically through `list2cmdline` -> ssh -> the login shell -> `bash -c` with one
+  `shlex.quote` boundary.
+* **Nothing local crosses into the remote by itself** -- twelve variables, all the server's, not even
+  `LANG`. Unlike `WSLENV`, this is not a leak scrubbing closes. But what a client SENDS is `SendEnv`'s
+  business and `SendEnv` lives in a config file this harness cannot redirect: measured, Windows
+  OpenSSH resolves the user's profile from the login token, so setting `HOME` and `USERPROFILE` does
+  not move it, and a probe that tried to test the file's influence that way was measuring nothing.
+  `-F none` closes it from the other side, and also closes `ProxyCommand` and `LocalCommand`.
+* **Two `ssh.exe` here, and PATH picks the one the OS did not ship.** They agree on every happy path
+  and disagree on failures, which is the half a refusal is made of. So the binary is resolved
+  explicitly, preferring the OS's own.
+
+### What the tests found that the tests could not have found
+
+The twelve `needs_ssh` tests run only when the environment names a host. One of them failed
+immediately, on a defect none of the synthetic tests could see: `_ssh_argv` read the probe's
+`known_hosts` path and fell back to `""`, emitting `UserKnownHostsFile=` with no value -- an argv
+`ssh` rejects outright, reported as "the host could not be reached". Production never reached it
+because `_route` probes first; **every mocked test handed the builder a path, and so asserted the
+assumption instead of the fact.** Fixed at the source: `_ssh_known_hosts()` materialises the pinned
+key if nothing has yet, so the builder is correct regardless of call order, and a synthetic test now
+pins it.
+
+### Deviation from the recorded plan, on the owner's instruction
+
+§49's gap register specified SSH *and* the harness-held secret subsystem -- a key passphrase and a
+remote password entered once and never seen by the agent. The owner split them this round: slice 4
+authenticates by key or agent and holds no secret at all, and the secret subsystem moves to slice 5,
+where sudo (SS3) is its second consumer and it gets built once against two rather than twice against
+one. The register's plan for "inside the workspace" -- a lexical test against a configured remote
+directory -- was also NOT adopted, and that one is a correction rather than a split: it is exactly the
+shape SS45 had just closed.
+
+### Verification
+
+`tests/test_ssh_backend.py` (136 tests, 12 of them against a real host), the EP6 matrix widened in
+place to 120 cells, and repairs to four files whose premises this batch changed. Full suite,
+`ruff check .`, bandit with the CI flags and directly over the new file, and a mutation pass.

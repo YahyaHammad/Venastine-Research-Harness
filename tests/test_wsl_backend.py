@@ -496,8 +496,8 @@ class TestTheGate:
                     shell_approval_mode="tiered")
         params = {"command": "ls", "backend": "wsl"}
         assert shell._shell_approval_check("shell", params) is False
-        assert shell.wsl_refusal("ls", BACKEND_WSL) is not None
-        assert "allow_wsl_backend" in shell.wsl_refusal("ls", BACKEND_WSL)
+        assert shell.uncontained_refusal("ls", BACKEND_WSL) is not None
+        assert "allow_wsl_backend" in shell.uncontained_refusal("ls", BACKEND_WSL)
 
     def test_a_read_only_in_workspace_command_runs_unasked(self, wsl_on):
         """SS1, unchanged and now operational."""
@@ -536,7 +536,7 @@ class TestProtectedSegmentsAreRefused:
         """SS40. In the container that directory is mounted read-only, so a
         write fails with EROFS and a read is a documented risk; on WSL
         there is no mount and a write SUCCEEDS."""
-        refusal = shell.wsl_refusal(command, BACKEND_WSL)
+        refusal = shell.uncontained_refusal(command, BACKEND_WSL)
         assert refusal is not None
         assert ".venastine" in refusal
         assert "read-only" in refusal
@@ -544,7 +544,7 @@ class TestProtectedSegmentsAreRefused:
     def test_merely_asked_about_in_the_container(self, wsl_on):
         """The contrast, so "refused" is a claim about the WSL route and
         not a rule that quietly moved."""
-        assert shell.wsl_refusal("cat .venastine/settings.json",
+        assert shell.uncontained_refusal("cat .venastine/settings.json",
                                  BACKEND_CONTAINER) is None
         assert shell._shell_approval_check(
             "shell", {"command": "cat .venastine/settings.json"}) is True
@@ -573,7 +573,7 @@ class TestProtectedSegmentsAreRefused:
         assert popen.call_args is None
 
     def test_an_ordinary_command_is_not_refused(self, wsl_on):
-        assert shell.wsl_refusal("ls", BACKEND_WSL) is None
+        assert shell.uncontained_refusal("ls", BACKEND_WSL) is None
 
 
 class TestTheApprovalNotice:
