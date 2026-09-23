@@ -895,18 +895,32 @@ registry.register(ToolSpec("shell", shell.TOOL_SCHEMA, shell.run, approval_check
 # below requires that identity, which is what ties the missing
 # `tool_approvals` field to the gate that replaces it.
 #
-# available_check rather than a permission: all five are hidden wherever
+# available_check rather than a permission: all seven are hidden wherever
 # nothing will wake the run when a session reports (a research pass, any run
 # outside a chat turn or a subagent). A start is refused there too, by
 # refusal_check before any approval prompt and again in the handler -- but
 # advertising a tool that can only be refused is the D24 defect, and under
 # `shell_approval_mode: never` nothing else would stop a pass calling it.
-# SS14: the two START tools open a session, so their lines are the ones a
-# reader can click. `shell_output` and `shell_kill` name a session they did
-# not create -- arming those would put the same target on three lines and
-# make "the line that started it" stop meaning anything.
+# SS14: the three START tools open a session, so their lines are the ones a
+# reader can click. `shell_output`, `shell_kill` and `shell_input` name a
+# session they did not create -- arming those would put the same target on
+# four lines, and on twenty for an interactive session that is typed into
+# twenty times, which makes "the line that started it" stop meaning
+# anything.
 registry.register(ToolSpec("shell_background", shell_sessions.BACKGROUND_TOOL_SCHEMA, shell_sessions.background_run, approval_check=shell._shell_approval_check, approval_notice=shell_sessions.background_notice, refusal_check=shell_sessions.background_refusal, available_check=shell_sessions.available, grant_policy=GRANT_NEVER, budget=BUDGET_IO, rationale_param="rationale", headline_param="command", opens_session=True))
 registry.register(ToolSpec("shell_monitor", shell_sessions.MONITOR_TOOL_SCHEMA, shell_sessions.monitor_run, approval_check=shell._shell_approval_check, approval_notice=shell_sessions.monitor_notice, refusal_check=shell_sessions.monitor_refusal, available_check=shell_sessions.available, grant_policy=GRANT_NEVER, budget=BUDGET_IO, rationale_param="rationale", headline_param="command", opens_session=True))
+# Slice 2. Its gate is NOT shell's: `_interactive_approval_check` asks
+# about the session being opened rather than about its first line, because
+# the yes covers every line that follows (SS29, SS32). The assert below
+# holds it to that function by identity, exactly as it holds the three
+# above to theirs.
+registry.register(ToolSpec("shell_interactive", shell_sessions.INTERACTIVE_TOOL_SCHEMA, shell_sessions.interactive_run, approval_check=shell._interactive_approval_check, approval_notice=shell_sessions.interactive_notice, refusal_check=shell_sessions.interactive_refusal, available_check=shell_sessions.available, grant_policy=GRANT_NEVER, budget=BUDGET_IO, rationale_param="rationale", headline_param="command", opens_session=True))
+# Typing into a session is NOT a start, so `opens_session` is False: one
+# session would otherwise be the target of every line sent to it, which is
+# the same reason `shell_output` and `shell_kill` are not armed. It keeps
+# an approval_check because SS29's exception -- a line naming a protected
+# segment -- still asks, and a control key never does (SS30).
+registry.register(ToolSpec("shell_input", shell_sessions.INPUT_TOOL_SCHEMA, shell_sessions.input_run, approval_check=shell_sessions.input_approval_check, approval_notice=shell_sessions.input_notice, refusal_check=shell_sessions.input_refusal, available_check=shell_sessions.available, grant_policy=GRANT_NEVER, budget=BUDGET_IO, headline_param="text"))
 # Reading and stopping need no approval (SS11): they act only on sessions
 # this conversation started, which someone already approved.
 registry.register(ToolSpec("shell_sessions", shell_sessions.SESSIONS_TOOL_SCHEMA, shell_sessions.sessions_run, available_check=shell_sessions.available, grant_policy=GRANT_ANYWHERE, budget=BUDGET_IO))
@@ -1033,6 +1047,22 @@ registry.register(ToolSpec(
     parallel=True,
 ))
 
+# WHICH gate each shell-mode-exempt tool must carry, by identity. A mapping
+# rather than the single name this started as, because slice 2 added a tool
+# whose gate is deliberately a different function: `shell_interactive` is
+# governed by `shell_approval_mode` like the rest, but asks its question
+# about the SESSION rather than about one command (SS29, SS32). Naming the
+# expected gate per tool keeps the check as strict as identity ever was and
+# makes it stricter in one way -- a name added to APPROVAL_BY_SHELL_MODE
+# with no entry here now fails, where before any shell gate would have done.
+_SHELL_MODE_GATES = {
+    "shell": shell._shell_approval_check,
+    "shell_background": shell._shell_approval_check,
+    "shell_monitor": shell._shell_approval_check,
+    "shell_interactive": shell._interactive_approval_check,
+}
+
+
 def _assert_shell_mode_exemption(tools: dict) -> None:
     """SS16: every tool exempt from `tool_approvals` carries the shell gate.
 
@@ -1050,16 +1080,20 @@ def _assert_shell_mode_exemption(tools: dict) -> None:
     broken = []
     for name in sorted(APPROVAL_BY_SHELL_MODE):
         spec = tools.get(name)
+        expected = _SHELL_MODE_GATES.get(name)
         if spec is None:
             broken.append(f"{name} is not registered")
-        elif spec.approval_check is not shell._shell_approval_check:
-            broken.append(f"{name} does not use shell's own approval check")
+        elif expected is None:
+            broken.append(f"{name} has no declared gate in "
+                          f"_SHELL_MODE_GATES")
+        elif spec.approval_check is not expected:
+            broken.append(f"{name} does not use {expected.__name__}")
     if broken:
         raise RuntimeError(
             "These tools are exempt from tool_approvals because "
             "shell_approval_mode is supposed to gate them, and it does not: "
-            f"{broken}. Either register them with "
-            "shell._shell_approval_check, or take them out of "
+            f"{broken}. Either register them with the gate "
+            "_SHELL_MODE_GATES names, or take them out of "
             "security.permissions.APPROVAL_BY_SHELL_MODE and give them a "
             "tool_approvals field (ROADMAP_v3 §49, SS16)."
         )

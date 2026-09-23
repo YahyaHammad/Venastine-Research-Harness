@@ -53,7 +53,7 @@ import config_update
 import storage
 from agents.manager import manager
 from agents.tui_commands import register_agent_commands
-from core import config_loader, shell_sessions
+from core import config_loader, session_wake, shell_sessions
 from core.agent_activity import AgentActivity
 from core.approval import RunAuthorization
 from core.client import api_initialization, effort_levels_for_model
@@ -562,7 +562,7 @@ def _redacted_command(row) -> str:
     command at two widths and a second call site is how one of them comes
     to skip the policy.
     """
-    tool = ("shell_monitor" if row.kind == "monitor" else "shell_background")
+    tool = session_wake.TOOL_FOR_KIND.get(row.kind, "shell_background")
     return check_output_policy(tool, {"command": row.command})["command"]
 
 

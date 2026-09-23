@@ -41,7 +41,7 @@ from typing import Optional
 from uuid import UUID
 
 import config
-from core.session_wake import TOOL_FOR_KIND
+from core.session_wake import KIND_FOR_TOOL, TOOL_FOR_KIND
 from core.shell_sessions import (
     EXITED,
     FAILED,
@@ -186,7 +186,7 @@ def stored_entries(thread_id: UUID, call_id: str) -> list[ViewEntry]:
     params = (call or {}).get("input") or {}
     clean = _clean(name, str(params.get("command") or ""),
                    str(params.get("rationale") or ""))
-    kind = KIND_MONITOR if name == "shell_monitor" else KIND_BACKGROUND
+    kind = KIND_FOR_TOOL.get(name, KIND_BACKGROUND)
     named_as = f"Session {session_id} " if session_id else "A session "
     status = _STATE_WORDS.get(shape, shape) or "did not report"
     entries: list[ViewEntry] = [

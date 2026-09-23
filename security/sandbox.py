@@ -934,6 +934,65 @@ def _venastine_readonly_mount(workspace_real: str) -> list[str]:
     return ["-v", f"{venastine}:/workspace/.venastine:ro"]
 
 
+# The command an interactive session's container runs (ROADMAP_v3 §49, slice
+# 2). Every part of it was measured through this builder before it was
+# written (batch 100), and each clause is here for a reason that was OBSERVED:
+#
+#   script -qfec          makes the pty INSIDE the container, so the client
+#                         never needs a real terminal and `docker run -t`'s
+#                         CR mangling never happens. `-e` returns the shell's
+#                         own exit code (measured: `exit 3` gives 3), `-f`
+#                         flushes so output arrives as it is written, `-q`
+#                         drops the transcript header.
+#   stty -echo            SS33. The pty is 0x0, so readline echoes a
+#                         200-character command back as `\r<xxxx` -- its
+#                         horizontal-scroll marker -- which no honest rule
+#                         could strip. With the echo off there is nothing to
+#                         strip at any length.
+#   rows 50 cols 1000     belt and braces for a program that turns echo back
+#                         on: then the mangling needs a 1000-column line
+#                         rather than an 80-character one.
+#   the prompt            SS34. Set to a token this process minted, so
+#                         "the shell is ready" is read rather than
+#                         inferred from silence. (Described rather than
+#                         named by its shell variable, whose spelling is
+#                         exactly the shape of a decision id -- the
+#                         citation guard is right to say so.)
+#   +o emacs +o vi        line editing off, so nothing re-enables the echo.
+#   --norc --noprofile    no user rc file reaches it, in a container whose
+#                         image the user may have replaced.
+_INTERACTIVE_INNER = (
+    "stty -echo rows 50 cols 1000; export PS1='{prompt}'; "
+    "exec bash --norc --noprofile -i +o emacs +o vi")
+
+_PROMPT_TOKEN_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789>")
+
+
+def new_prompt_token() -> str:
+    """A fresh prompt token for one interactive session (SS34).
+
+    Minted here rather than by the caller because it is embedded in a shell
+    string below: the character set is the reason that embedding is safe,
+    and a token and the quoting that contains it are one decision.
+    """
+    return "VEN" + uuid.uuid4().hex[:8] + ">"
+
+
+def _interactive_command(prompt_token: str) -> str:
+    """The container's command for an interactive session.
+
+    The token is asserted against its own alphabet rather than quoted
+    defensively: it is never a model's value -- `new_prompt_token` is the
+    only thing that makes one -- and a check that says so is worth more than
+    an escape that would hide the day it stopped being true.
+    """
+    if not prompt_token or set(prompt_token) - _PROMPT_TOKEN_CHARS:
+        raise ValueError("prompt token is not a minted one: %r" % prompt_token)
+    return 'script -qfec "%s" /dev/null' % _INTERACTIVE_INNER.format(
+        prompt=prompt_token)
+
+
 def _docker_argv(
     command: str,
     workspace_dir: str,
@@ -943,6 +1002,7 @@ def _docker_argv(
     name: str,
     *,
     session_timeout_s: Optional[int] = None,
+    prompt_token: str = "",
 ) -> list[str]:
     """The container command line, for a one-shot run and for a session.
 
@@ -979,6 +1039,20 @@ def _docker_argv(
                          124 after 3.6 s over two children, and a child
                          ignoring TERM KILLed at 5.5 s, the container
                          removed both times.
+
+    *prompt_token* makes it an INTERACTIVE session's argv (slice 2), which
+    differs in two more places and no others:
+
+      -i                 docker keeps the container's stdin open as a PIPE.
+                         NOT `-t`: the pty is made inside the container by
+                         `script`, so nothing here needs a real terminal.
+      the wrapper        `_interactive_command`, in place of the agent's
+                         text. An interactive session's *command* is TYPED
+                         into the shell once it is up, not handed to the
+                         container -- so it is classified and approved as
+                         `shell` would (SS32), and the shell it lands in is
+                         always the one measured here rather than whatever
+                         the text happened to start.
     """
     workspace_real = os.path.realpath(workspace_dir)
 
@@ -1002,6 +1076,8 @@ def _docker_argv(
     ]
     if session_timeout_s is not None:
         docker_args.append("--sig-proxy=false")
+    if prompt_token:
+        docker_args.append("-i")
 
     if not network:
         docker_args.append("--network")
@@ -1019,7 +1095,11 @@ def _docker_argv(
     docker_args.append(config.SANDBOX_DOCKER_IMAGE)
     if session_timeout_s is not None:
         docker_args.extend(["timeout", "-k", "10", str(session_timeout_s)])
-    if argv:
+    if prompt_token:
+        # The agent's text is not in this argv at all; see the docstring.
+        docker_args.extend(
+            ["bash", "-c", _interactive_command(prompt_token)])
+    elif argv:
         docker_args.extend(shlex.split(command))
     else:
         docker_args.extend(["bash", "-c", command])
@@ -1386,17 +1466,26 @@ def _isolation_kwargs() -> dict:
 
 def _popen_session(args: list[str], *, cwd: Optional[str] = None,
                    env: Optional[dict] = None,
-                   preexec_fn: Optional[Callable[[], None]] = None):
-    """Start a session's process: no stdin, one merged output stream.
+                   preexec_fn: Optional[Callable[[], None]] = None,
+                   stdin=subprocess.DEVNULL):
+    """Start a session's process: one merged output stream, and by
+    default no stdin.
 
-    NO STDIN, because a long-lived child reading the terminal is a second
-    reader beside the CLI's one (§29 N1). stderr MERGED into stdout, because
-    a monitor has to see lines in the order the program wrote them, and two
-    pipes read on two threads do not preserve that.
+    NO STDIN BY DEFAULT, because a long-lived child reading the TERMINAL is
+    a second reader beside the CLI's one (§29 N1). An interactive session
+    passes a PIPE (slice 2), and N1's reason survives the constant intact:
+    what it forbids is a child INHERITING THE CONSOLE, and a pipe that only
+    the harness writes to is not a second reader of anything. The default
+    stays DEVNULL so a caller gets the old behaviour by saying nothing.
+
+    stderr MERGED into stdout, because a monitor has to see lines in the
+    order the program wrote them, and two pipes read on two threads do not
+    preserve that. For an interactive session there is only one stream to
+    merge anyway: a pty carries both.
     """
     return subprocess.Popen(
         args, cwd=cwd, env=env,
-        stdin=subprocess.DEVNULL,
+        stdin=stdin,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         preexec_fn=preexec_fn,
@@ -1425,6 +1514,12 @@ class SessionProcess:
     @property
     def stdout(self):
         return self._proc.stdout
+
+    @property
+    def stdin(self):
+        """The write end, or None for a session started without one --
+        which is every kind but interactive."""
+        return self._proc.stdin
 
     @property
     def pid(self) -> int:
@@ -1584,6 +1679,67 @@ def start_sandboxed(
     except OSError as e:
         raise SandboxUnavailable(f"Could not start the command: {e}") from None
     raise SandboxUnavailable(_unavailable_message())
+
+
+
+def start_interactive(
+    workspace_dir: str,
+    *,
+    profile: CommandProfile,
+    docker_available: bool,
+    timeout_s: int,
+    prompt_token: str,
+) -> SessionProcess:
+    """Open a shell with a pty inside the container and return it at once.
+
+    `start_sandboxed`'s twin for a session the agent TYPES INTO: the same
+    workspace refusal, the same route, the same container argv builder, plus
+    a stdin pipe and the pty wrapper.
+
+    THE CONTAINER ROUTE OR NOTHING (SS28). Every other route is refused with
+    the reason rather than served differently. A pipe-only shell with no pty
+    is not a worse interactive session, it is a DIFFERENT one that the model
+    cannot see is different: no prompt comes back, output is block-buffered
+    until a program exits, and `isatty` sends half the programs worth opening
+    down another path. That gap between what was approved and what runs is
+    the drift class §46 (EP6) and #157 are about, so it is closed by refusing
+    rather than by documenting. WSL joins in slice 3, where it was measured.
+
+    There is no *command* argument on purpose: the agent's text is typed into
+    the shell once it is up, so this function's answer does not depend on it.
+    """
+    refusal = protected_paths.check_workspace(workspace_dir)
+    if refusal:
+        raise SandboxUnavailable(refusal)
+    os.makedirs(workspace_dir, exist_ok=True)
+    route = _route(profile, bool(docker_available))
+    if route != ROUTE_CONTAINER:
+        raise SandboxUnavailable(
+            "An interactive shell needs a container runtime, and none is "
+            "available. Unlike a one-shot command there is no fallback: a "
+            "shell without a pty would answer differently in ways you could "
+            "not see -- no prompt, output held back until a program exits, "
+            "and programs taking their non-interactive path. Install Docker "
+            "or Podman, or use shell_background for a command that does not "
+            "need to be typed into.")
+    runtime = known_runtime()
+    _log_image_identity(runtime)
+    name = f"session-{uuid.uuid4().hex[:12]}"
+    args = _docker_argv(
+        "", workspace_dir, profile.network, False, runtime, name,
+        session_timeout_s=int(timeout_s) + SESSION_TIMEOUT_MARGIN_S,
+        prompt_token=prompt_token)
+    try:
+        proc = _popen_session(args, stdin=subprocess.PIPE)
+    except FileNotFoundError:
+        raise SandboxUnavailable(
+            f"The {runtime} CLI was not found. Install Docker or Podman.") \
+            from None
+    except OSError as e:
+        raise SandboxUnavailable(
+            f"Could not open the shell: {e}") from None
+    return DockerSessionProcess(proc, runtime=runtime, name=name,
+                                tier=profile.tier)
 
 
 def kill_labelled_containers() -> list[str]:

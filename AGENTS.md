@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 5061 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 5172 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -148,7 +148,7 @@ made the move free: no import changed, and `tests/test_docs_consistency.py` is t
 opens any of these files (its `DOCS` constant is where the path now comes from).
 
 - **docs/ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49 onward, in progress) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A15 from §32, W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 SS1–SS24 from §49, NW1–NW5 from §50 and PG1–PG4 from §51). Section and D-numbers are stable and cross-referenced everywhere.
+- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49 onward, in progress) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A15 from §32, W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 SS1–SS34 from §49, NW1–NW5 from §50 and PG1–PG4 from §51). Section and D-numbers are stable and cross-referenced everywhere.
 
 **Six namespaces use the same `LETTER+NUMBER` shape, and only the first is the
 record.** An id that resolves to two places is a cross-reference that fails
@@ -1805,6 +1805,38 @@ And from §50 (batch 99) -- the agent declares that a command needs the network 
 - **The three tools share ONE description string** for the field (NW4, NW5): `shell.ShellParams`' is the
   copy `shell_background` and `shell_monitor` read.
 
+And slice 2 (batch 100) -- an interactive shell the agent types into (SS25-SS34):
+
+- **The pty is made INSIDE the container**, by `script -qfec`, not by `docker run -t`. The client then
+  never needs a real terminal and docker never mangles the stream. `-i` keeps stdin a pipe, and
+  `_popen_session` takes its stdin rather than asserting `DEVNULL` -- N1's reason survives the constant,
+  because what it forbids is a child INHERITING THE CONSOLE and a pipe only the harness writes to is not
+  a second reader of anything.
+- **The echo is OFF and the pty is sized** (SS33). Measured: the pty is 0x0, so readline echoes a
+  200-character command back as `\r<xxxx`, its horizontal-scroll marker, which no honest rule could
+  strip. Turning the echo off makes the problem not exist at any length instead of parsing it back out.
+- **The prompt is a token this process minted** (SS34), so "the shell is ready" is READ rather than
+  inferred from silence. Its consequence is the thing to hold on to: with the echo off, NOTHING appears
+  on the stream when a command starts, so a prompt still standing from the last command is
+  indistinguishable from an idle shell. A send therefore waits for the NEXT prompt and requires it to
+  settle for the quiet interval. **Do not "optimise" that settle away** -- it is what stops a prompt
+  merely passed through on the way to a queued line being reported as the answer.
+- **`send` always returns** (SS26), on whichever of four comes first -- `ready`, `matched`, `quiet`,
+  `bound` -- and the result NAMES which, because only `ready` says a command finished. `quiet` never
+  pre-empts a `wait_for`: a caller that said what it was waiting for did not ask about silence.
+- **A line over 4000 bytes is REFUSED, not sent** (measured: a pty in canonical mode takes 4095 bytes on
+  one line and silently drops the rest, so the shell runs a truncated command and reports success). A
+  command a human approved must not be edited by a terminal driver on its way in.
+- **Opening is approved as a SESSION, not as its first line** (SS29, SS32). `shell_interactive` carries
+  `shell._interactive_approval_check`, not shell's own, and the profile that routes it is STATED
+  (`interactive_profile`: runs_code, writes, measured) rather than read off text. Reading the first line
+  would mean opening with `pwd` was auto-approved as a read and handed back a shell that can run
+  anything. `_SHELL_MODE_GATES` holds each exempt tool to ITS gate by identity.
+- **Two questions, one list** (SS25): the 4-live cap counts an interactive session, and the prompt block
+  does not. `_live_locked` takes the kinds, and `wait_for_wake` passes the blocking ones -- load bearing,
+  since that loop keeps a turn alive and an idle shell would hold it open exactly as a hung read would.
+- **Its end is HELD, never a wake** (SS31), whoever ended it.
+
 And slice 1's foundations (batch 94) -- the pieces under the session tools, not yet reachable from any tool:
 
 - **A wake is a harness-written USER row, marked by `MessageLog.harness`** (SS5). A column, never a role
@@ -2434,7 +2466,7 @@ That example is deliberately a *current* divergence. This paragraph used to cite
 
 **Never name a top-level file after a stdlib or installed package.** A root `logging.py` once silently shadowed stdlib `logging`; hence `logging_setup.py`.
 
-**Registering a tool is four steps**: import the module, `registry.register(ToolSpec(...))`, add a boolean to `config.ToolPermissions` and -- with one deliberate exception -- to `config.ToolApprovals`, and `assert_permissions_declared()` at the bottom of `tools/registry.py` enforces the third at import time (D24). The exception is `security/permissions.py`'s `APPROVAL_BY_SHELL_MODE` -- `shell` and the two session tools that start a command -- whose approval lives solely in `shell_approval_mode`; a test pins that set as the sole exemption, and `_assert_shell_mode_exemption` requires each of them to carry shell's own approval check by identity, so the hole cannot outlive the gate that justifies it (§49, SS16). Skipping the declaration used to fail silently — `fetch_url` was registered, documented as working, and denied on every call for its entire life, with the schema still advertised so the model kept choosing it. It now raises `RuntimeError` on import instead. `mcp__*` names are exempt (they get `_default_for_unknown_tool`'s named default).
+**Registering a tool is four steps**: import the module, `registry.register(ToolSpec(...))`, add a boolean to `config.ToolPermissions` and -- with one deliberate exception -- to `config.ToolApprovals`, and `assert_permissions_declared()` at the bottom of `tools/registry.py` enforces the third at import time (D24). The exception is `security/permissions.py`'s `APPROVAL_BY_SHELL_MODE` -- `shell` and the three session tools that START one -- whose approval lives solely in `shell_approval_mode`; a test pins that set as the sole exemption, and `_assert_shell_mode_exemption` requires each of them to carry THE GATE `_SHELL_MODE_GATES` NAMES FOR IT, by identity, so the hole cannot outlive the gate that justifies it (§49, SS16). Three of them carry `shell._shell_approval_check`; `shell_interactive` carries `shell._interactive_approval_check`, because its yes covers every line typed into the session afterwards and so cannot be a question about one command (batch 100, SS29/SS32). Skipping the declaration used to fail silently — `fetch_url` was registered, documented as working, and denied on every call for its entire life, with the schema still advertised so the model kept choosing it. It now raises `RuntimeError` on import instead. `mcp__*` names are exempt (they get `_default_for_unknown_tool`'s named default).
 
 **A raising tool must not kill the run.** `dispatch()` wraps the handler call and turns any exception into `{"error": ...}`, logged at ERROR with the traceback so a real bug stays findable. `ToolCallDenied` and the unknown-tool `ValueError` are raised *above* the handler and deliberately still propagate. The error result goes through `check_output_policy` like any other — an exception message often carries the request that produced it, and for an HTTP client that means a URL with an API key in it. This is a backstop: `web_search` and `arxiv_search` return their own error dicts after exhausting retries (`fetch_url` always did), so the model gets something specific. The bug that forced this: `arxiv_search` requested `http://export.arxiv.org`, arXiv now 301-redirects it, httpx does **not** follow redirects by default, `raise_for_status()` ignores 3xx, and `ET.fromstring("")` on the empty redirect body raised — three retries, then an exception that flipped a finished ten-pass research run to `status='failed'`.
 

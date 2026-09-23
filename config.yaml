@@ -588,9 +588,18 @@ sandbox_max_pids: 200
 # this and told so -- never refused.
 shell_session_timeout_cap_s: 3600
 
-# How many background and monitor sessions may be live at once, counted
-# across the main agent and every subagent. Each is its own container
-# under the memory ceiling above.
+# How long an INTERACTIVE shell may sit with nothing typed into it
+# before it is closed (ROADMAP_v3 §49, SS25). Unlike a background
+# command, an interactive session does not block your prompt, so this is
+# the only thing that stops a forgotten shell holding a container open
+# until its timeout cap. Measured from the last input, not the last
+# output: a program printing to itself is still one nobody is using.
+shell_session_idle_timeout_s: 600
+
+# How many sessions of any kind may be live at once, counted across the
+# main agent and every subagent. Each is its own container under the
+# memory ceiling above. An interactive shell counts here -- it holds a
+# container like any other -- even though it does not block your prompt.
 shell_session_max_live: 4
 
 # How many times in a row finished sessions may wake the agent with no
@@ -850,6 +859,8 @@ tool_permissions:
   shell: false
   shell_background: false
   shell_monitor: false
+  shell_interactive: false
+  shell_input: false
   shell_sessions: false
   shell_output: false
   shell_kill: false
@@ -865,11 +876,14 @@ tool_permissions:
 
 # AUTHORITY -- whether each tool needs a human yes before it runs. Approval ORs
 # across every layer, so a true here is a one-way ratchet that can only
-# add prompts. `shell`, `shell_background` and `shell_monitor` are
-# deliberately absent: their approval is governed solely by
-# `shell_approval_mode` above -- there is no second switch, so there is
-# nothing here that can disagree with it. Listing, reading and stopping a
-# session ask nothing: they act only on this conversation's own sessions.
+# add prompts. `shell`, `shell_background`, `shell_monitor` and
+# `shell_interactive` are deliberately absent: their approval is governed
+# solely by `shell_approval_mode` above -- there is no second switch, so
+# there is nothing here that can disagree with it. Listing, reading and
+# stopping a session ask nothing: they act only on this conversation's own
+# sessions. `shell_input` is here and ships false because approving the
+# shell approved what you type into it (SS29) -- set it true to be asked
+# about every line instead.
 # A tool gated here is not merely denied where nothing can ask -- it stops
 # being advertised at all, which is why ask_user, pin and todo_write are
 # ungated.
@@ -887,6 +901,7 @@ tool_approvals:
   read: false
   write: false
   edit: false
+  shell_input: false
   shell_sessions: false
   shell_output: false
   shell_kill: false

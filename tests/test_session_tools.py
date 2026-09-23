@@ -1,5 +1,5 @@
 """
-ROADMAP_v3 §49, slice 1: the five session tools
+ROADMAP_v3 §49, slices 1 and 2: the seven session tools
 (tools/builtin/shell_sessions.py) and how they are registered.
 
 Offline, with no container and no real process: the manager is replaced by
@@ -21,11 +21,21 @@ from security.permissions import APPROVAL_BY_SHELL_MODE
 from tests.conftest import set_posture
 from tools.base import ToolSpec
 from tools.builtin import shell
-from tools.registry import _assert_shell_mode_exemption, registry
+from tools.registry import (
+    _SHELL_MODE_GATES,
+    _assert_shell_mode_exemption,
+    registry,
+)
 
-NAMES = ("shell_background", "shell_monitor", "shell_sessions",
-         "shell_output", "shell_kill")
-STARTERS = ("shell_background", "shell_monitor")
+NAMES = ("shell_background", "shell_monitor", "shell_interactive",
+         "shell_input", "shell_sessions", "shell_output",
+         "shell_kill")
+STARTERS = ("shell_background", "shell_monitor", "shell_interactive")
+# The starts whose gate is shell's own, asked about the COMMAND they were
+# given. `shell_interactive` is not one: its yes covers every later line,
+# so it is asked about the session instead (SS29, SS32), and the test
+# below pins that difference rather than letting a widened tuple hide it.
+COMMAND_GATED = ("shell_background", "shell_monitor")
 
 SECRET = "sk-abc123def456ghi789jkl012mno345pqr678"
 
@@ -104,14 +114,28 @@ class TestRegistration:
         approvals = config.ToolApprovals()
         for name in STARTERS:
             assert not hasattr(approvals, name), name
-        for name in ("shell_sessions", "shell_output", "shell_kill"):
+        for name in ("shell_input", "shell_sessions", "shell_output",
+                     "shell_kill"):
             assert getattr(approvals, name) is False, name
 
     def test_the_start_tools_carry_shells_own_gate_by_identity(self):
+        """SS16, as amended in batch 100: every exempt tool carries the
+        gate `_SHELL_MODE_GATES` names for it, by identity.
+
+        Per tool rather than one shared function, because slice 2 added a
+        start whose gate is deliberately a different one -- and naming it
+        pins more than the old check did, since a name added to the exempt
+        set with no entry in the mapping now fails.
+        """
         assert APPROVAL_BY_SHELL_MODE == {"shell", *STARTERS}
-        for name in STARTERS:
+        assert set(_SHELL_MODE_GATES) == APPROVAL_BY_SHELL_MODE
+        for name in COMMAND_GATED:
             assert (registry._tools[name].approval_check
                     is shell._shell_approval_check), name
+        assert (registry._tools["shell_interactive"].approval_check
+                is shell._interactive_approval_check)
+        for name, gate in _SHELL_MODE_GATES.items():
+            assert registry._tools[name].approval_check is gate, name
 
     def test_the_other_three_decide_no_approval_of_their_own(self):
         """No approval_check at all, which is also what makes them
@@ -153,10 +177,27 @@ class TestApproval:
             self, mode, command, monkeypatch, workspace, runtime_up):
         set_posture(monkeypatch, shell_approval_mode=mode)
 
-        for name in STARTERS:
+        for name in COMMAND_GATED:
             assert registry.approval_needed(
                 name, _params(command=command)) is registry.approval_needed(
                 "shell", {"command": command}), f"{name} under {mode}"
+
+    @pytest.mark.parametrize("mode", ["tiered", "contained"])
+    def test_opening_a_shell_asks_where_the_same_first_line_would_not(
+            self, mode, monkeypatch, workspace, runtime_up):
+        """SS29/SS32, and the reason `shell_interactive` has its own gate.
+
+        `pwd` through `shell` is a read that nobody is asked about. Opening
+        an interactive session WITH `pwd` as its first line is not a read:
+        the yes covers every line typed afterwards. A gate reading the
+        first line would have handed back a shell that can run anything,
+        approved as a directory listing.
+        """
+        set_posture(monkeypatch, shell_approval_mode=mode)
+
+        assert registry.approval_needed("shell", {"command": "pwd"}) is False
+        assert registry.approval_needed(
+            "shell_interactive", _params(command="pwd")) is True
 
     def test_the_notice_says_where_it_runs_and_for_how_long(
             self, monkeypatch, workspace, runtime_up):

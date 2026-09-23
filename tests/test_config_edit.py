@@ -72,7 +72,7 @@ class TestTheCatalogueCoversTheFile:
 
         names = set(rows)
         tools = list(config_schema.ToolPermissionsModel.model_fields)
-        assert len(tools) == 28
+        assert len(tools) == 30
         for tool in tools:
             assert f"tool_permissions.{tool}" in names
             if tool in APPROVAL_BY_SHELL_MODE:
@@ -102,9 +102,9 @@ class TestTheCatalogueCoversTheFile:
         marked = {row.name for row in config_edit.catalogue() if row.authority}
         expected = set(config_schema.HARNESS_AUTHORITY_KEYS)
         leaves = {name for name in marked if "." in name}
-        assert len(leaves) == 53, (
-            "tool_permissions holds all 28 tools and tool_approvals holds "
-            "all but the three whose approval lives solely in "
+        assert len(leaves) == 56, (
+            "tool_permissions holds all 30 tools and tool_approvals holds "
+            "all but the four whose approval lives solely in "
             "shell_approval_mode")
         assert marked - leaves == expected
 
@@ -260,7 +260,7 @@ class TestTheRoundTripIsLossless:
         # 128 since batch 95: the five session tools' permission flags, and
         # approvals fields for the three of them the shell mode does not
         # gate (SS11, SS16).
-        assert touched == 128, f"{touched} settable scalars, expected 128"
+        assert touched == 132, f"{touched} settable scalars, expected 132"
         assert config_edit._dump(tree) == text
 
     def test_a_one_value_change_is_a_one_line_diff(self, tmp_path,
@@ -374,7 +374,7 @@ class TestTheTablesCanBeAskedAbout:
     def test_a_table_is_found_and_explained(self):
         row = config_edit.find("tool_permissions")
         assert row is not None
-        assert "28 tools" in row.values
+        assert "30 tools" in row.values
         lines = " ".join(config_edit.explain("tool_permissions"))
         assert "not a key" not in lines
         assert "AUTHORITY" in lines

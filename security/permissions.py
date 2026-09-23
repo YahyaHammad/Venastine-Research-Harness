@@ -47,7 +47,8 @@ if TYPE_CHECKING:  # pragma: no cover - typing only, never imported at runtime
 # shell's own approval check, so the exemption cannot outlive the gate it is
 # an exemption FOR.
 APPROVAL_BY_SHELL_MODE = frozenset({"shell", "shell_background",
-                                    "shell_monitor"})
+                                    "shell_monitor",
+                                    "shell_interactive"})
 
 
 def _default_for_unknown_tool(tool_name: str) -> bool:

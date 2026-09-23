@@ -1406,6 +1406,41 @@ def http(monkeypatch):
 # ---- Background sessions (ROADMAP_v3 §49) ---------------------------------
 
 
+NEWLINE_BYTE = chr(10).encode()
+
+
+class FakeSessionStdin:
+    """The write end of an interactive session's stdin (§49, slice 2).
+
+    Records what the harness typed, so a test can assert on the BYTES
+    that reached the pty rather than on the call that produced them --
+    the newline a send appends, and the control character a `control`
+    sends instead of text, are only visible here.
+    """
+
+    def __init__(self, on_write=None):
+        self.chunks = []
+        self.broken = False
+        # What the far end does when a line arrives. A real shell answers
+        # a completed line with a prompt; a fake that never did would make
+        # every send in every test wait out its bound.
+        self.on_write = on_write
+
+    def write(self, data):
+        if self.broken:
+            raise OSError("broken pipe")
+        self.chunks.append(data)
+        if self.on_write is not None:
+            self.on_write(data)
+
+    def flush(self):
+        pass
+
+    @property
+    def sent(self):
+        return b"".join(self.chunks).decode("utf-8", "replace")
+
+
 class FakeSessionProcess:
     """Stands in for security.sandbox.SessionProcess: a background session's
     process, driven by the test instead of by a container.
@@ -1417,7 +1452,8 @@ class FakeSessionProcess:
     let a reader finish before the program had said anything.
     """
 
-    def __init__(self, *, ran_on="container", tier="SANDBOXED"):
+    def __init__(self, *, ran_on="container", tier="SANDBOXED",
+                 prompt_token=""):
         import queue
         import threading as _threading
         self.ran_on = ran_on
@@ -1428,6 +1464,16 @@ class FakeSessionProcess:
         self._exited = _threading.Event()
         self._code = None
         self.stdout = self
+        # Slice 2. An interactive session has a write end and a prompt;
+        # every other kind has neither, and gets a recorder nothing
+        # writes to rather than a second class to keep in step.
+        self.stdin = FakeSessionStdin()
+        self.prompt_token = prompt_token
+
+    def prompt(self):
+        """What a shell does when it finishes a command and wants the
+        next one: print the prompt this session was opened with."""
+        self.write(self.prompt_token)
 
     def write(self, data):
         self._chunks.put(data.encode("utf-8") if isinstance(data, str) else data)
@@ -1475,6 +1521,43 @@ def session_starter():
         return process
 
     starter.started = started
+    return starter
+
+
+@pytest.fixture
+def interactive_starter():
+    """`session_starter`'s twin for an INTERACTIVE session (§49, slice 2).
+
+    Separate because the manager passes `prompt_token` only for that kind,
+    and because the shell has to reach its first prompt before `start`
+    will type anything -- so the fake prints one as it comes up, exactly
+    where a real shell does. `prompt_on_start = False` withholds it, which
+    is the only way to test a shell that never comes up.
+    """
+    started = []
+
+    def starter(command, workspace_dir, *, profile, docker_available,
+                timeout_s, prompt_token="", shell_binary=None):
+        process = FakeSessionProcess(
+            tier=getattr(profile, "tier", "SANDBOXED"),
+            prompt_token=prompt_token)
+        started.append({"command": command, "timeout_s": timeout_s,
+                        "workspace_dir": workspace_dir,
+                        "docker_available": docker_available,
+                        "prompt_token": prompt_token,
+                        "process": process})
+        if starter.prompt_on_start and prompt_token:
+            process.prompt()
+        if starter.auto_prompt:
+            def answer(data, p=process):
+                if data.endswith(NEWLINE_BYTE):
+                    p.prompt()
+            process.stdin.on_write = answer
+        return process
+
+    starter.started = started
+    starter.prompt_on_start = True
+    starter.auto_prompt = True
     return starter
 
 

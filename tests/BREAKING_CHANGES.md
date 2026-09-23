@@ -4830,3 +4830,20 @@ consumers use, and it accepts only literal `True`.
 | Repeat the declaration in the prompt when the detector already saw it | `test_a_recognised_command_reads_as_one_fact` | One fact, one sentence. The extra clause exists to say the call ASKED for egress, which is only news when the detector did not already say so |
 | Write the description separately for each of the three tools | `test_both_session_start_tools_take_it` | Three copies of a parameter's meaning is three chances to drift. `shell.ShellParams`' description is the one copy the session tools read |
 | Assert the flag's effect through `tiered` | `test_contained_is_where_the_flag_changes_the_answer` | Under `tiered` a non-inert command already asks because `runs_code` is true (CE1), so such a test passes without the flag doing anything. `contained` is the mode where the declaration is the deciding fact |
+
+---
+
+## Batch 100 -- an interactive shell the agent types into (ROADMAP_v3 §49, slice 2)
+
+| What broke | Why | The repair |
+|---|---|---|
+| `test_session_tools.py::test_the_start_tools_carry_shells_own_gate_by_identity` | `APPROVAL_BY_SHELL_MODE` gained `shell_interactive`, whose gate is deliberately NOT `shell._shell_approval_check` -- its yes covers every line typed into the session afterwards, so it cannot be a question about one command (SS29, SS32) | Repaired to assert per tool against `tools.registry._SHELL_MODE_GATES`, which pins MORE than the old check: a name added to the exempt set with no entry in the mapping now fails, where before any shell gate would have done |
+| `test_session_tools.py::test_a_start_asks_exactly_when_the_same_command_would` | Same change. The claim is true of the two command-shaped starts and deliberately FALSE of the interactive one | `STARTERS` split: `COMMAND_GATED` for that sweep, and a new test pinning the DIFFERENCE -- opening with `pwd` asks where `pwd` through `shell` does not. Widening the tuple would have hidden the property the batch exists to create |
+| `test_permission_context.py::test_ac6_the_shell_mode_tools_are_the_sole_approvals_exemption` | The exempt set is pinned exactly, on purpose, so a future omission cannot ride in on its precedent | The set now names four, and the test also asserts `shell_input` is NOT in it and DOES carry an approvals field -- typing into a session already approved is an ordinary tool |
+| `tests/conftest.py`'s `FakeSessionProcess` | Gained a `stdin` recorder, a `prompt_token` and a `prompt()` method | Additive; every slice-1 test passes unchanged. The new `interactive_starter` fixture is separate because the manager passes `prompt_token` only for that kind, so a slice-1 fake still sees the call it always saw |
+
+**If you are here because a send test hangs or reports the wrong bound:** the settle interval is not
+decoration. `_wait_after_input` requires the prompt to be followed by `_INPUT_QUIET_S` of silence, and
+with a FROZEN clock that can never elapse -- which is why the lifetime tests set it to zero and the send
+tests use a real clock. Removing the settle makes a prompt passed through on the way to a queued line
+read as the answer to the line just sent.

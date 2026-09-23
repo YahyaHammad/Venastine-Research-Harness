@@ -1,9 +1,16 @@
 """
 core/shell_sessions.py
 
-ROADMAP_v3 §49, slice 1. Background and monitor shell sessions: commands
-that keep running after the tool call that started them has been answered,
-and the one object that knows about all of them.
+ROADMAP_v3 §49, slices 1 and 2. Shell sessions: commands that keep running
+after the tool call that started them has been answered, and the one object
+that knows about all of them.
+
+THREE KINDS. `background` and `monitor` are slice 1's -- started, watched,
+reported when they end. `interactive` is slice 2's: a shell held open with
+a pty that the agent TYPES INTO, whose state survives across its own turns.
+It differs in four places and nowhere else: its stdin is a pipe, its output
+passes through `core/ansi.py` first, it does not block the user's prompt
+(SS25), and its end is HELD rather than woken for (SS31).
 
 WHY IN core/. The TUI, the CLI and a sleeping subagent all consume what a
 session produces, and D12 keeps the CLI a permanent fallback -- so the
@@ -50,12 +57,23 @@ from typing import Optional
 
 import config
 from core import agent_activity
+from core.ansi import PtyStream
 from core.line_pattern import compile_pattern, validate
 
 logger = logging.getLogger(__name__)
 
 KIND_BACKGROUND = "background"
 KIND_MONITOR = "monitor"
+KIND_INTERACTIVE = "interactive"
+
+# The kinds whose being live BLOCKS the user's prompt (SS2). Not the same
+# question as which kinds occupy the 4-live cap, which is all of them: the
+# cap is about resources, which an idle shell does hold, and the block is
+# about whether the agent is waiting on work it cannot proceed without,
+# which for an idle REPL it is not (SS25). One list, two questions, and
+# `_live_locked` takes the kinds so neither caller can drift into the
+# other's answer.
+BLOCKING_KINDS = frozenset({KIND_BACKGROUND, KIND_MONITOR})
 
 STARTING = "starting"
 RUNNING = "running"
@@ -74,6 +92,50 @@ KILL_USER = "user"
 KILL_QUIT = "quit"
 KILL_OWNER_FAILED = "owner_failed"
 KILL_WAKE_LIMIT = "wake_limit"
+KILL_IDLE = "idle"
+KILL_OPEN_FAILED = "open_failed"
+
+# What an interactive session may be typed at, and how it is waited on.
+# The control names are the agent's vocabulary; the bytes are the pty's.
+CONTROLS = {"interrupt": "\x03", "eof": "\x04"}
+
+# Measured, batch 100. A pty in canonical mode accepts 4095 bytes on one
+# line and SILENTLY DROPS the rest -- the shell then runs a truncated
+# command and reports success. So a longer input is REFUSED here rather
+# than half-executed: a command the user approved must not be edited by a
+# terminal driver on its way in.
+MAX_INPUT_BYTES = 4000
+
+# What each of SS26's four bounds MEANS, carried in the result beside the
+# name. The distinction the agent has to act on is that only `ready` says a
+# command finished -- `quiet` is silence, which a running command produces
+# just as well as a finished one, and that ambiguity is why SS34 exists.
+_ENDED_MEANING = {
+    "ready": ("the shell returned to its prompt, so the command finished; "
+              "anything you sent has run"),
+    "matched": ("a line matched wait_for; the command may still be running, "
+                "so send again with no text to keep reading"),
+    "quiet": ("output stopped arriving, which does NOT mean the command "
+              "finished -- send again with no text to keep waiting"),
+    "bound": ("wait_s ran out without the shell coming back to its prompt. "
+              "Whatever you sent is still running and its output is still "
+              "being collected -- send again with no text to keep reading, "
+              "or control \"interrupt\" to stop it"),
+    "ended": "the session itself ended while waiting",
+}
+
+# A pty in canonical mode holds this many bytes on one line, measured.
+_PTY_LINE_LIMIT = 4095
+# How much new output one poll pulls back to run a wait_for pattern over.
+_MATCH_SLICE = 65_536
+
+# The round trip through the container was measured at about 50 ms, so a
+# third of a second of silence is quiet rather than slow.
+_INPUT_QUIET_S = 0.3
+_INPUT_POLL_S = 0.02
+# How long a shell gets to reach its first prompt before the open fails.
+# Measured at 0.43 s; this is that with room for a cold image.
+_OPEN_BOUND_S = 30.0
 
 MAX_MATCHED_LINES = 50
 _MAX_LINE_CHARS = 16_000
@@ -291,6 +353,12 @@ class _Session:
     kill_reason: str = ""
     timed_out: bool = False
     match_count: int = 0
+    # Interactive only. `pty` strips escape sequences and takes the
+    # prompt token back out (SS27, SS34); `last_input_mono` is what the
+    # idle deadline is measured from (SS25).
+    prompt_token: str = ""
+    pty: object = None
+    last_input_mono: float = 0.0
     # The agent's own kill takes the finish as its RESULT instead of a wake
     # (`kill`). Claimed and released under the manager lock, which `_finish`
     # also holds when it reads the claim.
@@ -342,7 +410,28 @@ NULL_SINK = SessionActivity()
 
 def _default_starter(*args, **kwargs):
     from security import sandbox
+    # An interactive session is the one shape `start_sandboxed` cannot
+    # serve: it needs a stdin pipe, the pty wrapper, and the container
+    # route or nothing (SS28). The kwarg is only ever passed for that
+    # kind, so a slice-1 fake starter sees the call it always saw.
+    if kwargs.get("prompt_token"):
+        kwargs.pop("command", None)
+        args = args[1:]          # the command is typed in, not run
+        return sandbox.start_interactive(*args, **kwargs)
     return sandbox.start_sandboxed(*args, **kwargs)
+
+
+
+def _new_prompt_token() -> str:
+    """One interactive session's prompt token (SS34).
+
+    Imported lazily for `_default_starter`'s reason: core must not import
+    the sandbox at module scope. Minted THERE rather than here because the
+    token and the shell string that embeds it are one decision, and the
+    character set is what makes that embedding safe.
+    """
+    from security import sandbox
+    return sandbox.new_prompt_token()
 
 
 class SessionManager:
@@ -429,7 +518,8 @@ class SessionManager:
     def start(self, *, kind: str, command: str, profile, docker_available: bool,
               requested_timeout_s: int, owner_thread, workspace_dir: str,
               call_id: str = "", rationale: str = "",
-              pattern: Optional[str] = None) -> dict:
+              pattern: Optional[str] = None,
+              open_wait_s: float = 10.0) -> dict:
         """Start a session and return what the agent is told. Raises
         SessionRefused with the reason, or the backend's SandboxUnavailable."""
         refusal = self.start_refusal(kind, pattern, owner_thread)
@@ -437,6 +527,8 @@ class SessionManager:
             raise SessionRefused(refusal)
         timeout_s, capped = self.effective_timeout(requested_timeout_s)
         matcher = compile_pattern(pattern) if kind == KIND_MONITOR else None
+        interactive = kind == KIND_INTERACTIVE
+        token = _new_prompt_token() if interactive else ""
         span = agent_activity.current()
         with self._lock:
             refusal = self._capacity_refusal_locked(owner_thread)
@@ -455,12 +547,16 @@ class SessionManager:
                 output=OutputBuffer(int(config.SHELL_SESSION_OUTPUT_HEAD_CHARS),
                                     int(config.SHELL_SESSION_OUTPUT_TAIL_CHARS)),
                 matcher=matcher, started_mono=self._clock(),
-                started_wall=self._wall_clock())
+                started_wall=self._wall_clock(),
+                prompt_token=token,
+                pty=PtyStream(token) if interactive else None,
+                last_input_mono=self._clock())
             self._sessions[session.id] = session
+        extra = {"prompt_token": token} if interactive else {}
         try:
             process = self._starter(command, workspace_dir, profile=profile,
                                     docker_available=docker_available,
-                                    timeout_s=timeout_s)
+                                    timeout_s=timeout_s, **extra)
         except Exception:
             with self._lock:
                 session.state = FAILED
@@ -482,15 +578,74 @@ class SessionManager:
         if killed_early:
             process.kill()
         self._post(rows)
+        if interactive:
+            return self._open_interactive(session, command, open_wait_s)
         return self._started_result(session)
+
+    def _open_interactive(self, session: _Session, command: str,
+                          wait_s: float) -> dict:
+        """Wait for the shell's first prompt, then TYPE the opening command.
+
+        WAITED FOR, not fired off. The terminal driver echoes what reaches
+        it before `stty -echo` has run, and that window is the container's
+        whole startup -- so input written the instant Popen returns would
+        be echoed back EVERY time, not rarely. Waiting for the prompt also
+        turns a shell that never comes up into a clear refusal instead of a
+        session that accepts input nothing will ever read.
+
+        TYPED, not handed to the container (SS32). The text is classified
+        and approved exactly as `shell` would classify it, and then it
+        lands in the shell that was measured here -- rather than becoming
+        the container's command, where whatever it started would be the
+        thing holding the pty and the prompt token would never come back.
+        """
+        if not self._await_prompt(session, _OPEN_BOUND_S):
+            self.kill(session.id, owner_thread=session.owner_thread,
+                      reason=KILL_OPEN_FAILED)
+            raise SessionRefused(
+                "The shell did not reach a prompt within "
+                f"{int(_OPEN_BOUND_S)}s and was stopped. The container "
+                "image must provide bash and util-linux's `script`.")
+        result = self._started_result(session)
+        if command:
+            sent = self.send(session.id, session.owner_thread,
+                             text=command, wait_s=wait_s)
+            for key in ("text", "ended", "ended_meaning", "next_offset",
+                        "total_chars", "more", "gap"):
+                if key in sent:
+                    result[key] = sent[key]
+        return result
+
+    def _await_prompt(self, session: _Session, bound_s: float) -> bool:
+        """Whether the shell reached its prompt inside *bound_s*."""
+        deadline = self._clock() + bound_s
+        while self._clock() < deadline:
+            pty = session.pty
+            if pty is not None and pty.ready_count > 0 and pty.at_prompt:
+                return True
+            if session.state not in LIVE_STATES:
+                return False
+            time.sleep(_INPUT_POLL_S)
+        return False
 
     def _started_result(self, session: _Session) -> dict:
         cap = int(config.SHELL_SESSION_TIMEOUT_CAP_S)
-        woken = ("it finishes, times out, or a line matches your pattern"
-                 if session.kind == KIND_MONITOR else
-                 "it finishes or times out")
-        note = (f"Runs in the background. You will be woken when {woken}; do "
-                f"not poll it.")
+        if session.kind == KIND_INTERACTIVE:
+            idle = int(config.SHELL_SESSION_IDLE_TIMEOUT_S)
+            note = (
+                "An interactive shell is open. Send it input with "
+                "shell_input; what you do in it -- the working directory, "
+                "variables, a REPL you started -- survives between your "
+                "turns. It does NOT block the user, and nothing wakes you "
+                f"when it ends: it closes after {idle}s with no input, or "
+                f"at its {session.timeout_s}s cap, whichever comes first. "
+                "Full-screen programs (vim, htop, less) are not supported.")
+        else:
+            woken = ("it finishes, times out, or a line matches your pattern"
+                     if session.kind == KIND_MONITOR else
+                     "it finishes or times out")
+            note = (f"Runs in the background. You will be woken when "
+                    f"{woken}; do not poll it.")
         if session.capped:
             note += (f" You asked for {session.requested_timeout_s}s, which is "
                      f"above the {cap}s cap, so it runs for {cap}s.")
@@ -513,9 +668,25 @@ class SessionManager:
         reader.start()
         process = session.process
         deadline = session.started_mono + session.timeout_s
+        # SS25. An interactive session also dies of being IGNORED. Its
+        # wall-clock cap is the same one every session has, but a shell
+        # nobody is typing into is holding a container for nothing, and
+        # because it does not block the user's prompt there is no other
+        # pressure to close it.
+        idle_s = (int(config.SHELL_SESSION_IDLE_TIMEOUT_S)
+                  if session.kind == KIND_INTERACTIVE else 0)
         code = None
         while True:
             remaining = deadline - self._clock()
+            if idle_s:
+                idle_left = session.last_input_mono + idle_s - self._clock()
+                if idle_left <= 0:
+                    with self._lock:
+                        if not session.kill_reason:
+                            session.kill_reason = KILL_IDLE
+                    process.kill()
+                    break
+                remaining = min(remaining, idle_left)
             if remaining <= 0:
                 with self._lock:
                     if not session.kill_reason:
@@ -541,12 +712,21 @@ class SessionManager:
                 if not chunk:
                     break
                 text = decoder.decode(chunk)
+                if session.pty is not None:
+                    # BEFORE the buffer and before every match (SS27), so
+                    # nothing downstream ever holds a version of this text
+                    # with the escape sequences still in it.
+                    text = session.pty.feed(text)
                 session.output.append(text)
                 if session.matcher is not None:
                     pending = self._match_complete_lines(session, pending + text)
         except (OSError, ValueError):
             logger.debug("session %s output stream closed", session.id)
         text = decoder.decode(b"", final=True)
+        if session.pty is not None:
+            # An unterminated escape sequence at the end of the stream was
+            # never a sequence, and held-back text is owed to the reader.
+            text = session.pty.feed(text) + session.pty.flush()
         session.output.append(text)
         if session.matcher is not None:
             pending = self._match_complete_lines(session, pending + text)
@@ -617,9 +797,15 @@ class SessionManager:
             # model call nobody needed. Read under the lock `kill` releases
             # the claim under, so a session that outlives the wait is
             # reported the ordinary way instead of not at all.
+            # SS31. An interactive session's end is HELD whoever ended it.
+            # It does not block the user's prompt (SS25), so a wake for one
+            # would be a turn starting underneath the user's cursor -- and
+            # there is nothing in it the agent is waiting on, since every
+            # send was already answered when it was made.
             claimed = session.kill_report_claimed
             hold = not claimed and (
                 inbox.suspended
+                or session.kind == KIND_INTERACTIVE
                 or (session.kill_reason == KILL_USER
                     and session.owner_depth == 0))
             if claimed:
@@ -650,21 +836,36 @@ class SessionManager:
 
     # -- what the consumers ask --------------------------------------------------
 
-    def _live_locked(self, owner_thread) -> int:
+    def _live_locked(self, owner_thread, kinds=None) -> int:
+        """How many of this thread's sessions are live, of *kinds*.
+
+        The kinds are a parameter because two different questions are
+        asked of this one list and they have different answers (SS25):
+        what is RUNNING, which is every kind, and what the user's prompt
+        is waiting on, which is not. Defaulting to all of them keeps the
+        broad question the cheap one to ask.
+        """
         owner = str(owner_thread)
         return sum(1 for s in self._sessions.values()
-                   if s.owner_thread == owner and s.state in LIVE_STATES)
+                   if s.owner_thread == owner and s.state in LIVE_STATES
+                   and (kinds is None or s.kind in kinds))
 
     def live_for(self, owner_thread) -> int:
         with self._lock:
             return self._live_locked(owner_thread)
 
     def blocks(self, owner_thread) -> bool:
-        """Whether this thread's input is blocked (SS2): it has live sessions
-        and waking has not been suspended by the consecutive-wake limit."""
+        """Whether this thread's input is blocked (SS2): it has a live
+        BLOCKING session and waking has not been suspended by the
+        consecutive-wake limit.
+
+        An interactive session is deliberately not counted (SS25): the
+        block exists because the agent is waiting on work the user cannot
+        usefully interrupt, and an open shell is not that.
+        """
         with self._lock:
             inbox = self._inboxes.get(str(owner_thread))
-            return (self._live_locked(owner_thread) > 0
+            return (self._live_locked(owner_thread, BLOCKING_KINDS) > 0
                     and not (inbox and inbox.suspended))
 
     def suspended(self, owner_thread) -> bool:
@@ -722,8 +923,13 @@ class SessionManager:
                     rows = self._rows_locked()
                     break
                 inbox = self._inboxes.get(str(owner_thread))
+                # BLOCKING_KINDS for SS25's reason, and here it is load
+                # bearing: this loop keeps a turn alive while something is
+                # still running, and an idle interactive shell would hold
+                # the turn open exactly as a hung read would.
                 if (self._closing or (inbox and inbox.suspended)
-                        or not self._live_locked(owner_thread)):
+                        or not self._live_locked(owner_thread,
+                                                 BLOCKING_KINDS)):
                     break
                 if deadline is not None and self._clock() >= deadline:
                     break
@@ -788,6 +994,162 @@ class SessionManager:
             buffer = session.output
         page = buffer.page(offset, limit)
         page.update(session=str(session_id), status=state)
+        return page
+
+    def send(self, session_id: str, owner_thread, *, text: str = "",
+             control: str = "", wait_s: float = 10.0,
+             wait_for: Optional[str] = None) -> dict:
+        """Type into an interactive session and wait for it, BOUNDED (SS26).
+
+        Returns everything the session wrote since this call began, and
+        `ended`, naming which of the four bounds ended the wait. Every one of
+        them returns: a send cannot wait forever, because the turn it is in
+        cannot either -- that is the whole reason the gap register called a
+        hung read a wedge.
+
+        An empty *text* with no *control* writes nothing and only waits,
+        which is how a caller reads more of something still running.
+        """
+        if control and control not in CONTROLS:
+            return {"error": f"Unknown control {control!r}. Use one of: "
+                             f"{', '.join(sorted(CONTROLS))}."}
+        matcher = None
+        if wait_for:
+            reason = validate(wait_for)
+            if reason is not None:
+                return {"error": f"Invalid pattern: {reason}. Patterns use "
+                                 f"RE2 syntax: no backreferences or "
+                                 f"lookaround."}
+            matcher = compile_pattern(wait_for)
+        if control:
+            payload = CONTROLS[control]
+        elif text:
+            # The newline is added rather than demanded: a line the shell
+            # never sees because its terminator was forgotten looks exactly
+            # like a command that produced no output.
+            payload = text if text.endswith("\n") else text + "\n"
+        else:
+            payload = ""
+        size = len(payload.encode("utf-8"))
+        if size > MAX_INPUT_BYTES:
+            return {"error": (
+                f"That input is {size} bytes. A pty accepts "
+                f"{_PTY_LINE_LIMIT} on one line and silently drops the rest, "
+                f"so the shell would run a TRUNCATED command and report "
+                f"success -- it is refused here instead. Write it to a file "
+                f"with `write` and run the file.")}
+        with self._lock:
+            session = self._owned_locked(session_id, owner_thread)
+            if session is None:
+                return {"error": f"No session {session_id} in this "
+                                 f"conversation."}
+            if session.kind != KIND_INTERACTIVE:
+                return {"error": f"Session {session.id} is a {session.kind} "
+                                 f"session and cannot be typed into. Only an "
+                                 f"interactive session takes input."}
+            if session.state not in LIVE_STATES:
+                return {"error": f"Session {session.id} has already finished "
+                                 f"({session.state})."}
+            process, pty = session.process, session.pty
+            mark = session.output.total
+            # ONE rule: a prompt that arrives AFTER this write, with the
+            # stream then at rest on it. Three cheaper rules were measured
+            # first and each was wrong somewhere.
+            #
+            # `at_prompt` alone says the stream ENDS with a prompt, which is
+            # not the same as the shell being idle -- with the echo off
+            # (SS33) a command produces nothing at all when it starts, so
+            # the last prompt stands on the stream for as long as a silent
+            # command runs. Measured: a wait issued while `sleep 2` ran read
+            # that stale prompt and returned `ready` before the command had
+            # finished. Nothing observable distinguishes the two; only this
+            # side knows a line was written.
+            #
+            # Counting two prompts when the shell looked busy fixed the
+            # queued case and broke leaving a REPL, where `exit()` is eaten
+            # by python and one prompt follows. Those two are identical from
+            # out here, and telling them apart means emulating the terminal.
+            #
+            # So: always the NEXT prompt, and always let it settle. A prompt
+            # that is merely passed through on the way to running a queued
+            # line is followed by that line's output within milliseconds, so
+            # it never settles; the prompt that ends the work does. The cost
+            # is the quiet interval on every send, which is a third of a
+            # second against a model round trip.
+            ready_target = pty.ready_count + 1
+            # Reset the idle clock on the INPUT, not on the output: a session
+            # printing to itself forever is still one nobody is using (SS25).
+            session.last_input_mono = self._clock()
+        if payload:
+            stdin = getattr(process, "stdin", None)
+            if stdin is None:
+                return {"error": f"Session {session.id} has no input stream."}
+            try:
+                stdin.write(payload.encode("utf-8"))
+                stdin.flush()
+            except (OSError, ValueError) as e:
+                return {"error": f"Could not reach session {session.id}: {e}."}
+        return self._wait_after_input(session, mark, ready_target, wait_s,
+                                      matcher)
+
+    def _wait_after_input(self, session: _Session, mark: int,
+                          ready_target: int, wait_s: float, matcher) -> dict:
+        """SS26's four bounds, in the order they can be believed.
+
+        `ready` is checked first because it is the only one that is a FACT
+        about the shell rather than an observation about silence, and it
+        ends a wait for a pattern that is never coming.
+        """
+        pty = session.pty
+        deadline = self._clock() + max(0.0, float(wait_s))
+        last_total, last_change = mark, self._clock()
+        searched, carry = mark, ""
+        while True:
+            total = session.output.total
+            if (pty.ready_count >= ready_target and pty.at_prompt
+                    and self._clock() - last_change >= _INPUT_QUIET_S):
+                ended = "ready"
+                break
+            if matcher is not None and total > searched:
+                page = session.output.page(searched, _MATCH_SLICE)
+                searched = int(page.get("next_offset", searched))
+                *lines, carry = (carry + page.get("text", "")).split("\n")
+                if len(carry) > _MAX_LINE_CHARS:
+                    lines.append(carry[:_MAX_LINE_CHARS])
+                    carry = carry[_MAX_LINE_CHARS:]
+                if any(matcher.search(line.rstrip("\r")) for line in lines):
+                    ended = "matched"
+                    break
+            now = self._clock()
+            if total != last_total:
+                last_total, last_change = total, now
+            elif (matcher is None and total > mark
+                    and now - last_change >= _INPUT_QUIET_S):
+                # Two conditions, each measured into existence.
+                #
+                # Only once something HAS arrived: a command that prints
+                # nothing while it works -- which is most of them, now that
+                # the echo is off -- would otherwise report `quiet` after a
+                # third of a second and read as finished.
+                #
+                # And NEVER when a pattern was given. A caller passing
+                # `wait_for` has said what it is waiting for, and silence is
+                # not it: measured, `wait_for="line2"` against a loop
+                # printing a line a second returned `quiet` after line1 --
+                # answering a question nobody asked, and leaving the loop
+                # running to desynchronize every later call.
+                ended = "quiet"
+                break
+            if session.state not in LIVE_STATES:
+                ended = "ended"
+                break
+            if now >= deadline:
+                ended = "bound"
+                break
+            time.sleep(_INPUT_POLL_S)
+        page = session.output.page(mark, int(config.MAX_READ_CHARS))
+        page.update(session=session.id, status=session.state, ended=ended,
+                    ended_meaning=_ENDED_MEANING[ended])
         return page
 
     def kill(self, session_id: str, *, owner_thread=None,

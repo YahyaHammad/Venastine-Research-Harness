@@ -14889,3 +14889,61 @@ run), `tools/builtin/shell_sessions.py` (the field on both start tools and the c
 `tests/test_declared_network.py` (new), `tests/test_rationale.py` (two premises),
 `docs/ROADMAP_v3.md`, `docs/ARCHITECTURE.md`, `AGENTS.md`, `README.md`,
 `tests/BREAKING_CHANGES.md`.
+
+---
+
+## Batch 100 -- an interactive shell the agent types into (2026-09-23)
+
+ROADMAP_v3 §49 slice 2, decisions SS25-SS34. A shell held open with a pty inside the container that the
+agent sends input to and reads the reply from, its state -- working directory, variables, a REPL -- surviving
+across the agent's own turns. Two new tools (`shell_interactive`, `shell_input`), one new module
+(`core/ansi.py`), and the third session kind.
+
+### What the probe found before any code was written
+
+The plan called for measuring the pty through this codebase's own argv builder rather than in isolation.
+Two things it assumed were wrong, and NEITHER would have been caught by the tests, because both were in
+what the tests would have been written against:
+
+- **The pty is 0x0.** So readline has no width, and a 200-character command echoes back as `\r<xxxx` --
+  its horizontal-scroll marker. The plan's echo-removal rule (strip it only when the output starts with
+  exactly what was sent) correctly declines to touch that, which would have delivered the marker to the
+  agent as output. SS33 turns the echo off instead, which removes the whole clause rather than refining it.
+- **A quiet return cannot be told from a command still running.** A 3-second command returns after 0.4s of
+  quiet with nothing back. SS34's minted prompt token makes "ready" a fact.
+
+Three more came out of the probes and each changed the code:
+
+- **A typed line over 4095 bytes is silently truncated** and the shell runs the shortened command,
+  reporting success. `send` refuses over 4000 bytes rather than half-executing something a human approved.
+- **`quiet` pre-empted `wait_for`**: a pattern waiting on a loop that printed a line a second returned
+  after the first line, answering a question nobody asked and leaving the loop running to desynchronize
+  every later call. Quiet is now suppressed whenever a pattern was given.
+- **A prompt still in flight was credited to the line just sent.** Two cheaper rules were tried and each
+  was wrong somewhere -- `at_prompt` alone reads a stale prompt as an idle shell (with the echo off,
+  nothing appears when a command STARTS), and counting two prompts when the shell looked busy broke
+  leaving a REPL. The rule that holds is the next prompt, settled for the quiet interval.
+
+### What was built
+
+`core/ansi.py` -- an `AnsiStripper` (sequences out, CRLF folded, a lone CR left alone), a `PromptSplitter`
+(the token out, and what it meant kept as a count plus an at-rest flag), and a `PtyStream` that holds them
+in the one order they can go in. All stateful: measured, 128 KB of output arrived in 74 chunks at arbitrary
+boundaries, so a sequence split across two reads is the ordinary case and not the corner.
+
+`security/sandbox.py` -- `new_prompt_token`, `_interactive_command` (which asserts the token against its own
+alphabet rather than quoting defensively, because it is never a model's value), `_docker_argv`'s
+`prompt_token` branch, `_popen_session`'s stdin parameter, `SessionProcess.stdin`, and `start_interactive`,
+which refuses every route but the container with the reason (SS28).
+
+`core/shell_sessions.py` -- `KIND_INTERACTIVE`, the pty filter on the read path, `send()` and its four
+bounds, the idle deadline beside the wall-clock one, the held finish, and `_live_locked(owner, kinds)`.
+
+`tools/builtin/shell.py` -- `interactive_profile` and `_interactive_approval_check`, which asks about the
+session rather than its first line.
+
+### Verification
+
+`tests/test_interactive_sessions.py` (106 tests), plus repairs to three files whose premises this batch
+changed. Full suite, `ruff check .`, bandit with the CI flags and directly over the new files, and a
+mutation pass.

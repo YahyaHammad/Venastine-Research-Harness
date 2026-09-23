@@ -312,16 +312,25 @@ def test_ac6_assert_permissions_declared_exempts_mcp_tools():
 
 
 def test_ac6_the_shell_mode_tools_are_the_sole_approvals_exemption():
-    """`shell` and the two session tools that start a command need a
+    """`shell` and the three session tools that START one need a
     permissions field like every tool, but no approvals field: their
     approval lives solely in `shell_approval_mode`, and a second switch
     there could only force `always`. The exemption is pinned to exactly
     that set so a future omission cannot ride in on its precedent -- that
-    is the `fetch_url` defect by another door."""
+    is the `fetch_url` defect by another door.
+
+    `shell_interactive` joined in batch 100. It is governed by the mode
+    like the others, and asks its question about the SESSION rather than
+    about one command (SS29, SS32) -- which tools/registry.py holds it to
+    by identity, per tool, through `_SHELL_MODE_GATES`. `shell_input` is
+    deliberately NOT here: typing into a session that was already approved
+    is an ordinary tool with an ordinary approvals field, shipped false."""
     from security.permissions import APPROVAL_BY_SHELL_MODE
 
     assert APPROVAL_BY_SHELL_MODE == {"shell", "shell_background",
-                                      "shell_monitor"}
+                                      "shell_monitor", "shell_interactive"}
+    assert "shell_input" not in APPROVAL_BY_SHELL_MODE
+    assert config.ToolApprovals().shell_input is False
     # must not raise
     assert_permissions_declared(["web_search", *sorted(APPROVAL_BY_SHELL_MODE)])
     with pytest.raises(RuntimeError, match="no_such_tool"):

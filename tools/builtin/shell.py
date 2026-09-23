@@ -81,11 +81,18 @@ from pydantic import BaseModel, Field, StrictBool
 
 import config
 from security import capability, posture
-from security.capability import UNAVAILABLE, UNCONTAINED, auto_approved
+from security.capability import (
+    UNAVAILABLE,
+    UNCONTAINED,
+    CommandProfile,
+    auto_approved,
+)
 from security.protected_paths import PROTECTED_SEGMENTS, protected_segment
 from security.sandbox import (
     HOST_READ,
     INERT,
+    SANDBOXED,
+    SANDBOXED_NET,
     SandboxUnavailable,
     _is_inert,
     classify_command,
@@ -435,6 +442,95 @@ def _shell_approval_notice(params: dict, _context=None) -> str:
         notice += (f" It names {segment}/, a protected path that always "
                    "requires approval.")
     return notice
+
+
+
+def interactive_profile(requires_network: bool = False) -> CommandProfile:
+    """What an interactive shell can do -- STATED, not derived (SS32).
+
+    `classify_command` reads a command's text. An interactive session has no
+    text to read: `cd`, an alias and a REPL mean what arrives later is not
+    an argv, and the first line is only the first line. So the capabilities
+    are declared at their upper bound -- it runs code, it writes -- and
+    `measured` is True because that IS the measurement: the answer does not
+    depend on parsing anything, which is exactly when a profile is allowed
+    to claim it was characterised (G5).
+
+    `escapes_workspace` is False because the container's filesystem is not
+    the host's, and SS28 admits no other route for this kind.
+    """
+    network = bool(requires_network)
+    return CommandProfile(
+        tier=SANDBOXED_NET if network else SANDBOXED,
+        measured=True,
+        escapes_workspace=False,
+        writes=True,
+        runs_code=True,
+        network=network,
+        reason=("an interactive shell in the container -- anything may be "
+                "typed into it" + (", and it was opened with network access"
+                                   if network else "")))
+
+
+def _interactive_approval_check(tool_name: str, params: dict) -> bool:
+    """Whether OPENING an interactive shell needs a human yes (SS29, SS32).
+
+    NOT `_shell_approval_check`, and the difference is the point. That one
+    answers about the text it is handed; here the text is only the first
+    line of a session whose LATER lines are covered by the same yes. Asking
+    about the first line would mean `shell_interactive` with `pwd` was
+    auto-approved as a read and handed back a shell that can run anything --
+    the approval and the authority describing different calls, which is
+    #157's shape.
+
+    So the question is asked about what is actually being granted:
+    `interactive_profile`, through the same mode ladder and the same
+    `auto_approved` rule as every other shell call. Under `tiered` and
+    `contained` that always asks, because it always runs code (§48, CE1) --
+    and it asks through the rule rather than by hardcoding "always", so if
+    the rule ever changes this follows it instead of contradicting it.
+    """
+    active = posture.current()
+    mode = capability.validate_mode(active.shell_approval_mode,
+                                    "config.SHELL_APPROVAL_MODE")
+    if mode == capability.ALWAYS:
+        return True
+    if mode == capability.NEVER:
+        return False
+    profile = interactive_profile(declared_network(params))
+    containment = containment_for(profile, is_docker_available())
+    if containment == UNAVAILABLE:
+        # Nothing can run it, so there is nothing to approve;
+        # `start_interactive` refuses with the instructions. Same polarity
+        # note as `_shell_approval_check`'s.
+        return False
+    return not auto_approved(profile, containment)
+
+
+def _interactive_approval_notice(params: dict, _context=None) -> str:
+    """What the person answering is being asked to allow.
+
+    It says the quiet part out loud (SS29): this yes is not for one command,
+    it is for the session. A prompt that described only the first line would
+    be telling the truth about the wrong thing.
+    """
+    network = declared_network(params)
+    profile = interactive_profile(network)
+    containment = containment_for(profile, is_docker_available())
+    where = ("in a container" if containment == capability.CONTAINED
+             else "with no container available")
+    first = params.get("command", "") if isinstance(params, dict) else ""
+    text = (f"Opens an interactive shell {where} and keeps it open. "
+            f"APPROVING THIS APPROVES EVERYTHING THE AGENT LATER TYPES INTO "
+            f"IT, not just the first line.")
+    if isinstance(first, str) and first.strip():
+        text += f" It starts by running: {first.strip()[:200]}"
+    if network:
+        text += " The call declared it needs the network, so egress is on."
+    segment = _command_touches_protected(first)
+    if segment is not None:
+        text += f" That first line names {segment}, which is protected."
+    return text
 
 
 def _resolved_binary(command) -> str:

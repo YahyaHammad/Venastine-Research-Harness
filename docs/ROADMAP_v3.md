@@ -22,7 +22,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 
 ## Index
 
-- **§49. Shell sessions, the container runtime, and where a command can run** — **(IN PROGRESS: slice 0, Podman, BUILT in batch 93; slice 1 COMPLETE -- its foundations in batch 94, its five tools, the sleeping subagent and the CLI wait loop in batch 95, the TUI's behaviour half in batch 97 and its display half in batch 98; slice 2, interactive sessions, next)** (the shell was one-shot and blocking, so a test suite could not outlive a turn and nothing could wake the agent; a machine with Podman and no working Docker had no sandbox at all)
+- **§49. Shell sessions, the container runtime, and where a command can run** — **(IN PROGRESS: slice 0, Podman, BUILT in batch 93; slice 1 COMPLETE -- its foundations in batch 94, its five tools, the sleeping subagent and the CLI wait loop in batch 95, the TUI's behaviour half in batch 97 and its display half in batch 98; slice 2, interactive sessions, BUILT in batch 100; slice 3, WSL, next)** (the shell was one-shot and blocking, so a test suite could not outlive a turn and nothing could wake the agent; a machine with Podman and no working Docker had no sandbox at all)
 - **§50. Declared network for a shell command** — **(BUILT in batch 99)** (the network detector reads command TEXT against a fourteen-word list, so a command it cannot see is auto-approved into `--network none` and fails with no way for the user to have allowed it)
 - **§51. Paging for network tool results** — **(RECORDED in batch 96, not built)** (`fetch_url` and `arxiv_search` truncate with no offset, so the agent cannot reach past the first page without shelling out to a raw HTTP request)
 
@@ -84,7 +84,7 @@ slices. The owner added Podman (slice 0) after the plan was approved.
   console Ctrl+C reaches every child.
 - The host fallback applies `RLIMIT_CPU = sandbox_cpu_seconds` (30).
 
-### Decisions (SS1–SS24)
+### Decisions (SS1–SS34)
 
 | # | Decision |
 |---|---|
@@ -112,6 +112,16 @@ slices. The owner added Podman (slice 0) after the plan was approved.
 | **SS22** | **Podman is the container runtime when Docker cannot run a container and Podman can.** Docker is probed first; if it is not installed or does not answer, Podman is probed; Docker wins when both answer; the answer is probed once per process. It is the same container route with a different CLI, not a new backend |
 | **SS23** | **The shipped image is fully qualified,** `docker.io/library/python:3.13-slim`, so it resolves under Podman without a short-name alias. A value a user set is carried as written |
 | **SS24** | **Podman that cannot enforce the resource limits is not used.** Rootless on cgroups other than v2, or without the cpu, memory and pids controllers delegated, means `--memory`, `--cpus` and `--pids-limit` would not bind; the harness then behaves as if no runtime exists (the fallback rules apply) and the log and the unavailable message say why |
+| **SS25** | **An interactive session does not block the user's prompt,** and dies at an IDLE timeout as well as the wall-clock cap. SS2's block exists because the agent is waiting on work and cannot act until it lands; an idle REPL is not work, and a block on one would stop the user typing for as long as the agent kept a shell open. No amendment to SS2 is needed: it already names background and monitor |
+| **SS26** | **Every send is bounded,** and returns on whichever of FOUR comes first: the shell is READY again (SS34's sentinel), a line matched an RE2 pattern the call supplied, output went quiet for an idle interval, or the wall bound expired. The result NAMES which one ended it, because they mean different things -- and `ready` ends a wait for a pattern that is never coming, which the three-bound version would have held to the bound |
+| **SS27** | **ANSI sequences are stripped in `core/`, with no terminal-emulator dependency.** Stripping precedes the buffer and every match, and carries a partial sequence across reads: measured, a 128 KB burst arrived in 74 chunks at arbitrary boundaries, so a sequence split across two is the ordinary case and not the corner. Full-screen programs that paint with cursor motion are not supported, and the tool description says so rather than leaving it to be discovered. There is no echo-removal clause: SS33 turns the echo off, so there is none to remove |
+| **SS28** | **Container route only.** An open with no runtime is refused with the reason. A pipe-only session with no pty behaves differently in ways the model cannot see -- no prompt, block-buffered output, `isatty` taking another path -- which is the drift class §46 (EP6) and #157 are about. WSL joins in slice 3, where it was measured working |
+| **SS29** | **The open call's approval covers its inputs,** and its prompt says so in words -- except that an input naming a protected path segment still asks, reusing `_command_touches_protected`. This is the existing policy shape: that check already sits above both the fallback opt-in and the `contained` opt-in in `_shell_approval_check` |
+| **SS30** | **A control send (interrupt, EOF) needs no approval,** above the mode check and so ungated under `always` too. SS11 already ships `shell_kill` ungated -- destroying the whole session needs no human -- so interrupting one command inside it cannot need one, and it is the agent's only escape from a wedge. Measured: `\x03` frees both a `sleep 60` and a `cat` holding stdin, in about 48 ms |
+| **SS31** | **An interactive session's end never wakes the agent on its own;** it is held and delivered with the user's next message, the route SS19 already built. With no prompt block (SS25), a wake would be a turn starting under the user's cursor |
+| **SS32** | **Input text is never classified.** `cd`, aliases and a REPL mean the text is not an argv, so `classify_command` is not asked: the profile is synthesized `runs_code=True, writes=True, measured=True` and the session inherits the tier its OPEN call was approved at. Network is fixed when the session opens (NW4) |
+| **SS33** | **The pty echoes nothing, and is sized** -- `stty -echo rows 50 cols 1000` with bash's line editing off. Measured (batch 100): the pty is 0x0, so readline has no width and a 200-character command echoes back as `\r<xxxx`, its horizontal-scroll marker. The plan's rule (strip the echo only when the output starts with exactly what was sent) correctly declines to touch that, which would have delivered the marker to the agent as output. Turning the echo off makes the problem not exist rather than parsing it back out, at any length; the sizing is belt and braces for a program that turns echo back on |
+| **SS34** | **The prompt is a token this process minted,** so "the shell is ready for input" is a fact rather than an inference from silence. Measured: a 3-second command returns after 0.4 s of quiet with only its echo back, so quiet cannot be told from still-running; with a sentinel `PS1`, a finished command's output ends with it, a running one's does not, and a half-typed command sitting at `PS2` shows as quiet-but-NOT-ready, which is a wedge the agent must clear. It counts only at the very END of the buffer, so a command that prints the token is not a false ready. ITS LIMIT, measured and stated rather than papered over: with the echo off there is nothing on the stream when a command STARTS, so a prompt still standing from the last command is indistinguishable from an idle shell. A send therefore waits for the NEXT prompt and requires it to settle, which is right in every case but one -- a line typed while another command is still running is queued by the terminal, and if what it queues behind is silent the prompt between them settles and is reported as the answer. Separating those needs a terminal emulator, which SS27 declines to be, so the tool tells the agent not to send until it has `ready` |
 
 ### Adopted defaults (implementation-level; the owner may overturn any)
 
@@ -136,7 +146,9 @@ slices. The owner added Podman (slice 0) after the plan was approved.
   `_viewing` widens to hold a session;
   the last 20 finished sessions are kept in memory; the listing, output and kill tools see only the caller's
   own thread's sessions; session containers carry a per-process label, `--sig-proxy=false` and
-  `stdin=DEVNULL`.
+  `stdin=DEVNULL` -- amended in batch 100: an INTERACTIVE session's stdin is a PIPE. N1's reason
+  survives the constant, because it is about a child INHERITING THE CONSOLE, and a pipe that only
+  the harness writes to is not a second reader of the terminal.
 - **The session panel is process-wide** (owner, batch 98), like the agent panel it sits under and like
   ctrl+b's picker. SS11 scopes the five TOOLS to the caller's own thread, which is a rule about what the
   model may touch; what the person may SEE is a different question, and a panel that hid a subagent's
@@ -161,6 +173,15 @@ slices. The owner added Podman (slice 0) after the plan was approved.
   readers ask.
 - **A `docker` command that is really Podman** (the podman-docker shim) is checked as Podman: its `info`
   output is Podman's, and SS24 would otherwise be skipped under the Docker name.
+- **Slice 2's numbers** (batch 100), all measured rather than picked: a 600 s idle timeout; a 0.3 s
+  quiet interval, against a measured 50 ms round trip; a `wait_s` of 10 s by default and 120 s at most,
+  so a send cannot outlive the turn it is in; the sentinel is `VEN<8 hex>>`, minted per session. The
+  wrapper is `script -qfec` inside the container rather than `docker run -t`: the pty is then made in
+  the container, so the client never needs a real terminal and docker never mangles the stream.
+- **An interactive session counts toward the 4-live cap but not toward the prompt block** (batch 100).
+  They are two questions asked of one list: the cap is about resources, which an idle shell does hold,
+  and the block is about whether the agent is waiting on work, which SS25 says it is not. `_live_locked`
+  takes the kinds to count, and the two callers pass different ones.
 - **`sandbox_docker_image`, `AGENT_SANDBOX_IMAGE`, `is_docker_available` and `_run_docker` keep their
   names**, and now mean the container route whichever runtime serves it. Renaming the key breaks
   `config_update.py`'s merge of a user's own value, and the function names are patched at about thirty-five
@@ -183,8 +204,15 @@ slices. The owner added Podman (slice 0) after the plan was approved.
    It cost one widening below the TUI: `ReplayEntry` carries `(kind, call id)` where it carried a bare id,
    and `registry.opens()` is the one question both readers ask -- a `▸ shell_background` line could not
    otherwise be armed in a REPLAY, so a session opened until you restarted and then went quiet.
-   Next: slice 2, interactive sessions.
-2. **Interactive sessions.**
+2. **Interactive sessions** (SS25-SS34) -- BUILT, batch 100. A shell held open inside the
+   container with a pty, input sent to it and the reply read back, its state surviving across the
+   agent's own turns. It is the first session kind whose stdin is not `DEVNULL`, the first that does
+   not block the user's prompt, and the first whose end is held rather than woken for.
+   Two things the plan assumed were wrong, and the probe found both before any code was written:
+   the pty is 0x0 so a long command's echo comes back mangled (SS33), and a quiet return cannot be
+   told from a command still running (SS34). Neither would have been caught by the tests, because
+   both were in what the tests would have been written against.
+   Next: slice 3, WSL.
 3. **WSL.**
 4. **SSH and the secrets it needs.**
 5. **Sudo** (SS3).
@@ -196,8 +224,11 @@ Then background subagents as their own section (SS10).
 - **Interactive:** a hung read would wedge the turn, so every send needs a bounded wait. Input is not a
   command -- aliases, `cd` and a REPL mean the text is not the argv -- so every input is `runs_code`, and
   network is fixed when the session opens. The per-input gate is per tool call, so no deferred approval
-  exists. Open: lifetime, ANSI stripping against a terminal-emulator dependency, whether Ctrl+C needs
-  approval, the live view.
+  exists. The four that were open are CLOSED in batch 100: lifetime is an idle timeout beside the
+  wall-clock cap (SS25); ANSI is stripped in `core/ansi.py` with no emulator dependency (SS27); Ctrl+C
+  needs no approval (SS30); the live view is slice 1's, unchanged -- read-only, kill the only control,
+  because a user typing into the agent's container desynchronizes the agent from a session it is still
+  reasoning about.
 - **WSL:** SECURITY.md's "fixed" claim about reaching the install tree and `~/.config/venastine/` holds for
   the container only; `.venastine/` writes are detected at the next launch by D17's hash, not prevented;
   `ran_on` gains `wsl`; INERT runs through `wsl.exe -e` as an argv; paths through `wslpath`; open: distro

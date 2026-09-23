@@ -206,6 +206,8 @@ class ToolPermissionsModel(_Model):
     shell: StrictBool
     shell_background: StrictBool
     shell_monitor: StrictBool
+    shell_interactive: StrictBool
+    shell_input: StrictBool
     shell_sessions: StrictBool
     shell_output: StrictBool
     shell_kill: StrictBool
@@ -224,8 +226,9 @@ class ToolApprovalsModel(_Model):
     """Whether each tool needs a human yes before it runs.
 
     Approval ORs across every layer, so a `True` here is a one-way ratchet
-    that can only ever add prompts. `shell`, `shell_background` and
-    `shell_monitor` are deliberately absent (security/permissions.py's
+    that can only ever add prompts. `shell`, `shell_background`,
+    `shell_monitor` and `shell_interactive` are deliberately absent
+    (security/permissions.py's
     APPROVAL_BY_SHELL_MODE): their approval is governed solely by
     `shell_approval_mode` (always / tiered / contained / never), and a
     second switch here could only force `always` -- exactly what the mode
@@ -246,6 +249,7 @@ class ToolApprovalsModel(_Model):
     read: StrictBool
     write: StrictBool
     edit: StrictBool
+    shell_input: StrictBool
     shell_sessions: StrictBool
     shell_output: StrictBool
     shell_kill: StrictBool
@@ -380,6 +384,7 @@ class HarnessConfig(_Model):
     # limits, like the four above -- NOT authority keys and not in the
     # frozen posture: none of them decides whether a command is asked about.
     shell_session_timeout_cap_s: PositiveInt
+    shell_session_idle_timeout_s: PositiveInt
     shell_session_max_live: PositiveInt
     shell_session_max_consecutive_wakes: PositiveInt
     shell_session_output_head_chars: PositiveInt
