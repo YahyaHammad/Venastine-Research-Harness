@@ -388,6 +388,7 @@ class FakeStdinReader:
         self.lines = list(lines)
         self.prompts = []
         self.timeouts = []
+        self.masked_prompts = []
 
     def _next(self):
         if not self.lines:
@@ -411,6 +412,29 @@ class FakeStdinReader:
         except EOFError:
             # ask() answers "nobody answered" rather than raising: EOF at
             # a gated prompt is not consent.
+            return None
+
+    def readline_masked(self, prompt):
+        """ROADMAP_v3 §49 slice 5a (SS59). The masked read.
+
+        Records the prompt like its siblings, so the #7 test -- "a kind
+        that reached nobody" -- sees a SECRET ask the same way it sees
+        every other. EOF answers None rather than raising, matching `ask`
+        and for its reason one step further along: the real method returns
+        None on a stdin that ended, on a terminal that is not a tty, and
+        on one whose echo cannot be turned off, and every one of those has
+        to decode as "nobody answered" rather than as an empty passphrase.
+
+        `masked_prompts` is separate so a test can assert that a secret was
+        asked for THROUGH THIS METHOD -- a handler that called `readline`
+        instead would still fill `prompts`, and would echo the passphrase
+        on a real terminal while every plumbing test stayed green.
+        """
+        self.prompts.append(prompt)
+        self.masked_prompts.append(prompt)
+        try:
+            return self._next()
+        except EOFError:
             return None
 
 

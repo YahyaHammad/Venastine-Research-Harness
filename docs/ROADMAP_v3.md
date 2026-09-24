@@ -180,7 +180,56 @@ run. Three of them changed the argv this slice builds, and one of them changed a
 - **The remote answers what it is.** `uname -s`, `command -v bash timeout` -- bounded, and the basis
   for refusing a remote that is not POSIX rather than sending it POSIX shell lines.
 
-### Decisions (SS1–SS55)
+### What was measured before slice 5a was written (batch 103)
+
+Nothing below was designed from documentation. Slices 2, 3 and 4 each had an assumption killed by a
+probe before a test was written against it, and every time the assumption was inside what the tests
+would have asserted.
+
+- **`hashlib.scrypt` refuses any parameter worth using under its DEFAULT `maxmem`** --
+  `ValueError: [digital envelope routines] memory limit exceeded` for N=2**15, 2**16 and 2**17, and
+  only N=2**14 passes. So `maxmem` is passed explicitly and derived from the parameters. Without
+  that measurement this module would have raised on the first unlock on every machine, in a message
+  that reads as a bad parameter rather than a library default -- which is how it gets "fixed" by
+  lowering N.
+- **The cost, here:** N=2**15 r=8 p=1 is 142 ms, N=2**14 is 73 ms, N=2**16 is 286 ms. The shipped
+  parameter is a measurement and it lives in the envelope, so raising it later does not strand a file.
+- **Zeroing a `bytearray` really clears the bytes** -- read back through `ctypes.string_at` at the
+  same address, before and after. **And `bytes(buf)` and `AESGCM.decrypt` both return IMMUTABLE
+  copies that nothing can zero**, which is why SS60's claim is "shortens a window" rather than
+  "closes one".
+- **`InvalidTag` carries no message at all.** A wrong passphrase, a flipped tag bit and an edited
+  KDF parameter are indistinguishable from the exception -- which is the behaviour the store wants,
+  and is why `WrongPassphrase` says nothing about which it was.
+- **Forced askpass WORKS on both `ssh` binaries on this machine** -- Windows OpenSSH 9.5p2 and
+  Git-for-Windows OpenSSH 10.3p1 -- through a `.cmd` (or `.bat`) shim, with the prompt arriving as
+  `argv[1]`.
+- **The key-passphrase prompt is TRUNCATED mid-path:**
+  `Enter passphrase for key 'C:\Users\...\19552cfb-c47c-4e1a-b': `. Matching it against the
+  identity file's path would have failed for any path longer than about sixty characters, which is
+  most of them. The prefix is what is dependable.
+- **The password prompt has TWO forms, one per authentication method:**
+  `user@host's password: ` (`password`) and `(user@host) Password: ` (`keyboard-interactive`) -- and
+  **a server offering both serves the second**, so a matcher knowing only `password` would refuse a
+  real server's ask.
+- **`NumberOfPasswordPrompts=1` does not mean one ask.** A wrong password produced TWO askpass
+  invocations, because the two methods each get their own budget. This killed the one-shot listener
+  design (SS64) and is the reason a refused connection is quarantined rather than retried (SS63).
+- **Stacked `AuthenticationMethods publickey,password` works** -- two invocations, the key
+  passphrase then the account password, rc 0, on both binaries. That is the owner's case.
+- **`BatchMode=no` with no askpass HANGS the Windows build for 20 s+**, and does not hang the Git
+  build (3.1 s, refused). SS47's measurement reproduced, and the reason the anti-hang guarantee may
+  not rest on "ssh will give up".
+- **A CRLF private key is refused by the MSYS2 `ssh` and accepted by the Windows one**, with
+  `error in libcrypto: unsupported` -- a message naming neither the file format nor the line endings.
+  Found by writing the probe's key files from PowerShell, which was this batch's own mistake and is
+  recorded because the message sends a reader looking at the wrong thing entirely.
+- **The WSL gate already auto-approves everything under `AUTO_APPROVE_SANDBOX_FALLBACK`** --
+  measured against the real gate: `rm -rf /home` and `sudo apt-get install` both answer `asks=False`
+  on `backend: "wsl"`. Pre-existing, not slice 5's doing, and the reason SS65 puts the root step
+  above both opt-ins.
+
+### Decisions (SS1–SS66)
 
 | # | Decision |
 |---|---|
@@ -239,6 +288,18 @@ run. Three of them changed the argv this slice builds, and one of them changed a
 | **SS53** | **Bounds are what SSH actually offers, and what it does not offer is stated.** `ConnectTimeout`, and `ServerAliveInterval`/`ServerAliveCountMax` so a dead network ends a session rather than hanging it. The wall clock is the in-guest `timeout -k` (SS50 verifies `timeout` exists). No memory, CPU or pid limit -- SS44's rule on a third route, and here not even a `ulimit` to be theatre about, since the remote's resources are the remote's. **A kill does not reach the remote command, and that is measured and disclosed rather than fixed with a pty:** ending the local `ssh` leaves the far side running until the backstop fires, and `-tt` would end it at the cost of merging stderr into stdout and CRLF-ing every line. A process-group kill on the remote needs a second connection and the remote pid, and stays an OPEN item in the register below, where it already was |
 | **SS54** | **`requires_network` is ignored on this route, and `.venastine/` is refused.** The network belongs to the remote and no `--network none` reaches it, so the field is a fiction here and the tool description says so instead of implying a control. The protected-segment refusal is SS40's answer reached by a different road: WSL is refused because it demonstrably CAN write this harness's own authority files, and SSH because nothing here can demonstrate that it cannot -- `ssh localhost` is this machine, a remote that mounts this one looks identical from here, and an unanswerable question is not a yes |
 | **SS55** | **SSH is UNCONTAINED (SS1, unchanged) and an enabled SSH backend is on the badge,** with its own `unsafe_reasons()` pair for SS41's reason. Three weakenings now, and they are different in kind, not degree: the fallback is the host when there is no container, WSL is a Linux userland beside a running one, and this is a machine that is not this machine at all. The pair names what that means -- no isolation, no limits, credentials this harness did not issue -- and the one trap a model actually walks into: **`write` saves LOCALLY while the shell runs remotely**, so a file just written is not there |
+
+| **SS56** | **One harness-held secret store, encrypted at rest under a master passphrase.** scrypt -> AES-256-GCM, at `~/.config/venastine/secrets.json`, written 0600 through `credentials.py`'s existing `os.open`-with-mode writer. **The property claimed, precisely:** the file is useless without the passphrase, so a shell the AGENT asks for -- on WSL, on SSH, on the host fallback -- reads ciphertext and nothing else. **Not claimed:** any defence against arbitrary in-process Python, which `security/posture.py` already concedes can rebind anything here; against a keylogger; or against a crash dump taken while the store is open. An OS keystore (DPAPI, libsecret, Keychain) was rejected for exactly the property that makes it convenient -- it decrypts for any process running as this user, and the agent's shell is a process running as this user |
+| **SS57** | **`cryptography` becomes a declared dependency,** and this is bookkeeping rather than an installation: measured, it is already in the hard closure via `google-genai` -> `google-auth>=2.14.1` -> `cryptography>=38.0.3`, with no extra marker. What the declaration buys is that a dependency this project's security rests on is pinned by this project rather than by whatever `google-auth` resolves to. It adds one `THIRD_PARTY_NOTICES.md` row (Apache-2.0 OR BSD-3-Clause, permissive, so the no-copyleft claim holds) and a SECOND entry in the paragraph that said `google-re2` was the only dependency shipping compiled native code. A floor and a ceiling rather than an exact pin, like `rich`: an exact pin would fight `google-auth`'s own floor. Rolling an AEAD by hand is refused -- the stdlib has `scrypt` and no cipher, and this repository ships a `cryptography-verification` skill whose whole subject is not doing that |
+| **SS58** | **A secret's NAME says which machine it unlocks.** `ssh.<host>.key_passphrase`, `ssh.<host>.login`, `ssh.<host>.sudo`, `wsl.<distro>.sudo`. Separate entries rather than one value per host, because they are consumed by different processes at different moments -- `ssh`'s own authentication, versus `sudo -S` on the far side's stdin -- and either can rotate without the other. `/secrets set` OFFERS to write one value to the paired name, so a stacked setup costs a keypress instead of a retyped password, and rotation stays a visible edit rather than one value silently breaking two things with one diagnosis. The name is built from `ssh_host`, not from the target, so editing `ssh_user` does not orphan the entry the user typed |
+| **SS59** | **Asking for a secret is an AC1 request kind, not a sixth channel.** `SECRET` joins the five in `core/interaction.py`, with `SAFE_DEFAULTS[SECRET] = None`. Its own kind rather than a flag on `QUESTION`, because the KIND is what tells a shell how to RENDER and here the rendering IS the substance: a shell that ignored a flag would show the passphrase in clear while every plumbing test passed. None rather than `""`, because the empty string is what a dismissed modal, a torn-down screen and a shell with no branch all produce -- and an empty password handed to `sudo` or `ssh` is an authentication ATTEMPT made on nobody's behalf, which on a remote account is a step toward a lockout. BOTH shells render it (AGENTS.md's rule, audit #7): the TUI gets the first masked modal in this project, the CLI gets a masked read on its ONE stdin reader -- `getpass` is refused because it reads stdin itself, which is the second reader audit #100 exists to prevent |
+| **SS60** | **Unlocked plaintext lives in process memory and nowhere else, and everything that is not "still working normally" locks.** The triggers: `/secrets lock`, quit, `atexit`, an exception escaping any `guarded()` block (BaseException, so a KeyboardInterrupt counts), the askpass listener's bad token / unrecognised prompt / over-budget / connection error / deadline, and the store file changing on disk under a running process. **A crash is a lock because there is nowhere else the plaintext is** -- and that sentence is only true if it is never on disk, never in an environment, never in an argv and never in a log, which are four TESTS rather than four claims. Plaintext is held in `bytearray` and zeroed on lock; **the limit is measured and stated rather than papered over**: `bytes()` and `AESGCM.decrypt` both return IMMUTABLE copies nothing can zero, so this shortens a window rather than closing one, and a crash dump taken while the store is open may still hold what was live. A refused AUTHENTICATION does NOT lock: one typo must not cost the master passphrase, and the attacker such a lock would defend against is not involved -- see SS63's quarantine instead |
+| **SS61** | **A live secret VALUE is redacted from tool output unconditionally, whatever `redact_tool_outputs` says.** The master switch governs pattern GUESSES about other people's credentials, and a user who turns it off has chosen to see those raw. This is different in kind: a value the harness itself put into a process, coming back out of one, and handing it to the model is the harness leaking its OWN secret. It sits beside the depth cap, which `redaction_enabled()` already documents as staying fail-closed because it is structure rather than content judgment. Applied in `redact_output_text` -- above the switch, so both its consumers get it -- and again in `logging_setup`'s formatter, which is the fourth sink and the one that KEEPS what it writes. The values never leave `security/secrets.py`: the redactor calls it rather than asking for a list, so exactly one module holds plaintext |
+| **SS62** | **A secret has no `__str__`.** It is carried in a wrapper whose `str`, `repr` and `__format__` are all the marker, which is unhashable, unpicklable, uncopyable and not JSON-serialisable. The bytes come out through ONE accessor, `reveal()`, which makes every real use greppable and every accidental one impossible. The cheapest control in the batch and the one preventing the largest class of leak, because every other control assumes the value stays where it was put. `reveal()` is named for what it does rather than called `value` so the call site shows that a copy was just made which `lock()` cannot reach |
+| **SS63** | **SS47 is AMENDED, not discarded.** Its property was never `BatchMode` -- it was that **`ssh` can never prompt on a terminal this process does not own**. `BatchMode=yes` guaranteed that by refusing to prompt at all; `SSH_ASKPASS_REQUIRE=force` guarantees it by sending every prompt to a helper that answers immediately and cannot block. **With nothing stored for the host the argv is slice 4's, option for option and in order**, pinned against the literal `84c886b` shipped -- a user on key-and-agent auth is not moved by this slice at all. With something stored, `BatchMode` comes off (it suppresses askpass too, so the two are mutually exclusive), `NumberOfPasswordPrompts=1` bounds the retries within one method, and the preference list is `publickey,keyboard-interactive,password` because a server offering both serves the SECOND. **A refused connection that used stored credentials QUARANTINES them for the run** rather than being retried: measured, one refused call makes TWO authentication attempts, so retrying every command would walk a real account into a lockout at four attempts a call. The refusal names `/secrets set <name>` |
+| **SS64** | **The secret reaches the askpass helper over a loopback connection authenticated by a single-use token, never in an environment variable.** `ssh` passes its whole environment to the askpass child, and that environment is readable by any process running as this user -- the property that got an OS keystore rejected for the store itself. So the environment carries a TOKEN and a port; the helper forwards `(token, prompt)`; the harness decides which secret answers and serves it. **The helper holds no secret and no policy** -- it is a pipe with a password on it, which is what makes it safe to leave in a temp directory. **What this buys, stated precisely rather than oversold:** a reader of `ssh`'s environment gets a token rather than a password and must then win a race during one connection, instead of reading a value at rest. Someone who can do that could have read the password at the moment it mattered anyway, so this is a real narrowing and not a boundary. **The listener is NOT one-shot**, and that is the correction the probe forced: a wrong password produces two asks despite `NumberOfPasswordPrompts=1`, because keyboard-interactive and password are separate methods with separate budgets, and a stacked host legitimately asks twice. It bounds the number of serves instead |
+| **SS65** | **(slice 5b) A command the harness will run through sudo ALWAYS asks,** above both opt-ins, in every mode except `never` -- the same shape and position as SS48's SSH step. This amends SS3's "approval follows `shell_approval_mode`" for root specifically, and the reason is measured rather than argued: `AUTO_APPROVE_SANDBOX_FALLBACK` already answers for the ENTIRE WSL backend (`rm -rf /home` on WSL asks=False today, because `containment_for` returns UNCONTAINED and the fallback opt-in sits above the capability rule), so a root step below it would be dead code on the backend where root is most reachable. The same measurement corrects the WSL `unsafe_reasons()` pair, whose last sentence is untrue in that configuration |
+| **SS66** | **(slice 5b) Sudo runs on WSL and SSH only,** through `sudo -k -S -p '' --` with the password on stdin -- SS3 unchanged, with `-k` so a cached ticket cannot pass the password line through to the command as input. The container is refused BECAUSE it already runs as root there, so sudo is neither installed nor needed and offering it would be a control that does nothing. The host fallback is refused and RECORDED rather than assumed: on Windows the host shell is PowerShell and `sudo.exe` elevates through a UAC consent dialog that cannot take a password on stdin at all, which is a different mechanism and a separate measurement |
 
 ### Adopted defaults (implementation-level; the owner may overturn any)
 
@@ -368,7 +429,18 @@ run. Three of them changed the argv this slice builds, and one of them changed a
    measured rather than unmeasured: a remote pty is the only way to get
    a prompt back, and it is exactly what destroys the stream.
    Next: slice 5, sudo.
-5. **Sudo** (SS3), with the harness-held secrets SS3 needs.
+5. **The harness-held secret store** (SS56-SS64) -- **BUILT**, batch 103. `/secrets` holds named
+   entries encrypted at rest under a master passphrase the user types once a session; an
+   encrypted SSH key and a password-authenticated host both work, and a stacked
+   `publickey,password` host works too. SS47 is amended rather than discarded: with nothing
+   stored the argv is slice 4's, option for option, and with something stored the anti-hang
+   guarantee moves from `BatchMode=yes` to `SSH_ASKPASS_REQUIRE=force`. The secret reaches
+   `ssh` over a token-authenticated loopback connection and is never in its environment
+   (SS64). Measuring first killed the one-shot listener -- a wrong password asks TWICE,
+   because keyboard-interactive and password are separate methods with separate budgets --
+   and corrected the prompt matcher, whose key prompt OpenSSH truncates mid-path.
+   Next: slice 5b, sudo.
+6. **Sudo** (SS3, SS65, SS66), the store's second consumer.
 
 Then background subagents as their own section (SS10).
 
@@ -412,13 +484,21 @@ Then background subagents as their own section (SS10).
   `timeout` is what bounds it (SS53); a Windows OpenSSH REMOTE, whose shell, tools and paths are none
   of the things this slice sends (SS50); the harness-held secrets, moved to slice 5 with sudo; and an
   interactive session over SSH, refused on a measured basis rather than an unmeasured one.
+- **The secret store: CLOSED in batch 103** (SS56-SS64). Everything the register asked for is
+  built: a request kind through `core/interaction.py` (SS59), both shells rendering a masked field,
+  redaction by VALUE whatever `redact_tool_outputs` says (SS61), process memory only and cleared at
+  quit (SS60). Two things the register did NOT ask for and the owner did: it is **encrypted at
+  rest** under a master passphrase (SS56), and **SSH login passwords and key passphrases are in it
+  too** (SS63) rather than waiting for sudo, because stacked `publickey,password` auth is a real
+  configuration and the two are one security class. **Still open, and recorded rather than decided:**
+  migrating the EXISTING plaintext credential stores (`providers.json`, `.env`) behind the same
+  passphrase, which is a different decision with a different cost -- it would put an API key behind
+  a prompt on every launch; and an idle re-lock timer, declined by the owner in favour of the
+  explicit lock plus SS60's triggers.
 - **Sudo:** `/usr/bin/sudo -k -S -p '' --`, where `-k` stops a cached ticket passing the password line to the
-  command; separate values for WSL and SSH; a badge entry. It arrives WITH the harness-held secret
-  subsystem SS3 needs (owner, batch 102), which slice 4 deliberately did not build for one consumer:
-  a request kind through `core/interaction.py`, both shells rendering a masked field, redaction by
-  VALUE whatever `redact_tool_outputs` says, process memory only, cleared at quit. SSH password and
-  key-passphrase auth join it there -- slice 4 ships key-and-agent only (SS47), which needs no secret
-  at all.
+  command; separate values for WSL and SSH; a badge entry. The secret store it needed is BUILT
+  (above), so slice 5b is sudo alone: `needs_root` on the three tools, the root step above both
+  opt-ins (SS65), and WSL and SSH only (SS66).
 - **Docker rootless on cgroups v1** ignores limits the same way SS24 describes for Podman, and is not checked.
   Recorded, not decided.
 
@@ -437,6 +517,20 @@ Then background subagents as their own section (SS10).
   persistent connection -- is worth less than it sounds: a session holds one connection for its whole
   life either way, and key/agent auth means a one-shot command's extra handshake prompts for nothing.
 - **A lexical remote-workspace check** to give SSH an auto-approved tier (SS48).
+- **An OS keystore for the secret store** (batch 103). DPAPI on Windows, libsecret and Keychain
+  elsewhere would need no passphrase and would work headless. They were rejected for the property
+  that makes them convenient: they decrypt for any process running as this user, and the agent's
+  own shell on WSL, SSH or the host fallback is a process running as this user. It would have
+  defended against a stolen backup and not against the threat this harness actually has.
+- **`ssh-add` to unlock an encrypted key** (batch 103), the obvious alternative to askpass for the
+  passphrase. It mutates the user's agent past the harness's lifetime -- the key stays loaded after
+  the process exits -- and askpass needs no such side effect. The existing agent path keeps working
+  untouched for anyone already using it.
+- **A one-shot askpass listener** (batch 103), killed by measurement: one connection makes more than
+  one prompt.
+- **Taking a password from `--secrets set <name> <value>`** (batch 103). An argv is readable by every
+  process on the machine and lands in the shell history, so the value would have leaked before the
+  store ever encrypted it. Every value is read at a masked prompt.
 - **A pty (`-tt`) to make a kill reach the remote** (SS53): measured, it merges stderr into stdout and
   CRLFs every line, so it would pay for termination with every command's output shape.
 - **Podman as a separate backend.** It serves the same route with the same argv, measured.

@@ -24,6 +24,7 @@ from logging.handlers import RotatingFileHandler
 # safety/policy_enforcement.py is a leaf (stdlib imports only, nothing
 # from this project), so there is no cycle to dodge.
 from safety.policy_enforcement import redact_secrets
+from security import secrets as harness_secrets
 
 __all__ = ["configure_logging"]
 
@@ -73,7 +74,20 @@ class _RedactingFormatter(logging.Formatter):
     """
 
     def format(self, record):
-        return redact_secrets(super().format(record))
+        # SS61, on the sink this docstring calls the fourth one. The
+        # harness's OWN secrets come out unconditionally, above
+        # `redact_secrets`' vendor patterns, for the reason
+        # `redact_output_text` states: a value this process put into a
+        # subprocess and then logged is a leak nobody opted into, and
+        # app.log is the sink that KEEPS it across runs.
+        #
+        # Belt and braces rather than redundancy: nothing is supposed to
+        # log a secret at all, `Secret` has no `__str__` to print, and
+        # `lock()` names its reason rather than quoting anything. This
+        # catches the traceback, which renders values nobody chose to
+        # format -- exactly the case this formatter exists for.
+        return harness_secrets.redact_live_values(
+            redact_secrets(super().format(record)))
 
 
 def _resolve_level(level):

@@ -430,3 +430,44 @@ def test_the_module_is_a_leaf():
     assert imported <= {
         "collections", "dataclasses", "typing", "logging",
         "threading"}, imported
+
+
+class TestTheSecretKind:
+    """ROADMAP_v3 §49 slice 5a (SS59).
+
+    Every assertion here is about the EMPTY answer, because that is the one
+    a dismissed modal, a torn-down screen, a non-tty terminal and a shell
+    with no branch for this kind all produce -- and an empty password is
+    not "no password", it is an authentication ATTEMPT made on nobody's
+    behalf. On a remote account that is a step toward a lockout.
+
+    The mutation pass found this missing: `decode` could return "" for a
+    dismissal and nothing noticed, because the parametrized invariants only
+    cover the `None` answer.
+    """
+
+    def test_an_empty_string_is_NOT_an_answer(self):
+        request = interaction.Request(kind=interaction.SECRET)
+        assert interaction.decode(request, "") is None
+
+    def test_a_real_string_is(self):
+        request = interaction.Request(kind=interaction.SECRET)
+        assert interaction.decode(request, "hunter2") == "hunter2"
+
+    def test_whitespace_IS_an_answer_and_is_not_trimmed(self):
+        """A passphrase may legitimately be spaces, and trimming one would
+        silently change what the user typed into something that does not
+        open their store."""
+        request = interaction.Request(kind=interaction.SECRET)
+        assert interaction.decode(request, "  pass  ") == "  pass  "
+
+    @pytest.mark.parametrize("raw", [None, True, False, 0, 1, [], {},
+                                     b"bytes", object()])
+    def test_nothing_that_is_not_a_string_becomes_a_password(self, raw):
+        """`str(raw)` would turn a widget, a bool or a dict into something
+        that gets TRIED against a real account."""
+        request = interaction.Request(kind=interaction.SECRET)
+        assert interaction.decode(request, raw) is None
+
+    def test_the_declining_default_is_None_rather_than_empty(self):
+        assert interaction.SAFE_DEFAULTS[interaction.SECRET] is None

@@ -141,6 +141,34 @@ mcp==2.0.0
 # wheel list above.
 google-re2==1.1.20251105
 
+# ROADMAP_v3 §49 slice 5a (SS57). AES-256-GCM for the harness-held secret
+# store, and scrypt is the stdlib's -- `hashlib` has the KDF and no cipher,
+# so this is the dependency or a hand-rolled AEAD, and this repository
+# ships a `cryptography-verification` skill whose whole subject is not
+# doing the second one.
+#
+# DECLARING IT ADDS NOTHING TO AN INSTALL, measured rather than assumed:
+# google-genai==1.0.0 -> google-auth>=2.14.1 -> cryptography>=38.0.3, with
+# no extra marker, so it is already in the hard closure of the line above.
+# What the declaration buys is that a dependency this project's SECURITY
+# rests on is pinned by this project rather than by whatever google-auth
+# happens to resolve to.
+#
+# Apache-2.0 OR BSD-3-Clause -- permissive, so THIRD_PARTY_NOTICES.md's
+# no-copyleft claim still holds. It is the SECOND dependency shipping
+# compiled native code (google-re2 was the first): the wheels carry a Rust
+# extension and OpenSSL, and that file's paragraph names both now.
+#
+# A FLOOR AND A CEILING rather than an exact pin, like `rich`: an exact pin
+# here would fight google-auth's own floor on a resolver that has to
+# satisfy both. The floor is the AEAD API this uses, which has been stable
+# since 3.x; the ceiling is D22's rule, so a MAJOR cannot change behaviour
+# underneath CI. What to re-measure when it moves: `AESGCM` still raises
+# `cryptography.exceptions.InvalidTag` with NO message (the store relies on
+# the three failure causes being indistinguishable), and the wheel list
+# still covers this project's platforms.
+cryptography>=42.0,<52
+
 # --- Test dependencies -------------------------------------------------
 # Previously absent, which the docs recorded as a known open item since
 # §14: the suite has always needed pytest and pytest-mock, and §16's TUI

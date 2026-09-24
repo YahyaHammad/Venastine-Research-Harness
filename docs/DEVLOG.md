@@ -15139,3 +15139,123 @@ shape SS45 had just closed.
 `tests/test_ssh_backend.py` (136 tests, 12 of them against a real host), the EP6 matrix widened in
 place to 120 cells, and repairs to four files whose premises this batch changed. Full suite,
 `ruff check .`, bandit with the CI flags and directly over the new file, and a mutation pass.
+
+## Batch 103 -- a secret this harness keeps, and one it can hand to ssh (2026-09-24)
+
+ROADMAP_v3 §49 slice 5a, decisions SS56-SS66. `/secrets` in the TUI and `--secrets` on the CLI hold
+named values encrypted at rest -- scrypt to AES-256-GCM at `~/.config/venastine/secrets.json`, opened
+by a master passphrase typed once a session. The first consumers are SSH's own credentials: an
+encrypted key's passphrase and an account password, including a host that requires **both**
+(`AuthenticationMethods publickey,password`), which is a real configuration and the case the owner
+asked for by name.
+
+Slice 4 deliberately held no secret at all, so this is the first thing the harness keeps between the
+moment a human types it and the moment a subprocess needs it. Every claim about it is therefore
+written as what it does **not** defend against as well:
+
+- it defends against **the agent**. A shell command on WSL, on SSH or on the host fallback can `cat`
+  the file and gets ciphertext, which is the threat this harness actually has. An OS keystore was
+  rejected for exactly the property that makes it convenient: DPAPI and its siblings decrypt for any
+  process running as this user, and the agent's own shell is such a process;
+- it does **not** defend against arbitrary in-process Python, which `security/posture.py` already
+  concedes defeats the frozen posture too; nor a keylogger; nor a crash dump taken while the store is
+  open. The plaintext is held in a `bytearray` and zeroed on lock, and measured, `bytes()` and
+  `AESGCM.decrypt` both hand back immutable copies nothing can reach -- so that shortens a window
+  rather than closing one, and `docs/SECURITY.md` says so in those words.
+
+SS60's sentence is "a crash is a lock because there is nowhere else the plaintext is", and it is only
+true if the value is never on disk, never in an environment, never in an argv and never in a log.
+Those are four tests against a real unlock-and-use cycle, not four claims -- a test that read the code
+would pass for a module that wrote the value somewhere nobody thought to look.
+
+SS62 is the cheapest control in the batch and prevents the largest class of leak, because every other
+control assumes the value stays where it was put: **a `Secret` has no `__str__`.** An f-string, a
+`%s`, a traceback, a `logger.debug`, a pytest assertion diff and a JSON dump all get `[REDACTED]`, and
+`reveal()` is the only route to the bytes -- so `grep -rn 'reveal()'` is the audit.
+
+### SS47 is amended, not discarded
+
+Its property was never `BatchMode` -- it was that `ssh` can never prompt on a terminal this process
+does not own. `BatchMode=yes` guaranteed that by refusing to prompt at all, which also meant an
+encrypted key could not be used. `SSH_ASKPASS_REQUIRE=force` carries the same guarantee the other way
+round, by sending every prompt to a helper that answers at once and cannot block.
+
+**With nothing stored the argv is slice 4's, option for option and in order**, asserted against the
+literal `84c886b` shipped -- including when a store exists but is locked, and when it holds another
+host's credentials. A user on key-and-agent auth is not moved by this slice at all.
+
+### What measuring found before any of it was written
+
+Against a real `sshd` -- two of them, on ports 2223 and 2224 in the WSL Ubuntu distro, one offering
+key-or-password and one requiring both -- and a throwaway account, so nothing touched the owner's own
+credentials:
+
+- **`NumberOfPasswordPrompts=1` does not mean one ask.** A wrong password produced **two** askpass
+  invocations, because `keyboard-interactive` and `password` are separate authentication methods with
+  separate prompt budgets. That killed the one-shot listener the plan described: it bounds the number
+  of serves instead (SS64). The same measurement is why a refused connection **quarantines** its
+  stored credentials for the run rather than retrying -- four authentication attempts a call walks a
+  real account into a lockout, and the quarantine is a better answer than locking the whole store,
+  which would cost the master passphrase over a typo;
+- **OpenSSH truncates the key prompt mid-path** --
+  `Enter passphrase for key 'C:\Users\...\19552cfb-c47c-4e1a-b': ` -- so matching it against the
+  identity file's path would have failed for any path longer than about sixty characters, which is
+  most of them. The prefix is what is dependable;
+- **the password prompt has two forms**, `user@host's password: ` and `(user@host) Password: `, one
+  per method -- and a server offering both serves the second, so a matcher knowing only `password`
+  would refuse a real server's ask and lock the store;
+- **`hashlib.scrypt` refuses the shipped parameter under its default `maxmem`**, with
+  "memory limit exceeded" for N=2**15 and above. Without an explicit argument this module raises on
+  the first unlock on every machine, in a message that reads as a bad parameter rather than a library
+  default -- which is how it gets "fixed" by lowering N. The cost here: N=2**15 is 142 ms, 2**14 is
+  73 ms, 2**16 is 286 ms;
+- **forced askpass works on both `ssh` builds on this machine**, through a `.cmd` shim, and
+  `BatchMode=no` with no askpass hangs the Windows build for 20 s while the Git build refuses in 3.1 s
+  -- so the anti-hang guarantee may not rest on "ssh will give up";
+- **a CRLF private key is refused by the MSYS2 build and accepted by the Windows one**, with
+  `error in libcrypto: unsupported`, a message naming neither the file format nor the line endings.
+  That was this batch's own mistake -- the probe's keys were written from PowerShell -- and it is
+  recorded because the message sends a reader looking at the wrong thing entirely;
+- **the WSL gate already auto-approves everything under `AUTO_APPROVE_SANDBOX_FALLBACK`**:
+  `rm -rf /home` on `backend: "wsl"` answers `asks=False` today. Pre-existing and not this slice's
+  doing, and the reason SS65 puts slice 5b's root step above both opt-ins rather than below them,
+  where it would be dead code.
+
+### The mutation pass, and what it was actually for
+
+Fifty rows, all killed, in foreground chunks. Five found something no other gate did, and **three were
+the row's fault rather than a test's** -- which is the distinction the pass exists to make, and the
+lesson batch 102 paid for twice:
+
+- `_aad` could return `b""` and break nothing, so the claim that the associated data is what stops a
+  KDF downgrade was **overstated**: every header field today either feeds the derivation or is checked
+  outright, so an edit already fails without it. The docstring now says what the AAD is really for --
+  a field added later that does neither -- and there is a test written as exactly that case;
+- the version check could be deleted, because the test asserted only `SecretsError` and
+  `WrongPassphrase` subclasses it. A refusal that names the wrong cause sends a reader to re-type a
+  passphrase that was correct;
+- `lock()` could stop **zeroing** and nothing noticed, which is half of SS60's own claim. Two tests
+  now hold a reference across the lock and read the buffer back;
+- `decode` could return `""` for a dismissed SECRET prompt -- an empty password is not "no password",
+  it is an authentication attempt made on nobody's behalf;
+- and **three guards could be deleted without any test moving**, because each had a second guard
+  behind it that already fired: a `maxmem` floor under a parameter floor, a None-filter over a
+  None-check, and an `is_unlocked()` check over a `StoreLocked` handler. All three are removed,
+  keeping the one that fires. A guard that cannot fire still reads as the thing protecting you, and
+  the handler is the half that survives a race in any case.
+
+Two rows were rewritten rather than scored, both for the same reason: swapping `hmac.compare_digest`
+for `==` changes no behaviour, so no test could ever kill it. They now mutate the comparison into one
+that accepts the wrong value (a constant `True`, and a sixteen-character prefix), which is a real
+weakening with a real assertion. One more was skipped on a needle matching twice -- `zero` is defined
+on both `Secret` and `_Unlocked` -- which is batch 102's M30 exactly, predicted in this pass's own
+docstring and still written wrong the first time.
+
+### Verification
+
+`tests/test_secrets.py` (64) and `tests/test_askpass.py` (27) new, `tests/test_ssh_backend.py` 136 to
+167 with six more live tests against a real host, and repairs to the four files whose premises this
+batch changed. Full suite, `ruff check .` clean, bandit exit 0 against a path-corrected baseline copy
+**and** directly over all four new files -- the two new `security/` modules are clean, and the tests
+reach `subprocess` through `sandbox.subprocess` rather than importing it, which is
+`test_ssh_backend.py`'s own recorded rule for the same reason.

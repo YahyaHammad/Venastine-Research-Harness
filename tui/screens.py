@@ -1149,3 +1149,69 @@ class ThreadPickerScreen(ModalScreen[object]):
 
     def action_cancel(self) -> None:
         self.dismiss(None)
+
+
+class SecretScreen(ModalScreen[object]):
+    """Ask for one secret, masked (ROADMAP_v3 §49 slice 5a, SS59).
+
+    THE FIRST MASKED INPUT IN THIS PROJECT, which is why it is its own
+    screen rather than a flag on QuestionScreen. The KIND is what tells a
+    shell how to render (§23 AC1), and here the rendering IS the substance: a
+    flag that a screen forgot to read would show the passphrase in clear
+    while every test about the plumbing still passed.
+
+    Four properties this screen owes, none of which QuestionScreen has:
+
+      * `password=True`, so the characters are never drawn;
+      * the value is dismissed and NOTHING ELSE. It is not put in a
+        reactive, not logged, not echoed into the transcript, and not kept
+        on the screen object past `dismiss` -- `on_button_pressed` reads
+        the widget and hands the string straight out;
+      * Escape and the Cancel button dismiss with None, which
+        `interaction.decode` turns into the declining default. A dismissed
+        passphrase prompt must not become an empty passphrase, because an
+        empty passphrase is an authentication ATTEMPT (SS59);
+      * Enter submits, because a password field that needs a mouse is a
+        password field people paste into something else first.
+    """
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, title: str, body: str = "",
+                 confirm_label: str = "Unlock"):
+        super().__init__()
+        self._title = title
+        self._body = body
+        self._confirm_label = confirm_label
+
+    def compose(self) -> ComposeResult:
+        widgets = [Label(Text(self._title), id="permission-title")]
+        if self._body:
+            widgets.append(
+                ScrollBox(Static(Text(self._body), id="permission-params"),
+                          id="permission-params-box"))
+        widgets.append(Input(password=True, id="secret-value"))
+        widgets.append(Horizontal(
+            Button(Text(self._confirm_label), variant="success",
+                   id="secret-ok"),
+            Button("Cancel", variant="error", id="secret-cancel"),
+            id="permission-buttons"))
+        yield Vertical(*widgets, id="permission-dialog")
+
+    def on_mount(self) -> None:
+        self.query_one("#secret-value", Input).focus()
+
+    def _submit(self) -> None:
+        self.dismiss(self.query_one("#secret-value", Input).value)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self._submit()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "secret-ok":
+            self._submit()
+        else:
+            self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)

@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 5536 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 5680 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -148,7 +148,7 @@ made the move free: no import changed, and `tests/test_docs_consistency.py` is t
 opens any of these files (its `DOCS` constant is where the path now comes from).
 
 - **docs/ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49 onward, in progress) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A15 from §32, W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 SS1–SS55 from §49, NW1–NW5 from §50 and PG1–PG4 from §51). Section and D-numbers are stable and cross-referenced everywhere.
+- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49 onward, in progress) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A15 from §32, W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 SS1–SS66 from §49, NW1–NW5 from §50 and PG1–PG4 from §51). Section and D-numbers are stable and cross-referenced everywhere.
 
 **Six namespaces use the same `LETTER+NUMBER` shape, and only the first is the
 record.** An id that resolves to two places is a cross-reference that fails
@@ -1714,7 +1714,7 @@ assert what the user was asked and whether it carried a deadline.
 A mutation that strands a reader **hangs** the suite rather than failing it, since two read paths now
 have no deadline. The mutation harness reports HANG as its own outcome.
 
-### The shell gate (`§28`, G1–G7; routing and disclosure amended by `§46`, EP4–EP8; what `tiered` approves amended by `§48`, CE1–CE7; the container runtime amended by ROADMAP_v3 `§49`, SS22–SS24; declared network added by ROADMAP_v3 `§50`, NW1–NW5; a third backend added by ROADMAP_v3 `§49` slice 3, SS35–SS45; a fourth by slice 4, SS46–SS55)
+### The shell gate (`§28`, G1–G7; routing and disclosure amended by `§46`, EP4–EP8; what `tiered` approves amended by `§48`, CE1–CE7; the container runtime amended by ROADMAP_v3 `§49`, SS22–SS24; declared network added by ROADMAP_v3 `§50`, NW1–NW5; a third backend added by ROADMAP_v3 `§49` slice 3, SS35–SS45; a fourth by slice 4, SS46–SS55; the harness-held secret store and SSH credentials by slice 5a, SS56–SS64)
 
 Read §28's record before touching `security/sandbox.py`, `security/capability.py` or
 `_shell_approval_check`, and §46's before touching where a command RUNS. The four things most
@@ -1839,6 +1839,46 @@ And slice 2 (batch 100) -- an interactive shell the agent types into (SS25-SS34)
 
 And slice 4 first, because it is the one with a rule the others do not have -- see below for
 slice 3.
+
+Slice 5a (batch 103) -- the harness-held secret store (SS56-SS64):
+
+* **`security/secrets.py` is the ONE place a plaintext lives.** scrypt -> AES-256-GCM at
+  `~/.config/venastine/secrets.json`, opened by a master passphrase the user types once a session.
+  `AGENT_SECRETS_FILE` is the test seam; the path resolves at CALL time, so redirecting HOME works.
+* **`Secret` has no `__str__`** (SS62). `str`, `repr` and `__format__` are all `[REDACTED]`, it is
+  unhashable, unpicklable, uncopyable and not JSON-serialisable, and `reveal()` is the only way to
+  the bytes -- so `grep -rn 'reveal()'` IS the audit. Cheapest control in the batch, largest class
+  of leak prevented, because every other control assumes the value stays where it was put.
+* **`maxmem` must be passed to `hashlib.scrypt`.** Measured: the DEFAULT limit refuses N=2**15 with
+  "memory limit exceeded". Without the argument this module raises on the first unlock on every
+  machine, in a message that reads as a bad parameter rather than a library default -- which is how
+  it gets "fixed" by lowering N. The floor in `_scrypt_maxmem` matters too: for a tiny `n` the
+  derived figure is BELOW OpenSSL's working set and produces the identical error.
+* **Everything that is not "still working normally" locks** (SS60), through one `lock()`: the
+  command, quit, `atexit`, an exception escaping `guarded()` (BaseException, so Ctrl+C counts), any
+  askpass refusal, and the store file changing on disk. A crash is a lock because the plaintext is
+  nowhere else -- which is only true because four tests say it is in no file, no environment, no
+  argv and no log. **A refused AUTHENTICATION does NOT lock**: that would cost the master passphrase
+  over a typo. It quarantines that host's credentials instead (SS63).
+* **Value redaction is UNCONDITIONAL** (SS61), above `redaction_enabled()` in `redact_output_text`
+  and again in `logging_setup`'s formatter. `redact_tool_outputs` governs guesses about other
+  people's credentials; this is the harness leaking its own, and no switch asks for that. The values
+  never leave `security/secrets.py` -- the redactor calls IT rather than asking for a list.
+* **A new AC1 kind needs a branch in BOTH shells** (SS59), and the parity test in `test_cli.py`
+  enforces it. The TUI got this project's first masked modal; the CLI got `readline_masked` on the
+  ONE stdin reader -- `getpass` is refused because it reads stdin itself, which is the second reader
+  audit #100 exists to prevent. `SAFE_DEFAULTS[SECRET]` is None, not `""`: an empty password is an
+  authentication ATTEMPT, and a dismissed modal must not make one.
+* **The askpass listener is NOT one-shot** (SS64), and that correction came from measuring: a wrong
+  password produces TWO asks despite `NumberOfPasswordPrompts=1`, because keyboard-interactive and
+  password are separate methods with separate budgets. It bounds serves instead.
+* **The prompt strings are measured, and both carry a trap.** OpenSSH TRUNCATES
+  `Enter passphrase for key '<path>': ` mid-path, so matching the identity file's path fails for
+  most paths -- match the prefix. And the password prompt has two forms, `user@host's password: `
+  and `(user@host) Password: `, of which a server offering both serves the SECOND.
+* **With nothing stored, the SSH argv is slice 4's, option for option and in order**, pinned
+  against the literal `84c886b` shipped. `BatchMode=yes` comes off only when this process actually
+  holds a credential for that host.
 
 And slice 4 (batch 102) -- SSH, a command on another machine (SS46-SS55):
 

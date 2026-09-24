@@ -6,6 +6,7 @@
 # `git archive` tarballs and GitHub "Download ZIP".
 providers.json export-ignore
 .env export-ignore
+secrets.json export-ignore
 *.db export-ignore
 # The WAL sidecars, for .gitignore's reason one channel over (NA18).
 *.db-wal export-ignore

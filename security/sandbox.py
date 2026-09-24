@@ -56,6 +56,7 @@ that other tools needing safe command execution can reuse it.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import json
 import logging
@@ -74,7 +75,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import config
-from security import posture, protected_paths
+from security import askpass, posture, protected_paths, secrets
 from security.capability import (
     CONTAINED,
     UNAVAILABLE,
@@ -868,7 +869,10 @@ def _reset_ssh_probe() -> None:
 
 
 def ssh_available() -> bool:
-    """Whether an SSH command could run: enabled AND a host answered."""
+    """Whether an SSH command could run: enabled AND a host answered AND
+    the stored credentials have not already been refused."""
+    if _ssh_auth_rejected:
+        return False
     return ssh_enabled() and _ssh().target is not None
 
 
@@ -900,9 +904,96 @@ def ssh_unavailable_reason() -> str:
                 "not a sandbox: it is a machine this harness cannot "
                 "inspect, with no isolation, no resource limits, and "
                 "credentials it did not issue.")
+    if _ssh_auth_rejected:
+        return ("The SSH backend is on, but no command can run: "
+                f"{_ssh_auth_rejected}.")
     reason = _ssh().reason
     return (f"The SSH backend is on, but no command can run: {reason}."
             if reason else "")
+
+
+#: SS60/SS63. Set when a connection that USED stored credentials was
+#: refused by the server, and never cleared by another attempt. A wrong
+#: stored password is not a reason to lock the whole store -- that would
+#: cost the master passphrase over one typo and buy nothing, since an
+#: attacker is not involved -- but it IS a reason to stop REPLAYING it:
+#: measured, one refused call makes TWO authentication attempts (the
+#: keyboard-interactive method and the password method each get their own
+#: prompt budget), so a harness that retried on every command would walk a
+#: real account into a lockout at four attempts a call.
+_ssh_auth_rejected = ""
+
+
+def _ssh_secret_name(suffix: str) -> str:
+    """Where this host's secrets live (SS58).
+
+    The NAME says which machine it unlocks, and it is built from the
+    configured host rather than from the target, so changing `ssh_user`
+    does not silently orphan the entry the user typed.
+    """
+    return "ssh.%s.%s" % ((config.SSH_HOST or "").strip(), suffix)
+
+
+def _ssh_stored_secrets() -> dict:
+    """`{askpass logical name -> Secret}` for the configured host.
+
+    Empty means "nothing is stored, or the store is locked", and empty is
+    what keeps slice 4's behaviour EXACTLY as it shipped: `_ssh_connection_argv`
+    reads this and, with nothing here, builds the argv it always built,
+    option for option. A user on key-and-agent auth is not moved by this
+    batch at all.
+
+    Reads through `secrets` rather than holding anything: this module never
+    stores a plaintext, and the `Secret`s handed out live only for the
+    length of one `askpass.serving` block.
+    """
+    if _ssh_auth_rejected:
+        return {}
+    if not (config.SSH_HOST or "").strip():
+        return {}
+    found = {}
+    try:
+        for logical, suffix in ((askpass.KEY_PASSPHRASE, "key_passphrase"),
+                                (askpass.LOGIN, "login")):
+            secret = secrets.get(_ssh_secret_name(suffix))
+            if secret is not None:
+                found[logical] = secret
+    except secrets.StoreLocked:
+        # THE one place "the store is not open" is answered, and it is the
+        # handler rather than an `is_unlocked()` check above it. Both were
+        # written; the mutation pass showed the check could be deleted
+        # without breaking anything, because this already answers.
+        #
+        # The handler is the half that survives a RACE, which is why it is
+        # the one kept: the store can lock BETWEEN a check and a read --
+        # the askpass listener refuses on its own thread, and a file that
+        # changed on disk locks inside `secrets.get` itself -- and no
+        # check above can cover that gap. Nothing stored is the safe
+        # reading, and it is also the true one.
+        return {}
+    return found
+
+
+def _note_ssh_auth_failure(stderr: str, used_secrets: bool) -> None:
+    """Quarantine the stored credentials when the server refused them."""
+    global _ssh_auth_rejected
+    if not used_secrets or _ssh_auth_rejected:
+        return
+    if "Permission denied" not in stderr:
+        return
+    _ssh_auth_rejected = (
+        "the stored credentials for this host were refused by the server. "
+        "They will not be tried again this run, so a wrong value cannot "
+        "walk the account into a lockout. Fix them with `/secrets set "
+        "%s` (or `%s`) and restart"
+        % (_ssh_secret_name("login"), _ssh_secret_name("key_passphrase")))
+    logger.warning("ssh: stored credentials refused; quarantined for this run")
+
+
+def _reset_ssh_auth_quarantine() -> None:
+    """Tests only."""
+    global _ssh_auth_rejected
+    _ssh_auth_rejected = ""
 
 
 def _ssh_env() -> dict:
@@ -933,6 +1024,55 @@ def _ssh_env() -> dict:
     return env
 
 
+def _ssh_auth_options() -> list[str]:
+    """The authentication options, and THE ONE PLACE that mode is decided.
+
+    Read through `_ssh_connection_argv` by the probe and by `_ssh_argv`
+    alike, so the connection the probe measured is the connection a command
+    gets -- EP6's rule on the half of this route that can now differ.
+
+    WITH NOTHING STORED THIS IS SLICE 4, OPTION FOR OPTION AND IN ORDER.
+    `BatchMode=yes` and publickey-only: an encrypted key with no agent
+    fails in 0.12 s instead of hanging for as long as anyone waits (SS47).
+    A user on key-and-agent auth is not moved by slice 5 at all, and a test
+    pins this list against the literal slice 4 shipped.
+
+    With something stored, `BatchMode` must come OFF -- it suppresses
+    askpass too, so it and a stored secret are mutually exclusive -- and
+    the anti-hang property moves to `SSH_ASKPASS_REQUIRE=force`, which
+    `security/askpass.py` sets and which sends every prompt to a helper
+    that answers immediately (SS63). Measured: `BatchMode=no` with no
+    askpass hung for 20 s on the Windows build; with forced askpass the
+    same call returned in 0.8 s.
+
+    `NumberOfPasswordPrompts=1` bounds the RETRIES within one method. It
+    does NOT bound the number of prompts -- measured, a wrong password
+    still produces two asks, because keyboard-interactive and password are
+    separate methods with separate budgets. That is why the listener
+    bounds its serves rather than serving exactly one, and why a refused
+    call is quarantined rather than retried.
+
+    The preference list is measured too: a server offering both serves
+    `keyboard-interactive`, so naming only `password` would fail against an
+    ordinary sshd while reading as a credential problem.
+    """
+    if _ssh_stored_secrets():
+        return [
+            "-o", "BatchMode=no",
+            "-o", "NumberOfPasswordPrompts=1",
+            "-o", ("PreferredAuthentications="
+                   "publickey,keyboard-interactive,password"),
+        ]
+    return [
+        # SS47, and the measurement that justifies the key-only default:
+        # WITHOUT this, an encrypted key with no agent HANGS -- 20 s and
+        # still waiting, because ssh is trying to prompt for a passphrase
+        # on a terminal this process does not own.
+        "-o", "BatchMode=yes",
+        "-o", "PreferredAuthentications=publickey",
+    ]
+
+
 def _ssh_connection_argv(binary: str, target: str, known: str) -> list[str]:
     """Everything that says WHERE and WHO, with no command on the end.
 
@@ -941,6 +1081,7 @@ def _ssh_connection_argv(binary: str, target: str, known: str) -> list[str]:
     EP6's rule is about, on a route where the probe is the only thing that
     ever proved the host reachable.
     """
+    auth = _ssh_auth_options()
     argv = [
         binary,
         # NO DOTFILES, the same property `bash --norc --noprofile` gives on
@@ -953,13 +1094,7 @@ def _ssh_connection_argv(binary: str, target: str, known: str) -> list[str]:
         # `LocalCommand` and `SendEnv`, so without this flag what runs is
         # not what this argv says.
         "-F", "none",
-        # SS47, and the measurement that justifies the whole key-only
-        # decision: WITHOUT this, an encrypted key with no agent HANGS --
-        # 20 s and still waiting, because ssh is trying to prompt for a
-        # passphrase on a terminal this process does not own. With it, the
-        # same call fails in 0.12 s.
-        "-o", "BatchMode=yes",
-        "-o", "PreferredAuthentications=publickey",
+        *auth,
         # SS49. The pin is the whole host-key policy: an unknown key and a
         # CHANGED key both refuse, and neither can be answered by a prompt
         # that a headless run has nobody to show.
@@ -969,11 +1104,6 @@ def _ssh_connection_argv(binary: str, target: str, known: str) -> list[str]:
         "-o", f"ServerAliveInterval={_SSH_ALIVE_INTERVAL_S}",
         "-o", f"ServerAliveCountMax={_SSH_ALIVE_COUNT_MAX}",
     ]
-    # NOTE what is NOT here: `LogLevel=ERROR`. Measured, it SWALLOWS the
-    # reason a connection failed -- a refused port answered rc 255 with an
-    # empty stderr, which is SS36's "no reason at all" shape exactly. The
-    # default level is silent on success (only the remote's own stderr
-    # arrives) and loud on failure, so it is what a refusal is built from.
     identity = (config.SSH_IDENTITY_FILE or "").strip()
     if identity:
         argv += ["-i", identity]
@@ -2147,7 +2277,24 @@ def _run_ssh(command: str, workspace_dir: str) -> dict:
     session the in-guest `timeout -k` that `_ssh_remote_script` wraps in.
     """
     args = _ssh_argv(command)
+    stored = _ssh_stored_secrets()
 
+    # SS64. The listener stands up only when something is stored, so the
+    # no-secret path does not open a socket at all -- and `serving` locks
+    # the store if anything escapes this block, which is SS60's
+    # "an exception during a secret consumer" trigger.
+    with askpass.serving(stored) if stored else contextlib.nullcontext() \
+            as live:
+        env = _ssh_env()
+        if live is not None:
+            env.update(live.env)
+        return _run_ssh_process(args, env, bool(stored))
+
+
+def _run_ssh_process(args: list, env: dict, used_secrets: bool) -> dict:
+    """The half of `_run_ssh` that owns the subprocess, split out so the
+    askpass window is a block rather than a try/finally wrapped round
+    three returns and two raises."""
     proc = None
     try:
         proc = subprocess.Popen(
@@ -2163,11 +2310,12 @@ def _run_ssh(command: str, workspace_dir: str) -> dict:
             # `SendEnv`'s business and `SendEnv` lives in a config file
             # this harness cannot redirect, which `-F none` closes from
             # the other side. Two answers to one question is the point.
-            env=_ssh_env(),
+            env=env,
         )
         stdout, stderr = proc.communicate(
             timeout=config.SANDBOX_TIMEOUT_SECONDS,
         )
+        _note_ssh_auth_failure(stderr, used_secrets)
         if (proc.returncode == _SSH_NO_WORKSPACE_CODE
                 and _SSH_NO_WORKSPACE_MARKER in stderr):
             raise SandboxUnavailable(_ssh_workspace_refusal(stderr))

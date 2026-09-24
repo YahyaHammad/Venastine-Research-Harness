@@ -40,6 +40,7 @@ from urllib.parse import urlparse
 # why batch 37 kept `logging_setup` OUT of `security/`: that one pulls in
 # this module, and the edge only stays acyclic while it runs one way.
 from security import posture
+from security import secrets as harness_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -378,6 +379,20 @@ def redact_output_text(text: str) -> str:
     the credential shapes -- which is a regression dressed as a feature.
     The docstring above already called this "the one path"; it now is one
     for both consumers."""
+    # SS61: THE HARNESS'S OWN SECRETS COME OUT FIRST, AND UNCONDITIONALLY.
+    # Above the switch on purpose. `redact_tool_outputs` governs pattern
+    # GUESSES about other people's credentials, and a user who turns it off
+    # has chosen to see those raw. A value this harness put into a
+    # subprocess, coming back out of one, is a different thing: passing it
+    # to the model is the harness leaking its OWN secret, and no switch asks
+    # for that. It sits beside the depth cap, which this module already
+    # keeps fail-closed for the same shape of reason -- it is structure and
+    # self-inflicted leakage, not content judgment.
+    #
+    # The VALUES never come here: security/secrets.py does the substitution
+    # itself, so exactly one module holds plaintext and the redactor is not
+    # it (fix at the producer).
+    text = harness_secrets.redact_live_values(text)
     if not redaction_enabled():
         return text
     return _redact_credential_shapes(redact_secrets(text))

@@ -102,6 +102,7 @@ from tui.screens import (
     ProjectKindScreen,
     QuestionScreen,
     ReviewScreen,
+    SecretScreen,
     SessionKillScreen,
     SubagentSignoffScreen,
     ThreadPickerScreen,
@@ -3761,6 +3762,11 @@ class VenastineApp(App):
                 request.payload.get("title", ""),
                 request.payload.get("body", ""),
                 request.payload.get("confirm_label", "Yes"))
+        if request.kind == interaction.SECRET:
+            return self.ask_secret_blocking(
+                request.payload.get("title", "Enter a secret"),
+                request.payload.get("body", ""),
+                request.payload.get("confirm_label", "Unlock"))
         if request.kind == interaction.CHOICE:
             return self.ask_choice_blocking(request.payload)
         if request.kind == interaction.QUESTION:
@@ -3995,6 +4001,32 @@ class VenastineApp(App):
                     f"denied; the spawn was refused]"),
                 after_line=("[answer arrived after the timeout — the spawn "
                             "was refused]")))
+
+    def ask_secret_blocking(self, title: str, body: str = "",
+                            confirm_label: str = "Unlock"):
+        """Show the masked modal and BLOCK until answered (SS59).
+
+        Returns the dismissal RAW -- the string, or None for a cancel, an
+        escape, a shutdown release or a timeout. `interaction.decode` turns
+        everything that is not a non-empty string into the declining
+        default, so a dismissed prompt cannot become an empty passphrase
+        and an empty passphrase cannot become an authentication attempt.
+
+        THE TIMEOUT LINE NAMES NO VALUE and neither does anything else on
+        this path. Every other `ask_*_blocking` writes a transcript line
+        saying what was decided; this one says only that nothing was
+        entered, because the decision here IS the value.
+        """
+        if self._shutting_down:
+            return None
+        return self._blocking_modal(
+            SecretScreen(title, body, confirm_label),
+            on_timeout=lambda screen: self._timed_out_ask(
+                screen,
+                dismiss_with=None,
+                on_timeout_line="[no answer — nothing was entered]",
+                after_line=("[answer arrived after the timeout — nothing "
+                            "was entered]")))
 
     def ask_review_blocking(self, finding: dict, round_index: int):
         """Show the review modal and BLOCK until answered. §20 V4.
@@ -6134,6 +6166,197 @@ def _config_offer_restart(app: VenastineApp, key: str) -> None:
         _decided)
 
 
+def _cmd_secrets(app: "VenastineApp", args: str) -> None:
+    """Manage the harness-held secret store (ROADMAP_v3 §49 slice 5a).
+
+    `status`, `list`, `set <name>`, `delete <name>`, `lock` -- and NOTHING
+    that prints a value. `security.secrets.names()` is the only accessor a
+    listing surface may reach for, which is what lets this whole command be
+    written without a way to show a password by accident (SS62).
+
+    CALLBACKS, NOT `ask_secret_blocking`. A command handler runs on the UI
+    THREAD, and the blocking asks are drained by that same thread -- so
+    calling one here would deadlock the app on the first `/secrets`, not
+    fail it. `action_pick_thread` is the pattern being followed: push the
+    screen, continue in its dismiss callback.
+
+    NOT MODEL-REACHABLE, and that is a property rather than an accident:
+    slash commands are typed by a human and are not tools, so nothing in a
+    context window can drive this. It is the same argument
+    `security/posture.py` makes for having no posture command -- the
+    surface that matters is the one reachable AFTER untrusted content is
+    already in the window.
+    """
+    from security import secrets
+
+    parts = args.split()
+    verb = parts[0].lower() if parts else "status"
+    rest = parts[1:]
+    say = app._transcript.write_system
+    err = app._transcript.write_error
+
+    def with_unlocked(then) -> None:
+        """Call `then()` with the store open, asking for the passphrase if
+        it is not. Does nothing at all if the user declines, which is the
+        declining default arriving through a callback instead of a return
+        value."""
+        if secrets.is_unlocked():
+            then()
+            return
+        if not secrets.exists():
+            say(f"No secrets store yet. /secrets set <name> creates one at "
+                f"{secrets.store_path()}.")
+            return
+
+        def opened(answer) -> None:
+            if not answer:
+                say("Nothing was entered — the store is still locked.")
+                return
+            try:
+                secrets.unlock(answer)
+            except secrets.SecretsError as exc:
+                err(str(exc))
+                return
+            then()
+
+        app.push_screen(
+            SecretScreen("Unlock the secrets store",
+                         f"Stored at {secrets.store_path()}."),
+            opened)
+
+    if verb == "lock":
+        say("Secrets locked." if secrets.lock("/secrets lock")
+            else "The secrets store was not unlocked.")
+        return
+
+    if verb == "status":
+        if not secrets.exists():
+            say(f"No secrets store. It would live at {secrets.store_path()}.")
+        elif secrets.is_unlocked():
+            say(f"Secrets store unlocked — {len(secrets.names())} entries. "
+                f"/secrets lock closes it.")
+        else:
+            say("Secrets store present, locked.")
+        return
+
+    if verb == "list":
+        def show() -> None:
+            entries = secrets.names()
+            if not entries:
+                say("No secrets stored.")
+                return
+            say("Stored secrets (names only):\n" +
+                "\n".join("  " + name for name in entries))
+        with_unlocked(show)
+        return
+
+    if verb == "delete":
+        if not rest:
+            say("Usage: /secrets delete <name>")
+            return
+
+        def remove() -> None:
+            say(f"Deleted {rest[0]}." if secrets.delete(rest[0])
+                else f"No secret named {rest[0]}.")
+        with_unlocked(remove)
+        return
+
+    if verb == "set":
+        if not rest:
+            say("Usage: /secrets set <name>")
+            return
+        name = rest[0]
+
+        def ask_value() -> None:
+            def saved(value) -> None:
+                if not value:
+                    say("Nothing was entered — unchanged.")
+                    return
+                try:
+                    secrets.put(name, value)
+                except secrets.SecretsError as exc:
+                    err(str(exc))
+                    return
+                say(f"Saved {name}.")
+                offer_twin(value)
+
+            app.push_screen(
+                SecretScreen(f"Value for {name}", "", confirm_label="Save"),
+                saved)
+
+        def offer_twin(value) -> None:
+            # SS58's reuse offer. A stacked host uses ONE account password
+            # for the ssh login and then for `sudo -S` on the far side, and
+            # typing it twice is how the two silently drift apart later.
+            # They stay SEPARATE entries so rotating one is a visible edit.
+            twin = _secret_twin(name)
+            if not twin:
+                return
+
+            def answered(yes) -> None:
+                if not yes:
+                    return
+                try:
+                    secrets.put(twin, value)
+                except secrets.SecretsError as exc:
+                    err(str(exc))
+                    return
+                say(f"Saved {twin}.")
+
+            app.push_screen(
+                ConfirmScreen(
+                    "Use the same value for another entry?",
+                    f"Many hosts use one account password for both the "
+                    f"SSH login and sudo.\n\n  {name}\n  {twin}",
+                    f"Also save as {twin}"),
+                answered)
+
+        if secrets.exists():
+            with_unlocked(ask_value)
+            return
+
+        def created(first) -> None:
+            if not first:
+                say("Nothing was entered — no store was made.")
+                return
+            try:
+                secrets.create(first)
+            except secrets.SecretsError as exc:
+                err(str(exc))
+                return
+            ask_value()
+
+        # Creating the store and adding the first entry are two passphrases
+        # in a row, so they are two prompts with different titles rather
+        # than one prompt that means different things on different runs.
+        app.push_screen(
+            SecretScreen(
+                "Choose a master passphrase",
+                "It encrypts the store. There is no recovery: if you "
+                "forget it, delete the file and start again.",
+                confirm_label="Create"),
+            created)
+        return
+
+    say("Usage: /secrets [status|list|set <name>|delete <name>|lock]")
+
+
+def _secret_twin(name: str):
+    """The entry a value is most often shared with (SS58).
+
+    `ssh.<host>.login` and `ssh.<host>.sudo` are the pair: the account
+    password authenticates the connection and then answers `sudo -S` on the
+    far side. Returned so `/secrets set` can OFFER to write both, which
+    keeps one typing mistake from becoming two different stored values --
+    while leaving them separate entries, so rotating one later is a visible
+    edit rather than a silent break in two places with one diagnosis.
+    """
+    for left, right in (("login", "sudo"), ("sudo", "login")):
+        if name.endswith("." + left):
+            return name[: -len(left)] + right
+    return None
+
+
 def register_builtin_commands() -> None:
     """Idempotent — registering by name overwrites, so a re-import or a
     second app instance in the test suite does not duplicate entries."""
@@ -6161,6 +6384,9 @@ def register_builtin_commands() -> None:
                      _cmd_trigger, "[tokens|off]"),
         SlashCommand("config", "browse and set the harness configuration",
                      _cmd_config, "[key] [value]", complete=_config_rows),
+        SlashCommand("secrets", "manage the harness-held secret store",
+                     _cmd_secrets,
+                     "[status|list|set <name>|delete <name>|lock]"),
         SlashCommand("claims", "show a research run's claims and their tiers",
                      _cmd_claims, "[run id]"),
         SlashCommand("copy", "copy text out of the session", _cmd_copy,

@@ -13,6 +13,13 @@ logs/
 *.db-wal
 *.db-shm
 providers.json
+# ROADMAP_v3 §49 slice 5a. The harness-held secret store's DEFAULT name, in
+# case anyone points AGENT_SECRETS_FILE at a checkout. It lives in
+# ~/.config/venastine and so is normally nowhere near a repository; this is
+# belt and braces, and it costs one line. The file is encrypted either way
+# -- that is the actual protection (SS56) -- but a committed ciphertext is
+# still an offline guessing target nobody meant to publish.
+secrets.json
 .qwen/
 .zcode/
 output/

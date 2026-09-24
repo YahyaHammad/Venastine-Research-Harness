@@ -995,3 +995,422 @@ class TestAgainstARealHost:
         monkeypatch.setenv("VEN_PROBE_SECRET", "s3cr3t-must-not-cross")
         result = sandbox._run_ssh("printenv || true", "C:/ws")
         assert "VEN_PROBE_SECRET" not in result["stdout"]
+
+
+# ===========================================================================
+# ---- Slice 5a: stored credentials (SS63, SS64) ----------------------------
+# ===========================================================================
+
+@pytest.fixture
+def ssh_secrets(tmp_path, monkeypatch):
+    """A store holding both of this host's credentials.
+
+    Clears the quarantine on the way in AND out: it is module state that
+    outlives a test, and a test that tripped it would otherwise make every
+    later test in the file assert against an unavailable backend.
+    """
+    from security import secrets
+
+    monkeypatch.setenv("AGENT_SECRETS_FILE", str(tmp_path / "secrets.json"))
+    secrets.lock()
+    sandbox._reset_ssh_auth_quarantine()
+    secrets.create("a master passphrase")
+    secrets.put("ssh.%s.key_passphrase" % HOST, "the-key-passphrase")
+    secrets.put("ssh.%s.login" % HOST, "the-login-password")
+    yield secrets
+    secrets.lock()
+    sandbox._reset_ssh_auth_quarantine()
+
+
+@pytest.fixture
+def no_store(tmp_path, monkeypatch):
+    """No secrets file at all -- slice 4's world."""
+    from security import secrets
+
+    monkeypatch.setenv("AGENT_SECRETS_FILE", str(tmp_path / "absent.json"))
+    secrets.lock()
+    sandbox._reset_ssh_auth_quarantine()
+    yield
+    sandbox._reset_ssh_auth_quarantine()
+
+
+#: The literal slice 4 shipped, in order (commit 84c886b). Written out
+#: rather than rebuilt from the module, because a test that derives the
+#: expected argv from the code under test cannot notice the code changing.
+SLICE_4_ARGV = [
+    "/usr/bin/ssh", "-F", "none",
+    "-o", "BatchMode=yes",
+    "-o", "PreferredAuthentications=publickey",
+    "-o", "StrictHostKeyChecking=yes",
+    "-o", "UserKnownHostsFile=/run/venastine-kh",
+    "-o", "ConnectTimeout=10",
+    "-o", "ServerAliveInterval=15",
+    "-o", "ServerAliveCountMax=3",
+    "-i", IDENTITY,
+    "-o", "IdentitiesOnly=yes",
+    "-p", str(PORT), "%s@%s" % (USER, HOST),
+]
+
+
+def _connection_argv():
+    return sandbox._ssh_connection_argv(
+        "/usr/bin/ssh", "%s@%s" % (USER, HOST), "/run/venastine-kh")
+
+
+class TestNothingStoredIsExactlySliceFour:
+    """The regression this batch is most able to cause. A user on
+    key-and-agent auth must not be moved by a single option."""
+
+    def test_the_connection_argv_is_byte_identical(self, ssh_on, no_store):
+        assert _connection_argv() == SLICE_4_ARGV
+
+    def test_a_LOCKED_store_is_the_same_as_no_store(self, ssh_on,
+                                                    ssh_secrets):
+        """The secrets exist and this process has closed them. Slice 4's
+        argv is the right answer: turning `BatchMode` off with nothing to
+        serve would re-open SS47's hang for no benefit at all."""
+        ssh_secrets.lock()
+        assert _connection_argv() == SLICE_4_ARGV
+
+    def test_a_store_holding_ANOTHER_hosts_secrets_changes_nothing(
+            self, ssh_on, ssh_secrets):
+        ssh_secrets.delete("ssh.%s.key_passphrase" % HOST)
+        ssh_secrets.delete("ssh.%s.login" % HOST)
+        ssh_secrets.put("ssh.some.other.host.login", "not this host")
+        assert _connection_argv() == SLICE_4_ARGV
+
+
+class TestAStoredCredentialChangesTheAuthOptions:
+
+    def test_batchmode_comes_off_and_askpass_takes_over(self, ssh_on,
+                                                        ssh_secrets):
+        argv = _connection_argv()
+        assert "BatchMode=no" in argv
+        assert "BatchMode=yes" not in argv
+        assert "NumberOfPasswordPrompts=1" in argv
+        assert ("PreferredAuthentications="
+                "publickey,keyboard-interactive,password") in argv
+
+    def test_the_options_sit_where_slice_four_had_them(self, ssh_on,
+                                                       ssh_secrets):
+        """Position, not merely presence. An option that quietly moved is
+        how an argv test stops testing the argv."""
+        argv = _connection_argv()
+        assert argv[:5] == ["/usr/bin/ssh", "-F", "none", "-o",
+                            "BatchMode=no"]
+
+    def test_the_measured_preference_order_is_what_ships(self, ssh_on,
+                                                         ssh_secrets):
+        """A server offering both serves keyboard-interactive, so naming
+        only `password` would fail against an ordinary sshd while reading
+        as a credential problem."""
+        argv = _connection_argv()
+        index = argv.index("PreferredAuthentications="
+                           "publickey,keyboard-interactive,password")
+        assert argv[index - 1] == "-o"
+
+    def test_only_a_passphrase_stored_still_switches_modes(self, ssh_on,
+                                                           ssh_secrets):
+        ssh_secrets.delete("ssh.%s.login" % HOST)
+        assert "BatchMode=no" in _connection_argv()
+
+    def test_only_a_login_stored_still_switches_modes(self, ssh_on,
+                                                      ssh_secrets):
+        ssh_secrets.delete("ssh.%s.key_passphrase" % HOST)
+        assert "BatchMode=no" in _connection_argv()
+
+    def test_the_probe_and_the_run_read_the_same_decision(self, ssh_on,
+                                                          ssh_secrets):
+        """EP6 on the half of this route that can now differ: if the probe
+        and `_ssh_argv` disagreed about how to authenticate, the connection
+        the probe measured would not be the connection a command gets."""
+        built = sandbox._ssh_argv("echo hi")
+        connection = _connection_argv()
+        assert built[:len(connection)] == connection
+
+
+class TestTheStoredSecretsLookup:
+
+    def test_it_finds_both_under_the_hosts_names(self, ssh_on, ssh_secrets):
+        from security import askpass
+
+        found = sandbox._ssh_stored_secrets()
+        assert set(found) == {askpass.KEY_PASSPHRASE, askpass.LOGIN}
+        assert found[askpass.LOGIN].reveal() == b"the-login-password"
+
+    def test_a_locked_store_finds_nothing_and_does_not_raise(self, ssh_on,
+                                                             ssh_secrets):
+        ssh_secrets.lock()
+        assert sandbox._ssh_stored_secrets() == {}
+
+    def test_no_configured_host_finds_nothing(self, ssh_on, ssh_secrets,
+                                              monkeypatch):
+        monkeypatch.setattr(config, "SSH_HOST", "")
+        assert sandbox._ssh_stored_secrets() == {}
+
+    def test_the_name_is_built_from_the_host(self, ssh_on):
+        assert sandbox._ssh_secret_name("login") == "ssh.%s.login" % HOST
+
+    def test_the_name_does_not_move_when_the_user_changes(
+            self, ssh_on, monkeypatch):
+        """Built from the HOST, not the target, so editing `ssh_user` does
+        not orphan the entry the user typed."""
+        before = sandbox._ssh_secret_name("login")
+        monkeypatch.setattr(config, "SSH_USER", "someone-else")
+        assert sandbox._ssh_secret_name("login") == before
+
+
+class TestTheQuarantine:
+    """A wrong stored password must not be replayed. Measured: one refused
+    call makes TWO authentication attempts, so retrying on every command
+    would walk a real account into a lockout at four attempts a call."""
+
+    def test_a_refusal_that_used_stored_secrets_quarantines(self, ssh_on,
+                                                            ssh_secrets):
+        sandbox._note_ssh_auth_failure(
+            "agent@build: Permission denied (publickey,password).", True)
+        assert not sandbox.ssh_available()
+        assert "stored credentials" in sandbox.ssh_unavailable_reason()
+
+    def test_the_reason_names_the_command_that_fixes_it(self, ssh_on,
+                                                        ssh_secrets):
+        sandbox._note_ssh_auth_failure("Permission denied", True)
+        reason = sandbox.ssh_unavailable_reason()
+        assert "/secrets set" in reason
+        assert "ssh.%s.login" % HOST in reason
+
+    def test_a_refusal_that_used_NO_stored_secret_does_not(self, ssh_on,
+                                                           no_store):
+        sandbox._note_ssh_auth_failure("Permission denied (publickey).",
+                                       False)
+        assert sandbox.ssh_available()
+
+    def test_an_ordinary_command_failure_does_not(self, ssh_on, ssh_secrets):
+        sandbox._note_ssh_auth_failure("bash: nope: command not found", True)
+        assert sandbox.ssh_available()
+
+    def test_a_quarantined_host_stops_offering_the_secrets(self, ssh_on,
+                                                            ssh_secrets):
+        """So the next call does not build a BatchMode=no argv that will
+        fail the same way: it refuses before connecting at all."""
+        sandbox._note_ssh_auth_failure("Permission denied", True)
+        assert sandbox._ssh_stored_secrets() == {}
+
+    def test_it_does_NOT_lock_the_whole_store(self, ssh_on, ssh_secrets):
+        """One typo must not cost the master passphrase. The attacker such
+        a lock would defend against is not involved: the server refused,
+        which means the value was wrong, not that anyone was reading it."""
+        sandbox._note_ssh_auth_failure("Permission denied", True)
+        assert ssh_secrets.is_unlocked()
+
+    def test_it_is_recorded_once_and_not_overwritten(self, ssh_on,
+                                                     ssh_secrets):
+        sandbox._note_ssh_auth_failure("Permission denied", True)
+        first = sandbox.ssh_unavailable_reason()
+        sandbox._note_ssh_auth_failure("Permission denied again", True)
+        assert sandbox.ssh_unavailable_reason() == first
+
+
+class _FakeProc:
+    returncode = 0
+
+    def communicate(self, timeout=None):
+        return ("ok", "")
+
+
+class TestTheRunPathServesTheSecrets:
+
+    @staticmethod
+    def _capture(monkeypatch):
+        seen = {}
+
+        def _popen(args, **kwargs):
+            seen["env"] = kwargs.get("env") or {}
+            seen["args"] = list(args)
+            return _FakeProc()
+
+        monkeypatch.setattr(sandbox.subprocess, "Popen", _popen)
+        return seen
+
+    def test_the_env_carries_the_token_and_never_a_value(
+            self, ssh_on, ssh_secrets, monkeypatch):
+        seen = self._capture(monkeypatch)
+        sandbox._run_ssh("echo hi", "/local/ws")
+        env = seen["env"]
+        assert "VEN_ASKPASS_TOKEN" in env
+        assert env["SSH_ASKPASS_REQUIRE"] == "force"
+        joined = "".join(env.values()) + " ".join(seen["args"])
+        assert "the-login-password" not in joined
+        assert "the-key-passphrase" not in joined
+        assert "a master passphrase" not in joined
+
+    def test_the_scrubbed_environment_is_still_the_base(
+            self, ssh_on, ssh_secrets, monkeypatch):
+        """SS42's scrub is not given up to make room for the token."""
+        seen = self._capture(monkeypatch)
+        sandbox._run_ssh("echo hi", "/local/ws")
+        assert "PROGRAMDATA" in seen["env"] or os.name != "nt"
+        assert "ANTHROPIC_API_KEY" not in seen["env"]
+
+    def test_with_nothing_stored_no_askpass_variables_appear(
+            self, ssh_on, no_store, monkeypatch):
+        seen = self._capture(monkeypatch)
+        sandbox._run_ssh("echo hi", "/local/ws")
+        assert "VEN_ASKPASS_TOKEN" not in seen["env"]
+        assert "SSH_ASKPASS" not in seen["env"]
+        assert "SSH_ASKPASS_REQUIRE" not in seen["env"]
+
+    def test_the_helper_is_cleaned_up_after_the_run(self, ssh_on,
+                                                     ssh_secrets,
+                                                     monkeypatch):
+        seen = self._capture(monkeypatch)
+        sandbox._run_ssh("echo hi", "/local/ws")
+        assert not os.path.exists(seen["env"]["SSH_ASKPASS"])
+
+
+# ===========================================================================
+@pytest.mark.skipif(not os.environ.get("VEN_TEST_SSH_HOST"),
+                    reason="no SSH host configured for tests "
+                           "(set VEN_TEST_SSH_*)")
+class TestAgainstARealHostWithStoredCredentials:
+    """Slice 5a against a real sshd (SS63, SS64).
+
+    Batch 102 earned this file's live section on its first run: the mocked
+    tests all handed `_ssh_argv` a known_hosts path, so all 122 of them
+    asserted an assumption that production did not hold. These three auth
+    shapes are the same kind of claim -- a prompt string, an option
+    interaction and a subprocess boundary -- and none of them can be proved
+    by a mock that decides what ssh would have asked.
+
+    Needs, beyond the slice 4 variables: VEN_TEST_SSH_ENCKEY (a passphrase-
+    protected identity), VEN_TEST_SSH_KEYPASS, VEN_TEST_SSH_PASSWORD, and
+    VEN_TEST_SSH_STACKED_PORT / VEN_TEST_SSH_STACKED_HOSTKEY for a server
+    requiring `publickey,password`.
+    """
+
+    @pytest.fixture(autouse=True)
+    def live(self, tmp_path, monkeypatch):
+        from security import secrets
+
+        monkeypatch.setattr(config, "SSH_HOST", _env("VEN_TEST_SSH_HOST"))
+        monkeypatch.setattr(config, "SSH_USER", _env("VEN_TEST_SSH_USER"))
+        monkeypatch.setattr(config, "SSH_PORT",
+                            int(_env("VEN_TEST_SSH_PORT", "22")))
+        monkeypatch.setattr(config, "SSH_REMOTE_WORKSPACE",
+                            _env("VEN_TEST_SSH_WS"))
+        monkeypatch.setattr(
+            config, "SSH_HOST_KEY",
+            open(_env("VEN_TEST_SSH_HOSTKEY"), encoding="utf-8").read())
+        monkeypatch.setattr(config, "SSH_BINARY", "")
+        set_posture(monkeypatch, allow_ssh_backend=True)
+        monkeypatch.setenv("AGENT_SECRETS_FILE",
+                           str(tmp_path / "secrets.json"))
+        secrets.lock()
+        sandbox._reset_ssh_auth_quarantine()
+        secrets.create("a live master passphrase")
+        sandbox._reset_ssh_probe()
+        yield secrets
+        secrets.lock()
+        sandbox._reset_ssh_probe()
+        sandbox._reset_ssh_auth_quarantine()
+
+    @staticmethod
+    def _name(suffix):
+        return "ssh.%s.%s" % (_env("VEN_TEST_SSH_HOST"), suffix)
+
+    @pytest.mark.skipif(not os.environ.get("VEN_TEST_SSH_ENCKEY"),
+                        reason="no encrypted key configured")
+    def test_an_encrypted_key_is_unlocked_from_the_store(self, live,
+                                                         monkeypatch):
+        """Slice 4 could not use this key at all: `BatchMode=yes` made an
+        encrypted key with no agent fail in 0.12 s, which was the whole
+        point. The harness holding the passphrase is what changes it."""
+        monkeypatch.setattr(config, "SSH_IDENTITY_FILE",
+                            _env("VEN_TEST_SSH_ENCKEY"))
+        live.put(self._name("key_passphrase"), _env("VEN_TEST_SSH_KEYPASS"))
+        sandbox._reset_ssh_probe()
+        result = sandbox._run_ssh("id -un", _env("VEN_TEST_SSH_WS"))
+        assert result["return_code"] == 0
+        assert result["stdout"].strip() == _env("VEN_TEST_SSH_USER")
+
+    @pytest.mark.skipif(not os.environ.get("VEN_TEST_SSH_ENCKEY"),
+                        reason="no encrypted key configured")
+    def test_the_same_key_WITHOUT_the_stored_passphrase_refuses_fast(
+            self, live, monkeypatch):
+        """SS47's measurement, still true: with nothing stored the argv is
+        slice 4's, and an encrypted key with no agent FAILS rather than
+        hanging. The bound is what makes key-only safe rather than
+        limiting, and it must survive slice 5."""
+        import time
+
+        monkeypatch.setattr(config, "SSH_IDENTITY_FILE",
+                            _env("VEN_TEST_SSH_ENCKEY"))
+        sandbox._reset_ssh_probe()
+        started = time.monotonic()
+        with pytest.raises(SandboxUnavailable):
+            sandbox._run_ssh("id -un", _env("VEN_TEST_SSH_WS"))
+        assert time.monotonic() - started < 15
+
+    @pytest.mark.skipif(not os.environ.get("VEN_TEST_SSH_PASSWORD"),
+                        reason="no account password configured")
+    def test_a_password_only_host_authenticates_from_the_store(
+            self, live, monkeypatch):
+        monkeypatch.setattr(config, "SSH_IDENTITY_FILE", "")
+        live.put(self._name("login"), _env("VEN_TEST_SSH_PASSWORD"))
+        sandbox._reset_ssh_probe()
+        result = sandbox._run_ssh("id -un", _env("VEN_TEST_SSH_WS"))
+        assert result["return_code"] == 0
+        assert result["stdout"].strip() == _env("VEN_TEST_SSH_USER")
+
+    @pytest.mark.skipif(not os.environ.get("VEN_TEST_SSH_STACKED_PORT"),
+                        reason="no stacked-auth server configured")
+    def test_a_stacked_host_needs_BOTH_and_gets_both(self, live,
+                                                     monkeypatch):
+        """`AuthenticationMethods publickey,password` -- the owner's case.
+        Measured: two askpass invocations, the key passphrase then the
+        account password, in that order."""
+        monkeypatch.setattr(config, "SSH_PORT",
+                            int(_env("VEN_TEST_SSH_STACKED_PORT")))
+        monkeypatch.setattr(
+            config, "SSH_HOST_KEY",
+            open(_env("VEN_TEST_SSH_STACKED_HOSTKEY"),
+                 encoding="utf-8").read())
+        monkeypatch.setattr(config, "SSH_IDENTITY_FILE",
+                            _env("VEN_TEST_SSH_ENCKEY"))
+        live.put(self._name("key_passphrase"), _env("VEN_TEST_SSH_KEYPASS"))
+        live.put(self._name("login"), _env("VEN_TEST_SSH_PASSWORD"))
+        sandbox._reset_ssh_probe()
+        result = sandbox._run_ssh("id -un", _env("VEN_TEST_SSH_WS"))
+        assert result["return_code"] == 0
+        assert result["stdout"].strip() == _env("VEN_TEST_SSH_USER")
+
+    @pytest.mark.skipif(not os.environ.get("VEN_TEST_SSH_PASSWORD"),
+                        reason="no account password configured")
+    def test_a_WRONG_stored_password_refuses_and_quarantines(
+            self, live, monkeypatch):
+        """The lockout guard, against a real server that really refuses.
+        Measured: one refused call makes TWO authentication attempts, so
+        the value that matters is that the SECOND call makes none."""
+        monkeypatch.setattr(config, "SSH_IDENTITY_FILE", "")
+        live.put(self._name("login"), "definitely-not-the-password")
+        sandbox._reset_ssh_probe()
+        with pytest.raises(SandboxUnavailable):
+            sandbox._run_ssh("id -un", _env("VEN_TEST_SSH_WS"))
+        assert not sandbox.ssh_available()
+        assert "stored credentials" in sandbox.ssh_unavailable_reason()
+        assert sandbox._ssh_stored_secrets() == {}
+
+    @pytest.mark.skipif(not os.environ.get("VEN_TEST_SSH_PASSWORD"),
+                        reason="no account password configured")
+    def test_the_password_does_not_reach_the_remote_environment(
+            self, live, monkeypatch):
+        """The askpass variables are the LOCAL client's. Nothing about
+        them may cross, and the token is spent by the time this runs."""
+        monkeypatch.setattr(config, "SSH_IDENTITY_FILE", "")
+        live.put(self._name("login"), _env("VEN_TEST_SSH_PASSWORD"))
+        sandbox._reset_ssh_probe()
+        result = sandbox._run_ssh("printenv || true",
+                                  _env("VEN_TEST_SSH_WS"))
+        assert _env("VEN_TEST_SSH_PASSWORD") not in result["stdout"]
+        assert "VEN_ASKPASS_TOKEN" not in result["stdout"]
+        assert "SSH_ASKPASS" not in result["stdout"]

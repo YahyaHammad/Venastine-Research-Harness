@@ -647,6 +647,10 @@ _PAYLOADS = {
     "confirm": {"title": "Write these files?", "body": "ARCHITECTURE.md"},
     "choice": {"options": ["software", "research"], "proposal": "software",
                "reason": "it has a pyproject.toml", "blank": False},
+    # ROADMAP_v3 §49 slice 5a (SS59). The seventh kind this table's own
+    # guard predicted.
+    "secret": {"title": "Unlock the secrets store",
+               "body": "Needed to authenticate to the remote host."},
 }
 
 
@@ -1586,3 +1590,95 @@ def test_a_plain_run_still_gets_the_floor():
 
     args = SimpleNamespace(effort=None)
     assert main.resolve_effort(args, {}) == config.DEFAULT_EFFORT == "high"
+
+
+# ===========================================================================
+# ---- ROADMAP_v3 §49 slice 5a (SS59): the masked read ----------------------
+# ===========================================================================
+
+class TestTheTerminalActuallyStopsEchoing:
+    """`_echo_off` is the only thing that stops a passphrase appearing on
+    screen, and every other CLI test replaces the reader wholesale -- so
+    nothing had ever run it. That is the defect shape AGENTS.md records for
+    `registry.dispatch`: mocking the layer under test removes the thing
+    under test.
+
+    Against a REAL pty, because terminal attributes ARE the mechanism and a
+    mock of them would assert that the mock works.
+    """
+
+    def test_it_clears_the_echo_bit_and_puts_it_back(self):
+        import os
+
+        if os.name == "nt":
+            pytest.skip("no pty; the Windows branch is covered below")
+        termios = pytest.importorskip("termios")
+        import main
+
+        controller, follower = os.openpty()
+        try:
+            before = termios.tcgetattr(follower)
+            assert before[3] & termios.ECHO, (
+                "a fresh pty should start with echo ON, or this test is "
+                "asserting nothing")
+
+            class _Stdin:
+                def fileno(self):
+                    return follower
+
+                def isatty(self):
+                    return True
+
+            original = sys.stdin
+            sys.stdin = _Stdin()
+            try:
+                restore = main._echo_off()
+                assert restore is not None
+                during = termios.tcgetattr(follower)
+                assert not (during[3] & termios.ECHO), (
+                    "echo is still on -- a passphrase typed here would be "
+                    "drawn on the screen")
+                restore()
+                after = termios.tcgetattr(follower)
+                assert after[3] & termios.ECHO
+            finally:
+                sys.stdin = original
+        finally:
+            os.close(controller)
+            os.close(follower)
+
+    def test_a_non_tty_reads_nothing_rather_than_echoing_into_a_pipe(self):
+        """A redirected stdin has no echo to turn off, so a passphrase
+        typed into one lands in the pipe, the scrollback and any log
+        capturing the run. None decodes as the declining default, which is
+        a refusal the user can see rather than a secret they cannot take
+        back."""
+        import io
+
+        import main
+
+        reader = main._StdinReader()
+        original = sys.stdin
+        sys.stdin = io.StringIO("typed anyway\n")
+        try:
+            assert reader.readline_masked("pass: ") is None
+        finally:
+            sys.stdin = original
+
+    def test_a_terminal_that_cannot_hide_input_reads_nothing(self,
+                                                             monkeypatch):
+        """`_echo_off` returning None means this terminal cannot suppress
+        the echo. Reading anyway would print it."""
+        import main
+
+        monkeypatch.setattr(main, "_echo_off", lambda: None)
+
+        class _Stdin:
+            def isatty(self):
+                return True
+
+        monkeypatch.setattr(sys, "stdin", _Stdin())
+        reader = main._StdinReader()
+        monkeypatch.setattr(reader, "_start", lambda: None)
+        monkeypatch.setattr(reader, "_ended", lambda: False)
+        assert reader.readline_masked("pass: ") is None

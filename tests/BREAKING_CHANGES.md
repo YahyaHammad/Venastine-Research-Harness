@@ -4890,3 +4890,18 @@ not before. The builder used to read the probe's `known_hosts` path and fall bac
 be reached". Production never hit it because `_route` probes first; every mocked test handed the
 builder a path and so asserted the assumption. A LIVE test found it, which is the argument for keeping
 the `needs_ssh` half of `test_ssh_backend.py` alive rather than trusting the 124 that run everywhere.
+
+## Batch 103 -- the harness-held secret store (ROADMAP_v3 §49 slice 5a)
+
+| What broke | Why | The repair |
+|---|---|---|
+| `tests/test_cli.py::TestEveryKindIsRendered` | `interaction.SAFE_DEFAULTS` gained `SECRET`, and this table's own guard fails when a kind is missing from it | One row in `_PAYLOADS`. The guard worked exactly as written -- it is there so a kind cannot be added without a branch in BOTH shells (audit #7) |
+| `tests/conftest.py::FakeStdinReader` | The CLI's SECRET handler reads through `readline_masked`, which the fake did not have | Added, recording into `prompts` like its siblings AND into a new `masked_prompts`, so a test can assert the secret was asked for through the MASKED method -- a handler calling `readline` would fill `prompts` and echo the passphrase on a real terminal |
+| `docs/ARCHITECTURE.md`'s tree | Two new modules and two new test files | `security/secrets.py`, `security/askpass.py`, `test_secrets.py` (59), `test_askpass.py` (26); `test_ssh_backend.py` 136 -> 167, `test_interaction.py` 92 -> 97, `test_cli.py` 98 -> 99; 88 -> 90 test files; 5536 -> 5658 |
+| `AGENTS.md`'s decision map | The record defines SS56-SS66 | SS1-SS55 -> SS1-SS66 |
+| `requirements.txt` | `cryptography` is now declared | It was ALREADY installed -- `google-genai` -> `google-auth` -> `cryptography>=38.0.3`, a hard requirement -- so no environment changes. `pip install -r requirements.txt` resolves identically |
+
+**If you authenticate with a key and an agent, nothing changed.** The SSH connection argv is asserted byte-identical to the literal slice 4 shipped whenever no secret is stored for the host, including when a store EXISTS but is locked. `BatchMode=yes` comes off only when this process is actually holding a credential for that host, and that is the one condition under which it could not have worked before.
+
+**If a test of yours leaves the secret store unlocked**, the next test in the same process inherits it -- the store is module state, like the SSH probe. `tests/test_ssh_backend.py`'s `ssh_secrets` fixture locks on the way in and out and resets the auth quarantine at both ends, which is the pattern to copy. A test that trips the quarantine without clearing it makes every later test in the file assert against an unavailable backend.
+

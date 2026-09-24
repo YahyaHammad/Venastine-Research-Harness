@@ -636,6 +636,115 @@ class _StdinReader:
             raise EOFError
         return line.rstrip("\r\n")
 
+    def readline_masked(self, prompt: str):
+        """`readline`, with the terminal not echoing (ROADMAP_v3 §49,
+        slice 5a, SS59).
+
+        Returns the typed line, or None when there is no terminal to
+        type it on, the terminal cannot hide it, or stdin ended.
+
+        WHY NOT `getpass.getpass`: it reads stdin ITSELF -- character
+        by character through `msvcrt` on Windows -- which would be a
+        SECOND reader of the one stdin this class exists to be the only
+        reader of. Audit #100 is what that costs, and a password prompt
+        is the worst place to reintroduce it: the pump would take the
+        passphrase and `getpass` would wait for a line nobody is going
+        to type.
+
+        So the READ is the ordinary one and only the ECHO changes,
+        which is a property of the terminal rather than of whoever is
+        reading. The pump still delivers the line; the console simply
+        does not draw it on the way past.
+
+        NOT A TTY MEANS NO ANSWER, deliberately. A redirected stdin has
+        no echo to turn off, so a passphrase typed into one would land
+        in the pipe, the scrollback and any log capturing the run.
+        None routes that to `interaction.decode`'s declining default,
+        which is a refusal the user can see rather than a secret they
+        cannot take back.
+        """
+        try:
+            if not sys.stdin.isatty():
+                return None
+        except (AttributeError, ValueError):
+            return None
+        self._start()
+        print(prompt, end="", flush=True)
+        if self._ended():
+            print()
+            return None
+        restore = _echo_off()
+        if restore is None:
+            print()
+            print("  [this terminal cannot hide what you type; "
+                  "nothing was read]")
+            return None
+        try:
+            line = self._lines.get()
+        finally:
+            restore()
+            # The newline the terminal did not echo on Enter.
+            print()
+        if line is self._EOF:
+            return None
+        return line.rstrip("\r\n")
+
+
+def _echo_off():
+    """Turn the terminal's echo off; return a callable restoring it, or
+    None when this terminal cannot do it.
+
+    Two implementations because there is no portable one, and each is
+    the platform's own mechanism rather than a library that would read
+    stdin on our behalf -- which is the whole point of doing it here.
+    """
+    if os.name == "nt":
+        try:
+            import ctypes
+            from ctypes import wintypes
+        except ImportError:                          # pragma: no cover
+            return None
+        try:
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.GetStdHandle(-10)      # STD_INPUT_HANDLE
+            mode = wintypes.DWORD()
+            if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                return None
+            enable_echo_input = 0x0004
+            if not kernel32.SetConsoleMode(
+                    handle, mode.value & ~enable_echo_input):
+                return None
+        except (AttributeError, OSError):             # pragma: no cover
+            return None
+
+        def restore():
+            kernel32.SetConsoleMode(handle, mode.value)
+
+        return restore
+    try:
+        import termios
+    except ImportError:                              # pragma: no cover
+        return None
+    try:
+        fd = sys.stdin.fileno()
+        before = termios.tcgetattr(fd)
+    except (ValueError, OSError, termios.error):
+        return None
+    after = list(before)
+    after[3] = after[3] & ~termios.ECHO              # lflags
+    try:
+        termios.tcsetattr(fd, termios.TCSADRAIN, after)
+    except (OSError, termios.error):
+        return None
+
+    def restore():
+        try:
+            termios.tcsetattr(fd, termios.TCSADRAIN, before)
+        except (OSError, termios.error):
+            pass
+
+    return restore
+
 
 _STDIN_READER: "_StdinReader | None" = None
 
@@ -942,8 +1051,31 @@ def build_attended_provider(honour_run_scope: bool = False,
     # perfectly wired up. CONFIRM and CHOICE sat in that state through two
     # sections. A runtime warning would only fire once someone reached the
     # branch, which is exactly the condition nobody noticed.
+    def _secret(request):
+        """SS59 on the CLI. Masked, and it names nothing it reads.
+
+        A missing branch here is audit #7's shape -- the kind falls
+        through to None, decode turns that into the declining default,
+        and the feature reports "nobody answered" on every CLI run
+        while looking perfectly wired up. The parity test against
+        `interaction.SAFE_DEFAULTS` is what makes adding a kind
+        without this a FAILURE rather than a later discovery.
+        """
+        payload = request.payload
+        print()
+        print(payload.get("title", "Enter a secret"))
+        body = payload.get("body", "")
+        if body:
+            print(body)
+        answer = reader.readline_masked("  (not shown as you type): ")
+        if answer is None:
+            print("  [nothing was entered]")
+            return None
+        return answer
+
     handlers = {
         interaction.APPROVAL: _approval,
+        interaction.SECRET: _secret,
         interaction.SUBAGENT_SIGNOFF: _signoff,
         interaction.QUESTION: _question,
         interaction.REVIEW: _review,
@@ -966,6 +1098,141 @@ def build_attended_provider(honour_run_scope: bool = False,
     # Read by the parity test; nothing in production branches on it.
     channel.rendered_kinds = frozenset(handlers)
     return channel
+
+
+def run_secrets_command(args) -> int:
+    """`--secrets ...`, ROADMAP_v3 §49 slice 5a (SS56-SS62).
+
+    Runs no model, touches no thread, and exits -- beside --memories for
+    that reason.
+
+    EVERY VALUE IS READ AT A MASKED PROMPT AND NONE IS TAKEN FROM ARGV.
+    That is not a convenience: on every platform this runs on, another
+    process can read this one's command line, and on a shell it also lands
+    in the history file. A `--secrets set name VALUE` spelling would have
+    been shorter and would have leaked the secret to disk before the store
+    ever encrypted it.
+
+    Prints names, counts and outcomes. Never a value (SS62).
+    """
+    from security import secrets
+
+    parts = list(args.secrets)
+    verb = parts[0].lower()
+    rest = parts[1:]
+    reader = _stdin_reader()
+
+    def ask(prompt: str):
+        value = reader.readline_masked(prompt)
+        if value is None:
+            print("  [nothing was entered]")
+        return value
+
+    def unlocked() -> bool:
+        if secrets.is_unlocked():
+            return True
+        if not secrets.exists():
+            print(f"No secrets store. --secrets set <name> creates one at "
+                  f"{secrets.store_path()}.")
+            return False
+        answer = ask("Master passphrase (not shown as you type): ")
+        if not answer:
+            return False
+        try:
+            secrets.unlock(answer)
+        except secrets.SecretsError as exc:
+            print(f"[error] {exc}")
+            return False
+        return True
+
+    if verb == "status":
+        if not secrets.exists():
+            print(f"No secrets store. It would live at "
+                  f"{secrets.store_path()}.")
+        else:
+            print(f"Secrets store present at {secrets.store_path()}.")
+        return 0
+
+    if verb == "list":
+        if not unlocked():
+            return 1
+        entries = secrets.names()
+        if not entries:
+            print("No secrets stored.")
+        else:
+            print("Stored secrets (names only):")
+            for name in entries:
+                print(f"  {name}")
+        return 0
+
+    if verb == "delete":
+        if not rest:
+            print("Usage: --secrets delete <name>")
+            return 2
+        if not unlocked():
+            return 1
+        if secrets.delete(rest[0]):
+            print(f"Deleted {rest[0]}.")
+            return 0
+        print(f"No secret named {rest[0]}.")
+        return 1
+
+    if verb == "set":
+        if not rest:
+            print("Usage: --secrets set <name>")
+            return 2
+        name = rest[0]
+        if not secrets.exists():
+            print("Creating a new secrets store. There is no recovery for "
+                  "a forgotten passphrase: delete the file and start again.")
+            first = ask("Choose a master passphrase: ")
+            if not first:
+                return 1
+            try:
+                secrets.create(first)
+            except secrets.SecretsError as exc:
+                print(f"[error] {exc}")
+                return 1
+        elif not unlocked():
+            return 1
+        value = ask(f"Value for {name}: ")
+        if not value:
+            return 1
+        try:
+            secrets.put(name, value)
+        except secrets.SecretsError as exc:
+            print(f"[error] {exc}")
+            return 1
+        print(f"Saved {name}.")
+        # SS58's reuse offer, in the CLI's own idiom.
+        twin = _secret_twin_name(name)
+        if twin:
+            answer = _ask(f"Also save the same value as {twin}? [y/N]: ")
+            if answer.strip().lower().startswith("y"):
+                try:
+                    secrets.put(twin, value)
+                except secrets.SecretsError as exc:
+                    print(f"[error] {exc}")
+                    return 1
+                print(f"Saved {twin}.")
+        return 0
+
+    print("Usage: --secrets status | list | set <name> | delete <name>")
+    return 2
+
+
+def _secret_twin_name(name: str):
+    """`ssh.<host>.login` <-> `ssh.<host>.sudo` (SS58).
+
+    Mirrors `tui/app.py`'s `_secret_twin` rather than importing it: main.py
+    does not import the TUI module at all, and doing so to share nine lines
+    would pull Textual into every CLI run. `tests/test_secrets.py` holds
+    the two against each other, so drift is a failure rather than a hole.
+    """
+    for left, right in (("login", "sudo"), ("sudo", "login")):
+        if name.endswith("." + left):
+            return name[: -len(left)] + right
+    return None
 
 
 def run_memory_command(args) -> int:
@@ -1352,6 +1619,21 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="UUID",
         help="Resume an existing conversation thread by its UUID.",
+    )
+    # ROADMAP_v3 §49 slice 5a. A flag rather than a subcommand, matching
+    # --memories/--forget, which are the other data-only commands that run
+    # no model call: this parser has no subparsers at the top level and
+    # adding one for this would reshape every existing invocation.
+    parser.add_argument(
+        "--secrets",
+        nargs="+",
+        default=None,
+        metavar="ARG",
+        help="Manage the harness-held secret store and exit: "
+             "status | list | set <name> | delete <name>. Values are "
+             "typed at a masked prompt, never given on the command line "
+             "-- an argv is visible to every process on the machine and "
+             "lands in your shell history.",
     )
     parser.add_argument(
         "--mode",
@@ -2097,7 +2379,7 @@ def main(argv=None) -> int:
     # named the restored one. The app computes its own against the pair it
     # will actually call. Fixed at the producer: the check was right and
     # its input was wrong.
-    if not (args.memories or args.forget or args.tui):
+    if not (args.memories or args.forget or args.secrets or args.tui):
         from credentials import provider_startup_issues
         for warning in provider_startup_issues(provider):
             print(f"[warning] {warning}")
@@ -2107,6 +2389,13 @@ def main(argv=None) -> int:
     # command runs a model or needs a tool.
     if args.memories or args.forget:
         return run_memory_command(args)
+
+    # ROADMAP_v3 §49 slice 5a. Beside the memory commands: no model call,
+    # no MCP server, no thread. ABOVE them in importance only in that it
+    # must run before anything could need a secret, which nothing here
+    # does -- so the ordering is alphabetical rather than load-bearing.
+    if args.secrets:
+        return run_secrets_command(args)
 
     # §21c (M21). Beside the memory commands and for the same reasons: it
     # needs the resolved project path for nothing, but it DOES need the

@@ -103,6 +103,16 @@ CHOICE = "choice"
 # four affordances the spec asks for by name, and a shape CHOICE's decoder
 # cannot express without becoming two decoders wearing one name.
 QUESTION = "question"
+# ROADMAP_v3 §49 slice 5a (SS59). One value, typed by a human, that the
+# caller needs and this module must never see printed.
+#
+# Its own kind rather than a QUESTION with a flag, because the KIND is what
+# tells a shell how to RENDER -- and the rendering is the whole point here:
+# the field is masked, the answer is not echoed, and it does not reach the
+# transcript, the log or the scrollback. A flag on an existing kind would
+# make a shell that ignored the flag look wired up while showing the
+# passphrase in clear.
+SECRET = "secret"
 
 # Review decisions, moved here from core/reasoning/review.py so the decoder
 # and the pipeline cannot disagree about what a valid answer is.
@@ -142,6 +152,14 @@ SAFE_DEFAULTS = {
     # answer carrying defer=True, because a user who says that has told the
     # model something, and a user who closed the modal has not.
     QUESTION: None,
+    # None, for CHOICE's reason and one more that is specific to this kind:
+    # the empty string is a value a user could legitimately mean to type,
+    # and it is also what a torn-down modal and a shell with no branch for
+    # SECRET both produce. Defaulting to "" would hand `sudo` an empty
+    # password -- an authentication ATTEMPT made on nobody's behalf, which
+    # on a remote account is a step towards a lockout. None is not a
+    # password, so every consumer has to notice.
+    SECRET: None,
 }
 
 
@@ -227,6 +245,21 @@ def decode(request: "Request", raw: Any) -> Any:
         # decision the user made -- unlike the shapes below, there is no
         # third state to confuse it with.
         return bool(raw)
+
+    if kind == SECRET:
+        # A string, or nothing. NOT `str(raw)`: a shell that returned a
+        # widget, a dict or a bool would be coerced into a "password" that
+        # is really a repr, and it would then be TRIED against a real
+        # account. And not `raw or None` either -- an empty string is the
+        # shape a dismissed modal produces, and it must decode as "nobody
+        # answered" rather than as a password of length zero.
+        #
+        # The value is returned raw and is NOT logged, here or anywhere on
+        # this path. This is the one decode branch whose input must not
+        # appear in a warning about its own shape.
+        if not isinstance(raw, str) or raw == "":
+            return None
+        return raw
 
     if kind == CHOICE:
         # Valid ONLY against what was offered. A shell returning something
