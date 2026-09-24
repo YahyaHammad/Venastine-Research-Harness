@@ -15259,3 +15259,119 @@ batch changed. Full suite, `ruff check .` clean, bandit exit 0 against a path-co
 **and** directly over all four new files -- the two new `security/` modules are clean, and the tests
 reach `subprocess` through `sandbox.subprocess` rather than importing it, which is
 `test_ssh_backend.py`'s own recorded rule for the same reason.
+
+## Batch 104 -- root, and the flag that was not protecting it (2026-09-24)
+
+ROADMAP_v3 §49 slice 5b, decisions SS67-SS72, and a correction to SS66. A tool call may now set
+`needs_root`; the harness prefixes `/usr/bin/sudo -k -S -p '' --`, supplies the password stored for
+that machine, and asks a human first every single time. It runs on WSL and over SSH and nowhere
+else. This is the store's second consumer, which is why slice 5a was built against two and shipped
+with one, and it completes §49.
+
+The gate half is not a new rule so much as a correction to an old one. Batch 103 measured, against
+the real gate rather than by reading it, that `sudo apt-get install` on `backend: "wsl"` answered
+**`asks=False`** whenever `AUTO_APPROVE_SANDBOX_FALLBACK` was on: WSL is UNCONTAINED, and that opt-in
+sits above the capability rule, so it answers for the entire backend and not only for the host
+fallback it is named after. The backend where root is most reachable was the one where nothing asked.
+So the root step reads above both opt-ins (SS65), and the WSL posture pair -- which claimed "Only a
+read-only command inside the workspace runs there without asking" -- now says what is true in each
+configuration, which is §48 (CE6)'s correction applied to a second pair.
+
+**The step fires on the declaration OR on the command text** (SS67), and the OR is the whole design.
+`declared_root` alone is a step the model steps around by typing `sudo` and leaving the flag off,
+which is precisely the call the measurement found running unasked. The text half is a raw token check
+against `sudo`, `doas`, `pkexec` and `su` -- never a parser (G2) -- so `echo sudo` costs one prompt,
+and that trade is the one `_command_touches_protected` already makes beside it. The asymmetry that
+makes it safe is worth stating: the token half only ever ADDS a prompt. A password is supplied for a
+declared call and for nothing else, so a spelling that slips past reaches a `sudo` with no password
+and fails, rather than reaching one with a password nobody approved. It is also why the no-secret
+refusal reads the declaration and not the token -- refusing an undeclared `sudo` for want of a stored
+password would break a passwordless setup that works today.
+
+### The measurement that changed the design, and corrected a decision
+
+SS66 said `-k` was there "so a cached ticket cannot pass the password line through to the command as
+input". That is not what `-k` does, and the probe proved it twice over.
+
+`sudo -S` reads stdin only when it actually has to **authenticate**. When it does not, it reads
+nothing -- and the password this harness wrote is then sitting in the pipe as **the command's own
+standard input**, where a `cat`, a `tee` or an interactive installer reads it. The trigger is a
+NOPASSWD rule, not a warm ticket; and `-k` does not help, because there is no authentication for it
+to force. Measured on **both** implementations this machine can reach:
+
+    sudo-rs 0.2.13 (Ubuntu)   NOPASSWD -> the command received the password
+    Sudo 1.9.17p2  (classic)  NOPASSWD -> the command received the password
+
+with `-k` and without it, on the WSL route and over SSH. The warm-ticket trap SS66 actually named
+could not be reproduced on either. So the recorded reason was wrong about the mechanism and wrong
+about the control, and a batch that had trusted it would have shipped a password into a command's
+stdin on exactly the hosts where the feature looks like it is working.
+
+The control is SS72: `exec 0</dev/null; ` in front of the command, inside the rooted shell. sudo still
+reads the pipe; the command cannot. It costs nothing real, because every one of these routes already
+hands a command DEVNULL -- so the guard preserves that contract rather than changing it -- and it is
+absent when no root is asked, because batch 103's own lesson was that a guard which cannot fire still
+reads as the thing protecting you. `-k` stays for what it does do: one approval buys exactly one
+authentication, so a ticket warmed by an approved command cannot quietly authorise a later one.
+
+### What else measuring found
+
+- **Ubuntu ships `sudo-rs`, not `sudo`.** A different implementation of the same command, and the one
+  the WSL route will actually call here. It carries the four flags, so the shape survived; nothing
+  about its behaviour transferred for free, and its stderr and attempt counts differ from classic
+  sudo's.
+- **A WSL one-shot inherited this process's stdin** (SS70). `_run_wsl` passed no `stdin=` at all.
+  Driven with the harness's stdin replaced by a pipe, the command in the distro read the string out of
+  it -- §29 N1's second reader, on a route written before that rule existed. DEVNULL now, or a pipe
+  carrying one line. The container, inert and host-fallback one-shots have the same gap and are
+  recorded rather than changed: they are not on this batch's route.
+- **The container is already root and ships no `sudo`** -- `uid=0`, `command -v sudo` empty. SS66's
+  refusal rested on that and it had been an assertion.
+- **No `requiretty`; sudo over a non-tty ssh connection works**, and the `cd --` guard still fires
+  first, so a missing remote workspace still answers 125 and the marker before anything is elevated.
+- **The password is in no process table, no `/proc/*/cmdline` and no environment.** Two earlier
+  readings said otherwise and **both were the probe's own fault**: the first grep's argv carried the
+  needle, and the second matched `SUDO_COMMAND`, which holds the command text. A measurement whose
+  needle is in its own haystack measures the probe. Trap 14, arriving through a shell instead of a
+  spy.
+
+### No new switch
+
+Root needs an off switch and it has one: the stored password (SS68). A call with nothing stored is
+refused outright, naming `wsl.<distro>.sudo` or `ssh.<host>.sudo` and the `/secrets set` line, and
+the gate reads that refusal as "there is nothing to approve" rather than asking (§32 A7). An
+`allow_root_commands` key was rejected for G3's reason -- a second switch over one decision -- and for
+one more: it would be a flag a reader could set to `true` without ever being asked for a password,
+which is two controls with one of them decorative. The cost is recorded rather than hidden: a host
+with passwordless sudo cannot use `needs_root` at all, even though it would work.
+
+There is no badge entry either, and deliberately. Root is always-ask, so it is not a weakening the
+badge should list; and whether a sudo password is stored is mutable at runtime, which UN1 keeps out of
+a posture frozen at startup. The two backend pairs gained a clause instead.
+
+### Verification
+
+Full suite 5819 selected, zero failures. `ruff check .` clean; bandit exit 0 against a path-corrected
+baseline copy and directly over the new file. A mutation pass in the foreground, in chunks. And six
+live tests against a real sshd and a real `sudo`, one of which is the only way to ask the question
+this batch turns on -- whether a root `cat` reads the password -- and which would have passed
+vacuously against any mock.
+
+**Running it under WSL found twenty-two tests that asserted nothing there.** They handed production
+code a workspace of `C:\ws`, which on Windows is absolute and outside the install tree and on POSIX
+is an ordinary RELATIVE name that joins onto it -- so `check_workspace` refused the call before the
+code under test was reached, and every one of them was green here for a reason that does not exist
+there. Batch 102 shipped three the same way and this project's own notes already said to use
+`tmp_path`; knowing the rule was not enough, so the fixture that now supplies the path carries the
+reason in its docstring, where the next person writing a test in this file will read it.
+
+With that fixed, **1164 pass under WSL** across every non-TUI file this batch touched. The five that
+remain fail IDENTICALLY with this batch's new file excluded, which is the fifteen-second check that
+settles whose they are: three are the documented order-dependent podman failures, and two are that
+distro's `textual 1.0.0` against the pinned `8.2.8`, which cannot parse the shipped stylesheet at
+all (`StylesheetParseError`, eight errors). Worth naming because those two are in `test_rationale.py`,
+which asserts the approval NOTICE this batch changed -- the one place a stale dependency could have
+been mistaken for a real regression, and the reason it was diagnosed rather than assumed.
+
+With `needs_root` false the WSL and SSH argvs are byte-identical to what `9048427` shipped, option for
+option and in order, proved against the pre-patch module rather than against a literal typed twice.

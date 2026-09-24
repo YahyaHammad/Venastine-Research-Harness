@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 5680 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 5819 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -148,7 +148,7 @@ made the move free: no import changed, and `tests/test_docs_consistency.py` is t
 opens any of these files (its `DOCS` constant is where the path now comes from).
 
 - **docs/ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49 onward, in progress) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A15 from §32, W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 SS1–SS66 from §49, NW1–NW5 from §50 and PG1–PG4 from §51). Section and D-numbers are stable and cross-referenced everywhere.
+- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49 onward, in progress) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A15 from §32, W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 SS1–SS72 from §49, NW1–NW5 from §50 and PG1–PG4 from §51). Section and D-numbers are stable and cross-referenced everywhere.
 
 **Six namespaces use the same `LETTER+NUMBER` shape, and only the first is the
 record.** An id that resolves to two places is a cross-reference that fails
@@ -1714,7 +1714,7 @@ assert what the user was asked and whether it carried a deadline.
 A mutation that strands a reader **hangs** the suite rather than failing it, since two read paths now
 have no deadline. The mutation harness reports HANG as its own outcome.
 
-### The shell gate (`§28`, G1–G7; routing and disclosure amended by `§46`, EP4–EP8; what `tiered` approves amended by `§48`, CE1–CE7; the container runtime amended by ROADMAP_v3 `§49`, SS22–SS24; declared network added by ROADMAP_v3 `§50`, NW1–NW5; a third backend added by ROADMAP_v3 `§49` slice 3, SS35–SS45; a fourth by slice 4, SS46–SS55; the harness-held secret store and SSH credentials by slice 5a, SS56–SS64)
+### The shell gate (`§28`, G1–G7; routing and disclosure amended by `§46`, EP4–EP8; what `tiered` approves amended by `§48`, CE1–CE7; the container runtime amended by ROADMAP_v3 `§49`, SS22–SS24; declared network added by ROADMAP_v3 `§50`, NW1–NW5; a third backend added by ROADMAP_v3 `§49` slice 3, SS35–SS45; a fourth by slice 4, SS46–SS55; the harness-held secret store and SSH credentials by slice 5a, SS56–SS64; root commands by slice 5b, SS65–SS72)
 
 Read §28's record before touching `security/sandbox.py`, `security/capability.py` or
 `_shell_approval_check`, and §46's before touching where a command RUNS. The four things most
@@ -1839,6 +1839,43 @@ And slice 2 (batch 100) -- an interactive shell the agent types into (SS25-SS34)
 
 And slice 4 first, because it is the one with a rule the others do not have -- see below for
 slice 3.
+
+Slice 5b (batch 104) -- a command the harness runs as root (SS65-SS72):
+
+* **A root command ALWAYS asks**, above both opt-ins, in every mode but `never` (SS65). This is a
+  CORRECTION to the gate and not a restatement of it: measured, `sudo apt-get install` on
+  `backend: "wsl"` answered `asks=False` whenever `AUTO_APPROVE_SANDBOX_FALLBACK` was on, because WSL
+  is UNCONTAINED and that opt-in sits above the capability rule. The backend where root is most
+  reachable was the one where nothing asked.
+* **The step fires on the DECLARATION or on the command TEXT** (SS67). `needs_root` is
+  `declared_network`'s sibling -- literal `True` only -- and it is OR'd with a raw token check for
+  `sudo`, `doas`, `pkexec`, `su`. Without the OR a model steps around the step by typing `sudo` and
+  leaving the flag off, which is exactly the call the measurement found running unasked. It is a
+  token check and never a parser (G2); `echo sudo` asks, and that is the trade.
+* **The token half never ARMS anything.** A password is supplied for a DECLARED call and for nothing
+  else, so a spelling that slips past the check reaches a `sudo` with no password and fails. That
+  asymmetry is also why the no-secret REFUSAL reads `declared_root` and not the token check --
+  refusing an undeclared `sudo` for want of a stored password would break a passwordless setup that
+  works today.
+* **`-k` IS NOT WHAT KEEPS THE PASSWORD AWAY FROM THE COMMAND.** SS66 said it was and SS66 was wrong.
+  `sudo -S` reads stdin only when it must AUTHENTICATE; under a NOPASSWD rule it reads nothing and the
+  password becomes the command's own input. Measured on sudo-rs 0.2.13 AND classic Sudo 1.9.17p2,
+  **with `-k` and without it**. The control is SS72's `exec 0</dev/null; ` in front of the command.
+  `-k` stays for what it does do: one approval buys exactly one authentication.
+* **Sudo wraps the SHELL, not the first word** (SS69), so the whole command line is root -- otherwise
+  `sudo echo x > /etc/f` writes as the user and the approval notice is a lie. Argv mode is dropped on
+  this path and nothing is lost: argv mode exists for AUTO-APPROVED inert commands, and a root command
+  is never auto-approved.
+* **No stored password is a REFUSAL, not a prompt** (SS68), naming `wsl.<distro>.sudo` or
+  `ssh.<host>.sudo` and the `/secrets set` line. The store's contents ARE the opt-in -- there is no
+  `allow_root_commands` key, because a second switch over one decision is the ratchet G3 removed.
+  `sudo_refusal()` is the ONE copy, read by the gate, by `run_sandboxed` and by `start_sandboxed`.
+* **A WSL one-shot used to inherit this process's stdin** (SS70) -- measured, a command in the distro
+  read a string written to the harness's own. That is §29 N1's second reader on a route written before
+  the rule. It is DEVNULL now, or a PIPE carrying one line. The container, inert and host-fallback
+  one-shots have the same gap and are recorded, not changed.
+* **With `needs_root` false, both argvs are byte-identical to `9048427`'s**, WSL and SSH, proved
+  against the pre-patch module rather than against a literal typed twice.
 
 Slice 5a (batch 103) -- the harness-held secret store (SS56-SS64):
 

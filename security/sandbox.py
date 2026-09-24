@@ -529,6 +529,7 @@ def _wsl_argv(
     *,
     argv_mode: bool,
     session_timeout_s: Optional[int] = None,
+    as_root: bool = False,
 ) -> list[str]:
     """The argv that runs *command* in the distro (SS43).
 
@@ -549,10 +550,28 @@ def _wsl_argv(
 
     *workspace_posix* is already translated by `_wsl_workspace`; see there
     for why `--cd` is never handed a Windows path.
+
+    *as_root* (slice 5b) puts `sudo` outermost and forces the SHELL form.
+    Both halves are decisions:
+
+    SS69 -- sudo wraps the shell, so the WHOLE command line runs as root,
+    pipes and redirects included. Prefixing only the first word gives the
+    classic half-root surprise (`sudo echo x > /etc/f` writes as the user)
+    and would make the approval notice a lie about what was approved.
+
+    ARGV MODE IS DROPPED HERE, and that does not weaken what it protects.
+    Argv mode exists so an AUTO-APPROVED inert command has no shell between
+    the classifier and the executor (SS39/SS43). A root command is never
+    auto-approved -- SS65/SS67 put an always-ask step above both opt-ins --
+    so the property has no work to do, and the guard below needs a shell.
     """
     args = [WSL, "--cd", workspace_posix, "-d", wsl_distro(), "-e"]
-    inner = (_inert_argv(command) if argv_mode
-             else ["bash", "--norc", "--noprofile", "-c", command])
+    if as_root:
+        inner = ["bash", "--norc", "--noprofile", "-c",
+                 _SUDO_STDIN_GUARD + command]
+    else:
+        inner = (_inert_argv(command) if argv_mode
+                 else ["bash", "--norc", "--noprofile", "-c", command])
     if session_timeout_s is not None:
         # The container route's backstop, unchanged in purpose: the harness
         # kills at the timeout and owns the `timed_out` answer, and this is
@@ -561,6 +580,12 @@ def _wsl_argv(
         # 3.2s.
         inner = ["timeout", "-k", str(_KILL_GRACE_S),
                  str(session_timeout_s)] + inner
+    if as_root:
+        # OUTERMOST, so `timeout` runs as root and can kill a root child.
+        # Measured both ways: rc 124 at 3s with no process left behind
+        # either way, and this order is the one that does not depend on
+        # sudo forwarding a signal it has no obligation to forward.
+        inner = _sudo_argv() + inner
     return args + inner
 
 
@@ -1117,7 +1142,8 @@ def _ssh_connection_argv(binary: str, target: str, known: str) -> list[str]:
 
 
 def _ssh_remote_script(command: str, workspace: str,
-                       session_timeout_s: Optional[int] = None) -> str:
+                       session_timeout_s: Optional[int] = None,
+                       as_root: bool = False) -> str:
     """The ONE string the remote login shell parses (SS51).
 
     `ssh` has no `execve` path: it joins its trailing argv with spaces and
@@ -1135,8 +1161,16 @@ def _ssh_remote_script(command: str, workspace: str,
     tier that the other routes may run unasked is the one defined by having
     no shell between the classifier and the executor, and this route cannot
     offer that.
+
+    *as_root* (slice 5b) splices `sudo` in front of the runner, INSIDE the
+    one quoting boundary and BEHIND the `cd --` guard -- so a remote
+    workspace that is not there still refuses with 125 and the marker
+    before anything is elevated, and the guard's own failure is still the
+    unprivileged user's. Measured against a real sshd: rc 125 and the
+    marker, with sudo in the script.
     """
-    runner = ["bash", "--norc", "--noprofile", "-c", command]
+    runner = ["bash", "--norc", "--noprofile", "-c",
+              _SUDO_STDIN_GUARD + command if as_root else command]
     if session_timeout_s is not None:
         # The container and WSL backstop, on a route that needs it MORE.
         # Measured: killing the local `ssh` does NOT kill the remote
@@ -1146,6 +1180,8 @@ def _ssh_remote_script(command: str, workspace: str,
         # client alive (rc 124).
         runner = ["timeout", "-k", str(_KILL_GRACE_S),
                   str(session_timeout_s)] + runner
+    if as_root:
+        runner = _sudo_argv() + runner
     quoted = " ".join(shlex.quote(part) for part in runner)
     return (
         "cd -- %s || { printf '%%s\\n' %s >&2; exit %d; }; exec %s"
@@ -1182,7 +1218,8 @@ def _ssh_known_hosts() -> str:
 
 
 def _ssh_argv(command: str, *,
-              session_timeout_s: Optional[int] = None) -> list[str]:
+              session_timeout_s: Optional[int] = None,
+              as_root: bool = False) -> list[str]:
     """The argv that runs *command* on the configured host.
 
     `_wsl_argv`'s opposite number. There is no `argv_mode` parameter and
@@ -1194,7 +1231,213 @@ def _ssh_argv(command: str, *,
     binary = (probe.binary if probe is not None and probe.binary
               else _ssh_binary())
     return _ssh_connection_argv(binary, ssh_target(), known) + [
-        _ssh_remote_script(command, workspace, session_timeout_s)]
+        _ssh_remote_script(command, workspace, session_timeout_s, as_root)]
+
+
+# ---------------------------------------------------------------------------
+# ---- Root commands (ROADMAP_v3 §49, slice 5b, SS65-SS72) -------------------
+# ---------------------------------------------------------------------------
+
+# An ABSOLUTE path, not a PATH lookup: `sudo` is the one binary on these
+# routes whose identity decides whether the password this harness holds
+# goes to the real thing. Measured present at this path on the distro
+# (a symlink to /etc/alternatives/sudo) and on the remote. A host without
+# it is refused by name rather than served by whatever `PATH` answers.
+_SUDO_BINARY = "/usr/bin/sudo"
+
+# `-k` invalidates any cached ticket, so ONE approval buys exactly ONE
+# authentication and a ticket warmed by an approved command cannot quietly
+# authorise a later one. That is the whole of what it does here, and the
+# correction matters: it does NOT stop the password line reaching the
+# command -- see _SUDO_STDIN_GUARD, where that was measured.
+#
+# `-S` reads the password from stdin. `-p ""` empties the prompt, measured
+# to leave a bare "\n" on stderr with sudo-rs and nothing at all with
+# classic sudo. `--` ends option parsing so a command starting with a dash
+# is a command.
+_SUDO_FLAGS = ("-k", "-S", "-p", "", "--")
+
+# THE GUARD, and the measurement that produced it (SS72).
+#
+# `sudo -S` reads stdin only when it actually has to authenticate. When it
+# does not -- a NOPASSWD rule, or a cached ticket on an implementation that
+# honours one -- it reads NOTHING, and the password this harness wrote is
+# then sitting in the pipe as THE COMMAND'S OWN STANDARD INPUT, where a
+# `cat`, a `tee` or an interactive installer reads it.
+#
+# Measured on both implementations, with `-k` and without it:
+#   sudo-rs 0.2.13 (Ubuntu) NOPASSWD -> the command received the password
+#   Sudo 1.9.17p2 (classic) NOPASSWD -> the command received the password
+# So `-k` is not the control; this is. The inner shell closes its own stdin
+# before the command runs, which costs nothing real: every one of these
+# routes gives a command DEVNULL today, so this preserves the contract
+# rather than changing it.
+_SUDO_STDIN_GUARD = "exec 0</dev/null; "
+
+# Per-backend, for the run. A refused password is not retried (SS71).
+_sudo_rejected: dict = {}
+
+
+def _sudo_argv() -> list:
+    """`sudo` and its flags. One copy, two argv builders."""
+    return [_SUDO_BINARY, *_SUDO_FLAGS]
+
+
+def _sudo_secret_name(backend: str) -> str:
+    """Which entry holds the password for this target (SS58).
+
+    The NAME says which machine it unlocks. Built from the configured
+    distro or host rather than from anything the model sent, so a call
+    cannot name someone else's secret.
+    """
+    if backend == BACKEND_WSL:
+        return "wsl.%s.sudo" % (wsl_distro() or "")
+    if backend == BACKEND_SSH:
+        return "ssh.%s.sudo" % ((config.SSH_HOST or "").strip())
+    return ""
+
+
+def _sudo_secret(backend: str):
+    """The stored password, or None when there is not one to be had.
+
+    None covers all three of "no entry", "the store is locked" and
+    "quarantined this run", because every one of them means the same thing
+    to a caller: this harness has no password to offer. `sudo_refusal` is
+    what tells them apart for a HUMAN.
+
+    The `StoreLocked` handler rather than an `is_unlocked()` check above
+    it, for `_ssh_stored_secrets`' recorded reason: the store can lock
+    BETWEEN a check and a read, and no check can cover that gap.
+    """
+    name = _sudo_secret_name(backend)
+    if not name or _sudo_rejected.get(backend):
+        return None
+    try:
+        return secrets.get(name)
+    except secrets.StoreLocked:
+        return None
+
+
+def sudo_refusal(backend: str):
+    """Why a root command cannot run on *backend*, or None (SS66/SS68).
+
+    ONE copy, for the same reason `uncontained_refusal` is one: the gate
+    reads it to answer "there is nothing to approve", and `run_sandboxed`
+    and `start_sandboxed` read it to stop the call. Three sites deciding
+    this separately is the drift #157 came from.
+
+    THE CONTAINER IS REFUSED BECAUSE IT IS ALREADY ROOT -- measured, the
+    pinned image runs as uid 0 and ships no `sudo` at all, so offering it
+    would be a control that does nothing and a prompt about a privilege
+    the command already has.
+
+    THE HOST FALLBACK IS REFUSED AND RECORDED rather than assumed: on
+    Windows the host shell is PowerShell and `sudo.exe` elevates through a
+    UAC consent dialog that cannot take a password on stdin at all. That is
+    a different mechanism and a separate measurement, and guessing at it is
+    how a control gets shipped that does not work.
+
+    NO STORED SECRET IS A REFUSAL, not a prompt (SS68). The store's
+    contents are the opt-in for root, which is why there is no
+    `allow_root_commands` key: a second switch over one decision is the
+    ratchet G3 removed.
+    """
+    if backend == BACKEND_WSL or backend == BACKEND_SSH:
+        quarantined = _sudo_rejected.get(backend)
+        if quarantined:
+            return quarantined
+        if _sudo_secret(backend) is None:
+            name = _sudo_secret_name(backend)
+            return (
+                f"This command asked to run as root, and no sudo password "
+                f"is stored for this target. Nothing is asked and nothing "
+                f"runs, because the stored secret is what turns root on at "
+                f"all. Store it with `/secrets set {name}` (or "
+                f"`--secrets set {name}` outside the app) and run the "
+                f"command again. The store must also be unlocked -- "
+                f"`/secrets status` says whether it is.")
+        return None
+    if backend == BACKEND_CONTAINER:
+        return (
+            "This command asked to run as root, and the container is "
+            "refused for that -- not because it is dangerous there but "
+            "because a command in the container ALREADY runs as root, and "
+            "the image ships no `sudo` at all. Drop `needs_root` and the "
+            "same command has the privileges it was asking for. Root on "
+            "the user's own machine is `backend: \"wsl\"`, and on the "
+            "remote `backend: \"ssh\"`.")
+    return (
+        "This command asked to run as root on a backend that cannot "
+        "offer it. Root runs on WSL and over SSH only.")
+
+
+def _note_sudo_auth_failure(stderr: str, backend: str,
+                            used_secret: bool) -> None:
+    """Quarantine a refused sudo password for the run (SS71).
+
+    `_note_ssh_auth_failure`'s shape and its reason. `passwd_tries`
+    defaults to three, and a model that retries a wrong password walks a
+    real account towards `pam_faillock` on the distributions that have it
+    in the auth stack. The harness stops offering the value and says which
+    entry to fix.
+
+    IT DOES NOT LOCK THE STORE. One wrong password must not cost the
+    master passphrase, which is the trade SS63 already made for SSH.
+    """
+    if not used_secret or _sudo_rejected.get(backend):
+        return
+    if "uthentication fail" not in stderr and "incorrect password" not in stderr:
+        return
+    name = _sudo_secret_name(backend)
+    _sudo_rejected[backend] = (
+        f"The stored sudo password for this target was refused. It will "
+        f"not be tried again this run, so a wrong value cannot walk the "
+        f"account towards a lockout. Fix it with `/secrets set {name}` "
+        f"and restart.")
+    logger.warning("sudo: stored password refused on %s; quarantined for "
+                   "this run", backend)
+
+
+def _reset_sudo_quarantine() -> None:
+    """Tests only."""
+    _sudo_rejected.clear()
+
+
+def _sudo_password_line(secret, binary: bool = False):
+    """The one line written to a root command's stdin.
+
+    ONE function for both shapes -- a session's streams are binary and a
+    one-shot's are text -- so the two cannot disagree about the encoding or
+    about the trailing newline, which `sudo -S` needs in order to end the
+    line at all. `reveal()` is the single named accessor SS62 leaves open,
+    which is what makes `grep -rn 'reveal()'` the audit.
+    """
+    line = secret.reveal() + b"\n"
+    return line if binary else line.decode("utf-8")
+
+
+def _feed_sudo_password(proc, secret) -> None:
+    """Hand a SESSION its password and close the pipe behind it.
+
+    A background session's stdin exists for this one line and nothing else,
+    so it is closed immediately: the command behind `sudo` is left with a
+    closed stdin, which is what every other route already gives it, and
+    what `_SUDO_STDIN_GUARD` enforces from the far side as well.
+    """
+    try:
+        proc.stdin.write(_sudo_password_line(secret, binary=True))
+        proc.stdin.flush()
+    except OSError as exc:
+        # Never the password, and never a raise: sudo then reads nothing
+        # and refuses, which the caller sees as the command's own failure
+        # with sudo's message on stderr.
+        logger.warning("sudo: could not write the password to the session: "
+                       "%s", exc.__class__.__name__)
+    finally:
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -1522,6 +1765,29 @@ def declared_backend(params) -> str:
     return BACKEND_CONTAINER
 
 
+def declared_root(params) -> bool:
+    """Whether a tool call DECLARED that it needs root (ROADMAP_v3 §49,
+    slice 5b, SS67).
+
+    `declared_network`'s sibling, coerced here for its reason exactly: the
+    gate reads the model's tool-call input BEFORE Pydantic has seen it, so
+    this value can be any JSON at all, and a gate and a runner that coerced
+    it differently would ask about an unprivileged command and run a
+    privileged one -- #157's shape, in the module written to close it.
+
+    Only literal `True`, like `declared_network` and for the same reason in
+    the same direction: a model that sends `"true"` is refused by
+    `StrictBool` at run time with an error naming the field, and NOTHING
+    EXECUTES -- so the two paths never disagree about what ran. A lenient
+    coercion would be the one that could run `sudo` off a string.
+
+    It is NOT the whole root question. `_shell_approval_check` ORs this
+    with a literal `sudo` token in the command text, because a model that
+    simply types `sudo` never sets the flag -- see SS67.
+    """
+    return isinstance(params, dict) and params.get("needs_root") is True
+
+
 def classify_command(command: str, workspace_dir: str,
                      requires_network: bool = False) -> CommandProfile:
     """Measure *command* into a capability set (ROADMAP_v2 §28, G1).
@@ -1842,7 +2108,8 @@ def _log_image_identity(runtime: str = DOCKER) -> None:
 _log_image_identity._said = False
 
 
-def _annotate(result: dict, profile: CommandProfile, ran_on: str) -> dict:
+def _annotate(result: dict, profile: CommandProfile, ran_on: str,
+              as_root: bool = False) -> dict:
     """Record WHERE a command ran, in the result the model reads (§46, EP4).
 
     The gate has always told the HUMAN this -- `_shell_approval_notice`
@@ -1876,6 +2143,11 @@ def _annotate(result: dict, profile: CommandProfile, ran_on: str) -> dict:
         return result
     result["ran_on"] = ran_on
     result["tier"] = profile.tier
+    # Slice 5b, and on the same argument as `ran_on` itself: a model that
+    # cannot see it ran as root will describe what it did as though it did
+    # not. Present only when true, so no unprivileged result changes shape.
+    if as_root:
+        result["as_root"] = True
     return result
 
 
@@ -2165,7 +2437,8 @@ def _run_docker(
         )
 
 
-def _run_wsl(command: str, workspace_dir: str, argv: bool = False) -> dict:
+def _run_wsl(command: str, workspace_dir: str, argv: bool = False,
+             as_root: bool = False) -> dict:
     """Run a command in the distro (ROADMAP_v3 §49, slice 3).
 
     `_run_docker`'s opposite number, and shorter for one measured reason:
@@ -2182,14 +2455,47 @@ def _run_wsl(command: str, workspace_dir: str, argv: bool = False) -> dict:
     workspace_posix = _wsl_workspace(workspace_dir)
     if not workspace_posix:
         raise SandboxUnavailable(_wsl_workspace_refusal(workspace_dir))
-    args = _wsl_argv(command, workspace_posix, argv_mode=argv)
+    secret = None
+    if as_root:
+        # The same refusal the gate read, re-read here: `run_sandboxed` is
+        # a public entry point and the store can lock between the two.
+        refusal = sudo_refusal(BACKEND_WSL)
+        if refusal:
+            raise SandboxUnavailable(refusal)
+        secret = _sudo_secret(BACKEND_WSL)
+    args = _wsl_argv(command, workspace_posix, argv_mode=argv,
+                     as_root=as_root)
+    # SS60's "an exception escaping any secret consumer" trigger. The SSH
+    # route gets this from `askpass.serving`; this route has no listener,
+    # so it says so itself.
+    with secrets.guarded("a root command on WSL") if as_root \
+            else contextlib.nullcontext():
+        return _run_wsl_process(args, secret)
 
+
+def _run_wsl_process(args: list, secret) -> dict:
+    """The half of `_run_wsl` that owns the subprocess.
+
+    Split out for `_run_ssh_process`'s reason: the window in which a
+    plaintext is in flight should be a BLOCK, not a try/finally wrapped
+    round three returns and a raise.
+    """
+    as_root = secret is not None
     proc = None
     try:
         proc = subprocess.Popen(
             args,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            # SS70, and a fix rather than a parameter this route needed.
+            # Passing no `stdin` at all made a WSL command INHERIT this
+            # process's console -- measured, a command here read a string
+            # written to the harness's own stdin -- which is a second
+            # reader beside the CLI's one (§29 N1) on a route written
+            # before that rule existed. DEVNULL is what the container and
+            # the SSH one-shot already give; the pipe carries one line and
+            # is the harness's alone to write.
+            stdin=subprocess.PIPE if as_root else subprocess.DEVNULL,
             text=True,
             # SS42, and the only thing between a `WSLENV` naming an API key
             # and the distro reading it. Measured: with `WSLENV` set to a
@@ -2199,8 +2505,11 @@ def _run_wsl(command: str, workspace_dir: str, argv: bool = False) -> dict:
             env=_scrubbed_env(),
         )
         stdout, stderr = proc.communicate(
+            input=(_sudo_password_line(secret)
+                   if secret is not None else None),
             timeout=config.SANDBOX_TIMEOUT_SECONDS,
         )
+        _note_sudo_auth_failure(stderr, BACKEND_WSL, secret is not None)
         return {
             "stdout": stdout[:config.MAX_READ_CHARS],
             "stderr": stderr[:config.MAX_READ_CHARS],
@@ -2261,7 +2570,8 @@ def _ssh_failed_to_start(stderr: str) -> str:
                                        " ".join(stderr.split())[:300])
 
 
-def _run_ssh(command: str, workspace_dir: str) -> dict:
+def _run_ssh(command: str, workspace_dir: str,
+             as_root: bool = False) -> dict:
     """Run a command on the configured remote host (ROADMAP_v3 §49, slice 4).
 
     *workspace_dir* is the LOCAL workspace and is deliberately unused: the
@@ -2276,22 +2586,35 @@ def _run_ssh(command: str, workspace_dir: str) -> dict:
     remote. What DOES bound this is the local wall clock below, and for a
     session the in-guest `timeout -k` that `_ssh_remote_script` wraps in.
     """
-    args = _ssh_argv(command)
+    sudo_secret = None
+    if as_root:
+        refusal = sudo_refusal(BACKEND_SSH)
+        if refusal:
+            raise SandboxUnavailable(refusal)
+        sudo_secret = _sudo_secret(BACKEND_SSH)
+    args = _ssh_argv(command, as_root=as_root)
     stored = _ssh_stored_secrets()
 
     # SS64. The listener stands up only when something is stored, so the
     # no-secret path does not open a socket at all -- and `serving` locks
     # the store if anything escapes this block, which is SS60's
     # "an exception during a secret consumer" trigger.
-    with askpass.serving(stored) if stored else contextlib.nullcontext() \
-            as live:
-        env = _ssh_env()
-        if live is not None:
-            env.update(live.env)
-        return _run_ssh_process(args, env, bool(stored))
+    #
+    # `guarded` is the same trigger for the ROOT half, which `serving`
+    # does not cover: a host on key auth stores no login secret, so there
+    # is no listener, and a sudo password is still in this process.
+    with secrets.guarded("a root command over SSH") if as_root \
+            else contextlib.nullcontext():
+        with askpass.serving(stored) if stored \
+                else contextlib.nullcontext() as live:
+            env = _ssh_env()
+            if live is not None:
+                env.update(live.env)
+            return _run_ssh_process(args, env, bool(stored), sudo_secret)
 
 
-def _run_ssh_process(args: list, env: dict, used_secrets: bool) -> dict:
+def _run_ssh_process(args: list, env: dict, used_secrets: bool,
+                     sudo_secret=None) -> dict:
     """The half of `_run_ssh` that owns the subprocess, split out so the
     askpass window is a block rather than a try/finally wrapped round
     three returns and two raises."""
@@ -2301,7 +2624,10 @@ def _run_ssh_process(args: list, env: dict, used_secrets: bool) -> dict:
             args,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            stdin=subprocess.DEVNULL,
+            # DEVNULL unless there is a password to deliver, so the
+            # no-root path is byte-for-byte the call slice 4 made.
+            stdin=(subprocess.PIPE if sudo_secret is not None
+                   else subprocess.DEVNULL),
             text=True,
             # Measured, and NOT load-bearing the way SS42's is: nothing
             # local crosses into an SSH session by itself -- the remote
@@ -2313,9 +2639,12 @@ def _run_ssh_process(args: list, env: dict, used_secrets: bool) -> dict:
             env=env,
         )
         stdout, stderr = proc.communicate(
+            input=(_sudo_password_line(sudo_secret)
+                   if sudo_secret is not None else None),
             timeout=config.SANDBOX_TIMEOUT_SECONDS,
         )
         _note_ssh_auth_failure(stderr, used_secrets)
+        _note_sudo_auth_failure(stderr, BACKEND_SSH, sudo_secret is not None)
         if (proc.returncode == _SSH_NO_WORKSPACE_CODE
                 and _SSH_NO_WORKSPACE_MARKER in stderr):
             raise SandboxUnavailable(_ssh_workspace_refusal(stderr))
@@ -2447,6 +2776,7 @@ def run_sandboxed(
     docker_available: Optional[bool] = None,
     profile: Optional[CommandProfile] = None,
     backend: str = BACKEND_CONTAINER,
+    needs_root: bool = False,
 ) -> dict:
     """Execute *command* through the appropriate sandbox backend.
 
@@ -2479,6 +2809,15 @@ def run_sandboxed(
     refusal = protected_paths.check_workspace(workspace_dir)
     if refusal:
         raise SandboxUnavailable(refusal)
+
+    # Slice 5b, above makedirs for the workspace check's own reason: a call
+    # that cannot run must not leave a directory behind. `_shell_approval_
+    # check` already read this same refusal to answer "there is nothing to
+    # approve", and `sudo_refusal` is the one copy both of them read.
+    if needs_root:
+        refusal = sudo_refusal(backend)
+        if refusal:
+            raise SandboxUnavailable(refusal)
 
     # Not on the WSL route, which runs `bash` IN THE DISTRO and never reads
     # this. `detect_shell()` probes pwsh and then powershell with a 5s
@@ -2516,8 +2855,9 @@ def run_sandboxed(
     if route == ROUTE_WSL:
         logger.debug("WSL path (%s): %s", wsl_distro(), command[:80])
         return _annotate(
-            _run_wsl(command, workspace_dir, argv=(profile.tier == INERT)),
-            profile, "wsl")
+            _run_wsl(command, workspace_dir, argv=(profile.tier == INERT),
+                     as_root=needs_root),
+            profile, "wsl", needs_root)
 
     if route == ROUTE_SSH:
         logger.debug("SSH path (%s): %s", ssh_target(), command[:80])
@@ -2525,7 +2865,8 @@ def run_sandboxed(
         # already takes it as a string, so the disclosure costs nothing
         # here -- what it buys is that a result can never imply the
         # command ran on this machine.
-        return _annotate(_run_ssh(command, workspace_dir), profile, "ssh")
+        return _annotate(_run_ssh(command, workspace_dir, needs_root),
+                         profile, "ssh", needs_root)
 
     # HOST_READ names a file the container cannot see, so it has exactly
     # one backend and takes it before Docker is even considered.
@@ -2908,6 +3249,7 @@ def start_sandboxed(
     timeout_s: int,
     shell_binary: Optional[str] = None,
     backend: str = BACKEND_CONTAINER,
+    needs_root: bool = False,
 ) -> SessionProcess:
     """Start *command* as a background session and return at once.
 
@@ -2924,8 +3266,13 @@ def start_sandboxed(
     refusal = protected_paths.check_workspace(workspace_dir)
     if refusal:
         raise SandboxUnavailable(refusal)
+    if needs_root:
+        refusal = sudo_refusal(backend)
+        if refusal:
+            raise SandboxUnavailable(refusal)
     os.makedirs(workspace_dir, exist_ok=True)
     route = _route(profile, bool(docker_available), backend)
+    sudo_secret = _sudo_secret(backend) if needs_root else None
     try:
         if route == ROUTE_WSL:
             workspace_posix = _wsl_workspace(workspace_dir)
@@ -2934,9 +3281,15 @@ def start_sandboxed(
                     _wsl_workspace_refusal(workspace_dir))
             args = _wsl_argv(
                 command, workspace_posix, argv_mode=(profile.tier == INERT),
-                session_timeout_s=int(timeout_s) + SESSION_TIMEOUT_MARGIN_S)
+                session_timeout_s=int(timeout_s) + SESSION_TIMEOUT_MARGIN_S,
+                as_root=needs_root)
             try:
-                proc = _popen_session(args, env=_scrubbed_env())
+                proc = _popen_session(
+                    args, env=_scrubbed_env(),
+                    stdin=(subprocess.PIPE if sudo_secret is not None
+                           else subprocess.DEVNULL))
+                if sudo_secret is not None:
+                    _feed_sudo_password(proc, sudo_secret)
             except FileNotFoundError:
                 raise SandboxUnavailable(
                     "wsl.exe was not found, so the WSL backend cannot run "
@@ -2945,9 +3298,15 @@ def start_sandboxed(
         if route == ROUTE_SSH:
             args = _ssh_argv(
                 command,
-                session_timeout_s=int(timeout_s) + SESSION_TIMEOUT_MARGIN_S)
+                session_timeout_s=int(timeout_s) + SESSION_TIMEOUT_MARGIN_S,
+                as_root=needs_root)
             try:
-                proc = _popen_session(args, env=_ssh_env())
+                proc = _popen_session(
+                    args, env=_ssh_env(),
+                    stdin=(subprocess.PIPE if sudo_secret is not None
+                           else subprocess.DEVNULL))
+                if sudo_secret is not None:
+                    _feed_sudo_password(proc, sudo_secret)
             except FileNotFoundError:
                 raise SandboxUnavailable(
                     f"{_ssh_binary()!r} was not found, so the SSH backend "

@@ -1213,8 +1213,15 @@ class TestTheQuarantine:
 
 class _FakeProc:
     returncode = 0
+    # What was written to this process's stdin, so a test can assert the
+    # ABSENCE as easily as the presence. Slice 5b gave `communicate` an
+    # `input` -- a sudo password on the root path and None everywhere
+    # else -- and a double that simply swallowed it would let the
+    # no-secret claims below pass without being about anything.
+    last_input = None
 
-    def communicate(self, timeout=None):
+    def communicate(self, input=None, timeout=None):     # noqa: A002
+        _FakeProc.last_input = input
         return ("ok", "")
 
 
@@ -1231,6 +1238,17 @@ class TestTheRunPathServesTheSecrets:
 
         monkeypatch.setattr(sandbox.subprocess, "Popen", _popen)
         return seen
+
+    def test_an_ordinary_run_writes_nothing_to_the_remote_stdin(
+            self, ssh_on, ssh_secrets, monkeypatch):
+        """Slice 5b put an `input` on this call for the sudo password.
+        This route carries a LOGIN secret and no root, so the answer must
+        still be None -- the askpass socket is how a login password
+        travels, and stdin stays the command's."""
+        self._capture(monkeypatch)
+        _FakeProc.last_input = "not-overwritten"
+        sandbox._run_ssh("echo hi", "/local/ws")
+        assert _FakeProc.last_input is None
 
     def test_the_env_carries_the_token_and_never_a_value(
             self, ssh_on, ssh_secrets, monkeypatch):

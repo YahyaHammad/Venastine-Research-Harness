@@ -4905,3 +4905,37 @@ the `needs_ssh` half of `test_ssh_backend.py` alive rather than trusting the 124
 
 **If a test of yours leaves the secret store unlocked**, the next test in the same process inherits it -- the store is module state, like the SSH probe. `tests/test_ssh_backend.py`'s `ssh_secrets` fixture locks on the way in and out and resets the auth quarantine at both ends, which is the pattern to copy. A test that trips the quarantine without clearing it makes every later test in the file assert against an unavailable backend.
 
+## Batch 104 -- a command the harness runs as root (ROADMAP_v3 §49 slice 5b)
+
+| What broke | Why | The repair |
+|---|---|---|
+| `tests/test_ssh_backend.py::_FakeProc` | `_run_ssh_process` now calls `communicate(input=...)` -- a sudo password on the root path and `None` everywhere else -- and the double took only `timeout` | One keyword, plus a `last_input` class attribute so the double RECORDS what it was given. A double that silently swallowed the argument would let the no-secret claims pass without being about anything, so there is now a test asserting an ordinary SSH run writes `None` |
+| `security.sandbox._run_wsl` | Split into `_run_wsl` and `_run_wsl_process`, so the window in which a plaintext is in flight is a block rather than a try/finally wrapped round three returns and a raise | `_run_ssh_process`'s shape from batch 103, for its reason. Callers of `_run_wsl` are unchanged; a test that patched its internals is not |
+| `security.sandbox._wsl_argv`, `_ssh_remote_script`, `_ssh_argv`, `_run_wsl`, `_run_ssh`, `_run_ssh_process`, `_annotate`, `run_sandboxed`, `start_sandboxed` | All gained an `as_root` / `needs_root` / `sudo_secret` parameter | Every one defaults to the unrooted behaviour, and the no-root argv is asserted byte-identical to the literal `9048427` shipped -- proved against the pre-patch module, not against a literal typed twice |
+| `tools.builtin.shell.uncontained_refusal` | A third refusal that is true of every backend including the container: a call that asked for root and cannot have it | A third parameter, `needs_root=False`, defaulting to today's answer. Call sites: the gate, `shell.run`, `shell_sessions._start` |
+| `core.shell_sessions.SessionManager.start` | One more kwarg through to the backend | `needs_root=False`, passed into the existing `extra` dict and only when true -- so a slice-1 fake starter still sees the call it has always seen |
+| `docs/ARCHITECTURE.md`'s tree | One new test file | `test_sudo.py` (138); `test_ssh_backend.py` 167 -> 168; 90 -> 91 test files; 5680 -> 5819 |
+| `AGENTS.md`'s decision map | The record defines SS67-SS72 | SS1-SS66 -> SS1-SS72 |
+| `security/posture.py`'s WSL pair | Its last sentence was FALSE under the fallback opt-in | Two spellings, chosen from the two fields the posture already holds. §48 (CE6)'s correction, applied to a second pair |
+
+**If a WSL command of yours suddenly reads nothing from stdin**, that is SS70 and it was a bug before.
+`_run_wsl` passed no `stdin=` at all, so a command in the distro INHERITED this process's console --
+measured, a command there read a string written to the harness's own stdin. It is `DEVNULL` now, which
+is what the container and the SSH one-shot already gave. The container, inert and host-fallback
+one-shots still inherit and that is recorded rather than fixed: they are not on this batch's route.
+
+**If you read anywhere that `-k` stops the sudo password reaching the command, that was wrong.**
+SS66 said it, the gap register repeated it, and both are corrected. `sudo -S` reads stdin only when it
+must AUTHENTICATE; under a NOPASSWD rule it reads nothing and the password becomes the command's own
+input. Reproduced on sudo-rs 0.2.13 and on classic Sudo 1.9.17p2, **with `-k` and without it**. The
+control is `_SUDO_STDIN_GUARD` -- `exec 0</dev/null; ` in front of the command inside the rooted shell.
+`-k` stays for what it does do: one approval buys exactly one authentication.
+
+**If a root command of yours asks when you expected the opt-in to cover it:** that is SS65, and it is
+the point. `AUTO_APPROVE_SANDBOX_FALLBACK` was measured answering for the ENTIRE WSL backend, so a root
+step below it would have been dead code on the one backend where root is most reachable. There is no
+setting that turns the asking off short of `shell_approval_mode: never`, which already means never.
+
+**If a test of yours trips the sudo quarantine without clearing it**, every later test in the same
+process sees that backend refusing root. `tests/test_sudo.py` clears it in an autouse fixture at both
+ends, which is the pattern to copy -- `sandbox._reset_sudo_quarantine()`.

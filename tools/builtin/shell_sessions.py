@@ -112,8 +112,29 @@ def _backend_field():
         description=shell.ShellParams.model_fields["backend"].description)
 
 
+def _root_field():
+    """The `needs_root` field, on the two start tools that take one.
+
+    `_backend_field`'s sibling, and absent from `InteractiveParams` for
+    exactly `_backend_field`'s reason: `start_interactive` is the container
+    route or nothing (SS28), and in the container the shell is ALREADY
+    root, so the flag there would name a privilege the session has and a
+    backend it cannot reach.
+
+    A FRESH `Field`, not the one off `ShellParams` -- a `FieldInfo` belongs
+    to the model that owns it, and handing the same object to two models is
+    shared mutable state in the one place a schema must not drift. The
+    DESCRIPTION is read across, which is the part that has to stay one
+    sentence in one place.
+    """
+    return Field(
+        default=False,
+        description=shell.ShellParams.model_fields["needs_root"].description)
+
+
 class BackgroundParams(_StartParams):
     backend: Literal["container", "wsl", "ssh"] = _backend_field()
+    needs_root: StrictBool = _root_field()
 
 
 class MonitorParams(_StartParams):
@@ -124,6 +145,7 @@ class MonitorParams(_StartParams):
                      "backreferences or lookaround. It is matched against the "
                      "raw output, and what you are shown is redacted."))
     backend: Literal["container", "wsl", "ssh"] = _backend_field()
+    needs_root: StrictBool = _root_field()
 
 
 _WAIT_DESCRIPTION = (
@@ -438,7 +460,10 @@ def _start(name: str, model, params: dict, memory, call_id) -> dict:
     # container for it and the refusal that DOES apply to it comes from
     # `start_interactive` -- which is the one that knows why.
     backend = getattr(parsed, "backend", shell.BACKEND_CONTAINER)
-    refusal = shell.uncontained_refusal(parsed.command, backend)
+    # `shell_interactive` has no `needs_root` for `_root_field`'s reason,
+    # so the getattr default is the honest answer rather than a guard.
+    needs_root = bool(getattr(parsed, "needs_root", False))
+    refusal = shell.uncontained_refusal(parsed.command, backend, needs_root)
     if refusal is not None:
         return {"error": refusal}
     # See `shell.run` for why an uncontained call does not probe: the guard
@@ -477,6 +502,7 @@ def _start(name: str, model, params: dict, memory, call_id) -> dict:
             profile=profile,
             docker_available=docker_up,
             backend=backend,
+            needs_root=needs_root,
             requested_timeout_s=parsed.timeout_s,
             owner_thread=memory.thread_id,
             workspace_dir=config.WORKSPACE_DIR,

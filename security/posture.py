@@ -209,14 +209,32 @@ class Posture:
         # fallback is the host when there is no container, and this is a
         # Linux userland the agent can ask for while one is running.
         if self.allow_wsl_backend:
+            # ROADMAP_v3 §49 slice 5b (SS65). The last clause used to read
+            # "Only a read-only command inside the workspace runs there
+            # without asking" unconditionally, and that is FALSE when the
+            # fallback opt-in is on -- measured against the real gate, where
+            # `rm -rf /home` on WSL answers asks=False, because WSL is
+            # UNCONTAINED and the opt-in sits above the capability rule.
+            # A badge that overstates what asks is worse than no badge, and
+            # this is §48 (CE6)'s correction applied to a second pair.
+            if (self.auto_approve_fallback
+                    and self.shell_approval_mode not in ("always", "never")):
+                asking = ("AUTO_APPROVE_SANDBOX_FALLBACK is on as well, so "
+                          "NOTHING there asks first -- that opt-in answers "
+                          "for the whole backend, not only for the host "
+                          "fallback it is named after. Running as root is "
+                          "the one exception and always asks")
+            else:
+                asking = ("Only a read-only command inside the workspace "
+                          "runs there without asking, and a command that "
+                          "runs as root always asks")
             reasons.append((
                 "wsl backend",
                 "ALLOW_WSL_BACKEND is on -- the agent can ask for a command "
                 "to run in WSL, which is not a sandbox: it reaches this "
                 "harness's own config and authority files, has no memory or "
                 "process limits, and can start Windows programs with your "
-                "full authority. Only a read-only command inside the "
-                "workspace runs there without asking"))
+                "full authority. " + asking))
         # SS55. A THIRD pair, not a widening of the WSL one, because the
         # three weakenings are different: the fallback is the host when
         # there is no container, WSL is a Linux userland beside a running
@@ -229,8 +247,9 @@ class Posture:
                 "to run on the configured remote host, which this harness "
                 "cannot inspect: no isolation, no memory or process limits, "
                 "and credentials it did not issue. Nothing runs there "
-                "without asking you first, and `write` still saves locally "
-                "while the shell runs remotely"))
+                "without asking you first -- running as root included "
+                "(slice 5b) -- and `write` still saves locally while the "
+                "shell runs remotely"))
         if not self.redact_tool_outputs:
             reasons.append((
                 "no redaction",

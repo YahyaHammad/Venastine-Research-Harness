@@ -1537,11 +1537,18 @@ def session_starter():
     started = []
 
     def starter(command, workspace_dir, *, profile, docker_available,
-                timeout_s, shell_binary=None):
+                timeout_s, shell_binary=None, **extra):
+        # `**extra` so the double can SEE what the manager only passes
+        # sometimes -- `backend` since slice 3, `needs_root` since slice 5b,
+        # both of which it adds to the call only when they are not the
+        # default. A double with a fixed signature cannot be asked whether
+        # a flag arrived; it just raises TypeError, or worse, does not,
+        # because the manager dropped the flag on the way. Recorded rather
+        # than swallowed, so "did this reach the backend" is an assertion.
         process = FakeSessionProcess(tier=getattr(profile, "tier", "SANDBOXED"))
         started.append({"command": command, "timeout_s": timeout_s,
                         "docker_available": docker_available,
-                        "process": process})
+                        "process": process, **extra})
         return process
 
     starter.started = started

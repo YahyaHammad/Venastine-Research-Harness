@@ -520,7 +520,8 @@ class SessionManager:
               call_id: str = "", rationale: str = "",
               pattern: Optional[str] = None,
               open_wait_s: float = 10.0,
-              backend: str = "container") -> dict:
+              backend: str = "container",
+              needs_root: bool = False) -> dict:
         """Start a session and return what the agent is told. Raises
         SessionRefused with the reason, or the backend's SandboxUnavailable."""
         refusal = self.start_refusal(kind, pattern, owner_thread)
@@ -568,6 +569,11 @@ class SessionManager:
         extra = {"prompt_token": token} if interactive else {}
         if not interactive and backend != "container":
             extra["backend"] = backend
+        # Slice 5b, on `backend`'s own terms: passed to the backend, not
+        # stored on the session, and only when it is true -- so a slice-1
+        # fake starter still sees the call it has always seen.
+        if not interactive and needs_root:
+            extra["needs_root"] = True
         try:
             process = self._starter(command, workspace_dir, profile=profile,
                                     docker_available=docker_available,

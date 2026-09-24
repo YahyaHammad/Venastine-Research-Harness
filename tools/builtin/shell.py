@@ -103,6 +103,7 @@ from security.sandbox import (
     containment_for,
     declared_backend,
     declared_network,
+    declared_root,
     detect_shell,
     is_docker_available,
     known_runtime,
@@ -110,6 +111,7 @@ from security.sandbox import (
     ssh_enabled,
     ssh_target,
     ssh_unavailable_reason,
+    sudo_refusal,
     wsl_distro,
     wsl_enabled,
     wsl_unavailable_reason,
@@ -194,6 +196,22 @@ class ShellParams(BaseModel):
             "user what they are being asked to allow."
         ),
     )
+    needs_root: StrictBool = Field(
+        default=False,
+        description=(
+            "Whether this command must run as root. The harness prefixes "
+            "sudo for you and supplies the password it holds for that "
+            "machine -- DO NOT write `sudo` in the command yourself, and "
+            "never put a password in it. The WHOLE command line runs as "
+            "root, redirects and pipes included. Only 'wsl' and 'ssh' can "
+            "do this: in the container you ALREADY are root, so drop the "
+            "flag there. A human is asked every single time, whatever the "
+            "approval mode, and the call is refused outright if no "
+            "password is stored for that machine -- the refusal says which "
+            "one to store. Leave it false unless the command genuinely "
+            "cannot work otherwise."
+        ),
+    )
     backend: Literal["container", "wsl", "ssh"] = Field(
         default="container",
         description=(
@@ -270,7 +288,15 @@ TOOL_SCHEMA = {
 # field has to be asked for. An unstated `backend` runs in the container,
 # which is both the safe answer and the right one for almost every call --
 # requiring it would make every command state the obvious in order to
+# requiring it would make every command state the obvious in order to
 # surface a field that matters for a handful.
+#
+# `needs_root` (slice 5b, SS67) is off the list for `backend`'s reason and
+# not for `requires_network`'s. Unstated, the command runs unprivileged and
+# fails with a permission error the model can READ and act on -- the
+# visible direction. And unlike either of the others, forgetting it is not
+# how root is reached by accident: a command that names `sudo` itself still
+# meets a human, because the always-ask step reads the command text too.
 TOOL_SCHEMA["input_schema"]["required"] = [
     "command", "rationale", "requires_network"]
 
@@ -385,6 +411,42 @@ def _command_touches_protected(command: str) -> str | None:
     return None
 
 
+# The binaries that make a command somebody else's. `sudo` is the one
+# slice 5b supplies a password for; the other three are here because they
+# answer the same question -- "does this line try to become another user"
+# -- and a step that knew only about `sudo` would auto-approve `doas` on
+# the one backend where the measurement showed nothing asks.
+_ROOT_BINARIES = frozenset({"sudo", "doas", "pkexec", "su"})
+
+
+def _command_names_root(command) -> bool:
+    """Whether the command TEXT names an escalation binary (SS67).
+
+    RAW `.split()` tokens and a basename compare -- a token check, never a
+    parser (G2), exactly like `_command_touches_protected` beside it and
+    for the same trade. `echo sudo` asks, and that costs one prompt; what
+    it buys is that `sudo apt-get install` cannot be auto-approved on WSL
+    because the call left `needs_root` unset. That was MEASURED to be the
+    live behaviour before this slice: under AUTO_APPROVE_SANDBOX_FALLBACK
+    the fallback opt-in answered for the whole WSL backend.
+
+    What it deliberately does NOT do is decide anything about HOW the
+    command runs. It only ever ADDS a prompt -- the harness supplies a
+    password for `needs_root` and for nothing else -- so a spelling that
+    slips past this check reaches a `sudo` with no password and fails,
+    rather than reaching one with a password nobody approved.
+
+    Total, like everything else the gate calls: `params["command"]` is
+    whatever the model emitted.
+    """
+    if not isinstance(command, str):
+        return False
+    for token in command.split():
+        if re.split(r"[\\/]", token)[-1] in _ROOT_BINARIES:
+            return True
+    return False
+
+
 def _shell_approval_check(tool_name: str, params: dict) -> bool:
     """Whether this shell call needs a human to say yes (ROADMAP_v2 §28).
 
@@ -411,6 +473,14 @@ def _shell_approval_check(tool_name: str, params: dict) -> bool:
       2c. An SSH call ALWAYS asks (ROADMAP_v3 §49, SS48), read
          above every opt-in below so that neither of them can answer
          for a machine this process cannot inspect.
+      2d. A ROOT call ALWAYS asks (slice 5b, SS65/SS67), in the same
+         position and for a measured version of the same reason: the
+         fallback opt-in already answers for the ENTIRE WSL backend,
+         so a root step below it would be dead code on the one
+         backend where root is most reachable. It fires on the
+         DECLARATION or on the command text naming an escalation
+         binary, because a model that types `sudo` itself never sets
+         the flag.
       3. AUTO_APPROVE_SANDBOX_FALLBACK is applied HERE, visibly, rather
          than passed into the generic rule to be honoured out of sight.
          It is the user's own opt-in to an isolation level the harness
@@ -469,7 +539,14 @@ def _shell_approval_check(tool_name: str, params: dict) -> bool:
     # is already fixed. Below the mode switch for the same reason
     # UNAVAILABLE is -- `always` asks about everything, including calls
     # that will not run, and that wart is one the gate already has.
-    if uncontained_refusal(command, backend) is not None:
+    # `declared_root` and NOT `_command_names_root`, and the asymmetry is
+    # the decision: the refusal is about a password THIS HARNESS would
+    # have to supply, which it only ever does for a declared call. A
+    # command that merely names `sudo` supplies its own or fails, and
+    # refusing it for want of a stored secret would break a passwordless
+    # setup that works today.
+    if uncontained_refusal(command, backend,
+                           declared_root(params)) is not None:
         return False
 
     # SS48. NOTHING on the SSH route is auto-approved, and this is the one
@@ -491,6 +568,13 @@ def _shell_approval_check(tool_name: str, params: dict) -> bool:
     # Below the mode switch, so `never` still means never (SS1) and
     # `always` still asks -- this widens neither.
     if backend == BACKEND_SSH:
+        return True
+
+    # SS65/SS67. Above both opt-ins below, and the OR is the whole point:
+    # `declared_root` alone would be a step the model can step around by
+    # writing `sudo` and leaving the flag off, which is exactly what the
+    # measurement found already running unasked.
+    if declared_root(params) or _command_names_root(command):
         return True
 
     # Step 2: a protected segment always asks, whatever the sandbox says.
@@ -570,6 +654,20 @@ def _shell_approval_notice(params: dict, _context=None) -> str:
                  f"so no argument of this command has been checked "
                  f"against anything")
     notice = f"{profile.tier}: {profile.reason}. Runs {where}."
+    # Slice 5b. The person is answering for a privilege level, not only a
+    # machine, and "uncontained" does not say which. Two sentences, because
+    # the two cases are genuinely different: one is the harness handing over
+    # a password it holds, the other is the command asking for root on its
+    # own with nothing behind it.
+    if declared_root(params):
+        notice += (" AS ROOT -- the whole command line runs under sudo, "
+                   "with the password this harness holds for that machine. "
+                   "Anything root can do there, this can do.")
+    elif _command_names_root(command):
+        notice += (" It names sudo (or su, doas, pkexec) itself, which is "
+                   "why this is being asked about at all. The harness "
+                   "supplies a password only for a call that declares "
+                   "needs_root, so this one may simply fail.")
     binary = _resolved_binary(command) if containment == UNCONTAINED else ""
     if binary:
         notice += f" Binary resolves to {binary}."
@@ -707,8 +805,9 @@ def _resolved_binary(command) -> str:
 # ---------------------------------------------------------------------------
 
 
-def uncontained_refusal(command: str, backend: str) -> str | None:
-    """Why this WSL or SSH call must not run at all, or None (§49).
+def uncontained_refusal(command: str, backend: str,
+                        needs_root: bool = False) -> str | None:
+    """Why this call must not run at all, or None (§49).
 
     `fallback_changed_refusal`'s shape, and ONE copy for the same reason:
     the gate reads it to answer "there is nothing to approve", and `run`
@@ -735,7 +834,17 @@ def uncontained_refusal(command: str, backend: str) -> str | None:
     on top of this -- `runs_code` is True for every non-inert profile
     (CE1), so it asks under `tiered` and, being UNCONTAINED here, under
     `contained` too.
+
+    A THIRD refusal arrives with slice 5b, and it is read FIRST because it
+    is true of every backend including the container: a call that asked for
+    root and cannot have it. `sudo_refusal` owns that decision -- see there
+    for why the container is refused for already being root, and why no
+    stored password is a refusal rather than a prompt (SS68).
     """
+    if needs_root:
+        refusal = sudo_refusal(backend)
+        if refusal is not None:
+            return refusal
     if backend == BACKEND_SSH:
         if not ssh_enabled():
             return ssh_unavailable_reason()
@@ -814,7 +923,8 @@ def run(params: dict) -> dict:
     # SS37/SS40/SS54, above the container probe: a call that asked for WSL
     # or SSH and cannot have it is refused by name, and is never quietly
     # served by a backend it did not ask for.
-    refusal = uncontained_refusal(parsed.command, parsed.backend)
+    refusal = uncontained_refusal(parsed.command, parsed.backend,
+                                  parsed.needs_root)
     if refusal is not None:
         return {"error": refusal}
 
@@ -838,6 +948,7 @@ def run(params: dict) -> dict:
             workspace_dir=config.WORKSPACE_DIR,
             docker_available=docker_up,
             backend=parsed.backend,
+            needs_root=parsed.needs_root,
             # §28: the SAME classification the approval check made, so
             # routing cannot disagree with the decision to allow it --
             # the declaration included (§50), read off the validated

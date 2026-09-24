@@ -229,7 +229,50 @@ would have asserted.
   on `backend: "wsl"`. Pre-existing, not slice 5's doing, and the reason SS65 puts the root step
   above both opt-ins.
 
-### Decisions (SS1–SS66)
+### What was measured before slice 5b was written (batch 104)
+
+The probe killed one recorded reason outright and changed the design. Everything below was run, not
+read.
+
+- **Ubuntu ships `sudo-rs 0.2.13`, not classic sudo** -- a different implementation of the same
+  command, and the one the WSL route will actually call on this machine. It carries `-k`, `-S`,
+  `-p` and `--`, so the shape survives; nothing about its behaviour transferred for free, and two of
+  the measurements below differ between it and classic `Sudo 1.9.17p2` in the kali distro.
+- **`sudo -k -S` consumes EXACTLY one line**, so the password and the command's own input can share
+  one pipe. Fed `"<pw>\nPAYLOAD\n"`, a root `cat` printed `PAYLOAD` and nothing else. This is what
+  makes stdin a viable transport at all.
+- **THE FINDING THAT CHANGED THE DESIGN: `-k` does NOT stop the password reaching the command.**
+  SS66 said it did. `sudo -S` reads stdin only when it has to AUTHENTICATE; under a NOPASSWD rule it
+  reads nothing, and the password is then the command's own standard input. Measured on **both**
+  implementations, **with `-k` and without it**: the root `cat` printed the password. The warm-ticket
+  trap SS66 actually named could not be reproduced on either -- so the recorded reason was wrong
+  twice over, and the control is the explicit `exec 0</dev/null;` guard (SS72), not the flag.
+- **The container is already root and has no `sudo`** -- `docker run --rm python:3.13-slim id` answers
+  `uid=0(root)`, and `command -v sudo` answers nothing. SS66's refusal rested on this and it was an
+  assertion until now.
+- **A WSL command inherits the harness's own stdin today.** `_run_wsl` passed no `stdin=` at all;
+  driven with this process's stdin replaced by a pipe, the command in the distro read the string out
+  of it. That is §29 N1's second reader, on a route written before the rule (SS70).
+- **Empty `-p ""` survives `wsl.exe`'s re-parse.** `list2cmdline` writes `-p ""` and the distro sees an
+  empty prompt; an empty argv element across that boundary is exactly the class that breaks silently.
+- **No `requiretty`, and sudo over a non-tty SSH connection works** -- rc 0, uid 0, with the password
+  on `ssh`'s stdin. The `cd --` guard still fires first and still answers 125 plus the marker for a
+  missing remote workspace, so nothing is elevated before the workspace is known.
+- **`sudo` preserves the working directory**, so `--cd` and the remote `cd --` keep their meaning.
+- **`timeout` inside `sudo` kills a root child** (rc 124 at 3 s, nothing left behind), on both routes.
+  Outside works too; inside is the order that does not depend on sudo forwarding a signal.
+- **The password is in no process table, no `/proc/*/cmdline` and no environment** -- checked on the
+  distro and on the remote. Two earlier readings said otherwise and **both were the probe's own
+  fault**: the first `grep`'s argv carried the needle, and the second matched `SUDO_COMMAND`, which
+  holds the COMMAND TEXT. A measurement whose needle is in its own haystack measures the probe.
+- **`-p ''` leaves a bare `\n` on stderr with sudo-rs and nothing at all with classic sudo**, so a
+  rooted command's stderr gains one newline on Ubuntu.
+- **A wrong password: rc 1**, one to two attempts against a closing pipe, then
+  `sudo: Authentication required but not attempted`. `passwd_tries` is 3 by default, which is what
+  SS71's quarantine is sized against. Neither distro has `pam_faillock` or `pam_tally2` in its auth
+  stack, so the lockout risk is a property of the REMOTE and not of this machine.
+
+### Decisions (SS1–SS72)
 
 | # | Decision |
 |---|---|
@@ -299,7 +342,16 @@ would have asserted.
 | **SS63** | **SS47 is AMENDED, not discarded.** Its property was never `BatchMode` -- it was that **`ssh` can never prompt on a terminal this process does not own**. `BatchMode=yes` guaranteed that by refusing to prompt at all; `SSH_ASKPASS_REQUIRE=force` guarantees it by sending every prompt to a helper that answers immediately and cannot block. **With nothing stored for the host the argv is slice 4's, option for option and in order**, pinned against the literal `84c886b` shipped -- a user on key-and-agent auth is not moved by this slice at all. With something stored, `BatchMode` comes off (it suppresses askpass too, so the two are mutually exclusive), `NumberOfPasswordPrompts=1` bounds the retries within one method, and the preference list is `publickey,keyboard-interactive,password` because a server offering both serves the SECOND. **A refused connection that used stored credentials QUARANTINES them for the run** rather than being retried: measured, one refused call makes TWO authentication attempts, so retrying every command would walk a real account into a lockout at four attempts a call. The refusal names `/secrets set <name>` |
 | **SS64** | **The secret reaches the askpass helper over a loopback connection authenticated by a single-use token, never in an environment variable.** `ssh` passes its whole environment to the askpass child, and that environment is readable by any process running as this user -- the property that got an OS keystore rejected for the store itself. So the environment carries a TOKEN and a port; the helper forwards `(token, prompt)`; the harness decides which secret answers and serves it. **The helper holds no secret and no policy** -- it is a pipe with a password on it, which is what makes it safe to leave in a temp directory. **What this buys, stated precisely rather than oversold:** a reader of `ssh`'s environment gets a token rather than a password and must then win a race during one connection, instead of reading a value at rest. Someone who can do that could have read the password at the moment it mattered anyway, so this is a real narrowing and not a boundary. **The listener is NOT one-shot**, and that is the correction the probe forced: a wrong password produces two asks despite `NumberOfPasswordPrompts=1`, because keyboard-interactive and password are separate methods with separate budgets, and a stacked host legitimately asks twice. It bounds the number of serves instead |
 | **SS65** | **(slice 5b) A command the harness will run through sudo ALWAYS asks,** above both opt-ins, in every mode except `never` -- the same shape and position as SS48's SSH step. This amends SS3's "approval follows `shell_approval_mode`" for root specifically, and the reason is measured rather than argued: `AUTO_APPROVE_SANDBOX_FALLBACK` already answers for the ENTIRE WSL backend (`rm -rf /home` on WSL asks=False today, because `containment_for` returns UNCONTAINED and the fallback opt-in sits above the capability rule), so a root step below it would be dead code on the backend where root is most reachable. The same measurement corrects the WSL `unsafe_reasons()` pair, whose last sentence is untrue in that configuration |
-| **SS66** | **(slice 5b) Sudo runs on WSL and SSH only,** through `sudo -k -S -p '' --` with the password on stdin -- SS3 unchanged, with `-k` so a cached ticket cannot pass the password line through to the command as input. The container is refused BECAUSE it already runs as root there, so sudo is neither installed nor needed and offering it would be a control that does nothing. The host fallback is refused and RECORDED rather than assumed: on Windows the host shell is PowerShell and `sudo.exe` elevates through a UAC consent dialog that cannot take a password on stdin at all, which is a different mechanism and a separate measurement |
+| **SS66** | **(slice 5b) Sudo runs on WSL and SSH only,** through `sudo -k -S -p '' --` with the password on stdin -- SS3 unchanged, with `-k`. **The reason recorded here was WRONG and is corrected in batch 104:** `-k` does not stop a
+password line reaching the command. What it buys is that one approval buys exactly one authentication,
+so a ticket warmed by an approved command cannot quietly authorise a later one. The control that stops
+the password becoming the command's input is SS72's stdin guard. The container is refused BECAUSE it already runs as root there, so sudo is neither installed nor needed and offering it would be a control that does nothing. The host fallback is refused and RECORDED rather than assumed: on Windows the host shell is PowerShell and `sudo.exe` elevates through a UAC consent dialog that cannot take a password on stdin at all, which is a different mechanism and a separate measurement |
+| **SS67** | **The root step fires on the DECLARATION or on a literal escalation token, whichever comes first.** `declared_root(params)` is `declared_network`'s sibling -- only literal `True`, read off the model's raw input before Pydantic, for #157's reason -- and it is OR'd with a raw `command.split()` check for `sudo`, `doas`, `pkexec` and `su`. The OR is the whole point: MEASURED, `sudo apt-get install` on WSL answered `asks=False` under the fallback opt-in, so a step reading only the flag would be dead code exactly where root is most reachable. It is a TOKEN check and never a parser (G2), and it fails in the safe direction -- a command that merely mentions the word costs one prompt, the same trade `_command_touches_protected` already makes. It only ever ADDS a prompt: the harness supplies a password for a DECLARED call and for nothing else, so a spelling that slips past reaches a `sudo` with no password and fails |
+| **SS68** | **No stored sudo password means the call is REFUSED, naming the entry.** `wsl.<distro>.sudo` and `ssh.<host>.sudo` (SS58), with the exact `/secrets set` line in the refusal, and read by the gate as "there is nothing to approve" rather than as a prompt (§32 A7). The store's contents are the opt-in for root and there is **no `allow_root_commands` key**: a second switch over one decision is the ratchet G3 removed, and "is there a sudo secret" is greppable in a way a config flag is not. **The cost, recorded rather than hidden:** a host with passwordless sudo cannot use `needs_root` at all, even though it would work |
+| **SS69** | **Sudo wraps the SHELL, not the first word.** `sudo -k -S -p '' -- bash --norc --noprofile -c <command>`, so the WHOLE command line runs as root -- pipes, redirects and `&&` included. Prefixing only the first word gives the classic half-root surprise (`sudo echo x > /etc/f` writes as the user) and would make the approval notice a lie about what was approved. Argv mode is dropped on this path and that weakens nothing: argv mode exists so an AUTO-APPROVED inert command has no shell between the classifier and the executor (SS39/SS43), and a root command is never auto-approved |
+| **SS70** | **A WSL one-shot gets `DEVNULL`, or a `PIPE` carrying only the password.** `_run_wsl` passed no `stdin=` at all, so the command inherited the harness's console -- measured, a command in the distro read a string written to this process's stdin. That is §29 N1's second reader on a route written before the rule. The rooted call gets a pipe the harness alone writes to, which is the reading of N1 slice 2 already made for an interactive session. The container, inert and host-fallback one-shots have the same gap and are **recorded, not changed**: they are not on this batch's route, and a shipped behaviour change to three of them is not something sudo's needs justify |
+| **SS71** | **A refused sudo password is quarantined for the run, like a refused SSH credential.** `_note_ssh_auth_failure`'s shape and its reason: `passwd_tries` defaults to three, and a model that retries a wrong password walks a real account towards `pam_faillock` on the distributions that have it. The harness stops offering the value and says which entry to fix. **It does NOT lock the store** -- one wrong password must not cost the master passphrase, which is the trade SS63 already made |
+| **SS72** | **The command behind sudo has its stdin explicitly closed, and THAT is the control.** `exec 0</dev/null; ` in front of the command inside the rooted shell. `sudo -S` reads stdin only when it must authenticate; under NOPASSWD it reads nothing and the password is then the command's own input -- measured on sudo-rs 0.2.13 AND classic Sudo 1.9.17p2, with `-k` and without it, on both the WSL and the SSH route. It costs nothing real: every one of these routes already hands a command DEVNULL, so the guard preserves that contract rather than changing it. It is absent when no root is asked, because a guard that cannot fire still reads as protection (batch 103's lesson, applied forward) |
 
 ### Adopted defaults (implementation-level; the owner may overturn any)
 
@@ -440,7 +492,16 @@ would have asserted.
    because keyboard-interactive and password are separate methods with separate budgets --
    and corrected the prompt matcher, whose key prompt OpenSSH truncates mid-path.
    Next: slice 5b, sudo.
-6. **Sudo** (SS3, SS65, SS66), the store's second consumer.
+6. **Sudo** (SS3, SS65-SS72), the store's second consumer -- **BUILT**, batch 104. `needs_root` on
+   `shell`, `shell_background` and `shell_monitor`; the harness prefixes `sudo -k -S -p '' --` on WSL
+   or SSH and writes the stored password to stdin and nowhere else. A human is asked EVERY time, above
+   both opt-ins, and the step fires on the command text as well as the declaration -- because the
+   measured behaviour was that `sudo apt-get install` on WSL asked nobody. The container is refused
+   for already being root (measured: uid 0, no `sudo` in the image) and the host fallback is refused
+   and recorded. Measuring first corrected SS66's own stated reason: `-k` does NOT stop the password
+   line reaching the command, a NOPASSWD rule does, and the control is SS72's explicit stdin guard --
+   measured on two sudo implementations, with the flag and without it.
+   §49 is complete.
 
 Then background subagents as their own section (SS10).
 
@@ -495,10 +556,18 @@ Then background subagents as their own section (SS10).
   passphrase, which is a different decision with a different cost -- it would put an API key behind
   a prompt on every launch; and an idle re-lock timer, declined by the owner in favour of the
   explicit lock plus SS60's triggers.
-- **Sudo:** `/usr/bin/sudo -k -S -p '' --`, where `-k` stops a cached ticket passing the password line to the
-  command; separate values for WSL and SSH; a badge entry. The secret store it needed is BUILT
-  (above), so slice 5b is sudo alone: `needs_root` on the three tools, the root step above both
-  opt-ins (SS65), and WSL and SSH only (SS66).
+- **Sudo: CLOSED in batch 104** (SS65-SS72). Everything the register asked for is built, and one thing
+  it asked for was wrong: it said `-k` stops a cached ticket passing the password line to the command,
+  and that is not what `-k` does. The register's own sentence was carried forward from SS66 and both
+  are corrected -- the trigger is a rule that needs no authentication (NOPASSWD), `-k` does not help,
+  and SS72's explicit `exec 0</dev/null;` is the control. Separate values for WSL and SSH are SS58's
+  naming, unchanged. There is no badge ENTRY for sudo and deliberately so: root is always-ask, so it
+  is not a weakening the badge should list, and whether a sudo password is stored is mutable at
+  runtime, which UN1 keeps out of the frozen posture. The two backend pairs gained a clause instead.
+  **Still open, and recorded rather than decided:** sudo on the host fallback, which on Windows means
+  `sudo.exe` and a UAC consent dialog that cannot take a password on stdin -- a different mechanism and
+  a separate measurement; and a passwordless-sudo host, which SS68 refuses rather than serves, because
+  the stored secret is what turns root on at all.
 - **Docker rootless on cgroups v1** ignores limits the same way SS24 describes for Podman, and is not checked.
   Recorded, not decided.
 
@@ -517,6 +586,18 @@ Then background subagents as their own section (SS10).
   persistent connection -- is worth less than it sounds: a session holds one connection for its whole
   life either way, and key/agent auth means a one-shot command's extra handshake prompts for nothing.
 - **A lexical remote-workspace check** to give SSH an auto-approved tier (SS48).
+- **An `allow_root_commands` config key** (batch 104). Root needs an off switch and it has one: the
+  stored password. A frozen-posture flag over the same decision is the ratchet G3 removed, and it
+  would have been a switch a reader could set to `true` without ever being asked for a password --
+  two controls, one of them decorative.
+- **Prefixing `sudo` to the first word only** (batch 104), which is what a reader expects
+  `sudo <command>` to mean. It produces the half-root surprise -- `sudo echo x > /etc/f` writes as the
+  unprivileged user -- and it would make the approval notice untrue about the thing that was approved.
+- **Reading `sudo` out of the command text and supplying a password for it** (batch 104). The token
+  check exists to ADD a prompt, never to arm anything: a harness that answered any `sudo` it spotted
+  would be feeding a held password to a line it did not construct.
+- **Trusting `-k` to keep the password away from the command** (batch 104), which is what SS66 and the
+  gap register both said it did. Measured false on two sudo implementations.
 - **An OS keystore for the secret store** (batch 103). DPAPI on Windows, libsecret and Keychain
   elsewhere would need no passphrase and would work headless. They were rejected for the property
   that makes them convenient: they decrypt for any process running as this user, and the agent's
