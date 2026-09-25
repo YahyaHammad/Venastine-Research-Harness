@@ -849,3 +849,50 @@ keeps working and only the install tree itself is refused. **Budget for the blas
 about thirty `main.main([])` calls in `tests/test_cli.py` run from the repo root and would hit
 the new refusal; extend the shared `startup` fixture rather than editing thirty tests, taking
 the seam from the existing `check_workspace` monkeypatch in that file.
+
+## 27. The container-runtime probe leaks across the whole session (open, measured batch 106)
+
+`security/sandbox.py:278` memoises a **live** `docker`/`podman` subprocess probe in the module
+global `_runtime_probe`, set once per process and never reset. `_reset_runtime_probe()` exists
+two functions below it (`sandbox.py:306`), is documented "Tests only", and is used by exactly
+ONE autouse fixture -- scoped to `TestDockerAvailable` in `tests/test_shell.py`, whose own
+docstring gives the general reason: "otherwise the first test's answer would be the only one any
+of them measured." Nothing in `tests/conftest.py` resets it.
+
+So the first test anywhere in a session that reaches a live probe fixes the answer for the
+~5,900 that follow, and `_probe_container_runtime` allows up to **10 seconds per daemon** when
+one is unresponsive. On the WSL box, which has both `docker` and `podman` on PATH, the answer
+therefore depends on machine load rather than on anything the suite controls.
+
+**Measured in batch 106, as a controlled comparison across four full WSL runs.** The failing
+set is nine either way and its membership MOVES:
+
+| Tree | New test files | The container-dependent tests that failed |
+|---|---|---|
+| §52 | included | `test_declared_network` x3 |
+| HEAD | ignored | `test_session_backends` x2 |
+| §52 | ignored | `test_session_backends` x2 |
+
+Source held constant and the test files varied: the cohort changes. Source varied and the test
+files held constant: the cohort is identical. **The variable is collection order**, which any
+new test file perturbs -- so adding a file to this suite changes which pre-existing flaky tests
+fail on WSL, and a batch's WSL run cannot be compared to a previous batch's by name.
+
+The failure reads as a real defect and is not one: `_shell_approval_check` returns `False` at
+`if containment == UNAVAILABLE`, so a test asserting "this call asks for approval" sees
+"auto-approved". `wsl-verifies-posix-behaviour`'s baseline table -- eight named tests -- is
+therefore not a stable list, and both HEAD and §52 produced a member outside it
+(`test_question_tool::test_the_discuss_button_defers` and `test_declared_network` respectively).
+
+**The fix is one autouse fixture in `tests/conftest.py`**, the same shape as batch 105's
+`clear_network_tool_caches` and for the same reason -- a module-level memo with a `_reset`
+helper called in one place instead of globally.
+
+**It was NOT done in batch 106, and the reason is a cost that has to be measured first.**
+Resetting before every test means every test that reaches a live probe re-probes, at up to 10
+seconds per unresponsive daemon. If more than a handful do, the fix adds minutes to every run
+on every platform to stabilise a cluster that is already understood. The implementing batch
+should **count the live probes first** -- patch `_probe_container_runtime` to increment a
+counter and run the suite once -- and then choose between the blanket autouse fixture and a
+session-scoped probe stubbed to a fixed answer, which costs nothing and makes the cohort
+deterministic but stops the suite from ever exercising the real detector.

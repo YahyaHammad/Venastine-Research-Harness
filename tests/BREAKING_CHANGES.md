@@ -4969,3 +4969,32 @@ for the day someone moves a constant, and is still mutation-pinned by a test tha
 **If a corpus document of yours is longer than it used to be**, that is PG7 and the short version was
 a defect. Page 2 of a URL used to be dropped because it was not LONGER than page 1, so a grounding
 pass scored the first page of everything the model paged through.
+
+## Batch 106 -- redact before the cut, and a bound on the held body (ROADMAP_v3 §52)
+
+| What broke | Why | The repair |
+|---|---|---|
+| `tools.builtin.fetch_url.run`'s `content` and `chars_available` | The body is redacted BEFORE it is cut (RB1), so both count REDACTED characters. For a page with no credentials in it nothing changes at all -- proved against the pre-patch module at eleven sizes and through a redirect | Nothing, unless you compared `chars_available` to `len(the body you served)` in a fixture that plants a credential. The tool's own offsets remain self-consistent, and a caller only ever passes back an offset the tool named |
+| `tools.builtin.fetch_url` now imports `redact_output_text` | A tool calling the output redactor itself is new here, and deliberate. Precedented: `source_corpus` and `tui/app.py` both do it, and batch 41 (X4) made the function public for exactly this kind of second consumer | If you stub `safety.policy_enforcement.redact_output_text` in a test, `fetch_url` now sees your stub. Patch the module attribute, not a local name |
+| `tools.builtin.fetch_url` emits a WARNING of its own | RB2. `check_output_policy` no longer has anything to alter in this tool's result, so #49's one-warning-per-altered-result would have stopped firing for it silently | A test asserting on the number of WARNINGs from a fetch of a credential-bearing page now sees one from `tools.builtin.fetch_url` instead of one from `safety.policy_enforcement`. A clean page still logs nothing |
+| `tools.builtin._net_common.TTLCache.__init__` | Takes `max_entries`, defaulting to the new module-level `MAX_ENTRIES = 128` | Positional callers are unaffected -- it is the second parameter and has a default. A cache you build by hand is now bounded; pass a larger value if you are deliberately storing more |
+| `tools.builtin._net_common.TTLCache.set` | Sweeps expired entries and evicts the oldest past the cap (RB5, RB6), and pops a key before re-assigning it so a refreshed entry becomes the newest | If you stored more than 128 entries in one cache and read them back, the earliest are now gone. No production caller reaches that: `MAX_ITERATIONS` is 50 and a redirecting fetch stores two keys, so one pass tops out at 100 |
+| `TTLCache.get` | **Unchanged**, and that is a decision rather than an oversight | Expire-on-read is what makes a post-TTL query a real request again rather than a permanent miss. A mutation deleting it as "redundant now that a sweep exists" is killed by a test |
+| `core.reasoning.source_corpus` | Comments only. No signature, no behaviour | The `next_offset` docstring no longer claims redaction is why held length and source position differ -- for `fetch_url` it no longer is (RB1), and what remains is `.strip()` and `MAX_DOCUMENT_CHARS` |
+| `docs/ARCHITECTURE.md`'s tree | Two new test files | `test_redact_before_cut.py` (37); `test_net_common.py` (25); 92 -> 94 test files; 5894 -> 5956 |
+| `AGENTS.md`'s decision map | The record defines RB1-RB7 | ROADMAP_v3 is now §49-§52 |
+
+**If you are writing a tool that cuts model-facing text into pieces, you owe this check.** RB1 fixes
+`fetch_url` because `fetch_url` is the only tool that pages a document. Nothing mechanical stops the
+next one from slicing first and redacting second, which is precisely what §51 did with the rule already
+written down twice. `AGENTS.md`'s redact-before-truncate entry now names all three surfaces.
+
+**If a `sources/<sha256>.txt` from an older run contains a credential**, that is the defect this batch
+fixes and it was reproduced before it was fixed: a token straddling character 5,000 of a paged document
+matched nothing in either page and was rejoined by PG7's append. Those artifacts are on disk from the
+run that wrote them; nothing here rewrites them.
+
+**If you tightened `MAX_ENTRIES` to save memory, put it back.** An eviction inside a single pass turns
+a page-2 request into a re-fetch, which is the spliced document PG5 exists to prevent -- a bounded
+memory cost traded for an unbounded correctness one. The 128 is derived from `MAX_ITERATIONS`, not
+chosen.

@@ -25,6 +25,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§49. Shell sessions, the container runtime, and where a command can run** — **(COMPLETE: slice 0, Podman, BUILT in batch 93; slice 1 COMPLETE -- its foundations in batch 94, its five tools, the sleeping subagent and the CLI wait loop in batch 95, the TUI's behaviour half in batch 97 and its display half in batch 98; slice 2, interactive sessions, BUILT in batch 100; slice 3, WSL, BUILT in batch 101; slice 4, SSH, BUILT in batch 102; slice 5a, the secret store, BUILT in batch 103; slice 5b, sudo, BUILT in batch 104)** (the shell was one-shot and blocking, so a test suite could not outlive a turn and nothing could wake the agent; a machine with Podman and no working Docker had no sandbox at all)
 - **§50. Declared network for a shell command** — **(BUILT in batch 99)** (the network detector reads command TEXT against a fourteen-word list, so a command it cannot see is auto-approved into `--network none` and fails with no way for the user to have allowed it)
 - **§51. Paging for network tool results** — **(BUILT in batch 105)** (`fetch_url` and `arxiv_search` truncate with no offset, so the agent cannot reach past the first page without shelling out to a raw HTTP request)
+- **§52. Redact before the cut, and a bound on the held body** — **(BUILT in batch 106)** (§51 cut the page out of the body before the redactor saw it, so a credential straddling character 5,000 reached the corpus whole; and the body it began holding was unredacted, in a cache whose entry count nothing bounded)
 
 ---
 
@@ -768,21 +769,130 @@ decisions above are corrected by measurement rather than implemented.**
   PG6's refusal to raise the byte cap -- the two decisions bound each other.
 - **A secret split across a page boundary is rejoined by the concatenation, and redaction cannot see it.**
   `redact_output_text` runs per page, as it ran per document before -- so a credential spanning
-  characters 4,990 to 5,010 is half in page 1 and half in page 2, neither half matches a pattern, and
-  PG7's append puts them back together in the corpus. Narrow, and stated rather than fixed: the fix is
-  redacting the WHOLE held text on every append, which re-scans up to 20,000 characters per page and
-  would still miss the same secret in the model's transcript, where the two halves arrive in separate
-  tool results and no redactor ever sees them adjacent. Recorded because the corpus is now the one place
-  in the system where the halves become adjacent, which was not true before §51.
+  characters 4,990 to 5,010 is half in page 1 and half in page 2, and PG7's append puts them back
+  together in the corpus. Recorded because the corpus is now the one place in the system where the halves
+  become adjacent, which was not true before §51. **CLOSED IN BATCH 106 (§52), and the fix is not the one
+  proposed here.** This entry proposed re-redacting the whole held text on every append; §52 redacts at
+  the PRODUCER instead, so the halves never exist to be rejoined, which also fixes the two tool results
+  the model itself reads and which this entry conceded no corpus-side fix could reach. Its claim that
+  "neither half matches a pattern" is corrected there too: measured, it is true of seven of the ten
+  patterns and false of the three whose quantifiers are open-ended.
 - **The held body cache is not swept.** `TTLCache` expires on READ and never sweeps, which is the shape
   both other network tools already have -- but they hold result lists and this holds bodies, so the cost
   of the same design is different. A run touching many URLs accumulates up to the byte cap for each until
-  something reads the key again, bounded in practice by PG6's refusal to raise that cap and by the 300 s
-  TTL, and not bounded at all in principle. Recorded rather than solved, because the eviction policy that
-  would solve it is a decision about a cache this batch only needed to make correct.
+  something reads the key again, and nothing reads a key nobody pages. **CLOSED IN BATCH 106 (§52, RB5
+  and RB6):** a sweep on write, and an entry cap, both in the shared class. This entry said the eviction
+  policy was "a decision about a cache this batch only needed to make correct", which was the right call
+  at the time and is what made it a one-paragraph decision rather than a rushed one.
 - **Still open, and recorded rather than decided:** a reachable window larger than 65,536 bytes, which
   would need the security bound re-argued rather than raised (PG6), and is the owner's call rather than a
   batch's; `web_search`'s overlapping pages, which are the provider's behaviour and are disclosed rather
   than corrected, since de-duplicating across pages would mean holding a result set the tool does not
   otherwise keep; and a cross-run or on-disk page cache, deliberately not built -- the held body is
   process-local and expires, like the two caches beside it.
+
+---
+
+## §52. Redact before the cut, and a bound on the held body
+
+**Built in batch 106**, from §51's own gap register. Both entries it left open turn out to be the same
+mistake seen twice: §51 introduced a **cut** and a **retention**, and left the first in the wrong order
+and the second without a bound.
+
+### What was already decided, twice, before §51 got it wrong
+
+This is not a new principle. The repository had locked "redact before you cut" on two other surfaces, and
+one of them states the exact mechanism that defeats the redactor:
+
+- `AGENTS.md`: **"The param digest is redacted BEFORE truncation. ... Truncating first cuts a credential
+  below the 20 characters its pattern needs."**
+- `tui/app.py`'s diff block runs redaction **"on the WHOLE texts, because the redactor works on whole
+  strings and a secret that reached the block would be just as readable split across two wrapped rows as
+  on one"** -- with its own measured example: `ci:pw@host` is untouched alone and redacted inside
+  `https://ci:pw@host`, because the userinfo pattern anchors on `//`. More context means more redaction.
+
+§51's paging is a third cut, and the first to put the redactor after it.
+
+### What was measured (batch 106)
+
+- **The leak is real, reproduced END TO END before anything was changed.** A `ghp_` token planted at
+  characters 4,980-5,020 was driven through the real `registry.dispatch` -- so through
+  `check_output_policy`, the redactor's actual caller -- for page 1 and page 2, and both results were fed
+  to a real `SourceCorpus`. Page 1 ended `...piscing elghp_a1B2c3D4e5F6g7H8`, page 2 began
+  `i9J0k1L2m3N4o5P6q7R8lorem ipsu`, **neither carried a redaction marker**, and the corpus held the token
+  whole at character 4,980 of a 10,000-character document. `artifact_entries()` carried it too.
+- **Which is to say: to `sources/<sha256>.txt` and to the embedding provider.** `output_writer._write_sources`
+  writes `document["text"]` to that file under a docstring calling it "the text itself, redacted", with
+  `PERSIST_SOURCE_TEXT` defaulting to `True`; `source_scoring.source_passages` chunks the same text into
+  the windows `EmbeddingScorer` sends to `client.embeddings.create`. The rejoined credential went to both.
+- **All ten patterns are defeated, and NOT in the same way.** Sweeping every interior cut position:
+
+  | Pattern | Cuts leaving the whole secret in the clear | Rate per boundary |
+  |---|---|---|
+  | `ghp_…{36}` | all 39 | 0.78% |
+  | `AIza…{35}` | all 38 | 0.76% |
+  | `<password>…</password>` | all 34 | 0.68% |
+  | `-----BEGIN … PRIVATE KEY-----` | all 30 | 0.60% |
+  | `password = "…"` | all 26 | 0.52% |
+  | `AKIA…{16}` | all 19 | 0.38% |
+  | `sk-ant-…{20,}` | 26 of 60, offsets 1-26 | 0.52% |
+  | `sk-…{20,}` | 22 of 30, offsets 1-22 | 0.44% |
+  | `//user:pass@` | 18 of 46, offsets 7-24 | 0.36% |
+  | `xox[baprs]-…{10,}` | 14 of 27, offsets 1-14 | 0.28% |
+
+  The fixed-length tokens, the PEM literal and both credential shapes are defeated by EVERY interior cut,
+  because a prefix of a fixed-length token is not that token. The three open-quantifier patterns are
+  defeated only near their head -- past that a long enough prefix still matches on its own, which leaves
+  `[REDACTED]` followed by the token's tail in the clear: a signpost rather than a clean miss. §51's gap
+  register said "neither half matches a pattern"; that is true of seven of the ten.
+- **Producer-side redaction is cheaper than what it replaces, for the case that matters.** Redacting a
+  whole 64 KB body once is **1.75 ms**; redacting its fourteen pages separately is **2.23 ms**, and one
+  page is 0.20 ms. So the worst case -- a model that reads page 1 and stops -- pays **+1.54 ms**, against
+  a `REQUEST_TIMEOUT_S` of 8,000 ms and a real network round trip. A fully paged document is 0.48 ms
+  faster than before.
+- **The cache grows and releases nothing.** 100 `fetch_url` fetches of a capped page held **6.3 MB**, and
+  not one entry was ever dropped: `TTLCache` expired only inside `get`, and nothing read those keys again.
+  A stale entry ten thousand seconds past a 300-second TTL stayed resident through a write to a different
+  key. Per entry the cost is bounded at ~64 KB whatever the encoding -- 21,845 chars for CJK, 16,384 for
+  astral -- and a redirect's two keys share one `str` object rather than copying it, so **the entry count
+  was the only unbounded dimension**. `MAX_ITERATIONS` is 50, which bounds a pass and not a process.
+- **Redaction does not disturb the multi-byte boundary.** 65,536 is not divisible by 3, so a CJK body
+  decodes with a U+FFFD at its last character; `redact_output_text` leaves the string byte-identical.
+- **Cross-run reuse is consistent, not a defect.** The cache is process-scoped, so a resumed thread can
+  page a body an earlier run fetched -- but only inside the 300 s TTL, and `is_url_permitted` still runs
+  on that call. That is exactly the freshness contract PG5 states. Recorded so it is not re-investigated.
+
+### Decisions (RB1-RB7)
+
+| # | Decision |
+|---|---|
+| **RB1** | **`fetch_url` redacts the whole body BEFORE it is cut or held.** One `redact_output_text` call on the decoded body, above both the cache and the slice, so the redactor sees the document exactly once while it is still one string. Everything below that line -- the held copy, page 1, and every page a later offset cuts out of it -- is a slice of already-clean text. Not a new principle but a third application of one the record already carries twice; §51 is the first place it was applied in the wrong order |
+| **RB2** | **`fetch_url` reports its own redaction, once per fetch, naming the URL and never the match.** Redacting at the producer means `check_output_policy` finds nothing left to alter, so #49's "nothing this function does is silent" would stop covering this tool with nothing to announce that it had. One line at the fetch is better observability than what it replaces -- a fully paged document previously warned up to fourteen times, once per page -- and it keeps that function's own rule about never echoing what was found, since saying so would put the credential in `app.log` and every sink a WARNING reaches. The URL is named because it is what makes the line actionable, and `logging_setup`'s formatter redaction is the sink-side guard for a URL carrying userinfo, exactly as it already is for the `fetch_url failed for %s` line |
+| **RB3** | **Every offset the tool speaks is a position in the REDACTED body, and that is the only position space it exposes.** `offset`, `chars_available` and the message all count redacted characters. Self-consistent, because a caller only ever passes back an offset the tool named. Two consequences stated rather than left to be discovered: a document containing credentials reports a smaller `chars_available` than its source has, and the same URL reports different totals with `REDACT_TOOL_OUTPUTS` on and off |
+| **RB4** | **`source_corpus` gains nothing, and this DECLINES §51's own proposed fix.** The register proposed re-redacting the whole merged text on every append. RB1 removes the need -- a `fetch_url` page now arrives already clean, so the corpus's entry-side pass is the no-op its docstring always described -- and re-scanning up to 20,000 characters per page would buy no coverage while still leaving unfixed the model's own two tool results, which the producer-side fix does close. The entry-side pass STAYS, because `arxiv_search` and `web_search` do not redact at their producers and rely on it |
+| **RB5** | **`TTLCache` sweeps expired entries on write.** Its docstring said a sweep "would be machinery for a problem neither tool has"; that was true of two callers holding result lists and false of the third, which holds bodies. The claim is corrected in place rather than left standing next to code contradicting it. `get` keeps its expire-on-read unchanged -- that path is what makes a post-TTL query a real request again, and a cache that only swept would serve a stale entry until something else happened to write |
+| **RB6** | **`TTLCache` carries an entry cap, `MAX_ENTRIES = 128`, and evicts the OLDEST.** Derived rather than picked: `MAX_ITERATIONS` is 50 and a redirecting fetch stores two keys for one body, so 100 keys is the most one pass can reach and the cap sits above it. That headroom is the requirement, not a nicety -- a page-2 request that misses degrades to a re-fetch, which is precisely the spliced document PG5 exists to prevent, so an eviction firing in ordinary use would trade a bounded memory cost for an unbounded correctness one. Oldest-first uses `dict` insertion order, which is age order because every entry is stamped as it is written, so no second ordering has to be kept consistent; and a re-stored key is popped first so that refreshing an entry does not leave it next in line to be thrown away. In entries rather than bytes because a generic cache cannot measure what a caller hands it -- for the caller that made this necessary the two are interchangeable, since PG6's refusal to raise `MAX_CONTENT_BYTES` is what holds each body to ~64 KB |
+| **RB7** | **§51's "neither half matches a pattern" is corrected, not repeated.** Measured true for every fixed-length vendor token, the PEM literal and both credential shapes; false for `sk-`, `sk-ant-` and `xox`, where a prefix of twenty or more characters still matches and what leaks is the token's tail beside a `[REDACTED]`. Recorded because the narrower claim is the one the tests pin, and because a register entry that overstates a gap is as hard to act on as one that understates it |
+
+### Gap register
+
+- **The fix is at the producer, so it does not reach a consumer that fetches differently.** RB1 covers
+  `fetch_url`, which is the only tool that cuts a document into pages. `arxiv_search` and `web_search`
+  truncate per item and their items are far shorter than any credential-bearing span, so the same defect
+  does not arise -- but a future tool that returns a long body and slices it would have to make the same
+  choice, and nothing mechanical forces it to. Recorded rather than solved: a lint for "slicing text that
+  has not been redacted" would have to understand provenance, which is more machinery than one comment in
+  the place a third such tool would be written.
+- **The model's transcript is still where two pages sit side by side unredacted in principle.** RB1 makes
+  each page clean, so there are no halves left to rejoin -- but that is a property of the producer, not a
+  guarantee the transcript enforces. If some other producer ever hands the model two adjacent fragments,
+  no redactor sees them together. Unchanged by §52 and stated because §51's register raised it.
+- **`MAX_ENTRIES` is a count and the thing it bounds is bytes.** For `fetch_url` the two are equivalent
+  only because `MAX_CONTENT_BYTES` holds an entry to ~64 KB; for `arxiv` and `web_search` the entries are
+  much smaller, so the same cap is far looser for them than for the caller it was derived from. Accepted:
+  a byte-accounting cache would need every caller to declare a size function, which is a cost paid by
+  three callers to bound one.
+- **Nothing sweeps on a process that stops writing.** The sweep runs on `set`, so a cache that is written
+  once and then only read holds its entries until each is read past its TTL -- better than before, and
+  still not a timer. Deliberate: a background sweeper is a thread, and a thread is a lifecycle this
+  module does not have.

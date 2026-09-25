@@ -15484,3 +15484,145 @@ and never that the marker is true, so a stale marker passed as a present one. Co
 gains the guard: a section whose body declares itself complete may not be advertised as in progress by
 its own index row. That is a contradiction inside one document, which is decidable -- and it was
 verified by putting the stale row back and watching the new test fail on it.
+
+## Batch 106 -- the order two calls run in (2026-09-25)
+
+**ROADMAP_v3 §52, decisions RB1-RB7.** §51's gap register left two properties recorded rather than
+fixed. They are not two loose ends: paging introduced a **cut** and a **retention**, and each entry is
+one of those done in the wrong order or without a bound.
+
+**THE RULE THIS BATCH RESTORES WAS ALREADY IN THE RECORD, TWICE.** `AGENTS.md`: "The param digest is
+redacted BEFORE truncation. ... Truncating first cuts a credential below the 20 characters its pattern
+needs." And `tui/app.py`'s diff block runs redaction "on the WHOLE texts, because the redactor works on
+whole strings and a secret that reached the block would be just as readable split across two wrapped
+rows as on one" -- with its own measured example, `ci:pw@host` untouched alone and redacted inside
+`https://ci:pw@host`. §51's paging is a third cut and the first to put the redactor after it. That is
+the finding worth carrying forward: a locked rule stated on two surfaces did not transfer to the third
+by itself, because the third did not look like truncation while it was being written. It looked like
+paging.
+
+**THE LEAK, REPRODUCED END TO END BEFORE ANYTHING WAS CHANGED.** A GitHub PAT planted at characters
+4,980-5,020 of a fetched body, driven through the real `registry.dispatch` -- so through
+`check_output_policy`, the redactor's actual caller -- and both pages fed to a real `SourceCorpus`:
+
+  * page 1 ended `...piscing elghp_a1B2c3D4e5F6g7H8`;
+  * page 2 began `i9J0k1L2m3N4o5P6q7R8lorem ipsu`;
+  * neither carried a redaction marker;
+  * and the corpus held the token WHOLE at character 4,980 of a 10,000-character document, in
+    `artifact_entries()` as well.
+
+`artifact_entries()` is what `output_writer._write_sources` writes to `sources/<sha256>.txt`, under a
+docstring calling that file "the text itself, redacted", with `PERSIST_SOURCE_TEXT` defaulting to
+`True`; it is also what `source_scoring.source_passages` chunks into the windows `EmbeddingScorer`
+sends to `client.embeddings.create`. So the rejoined credential went to disk and to a third-party
+embedding provider. The control in the same probe: the same body fetched once and not paged leaks
+nothing, because one redaction saw the whole token.
+
+**ALL TEN PATTERNS ARE DEFEATED, AND NOT IN THE SAME WAY, WHICH CORRECTS §51's OWN NOTE (RB7).** The
+gap register said "neither half matches a pattern". Measured by sweeping every interior cut position:
+the fixed-length vendor tokens (`ghp_`, `AKIA`, `AIza`), the PEM literal and both credential shapes are
+defeated by EVERY interior cut, because a prefix of a fixed-length token is not that token. The three
+open-quantifier patterns (`sk-`, `sk-ant-`, `xox`) are defeated only near their head -- 1 to 26
+characters in for `sk-ant-`, 1 to 14 for `xox` -- because past that the prefix still matches `{20,}` on
+its own. That case is not benign either: what survives is `[REDACTED]` followed by the token's tail in
+the clear, a signpost rather than a clean miss. Per boundary the rate is 0.28% to 0.78% of cut
+positions.
+
+**RB1 PUTS THE REDACTION ABOVE BOTH THE CACHE AND THE SLICE.** One `redact_output_text` call on the
+decoded body, so the redactor sees the document exactly once while it is still one string, and the held
+copy, page 1 and every later page are slices of already-clean text. Measured, it is not a cost: a whole
+64 KB body is 1.75 ms against 0.20 ms for one page, so the worst case -- a model that reads page 1 and
+stops -- pays +1.54 ms against a `REQUEST_TIMEOUT_S` of 8,000 ms and a real network round trip, and a
+fully paged document comes out 0.48 ms AHEAD of doing it fourteen times.
+
+It also closes half of the second property by accident, which is the argument for doing it here rather
+than in the corpus: before §51 the body was a local that died with the call, and holding it extended
+the lifetime of unredacted remote content from one function call to 300 seconds. The held copy is now
+redacted.
+
+**RB2, AND THE OBSERVABILITY THAT WOULD HAVE VANISHED SILENTLY.** Redacting at the producer means
+`check_output_policy` finds nothing left to alter, so #49's "nothing this function does is silent"
+would simply stop covering `fetch_url` -- with nothing to announce that it had stopped. The tool logs
+its own line, once per fetch, naming the URL and never the match. It is better than what it replaces: a
+fully paged document previously produced up to fourteen warnings, one per page, and this produces one,
+at the fetch.
+
+**RB3.** Every offset the tool speaks is a position in the redacted body. Self-consistent, because a
+caller only ever passes back an offset the tool named, and stated rather than left to be found: a
+document containing credentials reports a smaller `chars_available` than its source has, and the same
+URL reports different totals with `REDACT_TOOL_OUTPUTS` on and off.
+
+**RB4 DECLINES §51's OWN PROPOSED FIX.** The register proposed re-redacting the whole merged text in
+`source_corpus` on every append. RB1 removes the need, and the corpus-side version was the weaker of
+the two anyway: it would have re-scanned up to 20,000 characters per page, and it could not have
+touched the two tool results the MODEL reads, which the producer-side fix does. The entry-side pass
+STAYS, because `arxiv_search` and `web_search` do not redact at their producers and rely on it -- and a
+mutation deleting the continuation path's copy of it survived until a test was written for the case the
+module's own docstring names, a result handed to it by a producer that did not redact.
+
+**THE SECOND PROPERTY: THE CACHE RELEASED NOTHING.** Measured, 100 `fetch_url` fetches of a capped page
+held 6.3 MB and not one entry was ever dropped -- `TTLCache` expired only inside `get`, and nothing
+read those keys again. An entry ten thousand seconds past a 300-second TTL survived a write to a
+different key. The per-entry cost was already bounded at ~64 KB whatever the encoding (21,845
+characters for CJK, 16,384 for astral), and a redirect's two keys share one `str` rather than copying
+it, so the entry COUNT was the only unbounded dimension. `MAX_ITERATIONS` is 50, which bounds a pass
+and not a process, and the cache is module-level.
+
+RB5 sweeps on write; RB6 caps at `MAX_ENTRIES = 128` and evicts the oldest. Both in the shared class
+rather than a second one (G3), and its docstring's claim that a sweep "would be machinery for a problem
+neither tool has" is corrected in place -- it was true of two callers holding result lists and false of
+the third. The cap is derived and not chosen: 50 iterations times two keys for a redirecting fetch is
+100, so it sits above one pass's whole reach. **Tightening it would be a mistake**, because a page-2
+request that misses degrades to a re-fetch, which is the spliced document PG5 exists to prevent --
+bounded memory traded for unbounded correctness. Expire-on-read is deliberately untouched; it is what
+makes a post-TTL query a real request again, and a mutation deleting it as "now redundant" is killed.
+
+**24 mutation rows, all killed, foreground and in chunks -- and one of them was a row fault that found
+a test fault.** M19 first moved the sweep ABOVE the insert. That changes nothing: the inserted entry is
+stamped `now`, so it can never be swept, and no test can kill a mutation that changes no behaviour.
+Repointed to the ordering that IS observable -- the sweep against the EVICTION -- and diagnosing it
+showed that the test standing over that ordering could not discriminate either, because every entry in
+its fixture was stale, so evicting first took a stale entry and sweeping second removed the rest. The
+arrangement that tells them apart has a LIVE oldest entry and a younger stale one: sweeping first frees
+the stale slot and the cap never fires, while evicting first discards the live entry to make room that
+was about to be freed anyway.
+
+**Nothing moved, proved against the PRE-PATCH modules out of `git show HEAD:`** rather than against a
+literal typed twice, and end to end through `check_output_policy` rather than at the tool boundary --
+which is the right place for this batch specifically, because at the tool boundary a secret-bearing
+body legitimately differs and after dispatch it must not. Eleven body sizes on both sides of every
+boundary, every page of a 20,000-character document with its `message`, and a redirect chain: identical
+on all five keys. For a body that DOES carry a credential the two differ, and by exactly the length of
+the replacement and nothing else.
+
+**One thing recorded rather than solved.** The fix is at the producer, so it protects the one tool that
+cuts a document into pages. A future tool that returns a long body and slices it would owe the same
+check and nothing mechanical forces it to -- a lint for "slicing text that has not been redacted" would
+have to understand provenance. `AGENTS.md`'s redact-before-truncate entry now names all three surfaces
+and says a new one owes this rather than inherits it, which is the cheapest guard available.
+
+**AND ONE THE WSL RUN FOUND, WHICH IS NOW TECHNICAL_DEBT 27.** The WSL suite failed nine tests where
+the recorded baseline names eight, and three of them -- `test_declared_network` -- were not on that
+list. Settled by a controlled comparison rather than by attribution, across four full runs: with §52's
+source and the two new test files, `test_declared_network` x3 failed; at HEAD with those files ignored,
+`test_session_backends` x2 failed instead; **with §52's source and those files ignored, the cohort
+reverted to HEAD's exactly.** Source held constant while the test files varied moves the cohort; source
+varied while the files are held constant does not. So §52's code causes none of it.
+
+The mechanism is a pre-existing leak of the same family as the one batch 105 closed for the network
+caches. `security/sandbox.py` memoises a LIVE `docker`/`podman` subprocess probe in a module global set
+once per process and never reset; `_reset_runtime_probe()` sits two functions below it marked "Tests
+only" and is used by one autouse fixture scoped to a single class in `test_shell.py`, whose docstring
+states the general reason ("otherwise the first test's answer would be the only one any of them
+measured"). Nothing in `conftest.py` resets it, the probe allows up to ten seconds per unresponsive
+daemon, and the distro has both runtimes on PATH -- so the answer turns on machine load, and any new
+test file perturbs collection order and therefore which tests inherit the wrong answer. It reads as a
+real defect and is not one: `_shell_approval_check` returns `False` at `if containment == UNAVAILABLE`,
+so a test asserting "this asks for approval" sees "auto-approved".
+
+**Not fixed here, deliberately.** The one-fixture repair would make every test that reaches a live
+probe re-probe, at up to ten seconds each, which could cost minutes on every run on every platform to
+stabilise a cluster that is now understood. Item 27 says to count the live probes first and then
+choose. The consequence for the record is immediate, though: the baseline list of eight named tests is
+not a stable list -- both HEAD and §52 produced a member outside it -- so a WSL run cannot be compared
+to a previous batch's by test name, only by cause.

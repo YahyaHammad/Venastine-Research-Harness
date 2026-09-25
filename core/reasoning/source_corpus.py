@@ -28,6 +28,17 @@ boundary -- nothing is stored by this module unredacted -- beats depending
 on a guarantee made two layers away that a later refactor could quietly
 drop. The second pass is a no-op on already-clean text.
 
+AND IT IS NOT WHERE §52's SPLIT-CREDENTIAL FIX WENT, deliberately (RB4).
+§51 made this module the one place where two pages of a document become
+adjacent, so a credential straddling a page boundary was rejoined HERE --
+reproduced end to end in batch 106, into `artifact_entries()` and therefore
+into `sources/<sha256>.txt` and the window sent to the embedding provider.
+The register's proposed fix was to re-redact the whole merged text on every
+append. It was declined: `fetch_url` redacts before it cuts now, so the
+halves never exist, and re-scanning up to 20,000 characters per page would
+buy nothing this module can see -- while leaving unfixed the model's own two
+tool results, which the producer-side fix does close.
+
 THIS MODULE OWNS URL IDENTITY for the pipeline. Two spellings of one arXiv
 paper are one source, and a model that cites `/abs/2005.14165v3` after
 fetching `/abs/2005.14165` must not be told its own citation has no text.
@@ -101,8 +112,16 @@ class SourceDocument:
 
     #: ROADMAP_v3 §51 (PG7). How far into the SOURCE document the held text
     #: reaches, in the source's own character positions -- which is what
-    #: `fetch_url` pages by, and not the same as `len(text)` once redaction
-    #: has been applied. 0 for a document no paging tool produced.
+    #: `fetch_url` pages by, and not the same as `len(text)`. 0 for a
+    #: document no paging tool produced.
+    #:
+    #: §52 (RB1) removed ONE of the two reasons those numbers differ.
+    #: Redaction used to happen here, on each page, so a page's held length
+    #: could be shorter than the span it covered; `fetch_url` now redacts
+    #: before it cuts, so its pages arrive clean and that gap is gone. What
+    #: still separates the two is `.strip()` and `MAX_DOCUMENT_CHARS`, both
+    #: of which change how much is HELD and neither of which moves where a
+    #: page sat in the document it came from.
     #:
     #: It is what stops a page being absorbed twice. Without it, a model
     #: that re-reads page 2 -- which it will, because re-reading is how a

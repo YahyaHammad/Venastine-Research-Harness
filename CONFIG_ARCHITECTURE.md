@@ -513,6 +513,14 @@ was described by fetch_url.py's own comment for just as long. Everything
 written there has been through redact_output_text on entry to the
 corpus.
 
+ROADMAP_v3 §52 (RB1) is what makes that sentence true again for a paged
+document, and it was measured false first. §51 cut a page out of the
+body before the redactor saw it, so a credential straddling character
+5,000 matched nothing in either page and PG7's append rejoined it here
+-- reproduced end to end into artifact_entries(), which is exactly what
+this directory is written from. fetch_url redacts the whole body before
+it cuts now, so the halves never exist.
+
 It is new data at rest, so it has a switch and PRIVACY.md says what it
 holds. Turning it off costs the audit trail, not the scores: the corpus
 still exists in memory for the run that computes them.

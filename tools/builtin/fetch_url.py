@@ -5,7 +5,7 @@ import logging
 import httpx
 from pydantic import BaseModel, Field
 
-from safety.policy_enforcement import is_url_permitted
+from safety.policy_enforcement import is_url_permitted, redact_output_text
 from tools.builtin._net_common import TTLCache
 
 logger = logging.getLogger(__name__)
@@ -62,7 +62,18 @@ CACHE_TTL_S = 300
 
 # Keyed by URL -- BOTH the requested spelling and the one that answered,
 # because a redirect means the model may page with either. Holds
-# (answering url, decoded body, whether the byte cap stopped the read).
+# (answering url, decoded and REDACTED body, whether the byte cap stopped
+# the read).
+#
+# Redacted, since §52 (RB1). Two things follow and both are wanted: no page
+# cut from this body can split a credential, and the process no longer holds
+# unredacted remote content for the life of the entry -- before §51 the body
+# was a local that died with the call, and holding it extended the lifetime
+# of text nobody here wrote from one function call to 300 seconds.
+#
+# The entry COUNT is bounded by `_net_common.MAX_ENTRIES` (§52, RB6).
+# Measured (batch 106): 100 fetches held 6.3 MB and nothing was ever dropped,
+# because `TTLCache` expired on read alone and nothing read those keys again.
 _body_cache = TTLCache(CACHE_TTL_S)
 
 
@@ -93,6 +104,13 @@ def _bounded_body(response) -> tuple:
     extra chunk beyond the cap is what makes `more` honest: without it,
     a body that happens to end exactly at the cap is indistinguishable
     from one that was cut off.
+
+    NOT THE PLACE TO REDACT, though it is the first place the body exists
+    (§52). This reads BYTES and the redactor works on decoded strings: a
+    credential spanning the boundary between two `iter_bytes` chunks would
+    be as invisible here as one spanning two pages is downstream, which is
+    the very failure §52 exists to close. Redaction runs once in `run()`,
+    on the whole decoded body, above both the cache and the slice.
     """
     chunks, total, more = [], 0, False
     for chunk in response.iter_bytes():
@@ -124,6 +142,14 @@ def _page(url: str, body: str, more: bool, offset: int) -> dict:
     cap bit, or the body is longer than one page. `source_corpus` and the
     grounding passes read `url` and `content`; the register's constraint is
     that added keys are safe and changed ones are not.
+
+    EVERY POSITION HERE COUNTS REDACTED CHARACTERS (§52, RB3), because
+    `body` arrives redacted. That is the only position space this tool
+    speaks, and it is self-consistent: a caller only ever passes back an
+    offset this function named. Two consequences, stated rather than left to
+    be discovered -- a document containing credentials reports a smaller
+    `chars_available` than its source has, and the same URL reports
+    different totals with `REDACT_TOOL_OUTPUTS` on and off.
     """
     total = len(body)
     chunk = body[offset:offset + MAX_CONTENT_CHARS]
@@ -170,6 +196,45 @@ def _page(url: str, body: str, more: bool, offset: int) -> dict:
         )
 
     return result
+
+
+def _redacted(url: str, body: str) -> str:
+    """The body with credentials replaced, said once (§52, RB1 and RB2).
+
+    ORDER IS THE WHOLE POINT. `registry.dispatch` runs every result through
+    `check_output_policy`, so this text was always redacted -- but it was
+    redacted AFTER the page had been cut out of it, and a pattern only
+    matches what it can see whole. Measured (batch 106), a `ghp_` token
+    straddling character 5,000 survived both pages untouched, was rejoined by
+    the corpus's PG7 append, and landed in `sources/<sha256>.txt` and in the
+    window sent to the embedding provider. Every one of the ten patterns is
+    defeated by some cut; the fixed-length tokens and both credential shapes
+    are defeated by EVERY interior cut, because a prefix of a fixed-length
+    token is not that token.
+
+    This repo had already locked the rule twice. `param_digest` "redacts
+    BEFORE truncating" because "truncating first cuts a credential below the
+    20 characters its pattern needs", and `tui/app.py`'s diff block runs on
+    whole texts because a secret "would be just as readable split across two
+    wrapped rows as on one". §51's paging is a third cut, and the first to
+    get the order wrong.
+
+    RB2, the warning. Redacting here means `check_output_policy` finds
+    nothing left to alter, so #49's "nothing this function does is silent"
+    would stop covering this tool without anybody noticing. One line at the
+    fetch replaces up to fourteen at the pages, and it keeps that function's
+    own rule: the match is never echoed, because saying what was found would
+    put it in app.log and every sink a WARNING reaches. The URL is named --
+    it is what makes the line actionable, and `logging_setup`'s formatter
+    redaction is the sink-side guard for a URL carrying userinfo, exactly as
+    it is for the `fetch_url failed for %s` line below.
+    """
+    clean = redact_output_text(body)
+    if clean != body:
+        logger.warning(
+            "Output policy altered fetch_url result: credentials replaced "
+            "in the body of %s before it was paged.", url)
+    return clean
 
 
 def _cached(url: str):
@@ -267,6 +332,13 @@ def run(params: dict) -> dict:
             # 404s indistinguishable from a broken tool.
             logger.warning("fetch_url failed for %s: %s", url, e)
             return {"error": f"Could not fetch URL: {e}"}
+
+        # §52 (RB1). ABOVE BOTH THE CACHE AND THE SLICE, and that position
+        # is the fix: the redactor sees the whole document exactly once,
+        # while it is still one string. Everything below this line -- the
+        # held copy, page 1, and every page a later offset cuts out of it --
+        # is a slice of already-clean text.
+        body = _redacted(url, body)
 
         # Held before the page is cut, so a later offset reads the body
         # this fetch actually retrieved (PG5). Keyed by both spellings,
