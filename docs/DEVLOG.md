@@ -15375,3 +15375,112 @@ been mistaken for a real regression, and the reason it was diagnosed rather than
 
 With `needs_root` false the WSL and SSH argvs are byte-identical to what `9048427` shipped, option for
 option and in order, proved against the pre-patch module rather than against a literal typed twice.
+---
+
+## Batch 105 -- a second page, and the reader that was throwing it away (2026-09-25)
+
+ROADMAP_v3 §51, decisions PG5-PG9, and corrections to PG2 and PG3. `fetch_url` gains an `offset`,
+`arxiv_search` stops spending its provider's `start` parameter on the constant 0, `web_search` gains
+the `page` its provider had all along, and a value cut at a cap now says how to get the rest. §51 was
+recorded in batch 96 from an owner report and had sat unbuilt since; it was the last section in the
+record that was specified and not implemented.
+
+The complaint it was written from: `fetch_url` returned `body[:5000]` with `truncated: true` and no
+way to ask for the rest, so the workaround left to the model was a raw HTTP request through `shell` --
+which converts a reading task into a code-execution one, on precisely the surface §50 exists to govern.
+
+**MEASURING FIRST CORRECTED TWO OF THE FOUR RECORDED DECISIONS, and the first correction was to a
+measurement of my own.** PG2 says "a page is a re-fetch, not a seek into something already held". The
+first probe fetched three URLs twice BACK TO BACK, found all three byte-identical, and would have
+confirmed PG2 -- except that milliseconds is not the interval a model pages over, and one of the three
+returned 126 bytes, an error page rather than the article. Calling that stable measured nothing. Re-run
+across **45 seconds** with five real URLs and a guard against a body too short to be the page:
+
+  * `docs.python.org`, `bbc.com/news`, `arxiv.org/abs/1706.03762`, identical;
+  * `news.ycombinator.com`, **not**. First difference at byte 2,019 -- inside page 1 -- and the text at
+    offset 5000..10000 differed between the two fetches.
+
+So a model that read page 1 and asked for page 2 would have been handed two halves of two different
+documents, spliced at an arbitrary point, with nothing in the result able to say so. A news front page
+is exactly what a research run reads. PG5 holds the body instead, for the 300 s the two other network
+tools already hold their answers, keyed by both the requested URL and the one that answered. The cost
+argument is secondary and also measured: paging an 88 KB document by re-fetch is fourteen requests for
+the same body, 1.2 MB off the wire to read 65 KB, and 5.3 MB for `bbc.com/news`.
+
+**The cache does not get to skip the blocklist.** `is_url_permitted` runs on every call including a
+cache hit, because a cache consulted before the policy check is a blocklist with a hole in it -- the
+same defect as #54, reached by a second call rather than by a redirect. It is mutation-pinned twice.
+
+PG2's other clause said `MAX_CONTENT_BYTES` should rise with the reachable window. **It does not, and
+PG6 records why.** That constant is a security bound (§31 H7, #55) whose own comment says "the only
+thing that actually bounds this is refusing to read past a cap"; a cap raised whenever it is
+inconvenient is not a cap. What PG2 was protecting against -- a byte bound silently capping the page
+count -- is fixed by SAYING SO, which is cheaper than removing the bound. The cost is stated rather
+than hidden, and it is not small: measured, a quarter of an ordinary `docs.python.org` page and 83% of
+`bbc.com/news` sits past the limit and stays unreachable. The last page inside the window says the
+document was cut at the read limit and no further page exists, rather than naming an offset that would
+return nothing.
+
+**THE DEFECT THAT WAS NOT IN THE RECORD AT ALL, and the one that would have made the whole section
+pointless.** `core/reasoning/source_corpus.py` keys documents by URL and keeps the longest text.
+Driving `SourceCorpus.add` with a page-1 then a page-2 `fetch_url` result -- reproduced before anything
+was fixed -- returned 1 and then **0**: `len(existing.text) >= len(cleaned)` is 5000 >= 5000, so page 2
+was DROPPED and the held text stayed page 1. The model would read four pages and the grounding pass
+would score against the first, with the divergence invisible from both sides. The near miss is worse
+than the miss: a page 2 one character longer REPLACED page 1 outright, leaving the corpus holding the
+middle of a document and attributing it to the whole URL. PG7 concatenates instead, bounded by the
+`MAX_DOCUMENT_CHARS` that was already there and whose comment already said it was "not a second
+truncation of the tools that exist".
+
+Two smaller things the probe settled. **arXiv's `start` does what PG3 assumed** -- `start=0` and
+`start=5` returned disjoint id sets, and the feed carries `opensearch:totalResults` (261,387 for the
+query used), which is what lets a result say how many papers it did NOT return. And **`web_search` can
+page, which PG1-PG4 assumed it could not**: `ddgs 9.14.4` takes `page: int = 1` and accepted it live.
+But measured, its pages are not a partition -- page 2 overlapped page 1 by one result, where arXiv's
+overlapped by none -- so the two get different wording and neither claims the other's property.
+
+### Verification
+
+Full suite 5894 selected, zero failures. `ruff check .` clean; bandit exit 0 against a path-corrected
+baseline copy and directly over the changed files. **47 mutation rows, all killed**, foreground and in
+chunks -- and the pass earned its place, because four of the survivors were real and two of those were
+the same mistake twice:
+
+  * **`test_start_reaches_the_provider` patched `_call_arxiv_api` and asserted on the argument it was
+    handed -- but the hardcoded `"start": 0` lives INSIDE that function.** The mutation restoring it was
+    inside the mock, so no assertion could see it. `_call_ddgs` had the identical hole for `page=`. Both
+    are now driven at the provider boundary, against the recorded outgoing request. A test whose needle
+    is in its own haystack, which is the shape this project keeps paying for -- batch 104 hit it twice
+    with grep.
+  * **`next_offset` could be computed from the length of the HELD text rather than the source position**
+    and every test passed, because every one of them started at offset 0, where the two numbers coincide.
+    The case that separates them is a document whose first stored page sits at a non-zero offset,
+    followed by one that partially overlaps it -- there the overlap comes out negative and 2,000
+    characters are held twice, which a similarity score then counts twice for a passage the source
+    states once.
+  * **A guard I had written could be deleted with nothing failing.** `if overlap >= len(text): return 0`
+    was redundant with the empty-addition check below it in every case. It was REMOVED rather than
+    tested, and the comment in its place says why: batch 103's lesson about a guard that cannot fire
+    applies as much as the one about a guard that fires in the wrong place -- it still reads as the
+    thing protecting you.
+
+Three further rows were the ROW's fault and are recorded as such: `exclude=True` on a Pydantic field
+changes serialization and not the JSON schema, blanking the first line of a three-line concatenated
+description leaves it non-empty, and one `expect` list named a test that does not exist while the row
+was being killed by the right one.
+
+### Two things fixed on the way past
+
+**`arxiv._cache` and `web_search._cache` were never cleared between tests.** They have been
+module-level and uncleared since they were written; `clear_scholar_cache` next door does exactly this
+and says why. Nothing had tripped on it because no two tests in one process had used the same query.
+§51 made it load-bearing rather than latent -- the keys now carry a page, and a leaked entry would make
+a paging assertion pass for the wrong reason.
+
+**ROADMAP_v3's index row for §49 still said `IN PROGRESS`** and still stopped at slice 4, while §49's
+own Slices list said "§49 is complete". Batch 104 wrote that sentence and did not update the index;
+batch 103 had missed it before that. `test_docs_consistency.py` checked that a row HAS a status marker
+and never that the marker is true, so a stale marker passed as a present one. Corrected, and the file
+gains the guard: a section whose body declares itself complete may not be advertised as in progress by
+its own index row. That is a contradiction inside one document, which is decidable -- and it was
+verified by putting the stale row back and watching the new test fail on it.

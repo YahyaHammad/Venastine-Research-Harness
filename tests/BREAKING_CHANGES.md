@@ -4939,3 +4939,33 @@ setting that turns the asking off short of `shell_approval_mode: never`, which a
 **If a test of yours trips the sudo quarantine without clearing it**, every later test in the same
 process sees that backend refusing root. `tests/test_sudo.py` clears it in an autouse fixture at both
 ends, which is the pattern to copy -- `sandbox._reset_sudo_quarantine()`.
+---
+
+## Batch 105 -- paging for the network tools (ROADMAP_v3 §51)
+
+| What broke | Why | The repair |
+|---|---|---|
+| `tools.builtin.arxiv._parse_atom_feed` | Returns `(entries, total)` where it returned a bare list, so a result can report `opensearch:totalResults` | Unpack two values. It has no caller outside its own module; `_call_arxiv_api`, which several tests DO patch, is unchanged in arity for its first three arguments and takes `start` as a fourth with a default |
+| `tools.builtin.arxiv._cache` | Its value is now `(results, total)` rather than `results` | Nothing outside the module reads it. If you build one by hand in a test, build the pair |
+| `tools.builtin.web_search._call_ddgs` | Takes `page` as a third argument and passes it to `DDGS.text` | Defaults to 1, which is `ddgs`'s own default. **A double for this function must accept it** -- and a double that swallows it silently is why M40 survived the first mutation pass: every test patched `_call_ddgs`, so dropping `page=` INSIDE it was invisible. Patch `web_search.DDGS` instead when the claim is about what reaches the provider |
+| `tools.builtin.web_search.SearchResult` | A `snippet_truncated` field, so `model_dump()` has one more key | Defaults `False`. A consumer comparing a whole dict to a literal needs the key; `source_corpus` reads by name and is unaffected |
+| `core.reasoning.source_corpus.SourceDocument` | A `next_offset` field | Defaults 0. It is in the SOURCE document's character positions, not held characters -- the two coincide only at offset 0, which is exactly why a test that starts at 0 cannot tell them apart |
+| `core.reasoning.source_corpus._store` | A fifth parameter, `offset=None`, and a branch that APPENDS instead of competing on length | `None` means "this tool does not page" and reproduces the old behaviour exactly; `0` means "page one of something that may have more". The two are deliberately not the same value |
+| `tools.builtin.fetch_url.run` | Returns `offset`, `chars_available` and sometimes `message` beside the three keys it returned before | The three old keys keep their exact values, `truncated` included, at every size on both sides of the page boundary. Added keys are safe here by the §51 gap register's own rule; changed ones would not be |
+| `tests/conftest.py` | New autouse `clear_network_tool_caches` | Drops all three tool caches at both ends of every test. If a test of yours relied on a cached answer surviving into it, it was relying on a bug |
+| `docs/ARCHITECTURE.md`'s tree | One new test file | `test_paging.py` (74); `test_docs_consistency.py` 35 -> 36; 91 -> 92 test files; 5819 -> 5894 |
+| `AGENTS.md`'s decision map | The record defines PG5-PG9 | PG1-PG4 -> PG1-PG9, and ROADMAP_v3 is no longer "in progress" |
+
+**If a second `fetch_url` of the same URL returns a stale body, it will not** -- but a second PAGE of
+it deliberately does. `offset=0` always re-fetches and refreshes the held copy; only `offset>0` reads
+it. Every caller that passes no offset (the grounding passes, `output_writer`) is byte-for-byte where
+it was.
+
+**If you relied on `truncated` meaning "the body is longer than 5000 characters", it still does** at
+offset 0. At a later offset it means "there is more after this page", which is the same question asked
+of an arbitrary position. The `or more` term that no shipped constant can reach is still there, still
+for the day someone moves a constant, and is still mutation-pinned by a test that moves them.
+
+**If a corpus document of yours is longer than it used to be**, that is PG7 and the short version was
+a defect. Page 2 of a URL used to be dropped because it was not LONGER than page 1, so a grounding
+pass scored the first page of everything the model paged through.

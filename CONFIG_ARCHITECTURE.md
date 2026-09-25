@@ -1316,6 +1316,12 @@ Same posture as tools/builtin/arxiv.MAX_SUMMARY_CHARS (600) and
 web_search.MAX_SNIPPET_CHARS (300): model-facing text from a source
 this project did not write is bounded where it is produced.
 
+ROADMAP_v3 §51 (PG8) left both caps exactly where they are and made
+them SAY when they bit. A value cut at a cap and a value that happens
+to be that long were indistinguishable, so "the paper does not mention
+X" and "the first 600 characters do not" read the same to the model.
+The flag is the fix; raising the cap is not, for the reason above.
+
 ## Summaries, references and the checklist (ROADMAP_v2 §21c / §23)
 
 ### `compactor_agent`

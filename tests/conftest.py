@@ -598,6 +598,35 @@ def clear_scholar_cache():
 
 
 @pytest.fixture(autouse=True)
+def clear_network_tool_caches():
+    """Drop the three built-in network tools' caches between tests.
+
+    Same reason as `clear_scholar_cache` above, and it should have been
+    here with it: `arxiv._cache` and `web_search._cache` have been
+    module-level and uncleared since they were written, so a test that
+    stubs a FAILING provider could be served a payload an earlier test
+    cached and pass against a fake it never called. Nothing had tripped on
+    it because no two tests in one process had used the same query.
+
+    ROADMAP_v3 §51 made it load-bearing rather than latent: `fetch_url`
+    gained a body cache (PG5), paging tests turn on what is and is not
+    held, and the cache keys now carry a page (PG9) -- so a leaked entry
+    would make a paging assertion pass for the wrong reason, which is the
+    one failure a paging test cannot tolerate.
+    """
+    from tools.builtin import arxiv, fetch_url, web_search
+
+    def drop():
+        arxiv._cache.clear()
+        web_search._cache.clear()
+        fetch_url._body_cache.clear()
+
+    drop()
+    yield
+    drop()
+
+
+@pytest.fixture(autouse=True)
 def isolate_pipeline_models(tmp_path_factory, monkeypatch):
     """Point the remembered critic/embedder store somewhere disposable.
 

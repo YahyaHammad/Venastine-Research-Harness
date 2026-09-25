@@ -34,6 +34,13 @@ logger = logging.getLogger(__name__)
 ARXIV_API_URL = "https://export.arxiv.org/api/query"
 ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
 
+# ROADMAP_v3 §51 (PG3). arXiv answers in OpenSearch's paging elements as
+# well as Atom's entries, and they are what let a result say how many papers
+# the query has rather than only that it has more. Measured (batch 105):
+# `all:transformer attention` reports totalResults=261387, with startIndex
+# and itemsPerPage echoing the request.
+OPENSEARCH_NS = {"opensearch": "http://a9.com/-/spec/opensearch/1.1/"}
+
 _VALID_SORT_BY = {"relevance", "lastUpdatedDate", "submittedDate"}
 
 MAX_SUMMARY_CHARS = 600
@@ -59,6 +66,15 @@ class ArxivSearchParams(BaseModel):
         ),
     )
     max_results: int = Field(5, ge=1, le=20, description="Number of results to return")
+    start: int = Field(
+        0,
+        ge=0,
+        description=(
+            "Number of results to skip before returning any (0-based). Use "
+            "the start named in a result's message to page further into a "
+            "search that has more papers than were returned."
+        ),
+    )
     sort_by: str = Field(
         "relevance",
         description="How to sort results: 'relevance', 'lastUpdatedDate', or 'submittedDate'",
@@ -114,12 +130,16 @@ def _build_search_query(keywords: str, category: Optional[str]) -> str:
 
 # ---- Provider call ----------------------------------------------------------
 
-def _call_arxiv_api(search_query: str, max_results: int, sort_by: str) -> str:
+def _call_arxiv_api(search_query: str, max_results: int, sort_by: str,
+                    start: int = 0) -> str:
     response = httpx.get(
         ARXIV_API_URL,
         params={
             "search_query": search_query,
-            "start": 0,
+            # §51 (PG3). Was hardcoded to 0, which made every page of every
+            # search the first one: the provider had implemented paging all
+            # along and this tool spent the parameter on a constant.
+            "start": start,
             "max_results": max_results,
             "sortBy": sort_by,
             "sortOrder": "descending",
@@ -137,9 +157,31 @@ def _call_arxiv_api(search_query: str, max_results: int, sort_by: str) -> str:
 
 # ---- Atom XML parsing --------------------------------------------------
 
-def _parse_atom_feed(xml_text: str) -> list[dict]:
+def _total_results(root) -> Optional[int]:
+    """How many papers the query has, from OpenSearch's own element (PG3).
+
+    Optional rather than assumed: the element is arXiv's to emit, and a
+    result that reported a total it had invented would be worse than one
+    that reports none.
+    """
+    element = root.find("opensearch:totalResults", OPENSEARCH_NS)
+    if element is None or not (element.text or "").strip():
+        return None
+    try:
+        return int(element.text.strip())
+    except ValueError:
+        return None
+
+
+def _parse_atom_feed(xml_text: str) -> tuple:
+    """(entries, how many the query has in total).
+
+    The total is OpenSearch's, not a count of what came back -- the point
+    of it is to say what was NOT returned, which a count of what was cannot.
+    """
     root = ET.fromstring(xml_text)
     entries = root.findall("atom:entry", ATOM_NS)
+    total = _total_results(root)
 
     results = []
     for entry in entries:
@@ -148,7 +190,15 @@ def _parse_atom_feed(xml_text: str) -> list[dict]:
 
         title = entry.find("atom:title", ATOM_NS).text.strip().replace("\n", " ")
         summary_el = entry.find("atom:summary", ATOM_NS)
-        summary = (summary_el.text or "").strip().replace("\n", " ")[:MAX_SUMMARY_CHARS]
+        full_summary = (summary_el.text or "").strip().replace("\n", " ")
+        summary = full_summary[:MAX_SUMMARY_CHARS]
+        # §51 (PG8/PG4). The cap stays -- it bounds model-facing text from a
+        # source nobody here wrote, which is #131's lesson -- but a value cut
+        # at it now SAYS it was cut. Until §51 a 600-character abstract and
+        # one that happened to be 600 characters long were the same thing to
+        # a reader, so the model could not tell an abstract it had all of
+        # from one it had the first two thirds of.
+        summary_truncated = len(full_summary) > MAX_SUMMARY_CHARS
 
         published_el = entry.find("atom:published", ATOM_NS)
         published = published_el.text[:10] if published_el is not None else None
@@ -164,7 +214,7 @@ def _parse_atom_feed(xml_text: str) -> list[dict]:
             if link.get("title") == "pdf":
                 pdf_url = link.get("href")
 
-        results.append({
+        entry_result = {
             "arxiv_id": arxiv_id,
             "title": title,
             "authors": authors,
@@ -172,29 +222,46 @@ def _parse_atom_feed(xml_text: str) -> list[dict]:
             "published": published,
             "categories": categories,
             "pdf_url": pdf_url,
-        })
+        }
+        if summary_truncated:
+            # PG4's whole complaint: a truncated value that says nothing
+            # about how to recover the rest is what sends the model to the
+            # shell. The abs page is the route, and it is a URL `fetch_url`
+            # will take.
+            entry_result["summary_truncated"] = True
+            entry_result["full_summary_url"] = f"https://arxiv.org/abs/{arxiv_id}"
+        results.append(entry_result)
 
-    return results
+    return results, total
 
 
 # ---- Entry point called by the tool dispatcher -----------------------------
 
 def run(params: dict) -> dict:
     parsed = ArxivSearchParams(**params)
-    cache_key = f"{parsed.keywords}|{parsed.category}|{parsed.max_results}|{parsed.sort_by}"
+    # §51 (PG9). `start` is part of the key because it changes the response.
+    # Without it page 2 of a search would be served page 1 out of the cache
+    # -- the same class of collision this cache's own docstring warns about
+    # between the two tools, arriving instead between two pages of one
+    # query, and silent in exactly the same way.
+    cache_key = (f"{parsed.keywords}|{parsed.category}|{parsed.max_results}"
+                 f"|{parsed.sort_by}|{parsed.start}")
 
-    results = _cache.get(cache_key)
-    if results is not None:
+    cached = _cache.get(cache_key)
+    total: Optional[int] = None
+    if cached is not None:
         logger.info("arxiv_search cache hit for %r", parsed.keywords)
+        results, total = cached
     else:
         search_query = _build_search_query(parsed.keywords, parsed.category)
         last_exc: Optional[Exception] = None
         results = []
         for attempt in range(MAX_RETRIES + 1):
             try:
-                xml_text = _call_arxiv_api(search_query, parsed.max_results, parsed.sort_by)
-                results = _parse_atom_feed(xml_text)
-                _cache.set(cache_key, results)
+                xml_text = _call_arxiv_api(search_query, parsed.max_results,
+                                           parsed.sort_by, parsed.start)
+                results, total = _parse_atom_feed(xml_text)
+                _cache.set(cache_key, (results, total))
                 break
             except (httpx.HTTPError, ET.ParseError) as e:
                 last_exc = e
@@ -218,6 +285,30 @@ def run(params: dict) -> dict:
             }
 
     if not results:
+        if parsed.start:
+            # Distinguishable from "this query has nothing", which is what
+            # the bare message would have said about a page past the end.
+            return {
+                "results": [], "result_count": 0, "start": parsed.start,
+                "message": (
+                    f"No papers at start={parsed.start}. The search has "
+                    f"{total} in total." if total is not None else
+                    f"No papers at start={parsed.start}, which is past the "
+                    f"end of this search."
+                ),
+            }
         return {"results": [], "result_count": 0, "message": "No papers found."}
 
-    return {"results": results, "result_count": len(results)}
+    result = {"results": results, "result_count": len(results),
+              "start": parsed.start}
+
+    # PG4: say how to get the rest, not merely that there is a rest.
+    next_start = parsed.start + len(results)
+    if total is not None:
+        result["total_results"] = total
+        if next_start < total:
+            result["message"] = (
+                f"Returned papers {parsed.start + 1}-{next_start} of {total}. "
+                f"Use start={next_start} to see more."
+            )
+    return result

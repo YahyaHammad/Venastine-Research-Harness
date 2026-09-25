@@ -22,9 +22,9 @@ decision record is append-only, and a deviation is recorded as an owner decision
 
 ## Index
 
-- **§49. Shell sessions, the container runtime, and where a command can run** — **(IN PROGRESS: slice 0, Podman, BUILT in batch 93; slice 1 COMPLETE -- its foundations in batch 94, its five tools, the sleeping subagent and the CLI wait loop in batch 95, the TUI's behaviour half in batch 97 and its display half in batch 98; slice 2, interactive sessions, BUILT in batch 100; slice 3, WSL, BUILT in batch 101; slice 4, SSH, BUILT in batch 102)** (the shell was one-shot and blocking, so a test suite could not outlive a turn and nothing could wake the agent; a machine with Podman and no working Docker had no sandbox at all)
+- **§49. Shell sessions, the container runtime, and where a command can run** — **(COMPLETE: slice 0, Podman, BUILT in batch 93; slice 1 COMPLETE -- its foundations in batch 94, its five tools, the sleeping subagent and the CLI wait loop in batch 95, the TUI's behaviour half in batch 97 and its display half in batch 98; slice 2, interactive sessions, BUILT in batch 100; slice 3, WSL, BUILT in batch 101; slice 4, SSH, BUILT in batch 102; slice 5a, the secret store, BUILT in batch 103; slice 5b, sudo, BUILT in batch 104)** (the shell was one-shot and blocking, so a test suite could not outlive a turn and nothing could wake the agent; a machine with Podman and no working Docker had no sandbox at all)
 - **§50. Declared network for a shell command** — **(BUILT in batch 99)** (the network detector reads command TEXT against a fourteen-word list, so a command it cannot see is auto-approved into `--network none` and fails with no way for the user to have allowed it)
-- **§51. Paging for network tool results** — **(RECORDED in batch 96, not built)** (`fetch_url` and `arxiv_search` truncate with no offset, so the agent cannot reach past the first page without shelling out to a raw HTTP request)
+- **§51. Paging for network tool results** — **(BUILT in batch 105)** (`fetch_url` and `arxiv_search` truncate with no offset, so the agent cannot reach past the first page without shelling out to a raw HTTP request)
 
 ---
 
@@ -703,18 +703,86 @@ command runs and what it is allowed to reach -- and because it must cover the se
 - The workaround the agent is left with is a raw HTTP request through `shell`, which is the surface §50 is
   about: it converts a reading task into a code-execution one.
 
-### Decisions (PG1-PG4)
+### What was measured before it was built (batch 105)
+
+Every slice of §49 had an assumption killed by its probe, and §51 kept the record: **two of the four
+decisions above are corrected by measurement rather than implemented.**
+
+- **A re-fetch is not always a seek, and the first measurement of it was wrong.** Fetching three URLs
+  twice BACK TO BACK reported all three byte-identical -- a measurement taken over milliseconds, which is
+  not the interval a model pages over. One of the three also returned 126 bytes, an error page rather than
+  the article, and calling that "stable" measured nothing. Re-measured across **45 seconds** with five
+  real URLs and a guard against a body too short to be the page: four identical, and
+  `news.ycombinator.com` **not**. Its first difference landed at byte 2,019 -- inside page 1 -- and the
+  text at 5000..10000 differed between the two fetches. A model that read page 1 and asked for page 2
+  would have been handed two halves of two different documents, spliced at an arbitrary point, with
+  nothing in the result able to say so. A news front page is exactly what a research run reads.
+- **Paging by re-fetch costs the document once per page.** 14 pages of an 88 KB `docs.python.org` page is
+  1.2 MB off the wire to read 65 KB; `bbc.com/news` is 382 KB a page, 5.3 MB for the same 65 KB.
+- **The byte cap bites on ordinary pages, not pathological ones.** `docs.python.org/3/library/os.path.html`
+  is 88,230 bytes against a 65,536-byte read limit, so roughly a quarter of it is unreachable; `bbc.com/news`
+  is 381,981 bytes, of which 17% is reachable. Whatever the cap is set to, the result has to say when it bit.
+- **The cap splits a multi-byte character.** `_bounded_body` slices RAW bytes, so a 3-byte character
+  straddling 65,536 decodes to one U+FFFD under `errors="replace"`. True before §51; §51 puts it at a
+  boundary the model sees.
+- **arXiv's `start` does what PG3 assumed.** `start=0` and `start=5` over `all:transformer attention`
+  returned disjoint id sets -- zero overlap -- and the feed carries `opensearch:totalResults` (261,387),
+  `startIndex` and `itemsPerPage` beside the entries. So a result can say how many papers it did NOT
+  return, which is what PG4 needs and what a count of what came back cannot give.
+- **`web_search` CAN page, which PG1-PG4 assumed it could not.** `ddgs 9.14.4` takes `page: int = 1` on
+  its search path and accepted it live. **But its pages are not a partition:** page 2 of a live query
+  overlapped page 1 by one result, where arXiv's `start` overlapped by none. The two providers get
+  different wording and neither claims the other's property.
+- **`source_corpus` DROPPED page 2, and this was reproduced before it was fixed.** Driving `SourceCorpus.add`
+  with a page-1 then a page-2 `fetch_url` result returned 1 and then **0**: `_store` keys by URL and keeps
+  the longest text, and `len(existing.text) >= len(cleaned)` is 5000 >= 5000. The near miss is worse than
+  the miss -- a page 2 one character longer REPLACED page 1 outright, leaving the corpus holding the middle
+  of a document and attributing it to the whole URL. Nothing in PG1-PG4 mentions this, and it is the defect
+  that would have made paging worthless: the model reads four pages and the grounding pass scores the first.
+
+### Decisions (PG1-PG9)
 
 | # | Decision |
 |---|---|
 | **PG1** | **Mirror the `read` tool's shape**, which already solved this for files: an `offset`, a count clamped to a maximum with a NOTE rather than an error, and a message naming the offset to use next. One paging vocabulary across the tools that have one |
-| **PG2** | **`fetch_url` gains `offset`**, and `MAX_CONTENT_BYTES` rises with the reachable window so the byte bound cannot silently cap the page count. The cost is stated to the model: a page is a re-fetch, not a seek into something already held |
-| **PG3** | **`arxiv_search` exposes `start`**, which the provider already implements, so paging results costs nothing but the parameter |
+| **PG2** | **`fetch_url` gains `offset`**, and `MAX_CONTENT_BYTES` rises with the reachable window so the byte bound cannot silently cap the page count. The cost is stated to the model: a page is a re-fetch, not a seek into something already held. **CORRECTED IN BATCH 105 ON BOTH COUNTS -- see PG5 and PG6.** The re-fetch was measured to splice two different documents together, and raising the byte cap would have weakened a security bound (§31 H7, #55) to buy convenience. The offset is the half that survives |
+| **PG3** | **`arxiv_search` exposes `start`**, which the provider already implements, so paging results costs nothing but the parameter. **Measured true, and it extends further than it was written:** `web_search`'s provider implements paging too (`ddgs` takes `page`), which this record assumed it did not -- so that tool gains one on the same reasoning, with the measured caveat that its pages overlap where arXiv's do not |
 | **PG4** | **A truncated value says how to get the rest.** The present `truncated: true` tells the model something was lost and nothing about how to recover it, which is what sends it to the shell |
+| **PG5** | **A page comes from a HELD body, not a second fetch, and this AMENDS PG2.** `offset=0` always issues the request and refreshes the entry; `offset>0` reads it. PG2's reason was never wrong about the cost, it was wrong about the correctness: a re-fetch of a page that moved makes `offset=5000` a splice of two documents, and no key in the result could have said so. Measured on `news.ycombinator.com` across the interval a model actually pages over. Reuses `_net_common.TTLCache`, which both other network tools already carry, so no new machinery and no new dependency, and the held body costs at most the byte cap per URL for 300 s. Keyed by BOTH the requested spelling and the one that answered, because a redirect means the model may page with either. **`is_url_permitted` still runs on every call, cache hit included** -- a cache consulted before the blocklist is a blocklist with a hole in it, reached by a second call rather than by a redirect, which is #54 one layer up |
+| **PG6** | **`MAX_CONTENT_BYTES` does NOT rise, and this DECLINES PG2's first clause.** 65,536 bytes is a security bound (§31 H7, #55) whose own comment says "the only thing that actually bounds this is refusing to read past a cap"; a cap raised whenever it is inconvenient is not a cap. What PG2 was actually protecting against -- a byte bound silently capping the page count -- is fixed by saying so, which is cheaper than removing the bound. Paging reaches every page INSIDE the window, and at the edge the result says the document was cut at the read limit and no further page exists, rather than naming an offset that would return nothing (§32 A7's burn-a-turn class). The cost is stated rather than hidden: measured, roughly a quarter of an ordinary `docs.python.org` page and 83% of `bbc.com/news` is past the bound and stays unreachable |
+| **PG7** | **The corpus CONCATENATES pages for one URL.** `_store` learns that a `fetch_url` result carries an offset and extends the held text instead of competing with it on length, bounded by the existing `MAX_DOCUMENT_CHARS` -- whose own comment already says it is "not a second truncation of the tools that exist". Not in PG1-PG4 at all, and without it paging is worthless: measured, page 2 was DROPPED and the grounding pass would have scored page 1 however far the model read. One URL still means one document, so `output_writer`'s sources directory and the citation attribution are untouched. Overlap is one subtraction against the highest absorbed offset, held in the SOURCE's character positions and not in held characters -- the two coincide at offset 0, which is why the distinction has to be stated rather than discovered |
+| **PG8** | **A per-item truncation names its recovery route, which is PG4 made concrete.** An arXiv abstract cut at 600 characters and a search snippet cut at 300 carried NO marker at all, so "the paper does not mention X" and "the first 600 characters do not" read identically to the model. Each gains a flag, and the abstract gains the abs URL -- a route `fetch_url` can take. **The caps do not move.** They bound model-facing text from a source nobody here wrote, which is #131's lesson, and a knob to raise them would be a switch over a decision already taken (G3) |
+| **PG9** | **A page parameter is part of the cache key.** `arxiv`'s key was `keywords|category|max_results|sort_by` and `web_search`'s `query|num_results`. Adding a parameter that changes the response without adding it to the key serves page 1 to every request for page 2, silently -- the collision `_net_common`'s own docstring warns about between the two tools, arriving instead between two pages of one query. The same batch fixed the matching test-isolation hole: neither cache was cleared between tests, so a test could be served an entry an earlier one left |
 
-### Gap register
+### Gap register -- closed in batch 105
 
-- `fetch_url`'s result shape is consumed by the grounding passes and by `output_writer`'s sources directory;
-  added keys are safe, changed ones are not.
-- Open: whether a page should be cached for the length of a run so a second page is not a second fetch of
-  the same body, and what that would cost in memory for a 64 KB-per-URL window.
+- **The result shape held.** `fetch_url` added `offset`, `chars_available` and `message` and changed
+  nothing: `url` and `content` are what `source_corpus._add_fetch_url` reads, and `truncated` computes
+  to precisely what it did before at every size on both sides of the page boundary. The register's
+  constraint was the right one; what it did not anticipate is that the breakage would be SEMANTIC rather
+  than structural -- the same URL now returns different text per call, which is what broke the corpus.
+- **The caching question is DECIDED, and against the register's framing.** It asked whether a page should
+  be cached to save a second fetch, i.e. treated it as a cost question. Measured, it is a correctness
+  question first: a re-fetch of a page that moved returns a page 2 that does not continue page 1. PG5
+  holds the body for 300 s in one process, keyed by both URL spellings, and the memory cost is bounded by
+  PG6's refusal to raise the byte cap -- the two decisions bound each other.
+- **A secret split across a page boundary is rejoined by the concatenation, and redaction cannot see it.**
+  `redact_output_text` runs per page, as it ran per document before -- so a credential spanning
+  characters 4,990 to 5,010 is half in page 1 and half in page 2, neither half matches a pattern, and
+  PG7's append puts them back together in the corpus. Narrow, and stated rather than fixed: the fix is
+  redacting the WHOLE held text on every append, which re-scans up to 20,000 characters per page and
+  would still miss the same secret in the model's transcript, where the two halves arrive in separate
+  tool results and no redactor ever sees them adjacent. Recorded because the corpus is now the one place
+  in the system where the halves become adjacent, which was not true before §51.
+- **The held body cache is not swept.** `TTLCache` expires on READ and never sweeps, which is the shape
+  both other network tools already have -- but they hold result lists and this holds bodies, so the cost
+  of the same design is different. A run touching many URLs accumulates up to the byte cap for each until
+  something reads the key again, bounded in practice by PG6's refusal to raise that cap and by the 300 s
+  TTL, and not bounded at all in principle. Recorded rather than solved, because the eviction policy that
+  would solve it is a decision about a cache this batch only needed to make correct.
+- **Still open, and recorded rather than decided:** a reachable window larger than 65,536 bytes, which
+  would need the security bound re-argued rather than raised (PG6), and is the owner's call rather than a
+  batch's; `web_search`'s overlapping pages, which are the provider's behaviour and are disclosed rather
+  than corrected, since de-duplicating across pages would mean holding a result set the tool does not
+  otherwise keep; and a cross-run or on-disk page cache, deliberately not built -- the held body is
+  process-local and expires, like the two caches beside it.

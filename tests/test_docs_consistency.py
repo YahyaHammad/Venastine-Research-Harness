@@ -1562,6 +1562,60 @@ def test_every_roadmap_v3_index_entry_carries_a_status_marker():
         f"ROADMAP_v3.md index rows with no status marker: {unmarked}.")
 
 
+def test_an_index_status_marker_agrees_with_its_own_section():
+    """The marker test above checks a marker EXISTS. It does not check that
+    the marker is true, and that gap shipped twice.
+
+    Batch 105 found `§49`'s index row still reading `IN PROGRESS` and still
+    stopping at slice 4, while the Slices list inside §49 said "§49 is
+    complete" -- written by batch 104, which had also written the slice list.
+    Batch 103 missed it before that. The index is the thing a reader
+    consults to find out what is outstanding, so a stale marker there is
+    worse than none: it answers, and the answer is wrong.
+
+    The check is deliberately narrow, because a general "is this status
+    accurate" test cannot exist. A section that declares itself complete IN
+    ITS OWN BODY may not be advertised as in progress or unbuilt by its own
+    index row. That is a contradiction inside one document, which is
+    decidable, and it is exactly the drift that occurred.
+    """
+    with open(os.path.join(DOCS, "ROADMAP_v3.md"), encoding="utf-8") as f:
+        text = f.read()
+
+    index_block = text.split("## Index")[1].split("---")[0]
+    rows = {}
+    for match in re.finditer(r"^- \*\*§(\d+)\..*$", index_block, re.M):
+        rows[int(match.group(1))] = match.group(0)
+    assert rows, "ROADMAP_v3.md's index parsed no rows -- the spelling moved."
+
+    # Each section's own body, from its heading to the next one.
+    bodies = {}
+    starts = [(int(m.group(1)), m.start())
+              for m in re.finditer(r"^## §(\d+)\.", text, re.M)]
+    for i, (number, start) in enumerate(starts):
+        end = starts[i + 1][1] if i + 1 < len(starts) else len(text)
+        bodies[number] = text[start:end]
+
+    STALE = ("IN PROGRESS", "not built", "NOT BUILT")
+    contradictions = []
+    for number, body in bodies.items():
+        declares_complete = (
+            f"§{number} is complete" in body
+            or f"§{number} is COMPLETE" in body)
+        row = rows.get(number, "")
+        if declares_complete and any(word in row for word in STALE):
+            contradictions.append(
+                f"§{number}: its body says it is complete, its index row "
+                f"says {[w for w in STALE if w in row]}")
+
+    assert not contradictions, (
+        "ROADMAP_v3.md's index contradicts its own sections:\n  "
+        + "\n  ".join(contradictions)
+        + "\nThe index is what a reader consults for what is outstanding; a "
+          "marker that is stale answers the question wrongly rather than "
+          "leaving it open.")
+
+
 def test_the_revisit_note_covers_the_ensemble_family():
     """L1's shape, and the hole in the range test's scope: ROADMAP.md's §10
     revisit blockquote said "Decisions record: E1-E12" while the record held
