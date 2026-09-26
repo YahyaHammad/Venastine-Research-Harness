@@ -1502,11 +1502,25 @@ def test_resolve_effort_precedence():
     assert resolve_effort(ns(None), {"effort": "auto"}) is None
 
 
-def test_main_resolves_and_passes_effort_to_run_chat(monkeypatch):
+def test_main_resolves_and_passes_effort_to_run_chat(monkeypatch, tmp_path):
     """main() computes the level beside provider/model and hands it to the
     chat loop -- a flag that resolved to nothing would make --effort a
-    decorative argument."""
+    decorative argument.
+
+    THE CHDIR IS NOT DECORATION (batch 107). This is the only `main.main()`
+    call in the suite that does not take the `startup` fixture, whose first
+    act is exactly this line -- so it is the only one that ran from the
+    repository root, which is the harness's own install tree, which
+    `check_project` now refuses. It was green on the author's Windows box
+    for a reason worth knowing: that shell had `AGENT_WORKSPACE` set, so
+    the project resolved elsewhere and the guard never fired. WSL, with the
+    variable unset, failed it immediately. A test whose result depends on
+    the developer's environment is the same defect as TECHNICAL_DEBT 27 in
+    a different place, so the directory is pinned rather than inherited.
+    """
     import main
+
+    monkeypatch.chdir(tmp_path)
 
     captured = {}
 

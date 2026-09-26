@@ -146,6 +146,10 @@ default, and giving either a key would change behaviour:
   the project path, and the default `./workspace` is a subdirectory of the
   launch directory -- so a value test would move the project one level down for
   everyone who set nothing. YAML cannot express "was this variable named?".
+  Two consequences, both live since batch 107: an unset variable makes the LAUNCH
+  DIRECTORY the project, and `protected_paths.check_project` refuses that at startup
+  when it is the install tree (TECHNICAL_DEBT 26); and setting `workspace_dir` in the
+  file moves the workspace without moving the project (TECHNICAL_DEBT 28).
 
 ### The environment variables
 
@@ -666,6 +670,17 @@ is a subdirectory of wherever you launched, so a value test would make
 is the whole population this must not disturb. main() reads this to
 decide the project path; the decision is there, because the config layer
 holds plain values and this is one.
+
+Batch 107 made the UNSET branch a refusal rather than a silent fallback:
+with no variable the project is os.getcwd(), and
+protected_paths.check_project() refuses that when it is the harness's own
+install tree. Naming the harness had always been refused by
+check_workspace; the implicit route reached the same state by saying
+nothing. What that leaves open is TECHNICAL_DEBT 28 -- workspace_dir
+written HERE moves the workspace and not the project, because this value
+reads the environment and not the document, so someone who set it in the
+file is refused and told to set a variable they believe they already
+set.
 
 Note that this value has NO `config.yaml` key at all -- it is computed in
 `config_schema.derived_values()`, because YAML cannot ask whether a

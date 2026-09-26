@@ -304,7 +304,16 @@ def _known_unavailable_reason() -> str:
 
 
 def _reset_runtime_probe() -> None:
-    """Forget the probe's answer. Tests only."""
+    """Forget the probe's answer. Tests only.
+
+    The memo above is SESSION-GLOBAL, so this is called from
+    `tests/conftest.py`'s `isolate_sandbox_probes` before every test and
+    not only by the two classes that test the detector (TECHNICAL_DEBT
+    27). Until batch 107 it was the latter alone, and the first test
+    anywhere to reach a live probe decided the answer for every test
+    after it -- on Windows as well as WSL, so whether the suite passed
+    depended on whether a daemon happened to be running.
+    """
     global _runtime_probe
     with _runtime_lock:
         _runtime_probe = None
@@ -435,7 +444,13 @@ def _wsl() -> WslProbe:
 def _reset_wsl_probe() -> None:
     """Forget the WSL probe's answer and the workspace translation it
     produced. Tests only -- and BOTH, because the translation names the
-    distro that resolved it."""
+    distro that resolved it.
+
+    Called from `tests/conftest.py`'s `isolate_sandbox_probes` before
+    every test (TECHNICAL_DEBT 27). That it owns the lru_cache as well as
+    the memo is exactly why the fixture calls this rather than assigning
+    `_wsl_probe` itself.
+    """
     global _wsl_probe
     with _wsl_lock:
         _wsl_probe = None
@@ -881,7 +896,12 @@ def _ssh() -> SshProbe:
 
 def _reset_ssh_probe() -> None:
     """Forget the SSH probe's answer and remove the known_hosts it wrote.
-    Tests only -- and both, because the file names the key that resolved."""
+    Tests only -- and both, because the file names the key that resolved.
+
+    Called from `tests/conftest.py`'s `isolate_sandbox_probes` before
+    every test (TECHNICAL_DEBT 27). Like `_reset_wsl_probe`, it owns more
+    than the memo, which is why the fixture goes through it.
+    """
     global _ssh_probe, _ssh_known_hosts_path
     with _ssh_lock:
         _ssh_probe = None

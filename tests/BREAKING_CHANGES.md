@@ -4998,3 +4998,23 @@ run that wrote them; nothing here rewrites them.
 a page-2 request into a re-fetch, which is the spliced document PG5 exists to prevent -- a bounded
 memory cost traded for an unbounded correctness one. The 128 is derived from `MAX_ITERATIONS`, not
 chosen.
+
+## Batch 107 -- the harness as its own project, and the probe that answered once (TECHNICAL_DEBT 26, 27)
+
+| Change | What breaks | Symptom / fix |
+|---|---|---|
+| **Launching from the harness's own install tree is refused (exit 2)** | `python main.py` run from a clone, which is what `README.md` documented. Every flag, including `--memories`, `--forget`, `--summary`, `--init` and `--secrets` | `[error] The project would be the harness's own install tree ...`. The project is the launch directory when `AGENT_WORKSPACE` is unset, so this made the harness its own project -- D17 trust, `.venastine/`, `/init`'s destination and project-scoped memories all pointed at it, and the trust prompt listed the harness's own `AGENTS.md`. Naming the same directory was already refused, so this closes a disparity rather than adding a rule. **Run from your project, or set `AGENT_WORKSPACE`; to work on the harness itself, `AGENT_WORKSPACE=./workspace`** (exempt, and explicit). `workspace_dir` in `config.yaml` is NOT a substitute -- see TECHNICAL_DEBT 28 |
+| `main()` resolves `project_path` above `create_db_and_tables()` | Nothing -- no caller reads it in between | Deliberate, and it is half the fix. A refusal below that line would leave a database behind, which is exactly what audit #101 moved the call to prevent, and a refusal below `load_project_config` would print after the trust prompt it exists to stop. `tests/test_project_path_guard.py::TestWhereTheRefusalSits` asserts both, at `main()`, because a unit test of the comparison cannot see either |
+| `security/protected_paths.check_project()` exists beside `check_workspace()` | Nothing; new function | **Equality, not containment**, which is where it deliberately differs from its neighbour: `check_workspace` is a WRITE boundary and refuses anything inside the tree bar `workspace/` and `output/`, while this one only answers "is the project the harness". It realpaths its argument, and that is load-bearing -- `_relation` compares strings, so `<root>/workspace/..` reads as `disjoint` until it is resolved |
+| **Every test now gets a fixed answer from the three sandbox probes** | A test that reached `is_docker_available()`, `_wsl()` or `_ssh()` without patching and expected this machine's real answer | `tests/conftest.py::isolate_sandbox_probes`. The constant is `RuntimeProbe("docker")`, no WSL distro, no SSH host -- chosen by measuring, not by taste: the affected files are 1026 passed under it and 4 failed under "no runtime". **To test a different answer, `monkeypatch.setattr(sandbox, "_runtime_probe", ...)` as `test_session_backends.py` already does, or call `sandbox._reset_runtime_probe()` as the two classes in `test_shell.py` do.** Both still win inside a test |
+| The fixture is **setup-only** where `clear_network_tool_caches` is both ends | Nothing | Forced, not casual. `monkeypatch` is created by an earlier autouse fixture and undone AFTER this one, so a teardown would call `_reset_wsl_probe` while `test_wsl_backend`'s `wsl_on` still has `_wsl_workspace` replaced by a plain lambda -- `AttributeError: 'function' object has no attribute 'cache_clear'`. Softening that call to a `getattr` to suit a fixture is what `ARCHITECTURE.md` warns against, and the next test's setup installs the answer before anything reads one |
+
+**If four tests were passing for you and now look different, read this.** Before this batch, whether
+`tests/test_declared_network.py`'s three gate cases and `tests/test_wsl_backend.py`'s container
+notice passed depended on **whether Docker Desktop was running**. Measured: a full Windows run at
+HEAD failed all four with the daemon down, and the same commit was green the day before with it up.
+That is the same defect the WSL cohort has been showing since batch 105 -- the WSL box answers
+`podman` where Windows answers nothing -- and it was never a WSL quirk. The fixture makes both
+platforms agree because neither is asked.
+
+Count 5956 -> 5988.

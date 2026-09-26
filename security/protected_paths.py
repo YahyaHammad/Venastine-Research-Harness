@@ -219,6 +219,60 @@ def check_workspace(workspace_dir: str) -> str | None:
     return None
 
 
+def check_project(project_path: str) -> str | None:
+    """Why *project_path* may not be the PROJECT, or None (debt item 26).
+
+    The project is what `config_loader.get_project_path()` resolves, and
+    everything downstream follows it: D17 workspace trust, the
+    `.venastine/` config tier, `/init`'s destination and `UserMemory`'s
+    project scope (WS7, D25/M12). It may not be the harness's own install
+    tree.
+
+    THE DISPARITY THIS CLOSES, and it is why this is a guard rather than a
+    convention. Naming that directory was ALREADY refused --
+    `check_workspace` above returns a reason for `AGENT_WORKSPACE=<harness
+    root>`, and for every non-exempt subfolder of it. But `main()` falls
+    back to `os.getcwd()` when the variable is unset, so launching from a
+    clone reached the same state by saying nothing: measured in batch 96
+    from an owner report and reproduced in batch 107, the trust prompt
+    listed the harness's own `AGENTS.md`. The rule was enforced when you
+    said it and skipped when you did not.
+
+    EQUALITY, NOT CONTAINMENT, which is the one place this deliberately
+    differs from `check_workspace`. That one is a WRITE boundary and
+    refuses anything inside the tree except `workspace/` and `output/`;
+    this one answers "is the project the harness", and `<harness>/workspace`
+    is a perfectly good project. It is the shipped layout, and it is the
+    answer for someone working on the harness itself.
+
+    A REASON STRING rather than an exception, for `check_workspace`'s
+    reason: the caller prints it and exits. REALPATH'D HERE rather than at
+    the caller, because `main()`'s implicit branch hands over a bare
+    `os.getcwd()` -- and because the realpath is what makes this a question
+    about a directory instead of about a spelling. `_relation` compares
+    strings, so `<root>/workspace/..` and a Windows path differing only in
+    case both read as `disjoint` to it; `os.path.realpath` resolves the
+    first on every platform and canonicalises the second on Windows
+    (measured, batch 107).
+    """
+    root = harness_root()
+    if _relation(os.path.realpath(project_path), root) != "equal":
+        return None
+    return (
+        f"The project would be the harness's own install tree ({root}), "
+        f"because AGENT_WORKSPACE is not set and this was launched from "
+        f"there. Workspace trust, .venastine/, /init's destination and "
+        f"project-scoped memories all follow the project, so the harness "
+        f"would be asked to trust its own AGENTS.md and /init would "
+        f"scaffold documentation into its own source. Set AGENT_WORKSPACE "
+        f"to the directory you want to work in, or launch from that "
+        f"directory instead. Setting workspace_dir in config.yaml is not "
+        f"enough on its own: the project follows whether AGENT_WORKSPACE "
+        f"was named, not what the workspace resolves to. To work on the "
+        f"harness itself, AGENT_WORKSPACE=./workspace."
+    )
+
+
 def readonly_mounts(workspace_real: str) -> list[str]:
     """Docker `-v` arguments binding every protected path NESTED inside
     *workspace_real* read-only, in the order docker expects them.

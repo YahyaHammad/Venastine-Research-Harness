@@ -626,6 +626,117 @@ def clear_network_tool_caches():
     drop()
 
 
+def _sandbox_probe_defaults():
+    """The answer every test gets from the three sandbox probes.
+
+    NOT A NEUTRAL CHOICE AND NOT A GUESS -- measured, batch 107, by running
+    the affected files under each candidate. A working Docker is what this
+    suite has always been written against: with `RuntimeProbe("docker")`
+    those files are 1026 passed, and with "no runtime available" four fail
+    (`test_declared_network` x3 and `test_wsl_backend`'s container notice),
+    because `_shell_approval_check` returns False at
+    `if containment == UNAVAILABLE` and a call that should ask reads as
+    auto-approved. `known_runtime()` returning "docker" rather than
+    "podman" is the other half: `test_session_backends`' argv asserts the
+    CLI by name.
+
+    WSL and SSH go the other way for the same reason -- off by default in
+    `config.yaml`, so "nothing configured" is the state the suite assumes.
+    Their reason strings are the ones the real probes compose for an empty
+    machine, so a message built from one still reads correctly.
+    """
+    from security import sandbox
+
+    return types.SimpleNamespace(
+        runtime=sandbox.RuntimeProbe("docker"),
+        wsl=sandbox.WslProbe(
+            None,
+            "`wsl.exe -l -q` did not answer, so WSL is not installed or "
+            "its service is not running"),
+        ssh=sandbox.SshProbe(
+            None,
+            reason="no host is configured. Set `ssh_host` (and `ssh_user`) "
+                   "in config.yaml"),
+    )
+
+
+@pytest.fixture
+def sandbox_probe_defaults():
+    """The constants `isolate_sandbox_probes` installs, for the tests that
+    assert them. Not autouse: only `test_probe_isolation.py` needs the
+    values, and every other test only needs them to be the same ones."""
+    return _sandbox_probe_defaults()
+
+
+@pytest.fixture(autouse=True)
+def isolate_sandbox_probes():
+    """Give every test the same answer from the three sandbox probes.
+
+    `security/sandbox.py` memoises three LIVE subprocess probes in module
+    globals -- `_runtime_probe`, `_wsl_probe` and `_ssh_probe` -- each set
+    once per process and never reset. Until this fixture nothing here reset
+    any of them: the only resets were fixtures scoped to single classes in
+    the files that test the probes themselves, whose docstring gives the
+    general reason ("otherwise the first test's answer would be the only
+    one any of them measured") with nothing applying it generally.
+
+    SO THE SUITE'S RESULT DEPENDED ON A DAEMON. Measured in batch 106
+    across four full WSL runs: which tests fail there is decided by
+    COLLECTION ORDER, because collection order decides which test runs the
+    one live probe and therefore what the ~5,900 after it inherit; adding
+    a test file moved the cohort. Measured again in batch 107, and the
+    Windows half was the part nobody had seen -- a full run at HEAD failed
+    four tests purely because Docker Desktop was not running that morning,
+    where the same commit had been green the day before. This was never a
+    WSL quirk. It is the suite asking a live daemon what to assert.
+
+    AND IT READS AS A REAL DEFECT WHEN IT IS NOT, which is why this is
+    worth the words. `_shell_approval_check` returns False at
+    `if containment == UNAVAILABLE`, so a test asserting "this call asks
+    for approval" sees "auto-approved" -- an approval-gate failure with
+    nothing whatever to do with approval.
+
+    A FIXED ANSWER rather than a reset to None, and the difference is the
+    point. Resetting would make every incidental caller re-probe, at up to
+    three `info` calls of ten seconds each, and would still leave the
+    answer decided by whether a daemon replied on a loaded machine.
+    Measured: one full Windows run performed two live container probes,
+    both from incidental callers; every other probe call in it came from
+    the classes that patch `subprocess.run` and measure their own mocks.
+    Nothing exercises a live probe on purpose, so a constant costs no
+    coverage -- `TestDockerAvailable` and `TestTheContainerRuntime` call
+    `_reset_*` themselves and still drive the real detector.
+
+    THE `_reset_*` HELPERS RUN FIRST rather than the globals being assigned
+    directly, because two of them own more than a memo: `_reset_wsl_probe`
+    also clears `_wsl_workspace`'s lru_cache, whose entries name the distro
+    that resolved them, and `_reset_ssh_probe` also unlinks the known_hosts
+    file the probe wrote.
+
+    SETUP ONLY, where `clear_network_tool_caches` above does both ends, and
+    the asymmetry is forced rather than casual. `monkeypatch` is created by
+    an earlier autouse fixture in this file, so it is undone AFTER this one
+    tears down -- and `test_wsl_backend.py`'s `wsl_on` replaces
+    `_wsl_workspace` with a plain lambda, which `_reset_wsl_probe` would
+    then call `cache_clear()` on. Softening that call to a `getattr` to
+    suit a fixture is exactly what `ARCHITECTURE.md` warns against, and a
+    teardown buys nothing here anyway: the next test's setup installs the
+    answer before it can read one.
+    """
+    from security import sandbox
+
+    def install():
+        sandbox._reset_runtime_probe()
+        sandbox._reset_wsl_probe()
+        sandbox._reset_ssh_probe()
+        defaults = _sandbox_probe_defaults()
+        sandbox._runtime_probe = defaults.runtime
+        sandbox._wsl_probe = defaults.wsl
+        sandbox._ssh_probe = defaults.ssh
+
+    install()
+
+
 @pytest.fixture(autouse=True)
 def isolate_pipeline_models(tmp_path_factory, monkeypatch):
     """Point the remembered critic/embedder store somewhere disposable.

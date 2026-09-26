@@ -2321,6 +2321,55 @@ def main(argv=None) -> int:
         print(f"[error] {workspace_refusal}", file=sys.stderr)
         return 2
 
+    # THE PROJECT IS THE WORKSPACE WHEN ONE WAS NAMED (batch 44, reversing
+    # RM6). Everything downstream follows from this one line, because
+    # config_loader.get_project_path() is the single resolver: /init's
+    # destination (project_init.generator and, decisively,
+    # write_project_doc's own _project_root), D17 workspace trust, the
+    # `.venastine/` config tier, and UserMemory's project scope (D25/M12).
+    #
+    # RM6 said the opposite -- trust keys off cwd, AGENT_WORKSPACE is a
+    # permission boundary and "deliberately not a project path" -- and the
+    # report that reopened it is what that split actually looks like in
+    # use: with AGENT_WORKSPACE set, read/write/edit/shell were correctly
+    # confined to the project while /init scaffolded documentation into
+    # the HARNESS. One session, two different ideas of where the work was.
+    #
+    # MOVED UP HERE IN BATCH 107, from below create_db_and_tables, so the
+    # refusal underneath it can sit where it has to. Nothing between the
+    # two positions read it; it depends only on config and the cwd.
+    project_path = (os.path.realpath(config.WORKSPACE_DIR)
+                    if config.WORKSPACE_DIR_EXPLICIT else os.getcwd())
+
+    # TECHNICAL_DEBT 26. The other half of the guard six lines up, and it
+    # exists because that one only ever saw a workspace someone NAMED.
+    # With AGENT_WORKSPACE unset the line above falls back to os.getcwd(),
+    # so launching from the install tree made the harness its own project
+    # -- the same state check_workspace refuses, reached by saying nothing.
+    # Measured from an owner report (batch 96) and reproduced before the
+    # fix (batch 107): the trust prompt listed the harness's own AGENTS.md.
+    #
+    # THIS POSITION IS AS MUCH THE FIX AS THE COMPARISON IS. Above
+    # create_db_and_tables, so a refused launch leaves no database behind
+    # -- audit #101's argument for moving that call, and it applies to the
+    # second refusal exactly as it did to the first. And above
+    # load_project_config, because the reported SYMPTOM is produced inside
+    # it, by _ensure_workspace_trust: a refusal printed after that prompt
+    # would be a refusal after the damage.
+    #
+    # Above the early-exit commands too, so --memories, --forget,
+    # --summary, --init and --secrets are all refused. One rule with no
+    # exceptions (owner decision, batch 107). Four of the five are
+    # project-scoped and refusing them is the point -- --memories here
+    # would list the HARNESS's memories. --secrets is the one that is not,
+    # and it is refused anyway, because a guard with one exception is a
+    # guard someone has to remember.
+    project_refusal = protected_paths.check_project(project_path)
+    if project_refusal:
+        logger.error("%s", project_refusal)
+        print(f"[error] {project_refusal}", file=sys.stderr)
+        return 2
+
     # §29 (N6), audit #101. BELOW parse_args, which is where --help and a
     # typo'd flag exit -- both of which used to create a 77 KB six-table
     # SQLite database and a log directory in whatever directory they were
@@ -2338,27 +2387,12 @@ def main(argv=None) -> int:
     # path can forget to call.
     create_db_and_tables()
 
-    # THE PROJECT IS THE WORKSPACE WHEN ONE WAS NAMED (batch 44, reversing
-    # RM6). Everything downstream follows from this one line, because
-    # config_loader.get_project_path() is the single resolver: /init's
-    # destination (project_init.generator and, decisively,
-    # write_project_doc's own _project_root), D17 workspace trust, the
-    # `.venastine/` config tier, and UserMemory's project scope (D25/M12).
-    #
-    # RM6 said the opposite -- trust keys off cwd, AGENT_WORKSPACE is a
-    # permission boundary and "deliberately not a project path" -- and the
-    # report that reopened it is what that split actually looks like in
-    # use: with AGENT_WORKSPACE set, read/write/edit/shell were correctly
-    # confined to the project while /init scaffolded documentation into
-    # the HARNESS. One session, two different ideas of where the work was.
-    #
-    # SAFE BY AN ORDERING THAT ALREADY EXISTED: check_workspace() ran a
-    # few lines above and refuses a workspace that is, or sits inside, the
-    # harness install tree. So the project can never become the harness by
-    # this route -- and that guard is now load-bearing for a second
-    # reason, which is why the launcher must still never set the variable.
-    project_path = (os.path.realpath(config.WORKSPACE_DIR)
-                    if config.WORKSPACE_DIR_EXPLICIT else os.getcwd())
+    # SAFE BY TWO ORDERINGS, ONE OF WHICH ALREADY EXISTED: check_workspace()
+    # refuses a workspace that is, or sits inside, the harness install
+    # tree, and since batch 107 check_project() refuses the implicit route
+    # to the same place. So the project can never become the harness --
+    # and both guards are load-bearing for a second reason, which is why
+    # the launcher must still never set the variable.
     settings = load_project_config(project_path, args.trust_project)
     provider, model = resolve_runtime_defaults(args, settings)
     effort = resolve_effort(args, settings)

@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 5956 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 5988 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -84,7 +84,10 @@ move after seeing `APP_DB_PATH` redirected two lines above, and it is wrong.
 
 **Since §44 it is also the PROJECT PATH, which makes that rule stricter rather than looser** (WS7).
 `main()` sets `project_path` to the resolved workspace when `AGENT_WORKSPACE` is *named*, so trust,
-`.venastine/`, `/init`'s destination and `UserMemory`'s project scope all follow it. PRESENCE, never
+`.venastine/`, `/init`'s destination and `UserMemory`'s project scope all follow it. **And when it is
+NOT named, `main()` falls back to `os.getcwd()`, which is refused if that is the install tree**
+(`protected_paths.check_project`, TECHNICAL_DEBT 26, batch 107) -- naming the harness was always
+refused, and until then the implicit route reached the same state by saying nothing. PRESENCE, never
 value: the default `./workspace` is a subdirectory of the launch directory, so a value test would
 move the project one level down for everyone who set nothing. An injected value from the launcher
 would now relocate a user's whole project, not merely widen a write boundary.

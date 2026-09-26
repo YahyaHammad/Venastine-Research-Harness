@@ -15626,3 +15626,208 @@ stabilise a cluster that is now understood. Item 27 says to count the live probe
 choose. The consequence for the record is immediate, though: the baseline list of eight named tests is
 not a stable list -- both HEAD and §52 produced a member outside it -- so a WSL run cannot be compared
 to a previous batch's by test name, only by cause.
+
+## Batch 107 -- two leaks in the register, and a green suite that was not (2026-09-26)
+
+TECHNICAL_DEBT 26 and 27, built, plus corrections to four entries that were
+wrong about themselves. No ROADMAP section and no new decision-id prefix:
+batch 84 built item 20 (`/config`) the same way, and `AGENTS.md` already
+carries six `LETTER+NUMBER` namespaces with audit #147 open about the sprawl.
+
+The two items are unrelated in subject and identical in shape -- **a piece of
+process-global state decided once and then believed by everything after it.**
+One is `project_path`, resolved from the working directory when nobody named a
+workspace. The other is a container-runtime probe memoised for the process.
+
+### The register was wrong about both, and the corrections cost more than the code
+
+**Item 26 budgeted for a blast radius that does not exist.** It said "about
+thirty `main.main([])` calls in `tests/test_cli.py` run from the repo root and
+would hit the new refusal", and prescribed extending the shared `startup`
+fixture. Measured: eighteen call sites in sixteen tests, `main.main` in no
+other test file, and `startup`'s first act is `monkeypatch.chdir(tmp_path)` --
+so fifteen of the sixteen resolve their project to a temporary directory and
+never reach the guard. Exactly one runs from the repo root. The fixture needed
+no change at all. **A blast radius counted by grepping for the call is not the
+same as one counted by asking what the call SEES**, and here that was a factor
+of eighteen.
+
+**And its prescribed position would have kept the symptom.** The guard was to
+go "after `project_path` is resolved". That point is two lines above
+`load_project_config` -- and the reported symptom, the harness asking to trust
+its own `AGENTS.md`, is produced INSIDE that call by `_ensure_workspace_trust`.
+A refusal there prints after the prompt it exists to prevent. It is also below
+`create_db_and_tables`, so a refused launch would have left a database behind,
+which is precisely what audit #101 moved that call to stop and what the comment
+four lines above it argues for. So the resolution moved up instead, under the
+`check_workspace` block, and both orderings are now asserted at `main()`.
+
+Reproduced first, from the install tree with the variable unset:
+`describe_project_content` returned `['AGENTS.md']`, `is_trusted` was False,
+`load_project_config` received the harness root, and the run went on to
+`run_chat` and exited 0.
+
+The refusal is one rule with no exceptions (owner decision), so `--memories`,
+`--forget`, `--summary`, `--init` and `--secrets` are all refused from the
+install tree. Four of those are project-scoped and refusing them is the point.
+`--secrets` is not -- it manages the user-tier store and has no project
+dependency -- and it is refused anyway, because a guard with one exception is
+a guard someone has to remember. That is recorded in the entry as the single
+place an exception would be defensible.
+
+What it leaves open is **item 28**, new: `workspace_dir` in `config.yaml` names
+a workspace and does not make it the project, because `WORKSPACE_DIR_EXPLICIT`
+reads the environment and not the document. Item 26 turned that from a
+misplaced `/init` into a refused launch, so the message names the trap
+explicitly. Fixing it would move the project path for everyone already using
+the key, which is its own change.
+
+### The green suite was not green, and nobody could have seen it by reading
+
+Item 27 said the container probe leaks and the WSL cohort moves with collection
+order, and prescribed counting the live probes before choosing a fix. The count
+was run from a pytest plugin loaded with `-p`, so no repository file was edited
+while the suite ran.
+
+**The count was not the finding. The run was.** That full Windows run, at HEAD,
+with nothing changed, **failed four tests** -- the same three
+`test_declared_network` gate cases the WSL cohort keeps producing, plus
+`test_wsl_backend`'s container notice. The cause was that Docker Desktop was
+not running that morning. The same commit had been green the day before with
+the daemon up, and batch 106's "5910 passed, zero failures" was measured in
+that state.
+
+So this was never a WSL quirk. **The suite's result on the primary platform was
+a function of whether a background service happened to be started**, and every
+green run recorded in this repository inherited that condition silently. The
+reason it reads as a real defect is worth keeping: `_shell_approval_check`
+returns `False` at `if containment == UNAVAILABLE`, so a test asserting "this
+call asks for approval" sees "auto-approved" -- an approval-gate failure with
+nothing whatever to do with approval.
+
+Measured on both machines, which is what closes it: Windows answers
+`RuntimeProbe(name=None, "Docker's daemon did not answer...")`, and the WSL box
+answers `RuntimeProbe(name='podman')`, because both runtimes are on its PATH
+and Docker's daemon does not reply. Two platforms, two answers, one suite
+written against neither reliably.
+
+### What shipped, and why a constant rather than a reset
+
+`isolate_sandbox_probes` in `tests/conftest.py` installs a fixed answer for all
+**three** memoised probes -- the entry names one; `security/sandbox.py` has
+`_runtime_probe`, `_wsl_probe` and `_ssh_probe`, each with a `_reset_*` helper
+called only by fixtures inside the file that tests it, and `conftest.py` reset
+none of them. Two more of the entry's own numbers were wrong: the container
+probe can make three `info` calls, not one, so its ceiling is ~30 s rather than
+10; and there are two class-scoped reset fixtures, not one.
+
+The entry offered two fixes and neither was taken. A blanket reset to `None`
+makes every incidental caller re-probe. A session-scoped live probe still lets
+a loaded machine decide. The census is what licensed the third: across a full
+run, thirty-four calls into the three probe functions, of which **two** were
+live container probes (0.98 s together), both from incidental callers --
+everything else came from the two classes that patch `subprocess.run` and
+measure their own mocks. **Nothing exercises a live probe on purpose**, so the
+entry's stated cost of a stubbed answer was illusory.
+
+**Which constant was measured, not chosen.** Running the affected files under
+each candidate: `RuntimeProbe("docker")` gives 1026 passed, "no runtime
+available" gives four failures. A working Docker is what this suite has always
+silently assumed, and `known_runtime()` answering `docker` rather than `podman`
+is the other half, since `test_session_backends` asserts the CLI by name in the
+argv it builds. Windows and WSL agree now because neither is asked.
+
+Two details that are not decoration. The fixture calls the `_reset_*` helpers
+before installing the constant rather than assigning the globals, because two
+of them own more than a memo -- `_reset_wsl_probe` also clears
+`_wsl_workspace`'s `lru_cache` and `_reset_ssh_probe` also unlinks the
+`known_hosts` file the probe wrote. And it is **setup-only** where
+`clear_network_tool_caches` is both ends: `monkeypatch` is created by an
+earlier autouse fixture and undone after this one, so a teardown ran
+`_reset_wsl_probe` while `test_wsl_backend`'s `wsl_on` still had
+`_wsl_workspace` replaced by a plain lambda -- thirty-eight errors, and the
+tempting fix was a `getattr` in production code, which is what
+`ARCHITECTURE.md` warns against. A teardown buys nothing here anyway: the next
+test's setup installs the answer before anything can read one.
+
+Not swept in, and named so it is not rediscovered: `_ssh_auth_rejected` and
+`_sudo_rejected` are two more process globals in the same file, reset only in
+their own test files. They are quarantine state rather than probes -- nothing
+spawns to fill them, and blanket-clearing them could mask a test that depends
+on one.
+
+### The other three corrections
+
+**Item 22 closes without work.** Its premise was that the bandit baseline had
+drifted and wanted regenerating. With the filenames converted to the Windows
+form, bandit with the CI job's flags and pin exits 0 over the tracked tree:
+every finding matches. What it had measured in 2026-09-12 was the path
+separator, which batch 96 identified. The procedure survives and is already
+recorded; nothing needs doing.
+
+**Items 15 and 23 are one defect.** 15 (batch 58) noticed three pre-wrapped
+constructs freezing on resize; 23 (batch 90) measured that every drawn row
+keeps its width, pre-wrapped or not. 23 is the general statement and carries
+the measurement and the prescription, so 15 now points at it rather than
+inviting a second half-fix.
+
+**Item 12's second blocker is dead.** It says "There is no `/config` command";
+there is, since batch 84 -- which is item 20, two entries above it. And
+`config_edit.explain` already speaks provenance: the environment variable, the
+remembered `/model` pair, the CLI pin. What is left is narrow and has a home:
+`outranked_by` returns a static possibility ("a settings.json key **can** win")
+where the merge knows whether one does, which tier, and to what value.
+
+### The environment was hiding a second one, in my own shell
+
+The WSL run is this batch's acceptance test, and it earned that twice. The
+container cohort went to zero -- no `test_declared_network`, no
+`test_session_backends`, no `test_shell` container case, which is what item 27
+was for. And it failed one test that Windows had passed all day:
+`test_cli.py::test_main_resolves_and_passes_effort_to_run_chat`.
+
+That is **the exact site this batch's own measurement had identified** -- the
+single `main.main()` call in the suite that does not take the `startup`
+fixture, and therefore the only one that runs from the repository root. The
+plan named it. Windows stayed green and that was allowed to settle the
+question, which it should not have been.
+
+**Why Windows was green is the part worth keeping.** The author's shell has
+`AGENT_WORKSPACE=C:\workspace` set. So `WORKSPACE_DIR_EXPLICIT` was True, the
+project resolved somewhere else entirely, and the new guard never fired. WSL,
+with the variable unset, failed it on the first run. Which means every Windows
+full-suite number taken earlier in this batch -- and, since nothing here is new
+to this batch, the ones before it -- was measured in a non-default environment
+that neither CI nor a fresh clone has. The final Windows run below was taken
+with the variable unset for that reason.
+
+**It is the same defect as item 27, in a different place**: a test result
+decided by ambient machine state that nobody wrote down. Batch 107 found that
+shape three times -- a container daemon, a WSL distro, and an environment
+variable in the developer's own shell -- which is a better argument for the
+fixture than anything in its docstring. The test now pins its directory with
+`monkeypatch.chdir(tmp_path)`, the line `startup` already opens with, and says
+in its docstring why.
+
+### Verification
+
+Windows full suite **5942 passed, 46 skipped, 1 deselected, zero failures**
+(7:56), run with `AGENT_WORKSPACE` unset. `ruff check .` clean. Bandit exit 0
+three ways: the tracked tree against a path-corrected throwaway copy of the
+baseline, the two new test files directly (CI reads `git ls-files`, so an
+uncommitted file is invisible to it), and the changed modules directly -- that
+first one is also what closes item 22.
+
+Mutation pass **18 of 18 killed**, foreground and in chunks, each row restored
+from a `.bak`. Every selection was confirmed green unmutated first, because the
+harness has scored fake kills before by running a selection that was already
+red. The rows that matter are the three that move the refusal rather than
+change it -- below `create_db_and_tables`, below `load_project_config`, below
+the early-exit dispatch -- since those are the fix, and a unit test of
+`check_project` kills none of them.
+
+WSL: **5955 passed, 4 failed**, against nine in batch 106. All four are on the
+documented list with known causes: two matplotlib on py3.14, one `pilot_wait`
+timing, and `test_config_loader`'s HOME redirection. **The container cohort is
+gone**, which is what item 27 was measured against -- and with it, the reason a
+WSL run could not be compared to the previous batch's by name.

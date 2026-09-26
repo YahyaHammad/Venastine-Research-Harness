@@ -402,7 +402,7 @@ either extend the set or record that it was checked and is right.
 
 ---
 
-## 12. `effective_compaction()` reports no provenance (open, deferred)
+## 12. `effective_compaction()` reports no provenance (open, re-scoped batch 107)
 
 D27's third implementation note, unbuilt, and the only one of its three that
 was dropped without being recorded as a decision:
@@ -451,6 +451,23 @@ building together. D27's argument is entirely about the display.
 Recorded here rather than only in a batch log: it was already noted under "Not
 fixed" in two batches' DEVLOG entries, which is where someone looks when they
 already know it exists.
+
+**RE-SCOPED (batch 107), not closed -- and the second of its two blockers is gone.** This entry
+says "There is no `/config` command". There is: `/config` shipped in batch 84, which is item 20
+above. More than that, `config_edit.explain` already speaks provenance fluently -- it names the
+environment variable when one is set, the remembered `/model` pair, and a `--provider/--model`
+pin, each with a sentence about which one is in force this session.
+
+So what remains is narrower and has a home. `ConfigRow.outranked_by` returns a **static
+possibility**: "A settings.json compaction key outranks this one, so a project or user
+settings.json **can** win over whatever is written here." The merge in `effective_compaction`
+knows whether one DOES, which tier it came from and what the value is -- and destroys all three,
+one `update()` at a time. The work is a parallel `sources` dict (which, as this entry already
+argues, breaks none of the twelve subscripting call sites) and one sentence in `explain` that
+says "is" where it now says "can".
+
+The first blocker stands unchanged and so does the display argument. What changed is that the
+display exists, so the two halves no longer have to be built together.
 
 ---
 
@@ -513,7 +530,7 @@ across the commit boundary).
 list-context state machine in `split_blocks`, which is the same machinery the indent rule
 declined to add.
 
-## 15. Nothing re-renders on resize, so a pre-wrapped construct freezes (open, noted batch 58)
+## 15. Nothing re-renders on resize, so a pre-wrapped construct freezes (open, folded into item 23 in batch 107)
 
 `Transcript` pre-wraps three things rather than letting Rich soft-wrap them, because each needs
 a prefix on every rendered row: the diff gutter (§41), the thinking bar (§38) and, since batch
@@ -527,6 +544,14 @@ The fix is small and its risk is not: `on_resize` → `rerender()` re-lays the w
 loses the scroll position, and fires per event while a window edge is dragged, so it needs
 debouncing and a scroll-anchor. **Revisit** if resizing mid-session becomes a normal thing to
 do, or alongside any work that touches `rerender()` anyway.
+
+**FOLDED INTO ITEM 23 (batch 107).** These are one defect seen from two angles, and two entries
+for one defect invite two half-fixes. This one (batch 58) noticed that three PRE-WRAPPED
+constructs freeze on resize; item 23 (batch 90) measured that **every row already drawn** keeps
+the width it was drawn at, pre-wrapped or not, because RichLog renders at write time and stores
+Strips. 23 is the general statement and carries the measurement, the `rerender()` hazard and the
+prescription, so it is the one to read. This entry is kept for the three constructs it names,
+which are where the symptom is most visible.
 
 ## 16. A URL in a tool line is not clickable (closed, batch 65)
 
@@ -706,7 +731,7 @@ and is the larger half: runtime `config.UPPER` references in code context,
 which remain correct through the shim, and historical `ROADMAP.md` /
 `ROADMAP_v2.md` / `DEVLOG.md` prose recording what was true when written.
 
-## 22. The bandit baseline has drifted (open, 2026-09-12)
+## 22. The bandit baseline has drifted (closed, batch 107 -- it had not)
 
 `bandit` with the CI job's exact flags and its exact pin exits **1**, and has
 since before the `config.yaml` migration. The unmatched findings are
@@ -742,6 +767,16 @@ baseline here; convert the filenames to the Windows form first (batch 96 did thi
 scratch copy to verify two new entries actually matched). And a baseline regenerated on
 Windows would be checked in with `.\` filenames and would silently match nothing in CI, which
 is the more expensive half of this to learn by accident.
+
+**CLOSED (batch 107), by measurement rather than by work.** With the baseline's filenames
+converted to the Windows form, `bandit` with the CI job's exact flags and pin exits **0** over
+the tracked tree -- every finding matches. Batch 106 measured that three ways and batch 107
+re-measured it before closing. So this entry's original premise, that the baseline had drifted
+and wanted regenerating, was never true: what it measured was the path separator, which batch 96
+identified and which the paragraph above already records.
+
+What survives is the procedure, and it is already in `AGENTS.md` and `bandit.yml`. Nothing here
+needs doing.
 
 ## 23. The transcript does not reflow on a terminal resize (open, 2026-09-14)
 
@@ -818,7 +853,7 @@ shells to discard the span (core/events.py has no error variant, on purpose
 retract rows RichLog has already stored as Strips, plus the entry log and
 the label that span opened. Both are real designs of their own.
 
-## 26. An unset `AGENT_WORKSPACE` makes the harness its own project (open, 2026-09-17)
+## 26. An unset `AGENT_WORKSPACE` makes the harness its own project (closed, batch 107)
 
 Measured in batch 96, from an owner report after launching a fresh install on a new machine:
 the harness asked to trust its **own** `AGENTS.md`.
@@ -850,7 +885,43 @@ about thirty `main.main([])` calls in `tests/test_cli.py` run from the repo root
 the new refusal; extend the shared `startup` fixture rather than editing thirty tests, taking
 the seam from the existing `check_workspace` monkeypatch in that file.
 
-## 27. The container-runtime probe leaks across the whole session (open, measured batch 106)
+**RESOLVED (batch 107).** `security/protected_paths.check_project()` answers for the implicit
+route what `check_workspace` already answered for the explicit one, and `main.py` calls it
+immediately after the project path is resolved. Exit 2, the reason on stderr, equality rather
+than containment so `<harness>/workspace` and `<harness>/output` keep working.
+
+Three things this entry got wrong, and the first is the expensive one.
+
+**The blast radius does not exist.** Measured: **18 call sites in 16 tests**, `main.main` appears
+in **no other test file**, and the `startup` fixture's first act is `monkeypatch.chdir(tmp_path)`
+-- so fifteen of the sixteen resolve their project to `tmp_path` and never reach the guard at
+all. Exactly one test runs from the repo root, and it builds its own stubs. The fixture needed no
+change. The lesson generalises: **a blast radius counted by grepping for the call is not the same
+as one counted by asking what the call SEES**, and here the difference was a factor of eighteen.
+
+**The prescribed position would have kept the symptom.** The guard was to go "after
+`project_path` is resolved". That point is two lines above `load_project_config` -- and the
+reported symptom, the harness asking to trust its own `AGENTS.md`, is produced INSIDE that call
+by `_ensure_workspace_trust`. A refusal there prints after the prompt it exists to prevent. It is
+also below `create_db_and_tables`, so a refused launch would have left a database behind, which
+is the exact thing audit #101 moved that call to stop and which the comment four lines above it
+argues for. So the project-path resolution moved up instead, to just under the `check_workspace`
+block, and both orderings are asserted at `main()` rather than left to be inferred.
+
+**`--secrets` is refused too, and it is the one exception that would be defensible.** The owner
+chose one rule with no exceptions (2026-09-26). Of the five early-exit commands `--memories`,
+`--forget`, `--summary` and `--init` are project-scoped and refusing them is the point --
+`--memories` from the install tree lists the HARNESS's memories. `--secrets` manages the
+user-tier store under `~/.config/venastine` and has no project dependency whatever. If anyone
+ever wants one exception, that is where it goes; the cost of not having it is typing
+`AGENT_WORKSPACE=./workspace` in front of one command.
+
+Reproduced before it was fixed, from the install tree with the variable unset:
+`describe_project_content` returned `['AGENTS.md']`, `is_trusted` was False and
+`load_project_config` received the harness root -- after which the run proceeded to `run_chat`
+and exited 0. See also **item 28**, which this made user-visible.
+
+## 27. The container-runtime probe leaks across the whole session (closed, batch 107)
 
 `security/sandbox.py:278` memoises a **live** `docker`/`podman` subprocess probe in the module
 global `_runtime_probe`, set once per process and never reset. `_reset_runtime_probe()` exists
@@ -896,3 +967,81 @@ should **count the live probes first** -- patch `_probe_container_runtime` to in
 counter and run the suite once -- and then choose between the blanket autouse fixture and a
 session-scoped probe stubbed to a fixed answer, which costs nothing and makes the cohort
 deterministic but stops the suite from ever exercising the real detector.
+
+**RESOLVED (batch 107), for all three probes rather than the one this entry names.** The autouse
+fixture is `isolate_sandbox_probes` in `tests/conftest.py`.
+
+**THE HEADLINE IS NOT THE ONE THIS ENTRY WROTE. It was never a WSL quirk.** Counting the live
+probes turned up something the four WSL runs could not see: **a full Windows run at HEAD failed
+four tests** -- the same three `test_declared_network` cases the WSL cohort keeps producing, plus
+`test_wsl_backend`'s container notice -- for one reason, that **Docker Desktop was not running
+that morning**. The same commit was green the day before with the daemon up, and batch 106's
+"5910 passed, zero failures" was measured in that state. So the suite's result on the primary
+platform was a function of whether a background service happened to be started, and every green
+run recorded in this repository inherited that condition silently.
+
+**This entry also undercounted itself twice.** `security/sandbox.py` memoises **three** live
+probes, not one: `_runtime_probe`, `_wsl_probe` and `_ssh_probe`, each with a `_reset_*` helper
+used only by fixtures inside the file that tests it, and `tests/conftest.py` reset none of them.
+And the container probe's ceiling is not "10 s per daemon": `_probe_container_runtime` can make
+**three** `info` calls -- `docker info`, then `podman info`, then `_why_podman_cannot_limit`'s
+`info --format` -- so ~30 s. It named ONE class-scoped reset fixture; there are two.
+
+**The census, and it licensed a better fix than either option offered.** From a pytest plugin
+loaded with `-p`, so no repository file was edited while the suite ran: 34 calls into the three
+probe functions across a full run, of which **two** were live container probes (0.98 s together),
+both from incidental callers. Every other container call came from the two classes that patch
+`subprocess.run` and measure their own mocks. **So nothing exercises a live probe on purpose**,
+which is what makes this entry's stated cost of a stubbed answer -- "stops the suite from ever
+exercising the real detector" -- illusory. The detector is exercised against mocks, by tests
+that reset the memo themselves, and those keep working.
+
+**Which constant, chosen by measuring rather than by taste.** Running the affected files under
+each candidate: `RuntimeProbe("docker")` gives 1026 passed, and "no runtime available" gives
+four failures. A working Docker is what this suite has always silently assumed -- and
+`known_runtime()` returning `docker` rather than `podman` is the other half, since
+`test_session_backends` asserts the CLI by name in the argv. That also explains the WSL cohort
+exactly: measured there, the box answers `RuntimeProbe(name='podman')` because both runtimes are
+on its PATH and Docker's daemon does not reply, so every incidental caller inherited an answer
+the suite was not written for. Windows and WSL now agree because neither is asked.
+
+Neither option this entry named was taken. A blanket reset makes every incidental caller
+re-probe; a session-scoped live probe still lets a loaded machine decide. The `_reset_*` helpers
+run before the constant is installed rather than the globals being assigned, because two of them
+own more than a memo. The fixture is **setup-only**, which `clear_network_tool_caches` is not,
+and the asymmetry is forced: `monkeypatch` is created by an earlier autouse fixture and undone
+after this one, so a teardown would call `_reset_wsl_probe` while `test_wsl_backend`'s `wsl_on`
+still has `_wsl_workspace` replaced by a plain lambda with no `cache_clear`. Softening that call
+to a `getattr` to suit a fixture is what `ARCHITECTURE.md` warns against, and a teardown buys
+nothing: the next test's setup installs the answer before anything can read one.
+
+Not swept in, and named so it is not rediscovered: `_ssh_auth_rejected` and `_sudo_rejected` are
+two more process-global memos in the same file, reset only in `test_ssh_backend.py` and
+`test_sudo.py`. They are quarantine state rather than probes -- nothing spawns to fill them, and
+blanket-clearing them would mask a test that depends on one -- so they stay as they are.
+
+## 28. `workspace_dir` in `config.yaml` names a workspace but not a project (open, 2026-09-26)
+
+`WORKSPACE_DIR_EXPLICIT` is `"AGENT_WORKSPACE" in os.environ` -- the **presence of the variable**
+(`config_schema.py`), which is correct and deliberate: the shipped default `./workspace` is a
+subdirectory of the launch directory, so a value test would move the project one level down for
+everyone who set nothing, and `CONFIG_ARCHITECTURE.md` records that reasoning at length.
+
+But `workspace_dir` is also an ordinary `config.yaml` key, settable with `/config`. Someone who
+names their project there gets the workspace they asked for and a project path of `os.getcwd()`.
+Two routes to what reads like one setting, doing different things, and only one of them documented
+as doing the second.
+
+**Item 26 made this user-visible rather than latent.** Before batch 107 the mismatch cost a
+misplaced `/init` and a trust prompt in the wrong directory. Now it costs a **refused launch**: set
+`workspace_dir` in `config.yaml`, launch from the install tree, and the harness refuses and tells
+you to set a variable you reasonably believe you already set. The refusal message names the trap
+explicitly for that reason, which is mitigation and not a fix.
+
+**Not fixed in batch 107** (owner decision, 2026-09-26). Making `WORKSPACE_DIR_EXPLICIT` true for a
+`config.yaml` value would move the project path for everyone already using the key -- a behaviour
+change with users, inside a batch about something else. Whoever takes it decides first what "named"
+means: *any* value, which moves the project for every reader of a shipped `config.yaml` whose
+`workspace_dir` is already `./workspace`, or *differs from the shipped default*, which is a
+comparison against `config_schema`'s default and quietly makes `./workspace` un-nameable. That
+choice is the whole decision; the code after it is one line.
