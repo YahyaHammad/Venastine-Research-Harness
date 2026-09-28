@@ -78,6 +78,10 @@ from typing import Optional
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+# A ROOT module, and no new edge: json_store.py's own docstring names
+# `security/` as one of the packages it sits at the root to be reachable
+# from, beside `config`, `storage`, `database` and `credentials`.
+from json_store import write_json_atomic
 from security import protected_paths
 
 logger = logging.getLogger(__name__)
@@ -147,6 +151,40 @@ class StoreLocked(SecretsError):
 
 class WrongPassphrase(SecretsError):
     """The envelope did not open. Deliberately does not say why."""
+
+
+class StoreUnreadable(SecretsError):
+    """The file is not a store this build can open, WHATEVER the passphrase.
+
+    The distinction `WrongPassphrase` cannot carry, and it is a type rather
+    than a convention because the convention had already failed twice
+    (batch 108).
+
+    IN THE TESTS: `test_an_unknown_version_refuses_rather_than_guessing`
+    asserted `SecretsError`, which `WrongPassphrase` subclasses -- so
+    deleting the version check entirely still passed, because the AEAD then
+    failed the tag for a different reason. The mutation pass found it, and
+    the repair was `assert not isinstance(excinfo.value, WrongPassphrase)`
+    written out at each site.
+
+    IN PRODUCTION: both callers that report an unlock failure catch
+    `SecretsError` and print it. A recovery message added to that branch
+    would fire on a MISTYPED PASSPHRASE and tell someone to delete a
+    perfectly good store -- the exact footgun, in the exact shape the tests
+    had already met.
+
+    So the two are separated where they are RAISED, and a caller cannot get
+    the ordering wrong because there is no ordering to get wrong. Every
+    structural fault is one of these: an unreadable or non-JSON file, a
+    version or KDF this build does not know, malformed base64, key
+    derivation parameters below `MIN_SCRYPT_N`, and a plaintext that
+    decrypts cleanly and is not an entry table. A wrong passphrase is none
+    of them, and neither is a tampered ciphertext -- those are
+    indistinguishable by design (SS56) and both stay `WrongPassphrase`.
+
+    Subclasses `SecretsError`, so every existing `except` and every
+    `pytest.raises(SecretsError)` keeps working unchanged.
+    """
 
 
 class NoStore(SecretsError):
@@ -252,6 +290,33 @@ def exists() -> bool:
     return os.path.exists(store_path())
 
 
+def recovery_hint() -> str:
+    """What to tell someone holding a file this build cannot open.
+
+    ONE copy, for `--secrets` and `/secrets` both, because the two are the
+    same sentence and the CLI one is read by someone who has already tried
+    the TUI one.
+
+    IT NAMES THE PATH AND DELETES NOTHING. A store that will not open is
+    not necessarily a store with nothing in it -- it may have been written
+    by a different build, or be recoverable by hand from a backup -- and
+    an encrypted file is one this harness cannot inspect to find out. So
+    the refusal is a refusal, and removing the file stays the user's
+    action. `create` refuses to overwrite for the same reason, which is
+    what makes saying the path out loud necessary rather than merely
+    helpful: without it the next step is undiscoverable, in a directory
+    the shell gate and the file tools both refuse to touch.
+    """
+    return (
+        "This file is not a secrets store this build can open, and that is "
+        "not a wrong passphrase -- the envelope itself is unreadable. The "
+        "usual cause is a write that was interrupted before batch 108 made "
+        "them atomic. Nothing here will delete it for you: if you have no "
+        "backup of it, remove %s by hand and run the command again to start "
+        "a new store." % store_path()
+    )
+
+
 # ---------------------------------------------------------------------------
 # ---- The envelope ---------------------------------------------------------
 # ---------------------------------------------------------------------------
@@ -334,11 +399,11 @@ def _seal(entries: dict, passphrase: bytes) -> dict:
 
 def _open(envelope: dict, passphrase: bytes) -> dict:
     if envelope.get("version") != ENVELOPE_VERSION:
-        raise SecretsError(
+        raise StoreUnreadable(
             "secrets file is version %r; this build writes version %d"
             % (envelope.get("version"), ENVELOPE_VERSION))
     if envelope.get("kdf") != KDF_SCRYPT:
-        raise SecretsError("secrets file uses an unknown KDF: %r"
+        raise StoreUnreadable("secrets file uses an unknown KDF: %r"
                            % (envelope.get("kdf"),))
     try:
         salt = _unb64(envelope["salt"])
@@ -348,9 +413,9 @@ def _open(envelope: dict, passphrase: bytes) -> dict:
         r = int(envelope["r"])
         p = int(envelope["p"])
     except (KeyError, ValueError, TypeError) as exc:
-        raise SecretsError("secrets file is malformed: %s" % exc) from exc
+        raise StoreUnreadable("secrets file is malformed: %s" % exc) from exc
     if n < MIN_SCRYPT_N or r < 1 or p < 1 or n & (n - 1):
-        raise SecretsError(
+        raise StoreUnreadable(
             "secrets file asks for a weaker key derivation than this build "
             "accepts (n=%r, r=%r, p=%r); it will not be opened" % (n, r, p))
     try:
@@ -358,7 +423,7 @@ def _open(envelope: dict, passphrase: bytes) -> dict:
     except ValueError as exc:
         # Anything the KDF itself refuses is a malformed FILE, not a
         # programming error to propagate raw out of `unlock`.
-        raise SecretsError(
+        raise StoreUnreadable(
             "secrets file's key derivation parameters were rejected: %s"
             % exc) from exc
     try:
@@ -374,10 +439,10 @@ def _open(envelope: dict, passphrase: bytes) -> dict:
     try:
         entries = json.loads(plaintext.decode("utf-8"))
     except (ValueError, UnicodeDecodeError) as exc:
-        raise SecretsError("secrets file decrypted to something that is not "
+        raise StoreUnreadable("secrets file decrypted to something that is not "
                            "an entry table") from exc
     if not isinstance(entries, dict):
-        raise SecretsError("secrets file decrypted to something that is not "
+        raise StoreUnreadable("secrets file decrypted to something that is not "
                            "an entry table")
     return entries
 
@@ -480,9 +545,9 @@ def unlock(passphrase: str) -> None:
         with open(path, encoding="utf-8") as handle:
             envelope = json.load(handle)
     except (OSError, ValueError) as exc:
-        raise SecretsError("secrets file could not be read: %s" % exc) from exc
+        raise StoreUnreadable("secrets file could not be read: %s" % exc) from exc
     if not isinstance(envelope, dict):
-        raise SecretsError("secrets file is malformed")
+        raise StoreUnreadable("secrets file is malformed")
     raw = passphrase.encode("utf-8")
     entries = _open(envelope, raw)
     global _state
@@ -496,31 +561,69 @@ def unlock(passphrase: str) -> None:
 
 
 def create(passphrase: str) -> None:
-    """Write a new, empty store. Refuses to overwrite an existing one."""
+    """Write a new, empty store. Refuses to overwrite an existing one.
+
+    THE REFUSAL IS THE WRITE, not a check above it (batch 108). This was
+    `if os.path.exists(path): raise`, which is a TOCTOU -- and one that got
+    sharper rather than softer when `_write` became atomic, because
+    `os.replace` overwrites without complaint, so the check was the only
+    thing standing between a second `create` and somebody's store.
+    `O_EXCL` asks the filesystem the same question indivisibly.
+
+    So this does NOT go through `_write`. Atomic replace is the right shape
+    for `_flush`, which rewrites a file that already has contents many
+    times; exclusive creation is the right shape for the one write whose
+    whole contract is that the file must not already be there. A crash
+    inside this one leaves a truncated file that never held anything, which
+    is the case `unlock`'s structural refusal names.
+    """
     path = store_path()
-    if os.path.exists(path):
-        raise SecretsError("a secrets file already exists at %s" % path)
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)
-    _write(_seal({}, passphrase.encode("utf-8")), path)
+    envelope = _seal({}, passphrase.encode("utf-8"))
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError as exc:
+        raise SecretsError(
+            "a secrets file already exists at %s" % path) from exc
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(envelope, handle, indent=2, sort_keys=True)
     unlock(passphrase)
 
 
 def _write(envelope: dict, path: str) -> None:
-    """Write the envelope to a file created 0600.
+    """Write the envelope to a file created 0600, ATOMICALLY.
 
-    `os.open` WITH the mode, never `open()` then `os.chmod` -- the same
-    rule and the same reason as `credentials._write_secret_json`, whose
-    comment records that a post-write chmod leaves a window in which the
-    file is on disk with the umask's permissions. On Windows the mode is a
-    no-op and the protection is the ACL on the user profile directory;
-    that is recorded there too, and is why this file is encrypted rather
-    than relying on the mode at all.
+    0600 AT CREATION, never `open()` then `os.chmod` -- the same rule and
+    the same reason as `credentials._write_secret_json`, whose comment
+    records that a post-write chmod leaves a window in which the file is on
+    disk with the umask's permissions. On Windows the mode is a no-op and
+    the protection is the ACL on the user profile directory; that is
+    recorded there too, and is why this file is encrypted rather than
+    relying on the mode at all.
+
+    THE OTHER HALF, AND IT WAS MISSING UNTIL BATCH 108. This wrote
+    `O_TRUNC` straight over the live store, and `_flush` calls it on every
+    `put` and `delete` -- so a crash, a full disk or a kill between the
+    truncate and the flush left a half-written envelope. That is worse than
+    losing the write: `exists()` stays True, so `unlock` is attempted and
+    fails structurally, and `create` refuses to overwrite -- leaving a user
+    who cannot store a secret again without deleting a file by hand from a
+    directory the shell gate and the file tools both refuse to touch.
+
+    `json_store.write_json_atomic` is temp-file-plus-`os.replace` and
+    already existed, with the mode applied to the TEMP file because replace
+    carries it across. Its own docstring is where this argument is made --
+    "it leaves the file empty for the length of the write and permanently
+    damaged if the process dies inside it" -- and it names `security/` as
+    one of the packages it sits at the root to be reachable from. So the
+    two files in this project that hold credentials were the last two
+    JSON stores still using the pattern that module was extracted to
+    delete, and this is not a new writer but the one that was already
+    there.
     """
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        json.dump(envelope, handle, indent=2, sort_keys=True)
+    write_json_atomic(path, envelope, mode=0o600, indent=2, sort_keys=True)
 
 
 def _require_unlocked() -> _Unlocked:
@@ -567,22 +670,46 @@ def put(name: str, value: str) -> None:
             % MIN_SECRET_LENGTH)
     with _state_lock:
         state = _require_unlocked()
-        old = state.entries.get(name)
-        if old is not None:
-            old.zero()
+        previous = state.entries.get(name)
         state.entries[name] = Secret(value)
-        _flush(state)
+        try:
+            _flush(state)
+        except BaseException:
+            # MEMORY FOLLOWS DISK (batch 108). This used to zero the old
+            # Secret and install the new one BEFORE the write, so a flush
+            # that failed left the process holding a value that is not in
+            # the file -- reported as an error to the user and usable for
+            # the rest of the run, then gone at restart. `_require_unlocked`
+            # cannot notice: it compares the stamp against the file, and a
+            # failed write leaves both unchanged.
+            if previous is None:
+                state.entries.pop(name, None)
+            else:
+                state.entries[name] = previous
+            raise
+        # AFTER the write, and only on success: zeroing the old value is
+        # the irreversible half, so it waits until the new one is really
+        # on disk.
+        if previous is not None:
+            previous.zero()
 
 
 def delete(name: str) -> bool:
     """Remove one entry. Returns whether it was there."""
     with _state_lock:
         state = _require_unlocked()
-        secret = state.entries.pop(name, None)
+        secret = state.entries.get(name)
         if secret is None:
             return False
+        del state.entries[name]
+        try:
+            _flush(state)
+        except BaseException:
+            # `put`'s rule, and the same reason: a delete that failed to
+            # reach the disk must not have happened in memory either.
+            state.entries[name] = secret
+            raise
         secret.zero()
-        _flush(state)
         return True
 
 

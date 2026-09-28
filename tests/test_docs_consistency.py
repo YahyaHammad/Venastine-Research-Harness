@@ -1769,3 +1769,123 @@ def test_the_ceiling_check_can_actually_fail():
         not in readme, (
         "README carries the wall clock at two different numbers, which is "
         "the exact defect this pair of tests exists to catch")
+
+
+# ---------------------------------------------------------------------------
+# ---- Cited TEST NAMES resolve too (batch 108) ------------------------------
+# ---------------------------------------------------------------------------
+
+_CITED_TEST = re.compile(r"\b(Test[A-Z][A-Za-z0-9]*|test_[a-z0-9_]{4,})\b")
+
+
+def _defined_python_names():
+    """(every name the tree defines, every module basename).
+
+    DEFINITIONS, not just `def` and `class`, and the width is measured
+    rather than cautious: `project_init/manifest.py` documents a dataclass
+    field called `test_command` in its own docstring, and a def-only index
+    reports that as a dangling citation. Assignment targets, annotated
+    targets and parameters are all things prose legitimately names.
+    """
+    import ast
+
+    names, stems = set(), set()
+    for dirpath, _dirnames, filenames in _walk_project():
+        for name in filenames:
+            if not name.endswith(".py"):
+                continue
+            stems.add(os.path.splitext(name)[0])
+            path = os.path.join(dirpath, name)
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                try:
+                    tree = ast.parse(handle.read())
+                except SyntaxError:  # pragma: no cover -- another test's job
+                    continue
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.ClassDef, ast.FunctionDef,
+                                     ast.AsyncFunctionDef)):
+                    names.add(node.name)
+                elif isinstance(node, ast.Name) and isinstance(node.ctx,
+                                                               ast.Store):
+                    names.add(node.id)
+                elif (isinstance(node, ast.AnnAssign)
+                      and isinstance(node.target, ast.Name)):
+                    names.add(node.target.id)
+                elif isinstance(node, ast.arg):
+                    names.add(node.arg)
+    return names, stems
+
+
+def test_every_test_name_cited_in_production_code_resolves():
+    """The guard beside
+    `test_every_decision_id_cited_in_production_code_resolves`, for the
+    other thing production prose points at.
+
+    THE ONE IT WAS WRITTEN FROM (batch 108). `security/sandbox.py` closed
+    the argument for `_SHELL_METACHARACTERS` -- the closure that makes Q1
+    a closure rather than the next patch in a series -- with "pinned as
+    one by" the same words in lower snake case, as though the pin were a
+    function. It is the CLASS `TestTheTwoTokenisersCannotDisagree`, which
+    the same file cites correctly 140 lines further down. It survived two
+    batches, and a review found it rather than a reader.
+
+    WHY IT IS MORE THAN A TYPO. `protected_paths.user_config_dir` already
+    recorded this exact failure about itself and named the cost: "a reader
+    who greps the name finds nothing and concludes the duplication is
+    unguarded". Both sit under a sentence asserting that something
+    dangerous is pinned by a test, which is when a citation is
+    load-bearing.
+
+    PRODUCTION ONLY, deliberately. The suite's own prose legitimately
+    names tests and files that no longer exist -- `test_compaction_e2e.py`
+    is discussed by name in this very file, in the docstring of the check
+    that exists because five pointers survived its rename. A guard that
+    flagged those would need an allowlist on its first day.
+
+    A WRAPPED NAME IS NOT A MISSING ONE: a long citation broken across two
+    docstring lines arrives truncated, so a candidate that is a prefix of
+    a real name is read as that name rather than reported.
+    """
+    names, stems = _defined_python_names()
+    ordered = sorted(names)
+    dangling = []
+    for path in _production_python():
+        for line_number, text in _prose_lines(path):
+            for cited in sorted(set(_CITED_TEST.findall(text))):
+                if cited in names or cited in stems:
+                    continue
+                if any(real != cited and real.startswith(cited)
+                       for real in ordered):
+                    continue
+                dangling.append(
+                    f"{os.path.relpath(path, ROOT)}:{line_number} "
+                    f"cites {cited}")
+
+    assert not dangling, (
+        "Production code cites test names that do not exist:\n  "
+        + "\n  ".join(dangling)
+        + "\nA citation under a claim that something is pinned by a test "
+          "is load-bearing: a reader who greps the name and finds nothing "
+          "concludes the thing is unguarded. Fix the name, or describe the "
+          "pin without spelling a name that is not there."
+    )
+
+
+def test_the_cited_test_name_guard_can_actually_fail():
+    """The guard on the guard, in the shape
+    `test_the_ceiling_check_can_actually_fail` already uses here.
+
+    A walk that stopped finding files, or a regex that stopped matching,
+    would leave the check above passing forever. Each half is asserted
+    against a name nothing defines.
+    """
+    names, stems = _defined_python_names()
+    invented = "TestNothingAnywhereDefinesThis"
+
+    # The walk reaches real files.
+    assert "TestTheTwoTokenisersCannotDisagree" in names
+    assert len(list(_production_python())) > 20
+    # And the matcher would report an absent one.
+    assert invented not in names and invented not in stems
+    assert _CITED_TEST.findall(f"pinned by `{invented}`") == [invented]
+    assert not any(real.startswith(invented) for real in names)

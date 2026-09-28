@@ -15831,3 +15831,230 @@ documented list with known causes: two matplotlib on py3.14, one `pilot_wait`
 timing, and `test_config_loader`'s HOME redirection. **The container cohort is
 gone**, which is what item 27 was measured against -- and with it, the reason a
 WSL run could not be compared to the previous batch's by name.
+
+
+## Batch 108 -- what a review of thirteen unpushed commits found (2026-09-28)
+
+Not a section and not a debt item. The branch was thirteen commits ahead of
+origin with nothing pushed -- §49 slices 1-5b, §50, §51-§52 and batch 107,
+eighty-five files and about 23,900 insertions -- and the owner asked for the
+whole range to be reviewed before the next section: shell-classifier escape
+routes, approval bypass, privilege escalation, ACE/RCE, plus bugs and stale
+prose.
+
+**Four findings, none exploitable in the shipped posture.** Three are latent
+couplings of exactly the kind EP6 forbids -- one decision written twice -- and
+the fourth is a data-loss bug. The review's value was not the count. It was
+that following `AGENTS.md`'s own rule for the fourth ("when you fix a shared
+root cause, grep every other call site sharing it") turned a one-file bug into
+a two-file one and found the fix already written and unused.
+
+### The finding that grew when the rule was followed
+
+`security/secrets.py::_write` wrote `O_TRUNC` straight over the live store,
+and `_flush` calls it on every `put` and every `delete`. A crash, a full disk
+or a kill between the truncate and the flush leaves a half-written envelope --
+and the recovery is worse than the loss: `exists()` stays True so `unlock` is
+attempted and fails, `create` refuses to overwrite, and the user cannot store
+a secret again without deleting a file by hand from a directory the shell gate
+and the file tools both refuse to touch.
+
+Reproduced before it was fixed, and after, against the real module: with
+`_write` as it was, an interrupted write left the file unparseable and
+`unlock` with the CORRECT passphrase answered "secrets file could not be read:
+Unterminated string starting at line 2 column 9". With the fix, the file is
+unchanged byte for byte and opens with the original passphrase.
+
+**Then the grep, and it found two things.** `credentials.py::_write_secret_json`
+has the identical line over `providers.json` -- which is every stored API key,
+for every user who has ever saved one, where the secrets store is opt-in and
+mostly empty. It is the older of the two and the more exposed. And
+`json_store.py` already had the fix: `write_json_atomic`, temp file plus
+`os.replace`, mode applied to the temp file because replace carries it across.
+Its docstring even argues this exact case -- "it leaves the file empty for the
+length of the write and permanently damaged if the process dies inside it" --
+and explains that it sits at the ROOT so `security/` can reach it without a
+new edge.
+
+So the two files in this project that hold credentials were the last two JSON
+stores still carrying a private copy of the pattern that module was extracted
+to delete. That is a better description of the defect than "secrets.py has a
+bug", and only the grep produced it.
+
+**Routing them through it broke something the helper could not have known.**
+`os.path.dirname("providers.json")` is `""`, and `os.makedirs("")` raises.
+None of the six existing callers could reach it because all six build an
+absolute path; `LLM_PROVIDERS_FILE` defaults to a bare relative name. Joining
+the helper made a path SHAPE able to decide whether the write works, and the
+guard went in the helper rather than at the two call sites.
+
+### A type instead of an ordering, because the ordering had already failed
+
+The recovery path for an already-corrupt store needs a message, and the
+message must not reach someone who simply mistyped their passphrase. Both
+existing callers catch `SecretsError` and print it, and `WrongPassphrase`
+subclasses `SecretsError` -- so a recovery branch added there fires on a wrong
+passphrase and tells the user to delete a store that is perfectly good.
+
+The tests had already met this. `test_an_unknown_version_refuses_rather_than_
+guessing` asserted `SecretsError`, and **deleting the version check entirely
+still passed**, because the AEAD then failed the tag for a different reason;
+the mutation pass found it and the repair was `assert not isinstance(...,
+WrongPassphrase)` written out at each site.
+
+So `StoreUnreadable` is a type rather than a convention, and the distinction
+is made where the exceptions are RAISED. Every structural fault is one --
+unreadable file, unknown version or KDF, malformed base64, parameters below
+`MIN_SCRYPT_N`, a plaintext that decrypts cleanly and is not a table. A wrong
+passphrase is none of them, and neither is a tampered ciphertext: those stay
+indistinguishable from each other by design (SS56). There is now no ordering
+to get wrong, and every existing `except SecretsError` still works.
+
+### The two-tokeniser coupling, and a mutation that cannot be killed
+
+`_inert_argv` exists to be the one copy of the inert tokenisation and says so:
+"two copies of the rule would be two tokenisers free to drift, and the gap
+between two of them is where #157 arrived, twice". `_docker_argv`'s container
+branch was the second copy -- a bare `shlex.split(command)`, already drifted
+to `posix=True` unconditionally where `_inert_argv` reads
+`posix=(platform.system() != "Windows")`, and with no fallback for the
+`ValueError` an unbalanced quote raises.
+
+**It is not exploitable, and that is measured rather than argued.** Over
+398,184 generated strings that the real `_SHELL_METACHARACTERS` admits,
+`command.split()`, `shlex.split(posix=True)` and `shlex.split(posix=False)`
+returned the same list every time -- because the only characters the two modes
+disagree about are the three the regex rejects. The control in the same probe
+shows the modes genuinely differ on those three, so the agreement is the
+guard's doing rather than an artefact of the alphabet.
+
+Which means **no behavioural test can kill a revert of this fix**, and
+pretending otherwise would be the "needle matches its own haystack" survivor
+shape this project has hit every batch since 101. The pin is a sentinel on
+`_inert_argv` instead, and the mutation row says in writing that it is an
+identity pin and why. The container path was correct by coincidence with a
+guard in another function -- the "correct only when someone else ran first"
+coupling `_ssh_known_hosts` was rewritten to stop being.
+
+### A gate that asked a wider question than the schema
+
+`shell_input`'s approval check read `params.get("control")` for TRUTH, where
+its three siblings -- `declared_network`, `declared_backend`, `declared_root`
+-- each have a coercion function with a docstring saying why a pre-Pydantic
+read is safe. A control key skips approval ABOVE the mode switch (SS30), so it
+skipped even under `always`, and `"xyz"`, `True` and `["interrupt"]` are all
+truthy.
+
+**It was safe, and the reason was unwritten.** `Sessions.send` is
+`if control: ... elif text: ...`, so a call sending `control` and `text`
+together typed the control and discarded the text. That property lived in one
+`if/elif` in another module with no test over it; a later change honouring
+both fields would have turned an ungated step into a way to type an unapproved
+line into a live shell. It is pinned now, on the bytes that reach the pty,
+with a control test so it cannot pass for a `send` that types nothing.
+
+### The citation guard, and why the correction note is worded oddly
+
+`security/sandbox.py` closed the argument for `_SHELL_METACHARACTERS` -- the
+closure that makes Q1 a closure rather than the next patch in a series -- with
+"pinned as one by" the same words in lower snake case, as though the pin were
+a function. It is the CLASS `TestTheTwoTokenisersCannotDisagree`, cited
+correctly by `_within` 140 lines below. It survived two batches.
+
+`protected_paths.user_config_dir` already recorded this exact failure about
+itself and named the cost: "a reader who greps the name finds nothing and
+concludes the duplication is unguarded". Both sit under a sentence asserting
+that something dangerous is pinned by a test, which is when a citation is
+load-bearing. So `test_docs_consistency.py` now fails on a cited test name
+that resolves to nothing, beside the decision-id guard it already had.
+
+Two calibrations were needed and both came from running it. The "defined"
+index has to include assignment targets, not just `def` and `class`, or
+`project_init/manifest.py`'s dataclass field `test_command` reads as dangling.
+And it is **production files only**: the suite's own prose legitimately names
+tests and files that no longer exist -- `test_compaction_e2e.py` is discussed
+by name in `test_docs_consistency.py` itself, in the docstring of the check
+that exists because five pointers survived its rename. A guard needing an
+allowlist on its first day is a guard nobody will trust. The correction note
+in `sandbox.py` therefore DESCRIBES the dead spelling instead of writing it
+out, and says why.
+
+### What the review cleared, recorded so it is not re-derived
+
+**The planted-binary escape on the INERT host path does not exist.**
+`_run_inert` runs `shell=False` with `cwd=workspace_dir`, INERT is the tier
+the gate auto-approves, and the agent can put files in the workspace with
+`write` -- so the question was whether Windows resolves a bare `ls` against
+the working directory before PATH. Measured: a binary planted in `cwd` under a
+name absent from PATH is not found (`FileNotFoundError [WinError 2]`), with
+and without the scrubbed env, and a `.bat` of the same name is not found
+either, because CreateProcess appends `.exe` only and `PATHEXT` is a cmd.exe
+feature. On POSIX the question cannot arise: `execvp` searches PATH and
+`_scrubbed_env` pins it to `/usr/bin:/bin`.
+
+The same probe re-confirmed what `_resolved_binary` already discloses: on this
+machine `cat`, `ls`, `grep`, `head`, `tail`, `wc`, `whoami`, `diff` and eleven
+more resolve to `%LOCALAPPDATA%\hermes\git\usr\bin\*.EXE`, a third-party MSYS2
+toolchain in a user-writable directory. Conceded in `containment_for`, shown
+on the approval prompt, and the reason `_SSH_SYSTEM_BINARY` is hardcoded to
+System32.
+
+`wait_for` is not a ReDoS vector: `core/line_pattern.py` uses genuine
+`google-re2`, linear time with `max_mem` pinned, behind a provenance guard
+that refuses a look-alike `re2` module from another distribution.
+`containment_for` and `_route` are still the same ladder in the same order.
+The `reveal()` audit -- the module's own stated procedure -- finds four call
+sites outside tests and all four are legitimate. And every part of the §49
+surface ships off: `shell` and all seven session tools are permission `false`,
+both backends and both fallback switches are false, the mode is `tiered`.
+
+### And the WSL run found the one thing Windows structurally cannot
+
+The Windows suite was **5982 passed, zero failures**, with `AGENT_WORKSPACE`
+unset. WSL then failed four, three of them the documented set -- two
+matplotlib on py3.14 and `test_config_loader`'s HOME redirection -- and one
+that was this batch's own:
+`test_credentials.py::test_rewriting_an_existing_file_keeps_the_mode`.
+
+**It could not have failed on Windows**, because POSIX mode bits do not exist
+there and the whole test is `@posix_only`. Which is the same lesson batch 107
+learned from a shell variable and a container daemon, in its third form: a
+property that is invisible on the machine you develop on is not a property you
+have checked.
+
+The test had anticipated the change and left instructions in its own assertion
+message -- *"if this now reports 0o600, the fix grew a migration -- update this
+test and say so in the docstring rather than deleting it."* It had. `O_TRUNC`
+on an existing file does not reset its mode, so a `providers.json` created 0644
+by an older version stayed 0644; audit #19 recorded that as out of scope, on
+the honest ground that repairing a pre-existing file's mode is a migration and
+"new writes are safe". `os.replace` carries the TEMP file's mode across, so the
+destination's old mode is replaced rather than preserved. Measured on POSIX:
+**0644 before the save, 0600 after, content intact.**
+
+So the migration #19 declined to write arrived as a side effect of the
+atomicity fix, in the safe direction -- a world-readable credentials file is
+repaired the next time a key is saved, instead of waiting for someone to read a
+docstring. The test now asserts 0600 and carries that history, which is what it
+asked for.
+
+### Verification
+
+`ruff check .` clean. Bandit exit 0 three ways: the tracked tree against a
+path-corrected throwaway copy of the baseline, the changed files against the
+same, and the changed modules directly (26 pre-existing baseline entries, no
+new ones). The baseline was not regenerated.
+
+Windows full suite **5982 passed, 46 skipped, 1 deselected, zero failures**
+(7:58), with `AGENT_WORKSPACE` unset. WSL **5995 passed, 4 failed** -- three
+documented causes and the mode migration above, now green on both.
+
+Mutation **15 of 15 killed**, foreground in three chunks, each row restored
+from a `.bak`. The preflight earned its place immediately: it found
+`test_docs_consistency.py` already RED before any mutation, because forty new
+tests had made the documented count stale -- a harness that skipped it would
+have scored five fake kills in chunk 2. And one row had to be rewritten:
+changing `WrongPassphrase`'s base class is a NameError at import, which pytest
+reports as "1 error" and the harness scored as a kill. **A mutation that does
+not compile tests nothing.** Repointed at the AEAD's own raise, which
+compiles and is a real regression.

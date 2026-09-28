@@ -1045,3 +1045,40 @@ means: *any* value, which moves the project for every reader of a shipped `confi
 `workspace_dir` is already `./workspace`, or *differs from the shipped default*, which is a
 comparison against `config_schema`'s default and quietly makes `./workspace` un-nameable. That
 choice is the whole decision; the code after it is one line.
+
+## 29. Session ownership is skipped for a `None` thread, and the two lookups disagree (open, 2026-09-28)
+
+Found by batch 108's review of the unpushed range; not a defect today, and recorded because the
+asymmetry is a trap rather than because anything is wrong now.
+
+`core/shell_sessions.py::_owned_locked` answers "is this session this thread's":
+
+```python
+if owner_thread is not None and session.owner_thread != str(owner_thread):
+    return None
+```
+
+So `owner_thread=None` means **no ownership check at all** -- any session with that id is returned.
+`list_for` one function down asks the same question the other way, `s.owner_thread == str(owner_thread)`,
+where `None` stringifies to `"None"` and matches nothing. One value, two opposite readings, in two
+functions that sit next to each other.
+
+**It is unreachable from the tools, which is why this is an item and not a fix.** `shell_input`,
+`shell_output` and `shell_kill` all pass `memory.thread_id`, and `core/memory.py` sets that from
+`create_thread()` or from a thread id it has already validated -- it is never `None`. The `None`
+arm exists for the two internal sweeps, `kill_owned` and `kill_by_span`, which have already
+filtered by owner themselves and pass no thread deliberately.
+
+**What makes it worth writing down.** The tool layer's whole ownership story is "the owning thread
+is the injected `memory`'s, never a param -- a model that could name the thread could reach another
+conversation's sessions" (`tools/builtin/shell_sessions.py`). That guarantee rests on
+`memory.thread_id` never being `None`, which is a property of a different module and is asserted
+nowhere. A future caller that passes a thread id it happens not to have -- a replay path, a
+reconstructed session, a subagent whose run raised -- gets cross-conversation access with no error.
+
+**Prescription.** Make the internal sweeps say what they mean, with an explicit sentinel or a
+private `_locked_by_id` that does no ownership check, so `_owned_locked` can require a thread and
+`None` stops being a skeleton key. Then pin it: a test that `_owned_locked(id, None)` returns
+`None`, and one that the two lookups agree about the same argument. The change is small; what it
+buys is that the ownership boundary stops depending on a fact about `core/memory.py` that nothing
+checks.

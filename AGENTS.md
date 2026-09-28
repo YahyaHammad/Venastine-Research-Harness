@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 5988 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 6028 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -261,7 +261,10 @@ only, which no project can reach — following `trusted_projects.json` and
 unreadable. Since batch 45 the four stores share their MECHANICS through root
 `json_store.py` (atomic write, versioned fail-soft read) and nothing else: each keeps its
 own module, path, `STORE_VERSION` and failure posture, because those were decided
-separately. That extraction is also what made `known_mcp_servers.json` atomic — it was
+separately. **Batch 108 added the two that hold credentials** -- `credentials.py` and
+`security/secrets.py` -- which were the last stores in the project still writing `O_TRUNC`
+over the live file, so a crash mid-write destroyed every stored API key or secret; the
+helper's own docstring had argued that exact case since batch 45. That extraction is also what made `known_mcp_servers.json` atomic — it was
 the one of the four writing a CONSENT record through a bare `open(path, "w")`, while its
 three siblings each explained at length why that is unacceptable. `/effort` and `/thinking` are unchanged.
 

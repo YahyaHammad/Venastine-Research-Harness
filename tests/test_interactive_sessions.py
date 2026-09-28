@@ -1074,3 +1074,51 @@ class TestTheDisplaySurfacesKnowTheKind:
         which is why `shell_output` and `shell_kill` are not armed either."""
         assert registry.opens("shell_interactive") == ("session",)
         assert registry.opens("shell_input") == ()
+
+
+class TestAControlKeyDoesNotCarryText:
+    """The property `shell_input`'s approval gate rests on, which nothing
+    named until batch 108.
+
+    A call sending BOTH `control` and `text` skips approval -- SS30, above
+    the mode switch, so it skips even under `shell_approval_mode: always`.
+    That is only safe because `send` DISCARDS the text: the payload choice
+    is `if control: ... elif text: ...`. It lived in one `if/elif` with no
+    test over it, so a later change honouring both fields would have
+    turned an ungated step into a way to type an unapproved line into a
+    live shell.
+
+    Asserted on the BYTES that reached the pty, which is the only place
+    the difference is visible -- a test that checked the return value
+    would pass for a `send` that typed both.
+    """
+
+    def test_the_text_never_reaches_the_pty(self, manager,
+                                            interactive_starter):
+        opened = _open(manager)
+        stdin = interactive_starter.started[-1]["process"].stdin
+        stdin.chunks.clear()
+
+        manager.send(opened["session"], "t1", text="rm -rf /",
+                     control="interrupt", wait_s=WAIT)
+
+        typed = b"".join(
+            c if isinstance(c, bytes) else c.encode("utf-8")
+            for c in stdin.chunks)
+        assert typed == ss.CONTROLS["interrupt"].encode("utf-8")
+        assert b"rm" not in typed
+
+    def test_the_text_does_reach_it_when_there_is_no_control(
+            self, manager, interactive_starter):
+        """The control for the control. Without this the test above passes
+        for a `send` that types nothing at all."""
+        opened = _open(manager)
+        stdin = interactive_starter.started[-1]["process"].stdin
+        stdin.chunks.clear()
+
+        manager.send(opened["session"], "t1", text="echo hi", wait_s=WAIT)
+
+        typed = b"".join(
+            c if isinstance(c, bytes) else c.encode("utf-8")
+            for c in stdin.chunks)
+        assert b"echo hi" in typed

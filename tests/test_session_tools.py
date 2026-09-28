@@ -20,7 +20,7 @@ from core import shell_sessions as ss
 from security.permissions import APPROVAL_BY_SHELL_MODE
 from tests.conftest import set_posture
 from tools.base import ToolSpec
-from tools.builtin import shell
+from tools.builtin import shell, shell_sessions
 from tools.registry import (
     _SHELL_MODE_GATES,
     _assert_shell_mode_exemption,
@@ -497,3 +497,95 @@ def _until(predicate, timeout=5.0):
             return True
         time.sleep(0.01)
     return predicate()
+
+
+# ===========================================================================
+# ---- The control field the gate reads (batch 108) -------------------------
+# ===========================================================================
+
+class TestTheControlFieldIsCoerced:
+    """`declared_control`, and why a `params.get()` was not enough.
+
+    A control key skips approval (SS30), the skip sits ABOVE the mode
+    switch, and the gate reads the model's tool-call input BEFORE Pydantic
+    has seen it. So the question "is this a control key" was being asked
+    as "is this truthy", which is a wider question than
+    `Optional[Literal["interrupt", "eof"]]` asks two layers down.
+
+    WHAT WOULD MAKE THIS CLASS VACUOUS: testing only the two good values.
+    They worked before. Everything here is about the values that are NOT
+    control keys and were being treated as though they were.
+    """
+
+    @pytest.mark.parametrize("value,expected", [
+        ("interrupt", "interrupt"),
+        ("eof", "eof"),
+        # Every one of these was truthy, and none is a control key.
+        ("xyz", ""),
+        ("INTERRUPT", ""),
+        (True, ""),
+        (1, ""),
+        (["interrupt"], ""),
+        ({"control": "interrupt"}, ""),
+        (None, ""),
+    ])
+    def test_only_a_recognised_key_counts(self, value, expected):
+        assert shell_sessions.declared_control({"control": value}) == expected
+
+    def test_a_missing_field_and_a_non_dict_are_both_empty(self):
+        assert shell_sessions.declared_control({}) == ""
+        assert shell_sessions.declared_control("not a dict") == ""
+        assert shell_sessions.declared_control(None) == ""
+
+    def test_the_vocabulary_is_the_runners_own(self):
+        """Read off `core.shell_sessions.CONTROLS` rather than a second
+        spelling of the two literals. A gate and a runner each carrying
+        their own copy of a vocabulary is the drift #157 came from."""
+        for name in ss.CONTROLS:
+            assert shell_sessions.declared_control({"control": name}) == name
+
+    def test_the_schema_and_the_gate_admit_the_same_two(self):
+        """The third copy. `InputParams.control` is a `Literal`, so a
+        widening there with no matching widening in `CONTROLS` would give
+        the runner a key the gate never saw."""
+        import typing
+
+        field = shell_sessions.InputParams.model_fields["control"]
+        admitted = set()
+        for arg in typing.get_args(field.annotation):
+            admitted.update(a for a in typing.get_args(arg)
+                            if isinstance(a, str))
+        assert admitted == set(ss.CONTROLS)
+
+
+class TestOnlyARecognisedControlSkipsTheQuestion:
+    """The gate's own behaviour, at both polarities.
+
+    Under `always` a control key is STILL ungated -- that is SS30 and it is
+    deliberate. What must not happen is a value that merely looks like one
+    being waved past the same step.
+    """
+
+    def test_a_real_control_is_ungated_even_under_always(self, monkeypatch):
+        set_posture(monkeypatch, shell_approval_mode="always")
+
+        assert shell_sessions.input_approval_check(
+            "shell_input", {"session": "s1", "control": "interrupt"}) is False
+
+    def test_a_lookalike_falls_through_to_the_ordinary_ladder(
+            self, monkeypatch):
+        set_posture(monkeypatch, shell_approval_mode="always")
+
+        assert shell_sessions.input_approval_check(
+            "shell_input", {"session": "s1", "control": "xyz",
+                            "text": "echo hi"}) is True
+
+    def test_a_lookalike_carrying_a_protected_segment_asks_under_tiered(
+            self, monkeypatch):
+        """The case the old read got wrong in the direction that matters:
+        `control` truthy meant the text was never examined at all."""
+        set_posture(monkeypatch, shell_approval_mode="tiered")
+
+        assert shell_sessions.input_approval_check(
+            "shell_input", {"session": "s1", "control": True,
+                            "text": "cat .venastine/settings.json"}) is True

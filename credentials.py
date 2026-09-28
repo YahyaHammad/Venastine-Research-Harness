@@ -1,6 +1,11 @@
 import json
 import os
 
+# A root module importing a root module: no new edge, and json_store.py's
+# docstring names `credentials` among the things already imported from
+# everywhere for that reason.
+from json_store import write_json_atomic
+
 # #24. Resolved at IMPORT time, exactly like its four siblings --
 # config.DB_PATH / OUTPUT_DIR / WORKSPACE_DIR and logging_setup's log
 # file are all `os.environ.get(NAME, default)` evaluated once -- so a
@@ -75,23 +80,33 @@ _SECRET_FILE_MODE = 0o600
 
 
 def _write_secret_json(path: str, data: dict) -> None:
-    """Write JSON to a file created 0600, never world-readable even briefly.
+    """Write JSON to a file created 0600, never world-readable even briefly,
+    and never half-written.
 
-    os.open with the mode, NOT open() followed by os.chmod. A post-write
-    chmod leaves a window in which the key is on disk with the umask's
+    0600 AT CREATION, NOT open() followed by os.chmod. A post-write chmod
+    leaves a window in which the key is on disk with the umask's
     permissions -- short, but it is exactly the window an attacker with
     local read access is waiting for, and closing it costs one line.
+    `write_json_atomic` applies the mode to the TEMP file, which is the
+    same property: `os.replace` carries it across, and the key is never on
+    disk under the umask's permissions at any point.
 
-    WINDOWS: POSIX mode bits do not apply, and os.open's mode argument
-    only controls the read-only flag there. This is a no-op on Windows
-    rather than a wrong-op; the file's protection comes from the ACL on
-    the user profile directory instead. The tests skip accordingly, and
-    the CI container is where the assertion actually runs.
+    WINDOWS: POSIX mode bits do not apply, and the mode argument only
+    controls the read-only flag there. This is a no-op on Windows rather
+    than a wrong-op; the file's protection comes from the ACL on the user
+    profile directory instead. The tests skip accordingly, and the CI
+    container is where the assertion actually runs.
+
+    ATOMIC SINCE BATCH 108, and this was the older half of the same defect.
+    It wrote `O_TRUNC` straight over the live file, so a crash, a full disk
+    or a kill between the truncate and the flush destroyed every stored
+    provider key at once -- and unlike the secrets store, this file ships
+    in use for every user who has ever saved a credential. `json_store.py`
+    was extracted to delete exactly this pattern and says so; the two files
+    holding credentials were the last two stores in the project still
+    carrying a private copy of it.
     """
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
-                 _SECRET_FILE_MODE)
-    with os.fdopen(fd, "w", encoding="utf-8") as file:
-        json.dump(data, file, indent=2)
+    write_json_atomic(path, data, mode=_SECRET_FILE_MODE, indent=2)
 
 
 def _write_provider_data(provider_data: dict) -> None:

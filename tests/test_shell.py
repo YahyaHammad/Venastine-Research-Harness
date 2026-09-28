@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import config
-from security import protected_paths
+from security import protected_paths, sandbox
 from security.capability import (
     CONTAINED,
     UNAVAILABLE,
@@ -2501,3 +2501,60 @@ class TestProtectedSegmentsAlwaysAsk:
         assert ".venastine" in notice
         plain = _shell_approval_notice({"command": "cat notes.txt"})
         assert ".venastine" not in plain
+
+
+class TestTheContainerArgvUsesTheOneTokeniser:
+    """`_docker_argv` calls `_inert_argv`, and does not re-do it (batch 108).
+
+    `_inert_argv`'s docstring is explicit that it is ONE copy because the
+    tokenisation is load-bearing -- "two copies of the rule would be two
+    tokenisers free to drift, and the gap between two of them is where
+    #157 arrived, twice". The container branch was the second copy, a bare
+    `shlex.split(command)`, and it had already drifted in two ways:
+    `posix=True` unconditionally where `_inert_argv` reads
+    `posix=(platform.system() != "Windows")`, and no fallback for the
+    ValueError an unbalanced quote raises.
+
+    WHAT WOULD MAKE THE FIRST TEST BELOW VACUOUS, and it is why the second
+    one exists. The drift is NOT observable: measured over 398,184
+    generated strings that `_SHELL_METACHARACTERS` admits, `.split()`,
+    `shlex.split(posix=True)` and `shlex.split(posix=False)` agree every
+    time -- because the only characters the two modes disagree about are
+    the three the regex rejects. So a behavioural test cannot kill a
+    mutation that puts `shlex.split` back, and pretending otherwise would
+    be the "needle matches its own haystack" survivor shape. The second
+    test pins the CALL instead, which is the thing that was wrong.
+    """
+
+    def _trailing(self, command):
+        """What the container would actually exec, with the `docker run`
+        preamble dropped."""
+        argv = sandbox._docker_argv(
+            command, "/ws", network=False, argv=True, runtime=sandbox.DOCKER,
+            name="n")
+        return argv[argv.index(config.SANDBOX_DOCKER_IMAGE) + 1:]
+
+    def test_the_container_and_the_host_agree_on_every_inert_command(self):
+        corpus = TestTheTwoTokenisersCannotDisagree()
+        seen_inert = 0
+        for command in corpus._commands(4000):
+            if not _is_inert(command):
+                continue
+            seen_inert += 1
+            assert self._trailing(command) == sandbox._inert_argv(command)
+        assert seen_inert > 20, (
+            "the corpus stopped producing INERT commands, so this "
+            "measured nothing")
+
+    def test_the_container_branch_calls_inert_argv(self, monkeypatch):
+        """The identity pin, because the behaviour is identical either way.
+
+        A sentinel rather than a source scan: if the branch is rewritten
+        to tokenise for itself, this argv never appears and the test
+        fails, which a `shlex.split` mutation cannot dodge.
+        """
+        monkeypatch.setattr(sandbox, "_inert_argv",
+                            lambda command: ["SENTINEL", command])
+
+        assert self._trailing("cat notes.txt") == ["SENTINEL",
+                                                   "cat notes.txt"]

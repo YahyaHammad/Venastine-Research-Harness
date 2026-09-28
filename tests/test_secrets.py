@@ -651,3 +651,231 @@ class TestTheMarkerMatchesTheRedactor:
         from safety import policy_enforcement
 
         assert secrets.REDACTED == policy_enforcement.REDACTION_MARKER
+
+
+# ===========================================================================
+# ---- A write that dies partway (batch 108) --------------------------------
+# ===========================================================================
+
+class _DiesMidWrite:
+    """A value `json.dump` refuses, placed so it is reached LAST.
+
+    Stands in for the disk filling up or the process being killed, and it
+    is a faithful stand-in rather than a convenient one: `json.dump` writes
+    incrementally, so this raises after bytes are already in the file.
+    Measured -- 140 bytes on disk and the file no longer parses.
+
+    The key sorts last under `sort_keys=True`, so the envelope is almost
+    entirely written before the failure. A test that made the FIRST field
+    fail would leave an empty file and would pass against a writer that
+    truncated and then died, which is the writer this is about.
+    """
+
+
+def _dying_seal(monkeypatch):
+    """Make the next `_flush` fail after it has begun writing."""
+    real = secrets._seal
+
+    def seal(entries, passphrase):
+        envelope = real(entries, passphrase)
+        envelope["zzz_dies_here"] = _DiesMidWrite()
+        return envelope
+
+    monkeypatch.setattr(secrets, "_seal", seal)
+
+
+class TestAnInterruptedWriteKeepsTheStore:
+    """WHAT WOULD MAKE THIS CLASS VACUOUS: asserting that `put` raises.
+
+    It always raised. The defect was never the exception -- it was that
+    the exception arrived with the store already destroyed, because
+    `_write` truncated the live file and then wrote into it. So every test
+    here asserts about the state AFTERWARDS, and each one fails if `_write`
+    goes back to `os.open(..., O_TRUNC)`.
+
+    Measured against HEAD before the change: the file no longer parsed and
+    `unlock` with the correct passphrase answered "secrets file could not
+    be read: Unterminated string starting at line 2 column 9".
+    """
+
+    def test_the_previous_store_still_opens_with_the_original_passphrase(
+            self, store, monkeypatch):
+        secrets.put("ssh.h.login", VALUE)
+        _dying_seal(monkeypatch)
+
+        with pytest.raises(TypeError):
+            secrets.put("ssh.h.login", "a-replacement-value")
+
+        secrets.lock()
+        secrets.unlock(MASTER)
+        assert secrets.names() == ["ssh.h.login"]
+        assert secrets.get("ssh.h.login").reveal() == VALUE.encode("utf-8")
+
+    def test_the_destination_is_untouched_byte_for_byte(
+            self, store, monkeypatch):
+        secrets.put("ssh.h.login", VALUE)
+        before = store.read_bytes()
+        _dying_seal(monkeypatch)
+
+        with pytest.raises(TypeError):
+            secrets.put("another.name", "another-value")
+
+        assert store.read_bytes() == before
+
+    def test_no_temp_file_is_left_beside_the_store(self, store, monkeypatch):
+        """The debris half. A half-written SEALED ENVELOPE next to the real
+        one is not a plaintext leak, but it is a file nobody will ever
+        explain, and `write_json_atomic` is where the sweep belongs because
+        it is what created the thing."""
+        _dying_seal(monkeypatch)
+
+        with pytest.raises(TypeError):
+            secrets.put("ssh.h.login", VALUE)
+
+        assert [p.name for p in store.parent.iterdir()] == [store.name]
+
+    def test_a_failed_put_does_not_take_effect_in_memory(
+            self, store, monkeypatch):
+        """The half the disk tests cannot see.
+
+        `put` installed the new Secret and zeroed the old one BEFORE the
+        write, so a failed flush left this process holding a value that was
+        never persisted -- reported as an error and then usable for the
+        rest of the run. `_require_unlocked` cannot catch it: it compares
+        the stamp against the file, and a failed write leaves both
+        unchanged.
+        """
+        secrets.put("ssh.h.login", VALUE)
+        _dying_seal(monkeypatch)
+
+        with pytest.raises(TypeError):
+            secrets.put("ssh.h.login", "a-replacement-value")
+
+        assert secrets.get("ssh.h.login").reveal() == VALUE.encode("utf-8")
+
+    def test_a_failed_delete_does_not_take_effect_in_memory(
+            self, store, monkeypatch):
+        secrets.put("ssh.h.login", VALUE)
+        _dying_seal(monkeypatch)
+
+        with pytest.raises(TypeError):
+            secrets.delete("ssh.h.login")
+
+        assert secrets.names() == ["ssh.h.login"]
+        assert secrets.get("ssh.h.login").reveal() == VALUE.encode("utf-8")
+
+
+class TestCreateClaimsTheNameIndivisibly:
+    """`create` refuses to overwrite, and the refusal IS the write.
+
+    It was `if os.path.exists(path): raise`, which is a TOCTOU -- and one
+    that got sharper when `_write` became atomic, because `os.replace`
+    overwrites without complaint, so the check was the only thing between a
+    second `create` and somebody's store.
+    """
+
+    def test_a_second_create_refuses_and_leaves_the_first_store_intact(
+            self, store):
+        secrets.put("ssh.h.login", VALUE)
+        before = store.read_bytes()
+
+        with pytest.raises(secrets.SecretsError) as excinfo:
+            secrets.create("an entirely different passphrase")
+
+        assert "already exists" in str(excinfo.value)
+        assert store.read_bytes() == before
+        secrets.lock()
+        secrets.unlock(MASTER)
+        assert secrets.names() == ["ssh.h.login"]
+
+    def test_the_refusal_survives_a_lying_exists_check(
+            self, store, monkeypatch):
+        """Pins the MECHANISM, because the test above is green either way.
+
+        A TOCTOU is "the answer changed between the check and the use", and
+        `os.path.exists` answering False over a file that is there is that
+        race compressed into something a test can stage. The old `if
+        os.path.exists(path): raise` would sail past it and overwrite;
+        `O_EXCL` asks the filesystem at the moment it matters and still
+        refuses.
+        """
+        secrets.put("ssh.h.login", VALUE)
+        before = store.read_bytes()
+        secrets.lock()
+        monkeypatch.setattr(os.path, "exists", lambda _path: False)
+
+        with pytest.raises(secrets.SecretsError) as excinfo:
+            secrets.create("a racing passphrase")
+
+        assert "already exists" in str(excinfo.value)
+        assert store.read_bytes() == before
+
+
+class TestAStoreThisBuildCannotOpen:
+    """`StoreUnreadable` versus `WrongPassphrase`, which is the whole point.
+
+    WHAT WOULD MAKE THIS CLASS VACUOUS: asserting `SecretsError` anywhere.
+    `WrongPassphrase` subclasses it, so every test here would pass for a
+    build that raised the wrong one -- which is precisely how
+    `test_an_unknown_version_refuses_rather_than_guessing` came to need
+    `assert not isinstance(...)`, and precisely the mistake the recovery
+    message could make in production.
+    """
+
+    def test_a_truncated_store_is_store_unreadable(self, locked_store):
+        text = locked_store.read_text(encoding="utf-8")
+        locked_store.write_text(text[:40], encoding="utf-8")
+
+        with pytest.raises(secrets.StoreUnreadable):
+            secrets.unlock(MASTER)
+
+    def test_a_wrong_passphrase_is_not_store_unreadable(self, locked_store):
+        """THE FOOTGUN TEST. If this fails, the recovery message is being
+        shown to someone who typed their passphrase wrong, and it tells
+        them to delete a store that is perfectly good."""
+        with pytest.raises(secrets.WrongPassphrase) as excinfo:
+            secrets.unlock("not the master passphrase")
+
+        assert not isinstance(excinfo.value, secrets.StoreUnreadable)
+
+    def test_a_tampered_ciphertext_is_not_store_unreadable_either(
+            self, locked_store):
+        """Same direction, and it is deliberate: SS56 keeps a tampered
+        ciphertext indistinguishable from a wrong passphrase, so it must
+        not become distinguishable by which exception it raises."""
+        envelope = json.loads(locked_store.read_text(encoding="utf-8"))
+        raw = bytearray(base64.b64decode(envelope["ct"]))
+        raw[0] ^= 0xFF
+        envelope["ct"] = base64.b64encode(bytes(raw)).decode("ascii")
+        locked_store.write_text(json.dumps(envelope), encoding="utf-8")
+
+        with pytest.raises(secrets.WrongPassphrase) as excinfo:
+            secrets.unlock(MASTER)
+
+        assert not isinstance(excinfo.value, secrets.StoreUnreadable)
+
+    @pytest.mark.parametrize("edit,note", [
+        (lambda e: e.update(version=secrets.ENVELOPE_VERSION + 1), "version"),
+        (lambda e: e.update(kdf="something-else"), "kdf"),
+        (lambda e: e.update(n=secrets.MIN_SCRYPT_N // 2), "weak n"),
+        (lambda e: e.pop("salt"), "missing field"),
+        (lambda e: e.update(salt="not base64 at all!!"), "bad base64"),
+    ])
+    def test_every_structural_fault_is_store_unreadable(
+            self, locked_store, edit, note):
+        envelope = json.loads(locked_store.read_text(encoding="utf-8"))
+        edit(envelope)
+        locked_store.write_text(json.dumps(envelope), encoding="utf-8")
+
+        with pytest.raises(secrets.StoreUnreadable):
+            secrets.unlock(MASTER)
+
+    def test_the_recovery_hint_names_the_path_and_promises_no_deletion(
+            self, locked_store):
+        hint = secrets.recovery_hint()
+
+        assert str(locked_store) in hint
+        assert "by hand" in hint
+        # It must not claim the passphrase was wrong, which is the one
+        # thing a reader of this message has already ruled out.
+        assert "not a wrong passphrase" in hint

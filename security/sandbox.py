@@ -1494,7 +1494,17 @@ def _feed_sudo_password(proc, secret) -> None:
 # three are now all rejected. So for any command that reaches the inert
 # path, `command.split()` and `shlex.split(command)` are provably the
 # same list -- a closure, not a patch, and pinned as one by
-# `test_the_two_tokenisers_cannot_disagree`.
+# `TestTheTwoTokenisersCannotDisagree` in tests/test_shell.py.
+#
+# Until batch 108 this cited the same words in lower snake case, as
+# though the pin were a function -- a name that has never existed, while
+# the real one is the CLASS, cited correctly by `_within` 140 lines below.
+# It is the failure `protected_paths.user_config_dir` already recorded
+# about itself: a reader who greps the name finds nothing and concludes
+# the closure is unguarded. The dead spelling is described rather than
+# written out here, because `test_docs_consistency.py` now fails on a
+# cited test name that resolves to nothing, and a correction note is not
+# a reason to make the guard start its life with an exception.
 _SHELL_METACHARACTERS = re.compile(r"""[;|&$`><(){}!#~'"\\]""")
 
 # Dangerous flags for commands that remain in INERT_COMMANDS.
@@ -2386,7 +2396,26 @@ def _docker_argv(
         docker_args.extend(
             ["bash", "-c", _interactive_command(prompt_token)])
     elif argv:
-        docker_args.extend(shlex.split(command))
+        # `_inert_argv`, NOT a second `shlex.split` (batch 108). That
+        # function is the one copy of this tokenisation and its docstring
+        # is explicit that two copies are two tokenisers free to drift --
+        # which is the gap #157 arrived through, twice. This line was the
+        # second copy, and it had already drifted in two ways: `posix=True`
+        # unconditionally where `_inert_argv` reads
+        # `posix=(platform.system() != "Windows")`, and no fallback for the
+        # ValueError an unbalanced quote raises.
+        #
+        # Neither drift could be OBSERVED, and that is the point rather
+        # than a reason to have left it. Measured over 398,184 generated
+        # strings that `_SHELL_METACHARACTERS` admits, `command.split()`,
+        # `shlex.split(posix=True)` and `shlex.split(posix=False)` returned
+        # the same list every time -- because the only characters the two
+        # modes disagree about are the three the regex rejects. So the
+        # container path was correct by coincidence with a guard in another
+        # function, which is exactly the "correct only when someone else
+        # ran first" coupling `_ssh_known_hosts` was rewritten to stop
+        # being.
+        docker_args.extend(_inert_argv(command))
     else:
         docker_args.extend(["bash", "-c", command])
     return docker_args

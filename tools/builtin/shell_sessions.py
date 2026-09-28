@@ -398,10 +398,52 @@ def input_refusal(params: dict, context=None) -> Optional[str]:
     return _invalid(INPUT, InputParams, params)
 
 
+def declared_control(params) -> str:
+    """Which control key a call asked for, or "" (batch 108).
+
+    `declared_network`, `declared_backend` and `declared_root`'s sibling,
+    and a function for their reason exactly: the gate reads the model's
+    tool-call input BEFORE Pydantic has seen it, so this value can be any
+    JSON at all. This was `params.get("control")` read for TRUTH, which is
+    a different question from the one `InputParams` asks and a wider one --
+    `"xyz"`, `True` and `["interrupt"]` are all truthy and none is a
+    control key.
+
+    ONLY A RECOGNISED KEY counts, and it is checked against
+    `core.shell_sessions.CONTROLS` -- the dict the RUNNER indexes -- rather
+    than against a second spelling of the two literals here. A gate and a
+    runner that each carry their own copy of the vocabulary is the drift
+    #157 came from, one field over.
+
+    WHAT WAS ACTUALLY SAFE ABOUT THE OLD READ, stated because it was true
+    and unwritten, which is the worse half. A control key skips approval
+    (SS30) and the skip sits ABOVE the mode switch, so it skipped even
+    under `always` -- and a call sending `control` AND `text` therefore
+    typed neither prompt nor question. It could not type the text either,
+    but only because `Sessions.send` is `if control: ... elif text: ...`
+    and DISCARDS the text. That property lives in another module's
+    if/elif, nothing named it, and a later change honouring both fields
+    would have silently stopped the gate asking. It is pinned by a test
+    now.
+
+    Narrowing this is monotonically safer and changes nothing that runs: an
+    unrecognised value now falls through to the ordinary ladder, where it
+    may cost one prompt, and `Optional[Literal["interrupt", "eof"]]`
+    refuses it at run time either way so nothing executes.
+    """
+    if not isinstance(params, dict):
+        return ""
+    asked = params.get("control")
+    if isinstance(asked, str) and asked in core_sessions.CONTROLS:
+        return asked
+    return ""
+
+
 def input_approval_check(tool_name: str, params: dict) -> bool:
     """Whether typing this line needs a human yes (SS29, SS30).
 
-    A CONTROL key is ungated first, above the mode, for SS11's reason:
+    A RECOGNISED CONTROL key is ungated first, above the mode, for SS11's
+    reason:
     `shell_kill` destroys the whole session and asks nobody, so
     interrupting one command inside it cannot need more. It is also the
     only escape from a command that will not finish, and a gate on the
@@ -413,7 +455,7 @@ def input_approval_check(tool_name: str, params: dict) -> bool:
     check, the same always-ASK polarity, and the same reason for never
     being a deny (G2 -- this does not parse the text).
     """
-    if isinstance(params, dict) and params.get("control"):
+    if declared_control(params):
         return False
     active = posture.current()
     mode = capability.validate_mode(active.shell_approval_mode,

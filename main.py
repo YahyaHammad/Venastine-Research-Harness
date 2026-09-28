@@ -1140,6 +1140,16 @@ def run_secrets_command(args) -> int:
             return False
         try:
             secrets.unlock(answer)
+        except secrets.StoreUnreadable as exc:
+            # ABOVE the SecretsError arm, and it cannot be otherwise: a
+            # subclass has to be caught first or the base arm takes it.
+            # That ordering is not what makes this safe, though -- the TYPE
+            # is. `WrongPassphrase` is deliberately NOT a StoreUnreadable,
+            # so the recovery text cannot reach someone who simply typed
+            # their passphrase wrong (batch 108).
+            print(f"[error] {exc}")
+            print(secrets.recovery_hint())
+            return False
         except secrets.SecretsError as exc:
             print(f"[error] {exc}")
             return False

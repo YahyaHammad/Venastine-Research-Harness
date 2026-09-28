@@ -63,10 +63,17 @@ def write_json_atomic(path: str, payload, *, mode: Optional[int] = None,
     `mode` sets permissions on the TEMP FILE, not on the destination (#19).
     `os.replace` carries the source file's mode across, so setting it
     afterwards would be both a no-op and a lie, and setting it on the
-    destination beforehand is worse -- replace overwrites that too. Only
+    destination beforehand is worse -- replace overwrites that too.
+
+    THREE CALLERS PASS ONE SINCE BATCH 108, and two of them now pass it for
+    the reason the trust store explicitly does NOT: `credentials.py` and
+    `security/secrets.py` hold secrets, and 0600-at-creation is the property
+    their own comments argue for at length. That sentence used to read "only
     the trust store passes one today, and its docstring says why it is for
     consistency with credentials.py rather than because the file holds a
-    secret.
+    secret" -- true while the two secret stores each kept a private
+    truncate-then-write, which is the pattern this module was extracted to
+    delete.
 
     `trailing_newline` is off by default so every existing store writes
     the same bytes it always did. The four here are machine state nobody
@@ -75,7 +82,15 @@ def write_json_atomic(path: str, payload, *, mode: Optional[int] = None,
     committed file with no final newline carries git's "No newline at end
     of file" marker in every diff of it, forever after.
     """
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    # GUARDED, because `os.makedirs("")` raises rather than doing nothing
+    # and `os.path.dirname` returns "" for a bare filename. No caller could
+    # reach it while all six built an absolute path, but `AGENT_SECRETS_FILE`
+    # and `AGENT_PROVIDERS_FILE` are documented overrides a user may set to
+    # one -- so the two secret stores joining this helper (batch 108) is what
+    # made a path SHAPE able to decide whether the write works.
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     tmp = f"{path}.tmp"
 
     def _dump(handle) -> None:
@@ -83,13 +98,32 @@ def write_json_atomic(path: str, payload, *, mode: Optional[int] = None,
         if trailing_newline:
             handle.write("\n")
 
-    if mode is None:
-        with open(tmp, "w", encoding="utf-8") as f:
-            _dump(f)
-    else:
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            _dump(f)
+    # THE TEMP FILE IS SWEPT ON FAILURE (batch 108). Without this a write
+    # that dies inside `_dump` leaves `<path>.tmp` behind for good: the
+    # destination is correctly untouched, which is the whole point, but the
+    # debris is not. It is worst for the two stores that joined this helper
+    # in the same batch -- a half-written SEALED ENVELOPE sitting next to
+    # the secrets file, and a partial provider file next to the real one.
+    #
+    # Hygiene, never error policy: the original exception is re-raised
+    # unchanged, because "errors belong to the caller" above is the rule
+    # and a cleanup that swallowed one would be the opposite of it. The
+    # unlink is itself guarded, so a failure to tidy up cannot replace the
+    # failure worth reporting.
+    try:
+        if mode is None:
+            with open(tmp, "w", encoding="utf-8") as f:
+                _dump(f)
+        else:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                _dump(f)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
     os.replace(tmp, path)
 
 

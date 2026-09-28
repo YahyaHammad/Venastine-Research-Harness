@@ -6214,6 +6214,20 @@ def _cmd_secrets(app: "VenastineApp", args: str) -> None:
                 return
             try:
                 secrets.unlock(answer)
+            except secrets.StoreUnreadable as exc:
+                # `main.py`'s arm, and the same note: the ordering is
+                # forced by subclassing, but what keeps the recovery text
+                # away from a mistyped passphrase is that
+                # `WrongPassphrase` is not a `StoreUnreadable` (batch 108).
+                #
+                # TWO entries rather than one string with a newline in it.
+                # `_emit` renders ONE entry, and measured across `tui/`,
+                # not one existing `write_error` call carries an embedded
+                # newline -- so this would have been the first, on the
+                # path whose docstring says it draws a single line.
+                err(str(exc))
+                err(secrets.recovery_hint())
+                return
             except secrets.SecretsError as exc:
                 err(str(exc))
                 return

@@ -89,23 +89,40 @@ def test_a_permissive_umask_does_not_widen_it(_in_tmp):
 
 
 @posix_only
-def test_rewriting_an_existing_file_keeps_the_mode(_in_tmp):
-    """save_credentials is called again whenever a key is changed or a
-    provider added, and O_TRUNC on an existing file does NOT reset its
-    mode -- so a file that was created 0644 before this fix stays 0644.
+def test_rewriting_an_existing_file_repairs_a_loose_mode(_in_tmp):
+    """THE FIX GREW A MIGRATION IN BATCH 108, and this test said to come
+    here and say so rather than delete it. So: it did, and here is why.
 
-    Recorded as behaviour rather than fixed: repairing a pre-existing
-    file's mode is a migration, and the honest scope here is "new writes
-    are safe". A user who ran an older version should check the file.
+    This used to assert 0644 -- that a file created world-readable by an
+    older version STAYED world-readable, because `O_TRUNC` on an existing
+    file does not reset its mode. It was recorded as behaviour rather than
+    fixed, on the honest scope "new writes are safe", with a note that a
+    user who ran an older version should check the file themselves.
+
+    Batch 108 made the write atomic to stop an interrupted save destroying
+    every stored key, and `write_json_atomic` is temp-file-plus-
+    `os.replace` with the mode applied to the TEMP file. `os.replace`
+    carries the source's mode across, so the destination's old mode is
+    not preserved -- it is replaced. Measured on this machine: 0644 before
+    the save, **0600 after**, content intact.
+
+    That is the migration arriving as a side effect, and it is the right
+    direction: a `providers.json` left readable by every account on the
+    machine is repaired the next time a key is saved, instead of waiting
+    for a user to read a docstring. The scope note above is now obsolete,
+    which is the one thing worth keeping from it.
     """
     (_in_tmp / "providers.json").write_text("{}", encoding="utf-8")
     os.chmod(_in_tmp / "providers.json", 0o644)
 
     credentials.save_credentials("ANTHROPIC", "sk-ant-secret-value")
 
-    assert _mode(_in_tmp / "providers.json") == 0o644, (
-        "if this now reports 0o600, the fix grew a migration -- update "
-        "this test and say so in the docstring rather than deleting it")
+    assert _mode(_in_tmp / "providers.json") == 0o600, (
+        "an atomic write replaces the destination, so a loose mode on an "
+        "existing file should be repaired rather than carried forward")
+    # The discriminating half: a writer that produced an empty file would
+    # satisfy the mode assertion above.
+    assert "ANTHROPIC" in credentials.load_provider_data()
 
 
 # ---------------------------------------------------------------------------
@@ -402,3 +419,78 @@ def test_an_absolute_providers_path_does_not_name_a_directory_it_never_checked(
     assert "Copy providers.json.example" in message, (
         "the remedy must survive -- it is the half of #24 that made the "
         "message actionable.")
+
+
+
+# ---------------------------------------------------------------------------
+# ---- The write is atomic too (batch 108) -----------------------------------
+# ---------------------------------------------------------------------------
+#
+# #19 was about the MODE, and it left the other half of the same line
+# unexamined. `_write_secret_json` wrote `O_TRUNC` straight over the live
+# file, so a crash, a full disk or a kill between the truncate and the
+# flush destroyed every stored provider key at once -- and unlike the
+# secrets store, this file is in use for every user who has ever saved a
+# credential. `json_store.py` was extracted to delete exactly this pattern
+# and says so in its own docstring; these two files were the last stores
+# still carrying a private copy of it.
+
+class _DiesMidWrite:
+    """A value `json.dump` refuses, reached after bytes are already out.
+
+    `json.dump` writes incrementally, so this is a write that dies PARTWAY
+    rather than one that never starts -- which is the only kind that can
+    tell a truncate-in-place apart from a temp-file-and-replace.
+    """
+
+
+def _dying_dump(monkeypatch):
+    """Make the next provider write fail once it has begun."""
+    real = json.dump
+
+    def dump(payload, handle, **kwargs):
+        payload = dict(payload)
+        payload["zzz_dies_here"] = _DiesMidWrite()
+        return real(payload, handle, **kwargs)
+
+    monkeypatch.setattr(json, "dump", dump)
+
+
+def test_an_interrupted_write_leaves_the_previous_keys(_in_tmp, monkeypatch):
+    credentials.save_credentials("openai", "sk-the-first-key")
+    before = (_in_tmp / "providers.json").read_bytes()
+    _dying_dump(monkeypatch)
+
+    with pytest.raises(TypeError):
+        credentials.save_credentials("anthropic", "sk-ant-the-second-key")
+
+    assert (_in_tmp / "providers.json").read_bytes() == before
+    data = credentials.load_provider_data()
+    assert data["openai"]["API_KEY"] == "sk-the-first-key"
+
+
+def test_an_interrupted_write_leaves_no_temp_file(_in_tmp, monkeypatch):
+    credentials.save_credentials("openai", "sk-the-first-key")
+    _dying_dump(monkeypatch)
+
+    with pytest.raises(TypeError):
+        credentials.save_credentials("anthropic", "sk-ant-the-second-key")
+
+    assert not (_in_tmp / "providers.json.tmp").exists()
+
+
+def test_the_bare_relative_default_still_writes(_in_tmp):
+    """`LLM_PROVIDERS_FILE` defaults to the bare name `providers.json`, so
+    `os.path.dirname` of it is `""` -- and `os.makedirs("")` RAISES rather
+    than doing nothing.
+
+    Nothing could reach that before batch 108, because all six of
+    `write_json_atomic`'s callers built an absolute path. Routing the two
+    secret stores through it made a path SHAPE able to decide whether the
+    write works, and this is the shape that ships.
+    """
+    credentials.save_credentials("openai", "sk-a-key-for-the-bare-path")
+
+    assert (_in_tmp / "providers.json").exists()
+    assert (credentials.load_provider_data()["openai"]["API_KEY"]
+            == "sk-a-key-for-the-bare-path")
