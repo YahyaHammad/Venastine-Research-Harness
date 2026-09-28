@@ -201,13 +201,22 @@ def _collect_in_a_subprocess() -> list:
     `-p no:cacheprovider` keeps the child off .pytest_cache, which the
     parent may be writing at the same time. No recursion: the child
     collects and runs nothing.
+
+    `-n0` BECAUSE addopts REACHES THE CHILD, which is the same sentence
+    two lines up read the other way round. Since batch 109 that line also
+    carries `-n auto --dist loadfile`, so without this the child spawns a
+    worker per core to collect a list and run nothing -- pure cost, on a
+    call that is already the slowest thing in the fast CI gate. It also
+    keeps the parse below reading pytest's own `--collect-only -q` output
+    and not a distributed run's, whatever a future xdist does with the two
+    together.
     """
     if _COLLECTED:
         return _COLLECTED
 
     proc = subprocess.run(
         [sys.executable, "-m", "pytest", "--collect-only", "-q",
-         "-p", "no:cacheprovider"],
+         "-p", "no:cacheprovider", "-n0"],
         cwd=ROOT, capture_output=True, text=True,
     )
     # Node ids are rootdir-relative and always use forward slashes, so this

@@ -43,6 +43,10 @@ The dependencies listed below are **not** part of the project's own source but a
 | pytest | `>=8.0` | MIT | Yes |
 | pytest-mock | `>=3.14` | MIT | Yes |
 | pytest-asyncio | `>=1.0` | Apache-2.0 | Yes |
+| pytest-xdist | `>=3.6` | MIT | Yes |
+| execnet | transitive (via `pytest-xdist`) | MIT | Yes |
+
+`execnet` is listed although nothing declares it: it is `pytest-xdist`'s only dependency and the process that actually runs each worker, so a reader auditing what a `pip install -r requirements.txt` puts on the machine would otherwise have to go and find it. Both are permissive, so the no-copyleft claim under *What this means* is unchanged.
 
 ## Optional dependencies (`pyproject.toml` extras)
 

@@ -67,7 +67,9 @@ jobs:
 
       # The tarball is Python source, so the suite is what says it is
       # publishable. Mirrors tests.yml deliberately -- same pin, same
-      # fresh-clone step, same `python -m pytest` rather than a bare pytest.
+      # fresh-clone step, same `python -m pytest` rather than a bare pytest,
+      # and since batch 109 the same parallel default (tests.yml carries
+      # the measurement showing CI should not ask for the other 30%).
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"

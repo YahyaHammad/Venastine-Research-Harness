@@ -33,9 +33,15 @@ can't easily, since the failure mode is "Python imports the wrong
 file at startup" and that happens before any test runs. If a regression
 appears (tool warnings vanish from output despite being emitted), check
 this first.
+
+SECOND JOB SINCE BATCH 109: this file decides how many workers `-n auto`
+spends, and gives each worker its own matplotlib cache. Both have to be
+here rather than in `tests/conftest.py` -- see the section at the bottom.
 """
 
+import os
 import sys
+import tempfile
 import types
 
 # ---------------------------------------------------------------------------
@@ -709,3 +715,115 @@ def _install_fake_sdks():
 
 
 _install_fake_sdks()
+
+
+# ---------------------------------------------------------------------------
+# ---- Running the suite in parallel (batch 109) ----------------------------
+# ---------------------------------------------------------------------------
+#
+# WHY THIS IS IN THE *ROOT* CONFTEST AND NOT tests/conftest.py. Both are
+# loaded before collection, but only this one is loaded before
+# `pytest_cmdline_main`, and that is where xdist resolves `-n auto` into a
+# number. pytest reads `<rootdir>/conftest.py` as an INITIAL conftest; a
+# `pytest_xdist_auto_num_workers` in any other file is simply never called,
+# silently, and `-n auto` would go back to meaning every core.
+
+#: What `-n auto` spends. NOT a tuning constant to raise -- the whole point
+#: is that a contributor can run the suite and keep using the machine, and
+#: most of them are on the laptop they are also reading code on. Someone who
+#: wants the rest of the box says so with `-n logical`.
+_CPU_SHARE = 0.7
+
+
+def _usable_cpus() -> int:
+    """The cores this process may actually run on.
+
+    `os.cpu_count()` reports the MACHINE, not the allowance: a cgroup quota
+    or a CPU affinity mask makes it an overcount, and CI is exactly where
+    both live. Prefer the narrower answers where the interpreter has them,
+    and fall back only when it does not.
+    """
+    counter = getattr(os, "process_cpu_count", None)      # 3.13+
+    if counter is not None:
+        count = counter()
+        if count:
+            return count
+    if hasattr(os, "sched_getaffinity"):                  # POSIX
+        return len(os.sched_getaffinity(0)) or 1
+    return os.cpu_count() or 1
+
+
+def _worker_id() -> str:
+    """This process's xdist worker id ("gw3"), or "" in a serial run.
+
+    The environment variable rather than `config.workerinput`, because the
+    one caller below runs at import time -- before there is a config to
+    ask.
+    """
+    return os.environ.get("PYTEST_XDIST_WORKER", "")
+
+
+def _isolate_matplotlib_cache() -> None:
+    """Give each xdist worker its own MPLCONFIGDIR.
+
+    THE ONE SHARED MUTABLE RESOURCE THE PARALLELISATION AUDIT FOUND.
+    Everything else the suite writes is already per-process or per-test:
+    xdist hands each worker its own `tmp_path_factory` basetemp
+    (`.../popen-gwN`), HOME is redirected with `monkeypatch.setenv`, the
+    askpass socket takes an ephemeral port, and `sandbox`'s known_hosts
+    file is an `mkstemp` path in a process global. The font cache is not.
+    It lives at one path for the whole machine and is BUILT ON FIRST USE
+    (~5s, which AGENTS.md already records), so on a cold cache every worker
+    would race to write the same file.
+
+    SERIAL RUNS ARE LEFT ALONE, deliberately: with no worker id there is no
+    race, and redirecting anyway would throw away the user's warm cache and
+    pay the 5s on every run.
+    """
+    worker = _worker_id()
+    if not worker or os.environ.get("MPLCONFIGDIR"):
+        return
+    path = os.path.join(tempfile.gettempdir(), f"venastine-mpl-{worker}")
+    os.makedirs(path, exist_ok=True)
+    os.environ["MPLCONFIGDIR"] = path
+
+
+_isolate_matplotlib_cache()
+
+
+try:
+    import xdist  # noqa: F401
+except ImportError:                                       # pragma: no cover
+    # NOT DECORATION. pluggy's `check_pending()` rejects a hook
+    # implementation whose spec no loaded plugin registered, so defining
+    # the function below unconditionally would turn `pytest -p no:xdist`
+    # into a PluginValidationError instead of a plain missing-plugin
+    # message -- a confusing failure on the one invocation someone reaches
+    # for when they suspect xdist.
+    pass
+else:
+    def pytest_xdist_auto_num_workers(config):
+        """`-n auto` is 70% of the cores, rounded, never fewer than one.
+
+        xdist publishes this hook for exactly this purpose, which is why
+        nothing here mutates `config.option` or depends on hook ordering
+        against xdist's own `pytest_cmdline_main`.
+
+        Rounded half-up, so the table is statable: 2 cores -> 1 worker,
+        4 -> 3, 6 -> 4, 8 -> 6, 10 -> 7, 12 -> 8, 16 -> 11.
+
+        `-n logical` RETURNS None ON PURPOSE, deferring to xdist's own
+        detector so that spelling keeps meaning "every core". That leaves
+        four dials, all in xdist's own vocabulary and none invented here:
+
+            -n auto      70% of what this process may use  (the default)
+            -n logical   all of them                       (what CI runs)
+            -n <N>       exactly N
+            -n0          serial -- the escape hatch for a debugger, for
+                         the mutation harness, and for anything that reads
+                         pytest's output
+        """
+        if config.option.numprocesses != "auto":
+            return None
+        usable = _usable_cpus()
+        return max(1, min(usable, int(usable * _CPU_SHARE + 0.5)))

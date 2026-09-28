@@ -68,8 +68,12 @@ jobs:
       - name: Provide providers.json
         run: cp providers.json.example providers.json
 
+      # `-n0`: pytest.ini turns parallelism on by default (batch 109), and
+      # this job runs ONE file, so every worker but one would idle while
+      # each still paid its own interpreter start and collection. On a gate
+      # whose whole value is ~10s, that is the wrong trade.
       - name: Run docs-consistency
-        run: python -m pytest tests/test_docs_consistency.py -q
+        run: python -m pytest tests/test_docs_consistency.py -q -n0
 
   pytest:
     runs-on: ubuntu-latest
@@ -97,5 +101,20 @@ jobs:
       # `python -m pytest`, not a bare `pytest`: AGENTS.md records that a
       # pytest on PATH from a separate tool install runs in its own
       # environment and sees none of the project's dependencies.
+      #
+      # NO `-n` HERE, AND THAT WAS MEASURED RATHER THAN ASSUMED (batch 109).
+      # pytest.ini's `-n auto` gives 70% of the cores; the obvious CI move
+      # is `-n logical` for the other 30%, since a runner has nothing else
+      # to do with itself. It buys nothing. This suite is FLOOR-BOUND: with
+      # `--dist loadfile` the slowest single file sets the wall time, and
+      # tests/test_tui.py is 30.9% of the whole suite, so past about a
+      # quarter of the cores extra workers only contend. Measured on 16
+      # cores, same commit, alternating to cancel drift: `-n auto` 2:15 /
+      # 2:17 / 2:18 / 2:21, `-n logical` 2:37 / 3:01 / 3:06. Never faster,
+      # usually slower.
+      #
+      # So CI runs exactly what a contributor runs, which is worth more
+      # than a flag that does not help. Raising the ceiling means splitting
+      # test_tui.py (docs/TECHNICAL_DEBT.md 30), not turning a dial.
       - name: Run the suite
         run: python -m pytest -q

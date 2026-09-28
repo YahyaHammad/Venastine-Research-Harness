@@ -16058,3 +16058,122 @@ changing `WrongPassphrase`'s base class is a NameError at import, which pytest
 reports as "1 error" and the harness scored as a kill. **A mutation that does
 not compile tests nothing.** Repointed at the AEAD's own raise, which
 compiles and is a real regression.
+
+## Batch 109 -- the suite runs in parallel, and what that measured (2026-09-28)
+
+Developer experience, not a roadmap section. The suite was single-process,
+so a sixteen-core machine spent seven minutes on one core. It is
+`-n auto --dist loadfile` by default now: **7:10 -> 2:15, same commit, back
+to back, 5982 passed on three consecutive runs.**
+
+The owner asked first whether these tests can be parallelised without losing
+stability or coverage. They can, but not with xdist's default mode, and that
+turned out to be the whole of the interesting part.
+
+**THE SUITE DOES RELY ON ORDER, AND THE FAILURE MODE IS SILENCE.** Reading
+found three places, each deliberate and each documented by the test that owns
+it: `test_probe_isolation.py::TestWhatOneTestLeavesForTheNext` ("an ORDERED
+PAIR, deliberately, because the defect is a leak from one test into the next
+and no single test can express it" -- two pairs, the runtime memo and the
+`_wsl_workspace` cache), `test_config_edit.py::TestTheLoaderCacheDoesNotLeakBetweenTests`
+("these two run in definition order"), and `test_storage_e2e.py`'s
+module-scoped `real_storage`, the suite's only non-function-scoped fixture,
+with tests that read what earlier ones wrote to its database.
+
+None of the three would FAIL under `--dist load`. They would go **vacuous**,
+because ten autouse fixtures in `tests/conftest.py` reinstall the clean state
+for every test, so "and the next one does not inherit it" passes whoever ran
+before it. A green suite that has stopped checking the thing it exists to
+check is worse than a slow one, which is what makes the distribution mode the
+decision rather than a detail. `loadfile` gives a whole file to one worker in
+collection order -- exactly the pre-109 semantics, per file.
+
+**EVERYTHING ELSE WAS ALREADY READY, and the audit is worth recording because
+the next person will wonder.** One non-function-scoped fixture in 6028 tests.
+No `setup_class`, no `setup_module`, no `pytest-order`. Every per-test path
+from `tmp_path`/`tmp_path_factory`, and xdist gives each worker its own
+basetemp, so the counter-named preference files cannot collide. HOME
+redirection is always `monkeypatch.setenv`. The askpass socket takes an
+ephemeral port. `sandbox._ssh_known_hosts_path` is an `mkstemp` path in a
+PROCESS global, so `_reset_ssh_probe`'s unlink cannot reach another worker's
+file. And `test_docs_consistency.py`'s count checks read
+`request.session.items`, which xdist workers keep complete and index into --
+so the documented count still measures 6028 under `-n`.
+
+**ONE GENUINE CROSS-WORKER RACE**, and only one: matplotlib's font cache. It
+is a single path for the whole machine, built on first use, so a cold cache
+means every worker writing the same file. Each worker gets its own
+`MPLCONFIGDIR` now, from `PYTEST_XDIST_WORKER` at conftest import -- which
+xdist sets before it loads conftests, so it lands before the first
+`import matplotlib`. Serial runs are left alone deliberately: no race, and
+redirecting would throw away a warm cache and pay the ~5s every time.
+
+**`-n auto` IS 70% OF THE CORES**, through `pytest_xdist_auto_num_workers` --
+xdist's own hook for this, so nothing mutates `config.option` and nothing
+depends on hook ordering. It lives in the ROOT conftest because only that one
+is loaded before `pytest_cmdline_main`; the same function in
+`tests/conftest.py` would never be called, silently. The `try: import xdist`
+guard around it is not decoration either: pluggy's `check_pending()` rejects a
+hook implementation whose spec no plugin registered, so an unguarded
+definition would turn `pytest -p no:xdist` into a PluginValidationError.
+
+### What the measurement changed
+
+Two decisions taken in the plan did not survive contact with the numbers, and
+both were reversed rather than shipped.
+
+**CI WAS GOING TO TAKE `-n logical`, AND IT IS SLOWER.** The reasoning was
+that the 70% cap exists so a laptop stays usable and a runner has nothing else
+to do. The numbers say the cap is not what is limiting anything.
+`--durations=0` on the serial run, aggregated per file: **`tests/test_tui.py`
+is 127.8s of 413s measured -- 30.9% of the suite.** Under `loadfile` the
+slowest single file is the floor whatever the worker count, so the arithmetic
+ceiling is 3.2x and the measurement is 3.18x. The suite is FLOOR-BOUND at
+eleven workers; the extra five only contend. Re-measured alternating to cancel
+thermal drift: `-n auto` 2:15 / 2:17 / 2:18 / 2:21, `-n logical` 2:37 / 3:01 /
+3:06. **Never faster, usually slower.** So CI runs the same default a
+contributor runs, which is worth more than a flag that does not help.
+
+**`loadscope` IS FASTER AND FOUND A FOURTH ORDER DEPENDENCY.** Scheduling by
+class instead of by file measured **1:38 (4.38x)** -- it splits `test_tui.py`,
+which `loadfile` cannot. It also failed two tests, and they are a finding about
+the suite rather than an xdist quirk.
+`test_config_edit.py::TestTheFileAndTheSessionAreTwoThings` compares
+`in_session` against `in_file`; `in_session` resolves through
+`config_schema.current()` to `load()`, whose body is
+`if _cached is None: _cached = validate(read_document(None), ...)` -- and
+`read_document(None)` reads the module's `CONFIG_PATH`, which the test's own
+`_copy_config` has just repointed at a throwaway copy. So when that class is
+the first thing to touch `config_schema` in a process, the "session" value
+comes from the same file the test then writes to, both sides agree, and the
+distinction the tests exist for disappears. Under `loadfile` it passes only
+because eighteen earlier classes in the file filled `_cached` from the real
+document first.
+
+**Reading found three ordered sites; measuring found a fourth.** That is the
+argument for `loadfile` restated as evidence rather than as caution -- and it
+is a latent defect in its own right, since the same two tests are wrong-by-luck
+for anyone running that class alone. Left as TECHNICAL_DEBT 30 with the one-line
+fix written out, because repairing it is what would make the faster mode a real
+option and that is a decision of its own.
+
+**AND ONE OPTIMISATION MEASURED AND DECLINED**, so it is not proposed again.
+`tests/conftest.py::isolate_provider_check` is autouse and re-opens, re-parses,
+re-fills and re-serialises `providers.json` for all 6028 tests, which reads
+like obvious waste. Timed at the suite's own iteration count: 2.11s today
+against 1.29s for a once-per-process cached string. **0.82s on a 135s run --
+0.6%.** Not worth changing a fixture whose current shape is obvious. The only
+lever left on this suite's wall time is `test_tui.py`.
+
+Verification: ruff clean; bandit exit 0 both in the CI shape and over
+`conftest.py` alone, against a path-corrected throwaway copy of the baseline,
+never regenerated. Windows full suite green both ways after the doc edits --
+**7:00 serial and 2:19 parallel, 5982 passed / 46 skipped each**,
+`AGENT_WORKSPACE` unset. The fast docs gate answers rather than skips in its CI
+shape (`-n0`, one file): 37 passed, 1 skipped. WSL **5996 passed, 3 failed** in
+2:16 on fourteen cores -- the three documented causes (two matplotlib on
+py3.14, `test_config_loader`'s HOME redirection) and nothing new; batch 108's
+fourth was the mode migration and is still fixed. `pytest-xdist` had to be
+installed there, as it does anywhere the suite runs now.
+
+Counts unchanged at 6028: no test was added, removed or renamed.

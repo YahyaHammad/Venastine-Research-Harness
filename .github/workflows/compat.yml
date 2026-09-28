@@ -16,6 +16,11 @@
 # windows-latest covers the platform split for ~2 min instead of a second
 # 15-minute suite. Same fresh-clone steps (providers.json is needed even
 # here), same `python -m pytest` rule.
+#
+# Every job here takes pytest.ini's parallel default. For windows-subset
+# that is close to a no-op and the arithmetic says why: it names two
+# files, and `--dist loadfile` cannot put one file on two workers, so the
+# ceiling is two workers however many cores are asked for.
 
 name: compat
 
@@ -53,6 +58,9 @@ jobs:
       - name: Provide providers.json
         run: cp providers.json.example providers.json
 
+      # The parallel default, not `-n logical`, for tests.yml's measured
+      # reason (batch 109): the suite is floor-bound on test_tui.py, so
+      # asking for the other 30% of the cores is never faster.
       - name: Run the suite (informational)
         run: python -m pytest -q
 

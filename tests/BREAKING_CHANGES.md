@@ -5051,3 +5051,62 @@ and `_route` are still the same ladder. The `reveal()` audit finds four call sit
 legitimate.
 
 Count 5988 -> 6028.
+
+## Batch 109 -- the suite runs in parallel (pytest-xdist)
+
+Not a section: developer experience. `pytest` was single-process, so a sixteen-core machine spent
+seven minutes on one core. It is `-n auto --dist loadfile` by default now -- **7:10 -> 2:15,
+measured back to back on the same commit**, with the same 5982 passed / 46 skipped on three
+consecutive runs.
+
+| Change | What breaks | Symptom / fix |
+|---|---|---|
+| **`pytest.ini` carries `-n auto --dist loadfile`** | Anything that PARSES pytest's output, and any debugger | The suite is parallel unless told otherwise. **`pytest -n0` is serial**, and is what the mutation harness, an output-scraping script and a `--pdb` session want (`--pdb` already forces it by itself). `-x` becomes approximate: the other workers finish the test in flight before stopping |
+| **`pytest-xdist>=3.6` is a hard test dependency** | A checkout that has not re-run `pip install -r requirements.txt` | `error: unrecognized arguments: -n auto`. Deliberate rather than a soft fallback: a suite that silently takes three times longer on a machine missing a package is worse than one that names the package |
+| **`-n auto` means 70% of the cores, not all of them** | Nothing | `conftest.py`'s `pytest_xdist_auto_num_workers` -- xdist's own hook for this, so no option is mutated and nothing depends on hook ordering against xdist's `pytest_cmdline_main`. 16 cores -> 11 workers; 2 -> 1, 4 -> 3, 8 -> 6, 12 -> 8. The point is that the machine stays usable while the suite runs. `-n logical` (every core) and `-n <N>` keep xdist's own meanings |
+| **`--dist loadfile`, and NOT the default `load`** | Nothing today. It is the thing here not to "optimise" later | A COVERAGE decision, not a performance one. `load` hands out INDIVIDUAL tests, and four places in this suite depend on one test running immediately after another in the same process. Three of them -- `test_probe_isolation.py::TestWhatOneTestLeavesForTheNext` (two ordered pairs, and its docstring says so), `test_config_edit.py::TestTheLoaderCacheDoesNotLeakBetweenTests`, and `test_storage_e2e.py`'s module-scoped `real_storage` plus the tests that read what earlier ones wrote to its database -- **would not FAIL under `load`. They would go silently vacuous**, because the autouse fixtures reinstall the clean state for every test, so "and the next one does not inherit it" passes whoever ran before it. `loadfile` gives a whole file to one worker in collection order, which is exactly the pre-109 semantics per file |
+| Each xdist worker gets its own `MPLCONFIGDIR` | Nothing | The one shared mutable resource the audit found. Everything else the suite writes is already per-process or per-test: xdist hands each worker its own `tmp_path_factory` basetemp (`.../popen-gwN`), HOME is redirected with `monkeypatch.setenv`, the askpass socket takes an ephemeral port, and `sandbox`'s known_hosts is an `mkstemp` path held in a process global. matplotlib's font cache is one path for the whole machine, built on first use, so every worker would race to write it. A serial run is left alone -- no race, and redirecting would throw away a warm cache and pay the ~5s every time |
+| `test_docs_consistency.py`'s subprocess collection passes `-n0` | Nothing | `addopts` reaches that child, which is a property its docstring already reasoned about -- and that line now carries `-n auto` too. Spawning eleven workers to collect a list and run nothing is pure cost, on the slowest call in the fast CI gate. `.github/workflows/tests.yml`'s `docs-consistency` job takes `-n0` for the same reason: one file, so every worker but one would idle |
+
+**THE MEASUREMENT, so nobody re-derives it.** Same commit, same box (16 logical cores),
+`AGENT_WORKSPACE` unset, back to back:
+
+| Configuration | Wall | Speedup | Result |
+|---|---|---|---|
+| `-n0` (serial) | 7:10 | 1.00x | 5982 passed |
+| `-n auto --dist loadfile` | 2:15 | **3.18x** | 5982 passed |
+| `-n auto --dist loadfile` | 2:17 | 3.14x | 5982 passed |
+| `-n auto --dist loadfile` | 2:18 | 3.12x | 5982 passed |
+| `-n auto --dist loadscope` | 1:38 | 4.38x | **2 failed** |
+| `-n logical --dist loadfile` | 3:01 | 2.37x | 5982 passed |
+
+**`loadfile` IS ALREADY AT ITS CEILING, AND THE CEILING IS ONE FILE.** `--durations=0` on the serial
+run, aggregated per file: `tests/test_tui.py` is **127.8s of 413s measured -- 30.9% of the suite**.
+Under `loadfile` the slowest single file is the floor whatever the worker count, so the arithmetic
+ceiling is 3.2x and the measurement is 3.18x. **More workers cannot help.** That is also why
+`-n logical` (16 workers) came in slower than `-n auto` (11): past the floor, the extra five only
+contend. Re-measured alternating to cancel thermal drift -- `-n auto` 2:15 / 2:17 / 2:18 / 2:21,
+`-n logical` 2:37 / 3:01 / 3:06 -- never faster, usually slower. **So CI runs the same default a
+contributor runs** rather than asking for the whole runner, which was the plan until the numbers
+came in. Raising the ceiling means splitting `test_tui.py`, not turning a dial (TECHNICAL_DEBT 30).
+
+**WHAT `loadscope` BROKE, because it is a finding about the tests and not an xdist quirk.**
+`test_config_edit.py::TestTheFileAndTheSessionAreTwoThings` has two tests that compare `in_session`
+against `in_file`. `in_session` resolves through `config_schema.current()` -> `load()` ->
+`if _cached is None: read_document(None)`, which reads the module's `CONFIG_PATH` -- and
+`_copy_config` has just monkeypatched that to a throwaway copy. So when that class is the FIRST
+thing to touch `config_schema` in a process, the "session" value is read from the same tmp file the
+test then writes to, both sides agree, and nothing is pending. Under `loadfile` eighteen earlier
+classes in the file have already filled `_cached` from the real document, which is the only reason
+it passes. **A fourth order dependency, found by measuring where the other three were found by
+reading.** Recorded as TECHNICAL_DEBT 30 rather than patched here, because fixing it is what would
+make `loadscope` (and its extra 1.4x) a real option, and that is a decision of its own.
+
+**MEASURED AND DECLINED, so it is not proposed again.** `tests/conftest.py::isolate_provider_check`
+is autouse and re-opens, re-parses, re-fills and re-serialises `providers.json` for all 6028 tests,
+which reads like an obvious waste. Timed at the suite's own iteration count: 2.11s today against
+1.29s for a once-per-process cached string -- **0.82s saved on a 135s run, 0.6%**. Not worth a
+change to a fixture whose current shape is obvious. The only lever left on this suite's wall time is
+`test_tui.py`.
+
+Count unchanged at 6028.

@@ -1082,3 +1082,62 @@ private `_locked_by_id` that does no ownership check, so `_owned_locked` can req
 `None`, and one that the two lookups agree about the same argument. The change is small; what it
 buys is that the ownership boundary stops depending on a fact about `core/memory.py` that nothing
 checks.
+
+## 30. `test_tui.py` is the floor on how fast the suite can run (open, 2026-09-28)
+
+Batch 109 put the suite on `pytest-xdist` with `--dist loadfile`, which sends a whole file to one
+worker. That mode was chosen for coverage rather than speed -- four places in the suite depend on
+one test running immediately after another in the same process, and three of them would go
+*silently vacuous* under xdist's default `load` rather than failing. The cost of the choice is that
+**the slowest single file sets the wall time whatever the worker count.**
+
+Measured, `--durations=0` on a serial run, aggregated per file:
+
+| File | Seconds | Share |
+|---|---|---|
+| `tests/test_tui.py` | 127.8 | **30.9%** |
+| `tests/test_agent_navigation.py` | 26.3 | 6.4% |
+| `tests/test_live_output.py` | 22.7 | 5.5% |
+| `tests/test_interactive_sessions.py` | 22.2 | 5.4% |
+| `tests/test_tool_budgets.py` | 20.6 | 5.0% |
+
+413s of measured test time over a 127.8s floor is a **ceiling of 3.2x**, and `-n auto` already
+measures 3.18x. So the suite is not worker-starved and adding workers makes it worse -- `-n logical`
+(16) ran consistently slower than `-n auto` (11), because past the floor the extra processes only
+contend. **Anyone trying to speed the suite up by raising the worker count is turning a dial that
+is already at its stop.**
+
+`test_tui.py` is 431 tests and 423 Textual pilot sites; the time is the pilots, not any one test
+(its slowest is 2.95s). Two ways out, and they are different decisions:
+
+**Split the file.** Purely mechanical, no test changes, and it raises `loadfile`'s ceiling directly:
+split at class boundaries into three or four files of roughly equal pilot count and the floor drops
+towards the next file down, ~26s. Nothing in `test_tui.py` is an ordered pair, so the split is safe;
+what it costs is that the suite's largest file stops being findable by name.
+
+**Or make `--dist loadscope` viable**, which schedules by class and measured **1:38 (4.38x)** against
+loadfile's 2:15 -- without touching `test_tui.py` at all. It is not green today, and exactly one
+thing stops it:
+
+> `test_config_edit.py::TestTheFileAndTheSessionAreTwoThings` has two tests
+> (`test_changes_accumulate_across_keys`, `test_pending_lists_nothing_on_an_untouched_file`) that
+> compare `in_session` against `in_file`. `in_session` resolves through `config_schema.current()`
+> to `load()`, whose body is `if _cached is None: _cached = validate(read_document(None), ...)` --
+> and `read_document(None)` reads the module's `CONFIG_PATH`, which the test's own `_copy_config`
+> has just monkeypatched to a throwaway copy. So when that class is the FIRST thing to touch
+> `config_schema` in a process, the "session" value is read from the same file the test then writes
+> to, both sides agree, and the distinction the tests exist for disappears. Under `loadfile` it
+> passes only because eighteen earlier classes in the file have already filled `_cached` from the
+> real document.
+
+**That is a latent fragility in its own right, independent of xdist**: the same two tests are
+wrong-by-luck for anyone running that class on its own. The fix is one line -- establish the session
+document explicitly (`config_schema.current()`) *before* `_copy_config` repoints `CONFIG_PATH`, so
+the test states the precondition it has been silently inheriting. Worth doing on its own merits; it
+happens also to unlock the faster mode.
+
+**Prescription, in order.** Fix the `test_config_edit.py` precondition because it is a real defect.
+Then re-measure `loadscope` over three runs and compare the failure set by cause, not by count --
+`loadscope` splits every file by class, so it is a wider change than it looks and the two tests
+above are proof that reading the suite does not find all of these. Only then decide between the
+modes. The measurement harness is in the batch 109 scratchpad (`bench109.py`, `tally109.py`).

@@ -48,14 +48,24 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 6028 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 6028 tests, offline. 2:15 on 16 cores, 7:10 serial (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
 pytest -m integration                             # opt-in; spawns a real stdio MCP server (§17 AC8)
+
+# PARALLEL BY DEFAULT since batch 109 -- pytest.ini's addopts carries
+#   `-n auto --dist loadfile`, and nothing below needs typing normally.
+pytest -n0                                        # SERIAL. Debuggers, output parsing, the mutation harness
+pytest -n 4                                       # exactly four workers
+pytest -n logical                                 # every core -- and MEASURABLY NOT FASTER, see below
 ```
 
-Test dependencies (`pytest`, `pytest-mock`, `pytest-asyncio`) are now listed in `requirements.txt` — they had been missing since §14, which is why older docs warn about it.
+Test dependencies (`pytest`, `pytest-mock`, `pytest-asyncio`, and `pytest-xdist` since batch 109) are now listed in `requirements.txt` — they had been missing since §14, which is why older docs warn about it. **`pytest-xdist` is not optional**: `pytest.ini` puts `-n auto` in `addopts`, so without it `pytest` fails at argument parsing rather than quietly running serially, which is the intended trade — a suite that silently takes eight times longer on a machine missing a package is worse than one that names the package.
+
+**`--dist loadfile` is a coverage decision, not a performance one, and it is the one thing here not to "optimise".** xdist's default `load` hands out individual tests, and three places depend on one test running immediately after another in the same process: `test_probe_isolation.py::TestWhatOneTestLeavesForTheNext` (two ordered pairs, and its docstring says so), `test_config_edit.py::TestTheLoaderCacheDoesNotLeakBetweenTests`, and `test_storage_e2e.py`'s module-scoped `real_storage` plus the tests that read what earlier ones wrote to its database. Split across workers **none of them fails** — the autouse fixtures in `tests/conftest.py` reinstall the clean state for every test, so "and the next one does not inherit it" passes whoever ran before it, and the file goes silently vacuous. `loadfile` gives a whole file to one worker in collection order, which is exactly the pre-109 semantics per file.
+
+**The suite is FLOOR-BOUND, so do not reach for more workers.** Under `loadfile` the slowest single file sets the wall time whatever the worker count, and `tests/test_tui.py` is **127.8s of 413s measured — 30.9% of the suite**. That puts the arithmetic ceiling at 3.2×, and `-n auto` already measures 3.18×. Past roughly a quarter of the cores extra workers only contend: measured on 16 cores, same commit, alternating to cancel drift, `-n auto` (11 workers) ran 2:15 / 2:17 / 2:18 / 2:21 and `-n logical` (16) ran 2:37 / 3:01 / 3:06 — **never faster, usually slower**. This is why CI takes the same default a contributor does instead of asking for the whole runner. Raising the ceiling means splitting `test_tui.py` (TECHNICAL_DEBT 30), not turning a dial.
 
 **A fresh clone needs `cp providers.json.example providers.json` before `pytest`.** The file is gitignored, and **12 tests across four files** fail with `ValueError: No providers configured: ...` without it — 7 in `test_loop_tool_dispatch`, 3 in `test_loop_stop_conditions`, 1 in `test_agents` and 1 in `test_thread_legibility` (measured by moving the file aside and running the suite; the note used to say 11 across three, missing the §27 test written after it — audit #128) — `api_initialization()` needs the provider ENTRY to exist, even though the key inside it stays empty. Since #24 the message names the file and its remedy instead of reporting an unknown provider, and `AGENT_PROVIDERS_FILE` redirects it like every sibling path. "Offline, no API keys" is true; "no config file" is not. Also note `python3 -m pytest`: a `pytest` on PATH from a separate tool install runs in its own environment and sees none of the project's dependencies.
 

@@ -177,3 +177,16 @@ cryptography>=42.0,<52
 pytest>=8.0
 pytest-mock>=3.14
 pytest-asyncio>=1.0
+# Batch 109. NOT optional: pytest.ini's addopts carries `-n auto`, so
+# without this `pytest` fails at argument parsing rather than merely
+# running serially. That is deliberate -- a suite that silently takes
+# eight times longer on a machine missing a package is worse than one
+# that says which package.
+#
+# `>=` like its three siblings above rather than an exact pin. D22's
+# argument for pinning is about packages whose behaviour CI's RESULT
+# depends on; this one decides how the run is scheduled, and the three
+# ordered sites that care are pinned by `--dist loadfile` in pytest.ini
+# rather than by a version. Brings `execnet` (MIT), which is its only
+# transitive.
+pytest-xdist>=3.6
