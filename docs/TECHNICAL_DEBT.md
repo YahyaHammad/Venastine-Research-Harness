@@ -471,7 +471,7 @@ display exists, so the two halves no longer have to be built together.
 
 ---
 
-## 13. `spawn_subagent` has no `available_check` where `load_skill` does (open, noted batch 51)
+## 13. `spawn_subagent` has no `available_check` where `load_skill` does (closed, batch 110)
 
 `load_skill` declares `available_check=load_skill.has_skills`, and its
 docstring gives the reason in full: with no skills discovered "the system
@@ -504,6 +504,29 @@ appending. An `available_check` reading the same function — the way
 keep "advertised" and "catalogued" from drifting apart, which is the property
 that comment is really about.
 
+
+
+**RESOLVED (batch 110).** `subagent_tool.has_agents` is declared, and it reads
+`system_prompts.agent_catalog_text()` -- the same function prompt assembly uses, for the reason
+`has_skills` gives about `skill_catalog_text`: a parallel check is a second answer to "is there a
+catalog", free to drift from the first, and drift is what this entry is about.
+
+Two things the entry did not anticipate, both worth keeping.
+
+**It is roster-wide, not per-run, and the docstring says so.** `available_check` takes no context,
+so it can only answer "is there any spawnable agent at all". A run whose `spawn_targets` empties
+the list is still `refusal_reason`'s business and `agent_catalog_text(targets)`'s -- the same rule
+read from the two sides it has. A reader who assumed the new check covered both would believe a
+per-run restriction was being enforced at advertisement time.
+
+**Four tests were resting on the old answer**, three in `test_agents.py` and one in
+`test_research_authorization.py`. None of them is about the roster: each asserts something about
+the headless filter or about grant policy, against a registry whose `spawn_subagent` was
+advertised for a reason none of them named. They state the roster now. What caught the change was
+`test_a_run_that_can_ask_IS_offered_spawn_subagent`, a control written so that the negative
+assertions beside it "cannot pass against a registry that stopped advertising spawn_subagent
+anywhere" -- which is exactly what this batch did to them, and the best argument in the tree for
+writing that kind of control.
 
 ## 14. The indent-verbatim rule does not cover fences (open, deferred batch 58)
 
@@ -1046,7 +1069,7 @@ means: *any* value, which moves the project for every reader of a shipped `confi
 comparison against `config_schema`'s default and quietly makes `./workspace` un-nameable. That
 choice is the whole decision; the code after it is one line.
 
-## 29. Session ownership is skipped for a `None` thread, and the two lookups disagree (open, 2026-09-28)
+## 29. Session ownership is skipped for a `None` thread, and the two lookups disagree (closed, batch 110)
 
 Found by batch 108's review of the unpushed range; not a defect today, and recorded because the
 asymmetry is a trap rather than because anything is wrong now.
@@ -1083,7 +1106,28 @@ private `_locked_by_id` that does no ownership check, so `_owned_locked` can req
 buys is that the ownership boundary stops depending on a fact about `core/memory.py` that nothing
 checks.
 
-## 30. `test_tui.py` is the floor on how fast the suite can run (open, 2026-09-28)
+
+**RESOLVED (batch 110), with one correction to the entry above.** The `None` arm is not only the
+two internal sweeps. `kill`'s own docstring said *"owner_thread None is the user's kill, which may
+name any session"*, and the TUI's stop relies on it -- so the authority is real, and the fix is to
+name it rather than to remove it.
+
+`core.shell_sessions.ANY_OWNER` is that name: a module-level sentinel with a `__repr__`, so a
+traceback says which authority was exercised. `_owned_locked` lets `ANY_OWNER` past and compares
+everything else, `None` included, which makes it agree with `list_for` about the one input the two
+read in opposite directions. And **`kill`'s `owner_thread` lost its default** -- four call sites in
+the tree, eight in the suite -- because a default meaning "skip the check" makes the safe call the
+one a caller has to remember.
+
+Pinned in `tests/test_shell_sessions.py` and `tests/test_session_tools.py`: a missing thread owns
+nothing through `_owned_locked`, `kill`, `output` and `send`; the two lookups agree about `None`
+and about a foreign thread; `ANY_OWNER` still works, which is what the sweeps and the user's stop
+need; and at the tool layer a memory with no thread sees nothing rather than every session in the
+process. The `send` assertion reads its exact message on purpose -- `send` refuses a background
+session on its KIND two lines further down, so "an error came back" would pass with no ownership
+check at all.
+
+## 30. `test_tui.py` is the floor on how fast the suite can run (open, 2026-09-28; cause corrected and the faster mode adopted in batch 110)
 
 Batch 109 put the suite on `pytest-xdist` with `--dist loadfile`, which sends a whole file to one
 worker. That mode was chosen for coverage rather than speed -- four places in the suite depend on
@@ -1141,3 +1185,97 @@ Then re-measure `loadscope` over three runs and compare the failure set by cause
 `loadscope` splits every file by class, so it is a wider change than it looks and the two tests
 above are proof that reading the suite does not find all of these. Only then decide between the
 modes. The measurement harness is in the batch 109 scratchpad (`bench109.py`, `tally109.py`).
+
+---
+
+**BATCH 110: THE CAUSE ABOVE IS WRONG, the prescription was aimed at the wrong file, and
+`loadscope` is now the default. Each of those came from running something rather than reading it.**
+
+**The cause.** The entry says the two failing tests are "wrong-by-luck for anyone running that
+class on its own". They are not: the class passes standing alone, six of six in 1.7s, and passes
+again with the full suite collected behind it. What actually fails is a **cross-file leak, with no
+xdist involved**:
+
+```
+pytest tests/test_storage_e2e.py tests/test_config_edit.py     # 4 failed, 125 passed
+```
+
+`test_storage_e2e.py`'s module-scoped `real_storage` pops `config` out of `sys.modules` and
+re-imports it under `APP_DB_PATH`, which runs `config_schema.load(force=True)` -- deliberately, and
+`config.py`'s comment names this fixture as the reason the flag is there. `config_schema` is not in
+the swap list and cannot be, so the teardown restores `sys.modules` and the SCHEMA cache keeps
+`db_path = <tmp>/e2e.db` for the rest of the process.
+
+Four tests, not two. The extra pair is the interesting part: `TestTheLoaderCacheDoesNotLeakBetween
+Tests::test_two_still_sees_the_document_this_process_started_on`, whose class exists to catch this
+exact class of leak, and `test_the_shipped_file_is_untouched`, which fails with *"something in this
+run wrote the real file"* -- an accusation about a file nothing had touched. The suite is green only
+because collection is alphabetical and `test_config_edit` sorts first, the same sentence
+`restore_config_schema_cache` already uses about a different pair. **That fixture cannot cover
+this**: it is function-scoped, so pytest builds the module-scoped one first and the "before" it
+captures is already poisoned.
+
+Fixed by saving and restoring `config_schema._cached` in `real_storage`, beside the `APP_DB_PATH`
+it was read under. Pinned by a module-scoped sentinel that `real_storage` REQUESTS -- which is what
+buys it the last word, since a fixture is finalised in reverse setup order -- so it can assert the
+cache is the object the module started with after the swap has put it back. Nothing else inside
+a module can watch its own module-scoped teardown. Verified as a real kill: with the restore
+removed it becomes a teardown error naming the cause.
+
+(The first version of that pin was a child process running the two files in the failing order. It
+worked, and it cost two NEW bandit findings -- B404 for the `subprocess` import, B603 for the call
+-- in a project with zero `# nosec` and a standing rule against regenerating the baseline. The
+sentinel asserts the mechanism instead of the consequence and costs nothing.)
+
+**The measurement, taken again with the leak fixed.** Alternated so thermal drift cancels instead
+of accumulating in whichever mode ran second, and compared by failure SET rather than count:
+
+| Configuration | Runs | Wall | vs serial |
+|---|---|---|---|
+| `-n0` serial | 2 | 8:58, 9:13 | 1.0x |
+| `-n auto --dist loadfile` | 3 | 2:58 / 3:04 / 3:07 | 3.0x |
+| **`-n auto --dist loadscope`** | 8 | 2:09 - 2:22 | **4.2x** |
+| `-n logical --dist loadscope` | 5 | 2:13 - 2:19 | 4.0x |
+
+Every run green, and the same `passed`/`skipped` pair within a configuration. This box is busier
+than the one batch 109 measured on, which is why serial reads 9:06 where 109 read 7:10 -- the RATIO
+travels, and loadfile-to-loadscope is 1.37x here against 1.38x there.
+
+**`-n logical` is still not faster, and a first reading here said it was.** That reading compared
+three logical runs against ONE `-n auto` run of 2:27 taken in a busier window. Alternated properly:
+`-n auto` 2:09 / 2:10 against `-n logical` 2:13 / 2:13 / 2:14, so about 3% SLOWER. Lowering the
+floor narrowed batch 109's gap without changing its sign. One sample on one side of a comparison is
+not a measurement, and this one reached three files before the next five runs corrected it.
+
+**The floor moved, and so does this entry's prescription.** Re-aggregating the same `--durations=0`
+capture by loadscope's grouping rule -- the CLASS for a test in one, the MODULE for a test that is
+not:
+
+| Mode | The floor | Seconds | Share | Ceiling |
+|---|---|---|---|---|
+| loadfile | `tests/test_tui.py` | 124.5 | 32.4% | 3.09x |
+| **loadscope** | **`tests/test_tui.py`'s 28 module-level tests** | **79.7** | **20.7%** | **4.83x** |
+
+So the lever is no longer "split an 8,144-line file". It is the **28 tests in `test_tui.py` that
+sit outside any class**, which loadscope must keep together because a classless test is grouped by
+module. Gathering them into classes -- or moving them into a file of their own -- drops the floor
+towards the next group down (`test_mcp_client.py`, 15.9s) and costs one tree entry rather than
+four. The measured 4.1x is already 85% of the 4.83x ceiling, so this is worth perhaps another 15%
+and should be taken on its merits rather than for the number.
+
+**AND A SECOND HAZARD, found on the sixth run rather than by reading -- write this one down.**
+Under loadscope a FILE is no longer one unit. A file holding module-level tests AND a class is two
+groups, and a non-function-scoped fixture in it is set up twice on any worker that takes both.
+`test_storage_e2e.py` was exactly that, and its second `real_storage` raised
+`Table 'conversationthread' is already defined` -- the failure its own module docstring predicts
+("there can be only one swap"). **Five `-n auto` runs were green and a `-n logical` run was not**,
+so it is a scheduling lottery: the two groups landing on one worker is the accident, not the
+failure. `TestConcurrentWriters` is flattened to module level and
+`test_this_file_declares_no_test_class` pins it. `real_storage` is the suite's only
+non-function-scoped fixture (`grep -rn 'scope="module"' tests/`), so it was the only file at risk --
+and the rule the next one inherits is: **a module- or session-scoped fixture's file must hold no
+test class.**
+
+**What remains open in this item:** the 28 classless tests in `test_tui.py`, and nothing else. The
+`test_config_edit.py` precondition this entry prescribed was never the defect, and the mode
+decision it was blocking is taken.

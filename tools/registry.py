@@ -1032,6 +1032,12 @@ registry.register(ToolSpec(
     # which agent they are authorising.
     grant_policy=GRANT_NEVER,
     budget=BUDGET_HUMAN,
+    # TECHNICAL_DEBT 13, batch 110. The asymmetry `load_skill` did not
+    # have: with no spawnable agent discovered, this tool's only possible
+    # answer is `Unknown agent`, and until batch 51 shipped two of them
+    # that was every default install. See has_agents for why it reads the
+    # catalog function rather than the roster.
+    available_check=subagent_tool.has_agents,
     # §47. The only tool that does, so far: the child runs in a thread
     # of its own, which is what makes `▸ spawn_subagent` a line a
     # reader can open.

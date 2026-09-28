@@ -204,7 +204,7 @@ def _collect_in_a_subprocess() -> list:
 
     `-n0` BECAUSE addopts REACHES THE CHILD, which is the same sentence
     two lines up read the other way round. Since batch 109 that line also
-    carries `-n auto --dist loadfile`, so without this the child spawns a
+    carries `-n auto --dist loadscope`, so without this the child spawns a
     worker per core to collect a list and run nothing -- pure cost, on a
     call that is already the slowest thing in the fast CI gate. It also
     keeps the parse below reading pytest's own `--collect-only -q` output

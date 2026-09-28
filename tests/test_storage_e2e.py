@@ -68,7 +68,43 @@ _SWAPPED = ("sqlmodel", "config", "database", "storage")
 
 
 @pytest.fixture(scope="module")
-def real_storage(tmp_path_factory):
+def _schema_cache_is_put_back():
+    """Batch 110. Asserts, AFTER `real_storage` has torn down, that the
+    schema cache is the object this module started with.
+
+    The ordering is the whole design and it is why `real_storage` requests
+    this rather than the other way round: a fixture is finalised in reverse
+    setup order, so being set up FIRST is what buys the last word. By the
+    time this runs, the last test's function-scoped fixtures have restored
+    their own "before" (which is the poisoned value -- see below) and
+    `real_storage` has put the real one back.
+
+    Nothing inside a module can otherwise watch its own module-scoped
+    teardown, and the leak this guards is invisible from inside the module
+    anyway: it costs the NEXT file in the process, not this one. The
+    reproduction, for anyone who wants to see it fail rather than read
+    about it, is `pytest tests/test_storage_e2e.py
+    tests/test_config_edit.py` with the restore in `real_storage` removed
+    -- four failures, none of them here.
+    """
+    import config_schema
+
+    before = config_schema._cached
+    yield
+    assert config_schema._cached is before, (
+        "real_storage left config_schema._cached holding a different "
+        "document. It re-imports `config` under APP_DB_PATH, which runs "
+        "`config_schema.load(force=True)` and refills the cache with a "
+        "db_path in a tmp directory -- so every later test in this process "
+        "compares config.yaml against a database that does not exist. "
+        "`restore_config_schema_cache` in tests/conftest.py cannot catch "
+        "this: it is function-scoped, so the 'before' it captures is taken "
+        "AFTER this module's setup has already poisoned the value."
+    )
+
+
+@pytest.fixture(scope="module")
+def real_storage(tmp_path_factory, _schema_cache_is_put_back):
     """`storage` and `database` running on real SQLModel against a
     throwaway database, with core.memory rebound to them.
 
@@ -89,12 +125,36 @@ def real_storage(tmp_path_factory):
     conftest's docstring claims per-test fixtures already do this swap; that
     claim was stale, and no test doing it is part of why the defect this
     file exists for survived.
+
+    `config_schema._cached` IS PART OF "EVERYTHING", and until batch 110 it
+    was the one thing left out. Re-importing `config` runs
+    `config_schema.load(force=True)` -- deliberately, and `config.py`'s own
+    comment names this fixture as the reason -- so the schema's cache comes
+    back holding `db_path = <tmp>/e2e.db`. `config_schema` is not in
+    `_SWAPPED` and cannot be, so restoring `sys.modules` puts the old
+    `config` module object back without re-reading anything, and the cache
+    keeps the throwaway path for the rest of the process.
+
+    MEASURED, not hypothetical, and not an xdist problem:
+    `pytest tests/test_storage_e2e.py tests/test_config_edit.py` failed FOUR
+    tests before this line existed -- including
+    `TestTheLoaderCacheDoesNotLeakBetweenTests`, which exists to catch
+    exactly this, and `test_the_shipped_file_is_untouched`, whose message
+    accuses the run of writing the real `config.yaml` when nothing had. The
+    full suite passed only because collection is alphabetical and
+    `test_config_edit` sorts before `test_storage_e2e` -- the same sentence
+    `restore_config_schema_cache` in `tests/conftest.py` already uses about
+    a different pair, which is why that fixture cannot help here: it is
+    function-scoped, so it captures its "before" AFTER this module-scoped
+    setup has already run, and faithfully restores the poisoned value.
     """
+    import config_schema
     import core.memory as memory_mod
     from tests.conftest import MEMORY_STORAGE_SYMBOLS
 
     saved_modules = {name: sys.modules.get(name) for name in _SWAPPED}
     saved_db_path = os.environ.get("APP_DB_PATH")
+    saved_schema_cache = config_schema._cached
     saved_symbols = {name: getattr(memory_mod, name)
                      for name in MEMORY_STORAGE_SYMBOLS}
 
@@ -123,8 +183,48 @@ def real_storage(tmp_path_factory):
         os.environ.pop("APP_DB_PATH", None)
     else:
         os.environ["APP_DB_PATH"] = saved_db_path
+    # Beside the variable it was derived from, because they are one fact:
+    # the cache was re-read under that variable and has to go back with it.
+    config_schema._cached = saved_schema_cache
     for name, value in saved_symbols.items():
         setattr(memory_mod, name, value)
+
+
+def test_this_file_declares_no_test_class():
+    """Batch 110. "One file, because there can be only one swap" -- and
+    under `--dist loadscope` that sentence also means ONE GROUP.
+
+    loadscope groups a test by its CLASS where it has one and by its MODULE
+    where it does not. So a `Test*` class in this file is a SECOND group,
+    asking for a second `real_storage`, and pytest tears a module-scoped
+    fixture down when the worker leaves the module -- so the second setup
+    re-imports `storage` against a `SQLModel.metadata` that already has the
+    tables and raises `Table 'conversationthread' is already defined`,
+    which is exactly what this module's docstring has always predicted.
+
+    FOUND BY MEASURING, and it is a scheduling LOTTERY rather than a
+    deterministic break, which is the worst shape for something to be left
+    as a comment: five full runs at `-n auto` (11 workers) put the two
+    groups on different workers and were green, and a run at `-n logical`
+    (16) put both on gw6 and errored the pair. `TestConcurrentWriters` was
+    flattened to module level for this reason; the tests are unchanged.
+    """
+    import ast
+
+    with open(__file__, encoding="utf-8") as handle:
+        tree = ast.parse(handle.read())
+
+    classes = [node.name for node in tree.body
+               if isinstance(node, ast.ClassDef)
+               and node.name.startswith("Test")]
+
+    assert not classes, (
+        f"{classes} would be collected as separate --dist loadscope "
+        f"group(s), each wanting its own `real_storage`. Two of them on "
+        f"one worker raises \"Table 'conversationthread' is already "
+        f"defined\". Write the tests at module level; the helper classes "
+        f"in this file are fine because pytest collects `Test*` only."
+    )
 
 
 class _Resp:
@@ -1439,96 +1539,106 @@ def test_the_lineage_columns_migrate_onto_a_database_that_predates_them(
 # ---- Concurrent writers (ROADMAP_v2 §47 slice 8, hazard 7) ----------------
 # ---------------------------------------------------------------------------
 
-class TestConcurrentWriters:
-    """NA9 lets several subagents run at once, and each writes its own
-    thread. SQLite allows one writer at a time, so the question is whether
-    the engine's configuration turns that into waiting or into failing.
+# ---------------------------------------------------------------------------
+# ---- NA9: several subagents writing at once -------------------------------
+# ---------------------------------------------------------------------------
+#
+# NA9 lets several subagents run at once, and each writes its own thread.
+# SQLite allows one writer at a time, so the question is whether the
+# engine's configuration turns that into waiting or into failing.
+#
+# HERE, because this is the only file in the suite that meets a real
+# database -- the root conftest fakes `sqlmodel` before collection, and
+# there can be only one swap. A FakeStorage version of these tests could
+# not fail: the defect is in SQLite's locking, which the fake does not
+# have.
+#
+# EIGHT WRITERS, NOT THREE, and that is the whole discriminating choice.
+# Measured on the shipped engine: at three -- SUBAGENT_MAX_PARALLEL -- a
+# rollback-journal database does NOT lock, so a test at the real ceiling
+# passes with or without the fix and proves nothing. Eight is where the
+# unfixed configuration produced "database is locked", so it is where a
+# test can tell the two apart. The gap between them is also the reason WAL
+# is on at all: the ceiling is a tunable constant, and the failure it walks
+# into when raised is a lost message rather than a slow one.
+#
+# NOT A CLASS, since batch 110, and the reason is the whole file's: one
+# swap per process. `--dist loadscope` groups by CLASS where there is one
+# and by MODULE where there is not, so a class in this file is a SECOND
+# group wanting a second `real_storage` -- and the two landing on one
+# worker raises "Table 'conversationthread' is already defined" from the
+# re-import. Pinned below by
+# `test_this_file_declares_no_test_class`.
 
-    HERE, because this is the only file in the suite that meets a real
-    database -- the root conftest fakes `sqlmodel` before collection, and
-    there can be only one swap. A FakeStorage version of this test could not
-    fail: the defect is in SQLite's locking, which the fake does not have.
+def test_the_engine_is_configured_for_them(real_storage):
+    """The two pragmas, asked of a live connection rather than of the
+    source. `journal_mode` is persistent in the FILE, so reading it back
+    is the only way to know the listener actually reached the database
+    this process opened."""
+    from sqlalchemy import text
 
-    EIGHT WRITERS, NOT THREE, and that is the whole discriminating choice.
-    Measured on the shipped engine: at three -- SUBAGENT_MAX_PARALLEL -- a
-    rollback-journal database does NOT lock, so a test at the real ceiling
-    passes with or without the fix and proves nothing. Eight is where the
-    unfixed configuration produced "database is locked", so it is where a
-    test can tell the two apart. The gap between them is also the reason
-    WAL is on at all: the ceiling is a tunable constant, and the failure it
-    walks into when raised is a lost message rather than a slow one.
+    import database
+
+    with database.engine.connect() as conn:
+        assert conn.execute(
+            text("PRAGMA journal_mode")).scalar().lower() == "wal", (
+            "the database is not in WAL mode; concurrent subagent "
+            "writes will contend on a rollback journal")
+        assert conn.execute(
+            text("PRAGMA busy_timeout")).scalar() >= 5000, (
+            "the busy timeout is below the 5000ms the concurrency "
+            "measurements were taken at")
+
+def test_eight_concurrent_writers_all_land(real_storage):
+    """Each writer does what a child run does: create its own thread,
+    then append messages to it. A barrier starts them together, so the
+    contention is real rather than incidental.
+
+    Asserts the ROWS, not merely the absence of an exception. A writer
+    that swallowed a failure would leave a short thread, and "no
+    exception reached the test" is not the same claim as "every message
+    the model was told about is in the archive".
     """
+    import storage
 
-    def test_the_engine_is_configured_for_them(self, real_storage):
-        """The two pragmas, asked of a live connection rather than of the
-        source. `journal_mode` is persistent in the FILE, so reading it back
-        is the only way to know the listener actually reached the database
-        this process opened."""
-        from sqlalchemy import text
+    writers, rows = 8, 60
+    barrier = threading.Barrier(writers, timeout=30)
+    failures, made = [], {}
+    guard = threading.Lock()
 
-        import database
+    def writer(n):
+        try:
+            barrier.wait()
+            thread_id = storage.create_thread(
+                kind=storage.THREAD_KIND_SUBAGENT)
+            for i in range(rows):
+                # role "user", so the archive's assistant decoder is
+                # not handed a bare string. The claim here is about
+                # concurrent WRITES; the payload shape is another
+                # test's subject.
+                storage.save_message(
+                    thread_id, "user", "w%d r%d" % (n, i))
+            with guard:
+                made[n] = thread_id
+        except Exception as e:            # noqa: BLE001 -- the measurement
+            with guard:
+                failures.append((n, repr(e)))
 
-        with database.engine.connect() as conn:
-            assert conn.execute(
-                text("PRAGMA journal_mode")).scalar().lower() == "wal", (
-                "the database is not in WAL mode; concurrent subagent "
-                "writes will contend on a rollback journal")
-            assert conn.execute(
-                text("PRAGMA busy_timeout")).scalar() >= 5000, (
-                "the busy timeout is below the 5000ms the concurrency "
-                "measurements were taken at")
+    threads = [threading.Thread(target=writer, args=(n,))
+               for n in range(writers)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(60)
 
-    def test_eight_concurrent_writers_all_land(self, real_storage):
-        """Each writer does what a child run does: create its own thread,
-        then append messages to it. A barrier starts them together, so the
-        contention is real rather than incidental.
+    assert failures == [], (
+        f"{len(failures)} of {writers} concurrent writers failed: "
+        f"{failures[:3]}")
+    assert len(made) == writers
 
-        Asserts the ROWS, not merely the absence of an exception. A writer
-        that swallowed a failure would leave a short thread, and "no
-        exception reached the test" is not the same claim as "every message
-        the model was told about is in the archive".
-        """
-        import storage
-
-        writers, rows = 8, 60
-        barrier = threading.Barrier(writers, timeout=30)
-        failures, made = [], {}
-        guard = threading.Lock()
-
-        def writer(n):
-            try:
-                barrier.wait()
-                thread_id = storage.create_thread(
-                    kind=storage.THREAD_KIND_SUBAGENT)
-                for i in range(rows):
-                    # role "user", so the archive's assistant decoder is
-                    # not handed a bare string. The claim here is about
-                    # concurrent WRITES; the payload shape is another
-                    # test's subject.
-                    storage.save_message(
-                        thread_id, "user", "w%d r%d" % (n, i))
-                with guard:
-                    made[n] = thread_id
-            except Exception as e:            # noqa: BLE001 -- the measurement
-                with guard:
-                    failures.append((n, repr(e)))
-
-        threads = [threading.Thread(target=writer, args=(n,))
-                   for n in range(writers)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join(60)
-
-        assert failures == [], (
-            f"{len(failures)} of {writers} concurrent writers failed: "
-            f"{failures[:3]}")
-        assert len(made) == writers
-
-        for n, thread_id in made.items():
-            archived = storage.archive_history(thread_id)
-            assert len(archived) == rows, (
-                f"writer {n} wrote {len(archived)} of {rows} rows; a "
-                "message the model was told about is missing from the "
-                "archive")
-
+    for n, thread_id in made.items():
+        archived = storage.archive_history(thread_id)
+        assert len(archived) == rows, (
+            f"writer {n} wrote {len(archived)} of {rows} rows; a "
+            "message the model was told about is missing from the "
+            "archive")

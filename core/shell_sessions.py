@@ -95,6 +95,34 @@ KILL_WAKE_LIMIT = "wake_limit"
 KILL_IDLE = "idle"
 KILL_OPEN_FAILED = "open_failed"
 
+
+class _AnyOwner:
+    """The type of ANY_OWNER, for a legible repr in a traceback."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:                     # pragma: no cover - repr
+        return "ANY_OWNER"
+
+
+#: "Do not check ownership" -- the AUTHORITY OF THE USER OR THE HARNESS, said
+#: out loud (TECHNICAL_DEBT 29, batch 110).
+#:
+#: This used to be spelled `None`, which is the value a thread id takes when
+#: something forgot to supply one. `_owned_locked` read it as "any session
+#: matches" and `list_for` eleven lines below read the same value as "no
+#: session matches" -- one value, two opposite readings, in two functions
+#: that answer the same question. Both are now the second reading, and a
+#: caller that means to skip the check has to say so.
+#:
+#: Nothing reachable from the tools can pass this: `shell_input`,
+#: `shell_output` and `shell_kill` all hand over `memory.thread_id`, and the
+#: whole ownership story in tools/builtin/shell_sessions.py is that a model
+#: which could NAME a thread could reach another conversation's sessions.
+#: That story rested on `memory.thread_id` never being None, which is a
+#: property of another module and was asserted nowhere.
+ANY_OWNER = _AnyOwner()
+
 # What an interactive session may be typed at, and how it is waited on.
 # The control names are the agent's vocabulary; the bytes are the pty's.
 CONTROLS = {"interrupt": "\x03", "eof": "\x04"}
@@ -982,10 +1010,19 @@ class SessionManager:
     # -- what the tools ask --------------------------------------------------------
 
     def _owned_locked(self, session_id: str, owner_thread) -> Optional[_Session]:
+        """This thread's session of that id, or None.
+
+        `ANY_OWNER` is the only way past the check, and it is a value a
+        caller has to name (see its comment above). Everything else is
+        compared, `None` INCLUDED -- a missing thread id owns nothing, which
+        is the same answer `list_for` gives it one function down.
+        """
         session = self._sessions.get(str(session_id))
         if session is None:
             return None
-        if owner_thread is not None and session.owner_thread != str(owner_thread):
+        if owner_thread is ANY_OWNER:
+            return session
+        if owner_thread is None or session.owner_thread != str(owner_thread):
             return None
         return session
 
@@ -1173,10 +1210,16 @@ class SessionManager:
                     ended_meaning=_ENDED_MEANING[ended])
         return page
 
-    def kill(self, session_id: str, *, owner_thread=None,
+    def kill(self, session_id: str, *, owner_thread,
              reason: str = KILL_MODEL) -> dict:
-        """Stop a session and report its terminal state. *owner_thread* None
-        is the user's kill, which may name any session.
+        """Stop a session and report its terminal state. *owner_thread*
+        `ANY_OWNER` is the user's or the harness's kill, which may name any
+        session; a thread id is the model's, which may name only its own.
+
+        REQUIRED, with no default, since batch 110. The default was `None`
+        and `None` meant "skip the ownership check", so the safe call was
+        the one a caller had to remember to make. There are four call sites
+        and each of them now says which authority it is exercising.
 
         A kill the MODEL makes is its own report: this returns what the wake
         would have said -- the final state, the end of the output, and any
@@ -1230,13 +1273,17 @@ class SessionManager:
 
     def kill_owned(self, owner_thread, reason: str) -> list[str]:
         """Kill every live session this thread owns -- a subagent that ran
-        out of wakes (KILL_WAKE_LIMIT)."""
+        out of wakes (KILL_WAKE_LIMIT).
+
+        `ANY_OWNER` below because the ownership question was already asked,
+        two lines up and by this function: re-asking it per id would either
+        repeat the filter or, if the thread were None, quietly widen it."""
         with self._lock:
             ids = [s.id for s in self._sessions.values()
                    if s.owner_thread == str(owner_thread)
                    and s.state in LIVE_STATES]
         for session_id in ids:
-            self.kill(session_id, reason=reason)
+            self.kill(session_id, owner_thread=ANY_OWNER, reason=reason)
         return ids
 
     def kill_by_span(self, owner_span_id: str, reason: str) -> list[str]:
@@ -1247,7 +1294,11 @@ class SessionManager:
         `agent_activity`'s span is frozen and carries no address (the
         binding belongs to the sink). The span id is on the session from
         the moment it started, so what a failed run left behind is
-        identifiable even though its conversation is not."""
+        identifiable even though its conversation is not.
+
+        `ANY_OWNER` for the same reason as `kill_owned`, and here it is the
+        point rather than an economy: this sweep exists precisely because
+        the thread id is not available, so there is nothing to check by."""
         if not owner_span_id:
             return []
         with self._lock:
@@ -1255,7 +1306,7 @@ class SessionManager:
                    if s.owner_span_id == owner_span_id
                    and s.state in LIVE_STATES]
         for session_id in ids:
-            self.kill(session_id, reason=reason)
+            self.kill(session_id, owner_thread=ANY_OWNER, reason=reason)
         return ids
 
     # -- snapshots and shutdown ----------------------------------------------------

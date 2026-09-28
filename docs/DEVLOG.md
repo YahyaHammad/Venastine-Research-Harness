@@ -16177,3 +16177,269 @@ fourth was the mode migration and is still fixed. `pytest-xdist` had to be
 installed there, as it does anywhere the suite runs now.
 
 Counts unchanged at 6028: no test was added, removed or renamed.
+
+## Batch 110 -- three things that were right for a reason nobody had written down (2026-09-28)
+
+The debt register rather than a roadmap section: every section across the
+three roadmap documents is built, so the owner picked the cluster whose
+prescriptions were already written out -- items 30, 29 and 13.
+
+They are unrelated in subject and identical in shape. Each is a place the
+code is correct only because something ELSE happens to be true: a file that
+sorts earlier in the alphabet, a thread id that is never `None`, an agent
+roster that is never empty. Two of them are one careless caller away from
+mattering. The third was not latent at all, and the register had its cause
+wrong.
+
+### The register had item 30's cause wrong, and reproducing it is what showed that
+
+Item 30 said two tests in `test_config_edit.py` were "wrong-by-luck for
+anyone running that class on its own", and named the mechanism:
+`config_schema.current()` reading the `CONFIG_PATH` that the test's own
+`_copy_config` had just monkeypatched. It was derived from a traceback and
+the code around it, it was plausible, and the first thing this batch did was
+run the class on its own. **Six passed in 1.7 seconds.** So did the whole
+suite narrowed to that class with a full collection behind it.
+
+The real cause is a cross-file leak, and **xdist has nothing to do with it**:
+
+```
+pytest tests/test_storage_e2e.py tests/test_config_edit.py     # 4 failed
+```
+
+`real_storage` pops `config` out of `sys.modules` and re-imports it with
+`APP_DB_PATH` pointing at a throwaway database. That re-import runs
+`config_schema.load(force=True)` -- deliberately, and `config.py`'s comment
+names this very fixture as the reason the flag exists, because without it
+the fresh `config` would hand the engine the OLD `db_path`. What the comment
+does not say is what happens on the way back out: `config_schema` is not in
+the swap list and cannot be, so the teardown puts the old `config` module
+object back and the SCHEMA cache keeps `db_path = <tmp>/e2e.db` for the rest
+of the process.
+
+Four tests, not the two `loadscope` showed, and the extra two are the
+interesting ones. `TestTheLoaderCacheDoesNotLeakBetweenTests` exists to catch
+exactly this class of leak and was being broken by it. And
+`test_the_shipped_file_is_untouched` failed with *"something in this run
+wrote the real file"* -- an accusation about a file nothing had touched,
+which is what a diagnosis baked into an assertion message costs when the
+assumption under it moves.
+
+**The fixture that should have covered it could not, for a scope reason.**
+`restore_config_schema_cache` in `tests/conftest.py` saves and restores
+`config_schema._cached` around every test, and its docstring already tells
+this story about a different pair -- *"the full suite passed only because
+collection is alphabetical"*. It is function-scoped. pytest builds a
+module-scoped fixture first, so the "before" it captures is already the
+poisoned value, and it restores that faithfully after every test in the
+module. A guard can be correct, load-bearing, and blind to the thing beside
+it.
+
+The fix is one save and one restore in `real_storage`, beside the
+`APP_DB_PATH` the cache was re-read under, because they are one fact.
+
+**The pin is a fixture that watches a fixture**, because nothing else
+inside a module can watch its own module-scoped teardown run. `real_storage`
+REQUESTS a module-scoped sentinel, which is what buys the sentinel the last
+word -- a fixture is finalised in reverse setup order, so being set up first
+means being torn down last -- and it asserts the cache is the object the
+module started with. A real kill: remove the restore and it becomes a
+teardown error naming the cause.
+
+The first version of that pin was a child process running the two files in
+the failing order. It worked, and it cost two NEW bandit findings -- B404
+for the `subprocess` import, B603 for the call -- in a project that carries
+zero `# nosec` and has a standing rule against regenerating the baseline.
+Two baseline entries to assert a consequence, where a fixture asserts the
+mechanism for nothing. The bandit run is the reason the cheaper pin got
+written, which is an argument for running the whole gate before deciding a
+test is finished.
+
+### The mode measurement, taken again -- and then a sixth run
+
+Alternated so thermal drift cancels instead of accumulating in whichever
+mode ran second, and compared by failure SET rather than count.
+
+| Configuration | Runs | Wall | vs serial |
+|---|---|---|---|
+| `-n0` serial | 2 | 8:58, 9:13 | 1.0x |
+| `-n auto --dist loadfile` | 3 | 2:58 / 3:04 / 3:07 | 3.0x |
+| **`-n auto --dist loadscope`** | 8 | 2:09 - 2:22 | **4.2x** |
+| `-n logical --dist loadscope` | 5 | 2:13 - 2:19 | 4.0x |
+
+This box is busier than the one batch 109 measured on -- serial reads 9:06
+where 109 read 7:10 -- so the RATIO is the number that travels, and
+loadfile-to-loadscope is **1.37x here against 1.38x there**. The owner took
+the switch on those numbers.
+
+**`-n logical` is still not faster, and a first reading of it here said it
+was.** That reading compared three logical runs against ONE `-n auto` run
+of 2:27 from a busier window, and the 4% it claimed reached three files
+before the next five runs corrected it: alternated properly, `-n auto` ran
+2:09 / 2:10 against `-n logical`'s 2:13 / 2:13 / 2:14. Lowering the floor
+narrowed batch 109's gap without changing its sign. One sample on one side
+of a comparison is not a measurement.
+
+**Then the sixth run found what five green ones had hidden.** A
+`-n logical` run came back with two ERRORS, not failures, and the bench
+script called it green because it was grepping for `FAILED ` lines only --
+the false-GREEN twin of the false-RED trap that once scored 25 fake kills in
+the mutation harness. It now reads `ERROR ` and the exit code too.
+
+What it found is a hazard `loadscope` adds that nothing in the plan had
+predicted, because it is not about ORDER: **under loadscope a file is no
+longer one unit.** loadscope groups by the CLASS where a test has one and by
+the MODULE where it does not, so a file holding both is TWO groups -- and
+`test_storage_e2e.py` was exactly that, 48 module-level tests plus
+`TestConcurrentWriters`. Both groups want the module-scoped `real_storage`,
+pytest tears a module-scoped fixture down when the worker leaves the module,
+and the second setup re-imports `storage` against a `SQLModel.metadata` that
+already has the tables:
+
+```
+sqlalchemy.exc.InvalidRequestError: Table 'conversationthread' is already
+defined for this MetaData instance.
+```
+
+Which is, word for word, what that file's own module docstring has always
+predicted: *"ONE FILE, because there can be only one swap."* The docstring
+was right and the mode made "one file" mean "one group".
+
+**It is a scheduling lottery, which is the worst shape for a hazard.** Five
+runs at eleven workers put the two groups on different workers and were
+green; one run at sixteen put both on gw6. So `TestConcurrentWriters` is
+flattened to module level -- the two tests unchanged, the class docstring
+now a section comment -- and `test_this_file_declares_no_test_class` parses
+the module with `ast` and refuses a `Test*` class, naming the reason.
+`real_storage` is the suite's only non-function-scoped fixture
+(`grep -rn 'scope="module"' tests/` returns one line), so this was the only
+file at risk; the rule the next such fixture inherits is written into
+AGENTS.md beside the mode.
+
+**And the floor moved, which moves item 30's prescription.** Re-aggregating
+the same `--durations=0` capture by loadscope's grouping rule: the floor is
+no longer `test_tui.py` at 124.5s but **`test_tui.py`'s 28 module-level
+tests at 79.7s** -- one group, because a classless test is grouped by
+module. Ceiling 3.09x -> 4.83x, measured 4.1x. So the lever is 28 tests
+rather than an 8,144-line file, and the remaining headroom is about 15%.
+
+### `None` was a skeleton key, and the entry that recorded it was half right
+
+`core/shell_sessions.py::_owned_locked` answered "is this session this
+thread's" by skipping the check entirely for `owner_thread=None`, while
+`list_for` eleven lines below stringified `None` to `"None"` and matched
+nothing. One value, two opposite readings, in two functions that answer the
+same question -- and the permissive reading was the one a forgotten argument
+got.
+
+Item 29 said the `None` arm existed for the two internal sweeps. It also
+existed for the user: `kill`'s own docstring said *"owner_thread None is the
+user's kill, which may name any session"*, and the TUI's stop relies on it.
+So the authority is real and the fix is to NAME it, not to remove it.
+
+`ANY_OWNER` is that name -- a sentinel with a `__repr__` so a traceback says
+which authority was exercised. Everything else is compared, `None`
+included. And `kill`'s `owner_thread` lost its default: four call sites in
+the tree, eight in the suite, each of which now states what it is claiming.
+A default meaning "skip the check" makes the safe call the one a caller has
+to remember.
+
+Nothing reachable from the tools could pass `None` -- `shell_input`,
+`shell_output` and `shell_kill` all hand over `memory.thread_id`, which
+`core/memory.py` sets from a created or validated thread. That is the point
+rather than a reason to skip it: the tool layer's whole ownership story is
+that a model which could NAME a thread could reach another conversation's
+sessions, and that story rested on a property of a different module that
+nothing asserted.
+
+### The tool that advertised an answer it could not give
+
+`load_skill` declares `available_check=has_skills` and says why: with no
+skills discovered "this tool's only possible answer is 'Unknown skill'", a
+schema the model can see, choose, and never get value from.
+`spawn_subagent` had no such declaration, and its schema asks for an "Agent
+name exactly as listed in the Available agents catalog" -- so until batch 51
+shipped two spawnable agents, every default install advertised a tool whose
+only possible answer was `Unknown agent`.
+
+`has_agents` reads `agent_catalog_text()`, the same function prompt assembly
+uses, for the reason `has_skills` gives about `skill_catalog_text`: two
+answers to "is there a catalog" are two answers free to drift. It is
+ROSTER-WIDE and the docstring says so, because `available_check` takes no
+context -- a run whose `spawn_targets` empties the list is still
+`refusal_reason`'s business, and a reader who assumed otherwise would
+believe a per-run restriction was being enforced at advertisement time.
+
+**Four tests were resting on the old answer**, and the one that caught it
+was written to. `test_a_run_that_can_ask_IS_offered_spawn_subagent` exists
+so that its negative siblings "cannot pass against a registry that stopped
+advertising spawn_subagent anywhere" -- which is precisely what this change
+did. Three tests in `test_agents.py` and one in
+`test_research_authorization.py` state their roster now; none of them is
+about the roster, and each was reading a registry whose answer came from
+somewhere it did not name.
+
+### One number moved and two beside it turned out to have already moved
+
+`ARCHITECTURE.md` asserts three registry counts against the live registry
+(audit #126) because "this paragraph *is* the argument and a stale count
+weakens it". Advertised went 16 -> 15. The sentences AROUND those three are
+not asserted, and both of their numbers were stale by two: five session
+tools where there are seven, twelve hidden where there were fourteen. A
+guard that pins the claim it was written for does not pin the sentence next
+to it -- the same shape as `restore_config_schema_cache` above, and as the
+bench script that could not see an error.
+
+The paragraph also now says which STATE its numbers describe (before any
+discovery has run) and names the two tools that come back after it, because
+it was already claiming in one sentence that `load_skill` is advertised and
+counting it as hidden in another.
+
+### The mutation that survived, and the sharper key underneath it
+
+Five rows, foreground, preflight green first. Four killed immediately. The
+fifth was `owner_thread is None or` deleted from `_owned_locked`, and it
+survived every test in the file -- which reads at first like the clause
+being decoration, since `str(None)` is `"None"` and no session is owned by
+a thread called `"None"`.
+
+Except that `start` stores `str(owner_thread)` as well. A session created
+WITHOUT a thread carries the literal owner `"None"`, and with the clause
+gone `_owned_locked(id, None)` matches it on the string alone. That is not
+"no ownership check" any more; it is a check that SUCCEEDS, which is the
+same skeleton key with a sharper edge -- and nothing in the suite had ever
+created such a session, which is exactly why nothing caught the deletion.
+
+`test_a_session_stored_with_no_thread_is_not_a_back_door` creates one. Five
+of five killed.
+
+### Verification
+
+`ruff check .` clean. Bandit exit 0 two ways -- the tracked tree and the
+changed files, both against a path-corrected THROWAWAY copy of the
+baseline, never regenerated. It earned its keep rather than being a
+formality this time: the first version of the `real_storage` pin was a
+child process, bandit named its two new findings, and the pin is a fixture
+because of it.
+
+Windows full suite green **parallel and serial after every edit**:
+`-n auto --dist loadscope` 2:13 and 2:17, `-n0` 9:10, each
+`5990 passed, 46 skipped`, `AGENT_WORKSPACE` unset. **Twenty-one full runs**
+across the measurement and the verification, at three worker counts and two
+distribution modes -- which is what taking a mode change honestly costs,
+and it is the sixteenth of them that found the lottery.
+
+The fast docs gate answers rather than skips in its CI shape (`-n0`, one
+file): 37 passed, 1 skipped.
+
+Mutation **5 of 5 killed**, foreground, preflight green first, each row
+restored and re-read.
+
+WSL on the new default: **6004 passed, 3 failed, 29 skipped in 1:38** --
+the three documented causes and nothing else (two matplotlib on py3.14 and
+`test_re_importing_config_re_reads_the_file`'s HOME redirection, both
+present since batch 106), with batch 107's fourth still fixed. 1:38 against
+the 2:16 batch 109 measured there under loadfile, so the mode gain
+reproduces on a second OS.
+
+Counts 6028 -> 6036.

@@ -410,7 +410,8 @@ class TestTheWaitLoop:
         message; `owner_depth` is what tells them apart.)"""
         app = _bare_app()
         started = _start(manager)
-        manager.kill(started["session"], reason=ss.KILL_USER)
+        manager.kill(started["session"], owner_thread=ss.ANY_OWNER,
+                     reason=ss.KILL_USER)
         woken = []
         app._wait_for_sessions(
             THREAD, lambda t, r: woken.append(t) or iter(()))
@@ -455,7 +456,8 @@ class TestHeldResultsArriveWithTheNextMessage:
         # The user's own kill, which SS19 holds rather than wakes -- the
         # real route to a held result, rather than reaching into the
         # manager's inboxes to build one by hand.
-        manager.kill(started["session"], reason=ss.KILL_USER)
+        manager.kill(started["session"], owner_thread=ss.ANY_OWNER,
+                     reason=ss.KILL_USER)
 
         app._deliver_held(THREAD)
         assert app.memory.add_harness_message.called, \

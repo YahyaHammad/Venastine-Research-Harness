@@ -818,22 +818,73 @@ def test_spawn_grants_nothing_when_there_is_no_channel(_roots, _mcp_tool,
 # r3-1 through configuration rather than through the missing parameter, with
 # nothing in the suite failing. Both halves are now tested.
 
-def test_a_headless_run_is_never_offered_spawn_subagent():
+# BATCH 110: the three below now STATE the roster they depend on. Since
+# TECHNICAL_DEBT 13 the tool declares an available_check, so "no spawnable
+# agent discovered" is a fourth reason it can be absent from the schema list
+# -- and these tests are about the other three. Their own control
+# (`test_a_run_that_can_ask_IS_offered_spawn_subagent`, which exists so the
+# negative assertions cannot pass against a registry that stopped
+# advertising the tool anywhere) is what caught the change, which is the
+# best argument for writing controls like that one.
+
+def test_a_headless_run_is_never_offered_spawn_subagent(_roots):
     """The invariant. r3-1's fix (forwarding the channel) is only half of
     why a spawned child keeps its gated tools; this is the other half."""
+    _write_harness_agent(_roots, "worker")
+    config_loader.initialize(str(_roots["project"]))
+
     headless = {s["name"] for s in registry.schemas(None, callable_only=True)}
     assert "spawn_subagent" not in headless
     assert "spawn_subagent" in registry.headless_hidden(None)
 
 
-def test_a_run_that_can_ask_IS_offered_spawn_subagent():
+def test_a_run_that_can_ask_IS_offered_spawn_subagent(_roots):
     """Control. Without it the assertion above also passes against a
     registry that stopped advertising spawn_subagent anywhere, which would
     disable delegation entirely rather than confine it."""
+    _write_harness_agent(_roots, "worker")
+    config_loader.initialize(str(_roots["project"]))
+
     assert "spawn_subagent" in {s["name"] for s in registry.schemas(None)}
 
 
-def test_a_grant_cannot_smuggle_spawn_subagent_into_a_headless_run():
+def test_with_no_spawnable_agent_it_is_not_advertised_at_all(_roots):
+    """TECHNICAL_DEBT 13, batch 110. The asymmetry `load_skill` did not
+    have: its schema tells the model to name an agent "exactly as listed in
+    the Available agents catalog", and with no catalog the only possible
+    answer is `Unknown agent` -- a turn spent learning the tool cannot be
+    used, which is the fetch_url damage class D24 names.
+
+    Batch 51 shipped two spawnable agents, so the live instance went away
+    and only the asymmetry stayed. A user whose agents are all
+    non-spawnable, or who deletes the shipped pair, is back in it.
+
+    Both directions in one test, because the interesting property is that
+    the answer TRACKS the roster rather than that it is False once."""
+    config_loader.initialize(str(_roots["project"]))          # no agents
+    assert "spawn_subagent" not in {s["name"] for s in registry.schemas(None)}
+    assert "spawn_subagent" not in registry.headless_hidden(None)
+
+    _write_harness_agent(_roots, "worker")
+    config_loader.initialize(str(_roots["project"]))
+    assert "spawn_subagent" in {s["name"] for s in registry.schemas(None)}
+
+
+def test_a_non_spawnable_agent_does_not_advertise_the_tool(_roots):
+    """The roster is not the catalog, and `has_agents` reads the catalog.
+
+    An agent declared `spawnable: false` is selectable by a human through
+    `/agent` and cannot be spawned (#69), so a roster of nothing but those
+    is the no-catalog case -- and reading `get_agents()` directly here
+    instead of `agent_catalog_text()` would get it wrong."""
+    _write_harness_agent(_roots, "handheld", ["spawnable: false"])
+    config_loader.initialize(str(_roots["project"]))
+
+    assert config_loader.get_agents()
+    assert "spawn_subagent" not in {s["name"] for s in registry.schemas(None)}
+
+
+def test_a_grant_cannot_smuggle_spawn_subagent_into_a_headless_run(_roots):
     """R15 opened one door and R13 keeps this one shut. spawn_subagent has
     no approval_check, so grantable() says True and the new grant-aware
     filter would advertise it -- except that _answered_by_grant also reads
@@ -844,6 +895,9 @@ def test_a_grant_cannot_smuggle_spawn_subagent_into_a_headless_run():
     hand-built RunInfo. Advertising it would produce a tool the model can
     see and R14 then refuses -- advertised and uncallable, the damage class
     the rest of this batch removes."""
+    _write_harness_agent(_roots, "worker")
+    config_loader.initialize(str(_roots["project"]))
+
     smuggled = registry.schemas(None, callable_only=True,
                                 granted={"spawn_subagent"})
     assert "spawn_subagent" not in {s["name"] for s in smuggled}

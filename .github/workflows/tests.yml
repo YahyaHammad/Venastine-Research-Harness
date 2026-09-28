@@ -102,19 +102,22 @@ jobs:
       # pytest on PATH from a separate tool install runs in its own
       # environment and sees none of the project's dependencies.
       #
-      # NO `-n` HERE, AND THAT WAS MEASURED RATHER THAN ASSUMED (batch 109).
-      # pytest.ini's `-n auto` gives 70% of the cores; the obvious CI move
-      # is `-n logical` for the other 30%, since a runner has nothing else
-      # to do with itself. It buys nothing. This suite is FLOOR-BOUND: with
-      # `--dist loadfile` the slowest single file sets the wall time, and
-      # tests/test_tui.py is 30.9% of the whole suite, so past about a
-      # quarter of the cores extra workers only contend. Measured on 16
-      # cores, same commit, alternating to cancel drift: `-n auto` 2:15 /
-      # 2:17 / 2:18 / 2:21, `-n logical` 2:37 / 3:01 / 3:06. Never faster,
-      # usually slower.
+      # NO `-n` HERE, AND THAT WAS MEASURED RATHER THAN ASSUMED (batch 109,
+      # re-measured under loadscope in batch 110). pytest.ini's `-n auto`
+      # gives 70% of the cores; the obvious CI move is `-n logical` for the
+      # other 30%, since a runner has nothing else to do with itself. It
+      # buys nothing, under EITHER distribution mode. This suite is
+      # FLOOR-BOUND: the slowest single GROUP sets the wall time, and under
+      # `--dist loadscope` that is test_tui.py's 28 module-level tests at
+      # 20.7% of the suite, so past about a quarter of the cores extra
+      # workers only contend.
       #
-      # So CI runs exactly what a contributor runs, which is worth more
-      # than a flag that does not help. Raising the ceiling means splitting
-      # test_tui.py (docs/TECHNICAL_DEBT.md 30), not turning a dial.
+      # Measured twice. Under loadfile: `-n auto` 2:15 / 2:17 / 2:18 / 2:21
+      # against `-n logical` 2:37 / 3:01 / 3:06. Under loadscope, alternated
+      # on the same commit: `-n auto` 2:09 / 2:10 against `-n logical`
+      # 2:13 / 2:13 / 2:14. Lowering the floor narrowed the gap and did not
+      # change its sign. So CI runs exactly what a contributor runs.
+      # Raising the ceiling means the 28 classless tests in test_tui.py
+      # (docs/TECHNICAL_DEBT.md 30), not turning a dial.
       - name: Run the suite
         run: python -m pytest -q

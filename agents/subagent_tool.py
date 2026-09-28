@@ -57,6 +57,38 @@ TOOL_SCHEMA = {
 }
 
 
+def has_agents() -> bool:
+    """ToolSpec.available_check (TECHNICAL_DEBT 13, batch 110).
+
+    The schema above tells the model to name an "Agent name exactly as
+    listed in the Available agents catalog". With no SPAWNABLE agent
+    discovered there is no such catalog, so the tool's only possible
+    answer is `Unknown agent` -- a schema the model can see, choose, and
+    never get value from, which is the fetch_url damage class §15 exists
+    to fix. `load_skill.has_skills` is the same declaration for the same
+    reason, and `pin`, `unpin` and `remember` each carry one.
+
+    Reads the SAME function prompt assembly uses (agent_catalog_text, via
+    prompts/system_prompts.with_catalogs) rather than a parallel check, so
+    "advertised" and "catalogued" cannot drift apart. That is the whole
+    point of the choice: batch 51 shipped two spawnable agents, so the
+    live instance of this was gone and only the asymmetry remained.
+
+    ROSTER-WIDE, NOT PER-RUN, because `available_check` takes no context.
+    It answers "is there any spawnable agent at all". A run whose
+    `spawn_targets` empties the list is still the business of
+    `refusal_reason` and of `agent_catalog_text(targets)`, which read the
+    same restriction from the two sides it has.
+
+    Imported inside the function for the reason the module docstring
+    gives about core.loop: tools/registry.py imports this module, and
+    prompts/system_prompts.py imports the registry.
+    """
+    from prompts import system_prompts
+
+    return bool(system_prompts.agent_catalog_text())
+
+
 def refusal_reason(params: dict, context=None):
     """Why this spawn would be refused, or None (§32 A7, #70).
 

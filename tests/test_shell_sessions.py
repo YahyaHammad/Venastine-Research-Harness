@@ -282,7 +282,7 @@ class TestLifecycle:
         quit still reach the agent the ordinary way."""
         _start(manager, owner="child")
 
-        result = manager.kill("s1", reason=ss.KILL_USER)
+        result = manager.kill("s1", owner_thread=ss.ANY_OWNER, reason=ss.KILL_USER)
 
         assert result["status"] == ss.KILLED
         assert [e.shape for e in manager.take_held("child")] == [ss.KILLED]
@@ -301,6 +301,76 @@ class TestLifecycle:
         assert "error" in manager.kill("s1", owner_thread="child")
         assert "error" in manager.output("s1", "child")
         assert manager.list_for("child") == []
+
+    def test_a_missing_thread_id_owns_nothing(self, manager):
+        """TECHNICAL_DEBT 29, batch 110. `None` used to mean "skip the
+        ownership check" in `_owned_locked` and "match no session" in
+        `list_for` -- one value read two opposite ways by two functions
+        eleven lines apart, and the permissive reading was the one a
+        forgotten argument got.
+
+        THE TOOLS CANNOT REACH IT TODAY: `shell_input`, `shell_output` and
+        `shell_kill` all pass `memory.thread_id`, which `core/memory.py`
+        sets from a created or validated thread. That is a property of
+        another module, asserted nowhere, and it is the whole thing the
+        tool layer's "a model that could name a thread could reach another
+        conversation's sessions" rests on. So it is pinned here rather than
+        left as a fact about somebody else's file."""
+        _start(manager, owner="parent")
+
+        assert manager._owned_locked("s1", None) is None
+        assert "error" in manager.kill("s1", owner_thread=None)
+        assert "error" in manager.output("s1", None)
+        # The exact message, because `send` refuses a background session on
+        # its KIND two lines further down -- "an error came back" would
+        # pass here with no ownership check at all.
+        assert manager.send("s1", None, text="whoami")["error"] == (
+            "No session s1 in this conversation.")
+
+    def test_a_session_stored_with_no_thread_is_not_a_back_door(self,
+                                                                manager):
+        """Why the `is None` arm is not redundant with the string
+        comparison beside it -- and this test exists because a mutation
+        deleting that arm SURVIVED everything else in this file.
+
+        `start` stores `str(owner_thread)`, so a session created without a
+        thread carries the literal owner `"None"`. Drop the arm and
+        `_owned_locked(id, None)` matches it on the string alone: not "no
+        ownership check" any more, but a check that SUCCEEDS, which is the
+        same skeleton key with a sharper edge. Nothing reachable creates
+        such a session today, which is exactly why nothing was catching
+        the deletion.
+        """
+        started = _start(manager, owner=None)
+        session_id = started["session"]
+
+        assert manager.row(session_id).owner_thread == "None", (
+            "start() no longer stringifies the owner, so this test is "
+            "measuring something else -- check _owned_locked again")
+        assert manager._owned_locked(session_id, None) is None
+
+    def test_the_two_lookups_agree_about_the_same_argument(self, manager):
+        """The property item 29 is actually about. `_owned_locked` and
+        `list_for` answer the same question -- "is this session this
+        thread's" -- and used to disagree for exactly one input."""
+        _start(manager, owner="parent")
+
+        for owner in (None, "child"):
+            assert manager._owned_locked("s1", owner) is None
+            assert manager.list_for(owner) == []
+
+        assert manager._owned_locked("s1", "parent") is not None
+        assert [row["session"] for row in manager.list_for("parent")] == ["s1"]
+
+    def test_any_owner_is_the_only_way_past_the_check(self, manager):
+        """What the sweeps and the user's kill use, and it has to keep
+        working: `kill_owned`, `kill_by_span` and the TUI's ctrl-k have all
+        already established their authority by the time they call `kill`."""
+        _start(manager, owner="parent")
+
+        assert manager._owned_locked("s1", ss.ANY_OWNER) is not None
+        assert manager.kill("s1", owner_thread=ss.ANY_OWNER,
+                            reason=ss.KILL_USER)["status"] == ss.KILLED
 
     def test_output_pages_for_the_owner(self, manager, session_starter):
         _start(manager)
@@ -446,7 +516,7 @@ class TestWakingAndTheLimit:
         """SS19: killing a session yourself is not a reason to spend a
         model call telling the agent about it."""
         _start(manager)
-        manager.kill("s1", reason=ss.KILL_USER)
+        manager.kill("s1", owner_thread=ss.ANY_OWNER, reason=ss.KILL_USER)
         assert not manager.pending("t1")
         assert [e.shape for e in manager.take_held("t1")] == [ss.KILLED]
 
@@ -454,7 +524,7 @@ class TestWakingAndTheLimit:
             self, manager, session_starter):
         with agent_activity.span(None, "explore", 1):
             _start(manager, owner="child")
-        manager.kill("s1", reason=ss.KILL_USER)
+        manager.kill("s1", owner_thread=ss.ANY_OWNER, reason=ss.KILL_USER)
         assert _until(lambda: manager.pending("child"))
 
     def test_the_owner_agent_is_recorded_from_the_open_span(self, manager):

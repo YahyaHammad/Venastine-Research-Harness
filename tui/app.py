@@ -1873,8 +1873,13 @@ class VenastineApp(App):
         acknowledgement that they stopped it.
         """
         def _work() -> None:
+            # ANY_OWNER: the person at the keyboard may stop anything they
+            # can see, including a subagent's session in another thread.
+            # Said out loud since batch 110, when the same authority was
+            # spelled `None` and reached three other call sites by default.
             shell_sessions.sessions.kill(
-                session_id, reason=shell_sessions.KILL_USER)
+                session_id, owner_thread=shell_sessions.ANY_OWNER,
+                reason=shell_sessions.KILL_USER)
 
         self._visible_transcript.write_system(f"Stopping {session_id}…")
         self.run_worker(_work, thread=True, exit_on_error=False,

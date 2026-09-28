@@ -429,6 +429,29 @@ class TestTheOtherThree:
         assert "No session" in read["error"]
         assert "No session" in killed["error"]
 
+    def test_a_memory_with_no_thread_sees_nothing_rather_than_everything(
+            self, manager, session_starter):
+        """TECHNICAL_DEBT 29, batch 110. The tool layer's whole ownership
+        story is that the owning thread is the injected memory's and never
+        a parameter -- which rests on `memory.thread_id` never being None,
+        a property of core/memory.py that nothing checked.
+
+        It was a skeleton key: `_owned_locked` treated None as "no
+        ownership check", so a caller that lost its thread -- a replay
+        path, a reconstructed session, a subagent whose run raised -- would
+        have been handed every session in the process rather than an error.
+        Unreachable today and pinned anyway, because what makes it
+        unreachable lives in a different module."""
+        _start(memory=_FakeMemory("mine"))
+        nobody = _FakeMemory(None)
+
+        assert registry.dispatch("shell_sessions", {},
+                                 memory=nobody)["sessions"] == []
+        assert "No session" in registry.dispatch(
+            "shell_output", {"session": "s1"}, memory=nobody)["error"]
+        assert "No session" in registry.dispatch(
+            "shell_kill", {"session": "s1"}, memory=nobody)["error"]
+
     def test_output_is_paged_and_redacted(self, manager, session_starter):
         _start()
         session_starter.started[0]["process"].write(f"key {SECRET}\n")

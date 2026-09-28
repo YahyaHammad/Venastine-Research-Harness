@@ -18,9 +18,11 @@
 # here), same `python -m pytest` rule.
 #
 # Every job here takes pytest.ini's parallel default. For windows-subset
-# that is close to a no-op and the arithmetic says why: it names two
-# files, and `--dist loadfile` cannot put one file on two workers, so the
-# ceiling is two workers however many cores are asked for.
+# that is nearly a no-op and the arithmetic says why: it names two files,
+# and `--dist loadscope` splits a file only at its CLASS boundaries, so
+# the ceiling is however many classes those two files have between them
+# rather than the core count. (Before batch 110 the mode was loadfile and
+# the ceiling was two workers flat.)
 
 name: compat
 

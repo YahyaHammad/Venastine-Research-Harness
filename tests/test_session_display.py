@@ -452,7 +452,7 @@ class TestTheSink:
         app = _bare_app()
         sink = TuiSessions(app)
         _start(manager)
-        manager.kill("s1", reason=ss.KILL_USER)
+        manager.kill("s1", owner_thread=ss.ANY_OWNER, reason=ss.KILL_USER)
         sink.changed(manager.rows())
 
         assert app.posted[-1].rows, "the dead row was dropped before the UI"
@@ -862,7 +862,7 @@ class TestThePollFollowsWhatIsLive:
         app = _bare_app()
         _start(manager)
         app.open_session("s1")
-        manager.kill("s1", reason=ss.KILL_USER)
+        manager.kill("s1", owner_thread=ss.ANY_OWNER, reason=ss.KILL_USER)
         app._sync_view_poll()
 
         assert app._view_timer is None
@@ -903,7 +903,7 @@ class TestThePollFollowsWhatIsLive:
         _start(manager)
         app.open_session("s1")
         app._session_view_widget.reset()
-        manager.kill("s1", reason=ss.KILL_USER)
+        manager.kill("s1", owner_thread=ss.ANY_OWNER, reason=ss.KILL_USER)
 
         app.on_session_rows_changed(SessionRowsChanged(manager.rows()))
 
