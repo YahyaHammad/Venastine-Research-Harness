@@ -2348,12 +2348,18 @@ def main(argv=None) -> int:
     # MOVED UP HERE IN BATCH 107, from below create_db_and_tables, so the
     # refusal underneath it can sit where it has to. Nothing between the
     # two positions read it; it depends only on config and the cwd.
+    #
+    # UNCHANGED IN BATCH 111, and deliberately: WORKSPACE_DIR_EXPLICIT now
+    # answers to `workspace_is_project` as well as to AGENT_WORKSPACE
+    # (TECHNICAL_DEBT 28), and the whole point of putting the OR inside
+    # config_schema.derived_values is that this line never learns there are
+    # two routes. One question, asked once, answered in the config layer.
     project_path = (os.path.realpath(config.WORKSPACE_DIR)
                     if config.WORKSPACE_DIR_EXPLICIT else os.getcwd())
 
     # TECHNICAL_DEBT 26. The other half of the guard six lines up, and it
     # exists because that one only ever saw a workspace someone NAMED.
-    # With AGENT_WORKSPACE unset the line above falls back to os.getcwd(),
+    # With nothing naming one the line above falls back to os.getcwd(),
     # so launching from the install tree made the harness its own project
     # -- the same state check_workspace refuses, reached by saying nothing.
     # Measured from an owner report (batch 96) and reproduced before the

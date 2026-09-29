@@ -128,10 +128,14 @@ class TestTheHarnessIsNotItsOwnProject:
         something the model did -- so it is written for the person who has
         to fix it, which is `check_workspace`'s own rule one function up.
 
-        Both routes, because there are two and someone stuck on this will
-        have tried the wrong third one: `workspace_dir` in `config.yaml`
-        names a workspace and does NOT make it the project, since the rule
-        is the variable's PRESENCE (TECHNICAL_DEBT 28)."""
+        THREE ROUTES SINCE BATCH 111, where there were two and a trap. The
+        message used to close by saying `workspace_dir` in `config.yaml`
+        "is not enough on its own" -- accurate, and no use whatever to the
+        person reading it, who had just written the directory they meant
+        into the file the refusal is about. `workspace_is_project` is the
+        third route, so the sentence is about what to do rather than about
+        what does not work (TECHNICAL_DEBT 28).
+        """
         import main
 
         rc = main.main([])
@@ -140,10 +144,16 @@ class TestTheHarnessIsNotItsOwnProject:
         assert rc == 2
         assert "AGENT_WORKSPACE" in err
         assert "config.yaml" in err, (
-            "the one wrong turn this refusal has to head off is unnamed")
+            "the file someone stuck on this has already been editing")
+        assert "workspace_is_project" in err, (
+            "the route that does not need an environment variable is the "
+            "one this refusal exists to hand over")
         assert "./workspace" in err, (
             "working on the harness itself has an answer and it is not "
             "obvious; the message is where someone finds it")
+        assert "is not enough" not in err, (
+            "the old sentence told the reader their fix had failed and "
+            "left them nowhere to go; it is a route now")
 
     @pytest.mark.parametrize("argv", [
         ["--memories"],
@@ -229,6 +239,37 @@ class TestWhatMustKeepWorking:
         project.mkdir()
         monkeypatch.setattr(config, "WORKSPACE_DIR", str(project))
         monkeypatch.setattr(config, "WORKSPACE_DIR_EXPLICIT", True)
+
+        assert main.main([]) == 0
+        assert launch["project_path"] == os.path.realpath(str(project))
+
+    def test_the_file_alone_rescues_a_launch_from_the_install_tree(
+            self, launch, from_the_install_tree, monkeypatch, tmp_path):
+        """The same rescue as above with NO environment variable anywhere
+        -- the case TECHNICAL_DEBT 28 was about (batch 111).
+
+        Driven through `config_schema` rather than by patching
+        `WORKSPACE_DIR_EXPLICIT` to True, because that is the join under
+        test: the sibling test above can pass with `workspace_is_project`
+        deleted from the codebase entirely. Here the document says it and
+        nothing else does, so what arrives at `main()` had to come through
+        `derived_values`.
+        """
+        import config
+        import config_schema
+        import main
+
+        project = tmp_path / "declared-in-the-file"
+        project.mkdir()
+        monkeypatch.delenv("AGENT_WORKSPACE", raising=False)
+
+        declared = config_schema.current().model_copy(update={
+            "workspace_dir": str(project), "workspace_is_project": True})
+        namespace = config_schema.as_module_namespace(declared)
+        monkeypatch.setattr(config, "WORKSPACE_DIR",
+                            namespace["WORKSPACE_DIR"])
+        monkeypatch.setattr(config, "WORKSPACE_DIR_EXPLICIT",
+                            namespace["WORKSPACE_DIR_EXPLICIT"])
 
         assert main.main([]) == 0
         assert launch["project_path"] == os.path.realpath(str(project))

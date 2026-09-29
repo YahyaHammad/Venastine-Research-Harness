@@ -840,11 +840,16 @@ def effective_compaction(overrides: Optional[dict] = None,
                          warn: bool = False) -> dict:
     """The compaction values actually in force.
 
-    A flat {key: value}. NOT where each came from -- see
-    TECHNICAL_DEBT.md item 12; the merge below overwrites without
-    recording which tier won, and D27's third implementation note asked
-    for provenance AND somewhere to show it. This sentence used to
-    promise both (audit #91).
+    A flat {key: value}, and DELIBERATELY STILL FLAT. Where each value
+    came from is `compaction_sources()` below, beside this rather than
+    inside it: twelve call sites subscript what this returns, so
+    `{key: (value, tier)}` breaks every one of them and a parallel dict
+    breaks none -- TECHNICAL_DEBT 12's first blocker, which is a decision
+    about shape and is unchanged by having built the second half.
+
+    This docstring used to open "and where they came from" and return a
+    flat dict, which is audit #91's finding; then it promised nothing and
+    pointed at the register. Now it points at the function that answers.
 
     config.yaml default -> user settings.json -> trusted project
     settings.json -> `overrides` (a per-invocation `/compact --strength 4`,
@@ -867,9 +872,7 @@ def effective_compaction(overrides: Optional[dict] = None,
     """
     cfg = config_schema.current()
 
-    values = shipped_defaults()["compaction"]
-    values.update(get_settings().get("compaction") or {})
-    values.update({k: v for k, v in (overrides or {}).items() if v is not None})
+    values, _ = _compaction_merge(overrides)
 
     strength = values["strength"]
     if strength not in cfg.compaction_target_ratios:
@@ -935,6 +938,57 @@ def effective_compaction(overrides: Optional[dict] = None,
     return values
 
 
+def _compaction_merge(overrides: Optional[dict] = None) -> tuple[dict, dict]:
+    """`(values, sources)` for the seven compaction keys -- ONE ladder.
+
+    TECHNICAL_DEBT 12, batch 111. Both halves come out of the same three
+    `update()` calls because the alternative is two ladders that have to
+    agree about precedence, and a provenance report that disagrees with
+    the value it describes is worse than no provenance: it is a confident
+    wrong answer to "why is this number what it is".
+
+    `sources` names a tier for every key, always -- `"config.yaml"` when
+    nothing outranks the file -- where `settings_sources()` records only
+    what a settings file set. The difference is deliberate: that one
+    answers "did anything override this", which absence can express, and
+    this one answers "where did this number come from", which it cannot.
+    """
+    values = shipped_defaults()["compaction"]
+    sources = dict.fromkeys(values, "config.yaml")
+
+    tiers = settings_sources()
+    for key, value in (get_settings().get("compaction") or {}).items():
+        values[key] = value
+        # The tier that WROTE it, not "settings.json": the merge upstream
+        # kept them apart precisely so this line can tell them apart.
+        sources[key] = tiers.get(f"compaction.{key}", "user")
+
+    for key, value in (overrides or {}).items():
+        if value is not None:
+            values[key] = value
+            sources[key] = "override"
+
+    return values, sources
+
+
+def compaction_sources(overrides: Optional[dict] = None) -> dict:
+    """`{key: tier}` for the seven compaction keys -- where each value in
+    force came from. TECHNICAL_DEBT 12, and D27's third implementation
+    note, whose whole argument was that "compaction feels too aggressive"
+    should be a one-line answer rather than a value three files away.
+
+    Tiers: `"config.yaml"`, `"user"`, `"project"`, `"override"` -- nearest
+    wins, the same ladder `effective_compaction` walks, walked once by the
+    function they share.
+
+    NO VALIDATION HERE, and that is not an oversight. This is a display
+    call on a process whose configuration was validated at startup by
+    `initialize()`; raising from a `/config` explanation would replace a
+    sentence about a number with a traceback about a number.
+    """
+    return _compaction_merge(overrides)[1]
+
+
 def _read_settings_file(path: str) -> dict:
     if not os.path.exists(path):
         return {}
@@ -962,9 +1016,10 @@ def user_settings() -> dict:
         os.path.join(_user_config_dir(), "settings.json"))
 
 
-def _load_merged_settings(project_path: str, trusted: bool) -> dict:
-    """Resolution order: project (trusted) > user. Anything absent falls
-    through to config.yaml defaults at the consumer.
+def _load_merged_settings(project_path: str,
+                          trusted: bool) -> tuple[dict, dict]:
+    """`(values, sources)`. Resolution order: project (trusted) > user.
+    Anything absent falls through to config.yaml defaults at the consumer.
 
     Nested sections (`_NESTED_SETTINGS`) merge one level deeper than the
     rest. Every other setting is a scalar, so whole-value replacement IS
@@ -976,8 +1031,24 @@ def _load_merged_settings(project_path: str, trusted: bool) -> dict:
     Driven off _NESTED_SETTINGS rather than naming sections inline: §16
     added `tui` alongside `compaction`, and a second hardcoded section name
     here is exactly how the first one came to be missed.
+
+    `sources` MAPS EACH SETTING TO THE TIER THAT LAST WROTE IT, dotted for
+    a nested key: `{"compaction.strength": "project"}`. TECHNICAL_DEBT 12,
+    batch 111. It is built HERE, in the same pass as the merge, because
+    this is the only moment the two tiers are still distinguishable -- the
+    entry's own words for why provenance was missing were that it is "not
+    omitted, it is destroyed by the merge", and a second function
+    re-reading both files to work it out afterwards would be two
+    traversals that must agree, which is the shape this module's own
+    docstrings keep naming as how the first one drifts.
+
+    A value the user set and the project did not keeps `user`, which is
+    the whole point of recording it per key rather than per file: one
+    `settings.json` arriving with a cloned directory does not make every
+    compaction value the project's.
     """
     merged = user_settings()
+    sources = _tier_of(merged, "user")
     if trusted:
         project = _read_settings_file(os.path.join(
             workspace_trust.venastine_dir(project_path), "settings.json"))
@@ -986,10 +1057,29 @@ def _load_merged_settings(project_path: str, trusted: bool) -> dict:
             for section in _NESTED_SETTINGS
         }
         merged.update(project)
+        sources.update(_tier_of(project, "project"))
         for section, value in deep.items():
             if value:
                 merged[section] = value
-    return merged
+    return merged, sources
+
+
+def _tier_of(settings: dict, tier: str) -> dict:
+    """`{dotted key: tier}` for everything *settings* actually sets.
+
+    One level deep, for `_NESTED_SETTINGS`' reason and driven off the same
+    table: a section is the only kind of value whose keys are settings in
+    their own right, so a section is the only thing flattened. Its own
+    name is recorded too -- a consumer that reads a whole section, as
+    `tui` does, wants to know who supplied it.
+    """
+    flat = {}
+    for key, value in settings.items():
+        flat[key] = tier
+        if key in _NESTED_SETTINGS and isinstance(value, dict):
+            for leaf in value:
+                flat[f"{key}.{leaf}"] = tier
+    return flat
 
 
 _state: Optional[dict] = None
@@ -1006,7 +1096,7 @@ def initialize(project_path: str) -> None:
             "content (agents, skills, settings, AGENTS.md) will not load.",
             project_path,
         )
-    settings = _load_merged_settings(project_path, trusted)
+    settings, settings_tiers = _load_merged_settings(project_path, trusted)
     context = None
     if trusted:
         # §44: the project ROOT, not .venastine/. The hub is an ordinary
@@ -1036,6 +1126,10 @@ def initialize(project_path: str) -> None:
         "agents": _discover("agents", project_path, trusted),
         "skills": _discover("skills", project_path, trusted),
         "settings": settings,
+        # Beside the values rather than folded into them, because twelve
+        # call sites subscript that dict and `{key: (value, tier)}` breaks
+        # every one (TECHNICAL_DEBT 12's first blocker, unchanged).
+        "settings_sources": settings_tiers,
         "context": context,
     }
     # §32 A3. Before effective_compaction, because this one is about
@@ -1116,6 +1210,23 @@ def get_settings() -> dict:
     if _state is None:
         return {}  # pre-init consumers fall through to config.yaml defaults
     return dict(_state["settings"])
+
+
+def settings_sources() -> dict:
+    """`{dotted setting: "user" | "project"}` for everything a settings
+    file actually set. TECHNICAL_DEBT 12.
+
+    A setting absent here was not set by either file, which means the
+    value in force came from `config.yaml` -- so the caller reads the
+    absence rather than needing a third tier name in the mapping.
+
+    Empty pre-init for `get_settings()`'s reason, and the consequence is
+    the same one: a caller that runs before `initialize()` is told nothing
+    outranks the file, which is true of that moment.
+    """
+    if _state is None:
+        return {}
+    return dict(_state["settings_sources"])
 
 
 def spend_cap() -> Optional[int]:

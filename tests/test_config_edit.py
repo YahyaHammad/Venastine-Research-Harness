@@ -262,7 +262,8 @@ class TestTheRoundTripIsLossless:
         # gate (SS11, SS16).
         # 142 since batch 102: the SSH backend's one authority flag and
         # its seven host scalars (ROADMAP_v3 §49 slice 4, SS46).
-        assert touched == 142, f"{touched} settable scalars, expected 142"
+        # 143 since batch 111: `workspace_is_project` (TECHNICAL_DEBT 28).
+        assert touched == 143, f"{touched} settable scalars, expected 143"
         assert config_edit._dump(tree) == text
 
     def test_a_one_value_change_is_a_one_line_diff(self, tmp_path,
@@ -766,10 +767,201 @@ class TestExplainSaysWhatTheValueIsSubjectTo:
         lines = " ".join(config_edit.explain("compaction_trigger_tokens"))
         assert "settings.json" in lines
 
+    @staticmethod
+    def _speaking(monkeypatch, settings, sources):
+        """A process whose settings files have already been merged.
+
+        `_state` rather than the two accessors, because that is the one
+        object both read and patching them separately is how they come to
+        disagree in a test and nowhere else.
+        """
+        from core import config_loader
+
+        monkeypatch.setattr(config_loader, "_state", {
+            "project_path": "/somewhere",
+            "trusted": True,
+            "agents": {},
+            "skills": {},
+            "settings": settings,
+            "settings_sources": sources,
+            "context": None,
+        })
+
+    def test_a_settings_key_that_is_actually_winning_says_so(
+            self, monkeypatch):
+        """TECHNICAL_DEBT 12. The old sentence said a settings.json CAN
+        win -- a static possibility, in a process that knows the answer.
+        Now it names the tier, the value in force, and the fact that
+        writing here will not move it."""
+        self._speaking(monkeypatch,
+                       {"compaction": {"trigger_tokens": 90210}},
+                       {"compaction.trigger_tokens": "project"})
+
+        lines = " ".join(config_edit.explain("compaction_trigger_tokens"))
+
+        assert "This project's settings.json" in lines
+        assert "90210" in lines, "the value in force is the useful half"
+        assert "can win" not in lines
+
+    def test_it_names_the_user_tier_when_that_is_the_one_speaking(
+            self, monkeypatch):
+        self._speaking(monkeypatch,
+                       {"compaction": {"trigger_tokens": 4321}},
+                       {"compaction.trigger_tokens": "user"})
+
+        lines = " ".join(config_edit.explain("compaction_trigger_tokens"))
+
+        assert "Your settings.json" in lines
+        assert "project" not in lines.lower(), (
+            "telling someone their PROJECT set a value their user file "
+            "set sends them to edit the wrong file")
+
+    def test_a_key_nothing_set_keeps_the_sentence_about_what_could(
+            self, monkeypatch):
+        """The old sentence is kept rather than dropped: with nothing
+        speaking it is the whole truth, and the reason this key is
+        overridable at all is not visible from the key."""
+        self._speaking(monkeypatch, {"compaction": {"strength": 5}},
+                       {"compaction.strength": "user"})
+
+        lines = " ".join(config_edit.explain("compaction_trigger_tokens"))
+
+        assert "can win over whatever is written here" in lines
+        assert "is in force" not in lines
+
+    def test_the_sentence_is_not_only_for_compaction(self, monkeypatch):
+        """`settings_overrides()` maps eleven rows and the lookup is one
+        table, so restricting this to the seven compaction keys would
+        have meant writing a second, narrower one to stay quiet about the
+        rest."""
+        self._speaking(monkeypatch, {"research": {"subagent_review": True}},
+                       {"research.subagent_review": "project"})
+
+        lines = " ".join(config_edit.explain("subagent_review"))
+
+        assert "This project's settings.json" in lines
+        assert "research.subagent_review" in lines
+
+    def test_it_quotes_the_settings_value_and_not_the_imported_one(
+            self, monkeypatch):
+        """THE TRAP THIS AVOIDS. For a compaction key `row.in_session` is
+        `config.COMPACTION_*` -- what config.yaml said, bound at import --
+        because the settings merge happens inside `effective_compaction`
+        and never reaches the `config` module. So `in_session` is the
+        wrong one of three values to quote in a sentence about what is
+        winning, and quoting it would produce a line asserting that the
+        file's number is the settings file's."""
+        import config
+
+        self._speaking(monkeypatch,
+                       {"compaction": {"trigger_tokens": 11111}},
+                       {"compaction.trigger_tokens": "user"})
+
+        lines = " ".join(config_edit.explain("compaction_trigger_tokens"))
+        imported = config.COMPACTION_TRIGGER_TOKENS
+
+        assert "11111" in lines
+        assert imported != 11111, (
+            "this test asserts a DIFFERENCE, so it is vacuous the moment "
+            "config.yaml happens to ship 11111")
+        assert f"sets compaction.trigger_tokens to {imported}" not in lines
+
     def test_a_container_lists_its_entries_capped(self):
         lines = config_edit.explain("domain_authority_suffixes")
         assert any("and 93 more" in line for line in lines)
         assert any("CONFIG_ARCHITECTURE.md" in line for line in lines)
+
+
+class TestTheWorkspaceIsNotAutomaticallyTheProject:
+    """TECHNICAL_DEBT 28, batch 111. Two keys, one question between them.
+
+    WHAT WOULD MAKE THIS CLASS VACUOUS: asserting only that the sentences
+    exist. The defect was never a missing sentence -- it was that writing
+    one key and expecting both was the reasonable reading. So each test
+    here pins a sentence that DIFFERS between the two states, and the
+    shipped state (`false`, no variable) is asserted to say the negative
+    out loud rather than saying nothing.
+    """
+
+    def test_the_path_key_says_it_is_not_the_project_by_itself(
+            self, monkeypatch):
+        monkeypatch.delenv("AGENT_WORKSPACE", raising=False)
+        lines = " ".join(config_edit.explain("workspace_dir"))
+
+        assert "workspace_is_project" in lines
+        assert "is NOT the project in this session" in lines, (
+            "the shipped state is the one that surprises people, so it is "
+            "the one that has to be stated rather than implied")
+
+    def test_the_path_key_says_it_IS_the_project_when_the_variable_speaks(
+            self, monkeypatch):
+        monkeypatch.setenv("AGENT_WORKSPACE", "/anywhere")
+        lines = " ".join(config_edit.explain("workspace_dir"))
+
+        assert "It IS the project in this session" in lines
+        assert "$AGENT_WORKSPACE" in lines
+
+    def test_the_declaration_key_lists_what_moves_with_it(self,
+                                                          monkeypatch):
+        monkeypatch.delenv("AGENT_WORKSPACE", raising=False)
+        lines = " ".join(config_edit.explain("workspace_is_project"))
+
+        assert "workspace trust" in lines
+        assert "/init" in lines
+        assert "memories" in lines
+        assert "AGENT_WORKSPACE" in lines, (
+            "someone reading this key needs to know the variable does the "
+            "same thing, or they will set both and wonder which won")
+
+    def test_the_declaration_key_says_the_two_routes_do_not_compete(
+            self, monkeypatch):
+        """There is no precedence between them and saying so is the point:
+        an OR has no loser, and a reader who assumes one exists will go
+        looking for a rule that was deliberately not written."""
+        monkeypatch.setenv("AGENT_WORKSPACE", "/anywhere")
+        lines = " ".join(config_edit.explain("workspace_is_project"))
+
+        assert "already the project this session" in lines
+        assert "no precedence" in lines
+
+    def test_a_written_key_does_not_claim_the_session_already_moved(
+            self, tmp_path, monkeypatch):
+        """THE DISTINCTION THIS WHOLE MODULE IS ABOUT (batch 85), and the
+        one a sentence added to it is most likely to break. `/config
+        workspace_is_project true` writes the file and leaves the running
+        process exactly where it was; a line reading `in_file` would
+        announce that the project had moved when nothing had.
+        """
+        monkeypatch.delenv("AGENT_WORKSPACE", raising=False)
+        target = _copy_config(tmp_path, monkeypatch)
+        target.write_text(
+            _read(target).replace("workspace_is_project: false",
+                                  "workspace_is_project: true"),
+            encoding="utf-8")
+
+        lines = " ".join(config_edit.explain("workspace_dir"))
+
+        assert "is NOT the project in this session" in lines
+        assert "config.yaml now says workspace_is_project: true" in lines
+        assert "The next launch will." in lines
+
+    def test_nothing_is_said_about_a_difference_that_does_not_exist(
+            self, tmp_path, monkeypatch):
+        """The control. Without it the line above could be unconditional
+        and every assertion in the sibling test would still pass."""
+        monkeypatch.delenv("AGENT_WORKSPACE", raising=False)
+        _copy_config(tmp_path, monkeypatch)
+
+        lines = " ".join(config_edit.explain("workspace_dir"))
+
+        assert "has not picked up" not in lines
+
+    def test_neither_key_claims_to_be_authority(self, monkeypatch):
+        """The negative that `tests/test_posture.py` argues and this one
+        observes: nothing here says AUTHORITY, because neither key is."""
+        monkeypatch.delenv("AGENT_WORKSPACE", raising=False)
+        for name in ("workspace_dir", "workspace_is_project"):
+            assert "AUTHORITY" not in " ".join(config_edit.explain(name))
 
 
 class TestTheRelaunch:

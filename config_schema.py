@@ -356,8 +356,10 @@ class HarnessConfig(_Model):
 
     # -- File-ops workspace ------------------------------------------------
     # `output_dir` and `workspace_dir_explicit` are deliberately absent --
-    # see DERIVED_VALUES below.
+    # see DERIVED_VALUES below. `workspace_is_project` is NOT the second of
+    # those: it is an ordinary key that FEEDS one (TECHNICAL_DEBT 28).
     workspace_dir: str
+    workspace_is_project: StrictBool
     max_file_size_bytes: PositiveInt
     max_read_lines: PositiveInt
     max_read_chars: PositiveInt
@@ -582,6 +584,9 @@ HARNESS_ENV_VARS = tuple(sorted(
 #: The two values with NO `config.yaml` key, because neither is a static
 #: default and inventing one would change behaviour. Named here so the
 #: round-trip check in `tests/` can tell "absent on purpose" from "forgotten".
+#: `workspace_is_project` is NOT the key for the second of these -- it is one
+#: of the two inputs `derived_values` reads to compute it, and the other is
+#: an environment variable no key can stand in for.
 DERIVED_VALUES = ("OUTPUT_DIR", "WORKSPACE_DIR_EXPLICIT")
 
 #: Keys that need a human at the keyboard. No UNATTENDED surface may write
@@ -739,13 +744,19 @@ def _overlay_env(data: dict) -> dict:
     return merged
 
 
-def derived_values() -> dict:
+def derived_values(cfg: HarnessConfig) -> dict:
     """The two `{UPPER_CASE_NAME: value}` entries with no `config.yaml` key.
 
     Separate from the model because neither is a static default: one is a
-    composed path and the other is a question about the environment that YAML
-    cannot ask. `DERIVED_VALUES` names them so a completeness check can tell
-    "absent on purpose" from "forgotten".
+    composed path and the other is a question the environment answers and
+    YAML cannot ask. `DERIVED_VALUES` names them so a completeness check can
+    tell "absent on purpose" from "forgotten".
+
+    TAKES `cfg` SINCE BATCH 111, because one of the two is no longer a
+    question about the environment ALONE -- see `WORKSPACE_DIR_EXPLICIT`
+    below. There is exactly one caller and it already holds the config, so
+    this costs nothing; what it buys is that the file gets a say in a value
+    that decides where the work is.
     """
     return {
         # AGENT_OUTPUT_DIR, else `<AGENT_WORKSPACE or ".">/output`. ONE
@@ -758,12 +769,29 @@ def derived_values() -> dict:
         "OUTPUT_DIR": os.environ.get(
             "AGENT_OUTPUT_DIR",
             os.path.join(os.environ.get("AGENT_WORKSPACE", "."), "output")),
-        # PRESENCE, never value. `main()` uses this to decide whether the
-        # resolved workspace is also the PROJECT PATH, and the default
-        # `./workspace` is a subdirectory of the launch directory -- so a
-        # value test would move the project one level down for everyone who
-        # set nothing.
-        "WORKSPACE_DIR_EXPLICIT": "AGENT_WORKSPACE" in os.environ,
+        # WAS THE WORKSPACE NAMED AS THE PROJECT? `main()` uses this to
+        # decide whether the resolved workspace is also the PROJECT PATH.
+        # TWO ROUTES, AND EACH EXISTS FOR A REASON THE OTHER CANNOT SERVE
+        # (TECHNICAL_DEBT 28, batch 111):
+        #
+        #   * `AGENT_WORKSPACE`, by its PRESENCE and never its value. A value
+        #     test here would move the project one level down for everyone
+        #     who set nothing, because the shipped `./workspace` is a
+        #     subdirectory of the launch directory. YAML cannot ask whether a
+        #     variable was named, which is why this half is not a key.
+        #   * `workspace_is_project`, which IS a key, for the reader who has
+        #     no variable to set. Before it, someone who wrote their project
+        #     into `workspace_dir` got the workspace they asked for and a
+        #     project of `os.getcwd()` -- and launched from the install tree,
+        #     a refusal telling them to set a variable they believed they had
+        #     just set. Shipped `false`, so no existing install moves.
+        #
+        # OR, not "the file wins" or "the variable wins": both say the same
+        # thing about the same directory, so there is no precedence question
+        # to answer, and answering one would mean a user who did both getting
+        # less than a user who did either.
+        "WORKSPACE_DIR_EXPLICIT": (cfg.workspace_is_project
+                                   or "AGENT_WORKSPACE" in os.environ),
     }
 
 
@@ -779,7 +807,7 @@ def as_module_namespace(cfg: HarnessConfig) -> dict:
         if name in ("tool_permissions", "tool_approvals"):
             continue
         values[name.upper()] = getattr(cfg, name)
-    values.update(derived_values())
+    values.update(derived_values(cfg))
     return values
 
 

@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 6036 tests, offline. 2:10 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
+pytest                                            # 6064 tests, offline. 2:10 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -67,7 +67,7 @@ Test dependencies (`pytest`, `pytest-mock`, `pytest-asyncio`, and `pytest-xdist`
 
 **And a file is no longer one unit, which is the trap loadscope adds.** A file holding both module-level tests and a class is TWO groups, so a non-function-scoped fixture in it is set up twice on any worker that takes both — found by measuring, not by reading, when a `-n logical` run put `test_storage_e2e.py`'s two groups on one worker and the second `real_storage` raised `Table 'conversationthread' is already defined`. Five `-n auto` runs had been green, so it is a scheduling lottery. `real_storage` is the suite's ONLY non-function-scoped fixture (`grep -rn 'scope="module"' tests/`), and its file now declares no test class, pinned by `test_this_file_declares_no_test_class`. **If you add a module- or session-scoped fixture, its file must hold no test class.**
 
-**The suite is FLOOR-BOUND, so do not reach for more workers.** The slowest single GROUP sets the wall time whatever the worker count, and under loadscope that is `tests/test_tui.py`'s 28 module-level tests — one group, because a test outside a class is grouped by module — at **79.7s of 384.5s measured, 20.7%**, for an arithmetic ceiling of 4.8× against a measured 4.1×. (Under loadfile the floor was the whole file, 124.5s, ceiling 3.1×; that is the 1.37× the mode switch bought.) Extra workers past that buy nothing: alternated on the same commit, `-n auto` (11 workers) ran 2:09 / 2:10 and `-n logical` (16) ran 2:13 / 2:13 / 2:14 — **about 3% slower**, which is the same answer batch 109 got under loadfile and the reason CI takes the default a contributor does instead of asking for the whole runner. **Raising the ceiling means the 28 classless tests in `test_tui.py`** (TECHNICAL_DEBT 30), not turning a dial, and that is a smaller job than the whole-file split the entry first prescribed.
+**The suite is FLOOR-BOUND, so do not reach for more workers.** The slowest single GROUP sets the wall time whatever the worker count, and under loadscope that is `tests/test_tui.py`'s 183 module-level tests — one group, because a test outside a class is grouped by module — at **79.7s of 384.5s measured, 20.7%**, for an arithmetic ceiling of 4.8× against a measured 4.1×. (Under loadfile the floor was the whole file, 124.5s, ceiling 3.1×; that is the 1.37× the mode switch bought.) Extra workers past that buy nothing: alternated on the same commit, `-n auto` (11 workers) ran 2:09 / 2:10 and `-n logical` (16) ran 2:13 / 2:13 / 2:14 — **about 3% slower**, which is the same answer batch 109 got under loadfile and the reason CI takes the default a contributor does instead of asking for the whole runner. **Raising the ceiling means the 183 classless tests in `test_tui.py`** (TECHNICAL_DEBT 30), not turning a dial — a 183-site edit rather than a four-way file split, and batch 110 put "28" here by not counting them.
 
 **A fresh clone needs `cp providers.json.example providers.json` before `pytest`.** The file is gitignored, and **12 tests across four files** fail with `ValueError: No providers configured: ...` without it — 7 in `test_loop_tool_dispatch`, 3 in `test_loop_stop_conditions`, 1 in `test_agents` and 1 in `test_thread_legibility` (measured by moving the file aside and running the suite; the note used to say 11 across three, missing the §27 test written after it — audit #128) — `api_initialization()` needs the provider ENTRY to exist, even though the key inside it stays empty. Since #24 the message names the file and its remedy instead of reporting an unknown provider, and `AGENT_PROVIDERS_FILE` redirects it like every sibling path. "Offline, no API keys" is true; "no config file" is not. Also note `python3 -m pytest`: a `pytest` on PATH from a separate tool install runs in its own environment and sees none of the project's dependencies.
 
@@ -95,9 +95,12 @@ auto-approve writes there from every project. That second one is the trap: it is
 move after seeing `APP_DB_PATH` redirected two lines above, and it is wrong.
 
 **Since §44 it is also the PROJECT PATH, which makes that rule stricter rather than looser** (WS7).
-`main()` sets `project_path` to the resolved workspace when `AGENT_WORKSPACE` is *named*, so trust,
-`.venastine/`, `/init`'s destination and `UserMemory`'s project scope all follow it. **And when it is
-NOT named, `main()` falls back to `os.getcwd()`, which is refused if that is the install tree**
+`main()` sets `project_path` to the resolved workspace when the workspace is *named as the project*, so
+trust, `.venastine/`, `/init`'s destination and `UserMemory`'s project scope all follow it. **Two ways to
+name it since batch 111** (TECHNICAL_DEBT 28): the presence of `AGENT_WORKSPACE`, or `workspace_is_project:
+true` in `config.yaml`, OR'd inside `config_schema.derived_values(cfg)` so `main()` still reads one
+boolean. **And when NEITHER names it, `main()` falls back to `os.getcwd()`, which is refused if that is
+the install tree**
 (`protected_paths.check_project`, TECHNICAL_DEBT 26, batch 107) -- naming the harness was always
 refused, and until then the implicit route reached the same state by saying nothing. PRESENCE, never
 value: the default `./workspace` is a subdirectory of the launch directory, so a value test would
@@ -2631,7 +2634,7 @@ is gone outright, not kept as a fallback. `doc_path()` is one join now.
 
 `core/config_loader.py` discovers `.md` agents/skills across three tiers — harness (`<root>/{agents,skills}/builtin/`) → project (`.venastine/`, trust-gated) → user (`~/.config/venastine/`) — parses line-anchored YAML frontmatter, and merges `settings.json` (unknown keys **raise**). `core/workspace_trust.py` owns only the D17 trust store (resolved path + sorted-walk content hash); `main.py` owns the prompting UX.
 
-**Trust is keyed to the PROJECT PATH, which is `AGENT_WORKSPACE` when one is named and `os.getcwd()` otherwise** (§44 WS7, reversing RM6). RM6 recorded the opposite and the report that reopened it is what the split looked like in use: the file tools confined to the workspace while `/init` scaffolded the harness.
+**Trust is keyed to the PROJECT PATH, which is the workspace when something names it as the project -- `AGENT_WORKSPACE`, or `workspace_is_project` in `config.yaml` since batch 111 -- and `os.getcwd()` otherwise** (§44 WS7, reversing RM6; TECHNICAL_DEBT 28). RM6 recorded the opposite and the report that reopened it is what the split looked like in use: the file tools confined to the workspace while `/init` scaffolded the harness.
 
 **What a grant covers is `content_files()`, and that is now the root `AGENTS.md` plus everything under `.venastine/`** (WS9). The hub reaching a system prompt from outside the boundary would be D17's own stated threat arriving through the door WS8 opened, so the listing carries it — with PROJECT-relative paths, because `AGENTS.md` and `.venastine/AGENTS.md` are different files. `is_trusted()` asks that listing whether there is anything to trust rather than asking whether the directory exists, so a cloned repo shipping an `AGENTS.md` and no `.venastine/` now prompts, and a project with neither is silent as before. Every grant made before §44 re-prompts exactly once, because the set being consented to genuinely changed. `_content_hash()` iterates `content_files()` instead of walking a second time — the deeper fix this file used to list as still open, since two traversals that must agree by construction is how #18 drifted.
 

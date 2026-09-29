@@ -16443,3 +16443,183 @@ the 2:16 batch 109 measured there under loadfile, so the mode gain
 reproduces on a second OS.
 
 Counts 6028 -> 6036.
+
+## Batch 111 -- two surfaces that answered one way and behaved another (2026-09-29)
+
+TECHNICAL_DEBT 28 and 12, chosen as a pair because they are one defect seen
+twice: a configuration surface reports something, and the thing it reports is
+not the thing that happens. 28 is the only item in the open register that cost
+a real person a failed launch. 12 is the display half of the same complaint --
+`/config` knew which tier had won and said "a settings.json CAN win over
+whatever is written here", which is a static possibility stated by a process
+holding the answer.
+
+Both were owner decisions before they were code, and in both cases the
+decision ruled out the option the register itself had proposed.
+
+### Item 28: two keys, because one key was answering two questions
+
+`workspace_dir` is the file tools' read-write root. `WORKSPACE_DIR_EXPLICIT`
+decides the PROJECT path -- workspace trust, the `.venastine/` tier, `/init`'s
+destination, project-scoped memories -- and it is the PRESENCE of
+`AGENT_WORKSPACE`, never its value. Both of those are right, and together they
+leave someone configuring the harness through `config.yaml` with no way to say
+where the work is. What they got instead, reproduced before anything was
+changed:
+
+    workspace_dir           = <tmp>/myproject
+    workspace_is_project    = (did not exist)
+    AGENT_WORKSPACE set     = False
+    WORKSPACE_DIR_EXPLICIT  = False
+    main() project_path     = C:\Projects\Venastine Research Harness
+    check_project           = REFUSED
+        The project would be the harness's own install tree, because
+        AGENT_WORKSPACE is not set and this was launched from there...
+        Setting workspace_dir in config.yaml is not enough on its own
+
+A refusal whose first sentence tells you a variable is not set, and whose last
+tells you the file you have just edited does not count, to a person who has
+just named the directory they meant. The message was written knowing all of
+that -- item 28's own entry calls it mitigation.
+
+**THE FIX IS A SECOND KEY, AND NEITHER OPTION THE REGISTER OFFERED.** The entry
+framed the decision as "what does *named* mean": any value in the file, or a
+value differing from the shipped default. Checked rather than chosen between:
+
+  * *Any value* is not a spectrum, it is a constant. `config.yaml` ships
+    `workspace_dir: ./workspace` written out at line 497, so "the file names a
+    workspace" is true of every install nobody has edited. It moves the project
+    for the entire existing population -- precisely what the presence rule
+    exists to prevent.
+  * *Differs from the shipped default* needs a shipped default, and **there is
+    no such thing in this codebase.** `HarnessConfig` carries no field defaults
+    at all: all ~150 values are required and come from the file. So the
+    comparison needs either the first schema default here or a second
+    hand-written `"./workspace"` in Python -- the stale-second-copy shape
+    `shipped_defaults()`'s own docstring exists to refuse. And it makes
+    `./workspace` un-nameable, which the entry already knew.
+
+`workspace_is_project` has neither cost. Shipped `false`, so nothing moves; no
+value becomes un-nameable; and the two keys now say two different things
+instead of one key saying half of one.
+
+**`derived_values()` takes `cfg` and returns the OR.** One caller,
+`as_module_namespace`, which already held the config, so the signature change
+cost nothing. **`main()` was not touched**, and that is the design rather than
+an economy: the OR lives in the config layer, so the consumer still asks one
+question. A question with two spellings should be answered once.
+
+No precedence between the halves, and the comment says so. They assert the same
+thing about the same directory; inventing a winner would mean a user who did
+both getting less than a user who did either.
+
+**NOT AN AUTHORITY KEY, and the reason is now a test.** It decides the project
+path, which moves workspace trust and `/init`'s destination -- authority-shaped
+at a glance. It is not one, because an authority key is one NO UNATTENDED
+SURFACE reaches, and `AGENT_WORKSPACE` already produces this exact effect
+through an ordinary environment override. Gating the file key would put the
+confirmation on the louder of two routes. The structural fact underneath that
+turned out to be measurable and unwritten: `ENV_OVERRIDES` and
+`HARNESS_AUTHORITY_KEYS` are **disjoint**, which is what the word means here.
+`test_no_authority_key_has_an_environment_override` now says so, and fails if
+either set grows toward the other.
+
+The refusal offers three routes now -- launch from the directory, set the
+variable, or set the key beside the `workspace_dir` you already wrote -- and
+the test asserts both that the third is there and that "is not enough" is gone.
+A sentence telling someone their fix did not work, with nowhere to go, is worse
+than no sentence.
+
+### Item 12: recording the tier, not recomputing it
+
+The merge is three `update()` calls and each one overwrites without recording
+who won. The entry's own diagnosis is the thing to build against: provenance
+"is not omitted, it is destroyed by the merge". So it is recorded where it
+still exists -- `_load_merged_settings` returns `(values, sources)` from one
+pass. Working it out afterwards would mean re-reading both files and agreeing
+with a merge written elsewhere, which is two traversals that must agree: the
+shape this module's docstrings keep naming as how the first one drifts.
+
+`effective_compaction`'s return is still flat. Item 12's first blocker is that
+twelve call sites subscript it and `{key: (value, tier)}` breaks every one; a
+parallel dict breaks none, so the blocker is honoured rather than worked
+around. `_compaction_merge` walks the ladder once and hands back both, because
+a provenance report that disagrees with the value it describes is worse than
+none -- it is a confident wrong answer to "why is this number what it is".
+
+**The owner chose to name the tier** rather than collapse both files into one
+"settings.json". A project `settings.json` arrives with a directory you cloned,
+which is D17's entire premise, so which file is the useful half. Recorded per
+KEY, not per file, and that distinction is the one test worth having: a value
+the user set and the project did not stays `user`, and a per-file answer passes
+every single-file test and gets exactly that key wrong. Every test in the new
+class has both files present for that reason.
+
+**`explain()` says "is" where it said "can"**, for every row with a
+`settings_key` rather than only the seven compaction ones. `settings_overrides()`
+already maps them all onto one lookup, so narrowing it would have meant writing
+a second, narrower lookup in order to stay quiet about `subagent_review`. Where
+nothing speaks the old sentence stays, because there it is the whole truth.
+
+**A trap found while writing that sentence.** The obvious value to quote is
+`row.in_session`, and it is the wrong one. For a compaction key that is
+`config.COMPACTION_*`, bound at import from `config.yaml`, because the settings
+merge happens inside `effective_compaction` and never reaches the `config`
+module at all. So these rows have THREE values where batch 85's rule describes
+two, and the one named "the session's" is the one that is not in force --
+quoting it would have produced a line asserting that the file's number is the
+settings file's. The line reads the settings tier directly, and the test
+asserts the difference AND that a difference exists, so it cannot go quiet if
+`config.yaml` ever ships the number it uses.
+
+### And one I introduced and caught in review
+
+The first version of the `workspace_dir` sentence read the FILE's
+`workspace_is_project` and said "It IS the project here". *Here* is the
+session, and `in_file` is not the session -- `/config workspace_is_project
+true` writes the file and leaves the running process where it was until a
+restart. That distinction is batch 85's entire subject and it is stated in
+`KeyRow`'s docstring, in the same file the new line went into.
+
+It now reads the session for "is it", the file for "what is written", and adds
+a line when the two differ, which is the shape `pending` already has for a row
+about itself. Found by reading the diff back, not by a test -- so the mutation
+table gained an eighth row that puts the bug back, and two tests now stand
+against it: one that writes the key into a throwaway config and asserts the
+session says NOT-the-project anyway, and a control asserting the divergence
+line is silent when there is no divergence.
+
+### One correction carried in from the last batch
+
+TECHNICAL_DEBT 30 said its remainder was "the 28 classless tests in
+`test_tui.py`". Re-running `tally110.py` against the same `bench109-base.txt`
+capture: **183 test functions, 243 collected node ids.** My number from batch
+110, wrong by a factor of six and a half, and in three files.
+
+The 79.7s and the 20.7% are unaffected -- the script aggregated those and they
+were always right. What changes is the price of the prescription the entry
+gives: gathering 183 functions into classes is a 183-site edit in the largest
+file in the suite, not an afternoon's tidy, and whoever takes it should know
+that before starting. The "another 15%" beside it is now flagged as unmeasured
+too: it divides 4.2x by a 4.83x ceiling, but with the floor gone the suite
+becomes worker-bound (384.5s over 11 workers is 35s) and what remains is fixed
+overhead nobody has measured separately.
+
+The same shape as last batch's finding about its own entry, one level up. Batch
+110 corrected item 30's CAUSE by running the reproduction instead of trusting
+the sentence, and then wrote a new number into the same entry without counting
+it. A batch that catches a wrong claim is not thereby a batch whose own claims
+are right.
+
+### Verification
+
+Reproduced first, both ways, in a probe with `HOME` redirected: without the key
+the refusal fires and `main()` resolves the install tree; with the key and no
+variable anywhere the project is the named workspace and there is no refusal.
+ruff clean. Bandit exit 0 with the CI flags against a path-corrected throwaway
+copy of the baseline, never regenerated. Full suite parallel and serial on
+Windows with `AGENT_WORKSPACE` unset, WSL compared by cause, and a foreground
+mutation pass over the three new claims: the OR in `derived_values`, the tier
+attribution in `_load_merged_settings`, and `explain()`'s is/can branch.
+
+Counts 6036 -> 6064.

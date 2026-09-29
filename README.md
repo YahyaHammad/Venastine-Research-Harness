@@ -81,9 +81,15 @@ cd ~/my-project && python /path/to/venastine/main.py   # the project is where yo
 AGENT_WORKSPACE=~/my-project python main.py            # or name it, from anywhere
 ```
 
+```yaml
+# or, in config.yaml, for a setup with no variable to set
+workspace_dir: ~/my-project
+workspace_is_project: true
+```
+
 Working on the harness itself is `AGENT_WORKSPACE=./workspace`, which is the shipped layout and is
-exempt. Note that setting `workspace_dir` in `config.yaml` is *not* a substitute: the project follows
-whether the variable was named, not what the workspace resolves to.
+exempt. `workspace_dir` alone is *not* a substitute for either route: it moves the workspace and
+leaves the project where it was, which is what `workspace_is_project` beside it is for.
 
 ```bash
 python main.py                                    # chat, new thread
@@ -862,7 +868,7 @@ Deliberately not settings.json keys: editing these means editing the harness's o
 | `AGENT_PROVIDERS_FILE` | `providers.json` | Credential-file location |
 | `APP_DB_PATH` | `app.db` | SQLite database path |
 | `AGENT_OUTPUT_DIR` | `./output` | Research artifacts root |
-| `AGENT_WORKSPACE` | `./workspace` | File-tools and sandbox workspace root. **When you set it, it is also the project**: workspace trust, `.venastine/`, `/init`'s destination, `output/` and project-scoped memories all follow it rather than the directory you launched from. Unset, the project is the launch directory — and launching from the harness's own install tree is refused (exit 2), because that would make the harness its own project. The `workspace_dir` key in `config.yaml` sets the workspace but **not** the project: the rule is the presence of this variable, never its value |
+| `AGENT_WORKSPACE` | `./workspace` | File-tools and sandbox workspace root. **When you set it, it is also the project**: workspace trust, `.venastine/`, `/init`'s destination, `output/` and project-scoped memories all follow it rather than the directory you launched from. Unset, the project is the launch directory — and launching from the harness's own install tree is refused (exit 2), because that would make the harness its own project. The `workspace_dir` key in `config.yaml` sets the workspace but **not** the project on its own -- the rule is the presence of this variable, never its value -- so the file's way of saying it is the `workspace_is_project` key beside it |
 | `AGENT_SHELL` | auto-detect | Host shell binary for the `shell` tool |
 | `AGENT_SANDBOX_IMAGE` | `docker.io/library/python:3.13-slim` | Sandbox container image, under Docker or Podman |
 | `AGENT_LOG_LEVEL` | `INFO` | Log verbosity — name or numeric level |
@@ -904,7 +910,7 @@ note that shell approval is governed solely by `shell_approval_mode` -- `tool_ap
 deliberately has no `shell` key, so an old file carrying one is refused at startup
 naming the key — see `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 6036 tests, fully offline, no API keys needed. It runs in parallel by default (`pytest-xdist`, 70% of your cores): **2:10 on a 16-core machine, against 9:06 single-process.** `pytest -n0` forces the old serial run, which is what you want under a debugger or when something is parsing the output. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+Run the test suite with `pytest` — 6064 tests, fully offline, no API keys needed. It runs in parallel by default (`pytest-xdist`, 70% of your cores): **2:10 on a 16-core machine, against 9:06 single-process.** `pytest -n0` forces the old serial run, which is what you want under a debugger or when something is parsing the output. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
 ## Documentation
 

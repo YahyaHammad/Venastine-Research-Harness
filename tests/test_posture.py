@@ -441,6 +441,32 @@ class TestNothingReachableChangesIt:
         assert "ensemble_mode" not in keys
         assert "max_tokens" not in keys
 
+    def test_no_authority_key_has_an_environment_override(self):
+        """The two sets are disjoint, and that is the whole meaning of the
+        word: an authority key is one NO UNATTENDED SURFACE reaches, and an
+        environment variable is an unattended surface.
+
+        WRITTEN DOWN IN BATCH 111 BECAUSE A DECISION RESTED ON IT.
+        `workspace_is_project` (TECHNICAL_DEBT 28) decides the project
+        path, which moves workspace trust, the `.venastine/` tier, /init's
+        destination and project-scoped memories -- authority-shaped at a
+        glance, and deliberately NOT in the set. The reason is here: the
+        identical effect is already reachable through `AGENT_WORKSPACE`, an
+        ordinary override, so gating the file key would have put the
+        confirmation on the louder of two routes and left the quieter one
+        open. An authority key that gained a variable would be the same
+        mistake in reverse, and this fails when either happens.
+        """
+        import config_schema
+
+        overridden = {name.lower() for name in config_schema.ENV_OVERRIDES}
+        collision = overridden & set(config_schema.HARNESS_AUTHORITY_KEYS)
+        assert not collision, (
+            f"these keys are gated behind a confirmation AND settable by an "
+            f"environment variable, which means they are not gated: "
+            f"{sorted(collision)}")
+        assert "workspace_is_project" not in config_schema.HARNESS_AUTHORITY_KEYS
+
     def test_config_yaml_marks_every_authority_key_and_no_others(self):
         """The comment a human reads and the set the code reads are two
         copies of one list, so they are held against each other.

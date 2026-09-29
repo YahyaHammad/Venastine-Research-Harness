@@ -253,6 +253,156 @@ def test_get_settings_before_initialize_is_empty():
 
 
 # ---------------------------------------------------------------------------
+# ---- Which tier a setting came from (TECHNICAL_DEBT 12) ---------------------
+# ---------------------------------------------------------------------------
+
+class TestWhereASettingCameFrom:
+    """`settings_sources()` and `compaction_sources()`, batch 111.
+
+    D27's third implementation note, whose argument was that "compaction
+    feels too aggressive" should be a one-line answer rather than a value
+    three files away. The merge knew which tier won and threw it away, one
+    `update()` at a time.
+
+    WHAT WOULD MAKE THIS CLASS VACUOUS: testing only the case where one
+    file speaks. The whole difficulty is telling the tiers apart, so every
+    test below has BOTH files present wherever that is meaningful, and the
+    interesting assertion is always about the key the other one did not
+    set -- a per-file answer would get that one wrong and still pass a
+    single-file test.
+    """
+
+    def test_a_user_key_the_project_did_not_touch_stays_the_users(
+            self, _redirect_roots):
+        _write_settings(_redirect_roots["user"],
+                        {"compaction": {"strength": 5, "max_retries": 2}})
+        _write_settings(_redirect_roots["project"] / ".venastine",
+                        {"compaction": {"strength": 1}})
+        workspace_trust.grant_trust(str(_redirect_roots["project"]))
+
+        config_loader.initialize(str(_redirect_roots["project"]))
+        sources = config_loader.compaction_sources()
+
+        assert sources["strength"] == "project"
+        assert sources["max_retries"] == "user", (
+            "attributing per FILE rather than per KEY would call this one "
+            "the project's, because the project file is what won overall")
+        assert config_loader.effective_compaction()["max_retries"] == 2
+
+    def test_a_key_no_settings_file_sets_comes_from_the_yaml(
+            self, _redirect_roots):
+        _write_settings(_redirect_roots["user"],
+                        {"compaction": {"strength": 5}})
+
+        config_loader.initialize(str(_redirect_roots["project"]))
+        sources = config_loader.compaction_sources()
+
+        assert sources["strength"] == "user"
+        assert sources["trigger_tokens"] == "config.yaml"
+        assert set(sources) == set(config_loader._COMPACTION_DEFAULTS), (
+            "every key answers, so a caller never has to know whether "
+            "silence means the file or means nobody looked")
+
+    def test_an_override_outranks_whatever_wrote_the_value(
+            self, _redirect_roots):
+        _write_settings(_redirect_roots["user"],
+                        {"compaction": {"strength": 5}})
+
+        config_loader.initialize(str(_redirect_roots["project"]))
+        sources = config_loader.compaction_sources({"strength": 3})
+
+        assert sources["strength"] == "override"
+        assert config_loader.compaction_sources()["strength"] == "user", (
+            "a per-invocation override must not be remembered; /compact "
+            "--strength persists nothing and neither does this")
+
+    def test_a_none_in_the_overrides_is_not_an_override(
+            self, _redirect_roots):
+        """`effective_compaction` skips a None override, so this must too
+        or the two disagree about the value's origin while agreeing about
+        the value -- which is the confident wrong answer the shared ladder
+        exists to make impossible."""
+        _write_settings(_redirect_roots["user"],
+                        {"compaction": {"strength": 5}})
+
+        config_loader.initialize(str(_redirect_roots["project"]))
+
+        assert config_loader.compaction_sources(
+            {"strength": None})["strength"] == "user"
+
+    def test_an_untrusted_project_supplies_no_provenance_either(
+            self, _redirect_roots):
+        """D17: untrusted project content is ABSENT, not loaded-and-
+        disabled. The negative case, and the one where a provenance bug is
+        silent -- reporting `project` here would be a report that the
+        untrusted file had an effect it did not have."""
+        _write_settings(_redirect_roots["user"],
+                        {"compaction": {"strength": 5}})
+        _write_settings(_redirect_roots["project"] / ".venastine",
+                        {"compaction": {"strength": 1}})
+
+        config_loader.initialize(str(_redirect_roots["project"]))
+
+        assert config_loader.effective_compaction()["strength"] == 5
+        assert config_loader.compaction_sources()["strength"] == "user"
+        assert "compaction.strength" in config_loader.settings_sources()
+        assert config_loader.settings_sources()[
+            "compaction.strength"] == "user"
+
+    def test_the_sources_cover_flat_keys_and_section_names_too(
+            self, _redirect_roots):
+        """Not only compaction. `settings_sources()` records everything
+        the merge merged, because `_SETTINGS_OVERRIDES` maps ten other
+        `config.yaml` rows onto settings paths and `/config` explains all
+        of them from the same lookup."""
+        _write_settings(_redirect_roots["user"],
+                        {"default_model": "user-model",
+                         "compaction": {"strength": 5}})
+        _write_settings(_redirect_roots["project"] / ".venastine",
+                        {"research": {"subagent_review": True}})
+        workspace_trust.grant_trust(str(_redirect_roots["project"]))
+
+        config_loader.initialize(str(_redirect_roots["project"]))
+        sources = config_loader.settings_sources()
+
+        assert sources["default_model"] == "user"
+        assert sources["compaction.strength"] == "user"
+        assert sources["compaction"] == "user"
+        assert sources["research.subagent_review"] == "project"
+        assert "trigger_tokens" not in sources, (
+            "a key nothing set is absent here, which is how a caller "
+            "reads 'config.yaml won' without a fourth tier name")
+
+    def test_sources_before_initialize_are_empty(self):
+        assert config_loader.settings_sources() == {}
+
+    def test_the_two_reports_walk_the_same_ladder(self, _redirect_roots):
+        """The property that makes provenance worth printing: every key
+        whose source is a settings tier really does hold that tier's
+        value, and every key sourced to the file really does hold the
+        file's. Two ladders could pass each test above and still disagree
+        here."""
+        _write_settings(_redirect_roots["user"],
+                        {"compaction": {"strength": 5, "max_retries": 2}})
+        _write_settings(_redirect_roots["project"] / ".venastine",
+                        {"compaction": {"keep_recent_turns": 7}})
+        workspace_trust.grant_trust(str(_redirect_roots["project"]))
+
+        config_loader.initialize(str(_redirect_roots["project"]))
+        values = config_loader.effective_compaction()
+        sources = config_loader.compaction_sources()
+        merged = config_loader.get_settings()["compaction"]
+        shipped = config_loader.shipped_defaults()["compaction"]
+
+        for key, tier in sources.items():
+            if tier == "config.yaml":
+                assert values[key] == shipped[key], key
+                assert key not in merged, key
+            else:
+                assert values[key] == merged[key], key
+
+
+# ---------------------------------------------------------------------------
 # ---- AGENTS.md opt-in (AC5) -------------------------------------------------
 # ---------------------------------------------------------------------------
 
@@ -1139,11 +1289,95 @@ def test_the_shipped_config_yaml_covers_the_whole_schema():
     assert not keys - fields, (
         f"config.yaml carries keys the schema does not know: "
         f"{sorted(keys - fields)}")
-    # The two derived values must NOT be in the file -- they are computed from
-    # the environment and a key would change what they mean.
+    # The two derived values must NOT be in the file -- they are computed and
+    # a key of their own would change what they mean. `workspace_is_project`
+    # is an ORDINARY key that one of them reads, not a key FOR it.
     assert not keys & {"output_dir", "workspace_dir_explicit"}
+    assert "workspace_is_project" in keys
     for name in config_schema.DERIVED_VALUES:
         assert name.lower() not in keys
+
+
+class TestWhichWorkspaceIsAlsoTheProject:
+    """`WORKSPACE_DIR_EXPLICIT`, which decides the PROJECT PATH and since
+    batch 111 has two inputs (TECHNICAL_DEBT 28).
+
+    WHY BOTH, rather than one of them. The environment variable cannot be a
+    key: it is read by PRESENCE, and the shipped `workspace_dir` is
+    `./workspace`, so a value test would move the project one level down for
+    every install that set nothing. The key cannot be a variable either --
+    it is the only route a person editing `config.yaml` has, and before it
+    they got the workspace they asked for, a project of `os.getcwd()`, and
+    (launched from the install tree) a refusal telling them to set a
+    variable they believed they had just set.
+
+    THE TABLE IS THE TEST. There are exactly four states and the answer is
+    an OR, so anything less than all four leaves a mutation alive: dropping
+    either operand still passes three of them.
+    """
+
+    @staticmethod
+    def _cfg(declared):
+        import config_schema
+
+        return config_schema.current().model_copy(
+            update={"workspace_is_project": declared})
+
+    @pytest.mark.parametrize("declared,variable,expected", [
+        (False, False, False),
+        (False, True, True),
+        (True, False, True),
+        (True, True, True),
+    ], ids=["neither", "variable-only", "key-only", "both"])
+    def test_either_route_names_the_workspace_as_the_project(
+            self, monkeypatch, declared, variable, expected):
+        import config_schema
+
+        if variable:
+            monkeypatch.setenv("AGENT_WORKSPACE", "/somewhere")
+        else:
+            monkeypatch.delenv("AGENT_WORKSPACE", raising=False)
+
+        derived = config_schema.derived_values(self._cfg(declared))
+        assert derived["WORKSPACE_DIR_EXPLICIT"] is expected
+
+    def test_the_shipped_file_still_leaves_the_project_where_it_was(
+            self, monkeypatch):
+        """The key is shipped `false`, so no existing install moves.
+
+        The half of a behaviour change that is easy to forget to assert:
+        this one is a pure addition only while the default stays where it
+        is, and a flipped default would move the project for everyone who
+        never edited the file -- which is exactly what ruled out the
+        register's own "any value in the file counts" option.
+        """
+        import config_schema
+
+        monkeypatch.delenv("AGENT_WORKSPACE", raising=False)
+        document = config_schema.read_document()
+
+        assert document["workspace_is_project"] is False
+        assert config_schema.derived_values(
+            config_schema.current())["WORKSPACE_DIR_EXPLICIT"] is False
+
+    def test_the_value_main_reads_is_the_one_the_file_produced(
+            self, monkeypatch):
+        """The whole route from document to global, in one assertion.
+
+        The truth table above tests the OR and `test_project_path_guard.py`
+        tests what `main()` does with the answer; neither sees the join.
+        `as_module_namespace` is where the derived values are folded in, and
+        it is the only caller `derived_values` has -- so a signature that
+        stopped being passed `cfg` would fail HERE and nowhere else.
+        """
+        import config_schema
+
+        monkeypatch.delenv("AGENT_WORKSPACE", raising=False)
+        namespace = config_schema.as_module_namespace(self._cfg(True))
+
+        assert namespace["WORKSPACE_DIR_EXPLICIT"] is True
+        # And the key itself is published too, because every field is.
+        assert namespace["WORKSPACE_IS_PROJECT"] is True
 
 
 def test_the_two_permission_tables_declare_the_same_tools():

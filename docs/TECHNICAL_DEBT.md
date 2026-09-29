@@ -402,7 +402,7 @@ either extend the set or record that it was checked and is right.
 
 ---
 
-## 12. `effective_compaction()` reports no provenance (open, re-scoped batch 107)
+## 12. `effective_compaction()` reports no provenance (closed, batch 111)
 
 D27's third implementation note, unbuilt, and the only one of its three that
 was dropped without being recorded as a decision:
@@ -468,6 +468,50 @@ says "is" where it now says "can".
 
 The first blocker stands unchanged and so does the display argument. What changed is that the
 display exists, so the two halves no longer have to be built together.
+
+**RESOLVED (batch 111), with the first blocker honoured rather than worked around.**
+`effective_compaction`'s return is still flat, so none of the twelve subscripting call sites
+moved. Provenance is beside it:
+
+- **`_load_merged_settings` returns `(values, sources)`**, where `sources` maps a dotted setting
+  to the tier that last wrote it -- `{"compaction.strength": "project"}`. Built in the same pass
+  as the merge, because this entry's own sentence about the defect is the reason it has to be:
+  provenance "is not omitted, it is destroyed by the merge", so the only moment the two tiers are
+  still distinguishable is while they are being combined. A second function re-reading both files
+  afterwards would be two traversals that must agree, which is how the first one drifts.
+- **`initialize` stores it beside the values** as `_state["settings_sources"]`, read through a
+  new `settings_sources()` accessor that mirrors `get_settings()` and is empty pre-init for the
+  same reason.
+- **`_compaction_merge(overrides)` walks the ladder once and returns both**; `effective_compaction`
+  keeps every validation and warning it has and returns the values, and `compaction_sources()`
+  returns `{key: tier}` over the seven keys. One ladder rather than two, because a provenance
+  report that disagrees with the value it describes is worse than none -- it is a confident wrong
+  answer to "why is this number what it is".
+
+**The owner chose to name the tier** -- `config.yaml` / `user` / `project` / `override` -- rather
+than collapsing both files into one "settings.json". A project `settings.json` arrives with a
+directory you cloned, which is D17's whole premise, so *which* file is the useful half. Recorded
+per KEY, not per file: a value the user set and the project did not stays `user`, and a test
+asserts exactly that, because a per-file answer passes every single-file test and gets this one
+wrong.
+
+**`explain()` says "is" where it said "can"**, and the sentence covers every row with a
+`settings_key` rather than only the seven compaction ones -- `settings_overrides()` already maps
+them all onto the same lookup, so restricting it would have meant writing a second, narrower one
+in order to stay quiet about `subagent_review`. The old sentence is kept for the case where
+nothing speaks, where it is the whole truth.
+
+**One trap found while writing it, and pinned.** The obvious value to quote is `row.in_session`,
+and it is wrong: for a compaction key that is `config.COMPACTION_*`, bound at import from
+`config.yaml`, because the settings merge happens inside `effective_compaction` and never reaches
+the `config` module. So these rows have THREE values, not batch 85's two, and the one named "the
+session's" is the one that is not in force. The line reads the settings tier directly, and
+`test_it_quotes_the_settings_value_and_not_the_imported_one` asserts the difference -- including
+an assertion that the difference exists, so the test cannot go vacuous if `config.yaml` ever
+ships the number it uses.
+
+Not built, and not needed by the above: a `sources` entry for any tier below `settings.json`
+other than the file itself. There is none.
 
 ---
 
@@ -1043,7 +1087,7 @@ two more process-global memos in the same file, reset only in `test_ssh_backend.
 `test_sudo.py`. They are quarantine state rather than probes -- nothing spawns to fill them, and
 blanket-clearing them would mask a test that depends on one -- so they stay as they are.
 
-## 28. `workspace_dir` in `config.yaml` names a workspace but not a project (open, 2026-09-26)
+## 28. `workspace_dir` in `config.yaml` names a workspace but not a project (closed, batch 111)
 
 `WORKSPACE_DIR_EXPLICIT` is `"AGENT_WORKSPACE" in os.environ` -- the **presence of the variable**
 (`config_schema.py`), which is correct and deliberate: the shipped default `./workspace` is a
@@ -1068,6 +1112,62 @@ means: *any* value, which moves the project for every reader of a shipped `confi
 `workspace_dir` is already `./workspace`, or *differs from the shipped default*, which is a
 comparison against `config_schema`'s default and quietly makes `./workspace` un-nameable. That
 choice is the whole decision; the code after it is one line.
+
+**RESOLVED (batch 111), and by a third option neither of the two above.** The owner took
+`workspace_is_project`, a second `config.yaml` key shipped `false`, and
+`config_schema.derived_values` now reads `cfg.workspace_is_project or "AGENT_WORKSPACE" in
+os.environ`. It takes `cfg` to do it, which costs nothing: there is exactly one caller,
+`as_module_namespace`, and it already holds the parsed config.
+
+**Both options this entry offered turn out to be worse than they read here, and the second is
+worse for a reason the entry did not have.**
+
+- *Any value* is not a spectrum, it is always true: `config.yaml` ships `workspace_dir:
+  ./workspace` written out at line 497, so "the file names a workspace" is a fact about every
+  install that has never been edited. That moves the project for the entire existing population,
+  which is the one thing the presence rule exists to prevent.
+- *Differs from the shipped default* needs a shipped default to compare against, and **there is
+  no such thing in this codebase**: `HarnessConfig` carries no field defaults at all -- every one
+  of its ~150 values is required and comes from the file. So the comparison needs either the
+  repo's first schema default or a literal `"./workspace"` written a second time in Python, which
+  is precisely the stale-second-copy shape `shipped_defaults()`'s own docstring exists to refuse
+  ("EXISTS SO A TEMPLATE CANNOT QUOTE A STALE DEFAULT"). It also makes `./workspace` un-nameable,
+  which this entry already knew.
+
+A second key has neither cost. Nothing moves, because the default is `false`; no value becomes
+un-nameable; and the two keys now say two different things out loud instead of one key saying
+half of one. **`main()` was not touched** -- it still reads one boolean, because the OR lives in
+the config layer, which is where a question with two spellings should be answered once.
+
+**NOT an authority key**, and the reason is now a test rather than a paragraph
+(`test_posture.py::test_no_authority_key_has_an_environment_override`). An authority key is one
+NO UNATTENDED SURFACE reaches -- measured, `ENV_OVERRIDES` and `HARNESS_AUTHORITY_KEYS` are
+disjoint today. The identical effect is already reachable through `AGENT_WORKSPACE`, an ordinary
+override, so gating the file key would have put the confirmation on the louder of two routes. It
+is also strictly less dangerous than the `workspace_dir` beside it, which is not gated either and
+whose own comment names the sharper hazard.
+
+**The refusal message named two routes and a trap; it now names three routes.** It used to close
+with "Setting workspace_dir in config.yaml is not enough on its own" -- accurate, and no use at
+all to the person reading it, who had just written the directory they meant into the file the
+refusal is about. Reproduced before the change and again after (`probe28.py`): without the key,
+`check_project` refuses and `main()` resolves the install tree; with it and no variable anywhere,
+the project is the named workspace and there is no refusal.
+
+`/config` says it too, for both keys and in both directions -- `workspace_dir` states whether it
+IS the project in this session and names the companion when it is not, and `workspace_is_project`
+lists what moves with it. The shipped state is the one that surprises people, so it is the one
+stated rather than implied.
+
+**And the first version of that sentence broke the rule the module it lives in exists for.** It
+read `find("workspace_is_project").in_file` and said "It IS the project here" -- but *here* is
+the session, and `in_file` is not the session: `/config workspace_is_project true` writes the
+file and leaves the running process exactly where it was until a restart. That is batch 85's
+whole subject, stated in `KeyRow`'s own docstring, and the new line was in the same file. It now
+reads the session for "is it", the file for "what is written", and adds a line when they differ
+-- the shape `pending` already has for a row about itself. Caught by reading the diff back rather
+than by a test, which is why the mutation table gained an eighth row that reinstates exactly that
+bug (`pair-reads-the-file-for-the-session`, killed).
 
 ## 29. Session ownership is skipped for a `None` thread, and the two lookups disagree (closed, batch 110)
 
@@ -1256,12 +1356,27 @@ not:
 | loadfile | `tests/test_tui.py` | 124.5 | 32.4% | 3.09x |
 | **loadscope** | **`tests/test_tui.py`'s 28 module-level tests** | **79.7** | **20.7%** | **4.83x** |
 
-So the lever is no longer "split an 8,144-line file". It is the **28 tests in `test_tui.py` that
-sit outside any class**, which loadscope must keep together because a classless test is grouped by
+So the lever is no longer "split an 8,144-line file". It is the tests in `test_tui.py` that sit
+outside any class, which loadscope must keep together because a classless test is grouped by
 module. Gathering them into classes -- or moving them into a file of their own -- drops the floor
 towards the next group down (`test_mcp_client.py`, 15.9s) and costs one tree entry rather than
-four. The measured 4.1x is already 85% of the 4.83x ceiling, so this is worth perhaps another 15%
-and should be taken on its merits rather than for the number.
+four.
+
+**HOW MANY OF THEM: 183 test functions, 243 collected node ids. Batch 110 wrote "28" here and it
+was wrong by a factor of six and a half** -- corrected in batch 111 by re-running `tally110.py`
+against the same `bench109-base.txt` capture and counting the distinct node ids in the
+`tests/test_tui.py` module scope, rather than re-reading the sentence. The 79.7s and the 20.7%
+are unaffected; they were aggregated by the script and always right. What changes is the PRICE of
+the prescription: gathering 183 functions into classes is a 183-site edit in the suite's largest
+file, not an afternoon's tidy, and whoever takes it should know that before starting. The same
+correction shape as this entry's cause a batch earlier -- a number nobody re-derived, sitting
+next to a measurement that was taken properly.
+
+The upside may be larger than "15%" too, and that figure should also be treated as unmeasured.
+It comes from 4.2x against a 4.83x ceiling; but the ceiling is `total / floor`, and with the
+floor at the next group down the suite becomes worker-bound rather than floor-bound
+(384.5s over 11 workers is 35s), so what is left is fixed overhead nobody has measured
+separately. Somewhere between 15% and 35%, and the only way to know is to do it and run it.
 
 **AND A SECOND HAZARD, found on the sixth run rather than by reading -- write this one down.**
 Under loadscope a FILE is no longer one unit. A file holding module-level tests AND a class is two
@@ -1276,6 +1391,6 @@ non-function-scoped fixture (`grep -rn 'scope="module"' tests/`), so it was the 
 and the rule the next one inherits is: **a module- or session-scoped fixture's file must hold no
 test class.**
 
-**What remains open in this item:** the 28 classless tests in `test_tui.py`, and nothing else. The
+**What remains open in this item:** the 183 classless tests in `test_tui.py`, and nothing else. The
 `test_config_edit.py` precondition this entry prescribed was never the defect, and the mode
 decision it was blocking is taken.

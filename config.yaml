@@ -493,8 +493,18 @@ db_path: app.db
 # The file tools' read-write root, and a PERMISSION BOUNDARY: file_ops
 # auto-approves writes inside it. AGENT_WORKSPACE overrides, and naming it
 # also makes the resolved workspace the project path -- so pointing it at a
-# home directory would auto-approve writes there for every project.
+# home directory would auto-approve writes there for every project. Writing
+# the path HERE moves the workspace alone; the key below moves the project
+# with it.
 workspace_dir: ./workspace
+
+# Whether that workspace is also the PROJECT: what workspace trust asks about,
+# which .venastine/ supplies settings and agents, where /init scaffolds, and
+# what project-scoped memories belong to. Naming AGENT_WORKSPACE has always
+# done this; the key is the same statement made in the file, for the reader
+# who has no variable to set. Either route suffices, and neither is needed to
+# work inside a project you launched from -- that is already the project.
+workspace_is_project: false
 
 # Hard reject before opening, in both directions (25 MB).
 max_file_size_bytes: 25000000

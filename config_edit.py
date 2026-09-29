@@ -844,9 +844,15 @@ def explain(name: str, *,
             lines.append(
                 f"{variable} would override this if it were set.")
     elif row.outranked_by:
-        lines.append(
-            f"A {row.outranked_by} key outranks this one, so a project or "
-            f"user settings.json can win over whatever is written here.")
+        lines.extend(_settings_tier_lines(row))
+
+    # THE WORKSPACE PAIR (TECHNICAL_DEBT 28, batch 111). Two keys, one
+    # question between them, and the person reading either is the person
+    # about to assume the other. Said HERE rather than only in the launch
+    # refusal, because a refusal arrives after the decision and this
+    # arrives during it.
+    if name in ("workspace_dir", "workspace_is_project"):
+        lines.extend(_workspace_pair(name))
 
     if row.authority:
         key = authority_key(name)
@@ -869,6 +875,126 @@ def explain(name: str, *,
         lines.append(
             "Edit it in config.yaml. CONFIG_ARCHITECTURE.md says why it is "
             "what it is.")
+    return lines
+
+
+def _settings_tier_lines(row) -> list[str]:
+    """Whether a settings.json IS outranking this key, or merely could.
+
+    TECHNICAL_DEBT 12, batch 111. This used to be one sentence -- "a
+    project or user settings.json CAN win over whatever is written here"
+    -- which is a static possibility stated in a process that knows the
+    answer. `core/config_loader.settings_sources()` records which tier
+    wrote each setting, so the live case can name the tier and the value
+    and leave the reader with nothing to go and check.
+
+    THE OLD SENTENCE IS KEPT for the case where nothing speaks, because
+    there it is the whole truth and it is still worth saying: the reason
+    this key can be overridden is not visible from the key.
+
+    THE VALUE COMES FROM THE SETTINGS TIER, NOT FROM `row.in_session`, and
+    that is a trap worth naming. For a compaction key `in_session` is
+    `config.COMPACTION_*` -- what `config.yaml` said, bound at import --
+    because the settings merge happens inside `effective_compaction` and
+    never reaches the `config` module at all. So the two-values rule this
+    module is built on has a third value here, and `in_session` is the
+    wrong one of the three to quote in a sentence about what is winning.
+    """
+    from core import config_loader
+
+    tier = config_loader.settings_sources().get(row.settings_key)
+    if tier is None:
+        return [f"A {row.outranked_by} key outranks this one, so a project "
+                f"or user settings.json can win over whatever is written "
+                f"here."]
+
+    whose = {"project": "This project's", "user": "Your"}.get(
+        tier, f"A {tier}")
+    return [f"{whose} settings.json sets {row.settings_key} to "
+            f"{shown(_settings_value(row.settings_key))}, so that is what "
+            f"is in force and config.yaml's {shown(row.in_file)} is not. A "
+            f"write here does not change it -- the settings file wins "
+            f"again at the next launch."]
+
+
+def _settings_value(path: str) -> Any:
+    """What the merged settings hold at a dotted *path*, one level deep.
+
+    One level because `_NESTED_SETTINGS` is one level; a deeper path
+    cannot exist, and inventing a general walker for it would be code
+    written against a shape the validator refuses.
+    """
+    from core import config_loader
+
+    settings = config_loader.get_settings()
+    section, _, leaf = path.partition(".")
+    if not leaf:
+        return settings.get(section)
+    return (settings.get(section) or {}).get(leaf)
+
+
+def _workspace_pair(name: str) -> list[str]:
+    """What `explain` says about `workspace_dir` / `workspace_is_project`.
+
+    TECHNICAL_DEBT 28. The two keys answer different questions -- where the
+    file tools may write, and where the WORK is -- and for one release the
+    second question had no key at all, so writing the first and expecting
+    both was the obvious mistake to make. These sentences exist to make it
+    the unobvious one.
+
+    THE SESSION ANSWERS "is it", THE FILE ANSWERS "what is written", and
+    keeping those apart is this module's whole subject (batch 85). `/config
+    workspace_is_project true` writes the file and leaves the running
+    process exactly where it was until a restart, so a line that read the
+    file would tell someone their project had already moved when it had
+    not -- in a sentence added to the file that states the rule.
+
+    The session's answer is `derived_values(current())` rather than
+    `config.WORKSPACE_DIR_EXPLICIT`, because this module imports no
+    first-party name but `config_schema` and that function IS the
+    definition of the value; asking it is how these lines cannot drift
+    from what `main()` will do.
+    """
+    row = find("workspace_is_project")
+    in_file = bool(row and row.in_file)
+    session = config_schema.current()
+    now = bool(config_schema.derived_values(session)["WORKSPACE_DIR_EXPLICIT"])
+    variable = os.environ.get("AGENT_WORKSPACE") is not None
+
+    if name == "workspace_dir":
+        lines = [
+            "This is the file tools' root. Whether it is also the PROJECT "
+            "-- what workspace trust asks about, which .venastine/ is read, "
+            "where /init writes, what memories belong to -- is the separate "
+            "question workspace_is_project answers."]
+        if now:
+            named = ("$AGENT_WORKSPACE" if variable
+                     else "workspace_is_project")
+            lines.append(
+                f"It IS the project in this session, because {named} says "
+                f"so, so moving this path moves the work with it.")
+        else:
+            lines.append(
+                "It is NOT the project in this session: nothing named it, "
+                "so the project is the directory you launched from. Set "
+                "workspace_is_project true to change that.")
+        if in_file is not bool(session.workspace_is_project):
+            lines.append(
+                f"config.yaml now says workspace_is_project: "
+                f"{shown(in_file)}, which this session has not picked up. "
+                f"The next launch will.")
+        return lines
+
+    lines = [
+        "True means the workspace above is also the project: workspace "
+        "trust, the .venastine/ tier, /init's destination and "
+        "project-scoped memories all move to it. Naming AGENT_WORKSPACE "
+        "does the same thing; this is the way to say it in the file."]
+    if variable:
+        lines.append(
+            "$AGENT_WORKSPACE is set, so the workspace is already the "
+            "project this session whatever this key says. The two are OR'd "
+            "-- there is no precedence between them to get wrong.")
     return lines
 
 

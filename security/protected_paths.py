@@ -232,11 +232,19 @@ def check_project(project_path: str) -> str | None:
     convention. Naming that directory was ALREADY refused --
     `check_workspace` above returns a reason for `AGENT_WORKSPACE=<harness
     root>`, and for every non-exempt subfolder of it. But `main()` falls
-    back to `os.getcwd()` when the variable is unset, so launching from a
-    clone reached the same state by saying nothing: measured in batch 96
-    from an owner report and reproduced in batch 107, the trust prompt
-    listed the harness's own `AGENTS.md`. The rule was enforced when you
-    said it and skipped when you did not.
+    back to `os.getcwd()` when nothing names a workspace as the project, so
+    launching from a clone reached the same state by saying nothing:
+    measured in batch 96 from an owner report and reproduced in batch 107,
+    the trust prompt listed the harness's own `AGENTS.md`. The rule was
+    enforced when you said it and skipped when you did not.
+
+    THE MESSAGE NAMES THREE WAYS OUT since batch 111, and used to name two
+    and a trap. It said `workspace_dir` in `config.yaml` "is not enough on
+    its own" -- true, and no help at all to the person reading it, who had
+    just written the directory they meant into the file this refusal is
+    about. `workspace_is_project` is the third way (TECHNICAL_DEBT 28), and
+    the sentence is now about what to do rather than about what does not
+    work.
 
     EQUALITY, NOT CONTAINMENT, which is the one place this deliberately
     differs from `check_workspace`. That one is a WRITE boundary and
@@ -260,16 +268,16 @@ def check_project(project_path: str) -> str | None:
         return None
     return (
         f"The project would be the harness's own install tree ({root}), "
-        f"because AGENT_WORKSPACE is not set and this was launched from "
-        f"there. Workspace trust, .venastine/, /init's destination and "
-        f"project-scoped memories all follow the project, so the harness "
-        f"would be asked to trust its own AGENTS.md and /init would "
-        f"scaffold documentation into its own source. Set AGENT_WORKSPACE "
-        f"to the directory you want to work in, or launch from that "
-        f"directory instead. Setting workspace_dir in config.yaml is not "
-        f"enough on its own: the project follows whether AGENT_WORKSPACE "
-        f"was named, not what the workspace resolves to. To work on the "
-        f"harness itself, AGENT_WORKSPACE=./workspace."
+        f"because nothing named a workspace as the project and this was "
+        f"launched from there. Workspace trust, .venastine/, /init's "
+        f"destination and project-scoped memories all follow the project, "
+        f"so the harness would be asked to trust its own AGENTS.md and "
+        f"/init would scaffold documentation into its own source. Three "
+        f"ways out, any one of them enough: launch from the directory you "
+        f"want to work in; set AGENT_WORKSPACE to it; or, if you have "
+        f"already written it as workspace_dir in config.yaml, set "
+        f"workspace_is_project: true beside it. To work on the harness "
+        f"itself, AGENT_WORKSPACE=./workspace."
     )
 
 

@@ -141,15 +141,19 @@ default, and giving either a key would change behaviour:
   `workspace_dir`'s `"./workspace"`: an unset variable still means `./output`
   rather than `./workspace/output`. A key would have to be ignored whenever
   `AGENT_WORKSPACE` is named, which is the branch this form exists to avoid.
-- **`WORKSPACE_DIR_EXPLICIT`** is the **presence** of `AGENT_WORKSPACE`, never
-  its value. `main()` uses it to decide whether the resolved workspace is also
-  the project path, and the default `./workspace` is a subdirectory of the
-  launch directory -- so a value test would move the project one level down for
-  everyone who set nothing. YAML cannot express "was this variable named?".
-  Two consequences, both live since batch 107: an unset variable makes the LAUNCH
-  DIRECTORY the project, and `protected_paths.check_project` refuses that at startup
-  when it is the install tree (TECHNICAL_DEBT 26); and setting `workspace_dir` in the
-  file moves the workspace without moving the project (TECHNICAL_DEBT 28).
+- **`WORKSPACE_DIR_EXPLICIT`** answers "was this workspace named as the project?",
+  and since batch 111 it has **two inputs, OR'd**: the **presence** of
+  `AGENT_WORKSPACE`, never its value, and the `workspace_is_project` key. The
+  presence rule is why the variable cannot be a value test -- the default
+  `./workspace` is a subdirectory of the launch directory, so comparing values
+  would move the project one level down for everyone who set nothing, and YAML
+  cannot express "was this variable named?". The key exists because that left a
+  person editing `config.yaml` with no way to say it at all (TECHNICAL_DEBT 28),
+  which cost them a refused launch telling them to set a variable in a session
+  where they had just set the key. Still live from batch 107: an unset variable
+  and an undeclared key make the LAUNCH DIRECTORY the project, and
+  `protected_paths.check_project` refuses that at startup when it is the install
+  tree (TECHNICAL_DEBT 26).
 
 ### The environment variables
 
@@ -660,31 +664,72 @@ one expression with no branch in it -- an unset AGENT_WORKSPACE gives
 
 ### `workspace_dir`
 
+### `workspace_is_project`
+
+Whether the workspace above is also the PROJECT (batch 111,
+TECHNICAL_DEBT 28). Shipped `false`.
+
+THE SECOND OF TWO ROUTES TO ONE ANSWER, and it exists because the first
+one is an environment variable. `AGENT_WORKSPACE` has decided this since
+batch 44, by its presence; someone configuring the harness through
+`config.yaml` alone had no way to say it. What they got instead was the
+workspace they asked for and a project of `os.getcwd()` -- and, launched
+from the install tree, a refusal telling them to set a variable in the
+same breath as the file where they had just named the directory they
+meant. The refusal's own last paragraph used to say so.
+
+THE TWO OPTIONS THE DEBT ENTRY OFFERED WERE BOTH WORSE, and the second
+for a reason the entry did not have. "Any value in the file counts" is
+always true, because the shipped file writes `workspace_dir: ./workspace`
+out in full -- so it moves the project for every install nobody has
+edited. "Differs from the shipped default" needs a shipped default to
+compare against, and `HarnessConfig` has none: every field is required
+and comes from the file, by design, so the comparison would need either
+the first schema default in the codebase or a second hand-written copy
+of `"./workspace"` -- the exact staleness `shipped_defaults()` exists to
+prevent. It also quietly makes `./workspace` un-nameable.
+
+NOT AN AUTHORITY KEY, deliberately. An authority key is one no
+unattended surface reaches, and `ENV_OVERRIDES` and
+`HARNESS_AUTHORITY_KEYS` are disjoint for that reason
+(`test_no_authority_key_has_an_environment_override`). `AGENT_WORKSPACE`
+already produces this exact effect through an ordinary override, so
+gating the file key would put the confirmation on the louder of the two
+routes and leave the quieter one open. It is also strictly less
+dangerous than `workspace_dir` itself, which is ungated and carries the
+sharper hazard named above it.
+
 ### `workspace_dir_explicit`
 
-Whether AGENT_WORKSPACE was NAMED, as opposed to defaulted (batch 44).
+Whether the workspace was NAMED as the project, as opposed to defaulted
+(batch 44; a second input added in batch 111).
 
-The presence of the variable, never its value: the default "./workspace"
-is a subdirectory of wherever you launched, so a value test would make
-`./workspace` the project for everyone who never set anything -- which
-is the whole population this must not disturb. main() reads this to
-decide the project path; the decision is there, because the config layer
-holds plain values and this is one.
+`cfg.workspace_is_project or "AGENT_WORKSPACE" in os.environ`. The
+variable half is its PRESENCE, never its value: the default
+"./workspace" is a subdirectory of wherever you launched, so a value
+test would make `./workspace` the project for everyone who never set
+anything -- which is the whole population this must not disturb. main()
+reads this to decide the project path; the decision is there, because
+the config layer holds plain values and this is one.
 
-Batch 107 made the UNSET branch a refusal rather than a silent fallback:
-with no variable the project is os.getcwd(), and
+OR, with no precedence between the halves. Both say the same thing about
+the same directory, so there is no conflict to resolve, and inventing a
+winner would mean a user who did both getting less than a user who did
+either. main() never learns there are two routes -- that is the point of
+computing the OR here.
+
+Batch 107 made the UNNAMED branch a refusal rather than a silent
+fallback: with nothing naming a workspace the project is os.getcwd(), and
 protected_paths.check_project() refuses that when it is the harness's own
 install tree. Naming the harness had always been refused by
 check_workspace; the implicit route reached the same state by saying
-nothing. What that leaves open is TECHNICAL_DEBT 28 -- workspace_dir
-written HERE moves the workspace and not the project, because this value
-reads the environment and not the document, so someone who set it in the
-file is refused and told to set a variable they believe they already
-set.
+nothing. Batch 111 closed what that left open (TECHNICAL_DEBT 28) and the
+refusal now offers three ways out rather than two and a dead end.
 
-Note that this value has NO `config.yaml` key at all -- it is computed in
-`config_schema.derived_values()`, because YAML cannot ask whether a
-variable was named. There is nothing here to edit.
+Note that this value has NO `config.yaml` key of its own -- it is computed
+in `config_schema.derived_values(cfg)`, because half of it is a question
+about the environment that YAML cannot ask. `workspace_is_project` is an
+input to it, not a key for it. There is nothing here to edit.
 
 ### `max_file_size_bytes`
 
