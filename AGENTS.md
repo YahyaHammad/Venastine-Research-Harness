@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 6064 tests, offline. 2:10 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
+pytest                                            # 6087 tests, offline. 2:10 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -415,6 +415,18 @@ the very end of a line is not a row**: `plain_split` hands one back when a trail
 the width by its own cell, Rich folds that space into the row it ends, and drawing the remainder put
 a bare bar under every chunk committed that way.
 
+**And the COMMIT side of that same shape is batch 112** (`TECHNICAL_DEBT.md` 24). `plain_wrap`
+refuses to DRAW the empty remainder; `_commit_ready` and `thinking_delta` now refuse to COMMIT a
+cut that keeps nothing back, which is the only way the width rule can drain the buffer -- a row
+that filled exactly, then a space that overflows by its own cell. Committing there buys nothing,
+and if the next delta opens with the newline, the newline rule commits a chunk that is only
+`"\n"` and both draw paths render it as a blank row the replay does not have (measured: 5 rows
+live against 4, and 7 against 6 for reasoning). Holding for one delta puts the newline in the
+same chunk, where it ends the line. It is deliberately NOT in `_split_committable`, and the
+`limit >= len(self._pending)` clause beside it is why: that function is handed the CAPPED prefix,
+so a drained prefix is not a drained buffer, and holding there would make a paragraph in front of
+a held table wait for the table to close.
+
 **`line_start=False` says a chunk begins mid-line, and it fixed a shipped bug.** With a prefix of
 exactly 77 characters the wrap boundary falls immediately before a `# ` token; the committed
 fragment read as the start of a line, rendered as a heading and **ate the hash**, which a
@@ -440,6 +452,21 @@ across the commit boundary. The price, named and tested: an item nested with fou
 flat, two-space nesting renders. `verbatim()` is asked in exactly three places — `_scan`,
 `_is_row`, `list_item` — and **fences are exempt**, which is `TECHNICAL_DEBT.md` 14 rather than a
 silence.
+
+**A terminal resize re-lays the transcript, and the route is `reflow()` rather than `rerender()`**
+(batch 112, closing `TECHNICAL_DEBT.md` 23 and 15). RichLog renders at write time and stores
+Strips, so nothing re-wraps itself and every row drawn before a drag kept the width it was drawn
+at. `rerender()` cannot be the handler: it opens with `flush_stream()`, which ENDS an open answer
+span, so a resize mid-turn would split the live answer into two entries under two `venastine ›`
+labels. `reflow()` hands the open span's half-drawn line back to `_pending`, moves `_entries[-1]`
+with it, replays, and then **commits again** at the new width — that last step because the
+handed-back line is usually the whole of an open span, so without it a half-written answer blanks
+until the next delta. `_render_entry(closed=False)` withholds the one piece of furniture a
+replayed open span must not draw, reasoning's `╰`. `on_resize` is keyed on `_wrap_width()`
+CHANGING — a height drag moves no wrap — and debounced on `REFLOW_DEBOUNCE_S`. **RichLog defers
+its auto-scroll to after the next refresh**, which is why the reflow turns `auto_scroll` off and
+restores the reader's place with `immediate=True`: a position set during the redraw was
+overwritten a frame later, and the reader landed at the bottom.
 
 **A URL is its own label, and that is the security rule as a data shape.** `[text](url)` is not a
 construct: a bare `http(s)://` URL is detected wherever it appears — catching the one inside the

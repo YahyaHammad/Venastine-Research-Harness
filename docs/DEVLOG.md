@@ -16623,3 +16623,210 @@ mutation pass over the three new claims: the OR in `derived_values`, the tier
 attribution in `_load_merged_settings`, and `explain()`'s is/can branch.
 
 Counts 6036 -> 6064.
+
+## Batch 112 -- rows that were wrong once they were on screen (2026-09-29)
+
+TECHNICAL_DEBT 24 and 23, with 15 folded into 23 since batch 107. One subject
+seen from two ends: a `RichLog` renders at write time and stores `Strip`s, so
+a row that reached the screen can never be corrected -- only redrawn from
+`_entries`. Item 24 is a row that should never have been drawn. Item 23 is
+every row keeping a width the terminal has stopped having. They meet in the
+commit machinery, which is why doing them apart would have meant designing
+that meeting twice.
+
+Both were reproduced before anything changed, at the numbers the register
+recorded in batch 90: an answer drawing 5 rows live against 4 replayed,
+reasoning 7 against 6, and rows 78 wide against a 112-column panel after a
+widen. `probe112.py` reports all three and exits non-zero until all three
+are fixed, so the same instrument said REPRODUCED and then FIXED.
+
+### Item 24: the register's prescription, and a narrower mechanism
+
+The entry prescribes remembering, at the DRAWER, that the last row ended
+exactly at the width, and swallowing one newline that immediately follows.
+That works. Tracing it first turned up something smaller: there is exactly
+ONE way the width rule can drain the commit buffer. `width_split` and
+`plain_split` cut after the last space that FITS, and when that space is the
+buffer's final character -- a row that filled the width exactly, then a space
+that overflows by its own cell -- `line[:space + 1]` is the whole line. A cut
+that keeps nothing back has bought nothing: there is no held remainder to
+draw sooner. So it commits nothing, the newline arrives in the SAME chunk on
+the next delta, and it simply ends the line.
+
+Two lines rather than a flag, both paths at once, no new state -- and
+nothing for item 23's reflow to have to remember to clear, which is the
+interaction that made the pair worth doing together.
+
+**Where it is not is the interesting half.** Not in `markdown.plain_split`:
+that shares `_plain_cut` with `plain_wrap`, which is the wrap a REPLAY uses,
+so the fix would have moved the yardstick it is measured against. And not in
+`Transcript._split_committable`, for a reason that only appears one level up
+-- `_commit_ready` hands it `self._pending[:limit]`, the prefix the commit
+cap allows, so a drained PREFIX is not a drained BUFFER. Holding there would
+make a paragraph sitting in front of a held table wait for the table to
+close, which is precisely the regression `commit_span` replaced §38's
+whole-chunk rejection to remove. `limit >= len(self._pending)` is that half
+of the rule, and it has its own test with an unclosed `**` doing the capping.
+
+`plain_wrap` has refused to draw this row since batch 90 -- "a cut at the very
+END of the line closes the last row rather than opening an empty one". That
+is the replay side of the identical shape, fixed then, while the commit side
+went on producing it for twenty-two batches. They are one rule stated in two
+places now, which is what the row-equality classes exist to keep true.
+
+### Item 23: the obstacle was the whole item
+
+The entry is not vague about why it stayed open. `rerender()` would put a
+resized transcript right, and it opens with `flush_stream()`, which CLOSES an
+open answer span -- so a resize mid-turn would split the live answer into two
+entries under two `venastine ›` labels, the thing §38's one-entry-per-span
+rule exists to prevent. Nine batches of "that is its own change" were about
+that sentence.
+
+`reflow()` is the replay without the flush. `rerender()` becomes
+`flush_stream()` + `_replay()` and `reflow()` becomes un-commit + `_replay()`
++ re-commit, so the two share the loop that re-derives the labels from the
+role sequence and neither can drift from the other.
+
+**The un-commit.** Before replaying, the tail of `_stream_text` after its
+last newline goes back into `_pending`, and `_entries[-1]` moves with it.
+Without that, the replay draws the open entry whole, ending mid-line, and the
+next committed chunk is a separate `write()` and therefore a separate ROW --
+so the join lands mid-row at the new width and the seam stays for the rest of
+the answer. Moving the entry with the text is what keeps a `/copy` or a
+`/theme` in that window agreeing with the screen; pending text has never been
+in the entry log, so this keeps the existing rule rather than bending it.
+
+**And then commit again, which was not in the plan.** Writing the tests found
+it: the handed-back line is usually the WHOLE of an open span, because a
+model sends a paragraph before it sends a newline. So the un-commit empties
+the entry, the entry is dropped, and a reader watching their half-written
+answer sees it vanish until the next delta arrives. Re-cutting the buffer at
+the new width immediately after the replay puts it straight back, which is
+also why `_commit_thinking_ready` is split out of `thinking_delta`: the
+reflow has to commit a buffer nothing has added to.
+
+**`_render_entry(closed=False)`** is the one thing a replayed open span must
+withhold -- reasoning's `╰ …done thinking`, which would otherwise announce an
+end with the rest of the reasoning arriving under it. An open answer span
+needs nothing; it has no closing furniture.
+
+**The scroll, and the thing that had to be measured.** The row count changes
+with the width, so an exact restore is not available at any price; the
+fraction is. The first implementation computed it correctly and the reader
+landed at the bottom anyway, because `RichLog.write` calls
+`scroll_end(..., immediate=False)` and Textual DEFERS that to after the next
+screen refresh -- so the last write's pending scroll overwrote the restored
+position a frame later. `auto_scroll` is off for the duration of the redraw
+and both restores pass `immediate=True`. `rerender()` is deliberately left
+alone: `/theme` belongs at the bottom.
+
+### What the tests could not do, and what they do instead
+
+The rule asserted is the two row-equality classes' rule carried across a
+resize: the rows after a widen are the rows the same entries produce when
+written at that width to begin with. Over prose, a wrapping list item, a diff
+and a thinking span -- item 15's three pre-wrapped constructs plus the
+ordinary case -- with a companion test asserting the two panel widths really
+do wrap differently, because otherwise every case could pass by drawing the
+same rows twice and the failure would look like a pass.
+
+**The debounce is asserted on its mechanism.** One `pilot.resize_terminal`
+costs about 100ms here, so a ten-step drag takes 1.06s -- longer than any
+debounce a test can afford to sleep through, and under eleven xdist workers
+the margin is whatever the box happens to be doing. That is a scheduling
+lottery rather than a test, and batch 110's `real_storage` sentinel is the
+precedent: the test pushes the debounce past its own end and checks that each
+resize STOPPED the pending redraw before arming its own.
+
+A smaller one, found the same way: an early version of the wiring test set
+`app.console.size` AFTER `pilot.resize_terminal`, and a 0.02s debounce fired
+INSIDE the resize's own await -- so the reflow ran at the new region and the
+old console, and drew 78-wide rows against a 122-column panel. A real
+terminal changes both at once; the test now does too.
+
+### Item 24's cases are built, not written
+
+`TestAStreamedAnswerRendersLikeAWrittenOne` chunks its cases every five
+characters, which cannot produce this shape -- the edge row has to be
+COMMITTED and the newline has to open the delta after it. The new cases
+choose their deltas, and build the text from the measured `_wrap_width()`
+rather than writing a literal: a literal stops reproducing the day the
+panel's padding changes, and goes on passing. Each has the control beside it,
+which the register asks for by name: a real blank line after an edge row is
+still drawn, so the fix cannot quietly become "swallow every newline that
+follows a full row".
+
+### Four rows the mutation pass corrected
+
+Fourteen rows, all killed in the end -- and four of them only after the
+TESTS were fixed. Three of those were tests that did not measure what they
+said they measured.
+
+**One was measuring the wrong reflow.** `pilot.resize_terminal` arms the
+debounced redraw, and left alone it fires during a later `pause()` -- by
+which time the answer has finished and the entry log is complete, so it
+re-lays a FINISHED answer and the rows come out right whatever the explicit
+`reflow()` did with the open span. Deleting `_uncommit_partial_line`
+entirely changed nothing the test could see. Every test that calls
+`reflow()` by hand now cancels the armed one first, and the wiring tests
+assert the armed one separately.
+
+**One could not see a transient.** The answer path's mid-stream case
+compares the FINAL rows, and the re-commit is about what is on screen
+between the replay and the next delta -- so removing it left the end state
+correct and the reader watching a blank transcript in the middle. The
+reasoning case caught its own version because it reads the screen DURING;
+the answer case now does too.
+
+**One never reached the branch it was named for.** The open thinking span it
+built held no newline, so the un-commit emptied the entry, dropped it, and
+the replay never rendered the entry whose closing delimiter the test is
+about: `closed=False` was unreachable from it. Its reasoning now has a
+newline in it.
+
+**And one the row equality cannot see at all.** Holding EVERY width-rule
+commit rather than only the draining one stops progressive rendering dead,
+and both row-equality classes still pass -- because a stream that commits
+nothing draws, at the flush, exactly the rows a written answer draws. That
+is `TestTextIsCommittedBeforeTheTurnEnds`'s job, and the two classes are not
+interchangeable. The `not rest` clause now has its own case beside the rule
+it belongs to.
+
+### The spy only the full suite could see
+
+`_render_entry` gained a keyword-only `closed`, and
+`test_research_legibility.py::test_switching_theme_replays_the_transcript`
+replaces `_render_entry` with a spy whose own comment says it "takes
+whatever it is handed rather than enumerating the arguments". That was true
+of POSITIONAL arguments. The spy took `*targets` and no `**kwargs`, so the
+first `closed=` to reach it came back as a `TypeError` raised from inside
+`rerender()` -- a theme switch, crashing on an argument the theme switch
+never passes.
+
+Nothing targeted could have seen it. The test is three files from anything
+this batch touched, it does not resize, it does not stream, and it is in
+neither of the two files the batch moves; the docs gate, the four-file
+targeted run and the mutation pass all went past it. The parallel full run
+was the only instrument that read it, and it is batch 75's lesson arriving
+again: the full suite is not a formality at the end of a batch, it is the
+only thing that looks at the whole tree.
+
+### And one the verification found that is not this batch's
+
+The serial full run failed once on
+`test_tool_budgets.py::TestAComputeToolIsBoundedByAClockThatCanStopIt::test_the_probe_would_notice_a_child_that_kept_going`,
+with `assert 0 > 0`. Zero, not "stopped growing": the child subprocess had
+not produced its FIRST tick 2.0s after `Popen` returned, and it writes
+every 0.05s once running -- so what ran out of time was a cold interpreter
+start, on a box eight minutes into a one-core run. Nothing to do with this
+batch, and it did not reproduce: the class three times, the file, the
+parallel suite, and a second serial run (6041 passed, 7:27) are all green.
+
+It is a real latent defect even so, and it is now REGISTER ITEM 31 rather
+than a sentence here, because a test whose failure message names a defect
+that was not the one present will mislead whoever hits it next. Not fixed
+in this batch, by owner decision: it has nothing to do with the transcript,
+and a test edit buys both full suites again.
+
+Counts 6064 -> 6087.

@@ -597,7 +597,7 @@ across the commit boundary).
 list-context state machine in `split_blocks`, which is the same machinery the indent rule
 declined to add.
 
-## 15. Nothing re-renders on resize, so a pre-wrapped construct freezes (open, folded into item 23 in batch 107)
+## 15. Nothing re-renders on resize, so a pre-wrapped construct freezes (closed with item 23, batch 112)
 
 `Transcript` pre-wraps three things rather than letting Rich soft-wrap them, because each needs
 a prefix on every rendered row: the diff gutter (§41), the thinking bar (§38) and, since batch
@@ -619,6 +619,14 @@ the width it was drawn at, pre-wrapped or not, because RichLog renders at write 
 Strips. 23 is the general statement and carries the measurement, the `rerender()` hazard and the
 prescription, so it is the one to read. This entry is kept for the three constructs it names,
 which are where the symptom is most visible.
+
+**CLOSED WITH ITEM 23 (batch 112).** A resize now re-lays the whole
+transcript, so the three pre-wrapped constructs this entry names re-wrap with
+everything else; all three are cases in the resize row-equality class
+precisely because they are where the symptom was most visible. The two risks
+this entry raised are answered where 23 records them: the redraw is debounced
+on `REFLOW_DEBOUNCE_S` rather than run per event, and the scroll position
+keeps its fraction rather than being lost.
 
 ## 16. A URL in a tool line is not clickable (closed, batch 65)
 
@@ -845,7 +853,7 @@ identified and which the paragraph above already records.
 What survives is the procedure, and it is already in `AGENTS.md` and `bandit.yml`. Nothing here
 needs doing.
 
-## 23. The transcript does not reflow on a terminal resize (open, 2026-09-14)
+## 23. The transcript does not reflow on a terminal resize (closed, batch 112)
 
 Rows already drawn keep the width they were drawn at when the terminal is
 resized. RichLog renders at write time and stores Strips; its `on_resize`
@@ -872,7 +880,54 @@ prevent. A fix needs a redraw that leaves an open span open, debounced so a
 window drag is not one replay per event, and a decision about where the
 scroll position lands. That is its own change.
 
-## 24. A newline after a row that filled the width draws a blank row live (open, 2026-09-14)
+**RESOLVED (batch 112).** `on_resize` coalesces a redraw, and the redraw is
+`reflow()` rather than `rerender()`: the replay that does not flush. Every
+obstacle this entry names was real, and each is met rather than avoided.
+
+* **The open span stays open.** `_uncommit_partial_line` gives the tail of
+  `_stream_text` after its last newline back to `_pending` and moves
+  `_entries[-1]` with it, so a `/copy` or a `/theme` in the same window still
+  agrees with the screen; the replay draws what is left; and `_commit_ready`
+  re-cuts the tail at the new width. That last step is not tidying. The
+  handed-back line is usually the WHOLE of an open span, because a model
+  sends a paragraph before it sends a newline, so a replay on its own would
+  leave the reader watching their half-written answer vanish until the next
+  delta arrived. `_render_entry` gains `closed`, which only the reflow ever
+  passes False: the one piece of furniture a replayed open span must not
+  draw is reasoning's `-- done thinking` delimiter.
+* **Debounced** on `REFLOW_DEBOUNCE_S` (0.15s), and keyed on `_wrap_width()`
+  CHANGING rather than on the event -- a `Resize` arrives for a height change
+  too, and no wrap moves.
+* **The scroll keeps its FRACTION.** The row count changes with the width, so
+  an exact restore is not available at any price, and a resize is
+  involuntary: landing where `/theme` lands would lose the place of anyone
+  reading back through the session.
+
+**One thing had to be measured rather than reasoned about.** RichLog DEFERS
+its auto-scroll to after the next screen refresh (`scroll_end(...,
+immediate=False)`), so a scroll position computed and set during the reflow
+was overwritten a frame later by the last write's pending scroll -- the
+reader landed at the bottom however carefully it was worked out. `auto_scroll`
+is off for the duration of the redraw and both restores pass `immediate=True`.
+
+**Pinned as the two row-equality classes' rule carried across a resize**: the
+rows after a widen are the rows the same entries produce when written at that
+width to begin with. Over prose, a wrapping list item, a diff and a thinking
+span -- which are item 15's three pre-wrapped constructs plus the ordinary
+case -- with a companion test asserting that the two panel widths really do
+wrap differently, since otherwise every case could pass by drawing the same
+rows twice. And the hazard this entry parked the item on, asserted directly:
+one assistant entry and one `venastine` label after a resize mid-answer.
+
+**The debounce is asserted on its mechanism, not by waiting it out.** One
+`pilot.resize_terminal` costs ~100ms on this box, so a ten-step drag takes
+1.06s -- longer than any debounce short enough to sleep through in a test,
+and under eleven xdist workers the margin is whatever the box happens to be
+doing. That is a scheduling lottery rather than a test. The debounce is
+pushed past the end of the test instead, and what is checked is that each
+resize STOPPED the pending redraw before arming its own.
+
+## 24. A newline after a row that filled the width draws a blank row live (closed, batch 112)
 
 When the last row of a line fills the transcript exactly, the width rule
 commits the whole buffer -- the cut lands after a trailing space that
@@ -901,6 +956,43 @@ blank one, on both paths. The answer path's single-trailing-newline and
 blank-line-between-paragraphs rules are pinned, and getting this wrong
 swallows a real paragraph break, so it wants its own cases in both
 row-equality classes rather than riding along with a width fix.
+
+**RESOLVED (batch 112), and NOT by the prescription above.** That one
+remembers, at the DRAWER, that the last row ended at the width, and swallows
+one newline that follows it. The mechanism turns out to be narrower than the
+symptom. The only way the width rule can drain the buffer is
+`width_split`/`plain_split` cutting after the last space that FITS and that
+space being the buffer's final character -- a row that filled exactly, then a
+space that overflows by its own cell. A cut that keeps nothing back has
+bought nothing, so it commits nothing; the newline then arrives in the SAME
+chunk and simply ends the line. Two lines, both paths, no new state, and
+nothing for item 23's reflow to remember to clear.
+
+**Where it is not, and why.** Not in `markdown.plain_split`, which shares
+`_plain_cut` with `plain_wrap` -- the REPLAY's wrap, and the thing this whole
+surface is measured against. Not in `Transcript._split_committable` either,
+for a reason that only appears in the caller: `_commit_ready` hands it the
+CAPPED prefix, so a drained prefix is not a drained buffer, and holding there
+would make a paragraph sitting in front of a held table wait for the table to
+close -- the regression the cap was built to remove.
+`limit >= len(self._pending)` is that half of the rule and has a test of its
+own (`test_a_drained_prefix_is_not_a_drained_buffer`, an unclosed `**` doing
+the capping).
+
+**`plain_wrap` has refused to draw this row since batch 90** -- "a cut at the
+very END of the line closes the last row rather than opening an empty one" --
+which is the replay side of the identical shape, fixed while the commit side
+went on producing it. They are now one rule stated in two places, which is
+what the row equality exists to keep true.
+
+Reproduced before anything changed, at this entry's own numbers: 5 rows live
+against 4 replayed for an answer and 7 against 6 for reasoning, on an
+84-column pane where the entry measured a 160-column one. Pinned in BOTH
+row-equality classes as the entry asks, with the text built from the measured
+width rather than written as a literal -- a literal stops reproducing the day
+the padding changes and goes on passing -- and beside each one the control:
+a real blank line after an edge row is still drawn, so the fix cannot quietly
+become "swallow every newline after a full row".
 
 ## 25. A model call is not retried once its output is on screen (open, 2026-09-14)
 
@@ -1394,3 +1486,42 @@ test class.**
 **What remains open in this item:** the 183 classless tests in `test_tui.py`, and nothing else. The
 `test_config_edit.py` precondition this entry prescribed was never the defect, and the mode
 decision it was blocking is taken.
+
+## 31. A positive control measures interpreter startup as well as the thing it guards (open, 2026-09-30)
+
+`tests/test_tool_budgets.py::TestAComputeToolIsBoundedByAClockThatCanStopIt::test_the_probe_would_notice_a_child_that_kept_going`
+is the control beside the kill test: the test above it asserts that a file
+STOPPED growing, which is what it would assert if the child had never
+started, so this one runs the same handler and watches it keep going. It
+spawns `python -m tools.isolation` as a subprocess, sleeps a FIXED 1.0s,
+reads `st_size`, sleeps 1.0s again and asserts the size grew.
+
+**Seen failing once, in batch 112's serial full run**, with
+`AssertionError: assert 0 > 0`. Zero, not "did not grow": the child had not
+produced its FIRST tick 2.0s after `Popen` returned, and the probe writes
+every 0.05s once it is running. So what timed out was a cold interpreter
+start plus the probe module's imports, on a box eight minutes into a
+one-core run -- not the budget clock the test is about. The message it
+prints ("an unkilled child did not keep growing the file, so the test above
+is asserting nothing") describes a defect that was not the one present, and
+the child's stderr is captured but never shown, so a real crash would read
+identically.
+
+**Not reproducible on demand.** The class ran green three times
+consecutively (~14s each), the file green (31 passed), the parallel full
+suite green, and a second serial full run green (6041 passed, 7:27). It is
+a load-dependent flake, which is why it is written down rather than chased.
+
+**The shape of the fix, when someone takes it:** poll for the first tick
+under a generous deadline and measure growth from THERE, so the window the
+test actually cares about starts when the child starts; and put
+`proc.stderr` into the assertion message, so a child that died is
+distinguishable from a child that was slow. Both are changes to the test,
+not to `tools.isolation` -- there is no evidence of a defect in the thing
+under test.
+
+**Deliberately not fixed in batch 112** (owner decision, 2026-09-30). It
+was found BY that batch's verification and has nothing to do with its
+subject, and a test edit means re-running both full suites; carrying it as
+a register entry keeps it owed without widening a batch that was planned
+around the transcript.

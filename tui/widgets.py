@@ -75,6 +75,14 @@ THINKING_INDENT = "  "
 # (a bare-built test widget, a widget before mount) reads as 0.
 MIN_WRAP_WIDTH = 20
 
+# Batch 112 (TECHNICAL_DEBT 23). How long after the LAST resize event the
+# transcript re-lays itself. Dragging a window edge delivers one Resize per
+# frame and a replay is O(the whole session), so the redraw is coalesced
+# rather than run per event. 0.15s is below the threshold at which a redraw
+# reads as a delay and comfortably above a drag's frame interval. Tests
+# monkeypatch it to 0 rather than sleeping through it.
+REFLOW_DEBOUNCE_S = 0.15
+
 # Batch 55, the slash-command suggestion panel. The two caps are a pair:
 # five entries is the list a reader takes in at a glance, eight rows is
 # what leaves the transcript readable at the 24-row floor, and at 80
@@ -2070,12 +2078,18 @@ class Transcript(RichLog):
     streaming latency should look here first." They should still look
     here first; the answer is now the two rules above.
 
-    Known edge, stated rather than fixed: a terminal resize leaves every
-    already-drawn row wrapped to the old width, not only an answer in
-    flight. `_entries` keeps the unwrapped source, so rerender() puts it
-    right, but it flushes an open span and cannot simply run on a resize
-    -- TECHNICAL_DEBT item 23. A pane the switcher HIDES is a different
-    cause with the same look, and that one is fixed: see `_region_width`.
+    A TERMINAL RESIZE RE-LAYS THE TRANSCRIPT since batch 112, which is
+    what this paragraph used to say was a known edge. RichLog renders at
+    write time and stores Strips, so nothing re-wraps itself and every row
+    drawn before a drag kept the width it was drawn at -- not only an
+    answer in flight. `_entries` keeps the unwrapped source, so a replay
+    puts it right; what took nine batches is that `rerender()` opens with
+    `flush_stream()`, which ENDS an open answer span, so routing a resize
+    to it would split a live answer into two entries under two
+    `venastine ›` labels. `reflow()` is the replay that leaves the span
+    open -- see `_uncommit_partial_line` for the one thing it has to move
+    first -- and `on_resize` coalesces it. A pane the switcher HIDES is a
+    different cause with the same look, fixed earlier: see `_region_width`.
 
     §26 adds two things and one obligation.
 
@@ -2138,6 +2152,13 @@ class Transcript(RichLog):
         # ONE label per turn, above the model's first output of it
         # whether that output is reasoning or text -- see _open_label.
         self._label_in_force = False
+        # Batch 112 (TECHNICAL_DEBT 23). The width the rows on screen were
+        # laid out at -- maintained in `write()`, which every draw path
+        # funnels through -- and the pending coalesced redraw. None before
+        # the first write, which no real width equals, so the first resize
+        # always reflows rather than having to guess what was drawn.
+        self._drawn_width: int | None = None
+        self._reflow_timer = None
 
     def write(self, content, *args, width=None, **kwargs):
         """Write at the width this pane will be SHOWN at (§47).
@@ -2168,6 +2189,11 @@ class Transcript(RichLog):
         never-shown pane defers every write, so its deferred entries carry
         the width computed here, which is the width it is shown at.
         """
+        # Batch 112. Every drawn row passes here, so this is the one place
+        # that can say what width the screen is currently laid out at --
+        # which is what `on_resize` compares against, so a resize that does
+        # not change the wrap width (a height-only drag) redraws nothing.
+        self._drawn_width = self._wrap_width()
         if args:
             # Textual's own replay (or any positional caller): pass
             # through byte-identical, never merging a keyword beside it.
@@ -2270,7 +2296,13 @@ class Transcript(RichLog):
         self._render_entry(role, text, links, opens)
 
     def _render_entry(self, role: str, text: str, links=(),
-                      opens: tuple = ()) -> None:
+                      opens: tuple = (), *, closed: bool = True) -> None:
+        """Draw one entry. `closed` says whether the span it belongs to has
+        ENDED, and only `reflow()` ever passes False (batch 112): a resize
+        mid-reasoning replays a thinking entry that is still being streamed,
+        and drawing its `╰ …done thinking` there would announce an end that
+        has not happened. An open ANSWER span needs nothing -- it has no
+        closing furniture -- so the flag is thinking's alone."""
         if role == "user":
             # §43 (RM1). The turn's label is retired HERE and nowhere
             # else, so where the labels land is a pure function of the
@@ -2327,7 +2359,8 @@ class Transcript(RichLog):
             self._open_label()
             self._write_thinking_open()
             self._write_thinking_lines(text)
-            self._write_thinking_close()
+            if closed:
+                self._write_thinking_close()
         elif role in LINKED_ROLES:
             # `tool_error` arrives here, and needs no `links`: its text
             # is redact_secrets(str(error)) with no truncation, so the
@@ -2918,6 +2951,27 @@ class Transcript(RichLog):
         on EITHER path, so the rows it is drawn in are the rows the replay
         will draw. Without that a model could hold the screen indefinitely
         by never sending a newline.
+
+        BATCH 112 ADDS A THIRD RULE: A CUT THAT KEEPS NOTHING BACK COMMITS
+        NOTHING (TECHNICAL_DEBT 24). The width rule can drain the buffer,
+        in exactly one shape -- `width_split`/`plain_split` cut after the
+        last space that fits, and when that space is the buffer's final
+        character (a row that filled the width exactly, then a space that
+        overflows by its own cell) the cut is the whole of it. Committing
+        then buys nothing, because nothing is held back; and if the
+        model's NEXT delta opens with the newline, the newline rule
+        commits a chunk that is only `"\\n"` and both draw paths render it
+        as a blank row the replay does not have (measured: an answer drew
+        5 rows live and 4 replayed). Holding the row until the next delta
+        or the flush puts the newline in the SAME chunk, where it simply
+        ends the line -- which is what `plain_wrap`'s own docstring
+        already says about the replay side of this shape.
+
+        `limit >= len(self._pending)` is the half that is easy to drop:
+        the split is handed the CAPPED prefix, so a drained prefix is not
+        a drained buffer. Without it a paragraph sitting in front of a
+        held table would wait for the table to close, which is precisely
+        the regression the cap was built to remove.
         """
         width = self._wrap_width()
         while True:
@@ -2929,6 +2983,9 @@ class Transcript(RichLog):
                 self._pending[:limit], width, marks=True,
                 block=not mid_line)
             if not chunk:
+                return
+            if not chunk.endswith("\n") and not rest \
+                    and limit >= len(self._pending):
                 return
             self._pending = rest + self._pending[limit:]
             self._write_stream_chunk(chunk, line_start=not (mid_line or forced))
@@ -3037,10 +3094,24 @@ class Transcript(RichLog):
 
     def thinking_delta(self, delta: str) -> None:
         self._thinking_pending += delta
+        self._commit_thinking_ready()
+
+    def _commit_thinking_ready(self) -> None:
+        """`_commit_ready` for the reasoning span, and split out of
+        `thinking_delta` for its reason: `reflow()` has to re-commit a
+        buffer nothing has added to."""
         width = self._wrap_width(THINKING_INDENT + THINKING_BAR)
         while True:
             chunk, rest = self._split_committable(self._thinking_pending, width)
             if not chunk:
+                return
+            # A cut that keeps nothing back commits nothing, for
+            # _commit_ready's reason (TECHNICAL_DEBT 24) -- and here with
+            # no `limit` clause beside it, because this path has no
+            # commit cap and the buffer IS the whole of what was offered.
+            # Measured before the fix: a streamed span drew 7 rows where
+            # the replay drew 6, the extra one a bar with nothing beside it.
+            if not chunk.endswith("\n") and not rest:
                 return
             self._thinking_pending = rest
             self._write_thinking_chunk(chunk)
@@ -3135,13 +3206,26 @@ class Transcript(RichLog):
         cannot restyle what is already on screen -- without this, /theme
         would leave the session split between two palettes at the exact
         line the command was typed.
+
+        The flush is what makes this safe to call from a COMMAND and unsafe
+        to call from an event: it closes an open answer span, so a resize
+        routed here mid-turn would split the live answer into two entries
+        under two `venastine ›` labels. `reflow()` below is the route that
+        does not (TECHNICAL_DEBT 23).
         """
         self.flush_stream()
+        self._replay()
+
+    def _replay(self) -> None:
+        """Draw `_entries` from an empty screen. The shared half of
+        `rerender()` and `reflow()`, which differ only in what they do to
+        an open span before calling it."""
         self.clear()
         # §43 (RM1). The screen is empty, so no label is in force; the
         # loop below re-derives every one of them from the role sequence
         # exactly as the live path did.
         self._label_in_force = False
+        last = len(self._entries) - 1
         for index, (role, text) in enumerate(self._entries):
             # Batch 65: the targets too, or a /theme would silently
             # disarm every long URL in the session -- the line would
@@ -3150,8 +3234,147 @@ class Transcript(RichLog):
             # §47's side table too, for batch 65's reason one table
             # over: a /theme that dropped it would leave every spawn
             # line looking identical and silently unopenable.
-            self._render_entry(role, text, self._links.get(index, ()),
-                               self._opens.get(index, ()))
+            self._render_entry(role, text,
+                               self._links.get(index, ()),
+                               self._opens.get(index, ()),
+                               closed=not (self._thinking_open
+                                           and index == last))
+
+    # -- reflow on resize (TECHNICAL_DEBT 23, batch 112) --------------------
+
+    def on_resize(self, _event) -> None:
+        """Coalesce a redraw at the new width.
+
+        RichLog renders at WRITE time and stores Strips, so nothing already
+        drawn re-wraps by itself: widen a terminal mid-session and every row
+        drawn before the drag keeps the width it was drawn at while new rows
+        use the full panel. Measured before the fix: rows 114 wide against a
+        198-column panel.
+
+        Two guards, both load-bearing. A `Resize` also arrives for a HEIGHT
+        change, which moves no wrap, so the redraw is keyed on
+        `_wrap_width()` changing rather than on the event. And a width of 0
+        is "cannot be measured" (a widget before mount, a bare-built one in
+        the suite), never a real narrow pane -- a hidden pane measures its
+        on-screen sibling through `_region_width` and DOES reflow, which is
+        batch 90's fix and the reason this cannot simply skip hidden panes.
+        """
+        width = self._wrap_width()
+        if not width or width == self._drawn_width:
+            return
+        if self._reflow_timer is not None:
+            self._reflow_timer.stop()
+        self._reflow_timer = self.set_timer(REFLOW_DEBOUNCE_S, self.reflow)
+
+    def reflow(self) -> None:
+        """Re-lay the whole transcript at the current width, WITHOUT closing
+        an open span.
+
+        That is the whole difference from `rerender()`, and it is the reason
+        item 23 stayed open: a replay that flushes first would end the
+        answer being streamed and start the next chunk as a second entry
+        under a second label, which is what §38's one-entry-per-span rule
+        exists to prevent.
+        """
+        if not self._wrap_width():
+            return
+        fraction, at_bottom = self._scroll_fraction()
+        # AUTO-SCROLL OFF FOR THE REDRAW. RichLog scrolls to the end after
+        # every write, and it DEFERS that scroll to after the next screen
+        # refresh -- so a position set here would be overwritten a frame
+        # later by the last write's pending scroll_end, and the reader
+        # would land at the bottom however carefully it was computed.
+        # `rerender()` is left alone: /theme belongs at the bottom.
+        auto, self.auto_scroll = self.auto_scroll, False
+        try:
+            self._uncommit_partial_line()
+            self._replay()
+            # AND COMMIT AGAIN AT THE NEW WIDTH, which is not tidying: the
+            # line handed back above is usually the whole of an open span
+            # (a model sends a paragraph before it sends a newline), so a
+            # replay on its own would leave the reader watching their
+            # half-written answer disappear until the next delta arrived.
+            # These re-cut it at the width now in force and put it back.
+            self._commit_ready()
+            self._commit_thinking_ready()
+        finally:
+            self.auto_scroll = auto
+        self._restore_scroll(fraction, at_bottom)
+
+    def _uncommit_partial_line(self) -> None:
+        """Give an open span's half-drawn line back to its pending buffer.
+
+        Without this the replay draws `_stream_text` whole -- ending in the
+        middle of a line -- and the next committed chunk is a separate
+        `write()` and therefore a separate ROW, so the join lands mid-row at
+        the new width and the seam is visible for the rest of the answer.
+        Handing the tail back means the next commit re-cuts it at the width
+        now in force.
+
+        `_entries` moves with it. Pending text has never been in the entry
+        log, so keeping the two in step is what lets a `/copy` or a `/theme`
+        in the same window agree with the screen; the flush appends the
+        residual back at the end of the span, exactly as it always has.
+
+        If the tail was the whole entry, the entry goes: an empty assistant
+        entry would replay as a row nothing wrote, and `_open_label`'s guard
+        means the next chunk re-opening the span draws the same single
+        label. The two branches cannot both fire -- opening either span
+        closes the other -- and both are written because the state is
+        per-span and reading one to decide the other is how they drift.
+        """
+        if self._stream_open:
+            tail = self._stream_text.rsplit("\n", 1)[-1]
+            if tail:
+                self._stream_text = self._stream_text[:-len(tail)]
+                self._pending = tail + self._pending
+                if self._stream_text:
+                    self._entries[-1] = ("assistant", self._stream_text)
+                else:
+                    self._drop_last_entry()
+                    self._stream_open = False
+        if self._thinking_open:
+            tail = self._thinking_text.rsplit("\n", 1)[-1]
+            if tail:
+                self._thinking_text = self._thinking_text[:-len(tail)]
+                self._thinking_pending = tail + self._thinking_pending
+                if self._thinking_text:
+                    self._entries[-1] = ("thinking", self._thinking_text)
+                else:
+                    self._drop_last_entry()
+                    self._thinking_open = False
+
+    def _drop_last_entry(self) -> None:
+        """Remove the final entry and the side-table rows keyed to it.
+
+        Both tables are keyed by INDEX, and the index this frees is the one
+        the next appended entry takes -- so a row left behind would arm an
+        unrelated line with someone else's URL or someone else's call."""
+        index = len(self._entries) - 1
+        self._entries.pop()
+        self._links.pop(index, None)
+        self._opens.pop(index, None)
+
+    def _scroll_fraction(self) -> tuple:
+        """How far down the transcript the reader is, and whether that is
+        the bottom. A fraction rather than a row, because the row COUNT
+        changes with the width -- an exact restore is not available at any
+        price, and a resize is involuntary, so landing back where /theme
+        lands (the bottom) would lose a reader's place on a window drag."""
+        limit = self.max_scroll_y
+        if not limit:
+            return 0.0, True
+        return self.scroll_y / limit, self.scroll_y >= limit - 1
+
+    def _restore_scroll(self, fraction: float, at_bottom: bool) -> None:
+        """`immediate=True` on both, because the default defers the scroll
+        to after the next refresh and the reflow is already over by then --
+        the same deferral that makes turning `auto_scroll` off necessary."""
+        if at_bottom:
+            self.scroll_end(animate=False, immediate=True, x_axis=False)
+            return
+        self.scroll_to(y=round(fraction * self.max_scroll_y),
+                       animate=False, immediate=True)
 
     def last_answer(self) -> str:
         """The most recent answer in this session, or "" (for /copy last).

@@ -385,6 +385,108 @@ class TestTheSplitRuleItself:
         assert Transcript._split_committable("short", 20) == ("", "short")
 
 
+class TestACutThatKeepsNothingBackCommitsNothing:
+    """TECHNICAL_DEBT 24, at the level the rule lives at.
+
+    The width rule can drain the buffer, in one shape: the cut lands after
+    the last space that FITS, and when that space is the buffer's final
+    character -- a row that filled the width exactly, then a space that
+    overflows by its own cell -- the cut is the whole of it. Committing
+    then holds nothing back, and if the model's next delta opens with the
+    newline, the newline rule commits a chunk that is only "\\n" and both
+    draw paths render a blank row the replay does not have.
+
+    The rule is in `_commit_ready` and `thinking_delta` rather than in
+    `_split_committable`, and NOT in `markdown.width_split`/`plain_split`:
+    `plain_split` shares `_plain_cut` with `plain_wrap`, which is the
+    REPLAY's wrap, and moving that would move the rows this whole surface
+    is measured against.
+    """
+
+    @staticmethod
+    def _body(written):
+        return [row for row in written if "venastine" not in row]
+
+    def test_an_edge_row_waits_for_the_next_delta(self):
+        transcript, written = _recording_transcript()
+        transcript._wrap_width = lambda prefix="": 20
+
+        transcript.stream_delta("x" * 20 + " ")
+
+        assert not self._body(written), (
+            "the row drained the buffer and was drawn anyway, so a newline "
+            "in the next delta now has nothing to end")
+
+    def test_and_the_newline_then_ends_it_rather_than_opening_a_row(self):
+        transcript, written = _recording_transcript()
+        transcript._wrap_width = lambda prefix="": 20
+
+        transcript.stream_delta("x" * 20 + " ")
+        transcript.stream_delta("\n")
+
+        body = self._body(written)
+        assert len(body) == 1, body
+        assert body[0].startswith("x" * 20)
+
+    def test_a_cut_that_does_keep_something_back_still_commits(self):
+        """The `not rest` clause, and it needs its own case here.
+
+        Drop it and EVERY width-rule commit is held, so a long paragraph
+        stops streaming and §38's whole subject is undone -- and the two
+        row-equality classes cannot see that at all, because a stream
+        that commits nothing draws, at the flush, exactly the rows a
+        written answer draws. Found by the mutation pass rather than by
+        reading: the row equality and the progressive-rendering class are
+        not interchangeable, and this rule needs both.
+        """
+        transcript, written = _recording_transcript()
+        transcript._wrap_width = lambda prefix="": 20
+
+        transcript.stream_delta("word " * 12)
+
+        assert self._body(written), "a long paragraph drew nothing at all"
+
+    def test_nothing_is_lost_when_the_stream_ends_there(self):
+        """The hold is bounded by the flush, which draws the residual
+        whole -- so the cost of holding is one delta, never a row."""
+        transcript, written = _recording_transcript()
+        transcript._wrap_width = lambda prefix="": 20
+
+        transcript.stream_delta("x" * 20 + " ")
+
+        assert transcript.flush_stream() == "x" * 20 + " "
+        assert len(self._body(written)) == 1
+
+    def test_a_drained_prefix_is_not_a_drained_buffer(self):
+        """The `limit` clause, which is the half that is easy to drop.
+
+        The split is handed the CAPPED prefix, so text held behind the cap
+        is still pending. Here an unclosed `**` caps the commit and the
+        prefix in front of it drains -- and holding would put back the
+        regression the cap was built to remove: a paragraph in front of a
+        held construct waiting for that construct to close.
+        """
+        transcript, written = _recording_transcript()
+        transcript._wrap_width = lambda prefix="": 20
+
+        transcript.stream_delta("x" * 20 + " **bold")
+
+        body = self._body(written)
+        assert len(body) == 1, body
+        assert body[0].startswith("x" * 20)
+
+    def test_the_thinking_path_holds_too(self):
+        transcript, written = _recording_transcript()
+        transcript._wrap_width = lambda prefix="": 20
+
+        transcript.thinking_delta("y" * 20 + " ")
+        held = [row for row in written if "y" in row]
+        transcript.thinking_delta("\n")
+
+        assert not held, "the reasoning row drained the buffer and drew"
+        assert len([row for row in written if "y" in row]) == 1
+
+
 # ===========================================================================
 # ---- Thinking, shown inline (O7/O8) ---------------------------------------
 # ===========================================================================
@@ -1002,6 +1104,63 @@ class TestAStreamedAnswerRendersLikeAWrittenOne:
         text = self.CASES[name]
         assert await self._rows(text, True) == await self._rows(text, False)
 
+    # -- TECHNICAL_DEBT 24 -------------------------------------------------
+    #
+    # Its own cases rather than two more CASES entries, because the shape
+    # needs deltas chosen rather than cut every five characters: the edge
+    # row has to be COMMITTED and the newline has to open the delta after
+    # it. The text is built from the measured width at run time for the
+    # reason the hash case above is pinned at the length that reproduces
+    # it -- a literal would stop reproducing the day the padding changes,
+    # and would go on passing.
+
+    @staticmethod
+    async def _edge_rows(after: str, streamed: bool):
+        from tui.app import VenastineApp
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(84, 40)) as pilot:
+            transcript = app._transcript
+            transcript.clear()
+            transcript._entries.clear()
+            width = transcript._wrap_width()
+            head = "x" * width + " "
+            if streamed:
+                transcript.stream_delta(head)
+                transcript.stream_delta(after)
+                transcript.flush_stream()
+            else:
+                transcript.write_answer(head + after)
+            await pilot.pause()
+            return [strip.text.rstrip() for strip in transcript.lines]
+
+    @staticmethod
+    def _gap(rows) -> int:
+        """Rows between the edge row and the one after it."""
+        edge = next(i for i, row in enumerate(rows) if row.startswith("xxx"))
+        tail = next(i for i, row in enumerate(rows) if "tail" in row)
+        return tail - edge - 1
+
+    @pytest.mark.asyncio
+    async def test_a_newline_after_a_row_that_filled_the_width(self):
+        """The defect: the row drained the buffer, so the newline arrived
+        as a chunk of its own and drew the blank line between paragraphs
+        for a paragraph that had not ended."""
+        streamed = await self._edge_rows("\ntail text", True)
+
+        assert streamed == await self._edge_rows("\ntail text", False)
+        assert self._gap(streamed) == 0, streamed
+
+    @pytest.mark.asyncio
+    async def test_and_a_real_blank_line_after_one_still_draws(self):
+        """The control, and it is not optional: swallowing every newline
+        that follows an edge row would pass the test above and eat a
+        paragraph break, which is the failure the register warns about."""
+        streamed = await self._edge_rows("\n\ntail text", True)
+
+        assert streamed == await self._edge_rows("\n\ntail text", False)
+        assert self._gap(streamed) == 1, streamed
+
 
 class TestStreamedThinkingRendersLikeReplayedThinking:
     """The class above's rule, for the reasoning span.
@@ -1064,6 +1223,56 @@ class TestStreamedThinkingRendersLikeReplayedThinking:
         streamed = await self._rows(text, True)
         assert streamed == await self._rows(text, False)
         assert all(THINKING_BAR in row for row in self._body(streamed))
+
+    # -- TECHNICAL_DEBT 24, the reasoning half -----------------------------
+    #
+    # The same shape one grammar over, and it draws worse: a chunk that is
+    # only a newline reaches `_write_thinking_lines` as a bar with nothing
+    # beside it. `plain_wrap` has refused to draw that row since batch 90
+    # ("a cut at the very END of the line closes the last row rather than
+    # opening an empty one") -- the REPLAY side of this defect, fixed
+    # while the commit side went on producing it.
+
+    @staticmethod
+    async def _edge_rows(after: str, streamed: bool):
+        from tui.app import VenastineApp
+        from tui.widgets import THINKING_BAR, THINKING_INDENT
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(84, 40)) as pilot:
+            transcript = app._transcript
+            transcript.clear()
+            transcript._entries.clear()
+            width = transcript._wrap_width(THINKING_INDENT + THINKING_BAR)
+            head = "y" * width + " "
+            if streamed:
+                transcript.thinking_delta(head)
+                transcript.thinking_delta(after)
+                transcript.end_thinking()
+            else:
+                transcript._emit("thinking", head + after)
+            await pilot.pause()
+            return [strip.text.rstrip() for strip in transcript.lines]
+
+    @staticmethod
+    def _gap(rows) -> int:
+        edge = next(i for i, row in enumerate(rows) if "yyy" in row)
+        tail = next(i for i, row in enumerate(rows) if "tail" in row)
+        return tail - edge - 1
+
+    @pytest.mark.asyncio
+    async def test_a_newline_after_a_row_that_filled_the_width(self):
+        streamed = await self._edge_rows("\ntail thought", True)
+
+        assert streamed == await self._edge_rows("\ntail thought", False)
+        assert self._gap(streamed) == 0, streamed
+
+    @pytest.mark.asyncio
+    async def test_and_a_real_blank_line_after_one_still_draws(self):
+        streamed = await self._edge_rows("\n\ntail thought", True)
+
+        assert streamed == await self._edge_rows("\n\ntail thought", False)
+        assert self._gap(streamed) == 1, streamed
 
     @pytest.mark.asyncio
     async def test_a_long_line_committed_by_its_newline_keeps_the_bar(self):
@@ -1756,3 +1965,431 @@ class TestTheTargetsSurviveWhatTheEntriesDo:
             assert _armed(app) == [], (
                 "the new thread's line resolved against the old thread's "
                 "target -- reset() has to clear the side table too")
+
+
+# ===========================================================================
+# ---- A resize re-lays the transcript (TECHNICAL_DEBT 23, batch 112) -------
+# ===========================================================================
+
+def _diff_block(text: str):
+    from tui import diffs
+
+    return diffs.build_block("example.py", text,
+                             text.replace("boundary", "edge"))
+
+
+class TestAResizeRelaysTheTranscript:
+    """Rows already drawn used to keep the width they were drawn at.
+
+    RichLog renders at write time and stores Strips, so nothing re-wraps
+    itself: widen a terminal mid-session and every row from before the drag
+    stayed at the old width while new rows used the full panel. `_entries`
+    holds the unwrapped source, so a replay puts it right -- and what kept
+    this open is that `rerender()` opens with `flush_stream()`, which ENDS
+    an open answer span. A resize routed there mid-turn would split the
+    live answer into two entries under two `venastine ›` labels, which is
+    what §38's one-entry-per-span rule exists to prevent.
+
+    The rule asserted here is the two row-equality classes' rule carried
+    across a resize: the rows after a widen are the rows the same entries
+    produce when they are written at that width to begin with.
+    """
+
+    NARROW, WIDE = 84, 150
+
+    LONG = ("The transcript buffers every delta until a boundary arrives, "
+            "and the width rule decides where that boundary falls on a line "
+            "that has not ended yet. Rows already drawn keep the width they "
+            "were drawn at, which is the whole of this item.")
+
+    #: Item 15's three pre-wrapped constructs are here deliberately -- the
+    #: thinking bar, a list item's hanging indent and the diff gutter are
+    #: where the symptom is most visible, because Rich never wrapped them
+    #: in the first place: this widget did.
+    CASES = {
+        "prose": lambda view, text: view.write_answer(text),
+        "a list item that wraps":
+            lambda view, text: view.write_answer("- " + text),
+        "a thinking span": lambda view, text: view._emit("thinking", text),
+        "a diff": lambda view, text: view.write_role("diff",
+                                                     _diff_block(text)),
+    }
+
+    @staticmethod
+    def _rows(view):
+        return [strip.text.rstrip() for strip in view.lines]
+
+    @staticmethod
+    def _disarm(view):
+        """Cancel the redraw the resize itself armed.
+
+        Found by the mutation pass, and it had made one test measure
+        something other than what it says. A real `resize_terminal` arms
+        the debounced reflow; left alone it fires during a later
+        `pause()`, by which time the entry log is COMPLETE -- so it
+        re-lays a finished answer and the rows come out right whatever
+        the reflow under test did with the open span. Every test here
+        that calls `reflow()` explicitly disarms that one first, and the
+        wiring tests below assert the armed redraw separately.
+        """
+        if view._reflow_timer is not None:
+            view._reflow_timer.stop()
+            view._reflow_timer = None
+
+    @classmethod
+    async def _app_rows(cls, start, write, *, widen=False, text=None):
+        """Rows for `write` at `start` columns, optionally after a widen.
+
+        The console is sized beside the pilot because `run_test` sizes the
+        SCREEN and leaves `app.console` at 80, and RichLog clamps a
+        `width=None` write's measurement to the console -- without it the
+        two sizes would be one measurement (test_agent_navigation.py's
+        `_size_console`, same reason).
+
+        The console is sized WITH the resize and not after it: a real
+        terminal changes both at once, and doing it after leaves a
+        window in which the armed reflow can fire against the new
+        region and the old console.
+
+        `reflow()` is called directly here. That the RESIZE reaches it is a
+        separate question, asserted separately below, for test_tui.py's
+        rule: a handler called by hand proves the function works and not
+        that the app routes to it.
+        """
+        from tui.app import VenastineApp
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(start, 40)) as pilot:
+            app.console.size = (start, 40)
+            await pilot.pause()
+            view = app._transcript
+            view.clear()
+            view._entries.clear()
+            write(view, cls.LONG if text is None else text)
+            await pilot.pause()
+            if widen:
+                app.console.size = (cls.WIDE, 40)
+                await pilot.resize_terminal(cls.WIDE, 40)
+                await pilot.pause()
+                cls._disarm(view)
+                view.reflow()
+                await pilot.pause()
+            return cls._rows(view)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name", list(CASES))
+    async def test_the_rows_match_a_transcript_written_at_that_width(
+            self, name):
+        write = self.CASES[name]
+
+        assert await self._app_rows(self.NARROW, write, widen=True) == \
+            await self._app_rows(self.WIDE, write)
+
+    @pytest.mark.asyncio
+    async def test_the_two_sizes_really_wrap_differently(self):
+        """Without this, every case above could pass by drawing the same
+        rows twice -- which is exactly what it would do if the widen never
+        reached the panel, and that failure would look like a pass."""
+        prose = self.CASES["prose"]
+
+        assert await self._app_rows(self.NARROW, prose) != \
+            await self._app_rows(self.WIDE, prose)
+
+    # -- an answer that is still being streamed -----------------------------
+
+    @classmethod
+    async def _streamed_across_a_resize(cls):
+        """Half an answer narrow, a reflow, then the rest -- and the entry
+        log beside the rows, because the hazard this item was parked on is
+        about `_entries` rather than about pixels."""
+        from tui.app import VenastineApp
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(cls.NARROW, 40)) as pilot:
+            app.console.size = (cls.NARROW, 40)
+            await pilot.pause()
+            view = app._transcript
+            view.clear()
+            view._entries.clear()
+            words = cls.LONG.split(" ")
+            half = len(words) // 2
+            for word in words[:half]:
+                view.stream_delta(word + " ")
+            await pilot.pause()
+
+            app.console.size = (cls.WIDE, 40)
+            await pilot.resize_terminal(cls.WIDE, 40)
+            await pilot.pause()
+            cls._disarm(view)
+            view.reflow()
+            await pilot.pause()
+            during = cls._rows(view)
+            for word in words[half:]:
+                view.stream_delta(word + " ")
+            view.flush_stream()
+            await pilot.pause()
+            return cls._rows(view), list(view._entries), during
+
+    @pytest.mark.asyncio
+    async def test_an_answer_still_streaming_is_re_cut_at_the_new_width(self):
+        """The one the un-commit exists for. A replay that drew
+        `_stream_text` whole would end it mid-line, and the next committed
+        chunk is a separate write and therefore a separate ROW -- so the
+        join would land mid-row at the new width and the seam would stay
+        for the rest of the answer."""
+        rows, _entries, during = await self._streamed_across_a_resize()
+
+        assert rows == await self._app_rows(
+            self.WIDE, lambda view, text: view.write_answer(text),
+            text=self.LONG + " ")
+        assert any("The transcript buffers" in row for row in during), (
+            "the half-written answer vanished across the reflow -- the "
+            "un-commit takes the WHOLE of an open span when it holds no "
+            "newline yet, so the replay has nothing to draw and the "
+            "buffer has to be committed again straight after it")
+
+    @pytest.mark.asyncio
+    async def test_it_stays_one_entry_under_one_label(self):
+        """The hazard the register parked the item on: `rerender()` would
+        have flushed the span, so the rest of the answer would arrive as a
+        SECOND entry with its own `venastine ›`."""
+        rows, entries, _during = await self._streamed_across_a_resize()
+
+        assert [role for role, _text in entries].count("assistant") == 1, \
+            entries
+        assert sum(LABEL in row for row in rows) == 1, rows
+
+    @pytest.mark.asyncio
+    async def test_an_open_thinking_span_is_not_closed_by_the_reflow(self):
+        """`_render_entry`'s `closed` flag. The replay draws the entry, and
+        drawing its `╰ …done thinking` there would announce an end that has
+        not happened -- with the rest of the reasoning arriving under it."""
+        from tui.app import VenastineApp
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(self.NARROW, 40)) as pilot:
+            app.console.size = (self.NARROW, 40)
+            await pilot.pause()
+            view = app._transcript
+            view.clear()
+            view._entries.clear()
+            # WITH a newline in it: the un-commit gives the tail after the
+            # last newline back, so a span holding none at all is emptied
+            # and dropped -- and then the replay never reaches the entry
+            # whose closing delimiter this test is about.
+            view.thinking_delta("a first line of reasoning\n" + self.LONG)
+            await pilot.pause()
+
+            app.console.size = (self.WIDE, 40)
+            await pilot.resize_terminal(self.WIDE, 40)
+            await pilot.pause()
+            self._disarm(view)
+            view.reflow()
+            await pilot.pause()
+            during = self._rows(view)
+
+            view.end_thinking()
+            await pilot.pause()
+            after = self._rows(view)
+
+        assert any(THINKING_OPEN in row for row in during), (
+            "the reasoning on screen went missing across the reflow")
+        assert not [row for row in during if THINKING_CLOSE in row], during
+        assert len([row for row in after if THINKING_CLOSE in row]) == 1
+
+    # -- the wiring ---------------------------------------------------------
+
+    @staticmethod
+    def _counting(view):
+        """Replace `reflow` with a counter that still reflows."""
+        calls = []
+        original = view.reflow
+
+        def counted():
+            calls.append(1)
+            original()
+
+        view.reflow = counted
+        return calls
+
+    @staticmethod
+    def _recording_timers(view):
+        """Collect the timers `on_resize` arms, and which of them were
+        stopped, without stopping them from working."""
+        armed, stopped = [], []
+        set_timer = view.set_timer
+
+        def recording(delay, callback, **kwargs):
+            timer = set_timer(delay, callback, **kwargs)
+            real_stop = timer.stop
+
+            def stop():
+                stopped.append(timer)
+                real_stop()
+
+            timer.stop = stop
+            armed.append(timer)
+            return timer
+
+        view.set_timer = recording
+        return armed, stopped
+
+    @pytest.mark.asyncio
+    async def test_a_drag_re_arms_rather_than_stacking(self, monkeypatch):
+        """A window edge delivers one Resize per frame and a replay is
+        O(the whole session), so the redraw is coalesced.
+
+        Asserted on the MECHANISM rather than by waiting a debounce out.
+        One `resize_terminal` costs ~100ms here, so a burst outlasts any
+        debounce short enough to sleep through -- and under eleven xdist
+        workers the margin is whatever the box is doing, which is a
+        scheduling lottery rather than a test. The debounce is pushed past
+        the end of the test instead: nothing fires, and what is checked is
+        that each resize STOPPED the pending redraw before arming its own.
+
+        Widths above `min_width` deliberately: below it they all floor to
+        78, and a handler that ignored every one of them would be right.
+        """
+        from tui import widgets
+        from tui.app import VenastineApp
+
+        monkeypatch.setattr(widgets, "REFLOW_DEBOUNCE_S", 30)
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(120, 40)) as pilot:
+            app.console.size = (120, 40)
+            await pilot.pause()
+            view = app._transcript
+            view.write_answer(self.LONG)
+            await pilot.pause()
+            calls = self._counting(view)
+            armed, stopped = self._recording_timers(view)
+
+            for columns in (124, 128, 132):
+                app.console.size = (columns, 40)
+                await pilot.resize_terminal(columns, 40)
+            await pilot.pause()
+
+        assert calls == [], "a redraw ran before the drag had settled"
+        assert len(armed) == 3, armed
+        assert stopped == armed[:-1], "the pending redraw was left to fire"
+        assert view._reflow_timer is armed[-1]
+
+    @pytest.mark.asyncio
+    async def test_a_height_only_resize_arms_nothing(self, monkeypatch):
+        """A `Resize` arrives for a height change too, and no wrap moves."""
+        from tui import widgets
+        from tui.app import VenastineApp
+
+        monkeypatch.setattr(widgets, "REFLOW_DEBOUNCE_S", 30)
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(self.WIDE, 40)) as pilot:
+            app.console.size = (self.WIDE, 40)
+            await pilot.pause()
+            view = app._transcript
+            view.write_answer(self.LONG)
+            await pilot.pause()
+            armed, _stopped = self._recording_timers(view)
+
+            await pilot.resize_terminal(self.WIDE, 20)
+            await pilot.pause()
+
+        assert armed == [], "a height change redrew rows it cannot move"
+
+    @pytest.mark.asyncio
+    async def test_the_resize_itself_reaches_the_reflow(self, monkeypatch):
+        """The routing half of the pair, so that a handler that works and
+        is never called cannot pass.
+
+        The console is sized BEFORE the resize, not after: a terminal
+        changes both at once, and the debounce here is short enough that
+        the redraw can land inside `resize_terminal`'s own await.
+        """
+        import asyncio
+
+        from tui import widgets
+        from tui.app import VenastineApp
+
+        monkeypatch.setattr(widgets, "REFLOW_DEBOUNCE_S", 0.02)
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(self.NARROW, 40)) as pilot:
+            app.console.size = (self.NARROW, 40)
+            await pilot.pause()
+            view = app._transcript
+            view.clear()
+            view._entries.clear()
+            view.write_answer(self.LONG)
+            await pilot.pause()
+            narrow = self._rows(view)
+
+            app.console.size = (self.WIDE, 40)
+            await pilot.resize_terminal(self.WIDE, 40)
+            await asyncio.sleep(0.15)
+            await pilot.pause()
+            widened = self._rows(view)
+
+        assert widened != narrow
+        assert widened == await self._app_rows(
+            self.WIDE, self.CASES["prose"])
+
+    # -- the reader's place -------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_the_reader_keeps_their_place(self):
+        """A resize is involuntary -- you dragged a window edge -- so
+        landing where /theme lands (the bottom) would lose the place of
+        anyone reading back through the session. The row COUNT changes with
+        the width, so the fraction is the most that can be kept."""
+        from tui.app import VenastineApp
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(self.NARROW, 40)) as pilot:
+            app.console.size = (self.NARROW, 40)
+            await pilot.pause()
+            view = app._transcript
+            view.clear()
+            view._entries.clear()
+            for index in range(40):
+                view.write_answer(f"{index}. {self.LONG}")
+            await pilot.pause()
+            assert view.max_scroll_y, "nothing to scroll: the test is vacuous"
+
+            view.scroll_to(y=view.max_scroll_y // 3, animate=False)
+            await pilot.pause()
+            before = view.scroll_y / view.max_scroll_y
+
+            app.console.size = (self.WIDE, 40)
+            await pilot.resize_terminal(self.WIDE, 40)
+            await pilot.pause()
+            self._disarm(view)
+            view.reflow()
+            await pilot.pause()
+            after = view.scroll_y / view.max_scroll_y
+
+        assert abs(after - before) < 0.05, (before, after)
+
+    @pytest.mark.asyncio
+    async def test_the_bottom_stays_the_bottom(self):
+        """The common case, and the one a fraction alone could round off
+        the end of."""
+        from tui.app import VenastineApp
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(self.NARROW, 40)) as pilot:
+            app.console.size = (self.NARROW, 40)
+            await pilot.pause()
+            view = app._transcript
+            view.clear()
+            view._entries.clear()
+            for index in range(40):
+                view.write_answer(f"{index}. {self.LONG}")
+            await pilot.pause()
+            assert view.max_scroll_y
+
+            app.console.size = (self.WIDE, 40)
+            await pilot.resize_terminal(self.WIDE, 40)
+            await pilot.pause()
+            self._disarm(view)
+            view.reflow()
+            await pilot.pause()
+
+            assert view.scroll_y >= view.max_scroll_y - 1

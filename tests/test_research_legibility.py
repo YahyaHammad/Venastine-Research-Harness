@@ -832,8 +832,14 @@ async def test_switching_theme_replays_the_transcript():
         # whatever it is handed rather than enumerating the arguments,
         # which is the coupling registry.dispatch()'s stubs already
         # dropped for the same reason.
-        transcript._render_entry = lambda role, text, *targets: (
-            replayed.append((role, text)), original(role, text, *targets))[1]
+        # **kwargs since batch 112, because the sentence above was only
+        # true of POSITIONAL arguments: `closed` is keyword-only, and a
+        # spy that swallows *args alone raised a TypeError from inside
+        # rerender() -- three files from anything that batch touched, so
+        # only the full suite saw it.
+        transcript._render_entry = lambda role, text, *targets, **rest: (
+            replayed.append((role, text)),
+            original(role, text, *targets, **rest))[1]
 
         app.query_one("#prompt").value = "/theme light-red"
         await pilot.press("enter")
