@@ -208,6 +208,17 @@ def _translate(pass_id: str, stream, corpus=None):
                                 anything shows no activity, which is the
                                 shape §26 built pass_activity to cure. Flip
                                 it here if that turns up in a real run.
+      retract                   batch 113. A retraction tells a surface
+                                that DREW model text to take it back, and
+                                this one never drew any -- `chars` is the
+                                only thing that escaped. Left monotonic
+                                deliberately: the total measures what the
+                                pass produced, it is the panel's liveness
+                                figure rather than a bill, and a running
+                                total that jumped backwards mid-pass
+                                would read as the defect instead of the
+                                honesty. The TUI's own output-char meter
+                                is left alone for the same reason.
       permission_request        §25's ApprovalProvider already carries this
                                 to the shell and blocks on the answer. A
                                 second rendering of a question already on

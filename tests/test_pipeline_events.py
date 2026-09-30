@@ -212,7 +212,7 @@ class TestTheEventTypeDecision:
         assert PipelineEvent is not LoopEvent
         assert not issubclass(PipelineEvent, LoopEvent)
 
-    def test_loop_event_did_not_grow_a_ninth_field(self):
+    def test_loop_event_did_not_grow_a_tenth_field(self):
         """The mutation-sighted half of AC4. §22 adds ~7 event kinds and
         §23 adds more; P1's rejected option was to put them on LoopEvent,
         whose "exactly one field is populated" convention lives in a
@@ -223,7 +223,8 @@ class TestTheEventTypeDecision:
         Named for the next field, not the current count: it was
         "..._a_seventh_field" while asserting a seven-name set (audit
         #128), which was right in the assertion and off by one in the name,
-        and a test name is the first thing a reader trusts.
+        and a test name is the first thing a reader trusts. Renamed again
+        in batch 113, for the same reason and in the same direction.
 
         §38 IS the re-made decision, and it went exactly the way this test
         was built to make it go: the field was added deliberately, with the
@@ -233,11 +234,31 @@ class TestTheEventTypeDecision:
         whose valid combinations lived only in prose. `thinking_delta`
         describes one model call's progress and lives for a turn -- it is
         token_delta's family exactly, the case P1's rule was never about.
-        The ninth field still has to argue for itself here.
+
+        BATCH 113 IS THE SECOND RE-MADE DECISION, and it went the same
+        way. `retract` is not a §22/§23 kind and not a notice about the
+        run: it is an instruction to a surface that DREW model text,
+        telling it to take back everything since the last flush because
+        the call that produced it is being tried again. That is one model
+        call's progress and it lives for a turn, which is the family this
+        bag is for. It is display-only and, unlike `notice`, deliberately
+        not mirrored onto ModelResponse -- a consumer that drains has
+        drawn nothing and would be asked to undo something that never
+        happened.
+
+        The alternative considered and rejected was a new `notice` kind.
+        It would have cost no field, and that is the whole objection: a
+        notice is carried on the response and persisted with it, so a
+        retraction would have travelled to consumers with nothing to
+        retract, and "take these rows back" would have been indexed
+        beside "a compaction happened".
+
+        The tenth field still has to argue for itself here.
         """
         assert set(LoopEvent.__dataclass_fields__) == {
             "token_delta", "thinking_delta", "tool_call_start", "tool_result",
-            "permission_request", "notice", "final_response", "stop_reason",
+            "permission_request", "notice", "retract", "final_response",
+            "stop_reason",
         }
 
     def test_the_kind_is_the_discriminator(self):

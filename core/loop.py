@@ -1343,12 +1343,6 @@ class RunAgentLoop:
         grant_budget=None,
         compaction_mode: Optional[str] = None,
         activity=None,
-        # Batch 91. True when nothing this run streams reaches a screen --
-        # the two wrappers that drain through run_to_completion pass it --
-        # which lets a failed model call be retried even after it had
-        # started streaming. A drawn run (the TUI turn, a research pass)
-        # keeps the default: see the retry below.
-        drained: bool = False,
     ):
         """Generator yielding LoopEvent objects as the loop progresses.
 
@@ -1521,12 +1515,18 @@ class RunAgentLoop:
             # how OpenRouter reports an overloaded upstream. Which failures
             # qualify is core/provider_errors.py's question.
             #
-            # `shown` is the boundary the owner drew: a retry must not draw
-            # the same text twice, and a RichLog row cannot be taken back. A
-            # DRAINED run's deltas reach no screen -- run_to_completion
-            # discards them -- so it is retried whatever it had streamed; a
-            # drawn run (a TUI turn, a research pass) only while this attempt
-            # has shown nothing.
+            # `shown` was the boundary until batch 113 (TECHNICAL_DEBT 25).
+            # It read "a RichLog row cannot be taken back", which was true
+            # of the transcript as it stood: a retry after a delta would
+            # have drawn the answer a second time under the half already on
+            # screen, so a DRAWN run was refused the retry a reader most
+            # wanted. Batch 112 made a row retractable -- `_replay()` draws
+            # the transcript from `_entries` -- so the loop now says what
+            # happened and the drawing surface takes its own rows back.
+            #
+            # `shown` survives with a different job: it is no longer "may we
+            # retry" but "is there anything to retract", which is the only
+            # question left for it to answer.
             #
             # Below the wrappers that write the user message, so a retry
             # never writes it twice; and before the accounting, so only the
@@ -1552,18 +1552,36 @@ class RunAgentLoop:
                 except Exception as e:  # noqa: BLE001 -- re-raised unless it qualifies
                     retry += 1
                     if (retry > config.MODEL_CALL_MAX_RETRIES
-                            or (shown and not drained)
                             or not provider_errors.is_transient(e)):
                         raise
                     response = None
                     delay = provider_errors.backoff_delay(
                         retry, config.MODEL_CALL_RETRY_BASE_DELAY_S,
                         provider_errors.retry_after_s(e))
+                    attempts = config.MODEL_CALL_MAX_RETRIES + 1
                     logger.warning(
                         "Model call to %s/%s failed (%s); retrying in %.0fs, "
                         "attempt %d of %d.",
                         provider_name, model, provider_errors.describe(e),
-                        delay, retry + 1, config.MODEL_CALL_MAX_RETRIES + 1)
+                        delay, retry + 1, attempts)
+                    if shown:
+                        # Batch 113. BEFORE the wait, not after it: the
+                        # reader is about to watch a part-written answer
+                        # disappear and then several seconds of nothing,
+                        # and the sentence explaining that is worth more
+                        # while it is happening than once it is over.
+                        #
+                        # Only when something was drawn. An attempt that
+                        # streamed nothing has nothing to take back, and
+                        # the warning above is already the record of it.
+                        yield LoopEvent(retract={
+                            "text": "the answer was interrupted (%s); "
+                                    "retrying, attempt %d of %d"
+                                    % (provider_errors.describe(e),
+                                       retry + 1, attempts),
+                            "attempt": retry + 1,
+                            "attempts": attempts,
+                        })
                     provider_errors.wait(delay)
 
             if response is None:
@@ -1796,9 +1814,6 @@ class RunAgentLoop:
             max_steps, _resolve_spend_cap(max_total_tokens),
             temperature=temperature, effort=effort,
             response_channel=response_channel, activity=activity,
-            # Batch 91. Drained: nothing this streams reaches a screen, so a
-            # failed model call may be retried whatever it had streamed.
-            drained=True,
             **auth_kwargs,
         ))
         response.thread_id = memory.thread_id
@@ -1953,9 +1968,6 @@ class RunAgentLoop:
             memory, system_prompt, provider_name, model, context,
             max_steps, _resolve_spend_cap(max_total_tokens),
             temperature=temperature, effort=effort, activity=activity,
-            # Batch 91. Drained, like run_agent_conversation: a failed model
-            # call may be retried whatever it had streamed.
-            drained=True,
             **_authorization_kwargs(authorization),
         ))
         response.thread_id = thread_id
@@ -2059,7 +2071,6 @@ class RunAgentLoop:
             max_steps, _resolve_spend_cap(max_total_tokens),
             temperature=temperature, effort=effort,
             response_channel=response_channel, activity=activity,
-            drained=True,
             **auth_kwargs,
         ))
         response.thread_id = memory.thread_id

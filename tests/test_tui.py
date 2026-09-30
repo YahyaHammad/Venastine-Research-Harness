@@ -1414,6 +1414,40 @@ class TestEventsUnderAnOpenModal:
     shapes through a mounted app with a modal on top."""
 
     @pytest.mark.asyncio
+    async def test_a_retraction_event_reaches_the_transcript(self):
+        """Batch 113 (TECHNICAL_DEBT 25). The loop announces a retry of a
+        call that had already drawn; the app has to route that to the
+        widget that can take the rows back, and to nothing else.
+
+        Here rather than in test_live_output.py for this file's rule: the
+        widget's own behaviour is pinned over there, and what is checked
+        here is that an event of this shape arriving at `on_loop_event`
+        actually lands.
+        """
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.post_message(LoopEventMessage(
+                LoopEvent(token_delta="half an answer that died.\n")))
+            assert await settle(
+                pilot,
+                lambda: any(role == "assistant"
+                            for role, _t in app._transcript._entries)), \
+                "the answer never reached the transcript"
+
+            app.post_message(LoopEventMessage(LoopEvent(retract={
+                "text": "interrupted; retrying, attempt 2 of 3",
+                "attempt": 2, "attempts": 3})))
+            assert await settle(
+                pilot,
+                lambda: any("retrying" in t
+                            for _r, t in app._transcript._entries)), \
+                "the retraction line never landed"
+            assert not any(role == "assistant"
+                           for role, _t in app._transcript._entries), \
+                "the dead attempt is still in the entry log"
+
+    @pytest.mark.asyncio
     async def test_loop_events_land_while_a_modal_is_open(self):
         app = VenastineApp("ANTHROPIC", "test-model", {})
         async with app.run_test() as pilot:

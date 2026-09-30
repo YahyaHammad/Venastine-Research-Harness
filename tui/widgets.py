@@ -2159,6 +2159,11 @@ class Transcript(RichLog):
         # always reflows rather than having to guess what was drawn.
         self._drawn_width: int | None = None
         self._reflow_timer = None
+        # Batch 113 (TECHNICAL_DEBT 25). How many entries were on screen
+        # when the span now streaming began, which is where
+        # `retract_to_mark` truncates back to. None means nothing is
+        # retractable. See that method for why a mark and not a span.
+        self._retract_mark: int | None = None
 
     def write(self, content, *args, width=None, **kwargs):
         """Write at the width this pane will be SHOWN at (§47).
@@ -2921,8 +2926,20 @@ class Transcript(RichLog):
         return markdown.plain_split(pending, width)
 
     def stream_delta(self, delta: str) -> None:
+        self._arm_retraction()
         self._pending += delta
         self._commit_ready()
+
+    def _arm_retraction(self) -> None:
+        """Remember where the span now starting begins (batch 113).
+
+        Called by both delta entry points and idempotent within a span,
+        so interleaved reasoning -- which closes an open ANSWER without
+        flushing -- keeps one mark across all the entries of one model
+        call. `flush_stream` is what clears it.
+        """
+        if self._retract_mark is None:
+            self._retract_mark = len(self._entries)
 
     def _commit_ready(self) -> None:
         """Write whatever of the pending stream can safely be drawn now.
@@ -3020,7 +3037,12 @@ class Transcript(RichLog):
         ordering for free.
         """
         self.end_thinking()
-        return self._close_answer()
+        text = self._close_answer()
+        # Batch 113. A flush ENDS the retractable region: what it just
+        # committed belongs to a model call that finished, and the next
+        # delta will arm a new mark where its own span begins.
+        self._retract_mark = None
+        return text
 
     def _close_answer(self) -> str:
         """flush_stream without the thinking half.
@@ -3093,6 +3115,7 @@ class Transcript(RichLog):
                                 style))
 
     def thinking_delta(self, delta: str) -> None:
+        self._arm_retraction()
         self._thinking_pending += delta
         self._commit_thinking_ready()
 
@@ -3178,6 +3201,10 @@ class Transcript(RichLog):
         # in the session with no `venastine ›`.
         self._label_in_force = False
         self._entries.clear()
+        # Batch 113, on the open-span flags' list and for their reason: a
+        # mark left pointing into an emptied log would have the next
+        # retraction truncate to an index that no longer means anything.
+        self._retract_mark = None
         # Batch 65, and the same sentence as the line above it: a click
         # target left behind would belong to a thread that is no longer
         # on screen, and index N would then arm the NEXT thread's Nth
@@ -3354,6 +3381,87 @@ class Transcript(RichLog):
         self._entries.pop()
         self._links.pop(index, None)
         self._opens.pop(index, None)
+
+    def retract_to_mark(self, note: str | None = None) -> None:
+        """Take back everything drawn since the last flush, and redraw.
+
+        TECHNICAL_DEBT 25, batch 113. A model call that fails mid-answer
+        can now be tried again, and the reader must not be shown the
+        answer twice -- so what the failed attempt drew is deleted from
+        `_entries` and the transcript is redrawn from what is left. The
+        redraw is batch 112's `_replay()`, which is the whole reason this
+        costs a dozen lines rather than a batch of its own.
+
+        A MARK AND NOT A SPAN, which is the part worth reading. The
+        obvious rule is "drop the open span", and it is wrong: interleaved
+        reasoning makes `_write_thinking_chunk` close an open ANSWER
+        before it draws, so one attempt can leave several entries behind
+        with only the last of them open. Measured -- text, then reasoning,
+        then text, inside one attempt, is three entries and one open span.
+        Dropping the open one would leave the first two on screen and the
+        retry would then draw them again underneath.
+
+        THE MARK IS ARMED BY THE FIRST DELTA and CLEARED BY A FLUSH, and
+        the asymmetry is the correction of a rule this batch tried first.
+        Taking the mark at the flush reads well and is wrong, because
+        `write_system`, `write_user`, `write_error` and `write_role` all
+        OPEN with `flush_stream()`: a line written while a span was live
+        moved the mark past the attempt's own text, so the retraction
+        deleted the unrelated line and kept the half-answer. Wrong in
+        both directions at once, and found by the test written to pin
+        what the rule was supposed to cost.
+
+        Armed at the span's start instead, the ordinary case is identical
+        -- the app flushes before a tool line and at the end of a turn,
+        so the mark lands at the beginning of the call now streaming --
+        and the awkward one degrades to doing nothing, which is the right
+        way for it to fail.
+
+        Idempotent, and a no-op when nothing is armed: an attempt that
+        failed before its first delta has nothing to take back, which is
+        also why the loop guards the event on `shown`. The `note` is
+        still written in that case, because the retry is happening
+        whether or not this widget had anything to undo.
+
+        `note`, when given, is written under the redraw and survives the
+        next retraction; the tail of this method says why that costs
+        nothing.
+        """
+        while (self._retract_mark is not None
+               and len(self._entries) > self._retract_mark):
+            self._drop_last_entry()
+        # The buffers as well as the entries: text held back by the commit
+        # cap was produced by the attempt being retracted, and leaving it
+        # would splice the dead attempt's tail onto the new one's head.
+        self._pending = ""
+        self._stream_text = ""
+        self._stream_open = False
+        self._thinking_pending = ""
+        self._thinking_text = ""
+        self._thinking_open = False
+        # Both spans are closed now, so the replay draws every entry
+        # closed -- which is correct here and is exactly what `reflow()`
+        # must NOT do, the one place the two callers differ.
+        self._retract_mark = None
+        self._replay()
+        # No scroll restore, unlike `reflow()`. A retraction happens at the
+        # live end of the transcript with the reader watching it, so
+        # `auto_scroll` keeping them at the bottom is the right answer --
+        # `/theme`'s reasoning, not a resize's.
+        if note:
+            # AND IT SURVIVES THE NEXT RETRACTION for free, which is worth
+            # a sentence because the first version of this method bought
+            # it with a line of code. `write_system` opens with
+            # `flush_stream()`, so the note lands with NOTHING armed, and
+            # the next delta arms the mark after it. Two failures
+            # therefore leave two lines rather than one reading "attempt 3
+            # of 3" with nothing saying there had been an attempt 2 --
+            # which is the disclosure §21 spent a section on. Under the
+            # rule this batch tried first, where a flush SET the mark, the
+            # note would have landed inside the next retraction's region
+            # and an explicit advance was needed; the mutation pass found
+            # that line still here and no longer doing anything.
+            self.write_system(note)
 
     def _scroll_fraction(self) -> tuple:
         """How far down the transcript the reader is, and whether that is

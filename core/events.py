@@ -18,6 +18,15 @@ raise) depends on a real exception propagating -- converting failures
 into data-shaped events would require every consumer to know to unpack
 and re-raise. Consumers that want graceful error display (the TUI) wrap
 their own consumption loop in try/except.
+
+`retract` is NOT an error variant, and batch 113 added it without
+reopening that decision. The rule above is about where a failure is
+HANDLED: a failure must stay an exception so that the persistence which
+depends on one still fires. A retraction says nothing about whether the
+call failed for good -- it says the rows drawn so far are being replaced,
+and the exception still propagates, unchanged, when the retries run out.
+The two coexist because they answer different questions, and a consumer
+that ignores `retract` entirely is still correct about failures.
 """
 
 from dataclasses import dataclass
@@ -57,5 +66,24 @@ class LoopEvent:
     # §25 each hit once; the event is for live display, the response field
     # is for everyone else.
     notice: Optional[dict] = None
+    # Batch 113 (TECHNICAL_DEBT 25). THE NINTH FIELD, and it argues for
+    # itself where test_pipeline_events.py says it must. This is not a
+    # notice ABOUT the run -- it is an instruction to a drawing surface:
+    # take back everything you have drawn since the last flush, because
+    # the model call that produced it failed and is being tried again.
+    # thinking_delta's family exactly, and P1's rule was never about this
+    # case either: it describes one model call's progress and lives for a
+    # turn.
+    #
+    # {"text", "attempt", "attempts"} -- the sentence to show, and the
+    # numbers behind it for a consumer that would rather phrase its own.
+    #
+    # DISPLAY-ONLY, and unlike `notice` it is deliberately NOT mirrored
+    # onto ModelResponse. A consumer that drains has drawn nothing and so
+    # has nothing to retract; handing it a retraction in the response
+    # would be asking it to undo something that never happened. A
+    # consumer with no screen correctly ignores this field, which is why
+    # the research pipeline translates it into nothing at all.
+    retract: Optional[dict] = None
     final_response: Optional[Any] = None          # ModelResponse on terminal event
     stop_reason: Optional[str] = None             # "complete" | "max_steps_reached" | "token_budget_exceeded"

@@ -994,7 +994,7 @@ the padding changes and goes on passing -- and beside each one the control:
 a real blank line after an edge row is still drawn, so the fix cannot quietly
 become "swallow every newline after a full row".
 
-## 25. A model call is not retried once its output is on screen (open, 2026-09-14)
+## 25. A model call is not retried once its output is on screen (closed, batch 113)
 
 Batch 91 retries a model call that fails transiently -- a dropped connection,
 a 429 or 5xx, an error sent inside a stream that had already opened -- but a
@@ -1011,6 +1011,57 @@ shells to discard the span (core/events.py has no error variant, on purpose
 -- consumers rely on a real exception propagating), and a transcript able to
 retract rows RichLog has already stored as Strips, plus the entry log and
 the label that span opened. Both are real designs of their own.
+
+### RESOLVED in batch 113
+
+Both halves of that last paragraph turned out to be smaller than they read,
+and for opposite reasons.
+
+**"A transcript able to retract rows" was already built.** Batch 112 gave
+the widget `_replay()` -- redraw from `_entries` -- and `_drop_last_entry()`,
+which keeps the `_links`/`_opens` side tables in step with the log. The
+retraction is those two in a loop plus the buffer clears. The entry log and
+the label are not extra work either: the label is re-derived by the replay
+from the role sequence, which is §43's RM1, so one turn still shows one
+`venastine`.
+
+**The event was the real design**, and the objection recorded here does not
+apply to it. `core/events.py`'s "no error variant" rule is about where a
+failure is HANDLED -- it has to stay an exception so `orchestrator.py`'s
+failure-path persistence still fires. A retraction is not a failure turned
+into data: it says the rows drawn so far are being replaced, and the
+exception still propagates unchanged when the retries run out. `retract`
+is a ninth `LoopEvent` field, display-only and deliberately NOT mirrored
+onto `ModelResponse`, because a consumer that drains has drawn nothing and
+would be asked to undo something that never happened.
+`test_pipeline_events.py` is where that had to be argued, and is.
+
+**WHAT THE ENTRY GOT WRONG: a research pass was never a drawn run.** This
+item names "a TUI chat turn, a research pass" as the watched runs, and
+`core/reasoning/orchestrator.py` translates a pass's `token_delta` into a
+throttled character total and nothing else -- "only the volume escapes,
+never the content". A pass was nonetheless refused its retry, because
+`drained` was the proxy for "nothing reaches a screen" and a pass yields
+events. So the gate was protecting a counter. `Transcript` is the only
+surface in the repository that draws model text; `cli.py` is not a
+`token_delta` consumer at all.
+
+**`drained` is gone.** Its only reader was the clause this item is about,
+and one rule now covers every caller. Keeping it as an inert parameter was
+considered and rejected: a knob that does nothing is re-derived wrongly by
+the next reader.
+
+**AND THE BOUNDARY IS NOT THE SPAN**, which is the part the entry could not
+have known. "Discard the span" is the obvious rule and it is wrong:
+`_write_thinking_chunk` closes an open ANSWER before it draws, so one
+attempt with interleaved reasoning leaves several entries behind with only
+the last of them open -- measured as three, from text then reasoning then
+text. The retraction truncates to a MARK instead, armed by the first delta
+of a span and cleared by a flush. The first rule tried was "take the mark at
+every flush", and the test written to pin its stated cost found it wrong
+instead: every `write_*` opens with `flush_stream()`, so a line written
+mid-attempt moved the mark past the attempt's own text and the retraction
+deleted the unrelated line while keeping the half-answer.
 
 ## 26. An unset `AGENT_WORKSPACE` makes the harness its own project (closed, batch 107)
 

@@ -1978,6 +1978,414 @@ def _diff_block(text: str):
                              text.replace("boundary", "edge"))
 
 
+class TestARetractionTakesBackWhatTheAttemptDrew:
+    """TECHNICAL_DEBT 25, the transcript's half (batch 113).
+
+    A model call that fails in a way that can pass is now tried again even
+    after it has streamed, which it never was: batch 91 refused, because a
+    RichLog row could not be taken back and the retry would have drawn the
+    answer a second time under the half already on screen. Batch 112 made
+    a row retractable, and this is what spends it.
+
+    The rule asserted here is the two row-equality classes' rule carried
+    across a retraction: what is on screen after a failed attempt is taken
+    back and the replacement streams is what the replacement produces when
+    it is the only thing ever written.
+
+    THE BOUNDARY IS A MARK, NOT A SPAN, and one test here exists purely to
+    hold the measurement that decides it -- interleaved reasoning closes an
+    open answer, so one attempt can leave three entries with only the last
+    of them open.
+    """
+
+    NOTE = "the answer was interrupted (APIError: nope); retrying, 2 of 3"
+
+    FIRST = ("A first attempt that had begun to answer, at enough length "
+             "that it crosses a commit boundary and reaches the screen "
+             "rather than sitting in the buffer unseen.")
+    SECOND = ("A second attempt, which says something else entirely, "
+              "because a retry is a fresh sample and not a replay of the "
+              "one that died.")
+
+    @staticmethod
+    def _rows(view):
+        return [strip.text.rstrip() for strip in view.lines]
+
+    @staticmethod
+    def _chunks(text):
+        """Five characters at a time, the idiom the row-equality classes
+        use: small enough that a boundary lands mid-word."""
+        return [text[i:i + 5] for i in range(0, len(text), 5)]
+
+    @classmethod
+    async def _retracted_rows(cls, columns=84):
+        """Stream half an answer, retract it, stream the replacement."""
+        from tui.app import VenastineApp
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(columns, 40)) as pilot:
+            app.console.size = (columns, 40)
+            await pilot.pause()
+            view = app._transcript
+            view.clear()
+            view._entries.clear()
+            view.flush_stream()
+            for chunk in cls._chunks(cls.FIRST):
+                view.stream_delta(chunk)
+            await pilot.pause()
+            view.retract_to_mark(cls.NOTE)
+            for chunk in cls._chunks(cls.SECOND):
+                view.stream_delta(chunk)
+            view.flush_stream()
+            await pilot.pause()
+            return cls._rows(view), list(view._entries)
+
+    @classmethod
+    async def _clean_rows(cls, columns=84):
+        """The same note and the same replacement, nothing retracted."""
+        from tui.app import VenastineApp
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(columns, 40)) as pilot:
+            app.console.size = (columns, 40)
+            await pilot.pause()
+            view = app._transcript
+            view.clear()
+            view._entries.clear()
+            view.write_system(cls.NOTE)
+            view.write_answer(cls.SECOND)
+            await pilot.pause()
+            return cls._rows(view), list(view._entries)
+
+    @pytest.mark.asyncio
+    async def test_the_rows_equal_the_replacement_written_fresh(self):
+        retracted, _entries = await self._retracted_rows()
+        clean, _clean_entries = await self._clean_rows()
+        assert retracted == clean
+
+    @pytest.mark.asyncio
+    async def test_the_entry_log_keeps_no_trace_of_the_dead_attempt(self):
+        _rows, entries = await self._retracted_rows()
+        assert not any(self.FIRST[:40] in text for _role, text in entries)
+        assert any(self.SECOND[:40] in text for _role, text in entries)
+
+    @pytest.mark.asyncio
+    async def test_the_turn_still_carries_one_label(self):
+        """§38's one-entry-per-span rule, across a retraction: the
+        replacement must not arrive under a second `venastine ›`."""
+        rows, _entries = await self._retracted_rows()
+        assert len([row for row in rows if "venastine" in row]) == 1
+
+    @pytest.mark.asyncio
+    async def test_dropping_the_open_span_would_not_have_been_enough(self):
+        """The measurement the mark exists for, held here so it cannot
+        quietly stop being true.
+
+        Interleaved reasoning makes `_write_thinking_chunk` close an open
+        ANSWER before it draws, so one attempt is three entries with only
+        the last of them open. A retraction that dropped the open span
+        would leave the first two on screen and the retry would draw them
+        again underneath.
+        """
+        from tui.app import VenastineApp
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(84, 40)) as pilot:
+            app.console.size = (84, 40)
+            await pilot.pause()
+            view = app._transcript
+            view.clear()
+            view._entries.clear()
+            view.flush_stream()
+            view.stream_delta("a first sentence of answer.\n")
+            view.thinking_delta("a reconsideration mid-answer.\n")
+            view.stream_delta("a second sentence of answer.\n")
+            await pilot.pause()
+
+            assert [role for role, _text in view._entries] == [
+                "assistant", "thinking", "assistant"]
+            assert view._stream_open and not view._thinking_open
+
+            view.retract_to_mark()
+            await pilot.pause()
+            assert view._entries == []
+            assert self._rows(view) == []
+
+    @pytest.mark.asyncio
+    async def test_reasoning_alone_is_taken_back(self):
+        """A thinking delta sets the loop's `shown` too, so an attempt
+        that only reasoned before it died has a span to retract -- and
+        the closing delimiter must not survive the entry it closed."""
+        from tui.app import VenastineApp
+        from tui.widgets import THINKING_BAR
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(84, 40)) as pilot:
+            app.console.size = (84, 40)
+            await pilot.pause()
+            view = app._transcript
+            view.clear()
+            view._entries.clear()
+            view.flush_stream()
+            view.thinking_delta("half a thought, and then the stream died.\n")
+            await pilot.pause()
+            assert view._entries
+
+            view.retract_to_mark()
+            await pilot.pause()
+            assert view._entries == []
+            assert not any(THINKING_BAR in row for row in self._rows(view))
+
+    @pytest.mark.asyncio
+    async def test_an_answer_span_is_replaced_cleanly(self):
+        """The same statement for the answer side, and NOT redundant.
+
+        Every other case that retracts an open answer span passes a
+        `note`, and `write_system` opens with `flush_stream()` -- which
+        closes the span, so a missing `_stream_open = False` is invisible
+        there. The one case that retracts without a note had only ever
+        buffered, so the flag was already false. The mutation pass found
+        the gap by walking through it.
+        """
+        dead_head = "a first sentence that commits.\n"
+        dead_tail = "and a tail still sitting in the buffer"
+        retry_answer = "a different answer entirely, on the second try."
+
+        async def rows(with_a_dead_attempt):
+            from tui.app import VenastineApp
+
+            app = VenastineApp("ANTHROPIC", "test-model", {})
+            async with app.run_test(size=(84, 40)) as pilot:
+                app.console.size = (84, 40)
+                await pilot.pause()
+                view = app._transcript
+                view.clear()
+                view._entries.clear()
+                view.flush_stream()
+                if with_a_dead_attempt:
+                    view.stream_delta(dead_head)
+                    view.stream_delta(dead_tail)
+                    assert view._stream_open and view._pending
+                    view.retract_to_mark()
+                view.stream_delta(retry_answer)
+                view.flush_stream()
+                await pilot.pause()
+                return self._rows(view)
+
+        assert await rows(True) == await rows(False)
+
+    @pytest.mark.asyncio
+    async def test_a_reasoning_span_is_replaced_cleanly(self):
+        """A dead reasoning span, mid-buffer, with the retry over the top.
+
+        The only case that exercises either reasoning-side reset, which
+        the mutation pass established by walking through both. The span
+        here is OPEN -- a committed chunk, so there is an entry -- and
+        also has a tail still in `_thinking_pending`, and the retry
+        streams reasoning of its own afterwards:
+
+          * without the `_thinking_pending` clear the dead tail is
+            spliced onto the front of the retry's reasoning;
+          * without the `_thinking_open` reset the next committed chunk
+            writes into `_entries[-1]` of a log the retraction emptied.
+
+        Stated as row equality, which is this file's rule: what is on
+        screen is what the retry alone would have drawn.
+        """
+        dead_head = "a first thought that commits.\n"
+        dead_tail = "and a tail still sitting in the buffer"
+        retry_thought = "a different thought entirely, on the second try.\n"
+        retry_answer = "and the answer that followed it."
+
+        async def rows(with_a_dead_attempt):
+            from tui.app import VenastineApp
+
+            app = VenastineApp("ANTHROPIC", "test-model", {})
+            async with app.run_test(size=(84, 40)) as pilot:
+                app.console.size = (84, 40)
+                await pilot.pause()
+                view = app._transcript
+                view.clear()
+                view._entries.clear()
+                view.flush_stream()
+                if with_a_dead_attempt:
+                    view.thinking_delta(dead_head)
+                    view.thinking_delta(dead_tail)
+                    assert view._thinking_open and view._thinking_pending
+                    view.retract_to_mark()
+                view.thinking_delta(retry_thought)
+                view.end_thinking()
+                view.stream_delta(retry_answer)
+                view.flush_stream()
+                await pilot.pause()
+                return self._rows(view)
+
+        assert await rows(True) == await rows(False)
+
+    @pytest.mark.asyncio
+    async def test_an_attempt_that_drew_nothing_is_a_no_op(self):
+        """The loop guards the event on `shown`, but the widget must be
+        safe called anyway -- and it must not eat the turn's own history."""
+        from tui.app import VenastineApp
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(84, 40)) as pilot:
+            app.console.size = (84, 40)
+            await pilot.pause()
+            view = app._transcript
+            view.clear()
+            view._entries.clear()
+            view.write_user("a question from earlier in the turn")
+            view.write_answer("an answer from earlier in the turn")
+            await pilot.pause()
+            before, entries = self._rows(view), list(view._entries)
+
+            view.retract_to_mark()
+            await pilot.pause()
+            assert self._rows(view) == before
+            assert list(view._entries) == entries
+
+    @pytest.mark.asyncio
+    async def test_the_held_buffer_goes_with_it(self):
+        """Text the commit cap is still holding belongs to the attempt
+        being retracted. Left behind, it would be spliced onto the front
+        of whatever the retry streams -- a sentence made of two different
+        answers, which is worse than either."""
+        from tui.app import VenastineApp
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(84, 40)) as pilot:
+            app.console.size = (84, 40)
+            await pilot.pause()
+            view = app._transcript
+            view.clear()
+            view._entries.clear()
+            view.flush_stream()
+            view.stream_delta("an unterminated fragment with no boundary")
+            assert view._pending
+
+            view.retract_to_mark()
+            view.stream_delta("the replacement.")
+            text = view.flush_stream()
+            await pilot.pause()
+            assert text == "the replacement."
+            assert "unterminated" not in text
+
+    @pytest.mark.asyncio
+    async def test_a_second_retraction_keeps_the_first_note(self):
+        """Two failed attempts leave two lines, not one. Collapsing them
+        would leave a transcript reading "attempt 3 of 3" with nothing
+        saying there had ever been an attempt 2 -- and the note is only
+        worth writing if it survives the next thing that happens."""
+        from tui.app import VenastineApp
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(84, 40)) as pilot:
+            app.console.size = (84, 40)
+            await pilot.pause()
+            view = app._transcript
+            view.clear()
+            view._entries.clear()
+            view.flush_stream()
+            view.stream_delta("the first attempt.\n")
+            view.retract_to_mark("interrupted; retrying, attempt 2 of 3")
+            view.stream_delta("the second attempt.\n")
+            view.retract_to_mark("interrupted; retrying, attempt 3 of 3")
+            await pilot.pause()
+
+            notes = [text for _role, text in view._entries
+                     if "retrying" in text]
+            assert notes == ["interrupted; retrying, attempt 2 of 3",
+                             "interrupted; retrying, attempt 3 of 3"]
+            assert not any("attempt." in text for _role, text
+                           in view._entries)
+
+    @pytest.mark.asyncio
+    async def test_a_line_written_mid_attempt_disarms_the_retraction(self):
+        """The test that corrected the rule, kept pointing at it.
+
+        It was written to pin the stated cost of "the mark is taken at
+        every flush": a line written mid-attempt would fall inside the
+        mark and go with it. What it found was worse and in the other
+        direction -- every `write_*` OPENS with `flush_stream()`, so the
+        line moved the mark PAST the attempt's own text, and the
+        retraction then deleted the unrelated line and kept the
+        half-answer.
+
+        The mark is armed by the first delta now and cleared by a flush,
+        so this window degrades to doing nothing: the attempt's text and
+        the foreign line both stay, and the retry draws its answer under
+        them. Not ideal, and reachable in the app only by a `/theme`
+        mid-answer, which flushes through `rerender()`. Doing nothing is
+        the right way for it to fail, and this is where that is written
+        down.
+        """
+        from tui.app import VenastineApp
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(84, 40)) as pilot:
+            app.console.size = (84, 40)
+            await pilot.pause()
+            view = app._transcript
+            view.clear()
+            view._entries.clear()
+            view.flush_stream()
+            view.stream_delta("a partial answer.\n")
+            view.write_system("a line from somewhere else")
+            await pilot.pause()
+            before = list(view._entries)
+            assert view._retract_mark is None
+
+            view.retract_to_mark()
+            await pilot.pause()
+            assert list(view._entries) == before
+
+    @pytest.mark.asyncio
+    async def test_the_note_is_written_even_when_nothing_was_armed(self):
+        """The retry is happening whether or not this widget had rows to
+        undo, and a reader watching the answer stall deserves the
+        sentence either way."""
+        from tui.app import VenastineApp
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(84, 40)) as pilot:
+            app.console.size = (84, 40)
+            await pilot.pause()
+            view = app._transcript
+            view.clear()
+            view._entries.clear()
+            view.retract_to_mark(self.NOTE)
+            await pilot.pause()
+            assert [text for _role, text in view._entries] == [self.NOTE]
+
+    @pytest.mark.asyncio
+    async def test_interleaved_reasoning_keeps_one_mark(self):
+        """`_write_thinking_chunk` closes an open ANSWER without
+        flushing, which is what makes one attempt several entries. The
+        mark must survive that: re-arming per span would leave the
+        earlier entries of the same attempt behind."""
+        from tui.app import VenastineApp
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(84, 40)) as pilot:
+            app.console.size = (84, 40)
+            await pilot.pause()
+            view = app._transcript
+            view.clear()
+            view._entries.clear()
+            view.write_user("the question")
+            view.stream_delta("a first sentence of answer.\n")
+            armed = view._retract_mark
+            view.thinking_delta("a reconsideration mid-answer.\n")
+            view.stream_delta("a second sentence of answer.\n")
+            await pilot.pause()
+
+            assert view._retract_mark == armed == 1
+            view.retract_to_mark()
+            await pilot.pause()
+            assert [role for role, _text in view._entries] == ["user"]
+
+
 class TestAResizeRelaysTheTranscript:
     """Rows already drawn used to keep the width they were drawn at.
 

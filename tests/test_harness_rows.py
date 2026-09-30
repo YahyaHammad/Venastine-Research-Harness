@@ -167,5 +167,9 @@ class TestAWakeTurnRunsLikeTheRunItContinues:
         assert "AGENT PROMPT" in seen["prompt"]
         assert seen["kwargs"]["response_channel"] is channel
         assert seen["kwargs"]["granted_tools"] == {"read"}
-        assert seen["kwargs"]["drained"] is True
+        # `drained=True` was asserted here until batch 113 removed the
+        # parameter: it split the retry into a drawn rule and a drained
+        # one, and there is one rule now. Nothing replaces the assertion,
+        # because a wake turn no longer differs from any other caller in
+        # what it may retry -- which is the point.
         assert response.thread_id == memory.thread_id

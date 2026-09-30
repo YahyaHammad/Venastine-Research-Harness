@@ -3169,6 +3169,31 @@ class VenastineApp(App):
             self._meter.add_output_chars(len(event.token_delta))
         self._refresh_meter()
 
+        if event.retract:
+            # Batch 113 (TECHNICAL_DEBT 25). The model call that drew
+            # everything below the last flush failed in a way that can
+            # pass, and is about to be tried again -- so those rows come
+            # off before the retry draws its own, and the reader is told
+            # why the answer they were reading vanished.
+            #
+            # NOT through `_end_thinking()`, which every other branch
+            # here opens with: that closes the reasoning span first,
+            # drawing a delimiter onto entries this is about to delete.
+            # `retract_to_mark` clears the open-span flags itself, and
+            # the INDICATOR is stopped afterwards on #104's rule -- an
+            # undrawable indicator must not kill an event handler.
+            transcript.retract_to_mark(event.retract["text"])
+            try:
+                self._thinking_indicator.stop()
+            except NoMatches:
+                pass
+            # The mascot goes back to moving. The deltas paused it, and
+            # what follows is several seconds of a backoff wait with
+            # nothing arriving -- batch 61's worry about a figure going
+            # still during the one silence it exists to cover, one
+            # surface over.
+            self._raven.resume_animation()
+
         if event.thinking_delta:
             # §38. Same mascot handling as a token delta -- reasoning is
             # streaming output too, and the redraw loop costs the same.

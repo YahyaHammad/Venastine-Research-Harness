@@ -9,6 +9,12 @@ tests/test_provider_errors.py holds that table. This file is about what the
 loop does with the answer: when it may retry at all, what a retry must not
 repeat, and what a failure leaves behind.
 
+Batch 113 (TECHNICAL_DEBT 25) removed the boundary batch 91 drew. A retry
+no longer stops at the first delta of a DRAWN run, because a transcript
+row can be taken back now; the loop says so with a `retract` event and the
+surface deletes its own rows. `drained`, which existed only to split the
+two kinds of caller, is gone with it.
+
 The failures are LOOKALIKES -- a class named APIError carrying a `body`, a
 class named APIStatusError carrying a `status_code` -- for the reason
 test_provider_errors.py gives: the suite installs fake SDK modules, and the
@@ -21,8 +27,7 @@ import pytest
 
 import config
 from core.client import StreamToken
-from core.events import LoopEvent
-from core.loop import RunAgentLoop, run_to_completion
+from core.loop import RunAgentLoop
 from tests.conftest import (
     FakeMemory,
     make_model_response,
@@ -175,13 +180,27 @@ class TestWhatIsNotRetried:
         assert stream.calls == 1
         sleep.assert_not_called()
 
-    def test_a_drawn_run_that_already_showed_output_is_not_retried(
-            self, mocker, sleep):
-        """A transcript row cannot be taken back. Retrying here would draw
-        the answer a second time under the half already on screen."""
-        answer = make_model_response(text="whole answer")
-        stream = _script(_failing(_mid_stream_error(), "partial "),
-                         make_stream_from_response(answer))
+    def test_a_permanent_failure_retracts_nothing(self, mocker, sleep):
+        """A retraction belongs to a RETRY, not to a failure. A call that
+        cannot be tried again leaves the half-answer where it is, with the
+        error line under it: taking it back would delete the only thing on
+        screen and put nothing in its place."""
+        stream = _script(_failing(_auth_error(), "partial "))
+        mocker.patch("core.loop.call_model_stream", side_effect=stream)
+
+        events = []
+        with pytest.raises(Exception, match="Invalid API key"):
+            for event in RunAgentLoop._run(**_kwargs(FakeMemory())):
+                events.append(event)
+
+        assert stream.calls == 1
+        assert [e.retract for e in events if e.retract] == []
+
+    def test_the_last_attempt_retracts_nothing_either(self, mocker, sleep):
+        """Exhaustion is the same case one budget later. The retries run
+        out, the failure propagates, and the last thing drawn stays drawn
+        -- so there are two retractions for three attempts, never three."""
+        stream = _script(_failing(_mid_stream_error(), "partial "))
         mocker.patch("core.loop.call_model_stream", side_effect=stream)
 
         events = []
@@ -189,51 +208,124 @@ class TestWhatIsNotRetried:
             for event in RunAgentLoop._run(**_kwargs(FakeMemory())):
                 events.append(event)
 
-        assert stream.calls == 1
-        assert [e.token_delta for e in events if e.token_delta] == ["partial "]
-        sleep.assert_not_called()
+        assert stream.calls == 3
+        assert len([e for e in events if e.retract]) == 2
 
 
-class TestADrainedRunIsRetriedWhateverItStreamed:
+# ===========================================================================
+# ---- A run that already drew is retried too (TECHNICAL_DEBT 25) ------------
+# ===========================================================================
 
-    def test_it_retries_after_a_delta(self, mocker, sleep):
-        """Nothing a drained run streams reaches a screen -- run_to_completion
-        discards it -- so there is nothing to draw twice."""
+class TestARunThatAlreadyDrewIsRetried:
+    """Batch 113, and the inversion of what batch 91 could only refuse.
+
+    `shown` used to end the retry, for the reason its comment gave: a
+    RichLog row could not be taken back, so retrying after a delta would
+    have drawn the answer a second time under the half already on screen.
+    Batch 112 made a row retractable -- `_replay()` redraws the transcript
+    from `_entries` -- so the loop now announces the retry and the drawing
+    surface takes its own rows back.
+
+    The rule is one rule for every caller. It used to be two: a DRAINED
+    run was retried whatever it had streamed and a drawn one was not, and
+    that split is what `drained` existed for.
+    """
+
+    def test_it_retries_after_a_delta_and_says_so(self, mocker, sleep):
         answer = make_model_response(text="whole answer")
         stream = _script(_failing(_mid_stream_error(), "partial "),
                          make_stream_from_response(answer))
         mocker.patch("core.loop.call_model_stream", side_effect=stream)
 
-        response = run_to_completion(
-            RunAgentLoop._run(**_kwargs(FakeMemory(), drained=True)))
+        events = list(RunAgentLoop._run(**_kwargs(FakeMemory())))
 
-        assert response is answer
         assert stream.calls == 2
+        assert events[-1].final_response is answer
+        assert len([e for e in events if e.retract]) == 1
 
-    @pytest.mark.parametrize("entry", ["run_agent_conversation",
-                                       "continue_conversation"])
-    def test_the_two_draining_wrappers_say_so(self, mocker, fake_storage,
-                                              entry):
-        """The flag is what makes a subagent's retry possible after it had
-        started reasoning -- and it is set at the two entry points that
-        drain, and nowhere a caller would have to remember it."""
-        seen = {}
-        answer = make_model_response(text="ok")
+    def test_the_retraction_arrives_before_the_wait(self, mocker, sleep):
+        """Ordering, because it is the whole point of where the yield
+        sits: the reader learns why the answer vanished while the backoff
+        is happening, not once it is over."""
+        order = []
+        answer = make_model_response(text="whole answer")
+        stream = _script(_failing(_mid_stream_error(), "partial "),
+                         make_stream_from_response(answer))
+        mocker.patch("core.loop.call_model_stream", side_effect=stream)
+        sleep.side_effect = lambda *_a, **_k: order.append("wait")
 
-        def fake_run(memory, *args, **kwargs):
-            seen.update(kwargs)
-            yield LoopEvent(final_response=answer, stop_reason="complete")
+        for event in RunAgentLoop._run(**_kwargs(FakeMemory())):
+            if event.retract:
+                order.append("retract")
 
-        mocker.patch.object(RunAgentLoop, "_run", fake_run)
-        if entry == "run_agent_conversation":
-            RunAgentLoop.run_agent_conversation(
-                user_goal="hi", model="m", provider_name="ANTHROPIC")
-        else:
-            RunAgentLoop.continue_conversation(
-                thread_id=fake_storage.create_thread(), message="hi",
-                system_prompt="s", model="m", provider_name="ANTHROPIC")
+        assert order == ["retract", "wait"]
 
-        assert seen.get("drained") is True
+    def test_it_carries_the_sentence_and_the_numbers(self, mocker, sleep):
+        """Both, because the shells are not obliged to agree on wording:
+        the text is what the transcript shows, and the numbers are there
+        for a surface that would rather phrase its own."""
+        answer = make_model_response(text="whole answer")
+        stream = _script(_failing(_mid_stream_error(), "partial "),
+                         make_stream_from_response(answer))
+        mocker.patch("core.loop.call_model_stream", side_effect=stream)
+
+        retracted = [e.retract for e
+                     in RunAgentLoop._run(**_kwargs(FakeMemory()))
+                     if e.retract]
+
+        assert retracted[0]["attempt"] == 2
+        assert retracted[0]["attempts"] == 3
+        assert SERVICE_UNAVAILABLE in retracted[0]["text"]
+        assert "attempt 2 of 3" in retracted[0]["text"]
+
+    def test_an_attempt_that_drew_nothing_retracts_nothing(
+            self, mocker, sleep):
+        """`shown` survives the batch with a different job: it is no
+        longer "may we retry" but "is there anything to take back". A
+        failure before the first delta has nothing on screen behind it,
+        and a line explaining a retraction that did not happen would be
+        the only thing the reader saw."""
+        answer = make_model_response(text="whole answer")
+        stream = _script(_failing(_mid_stream_error()),
+                         make_stream_from_response(answer))
+        mocker.patch("core.loop.call_model_stream", side_effect=stream)
+
+        events = list(RunAgentLoop._run(**_kwargs(FakeMemory())))
+
+        assert stream.calls == 2
+        assert [e.retract for e in events if e.retract] == []
+
+    def test_reasoning_alone_is_enough_to_retract(self, mocker, sleep):
+        """A thinking delta sets `shown` too, and the transcript draws
+        reasoning when tui.show_thinking is on. An attempt that thought
+        and then died has a span on screen to take back."""
+        answer = make_model_response(text="whole answer")
+
+        def thinking_then_failing(*_args, **_kwargs):
+            yield StreamToken(thinking_delta="half a thought")
+            raise _mid_stream_error()
+
+        stream = _script(thinking_then_failing,
+                         make_stream_from_response(answer))
+        mocker.patch("core.loop.call_model_stream", side_effect=stream)
+
+        events = list(RunAgentLoop._run(**_kwargs(FakeMemory())))
+
+        assert stream.calls == 2
+        assert len([e for e in events if e.retract]) == 1
+
+    def test_one_rule_for_every_caller(self):
+        """The guard on the split coming back. `drained` was the flag that
+        made a drawn run and a drained one retry differently; it is gone,
+        and nothing passes anything in its place. A reintroduced two-speed
+        retry would be invisible in behaviour tests that only ever drive
+        one of the two kinds."""
+        import inspect
+
+        source = inspect.getsource(RunAgentLoop)
+        assert "drained" not in source
+        assert "drained" not in inspect.signature(
+            RunAgentLoop._run_steps).parameters
 
 
 # ===========================================================================

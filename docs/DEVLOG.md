@@ -16830,3 +16830,150 @@ in this batch, by owner decision: it has nothing to do with the transcript,
 and a test edit buys both full suites again.
 
 Counts 6064 -> 6087.
+
+## Batch 113 -- taking back what was drawn, so the call can be tried again
+
+TECHNICAL_DEBT 25, the last open item of the transcript cluster found in
+batches 90-91.
+
+Batch 91 gave the loop a retry for transient model-call failures and then
+had to refuse it in the one place a reader would most want it. The clause
+said so itself: `(shown and not drained)`, because "a RichLog row cannot be
+taken back". So a TUI turn that died mid-answer -- an error sent inside a
+stream that opened 200, which is how OpenRouter reports an overloaded
+upstream -- failed exactly as it had before batch 91, with the half-answer
+on screen and `[error: ...]` under it.
+
+Batch 112 built the thing that makes a row retractable: `_replay()`, which
+redraws the transcript from `_entries`, and `_drop_last_entry()`, which
+keeps the `_links`/`_opens` side tables in step. This batch spends it.
+
+Reproduced before anything changed: `probe113.py` reports one attempt, the
+deltas `["partial "]`, no retraction and the exception propagating -- then
+the same instrument reports two attempts, one retraction and no failure.
+
+### The register was heavier than the change in one place and wrong in another
+
+The entry's last paragraph names two things as "real designs of their own".
+One of them had already been built by the batch before, and the other was
+not the obstacle the entry thought.
+
+**"A transcript able to retract rows"** is `_drop_last_entry` in a loop plus
+the buffer clears. The entry log and the label are not extra work either:
+the replay re-derives every label from the role sequence, which is §43's
+RM1, so one turn still shows one `venastine`.
+
+**"`core/events.py` has no error variant, on purpose"** is true and does not
+apply. That rule is about where a failure is HANDLED -- it has to stay an
+exception so `orchestrator.py`'s failure-path persistence still fires. A
+retraction does not turn a failure into data: it says the rows drawn so far
+are being replaced, and the exception still propagates, unchanged, when the
+retries run out. The two answer different questions.
+
+**AND A RESEARCH PASS WAS NEVER A DRAWN RUN.** The entry names "a TUI chat
+turn, a research pass" as the watched runs. `core/reasoning/orchestrator.py`
+translates a pass's `token_delta` into a throttled character total and
+states the rule in its own list: *"Only the volume escapes, never the
+content."* A pass was refused its retry anyway, because `drained` was the
+proxy for "nothing reaches a screen" and a pass yields events. The gate was
+protecting a counter. `Transcript` is the only surface in the repository
+that draws model text -- `cli.py` is not a `token_delta` consumer at all --
+which is what made the fix one consumer rather than three.
+
+`drained` is therefore gone. Its only reader was that clause, and one rule
+now covers every caller. Keeping it as an inert parameter was considered
+and rejected: a knob that does nothing is re-derived wrongly by the next
+reader, and `test_one_rule_for_every_caller` reads the source so that a
+two-speed retry cannot come back invisibly.
+
+### The boundary is a mark, and the first rule for it was wrong
+
+"Discard the span" is the obvious rule and it does not survive contact with
+interleaved reasoning: `_write_thinking_chunk` closes an open ANSWER before
+it draws, so one attempt can leave several entries behind with only the
+last of them open. Measured rather than reasoned about -- text, then
+reasoning, then text, inside one attempt, is three entries and one open
+span. Dropping the open one leaves the first two for the retry to draw
+again underneath.
+
+So the retraction truncates to a mark. The rule this batch tried first was
+"take the mark at every flush", which reads well: a flush is exactly what
+separates one model call's output from the next. **The test written to pin
+its stated cost found it wrong instead.** `write_system`, `write_user`,
+`write_error` and `write_role` all OPEN with `flush_stream()`, so a line
+written while a span was live moved the mark PAST the attempt's own text --
+and the retraction then deleted the unrelated line and KEPT the
+half-answer. Wrong in both directions at once, and invisible to every test
+that did not write something in that window.
+
+The mark is armed by the first delta of a span and cleared by a flush now.
+The ordinary case is identical; the awkward one degrades to doing nothing,
+which is the right way for it to fail. `/theme` mid-answer is the only
+route to it in the app, and `test_a_line_written_mid_attempt_disarms_the_retraction`
+is where that is written down.
+
+### What the reader sees
+
+A line, not a silent replacement. §21's "no silent compaction, ever" is the
+precedent and the reasoning carries over exactly: the retried answer is a
+fresh sample and will not match what was on screen, which is precisely when
+a reader needs telling that the screen changed under them. The event is
+yielded BEFORE the backoff wait -- the explanation is worth more during the
+three seconds of nothing than after them -- and only when the attempt drew
+something, which is `shown`'s remaining job.
+
+Two failed attempts leave two lines, and that turned out to cost nothing.
+`write_system` opens with `flush_stream()`, which clears the mark, so the
+note lands with nothing armed and the next delta arms after it. Collapsing
+them would leave a transcript reading "attempt 3 of 3" with nothing saying
+there had ever been an attempt 2.
+
+The output-char meter is left MONOTONIC, and so is the pipeline's
+`pass_activity` total. Batch 61 counts chars "whether or not the renderer
+draws it" so the figure never goes still; it is liveness rather than a
+bill, token accounting already counts only the attempt that succeeded, and
+a running total that jumped backwards mid-turn would read as the defect
+instead of the honesty.
+
+### Three rows the mutation pass corrected
+
+Twelve rows, all killed in the end. Three of them went through untouched
+first, and only one of those three was a test gap of the ordinary kind.
+
+**Two were reasoning and answer spans that no test ever continued.**
+Deleting `self._thinking_pending = ""` and `self._thinking_open = False`
+changed nothing observable, because the case that retracts a reasoning
+span ended its delta with a newline -- so the buffer was already empty --
+and nothing streamed AFTER the retraction, so an open flag left set had
+nothing to corrupt. The answer side survived for a third reason worth
+writing down: every case that retracts an OPEN answer span passes a
+`note`, and `write_system` opens with `flush_stream()`, which closes the
+span the mutation left open. The two cases now open a span, leave a tail
+in its buffer, and stream the retry over the top, stated as row equality.
+
+**And one was DEAD CODE, not a missing test.** `retract_to_mark` ended
+with `self._retract_mark = len(self._entries)` after writing the note, and
+a mutation putting `return` in front of it killed nothing. It was
+load-bearing under the rule this batch tried first, where a flush SET the
+mark: the note would have landed inside the next retraction's region.
+Arming-on-delta made it unnecessary -- the flush inside `write_system`
+clears the mark, and the next delta arms after the note -- and nothing
+noticed until something tried to remove it. Deleted rather than covered:
+a test written for it would have pinned a line that does nothing.
+
+### And a fourth file, which only the full suite could see
+
+`drained` had three call sites in `core/loop.py` and a fourth reader
+nowhere near them: `test_harness_rows.py` captured the loop's kwargs
+through a fake `_run` and asserted `seen["kwargs"]["drained"] is True`. It
+came back as a `KeyError` from a file this batch never opened, in a test
+about a wake turn carrying its run's channel and grant.
+
+`test_one_rule_for_every_caller` did not and should not catch it: it reads
+`RunAgentLoop`'s own source, which is the right guard against the
+production split returning, and has nothing to say about an assertion in
+another file. The parallel full run was the instrument, for the second
+batch running -- batch 112's `_render_entry` spy was the same distance
+away for the same reason.
+
+Counts 6087 -> 6105.
