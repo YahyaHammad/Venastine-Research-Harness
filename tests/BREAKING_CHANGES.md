@@ -5210,3 +5210,19 @@ back. Batch 112 made one retractable; this spends it.
 | **The retraction handler must not call `_end_thinking()` first** | -- | Every other branch of `on_loop_event` opens with it; this one cannot, because it closes the reasoning span and draws the delimiter onto entries about to be deleted. `retract_to_mark` clears the open-span flags itself, and the INDICATOR is stopped afterwards on #104's rule |
 
 Count 6087 -> 6105.
+
+## Batch 114 -- the suite's own floor, and a control that measured the wrong clock (TECHNICAL_DEBT 30, 31)
+
+`--dist loadscope` groups a test by its CLASS where it has one and by its MODULE where it does not,
+and a group is what gets handed to one worker. `tests/test_tui.py`'s 183 classless tests were
+therefore a single indivisible unit -- 292 node ids, the floor every other worker waited on. They
+are 41 classes now, cut along the section banners the file already carried.
+
+| Change | What breaks | Symptom / fix |
+|---|---|---|
+| **A new test in `tests/test_tui.py` must be inside a class** | A module-level test added to that file, from now on | `TestThisFileIsGroupedForLoadscope::test_every_test_here_is_inside_a_class` parses the file with `ast` and names the stray. The section banner above a test names the class to file it under. It is the mirror of `test_storage_e2e.py::test_this_file_declares_no_test_class`, and it sits inside a class itself because a module-level test there would be the thing it forbids |
+| **183 tests in `test_tui.py` changed NODE ID, and none changed name** | Anything holding `tests/test_tui.py::test_x` -- a saved node id, a CI rerun list, a `--deselect` | It is `tests/test_tui.py::TestSomething::test_x` now. The names are untouched, which is why `test_every_test_name_cited_in_production_code_resolves` stays green: it resolves NAMES, and `tui/app.py`'s two citations into this file still resolve. `-k` expressions are unaffected |
+| **`test_tui.py` is 62 groups where it was 21** | A future coupling between two CLASSES in that file, which `loadscope` will now schedule apart | This is the cost `pytest.ini` already priced, taken deliberately. Nothing in the 183 was an ordered pair, and that was established by RUNNING every one of the 62 classes standing alone rather than by reading the file. An ordered pair still belongs inside one class |
+| **Nothing was hoisted to make a class span a section** | -- | Four sections have a module-level helper, a data block or an existing `Test` class sitting between their own tests (`type_into_prompt`, `REVIEW`/`ASKS`, `_syntax_token_theme`, `TestEventsUnderAnOpenModal`). A class cannot span one, so each of those four yields TWO classes rather than a moved definition. 37 owners + 4 seams = 41 |
+| **`test_the_probe_would_notice_a_child_that_kept_going` polls for the first tick** | Nothing. Same test, same subject | TECHNICAL_DEBT 31. It slept a fixed 1.0s before its first reading, so a cold interpreter start was inside the window it measured -- it failed once that way in batch 112's serial full run, with `assert 0 > 0` and a message about the budget clock. It measures growth from the first tick now, under a 30s deadline, and puts `proc.stderr` in the failure -- read AFTER the kill, since `.read()` on a live pipe blocks until EOF, which is why both failure paths are `pytest.fail` rather than an `assert` whose message would be built while the child is still up |
+| **`test_themes.py` was NOT classed, and the count says it should have been** | -- | 319 classless node ids, more than test_tui.py's 292, and no classes at all. Measured at ~12.5s against a floor of ~38s, so classing it would lower nothing. Recorded in the register so the next reader does not rank by count |

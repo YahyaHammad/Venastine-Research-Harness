@@ -71,287 +71,292 @@ from tui.widgets import (
 )
 
 
-@pytest.mark.asyncio
-async def test_research_grant_picker_authorises_the_run(mocker):
-    """§25 R1 end to end in the TUI: /research --grant opens the picker,
-    and what the user ticks becomes the RunAuthorization the pipeline
-    receives.
-
-    Asserted on the pipeline's authorization argument, not on the modal
-    rendering -- the same reasoning as AC2. A picker that appears and then
-    drops the answer would look correct on screen and grant nothing.
+class TestTheGrantPickerAndAttendedResearch:
+    """The research surfaces that gate a run: the grant picker that
+    authorises it, and the attended flag that lets the model ask.
     """
-    from tui.app import _cmd_research
-    from tui.screens import GrantPickerScreen
 
-    mocker.patch("core.reasoning.authorization.candidates",
-                 return_value=[("mcp__lib__search", "Search."),
-                               ("mcp__lib__write", "Write.")])
-    captured = {}
-    mocker.patch(
-        "core.reasoning.orchestrator.stream_deep_research_pipeline",
-        side_effect=lambda **kw: (captured.update(kw), _stub_events())[1])
+    @pytest.mark.asyncio
+    async def test_research_grant_picker_authorises_the_run(self, mocker):
+        """§25 R1 end to end in the TUI: /research --grant opens the picker,
+        and what the user ticks becomes the RunAuthorization the pipeline
+        receives.
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        _cmd_research(app, "--grant what is entropy")
-        assert await settle(
-            pilot, lambda: isinstance(app.screen, GrantPickerScreen)), \
-            "the picker never opened"
+        Asserted on the pipeline's authorization argument, not on the modal
+        rendering -- the same reasoning as AC2. A picker that appears and then
+        drops the answer would look correct on screen and grant nothing.
+        """
+        from tui.app import _cmd_research
+        from tui.screens import GrantPickerScreen
 
-        app.screen.dismiss({"mcp__lib__search"})
-        assert await settle(pilot, lambda: "authorization" in captured), \
-            "the pipeline never started after the picker was answered"
+        mocker.patch("core.reasoning.authorization.candidates",
+                     return_value=[("mcp__lib__search", "Search."),
+                                   ("mcp__lib__write", "Write.")])
+        captured = {}
+        mocker.patch(
+            "core.reasoning.orchestrator.stream_deep_research_pipeline",
+            side_effect=lambda **kw: (captured.update(kw), _stub_events())[1])
 
-    auth = captured["authorization"]
-    assert auth is not None
-    assert auth.granted_tools == {"mcp__lib__search"}
-    # The one the user did NOT tick stays gated -- per-tool, not per-set.
-    assert "mcp__lib__write" not in auth.granted_tools
-    assert captured["user_query"] == "what is entropy"
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            _cmd_research(app, "--grant what is entropy")
+            assert await settle(
+                pilot, lambda: isinstance(app.screen, GrantPickerScreen)), \
+                "the picker never opened"
 
+            app.screen.dismiss({"mcp__lib__search"})
+            assert await settle(pilot, lambda: "authorization" in captured), \
+                "the pipeline never started after the picker was answered"
 
-@pytest.mark.asyncio
-async def test_research_attended_flag_gives_the_pipeline_a_provider(mocker):
-    """§25 R9/R10 in the TUI: /research --attended reaches the pipeline as
-    a RunAuthorization carrying a provider, so gated tools stop being
-    hidden and each call raises the modal instead.
-
-    Asserted on the bundle the pipeline receives. Testing the flag splitter
-    alone would pass against a shell that parses --attended perfectly and
-    then never builds anything from it.
-    """
-    from tui.app import _cmd_research
-
-    mocker.patch("core.reasoning.authorization.candidates", return_value=[])
-    captured = {}
-    mocker.patch(
-        "core.reasoning.orchestrator.stream_deep_research_pipeline",
-        side_effect=lambda **kw: (captured.update(kw), _stub_events())[1])
-
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        _cmd_research(app, "--attended what is entropy")
-        assert await settle(pilot, lambda: "authorization" in captured)
-
-    auth = captured["authorization"]
-    assert auth is not None, "--attended produced no authorization"
-    assert auth.provider is not None
-    assert auth.provider.honour_run_scope is False   # R11
-    assert auth.granted_tools == set()               # attended, nothing granted
-    assert captured["user_query"] == "what is entropy"
+        auth = captured["authorization"]
+        assert auth is not None
+        assert auth.granted_tools == {"mcp__lib__search"}
+        # The one the user did NOT tick stays gated -- per-tool, not per-set.
+        assert "mcp__lib__write" not in auth.granted_tools
+        assert captured["user_query"] == "what is entropy"
 
 
-@pytest.mark.asyncio
-async def test_attended_survives_grant_when_nothing_can_be_granted(mocker):
-    """#106. §25 made authorization TWO independent axes -- a grant set,
-    possibly empty, and an ApprovalProvider, possibly absent. This branch
-    collapsed them: `_start_research(app, query, None)` dropped the
-    provider along with the grant, and §25 documents None as the pre-§25
-    status quo, "no grants, nobody to ask, every gated tool hidden from
-    every pass". So adding --grant to an --attended run turned attended
-    OFF, and the run proceeded looking supervised.
+    @pytest.mark.asyncio
+    async def test_research_attended_flag_gives_the_pipeline_a_provider(self, mocker):
+        """§25 R9/R10 in the TUI: /research --attended reaches the pipeline as
+        a RunAuthorization carrying a provider, so gated tools stop being
+        hidden and each call raises the modal instead.
 
-    The twin of test_research_attended_flag_gives_the_pipeline_a_provider
-    above, with the same fixture, differing only by the flag. Asserted on
-    the bundle the PIPELINE receives, because the failure is silent
-    everywhere else -- nothing errors, the run just quietly stops being
-    attended.
+        Asserted on the bundle the pipeline receives. Testing the flag splitter
+        alone would pass against a shell that parses --attended perfectly and
+        then never builds anything from it.
+        """
+        from tui.app import _cmd_research
 
-    R13 is why this is not a corner case any more. With every built-in
-    either ungated, param-dependent or excluded by policy, candidates()
-    is empty until an MCP server connects -- so `candidates` patched to
-    [] here is the DEFAULT install, not a contrived one."""
-    from tui.app import _cmd_research
+        mocker.patch("core.reasoning.authorization.candidates", return_value=[])
+        captured = {}
+        mocker.patch(
+            "core.reasoning.orchestrator.stream_deep_research_pipeline",
+            side_effect=lambda **kw: (captured.update(kw), _stub_events())[1])
 
-    mocker.patch("core.reasoning.authorization.candidates", return_value=[])
-    captured = {}
-    mocker.patch(
-        "core.reasoning.orchestrator.stream_deep_research_pipeline",
-        side_effect=lambda **kw: (captured.update(kw), _stub_events())[1])
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            _cmd_research(app, "--attended what is entropy")
+            assert await settle(pilot, lambda: "authorization" in captured)
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        _cmd_research(app, "--attended --grant what is entropy")
-        assert await settle(pilot, lambda: "authorization" in captured)
-
-    auth = captured["authorization"]
-    assert auth is not None, "--grant discarded the attended provider"
-    assert auth.provider is not None
-    assert auth.provider.honour_run_scope is False   # R11 still holds
-    assert auth.granted_tools == set()               # nothing WAS grantable
-    assert captured["user_query"] == "what is entropy"
+        auth = captured["authorization"]
+        assert auth is not None, "--attended produced no authorization"
+        assert auth.provider is not None
+        assert auth.provider.honour_run_scope is False   # R11
+        assert auth.granted_tools == set()               # attended, nothing granted
+        assert captured["user_query"] == "what is entropy"
 
 
-@pytest.mark.asyncio
-async def test_grant_alone_with_nothing_grantable_still_authorises_nothing(
-        mocker):
-    """The other side of #106's fix, so it cannot overshoot.
+    @pytest.mark.asyncio
+    async def test_attended_survives_grant_when_nothing_can_be_granted(self, mocker):
+        """#106. §25 made authorization TWO independent axes -- a grant set,
+        possibly empty, and an ApprovalProvider, possibly absent. This branch
+        collapsed them: `_start_research(app, query, None)` dropped the
+        provider along with the grant, and §25 documents None as the pre-§25
+        status quo, "no grants, nobody to ask, every gated tool hidden from
+        every pass". So adding --grant to an --attended run turned attended
+        OFF, and the run proceeded looking supervised.
 
-    `_authorization_for` returns None when attended is off, and that must
-    survive: a bare --grant with nothing to grant is genuinely the
-    pre-§25 status quo, and manufacturing a bundle there would hand the
-    pipeline a provider nobody asked for."""
-    from tui.app import _cmd_research
+        The twin of test_research_attended_flag_gives_the_pipeline_a_provider
+        above, with the same fixture, differing only by the flag. Asserted on
+        the bundle the PIPELINE receives, because the failure is silent
+        everywhere else -- nothing errors, the run just quietly stops being
+        attended.
 
-    mocker.patch("core.reasoning.authorization.candidates", return_value=[])
-    captured = {}
-    mocker.patch(
-        "core.reasoning.orchestrator.stream_deep_research_pipeline",
-        side_effect=lambda **kw: (captured.update(kw), _stub_events())[1])
+        R13 is why this is not a corner case any more. With every built-in
+        either ungated, param-dependent or excluded by policy, candidates()
+        is empty until an MCP server connects -- so `candidates` patched to
+        [] here is the DEFAULT install, not a contrived one."""
+        from tui.app import _cmd_research
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        _cmd_research(app, "--grant what is entropy")
-        assert await settle(pilot, lambda: "authorization" in captured)
+        mocker.patch("core.reasoning.authorization.candidates", return_value=[])
+        captured = {}
+        mocker.patch(
+            "core.reasoning.orchestrator.stream_deep_research_pipeline",
+            side_effect=lambda **kw: (captured.update(kw), _stub_events())[1])
 
-    assert captured["authorization"] is None
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            _cmd_research(app, "--attended --grant what is entropy")
+            assert await settle(pilot, lambda: "authorization" in captured)
 
-
-@pytest.mark.asyncio
-async def test_research_attended_can_be_persisted_in_settings(mocker):
-    """R12's asymmetry from the TUI side: the MODE comes out of
-    settings.json, and a persisted mode can only ever ADD prompts."""
-    from tui.app import _cmd_research
-
-    mocker.patch("core.reasoning.authorization.candidates", return_value=[])
-    captured = {}
-    mocker.patch(
-        "core.reasoning.orchestrator.stream_deep_research_pipeline",
-        side_effect=lambda **kw: (captured.update(kw), _stub_events())[1])
-
-    app = VenastineApp("ANTHROPIC", "test-model",
-                       {"research": {"approval_mode": "attended"}})
-    async with app.run_test() as pilot:
-        _cmd_research(app, "what is entropy")     # no flag
-        assert await settle(pilot, lambda: "authorization" in captured)
-
-    assert captured["authorization"] is not None
-    assert captured["authorization"].provider is not None
+        auth = captured["authorization"]
+        assert auth is not None, "--grant discarded the attended provider"
+        assert auth.provider is not None
+        assert auth.provider.honour_run_scope is False   # R11 still holds
+        assert auth.granted_tools == set()               # nothing WAS grantable
+        assert captured["user_query"] == "what is entropy"
 
 
-@pytest.mark.asyncio
-async def test_cancelling_the_grant_picker_cancels_the_run(mocker):
-    """Dismissing with None means "I did not mean to start this", which is
-    a different answer from ticking nothing. Running anyway would start a
-    ten-pass job the user just tried to back out of."""
-    from tui.app import _cmd_research
-    from tui.screens import GrantPickerScreen
+    @pytest.mark.asyncio
+    async def test_grant_alone_with_nothing_grantable_still_authorises_nothing(self,
+            mocker):
+        """The other side of #106's fix, so it cannot overshoot.
 
-    mocker.patch("core.reasoning.authorization.candidates",
-                 return_value=[("mcp__lib__search", "Search.")])
-    started = []
-    mocker.patch("core.reasoning.orchestrator.stream_deep_research_pipeline",
-                 side_effect=lambda **kw: (started.append(kw), _stub_events())[1])
+        `_authorization_for` returns None when attended is off, and that must
+        survive: a bare --grant with nothing to grant is genuinely the
+        pre-§25 status quo, and manufacturing a bundle there would hand the
+        pipeline a provider nobody asked for."""
+        from tui.app import _cmd_research
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        _cmd_research(app, "--grant what is entropy")
-        assert await settle(
-            pilot, lambda: isinstance(app.screen, GrantPickerScreen))
-        app.screen.dismiss(None)
-        await pump(pilot, 20)
-        assert started == [], "cancelling the picker still started the run"
-        assert app._busy is False
+        mocker.patch("core.reasoning.authorization.candidates", return_value=[])
+        captured = {}
+        mocker.patch(
+            "core.reasoning.orchestrator.stream_deep_research_pipeline",
+            side_effect=lambda **kw: (captured.update(kw), _stub_events())[1])
 
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            _cmd_research(app, "--grant what is entropy")
+            assert await settle(pilot, lambda: "authorization" in captured)
 
-@pytest.mark.asyncio
-async def test_attended_research_shows_the_modal_and_returns_the_answer():
-    """§25 R9 in the TUI: a research pass asking mid-run gets the same
-    PermissionScreen the chat path uses, and the worker's blocking call
-    returns what the user clicked.
-
-    Driven through ask_permission_blocking directly on a worker thread,
-    because that is the exact call the response channel makes (§23) --
-    going via a whole pipeline run would test the orchestrator instead.
-    """
-    import threading
-
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        answer = {}
-
-        def worker():
-            answer["value"] = app.ask_permission_blocking(
-                "mcp__a__gated", {"q": "x"}, "notice text")
-
-        t = threading.Thread(target=worker, daemon=True)
-        t.start()
-
-        assert await settle(
-            pilot, lambda: isinstance(app.screen, PermissionScreen)), \
-            "the research approval modal never opened"
-        app.screen.dismiss(True)
-
-        assert await settle(pilot, lambda: "value" in answer), \
-            "the worker never unblocked"
-        assert answer["value"] is True
+        assert captured["authorization"] is None
 
 
-@pytest.mark.asyncio
-async def test_quitting_during_an_attended_research_prompt_releases_the_worker():
-    """The f10 invariant, fourth instance. Textual runs thread workers on
-    NON-daemon executor threads and cannot interrupt one blocked in
-    Queue.get(), so an exit that does not answer the channel leaves
-    App.run() unable to return -- a hang, not an error.
+    @pytest.mark.asyncio
+    async def test_research_attended_can_be_persisted_in_settings(self, mocker):
+        """R12's asymmetry from the TUI side: the MODE comes out of
+        settings.json, and a persisted mode can only ever ADD prompts."""
+        from tui.app import _cmd_research
 
-    ask_permission_blocking reuses `_permission_channel` precisely so the
-    existing release path covers it; a private queue would have been a
-    fourth uncovered dismissal route.
+        mocker.patch("core.reasoning.authorization.candidates", return_value=[])
+        captured = {}
+        mocker.patch(
+            "core.reasoning.orchestrator.stream_deep_research_pipeline",
+            side_effect=lambda **kw: (captured.update(kw), _stub_events())[1])
 
-    Asserted on the REGISTRATION first, because that assertion NAMES the
-    cause -- the research prompt's channel being the one the release path
-    knows about. Same instinct as the chat-side f10 test, which asserts
-    channel.puts == [False].
+        app = VenastineApp("ANTHROPIC", "test-model",
+                           {"research": {"approval_mode": "attended"}})
+        async with app.run_test() as pilot:
+            _cmd_research(app, "what is entropy")     # no flag
+            assert await settle(pilot, lambda: "authorization" in captured)
 
-    CORRECTION (TECHNICAL_DEBT 8, 2026-08-07), on two counts.
+        assert captured["authorization"] is not None
+        assert captured["authorization"].provider is not None
 
-    This docstring used to add "Textual dismisses open screens during
-    shutdown, which fires the modal's own callback and answers the queue
-    anyway". That is **false** on textual 1.0.0: `_result_callbacks` is
-    invoked only from `Screen.dismiss()` (`screen.py:1442`), and
-    `App._close_all()` prunes screens without going near it.
-    `_release_permission_channel` is the only thing that unblocks this
-    worker.
 
-    It then concluded that "a liveness assertion here proves nothing".
-    Also false, and measured: neuter `_release_permission_channel` so it
-    puts nothing, and the `not t.is_alive()` assertion below is the one
-    that fails. The reason is a second no-timeout block, not the queue --
-    the worker times out of `channel.get`, then calls
-    `call_from_thread(on_timeout, screen)`, whose `future.result()` has no
-    timeout and whose event loop `exit()` has already stopped. So it parks
-    there instead, and stays alive.
+    @pytest.mark.asyncio
+    async def test_cancelling_the_grant_picker_cancels_the_run(self, mocker):
+        """Dismissing with None means "I did not mean to start this", which is
+        a different answer from ticking nothing. Running anyway would start a
+        ten-pass job the user just tried to back out of."""
+        from tui.app import _cmd_research
+        from tui.screens import GrantPickerScreen
 
-    Both assertions therefore earn their place: liveness catches the
-    regression, the registration says which regression it was.
-    """
-    import threading
+        mocker.patch("core.reasoning.authorization.candidates",
+                     return_value=[("mcp__lib__search", "Search.")])
+        started = []
+        mocker.patch("core.reasoning.orchestrator.stream_deep_research_pipeline",
+                     side_effect=lambda **kw: (started.append(kw), _stub_events())[1])
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        answer = {}
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            _cmd_research(app, "--grant what is entropy")
+            assert await settle(
+                pilot, lambda: isinstance(app.screen, GrantPickerScreen))
+            app.screen.dismiss(None)
+            await pump(pilot, 20)
+            assert started == [], "cancelling the picker still started the run"
+            assert app._busy is False
 
-        def worker():
-            answer["value"] = app.ask_permission_blocking(
-                "mcp__a__gated", {}, None)
 
-        t = threading.Thread(target=worker, daemon=True)
-        t.start()
-        assert await settle(
-            pilot, lambda: isinstance(app.screen, PermissionScreen))
+    @pytest.mark.asyncio
+    async def test_attended_research_shows_the_modal_and_returns_the_answer(self):
+        """§25 R9 in the TUI: a research pass asking mid-run gets the same
+        PermissionScreen the chat path uses, and the worker's blocking call
+        returns what the user clicked.
 
-        # THE assertion: the research prompt's channel is the one the
-        # existing release path knows about. A private queue here would
-        # leave a worker parked on a Queue.get() nothing can answer.
-        assert app._permission_channel is not None, \
-            "the research approval channel is invisible to _release_permission_channel"
+        Driven through ask_permission_blocking directly on a worker thread,
+        because that is the exact call the response channel makes (§23) --
+        going via a whole pipeline run would test the orchestrator instead.
+        """
+        import threading
 
-        app.exit()
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            answer = {}
 
-        t.join(timeout=10)
-        assert not t.is_alive(), "exit() left the worker blocked on approval"
-        assert answer["value"] is False, "an unanswered exit must deny"
+            def worker():
+                answer["value"] = app.ask_permission_blocking(
+                    "mcp__a__gated", {"q": "x"}, "notice text")
+
+            t = threading.Thread(target=worker, daemon=True)
+            t.start()
+
+            assert await settle(
+                pilot, lambda: isinstance(app.screen, PermissionScreen)), \
+                "the research approval modal never opened"
+            app.screen.dismiss(True)
+
+            assert await settle(pilot, lambda: "value" in answer), \
+                "the worker never unblocked"
+            assert answer["value"] is True
+
+
+    @pytest.mark.asyncio
+    async def test_quitting_during_an_attended_research_prompt_releases_the_worker(self):
+        """The f10 invariant, fourth instance. Textual runs thread workers on
+        NON-daemon executor threads and cannot interrupt one blocked in
+        Queue.get(), so an exit that does not answer the channel leaves
+        App.run() unable to return -- a hang, not an error.
+
+        ask_permission_blocking reuses `_permission_channel` precisely so the
+        existing release path covers it; a private queue would have been a
+        fourth uncovered dismissal route.
+
+        Asserted on the REGISTRATION first, because that assertion NAMES the
+        cause -- the research prompt's channel being the one the release path
+        knows about. Same instinct as the chat-side f10 test, which asserts
+        channel.puts == [False].
+
+        CORRECTION (TECHNICAL_DEBT 8, 2026-08-07), on two counts.
+
+        This docstring used to add "Textual dismisses open screens during
+        shutdown, which fires the modal's own callback and answers the queue
+        anyway". That is **false** on textual 1.0.0: `_result_callbacks` is
+        invoked only from `Screen.dismiss()` (`screen.py:1442`), and
+        `App._close_all()` prunes screens without going near it.
+        `_release_permission_channel` is the only thing that unblocks this
+        worker.
+
+        It then concluded that "a liveness assertion here proves nothing".
+        Also false, and measured: neuter `_release_permission_channel` so it
+        puts nothing, and the `not t.is_alive()` assertion below is the one
+        that fails. The reason is a second no-timeout block, not the queue --
+        the worker times out of `channel.get`, then calls
+        `call_from_thread(on_timeout, screen)`, whose `future.result()` has no
+        timeout and whose event loop `exit()` has already stopped. So it parks
+        there instead, and stays alive.
+
+        Both assertions therefore earn their place: liveness catches the
+        regression, the registration says which regression it was.
+        """
+        import threading
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            answer = {}
+
+            def worker():
+                answer["value"] = app.ask_permission_blocking(
+                    "mcp__a__gated", {}, None)
+
+            t = threading.Thread(target=worker, daemon=True)
+            t.start()
+            assert await settle(
+                pilot, lambda: isinstance(app.screen, PermissionScreen))
+
+            # THE assertion: the research prompt's channel is the one the
+            # existing release path knows about. A private queue here would
+            # leave a worker parked on a Queue.get() nothing can answer.
+            assert app._permission_channel is not None, \
+                "the research approval channel is invisible to _release_permission_channel"
+
+            app.exit()
+
+            t.join(timeout=10)
+            assert not t.is_alive(), "exit() left the worker blocked on approval"
+            assert answer["value"] is False, "an unanswered exit must deny"
 
 
 def _stub_run():
@@ -403,76 +408,80 @@ def _mocked_loop(mocker):
 # ---- AC2: the permission round-trip ---------------------------------------
 # ---------------------------------------------------------------------------
 
-@pytest.mark.asyncio
-async def test_ac2_approving_a_permission_prompt_resumes_the_same_generator(_mocked_loop):
-    """Approve -> the tool actually runs.
 
-    The assertion is on registry.dispatch, because that is the only thing
-    that proves the generator was resumed rather than restarted: a fresh
-    generator would re-issue the model call, and a dropped answer would
-    never reach dispatch at all.
-    """
-    _mocked_loop.patch("core.loop.registry.approval_needed", return_value=True)
-    dispatch = _mocked_loop.patch(
-        "core.loop.registry.dispatch", return_value={"result": "ran"})
+class TestThePermissionRoundTrip:
+    """AC2. A permission prompt resumes the SAME generator it suspended."""
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        app.query_one("#prompt").value = "do a thing"
-        await pilot.press("enter")
+    @pytest.mark.asyncio
+    async def test_ac2_approving_a_permission_prompt_resumes_the_same_generator(self, _mocked_loop):
+        """Approve -> the tool actually runs.
 
-        assert await settle(
-            pilot, lambda: isinstance(app.screen, PermissionScreen)
-        ), "permission modal never appeared"
+        The assertion is on registry.dispatch, because that is the only thing
+        that proves the generator was resumed rather than restarted: a fresh
+        generator would re-issue the model call, and a dropped answer would
+        never reach dispatch at all.
+        """
+        _mocked_loop.patch("core.loop.registry.approval_needed", return_value=True)
+        dispatch = _mocked_loop.patch(
+            "core.loop.registry.dispatch", return_value={"result": "ran"})
 
-        await pilot.click("#allow")
-        assert await settle(pilot, lambda: dispatch.called), "tool never dispatched"
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app.query_one("#prompt").value = "do a thing"
+            await pilot.press("enter")
 
-    name, params = dispatch.call_args[0][0], dispatch.call_args[0][1]
-    assert name == "web_search"
-    assert params == {"query": "x"}
+            assert await settle(
+                pilot, lambda: isinstance(app.screen, PermissionScreen)
+            ), "permission modal never appeared"
 
+            await pilot.click("#allow")
+            assert await settle(pilot, lambda: dispatch.called), "tool never dispatched"
 
-@pytest.mark.asyncio
-async def test_ac2_denying_a_permission_prompt_blocks_the_tool(_mocked_loop):
-    """Deny -> the tool does NOT run, and the loop still finishes.
-
-    The second half matters as much as the first: a denial that left the
-    worker blocked would be indistinguishable from a hang.
-    """
-    _mocked_loop.patch("core.loop.registry.approval_needed", return_value=True)
-    dispatch = _mocked_loop.patch("core.loop.registry.dispatch")
-
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        app.query_one("#prompt").value = "do a thing"
-        await pilot.press("enter")
-        assert await settle(pilot, lambda: isinstance(app.screen, PermissionScreen))
-
-        await pilot.click("#deny")
-        assert await settle(pilot, lambda: app._busy is False), "turn never finished"
-
-    dispatch.assert_not_called()
+        name, params = dispatch.call_args[0][0], dispatch.call_args[0][1]
+        assert name == "web_search"
+        assert params == {"query": "x"}
 
 
-@pytest.mark.asyncio
-async def test_ac2_escape_denies_rather_than_hanging(_mocked_loop):
-    """Escape dismisses the modal. It must resolve to a denial, not to
-    None -- the worker is blocked on a queue.get() that only a real value
-    releases."""
-    _mocked_loop.patch("core.loop.registry.approval_needed", return_value=True)
-    dispatch = _mocked_loop.patch("core.loop.registry.dispatch")
+    @pytest.mark.asyncio
+    async def test_ac2_denying_a_permission_prompt_blocks_the_tool(self, _mocked_loop):
+        """Deny -> the tool does NOT run, and the loop still finishes.
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        app.query_one("#prompt").value = "do a thing"
-        await pilot.press("enter")
-        assert await settle(pilot, lambda: isinstance(app.screen, PermissionScreen))
+        The second half matters as much as the first: a denial that left the
+        worker blocked would be indistinguishable from a hang.
+        """
+        _mocked_loop.patch("core.loop.registry.approval_needed", return_value=True)
+        dispatch = _mocked_loop.patch("core.loop.registry.dispatch")
 
-        await pilot.press("escape")
-        assert await settle(pilot, lambda: app._busy is False), "escape left the loop blocked"
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app.query_one("#prompt").value = "do a thing"
+            await pilot.press("enter")
+            assert await settle(pilot, lambda: isinstance(app.screen, PermissionScreen))
 
-    dispatch.assert_not_called()
+            await pilot.click("#deny")
+            assert await settle(pilot, lambda: app._busy is False), "turn never finished"
+
+        dispatch.assert_not_called()
+
+
+    @pytest.mark.asyncio
+    async def test_ac2_escape_denies_rather_than_hanging(self, _mocked_loop):
+        """Escape dismisses the modal. It must resolve to a denial, not to
+        None -- the worker is blocked on a queue.get() that only a real value
+        releases."""
+        _mocked_loop.patch("core.loop.registry.approval_needed", return_value=True)
+        dispatch = _mocked_loop.patch("core.loop.registry.dispatch")
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app.query_one("#prompt").value = "do a thing"
+            await pilot.press("enter")
+            assert await settle(pilot, lambda: isinstance(app.screen, PermissionScreen))
+
+            await pilot.press("escape")
+            assert await settle(pilot, lambda: app._busy is False), "escape left the loop blocked"
+
+        dispatch.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -512,158 +521,171 @@ async def _with_a_modal_up(pilot, app, act):
     return [text for _, text in transcript._entries]
 
 
-@pytest.mark.asyncio
-async def test_a_routed_warning_under_a_modal_reaches_the_transcript():
-    """The CI failure, reduced. TranscriptLogHandler exists because the
-    TUI detaches stderr, so a warning that is dropped instead of drawn is
-    invisible everywhere but logs/app.log -- and one that arrives during
-    an approval is exactly the kind worth seeing."""
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        texts = await _with_a_modal_up(
-            pilot, app,
-            lambda: logging.getLogger("tests.modal").warning("the disk is full"))
-
-    assert any("disk is full" in t for t in texts), (
-        f"the warning never reached the transcript; entries were {texts}")
-
-
-@pytest.mark.asyncio
-async def test_a_worker_report_under_a_modal_does_not_kill_the_app():
-    """The effort-levels probe runs in a thread worker started at mount,
-    so its report lands whenever it lands -- including mid-approval. It
-    writes to the transcript on the failure path."""
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        await _with_a_modal_up(
-            pilot, app,
-            lambda: app.post_message(EffortLevelsReady(
-                None, RuntimeError("probe failed"), "high", True)))
-
-
-@pytest.mark.asyncio
-async def test_a_timeout_narration_under_a_modal_reaches_the_transcript():
-    """_timed_out_ask's whole occasion is an open modal, and its second
-    branch -- the user answered microseconds late, so THAT screen is gone
-    -- can still run with another one on top."""
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        already_gone = ConfirmScreen("Gone", "body", "Yes")
-        texts = await _with_a_modal_up(
-            pilot, app,
-            lambda: app._timed_out_ask(
-                already_gone, dismiss_with=False,
-                on_timeout_line="[no answer]", after_line="[late answer]"))
-
-    assert any("late answer" in t for t in texts), (
-        f"the narration never reached the transcript; entries were {texts}")
-
-
-@pytest.mark.asyncio
-async def test_a_narration_that_raises_still_declines(mocker):
-    """The masking half. _blocking_modal's contract is to return the raw
-    dismissal value, and None is what decode turns into the declining
-    default. A failure while merely SAYING the request timed out used to
-    escape as an exception, get logged by interaction.ask as "response
-    channel raised", and name itself as the cause of a refusal it did not
-    cause -- hiding whatever actually broke.
+class TestAModalMustNotShadowTheTranscript:
+    """A modal is pushed OVER the transcript, not in place of it: what is
+    written while one is open still has to arrive.
     """
-    mocker.patch.object(config, "ATTENDED_APPROVAL_TIMEOUT_S", 0.05)
-    app = VenastineApp("ANTHROPIC", "test-model", {})
 
-    def explode(screen):
-        raise RuntimeError("the narration itself fell over")
+    @pytest.mark.asyncio
+    async def test_a_routed_warning_under_a_modal_reaches_the_transcript(self):
+        """The CI failure, reduced. TranscriptLogHandler exists because the
+        TUI detaches stderr, so a warning that is dropped instead of drawn is
+        invisible everywhere but logs/app.log -- and one that arrives during
+        an approval is exactly the kind worth seeing."""
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            texts = await _with_a_modal_up(
+                pilot, app,
+                lambda: logging.getLogger("tests.modal").warning("the disk is full"))
 
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        answer = await asyncio.to_thread(
-            app._blocking_modal,
-            ConfirmScreen("Confirm", "body", "Yes"), on_timeout=explode)
+        assert any("disk is full" in t for t in texts), (
+            f"the warning never reached the transcript; entries were {texts}")
 
-    assert answer is None, (
-        f"a broken narration changed the answer to {answer!r}; the request "
-        "must still decline")
+
+    @pytest.mark.asyncio
+    async def test_a_worker_report_under_a_modal_does_not_kill_the_app(self):
+        """The effort-levels probe runs in a thread worker started at mount,
+        so its report lands whenever it lands -- including mid-approval. It
+        writes to the transcript on the failure path."""
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await _with_a_modal_up(
+                pilot, app,
+                lambda: app.post_message(EffortLevelsReady(
+                    None, RuntimeError("probe failed"), "high", True)))
+
+
+    @pytest.mark.asyncio
+    async def test_a_timeout_narration_under_a_modal_reaches_the_transcript(self):
+        """_timed_out_ask's whole occasion is an open modal, and its second
+        branch -- the user answered microseconds late, so THAT screen is gone
+        -- can still run with another one on top."""
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            already_gone = ConfirmScreen("Gone", "body", "Yes")
+            texts = await _with_a_modal_up(
+                pilot, app,
+                lambda: app._timed_out_ask(
+                    already_gone, dismiss_with=False,
+                    on_timeout_line="[no answer]", after_line="[late answer]"))
+
+        assert any("late answer" in t for t in texts), (
+            f"the narration never reached the transcript; entries were {texts}")
+
+
+    @pytest.mark.asyncio
+    async def test_a_narration_that_raises_still_declines(self, mocker):
+        """The masking half. _blocking_modal's contract is to return the raw
+        dismissal value, and None is what decode turns into the declining
+        default. A failure while merely SAYING the request timed out used to
+        escape as an exception, get logged by interaction.ask as "response
+        channel raised", and name itself as the cause of a refusal it did not
+        cause -- hiding whatever actually broke.
+        """
+        mocker.patch.object(config, "ATTENDED_APPROVAL_TIMEOUT_S", 0.05)
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+
+        def explode(screen):
+            raise RuntimeError("the narration itself fell over")
+
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            answer = await asyncio.to_thread(
+                app._blocking_modal,
+                ConfirmScreen("Confirm", "body", "Yes"), on_timeout=explode)
+
+        assert answer is None, (
+            f"a broken narration changed the answer to {answer!r}; the request "
+            "must still decline")
 
 
 # ---------------------------------------------------------------------------
 # ---- AC3: a raising tool must not kill the app ----------------------------
 # ---------------------------------------------------------------------------
 
-@pytest.mark.asyncio
-async def test_ac3_exception_in_a_tool_does_not_terminate_the_app(_mocked_loop):
-    """A non-ToolCallDenied exception escapes _run() by design (core/events
-    has no error variant -- see its docstring). The app must survive it and
-    report it.
-    """
-    _mocked_loop.patch("core.loop.registry.approval_needed", return_value=False)
-    _mocked_loop.patch(
-        "core.loop.registry.dispatch",
-        side_effect=RuntimeError("transient network failure"),
-    )
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        app.query_one("#prompt").value = "do a thing"
-        await pilot.press("enter")
+class TestARaisingToolMustNotKillTheApp:
+    """AC3. A tool that raises is reported, and the shell survives it."""
 
-        assert await settle(pilot, lambda: app._busy is False), "turn never finished"
-        # The whole point: still alive after the worker raised.
-        assert app.is_running
-        assert app._raven.state.key == "idle", "raven must not be stuck mid-activity"
+    @pytest.mark.asyncio
+    async def test_ac3_exception_in_a_tool_does_not_terminate_the_app(self, _mocked_loop):
+        """A non-ToolCallDenied exception escapes _run() by design (core/events
+        has no error variant -- see its docstring). The app must survive it and
+        report it.
+        """
+        _mocked_loop.patch("core.loop.registry.approval_needed", return_value=False)
+        _mocked_loop.patch(
+            "core.loop.registry.dispatch",
+            side_effect=RuntimeError("transient network failure"),
+        )
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app.query_one("#prompt").value = "do a thing"
+            await pilot.press("enter")
+
+            assert await settle(pilot, lambda: app._busy is False), "turn never finished"
+            # The whole point: still alive after the worker raised.
+            assert app.is_running
+            assert app._raven.state.key == "idle", "raven must not be stuck mid-activity"
 
 
 # ---------------------------------------------------------------------------
 # ---- Shell behaviour ------------------------------------------------------
 # ---------------------------------------------------------------------------
 
-@pytest.mark.asyncio
-async def test_unknown_slash_command_is_not_sent_to_the_model(mocker):
-    """A mistyped command must say so, not silently become a chat turn that
-    costs a request."""
-    mocker.patch("core.loop.api_initialization", return_value=object())
-    stream = mocker.patch("core.loop.call_model_stream")
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        app.query_one("#prompt").value = "/definitelynotacommand"
-        await pilot.press("enter")
-        await pilot.pause()
-        assert app._busy is False
+class TestTheShellsOwnBehaviour:
+    """The lines the shell answers itself, without reaching the model."""
 
-    stream.assert_not_called()
+    @pytest.mark.asyncio
+    async def test_unknown_slash_command_is_not_sent_to_the_model(self, mocker):
+        """A mistyped command must say so, not silently become a chat turn that
+        costs a request."""
+        mocker.patch("core.loop.api_initialization", return_value=object())
+        stream = mocker.patch("core.loop.call_model_stream")
 
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app.query_one("#prompt").value = "/definitelynotacommand"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app._busy is False
 
-@pytest.mark.asyncio
-async def test_theme_command_switches_and_rejects_unknown_names():
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        app.query_one("#prompt").value = "/theme light-green"
-        await pilot.press("enter")
-        await pilot.pause()
-        assert app.theme == "light-green"
-
-        app.query_one("#prompt").value = "/theme chartreuse"
-        await pilot.press("enter")
-        await pilot.pause()
-        assert app.theme == "light-green", "an unknown theme must not change the app"
+        stream.assert_not_called()
 
 
-@pytest.mark.asyncio
-async def test_theme_preference_from_settings_is_applied_at_mount():
-    app = VenastineApp("ANTHROPIC", "test-model", {"tui": {"theme": "dark-blue"}})
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        assert app.theme == "dark-blue"
+    @pytest.mark.asyncio
+    async def test_theme_command_switches_and_rejects_unknown_names(self):
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app.query_one("#prompt").value = "/theme light-green"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.theme == "light-green"
+
+            app.query_one("#prompt").value = "/theme chartreuse"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.theme == "light-green", "an unknown theme must not change the app"
 
 
-@pytest.mark.asyncio
-async def test_unknown_theme_in_settings_falls_back_rather_than_crashing():
-    """config_loader type-checks tui.theme as a string but cannot know the
-    valid names; a stale one must not stop the app starting."""
-    app = VenastineApp("ANTHROPIC", "test-model", {"tui": {"theme": "retired-theme"}})
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        assert app.theme == "dark-plain"
+    @pytest.mark.asyncio
+    async def test_theme_preference_from_settings_is_applied_at_mount(self):
+        app = VenastineApp("ANTHROPIC", "test-model", {"tui": {"theme": "dark-blue"}})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert app.theme == "dark-blue"
+
+
+    @pytest.mark.asyncio
+    async def test_unknown_theme_in_settings_falls_back_rather_than_crashing(self):
+        """config_loader type-checks tui.theme as a string but cannot know the
+        valid names; a stale one must not stop the app starting."""
+        app = VenastineApp("ANTHROPIC", "test-model", {"tui": {"theme": "retired-theme"}})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert app.theme == "dark-plain"
 
 
 # ---------------------------------------------------------------------------
@@ -681,404 +703,407 @@ async def test_unknown_theme_in_settings_falls_back_rather_than_crashing():
 # they want to look at the file.
 
 
-@pytest.mark.asyncio
-async def test_theme_command_is_remembered_for_the_next_launch(
-        isolate_ui_preferences):
-    """The reported defect: /theme applied, and then the next launch came
-    up on the default again."""
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        app.query_one("#prompt").value = "/theme ember"
-        await pilot.press("enter")
-        await pilot.pause()
-        assert app.theme == "ember"
+class TestTheRememberedTheme:
+    """/theme picks one, and the next launch starts on it."""
 
-    stored = json.loads(isolate_ui_preferences.read_text(encoding="utf-8"))
-    assert stored["theme"] == "ember"
-    assert stored["settings_theme"] is None, \
-        "settings.json named no theme, and that has to be recorded as a " \
-        "fact rather than as the resolved default"
+    @pytest.mark.asyncio
+    async def test_theme_command_is_remembered_for_the_next_launch(self,
+            isolate_ui_preferences):
+        """The reported defect: /theme applied, and then the next launch came
+        up on the default again."""
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app.query_one("#prompt").value = "/theme ember"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.theme == "ember"
 
-    nextrun = VenastineApp("ANTHROPIC", "test-model", {})
-    async with nextrun.run_test() as pilot:
-        await pilot.pause()
-        assert nextrun.theme == "ember"
+        stored = json.loads(isolate_ui_preferences.read_text(encoding="utf-8"))
+        assert stored["theme"] == "ember"
+        assert stored["settings_theme"] is None, \
+            "settings.json named no theme, and that has to be recorded as a " \
+            "fact rather than as the resolved default"
 
-
-@pytest.mark.asyncio
-async def test_a_theme_set_outside_the_slash_command_is_remembered():
-    """ctrl+p's command palette sets App.theme directly, and offers
-    Textual's own built-ins beside this project's fourteen. Hooking
-    _cmd_theme alone would have made that route a silent no-op, so the
-    hook is watch_theme -- and the restore then has to accept a name
-    themes.resolve() has never heard of."""
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        app.theme = "nord"
-        await pilot.pause()
-
-    nextrun = VenastineApp("ANTHROPIC", "test-model", {})
-    async with nextrun.run_test() as pilot:
-        await pilot.pause()
-        assert nextrun.theme == "nord"
+        nextrun = VenastineApp("ANTHROPIC", "test-model", {})
+        async with nextrun.run_test() as pilot:
+            await pilot.pause()
+            assert nextrun.theme == "ember"
 
 
-@pytest.mark.asyncio
-async def test_an_edited_tui_theme_outranks_a_remembered_choice():
-    """The staleness rule. A remembered theme wins only while tui.theme
-    still says what it said when the choice was made -- otherwise editing
-    settings.json would be a permanent silent no-op for anyone who had
-    ever typed /theme."""
-    first = VenastineApp("ANTHROPIC", "test-model",
-                         {"tui": {"theme": "dark-blue"}})
-    async with first.run_test() as pilot:
-        first.query_one("#prompt").value = "/theme matrix"
-        await pilot.press("enter")
-        await pilot.pause()
-        assert first.theme == "matrix"
+    @pytest.mark.asyncio
+    async def test_a_theme_set_outside_the_slash_command_is_remembered(self):
+        """ctrl+p's command palette sets App.theme directly, and offers
+        Textual's own built-ins beside this project's fourteen. Hooking
+        _cmd_theme alone would have made that route a silent no-op, so the
+        hook is watch_theme -- and the restore then has to accept a name
+        themes.resolve() has never heard of."""
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.theme = "nord"
+            await pilot.pause()
 
-    edited = VenastineApp("ANTHROPIC", "test-model",
-                          {"tui": {"theme": "dark-green"}})
-    async with edited.run_test() as pilot:
-        await pilot.pause()
-        assert edited.theme == "dark-green", \
-            "tui.theme changed since the choice was recorded, so the file " \
-            "re-asserts itself"
+        nextrun = VenastineApp("ANTHROPIC", "test-model", {})
+        async with nextrun.run_test() as pilot:
+            await pilot.pause()
+            assert nextrun.theme == "nord"
 
-    unchanged = VenastineApp("ANTHROPIC", "test-model",
+
+    @pytest.mark.asyncio
+    async def test_an_edited_tui_theme_outranks_a_remembered_choice(self):
+        """The staleness rule. A remembered theme wins only while tui.theme
+        still says what it said when the choice was made -- otherwise editing
+        settings.json would be a permanent silent no-op for anyone who had
+        ever typed /theme."""
+        first = VenastineApp("ANTHROPIC", "test-model",
                              {"tui": {"theme": "dark-blue"}})
-    async with unchanged.run_test() as pilot:
-        await pilot.pause()
-        assert unchanged.theme == "matrix", \
-            "tui.theme is what it was, so the live choice still stands"
+        async with first.run_test() as pilot:
+            first.query_one("#prompt").value = "/theme matrix"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert first.theme == "matrix"
+
+        edited = VenastineApp("ANTHROPIC", "test-model",
+                              {"tui": {"theme": "dark-green"}})
+        async with edited.run_test() as pilot:
+            await pilot.pause()
+            assert edited.theme == "dark-green", \
+                "tui.theme changed since the choice was recorded, so the file " \
+                "re-asserts itself"
+
+        unchanged = VenastineApp("ANTHROPIC", "test-model",
+                                 {"tui": {"theme": "dark-blue"}})
+        async with unchanged.run_test() as pilot:
+            await pilot.pause()
+            assert unchanged.theme == "matrix", \
+                "tui.theme is what it was, so the live choice still stands"
 
 
-@pytest.mark.asyncio
-async def test_adding_tui_theme_to_settings_re_asserts_it():
-    """None and "dark-plain" must not compare equal. The staleness key is
-    the RAW settings value, so ADDING tui.theme -- not only changing an
-    existing one -- outranks an older /theme."""
-    first = VenastineApp("ANTHROPIC", "test-model", {})
-    async with first.run_test() as pilot:
-        first.query_one("#prompt").value = "/theme matrix"
-        await pilot.press("enter")
-        await pilot.pause()
+    @pytest.mark.asyncio
+    async def test_adding_tui_theme_to_settings_re_asserts_it(self):
+        """None and "dark-plain" must not compare equal. The staleness key is
+        the RAW settings value, so ADDING tui.theme -- not only changing an
+        existing one -- outranks an older /theme."""
+        first = VenastineApp("ANTHROPIC", "test-model", {})
+        async with first.run_test() as pilot:
+            first.query_one("#prompt").value = "/theme matrix"
+            await pilot.press("enter")
+            await pilot.pause()
 
-    added = VenastineApp("ANTHROPIC", "test-model",
-                         {"tui": {"theme": "dark-plain"}})
-    async with added.run_test() as pilot:
-        await pilot.pause()
-        assert added.theme == "dark-plain"
-
-
-@pytest.mark.asyncio
-async def test_a_remembered_theme_that_no_longer_exists_falls_back(
-        isolate_ui_preferences):
-    """App.theme VALIDATES against available_themes and raises
-    InvalidThemeError on a name it does not know, so a store written by a
-    build whose themes have since changed would be a crash at mount rather
-    than a preference nobody can honour."""
-    isolate_ui_preferences.write_text(json.dumps(
-        {"version": 1, "theme": "retired-theme", "settings_theme": None}),
-        encoding="utf-8")
-
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        assert app.theme == "dark-plain"
+        added = VenastineApp("ANTHROPIC", "test-model",
+                             {"tui": {"theme": "dark-plain"}})
+        async with added.run_test() as pilot:
+            await pilot.pause()
+            assert added.theme == "dark-plain"
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("content", [
-    "{not json at all",
-    "[]",
-    '{"version": 99, "theme": "ember", "settings_theme": null}',
-    '{"version": 1, "settings_theme": null}',
-])
-async def test_an_unreadable_preference_store_is_ignored(
-        isolate_ui_preferences, content):
-    """Fails soft in every direction: the worst consequence of forgetting
-    a colour scheme is mounting on the configured one. The trust store
-    fails CLOSED for a security reason; there is no such property here."""
-    isolate_ui_preferences.write_text(content, encoding="utf-8")
+    @pytest.mark.asyncio
+    async def test_a_remembered_theme_that_no_longer_exists_falls_back(self,
+            isolate_ui_preferences):
+        """App.theme VALIDATES against available_themes and raises
+        InvalidThemeError on a name it does not know, so a store written by a
+        build whose themes have since changed would be a crash at mount rather
+        than a preference nobody can honour."""
+        isolate_ui_preferences.write_text(json.dumps(
+            {"version": 1, "theme": "retired-theme", "settings_theme": None}),
+            encoding="utf-8")
 
-    app = VenastineApp("ANTHROPIC", "test-model", {"tui": {"theme": "paper"}})
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        assert app.theme == "paper"
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert app.theme == "dark-plain"
 
 
-@pytest.mark.asyncio
-async def test_mounting_without_choosing_a_theme_writes_nothing(
-        isolate_ui_preferences):
-    """App.theme is a Reactive with init on, so its watcher fires during
-    mount as well as on a choice. Without the _theme_persisting guard
-    every launch would record the theme it merely restored, and a default
-    would become indistinguishable from a decision."""
-    app = VenastineApp("ANTHROPIC", "test-model", {"tui": {"theme": "paper"}})
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        assert app.theme == "paper"
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("content", [
+        "{not json at all",
+        "[]",
+        '{"version": 99, "theme": "ember", "settings_theme": null}',
+        '{"version": 1, "settings_theme": null}',
+    ])
+    async def test_an_unreadable_preference_store_is_ignored(self,
+            isolate_ui_preferences, content):
+        """Fails soft in every direction: the worst consequence of forgetting
+        a colour scheme is mounting on the configured one. The trust store
+        fails CLOSED for a security reason; there is no such property here."""
+        isolate_ui_preferences.write_text(content, encoding="utf-8")
 
-    assert not isolate_ui_preferences.exists()
-
-
-@pytest.mark.asyncio
-async def test_a_failed_save_still_switches_the_theme_and_claims_nothing(
-        mocker):
-    """A write that cannot land must not cost the user the switch, and
-    must not be reported as remembered -- the WARNING
-    preferences.remember_theme logs reaches the transcript through TranscriptLogHandler, so saying
-    nothing here is neither silent nor a duplicate."""
-    mocker.patch("tui.app.preferences.remember_theme", return_value=False)
-
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        app.query_one("#prompt").value = "/theme ember"
-        await pilot.press("enter")
-        await pilot.pause()
-        assert app.theme == "ember"
-        assert not [t for _role, t in app._transcript._entries
-                    if "Remembered" in t], \
-            "a save that failed was reported as a save that worked"
+        app = VenastineApp("ANTHROPIC", "test-model", {"tui": {"theme": "paper"}})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert app.theme == "paper"
 
 
-def test_remember_reports_a_write_it_could_not_make(tmp_path, mocker):
-    """The store level of the same fact. A file where the directory should
-    be is the cheapest real OSError to produce, and it has to come back as
-    False rather than out of the TUI as an exception."""
-    from tui import preferences
+    @pytest.mark.asyncio
+    async def test_mounting_without_choosing_a_theme_writes_nothing(self,
+            isolate_ui_preferences):
+        """App.theme is a Reactive with init on, so its watcher fires during
+        mount as well as on a choice. Without the _theme_persisting guard
+        every launch would record the theme it merely restored, and a default
+        would become indistinguishable from a decision."""
+        app = VenastineApp("ANTHROPIC", "test-model", {"tui": {"theme": "paper"}})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert app.theme == "paper"
 
-    blocker = tmp_path / "not-a-directory"
-    blocker.write_text("", encoding="utf-8")
-    mocker.patch.object(preferences, "store_path",
-                        lambda: str(blocker / "ui_preferences.json"))
-
-    assert preferences.remember_theme("ember", None) is False
-    assert preferences.load_theme() is None
-    assert preferences.remember_model("ANTHROPIC", "m", None, None) is False
-    assert preferences.load_model() is None
+        assert not isolate_ui_preferences.exists()
 
 
-# ---------------------------------------------------------------------------
-#
-# §43 (RM3/RM4). The same feature, one preference along: the pair chosen
-# with /model is the pair the next launch mounts on. Same store, same
-# staleness rule, same refusal to write settings.json -- and here that
-# refusal has a second reason, since the project copy of that file lives
-# inside D17's trust content hash.
+    @pytest.mark.asyncio
+    async def test_a_failed_save_still_switches_the_theme_and_claims_nothing(self,
+            mocker):
+        """A write that cannot land must not cost the user the switch, and
+        must not be reported as remembered -- the WARNING
+        preferences.remember_theme logs reaches the transcript through TranscriptLogHandler, so saying
+        nothing here is neither silent nor a duplicate."""
+        mocker.patch("tui.app.preferences.remember_theme", return_value=False)
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app.query_one("#prompt").value = "/theme ember"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.theme == "ember"
+            assert not [t for _role, t in app._transcript._entries
+                        if "Remembered" in t], \
+                "a save that failed was reported as a save that worked"
 
 
-@pytest.mark.asyncio
-async def test_model_command_is_remembered_for_the_next_launch(
-        isolate_ui_preferences):
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        app.query_one("#prompt").value = "/model ANTHROPIC chosen-model"
-        await pilot.press("enter")
-        await pilot.pause()
-        assert app.model == "chosen-model"
-        assert [t for _role, t in app._transcript._entries
-                if "Remembered" in t], "the save was never confirmed"
+    def test_remember_reports_a_write_it_could_not_make(self, tmp_path, mocker):
+        """The store level of the same fact. A file where the directory should
+        be is the cheapest real OSError to produce, and it has to come back as
+        False rather than out of the TUI as an exception."""
+        from tui import preferences
 
-    stored = json.loads(isolate_ui_preferences.read_text(encoding="utf-8"))
-    assert stored["provider"] == "ANTHROPIC"
-    assert stored["model"] == "chosen-model"
-    assert stored["settings_provider"] is None
-    assert stored["settings_model"] is None, \
-        "settings.json named no default_model, and that has to be recorded " \
-        "as a fact rather than as the resolved default"
+        blocker = tmp_path / "not-a-directory"
+        blocker.write_text("", encoding="utf-8")
+        mocker.patch.object(preferences, "store_path",
+                            lambda: str(blocker / "ui_preferences.json"))
 
-    nextrun = VenastineApp("ANTHROPIC", "test-model", {})
-    async with nextrun.run_test() as pilot:
-        assert nextrun.model == "chosen-model"
-        assert nextrun.provider_name == "ANTHROPIC"
-        assert any("(remembered)" in t
-                   for _role, t in nextrun._transcript._entries), \
-            "a restored pair has to say where it came from (#138)"
+        assert preferences.remember_theme("ember", None) is False
+        assert preferences.load_theme() is None
+        assert preferences.remember_model("ANTHROPIC", "m", None, None) is False
+        assert preferences.load_model() is None
 
 
-@pytest.mark.asyncio
-async def test_a_remembered_pair_is_restored_whole(isolate_ui_preferences):
-    """A model name is meaningless against the wrong provider, so the
-    record is a pair and it is restored whole or not at all."""
-    isolate_ui_preferences.write_text(json.dumps(
-        {"version": 1, "provider": "OPENAI", "model": "gpt-5.1",
-         "settings_provider": None, "settings_model": None}),
-        encoding="utf-8")
-
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test():
-        assert (app.provider_name, app.model) == ("OPENAI", "gpt-5.1")
+    # ---------------------------------------------------------------------------
+    #
+    # §43 (RM3/RM4). The same feature, one preference along: the pair chosen
+    # with /model is the pair the next launch mounts on. Same store, same
+    # staleness rule, same refusal to write settings.json -- and here that
+    # refusal has a second reason, since the project copy of that file lives
+    # inside D17's trust content hash.
 
 
-@pytest.mark.asyncio
-async def test_editing_default_model_re_asserts_it(isolate_ui_preferences):
-    """The staleness rule. A remembered pair outranks settings.json only
-    while settings.json still says what it said when the pair was
-    chosen."""
-    isolate_ui_preferences.write_text(json.dumps(
-        {"version": 1, "provider": "ANTHROPIC", "model": "old-choice",
-         "settings_provider": None, "settings_model": "was-this"}),
-        encoding="utf-8")
+    @pytest.mark.asyncio
+    async def test_model_command_is_remembered_for_the_next_launch(self,
+            isolate_ui_preferences):
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app.query_one("#prompt").value = "/model ANTHROPIC chosen-model"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.model == "chosen-model"
+            assert [t for _role, t in app._transcript._entries
+                    if "Remembered" in t], "the save was never confirmed"
 
-    app = VenastineApp("ANTHROPIC", "is-now-this",
-                       {"default_model": "is-now-this"})
-    async with app.run_test():
-        assert app.model == "is-now-this"
+        stored = json.loads(isolate_ui_preferences.read_text(encoding="utf-8"))
+        assert stored["provider"] == "ANTHROPIC"
+        assert stored["model"] == "chosen-model"
+        assert stored["settings_provider"] is None
+        assert stored["settings_model"] is None, \
+            "settings.json named no default_model, and that has to be recorded " \
+            "as a fact rather than as the resolved default"
 
-
-@pytest.mark.asyncio
-async def test_adding_default_model_to_settings_re_asserts_it(
-        isolate_ui_preferences):
-    """The half that catches a collapsed None. `settings_model: null` --
-    "settings.json named no default_model when this was chosen" -- has to
-    stay distinguishable from an explicit value, or ADDING the key
-    becomes a silent no-op while CHANGING one still works."""
-    isolate_ui_preferences.write_text(json.dumps(
-        {"version": 1, "provider": "ANTHROPIC", "model": "old-choice",
-         "settings_provider": None, "settings_model": None}),
-        encoding="utf-8")
-
-    app = VenastineApp("ANTHROPIC", "named-in-settings",
-                       {"default_model": "named-in-settings"})
-    async with app.run_test():
-        assert app.model == "named-in-settings"
+        nextrun = VenastineApp("ANTHROPIC", "test-model", {})
+        async with nextrun.run_test() as pilot:
+            assert nextrun.model == "chosen-model"
+            assert nextrun.provider_name == "ANTHROPIC"
+            assert any("(remembered)" in t
+                       for _role, t in nextrun._transcript._entries), \
+                "a restored pair has to say where it came from (#138)"
 
 
-@pytest.mark.asyncio
-async def test_a_remembered_provider_that_is_gone_falls_back(
-        isolate_ui_preferences, mocker):
-    """/model's own unknown-provider refusal, applied at mount.
-    api_initialization would otherwise raise on the first turn, a long
-    way from the providers.json edit that caused it."""
-    mocker.patch("credentials.load_provider_data",
-                 return_value={"ANTHROPIC": {"API_KEY": "x"}})
-    isolate_ui_preferences.write_text(json.dumps(
-        {"version": 1, "provider": "RETIRED", "model": "gone",
-         "settings_provider": None, "settings_model": None}),
-        encoding="utf-8")
+    @pytest.mark.asyncio
+    async def test_a_remembered_pair_is_restored_whole(self, isolate_ui_preferences):
+        """A model name is meaningless against the wrong provider, so the
+        record is a pair and it is restored whole or not at all."""
+        isolate_ui_preferences.write_text(json.dumps(
+            {"version": 1, "provider": "OPENAI", "model": "gpt-5.1",
+             "settings_provider": None, "settings_model": None}),
+            encoding="utf-8")
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test():
-        assert (app.provider_name, app.model) == ("ANTHROPIC", "test-model")
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test():
+            assert (app.provider_name, app.model) == ("OPENAI", "gpt-5.1")
 
 
-@pytest.mark.asyncio
-async def test_a_launch_flag_outranks_a_remembered_pair(
-        isolate_ui_preferences):
-    """--provider/--model is an instruction about this launch. main has
-    already collapsed the flags into the resolved pair by the time the
-    app is built, which is why cli_pinned has to be passed separately."""
-    isolate_ui_preferences.write_text(json.dumps(
-        {"version": 1, "provider": "OPENAI", "model": "gpt-5.1",
-         "settings_provider": None, "settings_model": None}),
-        encoding="utf-8")
+    @pytest.mark.asyncio
+    async def test_editing_default_model_re_asserts_it(self, isolate_ui_preferences):
+        """The staleness rule. A remembered pair outranks settings.json only
+        while settings.json still says what it said when the pair was
+        chosen."""
+        isolate_ui_preferences.write_text(json.dumps(
+            {"version": 1, "provider": "ANTHROPIC", "model": "old-choice",
+             "settings_provider": None, "settings_model": "was-this"}),
+            encoding="utf-8")
 
-    app = VenastineApp("ANTHROPIC", "named-on-the-command-line", {},
-                       cli_pinned=True)
-    async with app.run_test():
-        assert app.model == "named-on-the-command-line"
-        assert app.provider_name == "ANTHROPIC"
+        app = VenastineApp("ANTHROPIC", "is-now-this",
+                           {"default_model": "is-now-this"})
+        async with app.run_test():
+            assert app.model == "is-now-this"
 
 
-@pytest.mark.asyncio
-async def test_a_failed_save_still_switches_the_model_and_claims_nothing(
-        mocker):
-    mocker.patch("tui.app.preferences.remember_model", return_value=False)
+    @pytest.mark.asyncio
+    async def test_adding_default_model_to_settings_re_asserts_it(self,
+            isolate_ui_preferences):
+        """The half that catches a collapsed None. `settings_model: null` --
+        "settings.json named no default_model when this was chosen" -- has to
+        stay distinguishable from an explicit value, or ADDING the key
+        becomes a silent no-op while CHANGING one still works."""
+        isolate_ui_preferences.write_text(json.dumps(
+            {"version": 1, "provider": "ANTHROPIC", "model": "old-choice",
+             "settings_provider": None, "settings_model": None}),
+            encoding="utf-8")
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        app.query_one("#prompt").value = "/model ANTHROPIC chosen-model"
-        await pilot.press("enter")
-        await pilot.pause()
-        assert app.model == "chosen-model"
-        assert not [t for _role, t in app._transcript._entries
-                    if "Remembered" in t], \
-            "a save that failed was reported as a save that worked"
-
-
-def test_the_two_records_share_a_file_without_clobbering_each_other(
-        isolate_ui_preferences):
-    """The read-modify-write obligation. Two records, one file, written
-    at different moments by different commands -- a writer that
-    serialised only its own fields would drop the other's, and each half
-    would look correct in its own test."""
-    from tui import preferences
-
-    assert preferences.remember_theme("ember", None) is True
-    assert preferences.remember_model("OPENAI", "gpt-5.1", None, None) is True
-
-    assert preferences.load_theme()["theme"] == "ember"
-    assert preferences.load_model()["model"] == "gpt-5.1"
-
-    assert preferences.remember_theme("matrix", "dark-plain") is True
-    assert preferences.load_model()["provider"] == "OPENAI", \
-        "remembering a theme forgot the model"
+        app = VenastineApp("ANTHROPIC", "named-in-settings",
+                           {"default_model": "named-in-settings"})
+        async with app.run_test():
+            assert app.model == "named-in-settings"
 
 
-def test_a_store_written_before_the_model_record_still_loads_its_theme(
-        isolate_ui_preferences):
-    """Why STORE_VERSION was not bumped: the model keys are optional, so
-    an existing v1 store keeps its theme and gains the pair on the first
-    /model. Bumping would have thrown every user's theme away once."""
-    from tui import preferences
+    @pytest.mark.asyncio
+    async def test_a_remembered_provider_that_is_gone_falls_back(self,
+            isolate_ui_preferences, mocker):
+        """/model's own unknown-provider refusal, applied at mount.
+        api_initialization would otherwise raise on the first turn, a long
+        way from the providers.json edit that caused it."""
+        mocker.patch("credentials.load_provider_data",
+                     return_value={"ANTHROPIC": {"API_KEY": "x"}})
+        isolate_ui_preferences.write_text(json.dumps(
+            {"version": 1, "provider": "RETIRED", "model": "gone",
+             "settings_provider": None, "settings_model": None}),
+            encoding="utf-8")
 
-    isolate_ui_preferences.write_text(json.dumps(
-        {"version": 1, "theme": "ember", "settings_theme": None}),
-        encoding="utf-8")
-
-    assert preferences.load_theme()["theme"] == "ember"
-    assert preferences.load_model() is None
-    assert preferences.remember_model("OPENAI", "gpt-5.1", None, None) is True
-    assert preferences.load_theme()["theme"] == "ember"
-
-
-@pytest.mark.asyncio
-async def test_effort_command_offers_only_levels_the_model_supports(mocker):
-    mocker.patch("tui.app.api_initialization", return_value=object())
-    mocker.patch("tui.app.effort_levels_for_model", return_value=["low", "high"])
-
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        app.query_one("#prompt").value = "/effort high"
-        await pilot.press("enter")
-        await pilot.pause()
-        assert app.effort == "high"
-
-        app.query_one("#prompt").value = "/effort xhigh"   # not offered
-        await pilot.press("enter")
-        await pilot.pause()
-        assert app.effort == "high", "an unsupported level must be rejected"
-
-        app.query_one("#prompt").value = "/effort auto"
-        await pilot.press("enter")
-        await pilot.pause()
-        assert app.effort is None
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test():
+            assert (app.provider_name, app.model) == ("ANTHROPIC", "test-model")
 
 
-@pytest.mark.asyncio
-async def test_effort_reaches_the_model_call(_mocked_loop):
-    """The setting has to travel: app -> _run -> call_model_stream. Asserted
-    on the call arguments rather than on the raven, because the raven can be
-    right while the parameter never leaves the UI."""
-    _mocked_loop.patch("core.loop.registry.approval_needed", return_value=False)
-    _mocked_loop.patch("core.loop.registry.dispatch", return_value={"result": "ok"})
-    stream = _mocked_loop.patch(
-        "core.loop.call_model_stream",
-        side_effect=make_stream_sequence(make_model_response(text="hi")),
-    )
+    @pytest.mark.asyncio
+    async def test_a_launch_flag_outranks_a_remembered_pair(self,
+            isolate_ui_preferences):
+        """--provider/--model is an instruction about this launch. main has
+        already collapsed the flags into the resolved pair by the time the
+        app is built, which is why cli_pinned has to be passed separately."""
+        isolate_ui_preferences.write_text(json.dumps(
+            {"version": 1, "provider": "OPENAI", "model": "gpt-5.1",
+             "settings_provider": None, "settings_model": None}),
+            encoding="utf-8")
 
-    app = VenastineApp("ANTHROPIC", "test-model", {"tui": {"effort": "high"}})
-    async with app.run_test() as pilot:
-        app.query_one("#prompt").value = "hello"
-        await pilot.press("enter")
-        assert await settle(pilot, lambda: stream.called)
+        app = VenastineApp("ANTHROPIC", "named-on-the-command-line", {},
+                           cli_pinned=True)
+        async with app.run_test():
+            assert app.model == "named-on-the-command-line"
+            assert app.provider_name == "ANTHROPIC"
 
-    # call_model_stream(client, provider, model, messages, system, tools,
-    #                   temperature, effort)
-    assert stream.call_args[0][7] == "high"
+
+    @pytest.mark.asyncio
+    async def test_a_failed_save_still_switches_the_model_and_claims_nothing(self,
+            mocker):
+        mocker.patch("tui.app.preferences.remember_model", return_value=False)
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app.query_one("#prompt").value = "/model ANTHROPIC chosen-model"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.model == "chosen-model"
+            assert not [t for _role, t in app._transcript._entries
+                        if "Remembered" in t], \
+                "a save that failed was reported as a save that worked"
+
+
+    def test_the_two_records_share_a_file_without_clobbering_each_other(self,
+            isolate_ui_preferences):
+        """The read-modify-write obligation. Two records, one file, written
+        at different moments by different commands -- a writer that
+        serialised only its own fields would drop the other's, and each half
+        would look correct in its own test."""
+        from tui import preferences
+
+        assert preferences.remember_theme("ember", None) is True
+        assert preferences.remember_model("OPENAI", "gpt-5.1", None, None) is True
+
+        assert preferences.load_theme()["theme"] == "ember"
+        assert preferences.load_model()["model"] == "gpt-5.1"
+
+        assert preferences.remember_theme("matrix", "dark-plain") is True
+        assert preferences.load_model()["provider"] == "OPENAI", \
+            "remembering a theme forgot the model"
+
+
+    def test_a_store_written_before_the_model_record_still_loads_its_theme(self,
+            isolate_ui_preferences):
+        """Why STORE_VERSION was not bumped: the model keys are optional, so
+        an existing v1 store keeps its theme and gains the pair on the first
+        /model. Bumping would have thrown every user's theme away once."""
+        from tui import preferences
+
+        isolate_ui_preferences.write_text(json.dumps(
+            {"version": 1, "theme": "ember", "settings_theme": None}),
+            encoding="utf-8")
+
+        assert preferences.load_theme()["theme"] == "ember"
+        assert preferences.load_model() is None
+        assert preferences.remember_model("OPENAI", "gpt-5.1", None, None) is True
+        assert preferences.load_theme()["theme"] == "ember"
+
+
+    @pytest.mark.asyncio
+    async def test_effort_command_offers_only_levels_the_model_supports(self, mocker):
+        mocker.patch("tui.app.api_initialization", return_value=object())
+        mocker.patch("tui.app.effort_levels_for_model", return_value=["low", "high"])
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app.query_one("#prompt").value = "/effort high"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.effort == "high"
+
+            app.query_one("#prompt").value = "/effort xhigh"   # not offered
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.effort == "high", "an unsupported level must be rejected"
+
+            app.query_one("#prompt").value = "/effort auto"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.effort is None
+
+
+    @pytest.mark.asyncio
+    async def test_effort_reaches_the_model_call(self, _mocked_loop):
+        """The setting has to travel: app -> _run -> call_model_stream. Asserted
+        on the call arguments rather than on the raven, because the raven can be
+        right while the parameter never leaves the UI."""
+        _mocked_loop.patch("core.loop.registry.approval_needed", return_value=False)
+        _mocked_loop.patch("core.loop.registry.dispatch", return_value={"result": "ok"})
+        stream = _mocked_loop.patch(
+            "core.loop.call_model_stream",
+            side_effect=make_stream_sequence(make_model_response(text="hi")),
+        )
+
+        app = VenastineApp("ANTHROPIC", "test-model", {"tui": {"effort": "high"}})
+        async with app.run_test() as pilot:
+            app.query_one("#prompt").value = "hello"
+            await pilot.press("enter")
+            assert await settle(pilot, lambda: stream.called)
+
+        # call_model_stream(client, provider, model, messages, system, tools,
+        #                   temperature, effort)
+        assert stream.call_args[0][7] == "high"
 
 
 # ---------------------------------------------------------------------------
@@ -1112,129 +1137,140 @@ class _RecordingQueue(queue.Queue):
         super().put(item, *a, **kw)
 
 
-@pytest.mark.asyncio
-async def test_quitting_with_a_prompt_open_releases_the_blocked_worker(
-        _mocked_loop, monkeypatch):
-    _mocked_loop.patch("core.loop.registry.approval_needed", return_value=True)
-    dispatch = _mocked_loop.patch("core.loop.registry.dispatch")
-    monkeypatch.setattr("tui.app.queue.Queue", _RecordingQueue)
+class TestQuittingIsADismissalPathToo:
+    """Review f10. A quit while a modal is open has to release the
+    blocked worker, exactly as a dismissal does.
+    """
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        app.query_one("#prompt").value = "do a thing"
-        await pilot.press("enter")
-        assert await settle(pilot, lambda: isinstance(app.screen, PermissionScreen))
+    @pytest.mark.asyncio
+    async def test_quitting_with_a_prompt_open_releases_the_blocked_worker(self,
+            _mocked_loop, monkeypatch):
+        _mocked_loop.patch("core.loop.registry.approval_needed", return_value=True)
+        dispatch = _mocked_loop.patch("core.loop.registry.dispatch")
+        monkeypatch.setattr("tui.app.queue.Queue", _RecordingQueue)
 
-        channel = app._permission_channel
-        assert channel is not None and channel.puts == []
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app.query_one("#prompt").value = "do a thing"
+            await pilot.press("enter")
+            assert await settle(pilot, lambda: isinstance(app.screen, PermissionScreen))
 
-        app.exit()
-        await pilot.pause()
+            channel = app._permission_channel
+            assert channel is not None and channel.puts == []
 
-        assert channel.puts == [False], \
-            "exit() left the worker blocked on the permission channel"
+            app.exit()
+            await pilot.pause()
 
-    dispatch.assert_not_called()
+            assert channel.puts == [False], \
+                "exit() left the worker blocked on the permission channel"
+
+        dispatch.assert_not_called()
 
 
-@pytest.mark.asyncio
-async def test_exit_without_a_pending_prompt_is_harmless(_mocked_loop):
-    """Control: the release must be a no-op when nothing is waiting, or
-    every ordinary quit would push a stray value onto a dead channel."""
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        assert app._permission_channel is None
-        app.exit()
-        await pilot.pause()
+    @pytest.mark.asyncio
+    async def test_exit_without_a_pending_prompt_is_harmless(self, _mocked_loop):
+        """Control: the release must be a no-op when nothing is waiting, or
+        every ordinary quit would push a stray value onto a dead channel."""
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert app._permission_channel is None
+            app.exit()
+            await pilot.pause()
 
 
 # ---------------------------------------------------------------------------
 # ---- Effort: validated, and never on the UI thread (f11, f42, f46) -------
 # ---------------------------------------------------------------------------
 
-def test_unknown_effort_level_renders_by_name_without_a_bar():
-    """Levels are discovered at runtime from the Models API, so one
-    outside the hardcoded table is reachable. Drawing it with "low"'s
-    single bar misreported its rank as the least-effort setting, while
-    the module comment promised the neutral display."""
-    from tui import ravens
 
-    assert ravens.effort_raven(None) == "<o)~ auto"
-    assert "▁▁▁" in ravens.effort_raven("low")
-    unknown = ravens.effort_raven("minimal")
-    assert "minimal" in unknown
-    assert "▁" not in unknown
+class TestEffortIsValidatedOffTheUIThread:
+    """f11, f42, f46. The level is validated before it is used, and the
+    validation never runs where it would block the UI.
+    """
 
+    def test_unknown_effort_level_renders_by_name_without_a_bar(self):
+        """Levels are discovered at runtime from the Models API, so one
+        outside the hardcoded table is reachable. Drawing it with "low"'s
+        single bar misreported its rank as the least-effort setting, while
+        the module comment promised the neutral display."""
+        from tui import ravens
 
-@pytest.mark.asyncio
-async def test_persisted_effort_is_validated_at_mount(mocker):
-    """A stale or mistyped tui.effort was trusted as-is and sent on every
-    turn -- unlike the sibling tui.theme, which gets themes.resolve()'s
-    fallback in the same constructor."""
-    mocker.patch("tui.app.api_initialization", return_value=object())
-    mocker.patch("tui.app.effort_levels_for_model", return_value=["low", "high"])
-
-    app = VenastineApp("ANTHROPIC", "test-model", {"tui": {"effort": "xhigh"}})
-    async with app.run_test() as pilot:
-        assert await settle(pilot, lambda: app.effort is None), \
-            "an unusable persisted effort was kept"
+        assert ravens.effort_raven(None) == "<o)~ auto"
+        assert "▁▁▁" in ravens.effort_raven("low")
+        unknown = ravens.effort_raven("minimal")
+        assert "minimal" in unknown
+        assert "▁" not in unknown
 
 
-@pytest.mark.asyncio
-async def test_valid_persisted_effort_survives_validation(mocker):
-    """Control: the check must not clear a level the model does accept."""
-    mocker.patch("tui.app.api_initialization", return_value=object())
-    mocker.patch("tui.app.effort_levels_for_model", return_value=["low", "high"])
+    @pytest.mark.asyncio
+    async def test_persisted_effort_is_validated_at_mount(self, mocker):
+        """A stale or mistyped tui.effort was trusted as-is and sent on every
+        turn -- unlike the sibling tui.theme, which gets themes.resolve()'s
+        fallback in the same constructor."""
+        mocker.patch("tui.app.api_initialization", return_value=object())
+        mocker.patch("tui.app.effort_levels_for_model", return_value=["low", "high"])
 
-    app = VenastineApp("ANTHROPIC", "test-model", {"tui": {"effort": "high"}})
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        await pilot.pause()
-        assert app.effort == "high"
+        app = VenastineApp("ANTHROPIC", "test-model", {"tui": {"effort": "xhigh"}})
+        async with app.run_test() as pilot:
+            assert await settle(pilot, lambda: app.effort is None), \
+                "an unusable persisted effort was kept"
 
 
-@pytest.mark.asyncio
-async def test_effort_lookup_does_not_block_the_ui_thread(mocker):
-    """/effort made a synchronous Models API call (SDK default timeout:
-    600s) on the UI thread, freezing the whole app until it returned.
-    Asserted by holding the lookup open and checking the app still
-    responds -- a test that only checked the final level would pass
-    against the frozen version."""
-    import threading
-    import time
+    @pytest.mark.asyncio
+    async def test_valid_persisted_effort_survives_validation(self, mocker):
+        """Control: the check must not clear a level the model does accept."""
+        mocker.patch("tui.app.api_initialization", return_value=object())
+        mocker.patch("tui.app.effort_levels_for_model", return_value=["low", "high"])
 
-    release = threading.Event()
+        app = VenastineApp("ANTHROPIC", "test-model", {"tui": {"effort": "high"}})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            assert app.effort == "high"
 
-    def slow_lookup(*a, **kw):
-        release.wait(timeout=10)
-        return ["low", "high"]
 
-    mocker.patch("tui.app.api_initialization", return_value=object())
-    mocker.patch("tui.app.effort_levels_for_model", side_effect=slow_lookup)
+    @pytest.mark.asyncio
+    async def test_effort_lookup_does_not_block_the_ui_thread(self, mocker):
+        """/effort made a synchronous Models API call (SDK default timeout:
+        600s) on the UI thread, freezing the whole app until it returned.
+        Asserted by holding the lookup open and checking the app still
+        responds -- a test that only checked the final level would pass
+        against the frozen version."""
+        import threading
+        import time
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        app.query_one("#prompt").value = "/effort high"
+        release = threading.Event()
 
-        # The measurement IS the assertion. Run inline, the command still
-        # completes and still sets the level -- it just does it after the
-        # UI has been frozen for the whole call, so only elapsed time
-        # distinguishes the two implementations.
-        started = time.monotonic()
-        await pilot.press("enter")
-        elapsed = time.monotonic() - started
-        assert elapsed < 3.0, \
-            f"/effort blocked the UI thread for {elapsed:.1f}s"
+        def slow_lookup(*a, **kw):
+            release.wait(timeout=10)
+            return ["low", "high"]
 
-        # And the UI is genuinely live while the lookup is outstanding.
-        app.query_one("#prompt").value = "still alive"
-        await pilot.pause()
-        assert app.query_one("#prompt").value == "still alive"
+        mocker.patch("tui.app.api_initialization", return_value=object())
+        mocker.patch("tui.app.effort_levels_for_model", side_effect=slow_lookup)
 
-        release.set()
-        assert await settle(pilot, lambda: app.effort == "high"), \
-            "the effort change never landed"
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app.query_one("#prompt").value = "/effort high"
+
+            # The measurement IS the assertion. Run inline, the command still
+            # completes and still sets the level -- it just does it after the
+            # UI has been frozen for the whole call, so only elapsed time
+            # distinguishes the two implementations.
+            started = time.monotonic()
+            await pilot.press("enter")
+            elapsed = time.monotonic() - started
+            assert elapsed < 3.0, \
+                f"/effort blocked the UI thread for {elapsed:.1f}s"
+
+            # And the UI is genuinely live while the lookup is outstanding.
+            app.query_one("#prompt").value = "still alive"
+            await pilot.pause()
+            assert app.query_one("#prompt").value == "still alive"
+
+            release.set()
+            assert await settle(pilot, lambda: app.effort == "high"), \
+                "the effort change never landed"
 
 
 # ---------------------------------------------------------------------------
@@ -1247,160 +1283,166 @@ async def test_effort_lookup_does_not_block_the_ui_thread(mocker):
 # for the TUI fixes the corruption; routing WARNING+ into the transcript
 # is the other half, or the warnings would simply become invisible.
 
-@pytest.mark.asyncio
-async def test_a_warning_reaches_the_transcript_in_the_warning_role():
-    """Batch 41 (X2). This used to patch write_system and assert only
-    that the line ARRIVED -- which it did, in `system`: dim italic, the
-    same style as the mount banner. `themes.role_styles` had carried a
-    `warning` colour since §26 and no transcript line had ever used it,
-    so the handler that exists to make warnings visible was delivering
-    them in the one role that reads as narration.
 
-    The role is asserted beside the text now, because arriving and
-    arriving legibly are two different claims.
+class TestLoggingMustNotScribbleOnTheScreen:
+    """A log record reaches the transcript in its own role, and nothing
+    writes to the terminal behind Textual's back.
     """
-    import logging
 
-    written = []
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        app._transcript.write_role = \
-            lambda role, text: written.append((role, text))
-        logging.getLogger("core.compaction").warning(
-            "No context window known for model 'x'")
-        assert await settle(
-            pilot,
-            lambda: any("context window" in t for _r, t in written)), \
-            "a WARNING never reached the transcript"
+    @pytest.mark.asyncio
+    async def test_a_warning_reaches_the_transcript_in_the_warning_role(self):
+        """Batch 41 (X2). This used to patch write_system and assert only
+        that the line ARRIVED -- which it did, in `system`: dim italic, the
+        same style as the mount banner. `themes.role_styles` had carried a
+        `warning` colour since §26 and no transcript line had ever used it,
+        so the handler that exists to make warnings visible was delivering
+        them in the one role that reads as narration.
 
-    assert any(role == "warning" and text.startswith("[warning]")
-               for role, text in written), \
-        f"a WARNING arrived as {[r for r, _ in written]} -- the level must be visible in BOTH the label and the colour"
+        The role is asserted beside the text now, because arriving and
+        arriving legibly are two different claims.
+        """
+        import logging
 
+        written = []
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app._transcript.write_role = \
+                lambda role, text: written.append((role, text))
+            logging.getLogger("core.compaction").warning(
+                "No context window known for model 'x'")
+            assert await settle(
+                pilot,
+                lambda: any("context window" in t for _r, t in written)), \
+                "a WARNING never reached the transcript"
 
-@pytest.mark.asyncio
-async def test_info_is_not_routed_to_the_transcript():
-    """The control. INFO in a chat transcript is noise, and the rotating
-    file already has it at full detail with timestamps."""
-    import logging
-
-    written = []
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        # write_role, not write_system: since batch 41 every routed
-        # record goes through the role path, and patching the old one
-        # would make this control pass by watching a method logging no
-        # longer calls -- vacuously, which is the one failure mode a
-        # control test has.
-        app._transcript.write_role = \
-            lambda role, text: written.append((role, text))
-        logging.getLogger("core.compaction").info("cache hit")
-        await pump(pilot, 10)
-
-    assert not any("cache hit" in t for _r, t in written)
+        assert any(role == "warning" and text.startswith("[warning]")
+                   for role, text in written), \
+            f"a WARNING arrived as {[r for r, _ in written]} -- the level must be visible in BOTH the label and the colour"
 
 
-@pytest.mark.asyncio
-async def test_an_error_renders_as_an_error():
-    """The other half of X2's branch. Collapsing write_error and
-    write_system into one write_role() call must not quietly demote an
-    ERROR: write_role("error", ...) and write_error() render
-    identically, and this is what says so."""
-    import logging
+    @pytest.mark.asyncio
+    async def test_info_is_not_routed_to_the_transcript(self):
+        """The control. INFO in a chat transcript is noise, and the rotating
+        file already has it at full detail with timestamps."""
+        import logging
 
-    errors = []
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        app._transcript.write_role = \
-            lambda role, text: errors.append((role, text))
-        logging.getLogger("tools.registry").error("tool exploded")
-        assert await settle(
-            pilot,
-            lambda: any(role == "error" and "tool exploded" in text
-                        for role, text in errors))
+        written = []
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            # write_role, not write_system: since batch 41 every routed
+            # record goes through the role path, and patching the old one
+            # would make this control pass by watching a method logging no
+            # longer calls -- vacuously, which is the one failure mode a
+            # control test has.
+            app._transcript.write_role = \
+                lambda role, text: written.append((role, text))
+            logging.getLogger("core.compaction").info("cache hit")
+            await pump(pilot, 10)
 
-
-@pytest.mark.asyncio
-async def test_a_routed_error_carries_its_exceptions_reason():
-    """Batch 91. `logger.exception("Tool %s raised; returning it as an error
-    result.", name)` puts the cause in exc_info ALONE, so the transcript said
-    a spawn had failed and never why -- and the why was "The service is
-    temporarily unavailable", which would have answered the question on
-    sight. One line of it, not the traceback: the log file keeps that."""
-    import logging
-
-    errors = []
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        app._transcript.write_role = \
-            lambda role, text: errors.append((role, text))
-        try:
-            raise RuntimeError("The service is temporarily unavailable.")
-        except RuntimeError:
-            logging.getLogger("tools.registry").exception(
-                "Tool spawn_subagent raised; returning it as an error result.")
-        assert await settle(
-            pilot, lambda: any("spawn_subagent" in t for _r, t in errors))
-
-    role, text = next((r, t) for r, t in errors if "spawn_subagent" in t)
-    assert role == "error"
-    assert text.endswith(
-        "(RuntimeError: The service is temporarily unavailable.)"), text
-    assert "Traceback" not in text
+        assert not any("cache hit" in t for _r, t in written)
 
 
-@pytest.mark.asyncio
-async def test_a_routed_line_is_redacted_like_the_log_file():
-    """Batch 91. The log FILE has been redacted at its formatter since #132,
-    and this handler posted the raw message beside it -- so a warning
-    interpolating a URL or an exception reached the screen with its key
-    intact. Both routes a secret can take are covered: the message's own
-    arguments, and the exception text the handler now appends."""
-    import logging
+    @pytest.mark.asyncio
+    async def test_an_error_renders_as_an_error(self):
+        """The other half of X2's branch. Collapsing write_error and
+        write_system into one write_role() call must not quietly demote an
+        ERROR: write_role("error", ...) and write_error() render
+        identically, and this is what says so."""
+        import logging
 
-    key = "sk-ant-api03-" + "b" * 32
-    written = []
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        app._transcript.write_role = \
-            lambda role, text: written.append((role, text))
-        logging.getLogger("tools.builtin.fetch_url").warning(
-            "fetch_url failed for https://x.test/?key=%s", key)
-        try:
-            raise RuntimeError(f"rejected {key}")
-        except RuntimeError:
-            logging.getLogger("tools.registry").exception(
-                "Tool fetch_url raised; returning it as an error result.")
-        assert await settle(
-            pilot,
-            lambda: sum("[REDACTED]" in t for _r, t in written) >= 2)
-
-    assert not any(key in text for _role, text in written)
+        errors = []
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app._transcript.write_role = \
+                lambda role, text: errors.append((role, text))
+            logging.getLogger("tools.registry").error("tool exploded")
+            assert await settle(
+                pilot,
+                lambda: any(role == "error" and "tool exploded" in text
+                            for role, text in errors))
 
 
-@pytest.mark.asyncio
-async def test_the_handler_is_detached_when_the_app_unmounts():
-    """The handler holds a reference to the app. Leaving it on the root
-    logger keeps a dead app alive and, across this suite, stacks one
-    handler per App instance -- so the last test in the file would post
-    to thirty dead apps."""
-    import logging
+    @pytest.mark.asyncio
+    async def test_a_routed_error_carries_its_exceptions_reason(self):
+        """Batch 91. `logger.exception("Tool %s raised; returning it as an error
+        result.", name)` puts the cause in exc_info ALONE, so the transcript said
+        a spawn had failed and never why -- and the why was "The service is
+        temporarily unavailable", which would have answered the question on
+        sight. One line of it, not the traceback: the log file keeps that."""
+        import logging
 
-    from tui.app import TranscriptLogHandler
+        errors = []
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app._transcript.write_role = \
+                lambda role, text: errors.append((role, text))
+            try:
+                raise RuntimeError("The service is temporarily unavailable.")
+            except RuntimeError:
+                logging.getLogger("tools.registry").exception(
+                    "Tool spawn_subagent raised; returning it as an error result.")
+            assert await settle(
+                pilot, lambda: any("spawn_subagent" in t for _r, t in errors))
 
-    before = [h for h in logging.getLogger().handlers
-              if isinstance(h, TranscriptLogHandler)]
+        role, text = next((r, t) for r, t in errors if "spawn_subagent" in t)
+        assert role == "error"
+        assert text.endswith(
+            "(RuntimeError: The service is temporarily unavailable.)"), text
+        assert "Traceback" not in text
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        during = [h for h in logging.getLogger().handlers
+
+    @pytest.mark.asyncio
+    async def test_a_routed_line_is_redacted_like_the_log_file(self):
+        """Batch 91. The log FILE has been redacted at its formatter since #132,
+        and this handler posted the raw message beside it -- so a warning
+        interpolating a URL or an exception reached the screen with its key
+        intact. Both routes a secret can take are covered: the message's own
+        arguments, and the exception text the handler now appends."""
+        import logging
+
+        key = "sk-ant-api03-" + "b" * 32
+        written = []
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app._transcript.write_role = \
+                lambda role, text: written.append((role, text))
+            logging.getLogger("tools.builtin.fetch_url").warning(
+                "fetch_url failed for https://x.test/?key=%s", key)
+            try:
+                raise RuntimeError(f"rejected {key}")
+            except RuntimeError:
+                logging.getLogger("tools.registry").exception(
+                    "Tool fetch_url raised; returning it as an error result.")
+            assert await settle(
+                pilot,
+                lambda: sum("[REDACTED]" in t for _r, t in written) >= 2)
+
+        assert not any(key in text for _role, text in written)
+
+
+    @pytest.mark.asyncio
+    async def test_the_handler_is_detached_when_the_app_unmounts(self):
+        """The handler holds a reference to the app. Leaving it on the root
+        logger keeps a dead app alive and, across this suite, stacks one
+        handler per App instance -- so the last test in the file would post
+        to thirty dead apps."""
+        import logging
+
+        from tui.app import TranscriptLogHandler
+
+        before = [h for h in logging.getLogger().handlers
                   if isinstance(h, TranscriptLogHandler)]
-        assert len(during) == len(before) + 1, "the handler was never attached"
 
-    after = [h for h in logging.getLogger().handlers
-             if isinstance(h, TranscriptLogHandler)]
-    assert len(after) == len(before), "the handler outlived its app"
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            during = [h for h in logging.getLogger().handlers
+                      if isinstance(h, TranscriptLogHandler)]
+            assert len(during) == len(before) + 1, "the handler was never attached"
+
+        after = [h for h in logging.getLogger().handlers
+                 if isinstance(h, TranscriptLogHandler)]
+        assert len(after) == len(before), "the handler outlived its app"
 
 
 class TestEventsUnderAnOpenModal:
@@ -1595,73 +1637,79 @@ class TestEventsUnderAnOpenModal:
         assert answered == ["modal answered: ConfirmScreen"], answered
 
 
-@pytest.mark.asyncio
-async def test_an_unhandled_ui_error_is_logged_before_textual_reports_it(caplog):
-    """Batch 78. Textual reports message-handler panics to the error
-    console only -- the NoMatches that took the app down left nothing in
-    logs/app.log, and the exit screen's `textual run --dev` note does not
-    apply to an app launched from main.py. The override logs through the
-    redacting formatter first, then delegates: the pilot re-raise below
-    is super()'s behaviour, kept, and the test would pass vacuously
-    without it -- a logged record for an error that never surfaced would
-    prove the wrong thing."""
-    import logging
+class TestWhatTheLogKeepsWhenSomethingFails:
+    """The other half of the same rule: an unhandled UI error, a dead
+    worker and a failing handler each leave a record AND leave the
+    app standing.
+    """
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    with caplog.at_level(logging.CRITICAL, logger="tui.app"):
-        with pytest.raises(ValueError, match="boom"):
-            async with app.run_test() as pilot:
-                await pilot.pause()
-                app._handle_exception(ValueError("boom"))
+    @pytest.mark.asyncio
+    async def test_an_unhandled_ui_error_is_logged_before_textual_reports_it(self, caplog):
+        """Batch 78. Textual reports message-handler panics to the error
+        console only -- the NoMatches that took the app down left nothing in
+        logs/app.log, and the exit screen's `textual run --dev` note does not
+        apply to an app launched from main.py. The override logs through the
+        redacting formatter first, then delegates: the pilot re-raise below
+        is super()'s behaviour, kept, and the test would pass vacuously
+        without it -- a logged record for an error that never surfaced would
+        prove the wrong thing."""
+        import logging
 
-    assert any("Unrecoverable UI error" in r.getMessage()
-               for r in caplog.records), \
-        "an unhandled UI error left no record in the log"
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        with caplog.at_level(logging.CRITICAL, logger="tui.app"):
+            with pytest.raises(ValueError, match="boom"):
+                async with app.run_test() as pilot:
+                    await pilot.pause()
+                    app._handle_exception(ValueError("boom"))
 
-
-@pytest.mark.asyncio
-async def test_a_dead_worker_leaves_a_traceback_in_the_log(caplog):
-    """Batch 78. on_worker_state_changed toasted worker deaths and logged
-    nothing -- and on_turn_finished renders message.error into the
-    transcript without recording it either, so a parked-worker cascade
-    like the modal crash's was only recoverable from memory. The handler
-    every run_worker shares is the single logging site."""
-    import logging
-
-    from textual.worker import WorkerState
-
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        with caplog.at_level(logging.ERROR, logger="tui.app"):
-            app.on_worker_state_changed(SimpleNamespace(worker=SimpleNamespace(
-                state=WorkerState.ERROR, error=ValueError("worker blew up"),
-                name="agent-turn")))
-
-    matching = [r for r in caplog.records
-                if "agent-turn" in r.getMessage()
-                and "worker blew up" in r.getMessage()]
-    assert matching, "a dead worker left no record in the log"
-    assert matching[0].exc_info is not None, \
-        "the record names the failure but carries no traceback"
+        assert any("Unrecoverable UI error" in r.getMessage()
+                   for r in caplog.records), \
+            "an unhandled UI error left no record in the log"
 
 
-@pytest.mark.asyncio
-async def test_a_handler_failure_cannot_take_the_app_down():
-    """emit() runs wherever the logging happened -- a research worker
-    thread, the MCP bridge thread. A logging handler that raises inside a
-    message pump would kill the app over a diagnostic."""
-    import logging
+    @pytest.mark.asyncio
+    async def test_a_dead_worker_leaves_a_traceback_in_the_log(self, caplog):
+        """Batch 78. on_worker_state_changed toasted worker deaths and logged
+        nothing -- and on_turn_finished renders message.error into the
+        transcript without recording it either, so a parked-worker cascade
+        like the modal crash's was only recoverable from memory. The handler
+        every run_worker shares is the single logging site."""
+        import logging
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        app._log_handler._app = None          # force emit() to blow up
-        logging.getLogger("core.compaction").warning("boom")
-        await pump(pilot, 5)
-        # Still live and still handling input.
-        app.query_one("#prompt").value = "alive"
-        await pilot.pause()
-        assert app.query_one("#prompt").value == "alive"
+        from textual.worker import WorkerState
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            with caplog.at_level(logging.ERROR, logger="tui.app"):
+                app.on_worker_state_changed(SimpleNamespace(worker=SimpleNamespace(
+                    state=WorkerState.ERROR, error=ValueError("worker blew up"),
+                    name="agent-turn")))
+
+        matching = [r for r in caplog.records
+                    if "agent-turn" in r.getMessage()
+                    and "worker blew up" in r.getMessage()]
+        assert matching, "a dead worker left no record in the log"
+        assert matching[0].exc_info is not None, \
+            "the record names the failure but carries no traceback"
+
+
+    @pytest.mark.asyncio
+    async def test_a_handler_failure_cannot_take_the_app_down(self):
+        """emit() runs wherever the logging happened -- a research worker
+        thread, the MCP bridge thread. A logging handler that raises inside a
+        message pump would kill the app over a diagnostic."""
+        import logging
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app._log_handler._app = None          # force emit() to blow up
+            logging.getLogger("core.compaction").warning("boom")
+            await pump(pilot, 5)
+            # Still live and still handling input.
+            app.query_one("#prompt").value = "alive"
+            await pilot.pause()
+            assert app.query_one("#prompt").value == "alive"
 
 
 # ---------------------------------------------------------------------------
@@ -1681,88 +1729,91 @@ _TWO_PROVIDERS = {
 }
 
 
-@pytest.mark.asyncio
-async def test_model_switches_the_model_and_keeps_the_provider(mocker):
-    mocker.patch("credentials.load_provider_data", return_value=_TWO_PROVIDERS)
+class TestSwitchingProviderAndModelMidSession:
+    """/model, and what it carries across the switch."""
 
-    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
-    async with app.run_test() as pilot:
-        app.query_one("#prompt").value = "/model claude-opus-4"
-        await pilot.press("enter")
-        await pilot.pause()
+    @pytest.mark.asyncio
+    async def test_model_switches_the_model_and_keeps_the_provider(self, mocker):
+        mocker.patch("credentials.load_provider_data", return_value=_TWO_PROVIDERS)
 
-    assert app.model == "claude-opus-4"
-    assert app.provider_name == "ANTHROPIC", "one argument must not move provider"
+        app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
+        async with app.run_test() as pilot:
+            app.query_one("#prompt").value = "/model claude-opus-4"
+            await pilot.press("enter")
+            await pilot.pause()
 
-
-@pytest.mark.asyncio
-async def test_model_switches_both_when_given_a_provider(mocker):
-    """The case the command exists for: the default provider has no key."""
-    mocker.patch("credentials.load_provider_data", return_value=_TWO_PROVIDERS)
-
-    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
-    async with app.run_test() as pilot:
-        app.query_one("#prompt").value = "/model openai gpt-4o"
-        await pilot.press("enter")
-        await pilot.pause()
-
-    assert (app.provider_name, app.model) == ("OPENAI", "gpt-4o"), \
-        "the provider name must be upper-cased to match providers.json"
+        assert app.model == "claude-opus-4"
+        assert app.provider_name == "ANTHROPIC", "one argument must not move provider"
 
 
-@pytest.mark.asyncio
-async def test_an_unknown_provider_changes_nothing(mocker):
-    """api_initialization raises the same ValueError on the next turn, a
-    long way from the typo that caused it."""
-    mocker.patch("credentials.load_provider_data", return_value=_TWO_PROVIDERS)
+    @pytest.mark.asyncio
+    async def test_model_switches_both_when_given_a_provider(self, mocker):
+        """The case the command exists for: the default provider has no key."""
+        mocker.patch("credentials.load_provider_data", return_value=_TWO_PROVIDERS)
 
-    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
-    async with app.run_test() as pilot:
-        app.query_one("#prompt").value = "/model OPENAOI gpt-4o"
-        await pilot.press("enter")
-        await pilot.pause()
+        app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
+        async with app.run_test() as pilot:
+            app.query_one("#prompt").value = "/model openai gpt-4o"
+            await pilot.press("enter")
+            await pilot.pause()
 
-    assert (app.provider_name, app.model) == ("ANTHROPIC", "claude-sonnet-5")
-
-
-@pytest.mark.asyncio
-async def test_a_provider_with_no_key_warns_but_still_switches(mocker):
-    """WARN, not refuse. An OpenAI-compatible endpoint running locally
-    legitimately needs no key, so refusing would block a real
-    configuration — but a hosted provider will fail auth on every call,
-    and finding that out one turn later is the worse trade."""
-    mocker.patch("credentials.load_provider_data", return_value=_TWO_PROVIDERS)
-    written = []
-
-    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
-    async with app.run_test() as pilot:
-        mocker.patch.object(type(app._transcript), "write_error",
-                            side_effect=lambda self, t: written.append(t),
-                            autospec=True)
-        app.query_one("#prompt").value = "/model LOCAL my-local-model"
-        await pilot.press("enter")
-        await pilot.pause()
-
-    assert (app.provider_name, app.model) == ("LOCAL", "my-local-model")
-    assert any("no API_KEY" in line for line in written), \
-        "switching to a keyless provider said nothing about it"
+        assert (app.provider_name, app.model) == ("OPENAI", "gpt-4o"), \
+            "the provider name must be upper-cased to match providers.json"
 
 
-@pytest.mark.asyncio
-async def test_model_is_refused_mid_turn(_mocked_loop, mocker):
-    """Swapping under a running worker leaves the transcript claiming one
-    model while the thread records another — the same guard /new,
-    /research and the thread picker use."""
-    mocker.patch("credentials.load_provider_data", return_value=_TWO_PROVIDERS)
-    from tui.app import _cmd_model
+    @pytest.mark.asyncio
+    async def test_an_unknown_provider_changes_nothing(self, mocker):
+        """api_initialization raises the same ValueError on the next turn, a
+        long way from the typo that caused it."""
+        mocker.patch("credentials.load_provider_data", return_value=_TWO_PROVIDERS)
 
-    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
-    async with app.run_test() as pilot:
-        app._busy = True
-        _cmd_model(app, "OPENAI gpt-4o")
-        await pilot.pause()
+        app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
+        async with app.run_test() as pilot:
+            app.query_one("#prompt").value = "/model OPENAOI gpt-4o"
+            await pilot.press("enter")
+            await pilot.pause()
 
-    assert (app.provider_name, app.model) == ("ANTHROPIC", "claude-sonnet-5")
+        assert (app.provider_name, app.model) == ("ANTHROPIC", "claude-sonnet-5")
+
+
+    @pytest.mark.asyncio
+    async def test_a_provider_with_no_key_warns_but_still_switches(self, mocker):
+        """WARN, not refuse. An OpenAI-compatible endpoint running locally
+        legitimately needs no key, so refusing would block a real
+        configuration — but a hosted provider will fail auth on every call,
+        and finding that out one turn later is the worse trade."""
+        mocker.patch("credentials.load_provider_data", return_value=_TWO_PROVIDERS)
+        written = []
+
+        app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
+        async with app.run_test() as pilot:
+            mocker.patch.object(type(app._transcript), "write_error",
+                                side_effect=lambda self, t: written.append(t),
+                                autospec=True)
+            app.query_one("#prompt").value = "/model LOCAL my-local-model"
+            await pilot.press("enter")
+            await pilot.pause()
+
+        assert (app.provider_name, app.model) == ("LOCAL", "my-local-model")
+        assert any("no API_KEY" in line for line in written), \
+            "switching to a keyless provider said nothing about it"
+
+
+    @pytest.mark.asyncio
+    async def test_model_is_refused_mid_turn(self, _mocked_loop, mocker):
+        """Swapping under a running worker leaves the transcript claiming one
+        model while the thread records another — the same guard /new,
+        /research and the thread picker use."""
+        mocker.patch("credentials.load_provider_data", return_value=_TWO_PROVIDERS)
+        from tui.app import _cmd_model
+
+        app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
+        async with app.run_test() as pilot:
+            app._busy = True
+            _cmd_model(app, "OPENAI gpt-4o")
+            await pilot.pause()
+
+        assert (app.provider_name, app.model) == ("ANTHROPIC", "claude-sonnet-5")
 
 
 # ---------------------------------------------------------------------------
@@ -1777,732 +1828,741 @@ def _capture(app) -> tuple:
     return system, errors
 
 
-@pytest.mark.parametrize("text,expected", [
-    ("40000", 40_000),
-    ("40k", 40_000),
-    ("40K", 40_000),
-    ("1m", 1_000_000),
-    ("1.5m", 1_500_000),
-])
-def test_token_counts_parse(text, expected):
-    from tui.app import _parse_token_count
-
-    assert _parse_token_count(text) == (expected, None)
-
-
-@pytest.mark.parametrize("text", ["", "abc", "40kb", "-5", "0", "1e", "k"])
-def test_a_token_count_it_does_not_fully_understand_is_refused(text):
-    """Rejected rather than salvaged. Reading `40kb` as 40k would set a
-    number the user did not ask for and then report success."""
-    from tui.app import _parse_token_count
-
-    tokens, error = _parse_token_count(text)
-    assert tokens is None and error
-
-
-@pytest.mark.asyncio
-async def test_trigger_sets_a_session_override_and_moves_the_threshold():
-    from core import compaction, session
-    from tui.app import _cmd_trigger
-
-    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
-    async with app.run_test() as pilot:
-        system, errors = _capture(app)
-        _cmd_trigger(app, "80k")
-        await pilot.pause()
-
-    assert not errors
-    assert session.trigger_for("ANTHROPIC", "claude-sonnet-5") == 80_000
-    _, compact_at = compaction.thresholds(
-        "claude-sonnet-5", provider_name="ANTHROPIC")
-    assert compact_at == 80_000
-    assert any("this session only" in line for line in system)
-    session.clear()
-
-
-@pytest.mark.asyncio
-async def test_a_trigger_below_its_dependent_floors_is_REFUSED():
-    """Eagerly, against the same function the automatic path uses.
-
-    Without this the value is accepted here and raises ValueError later
-    inside should_compact() -- on the hot path, mid-turn, a long way from
-    the command that caused it. The message must name the floor.
+class TestTheWindowAndTheTrigger:
+    """Batch 31. /window and /trigger -- the two commands that decide
+    when a turn is compacted, and what the figures behind them mean.
     """
-    from core import session
-    from tui.app import _cmd_trigger
-
-    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
-    async with app.run_test() as pilot:
-        system, errors = _capture(app)
-        _cmd_trigger(app, "5k")
-        await pilot.pause()
-
-    assert session.trigger_for("ANTHROPIC", "claude-sonnet-5") is None
-    assert errors and "warning_margin" in errors[0]
-    session.clear()
-
-
-@pytest.mark.asyncio
-async def test_lowering_the_trigger_under_the_thread_says_a_fold_is_coming():
-    """The fold is legitimate and bounded -- compact() returns no-progress
-    on every evaluation after the first -- but arriving unannounced would
-    read as the command having done something it did not."""
-    from core import session
-    from tui.app import _cmd_trigger
-
-    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
-    async with app.run_test() as pilot:
-        app._memory = SimpleNamespace(last_input_tokens=35_000)
-        system, errors = _capture(app)
-        _cmd_trigger(app, "20k")
-        await pilot.pause()
-
-    assert not errors
-    assert any("expect one compaction" in line for line in system)
-    session.clear()
-
-
-@pytest.mark.asyncio
-async def test_a_trigger_above_the_thread_says_nothing_about_folding():
-    from core import session
-    from tui.app import _cmd_trigger
-
-    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
-    async with app.run_test() as pilot:
-        app._memory = SimpleNamespace(last_input_tokens=12_000)
-        system, errors = _capture(app)
-        _cmd_trigger(app, "80k")
-        await pilot.pause()
-
-    assert not any("expect one compaction" in line for line in system)
-    session.clear()
-
-
-@pytest.mark.asyncio
-async def test_window_warns_but_does_not_refuse_above_the_reported_window():
-    """Raising it is the best reason to have the command -- a gateway or a
-    self-hosted endpoint can report its own default rather than the
-    deployment's real window -- so refusing would block exactly the case
-    it exists for."""
-    from core import client as client_module
-    from core import model_windows
-    from tui.app import _cmd_window
-
-    client_module._context_window_cache[("ANTHROPIC", "claude-sonnet-5")] = 200_000
-
-    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
-    async with app.run_test() as pilot:
-        system, errors = _capture(app)
-        _cmd_window(app, "1m")
-        await pilot.pause()
-
-    assert model_windows.window_for("ANTHROPIC", "claude-sonnet-5") \
-        == 1_000_000
-    assert errors and "200,000" in errors[0]
-    client_module._context_window_cache.clear()
-
-
-@pytest.mark.asyncio
-async def test_a_window_at_or_below_the_backstop_margin_is_REFUSED():
-    """compact_at would clamp to its floor of 1 and every evaluation of a
-    research pass would compact."""
-    from core import model_windows
-    from tui.app import _cmd_window
-
-    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
-    async with app.run_test() as pilot:
-        system, errors = _capture(app)
-        _cmd_window(app, str(config.COMPACTION_PIPELINE_BACKSTOP_TOKENS))
-        await pilot.pause()
-
-    assert model_windows.window_for("ANTHROPIC", "claude-sonnet-5") is None
-    assert errors and "backstop" in errors[0]
-
-
-@pytest.mark.asyncio
-async def test_a_remembered_window_is_confirmed_only_when_it_reached_disk(
-        mocker):
-    """/theme and /model's rule, applied to the third preference: a
-    failure WARNS inside the store and reaches the transcript through
-    TranscriptLogHandler, so the command must not also claim a save it did
-    not make. The value is still reported; only the claim goes."""
-    from tui.app import _cmd_window
-
-    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
-    async with app.run_test() as pilot:
-        system, _ = _capture(app)
-        _cmd_window(app, "400k")
-        await pilot.pause()
-        assert any("Remembered for this model" in line for line in system)
-
-        mocker.patch("core.model_windows.remember_window", return_value=False)
-        system2, _ = _capture(app)
-        _cmd_window(app, "500k")
-        await pilot.pause()
-
-    assert any("Context window 500k" in line for line in system2), (
-        "the number is still reported; only the claim that it was saved goes")
-    assert not any("Remembered for this model" in line for line in system2)
-
-
-@pytest.mark.asyncio
-async def test_off_clears_the_remembered_window_and_leaves_the_trigger():
-    from core import model_windows, session
-    from tui.app import _cmd_window
-
-    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
-    async with app.run_test() as pilot:
-        model_windows.remember_window("ANTHROPIC", "claude-sonnet-5", 400_000)
-        session.set_trigger("ANTHROPIC", "claude-sonnet-5", 80_000)
-        system, errors = _capture(app)
-        _cmd_window(app, "off")
-        await pilot.pause()
-
-    assert model_windows.window_for("ANTHROPIC", "claude-sonnet-5") is None
-    assert session.trigger_for("ANTHROPIC", "claude-sonnet-5") == 80_000
-    assert any("cleared" in line for line in system)
-    session.clear()
-
-
-@pytest.mark.asyncio
-async def test_the_bare_form_reports_the_value_and_its_provenance():
-    """Provenance is the point: four sources can answer for the window, and
-    a number with no source attached is what makes someone edit the wrong
-    one."""
-    from core import model_windows
-    from tui.app import _cmd_window
-
-    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
-    async with app.run_test() as pilot:
-        system, _ = _capture(app)
-        _cmd_window(app, "")
-        await pilot.pause()
-        assert any("MODEL_CONTEXT_WINDOWS" in line for line in system)
-
-        model_windows.remember_window("ANTHROPIC", "claude-sonnet-5", 400_000)
-        system2, _ = _capture(app)
-        _cmd_window(app, "")
-        await pilot.pause()
-
-    assert any("remembered for" in line and "400,000" in line
-               for line in system2)
-
-
-@pytest.mark.asyncio
-async def test_switching_model_clears_the_trigger_but_keeps_the_window(mocker):
-    """Batch 44 split what §31 had joined.
-
-    The trigger is cleared and SAID rather than dropped quietly -- a
-    number tuned for one model must not govern the next. The remembered
-    window is NOT cleared: it is a fact about a deployment, kept per pair,
-    and a /model switch simply resolves a different key."""
-    mocker.patch("credentials.load_provider_data", return_value=_TWO_PROVIDERS)
-    from core import model_windows, session
-    from tui.app import _cmd_model
-
-    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
-    async with app.run_test() as pilot:
-        model_windows.remember_window("ANTHROPIC", "claude-sonnet-5", 400_000)
-        session.set_trigger("ANTHROPIC", "claude-sonnet-5", 80_000)
-        system, _ = _capture(app)
-        _cmd_model(app, "OPENAI gpt-4o")
-        await pilot.pause()
-
-    assert session.state() == {}
-    assert any("cleared by the switch" in line for line in system)
-
-    # The window survives the round trip; the trigger does not.
-    assert session.trigger_for("ANTHROPIC", "claude-sonnet-5") is None
-    assert model_windows.window_for("ANTHROPIC", "claude-sonnet-5") == 400_000
-    session.clear()
-
-
-@pytest.mark.asyncio
-async def test_switching_model_says_nothing_when_no_override_was_set(mocker):
-    """A switch on a session that never touched these must not print a
-    line about state it did not have."""
-    mocker.patch("credentials.load_provider_data", return_value=_TWO_PROVIDERS)
-    from tui.app import _cmd_model
-
-    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
-    async with app.run_test() as pilot:
-        system, _ = _capture(app)
-        _cmd_model(app, "OPENAI gpt-4o")
-        await pilot.pause()
-
-    assert not any("cleared by the switch" in line for line in system)
-
-
-@pytest.mark.asyncio
-async def test_setting_a_trigger_before_the_first_message_makes_no_thread():
-    """Setting one before any message is half of what the command is for.
-
-    `app.memory` is a property that CREATES and persists a
-    ConversationThread row on first use, so reading it here would leave
-    the phantom empty thread its own docstring describes having fixed --
-    launch the TUI, type /trigger, quit, and the Ctrl+T picker fills with
-    a row carrying nothing but an id.
-    """
-    from core import session
-    from tui.app import _cmd_trigger
-
-    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
-    async with app.run_test() as pilot:
-        assert app._memory is None
-        system, errors = _capture(app)
-        _cmd_trigger(app, "80k")
-        await pilot.pause()
-
-    assert not errors
-    assert session.trigger_for("ANTHROPIC", "claude-sonnet-5") == 80_000
-    assert app._memory is None, "the command created a thread"
-    session.clear()
-
-
-def test_both_commands_are_registered():
-    """/help is generated from the registry, so registration is what makes
-    them discoverable at all."""
-    from tui.commands import registry
-
-    names = {c.name for c in registry.all()}
-    assert {"window", "trigger"} <= names
-
-
-@pytest.mark.asyncio
-async def test_switching_model_revalidates_the_effort_level(mocker):
-    """Effort is per-MODEL. A level the old model accepted can be rejected
-    outright by the new one, and every later turn would fail with a
-    provider 400 — the exact failure the mount-time check exists to stop,
-    reachable again through a switch."""
-    mocker.patch("credentials.load_provider_data", return_value=_TWO_PROVIDERS)
-    mocker.patch("tui.app.api_initialization", return_value=object())
-    # The NEW model exposes no effort control at all.
-    mocker.patch("tui.app.effort_levels_for_model", return_value=[])
-
-    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {"tui": {"effort": "high"}})
-    async with app.run_test() as pilot:
-        app.effort = "high"          # survived mount validation in this fake
-        app.query_one("#prompt").value = "/model OPENAI gpt-4o"
-        await pilot.press("enter")
-        assert await settle(pilot, lambda: app.effort is None), \
-            "a stale effort level survived the model switch"
-
-
-@pytest.mark.asyncio
-async def test_the_header_shows_which_model_the_next_turn_uses(mocker):
-    """The mount banner scrolls away, so after a switch nothing on screen
-    said what the next turn would actually call."""
-    mocker.patch("credentials.load_provider_data", return_value=_TWO_PROVIDERS)
-
-    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        assert app.sub_title == "ANTHROPIC | claude-sonnet-5"
-
-        app.query_one("#prompt").value = "/model OPENAI gpt-4o"
-        await pilot.press("enter")
-        await pilot.pause()
-        assert app.sub_title == "OPENAI | gpt-4o"
-
-
-@pytest.mark.asyncio
-async def test_bare_model_reports_without_changing_anything(mocker):
-    mocker.patch("credentials.load_provider_data", return_value=_TWO_PROVIDERS)
-    written = []
-
-    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
-    async with app.run_test() as pilot:
-        mocker.patch.object(type(app._transcript), "write_system",
-                            side_effect=lambda self, t: written.append(t),
-                            autospec=True)
-        app.query_one("#prompt").value = "/model"
-        await pilot.press("enter")
-        await pilot.pause()
-
-    assert (app.provider_name, app.model) == ("ANTHROPIC", "claude-sonnet-5")
-    joined = " ".join(written)
-    assert "ANTHROPIC" in joined and "claude-sonnet-5" in joined
-    # Only providers that actually have a key -- listing LOCAL as ready
-    # would send the user at a provider whose every call 401s.
-    assert "LOCAL" not in joined.split("Providers with a key:")[1]
-
-
-@pytest.mark.asyncio
-async def test_the_new_model_reaches_the_next_model_call(_mocked_loop):
-    """The switch has to TRAVEL: app -> _run -> call_model_stream. Asserted
-    on the call arguments, because setting the attribute proves only that
-    the attribute was set."""
-    _mocked_loop.patch("credentials.load_provider_data",
-                       return_value=_TWO_PROVIDERS)
-    _mocked_loop.patch("core.loop.registry.approval_needed", return_value=False)
-    stream = _mocked_loop.patch(
-        "core.loop.call_model_stream",
-        side_effect=make_stream_sequence(make_model_response(text="hi")),
-    )
-
-    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
-    async with app.run_test() as pilot:
-        app.query_one("#prompt").value = "/model OPENAI gpt-4o"
-        await pilot.press("enter")
-        await pilot.pause()
-
-        app.query_one("#prompt").value = "hello"
-        await pilot.press("enter")
-        assert await settle(pilot, lambda: stream.called)
-
-    # call_model_stream(client, provider, model, messages, system, tools, ...)
-    assert stream.call_args[0][1] == "OPENAI"
-    assert stream.call_args[0][2] == "gpt-4o"
+
+    @pytest.mark.parametrize("text,expected", [
+        ("40000", 40_000),
+        ("40k", 40_000),
+        ("40K", 40_000),
+        ("1m", 1_000_000),
+        ("1.5m", 1_500_000),
+    ])
+    def test_token_counts_parse(self, text, expected):
+        from tui.app import _parse_token_count
+
+        assert _parse_token_count(text) == (expected, None)
+
+
+    @pytest.mark.parametrize("text", ["", "abc", "40kb", "-5", "0", "1e", "k"])
+    def test_a_token_count_it_does_not_fully_understand_is_refused(self, text):
+        """Rejected rather than salvaged. Reading `40kb` as 40k would set a
+        number the user did not ask for and then report success."""
+        from tui.app import _parse_token_count
+
+        tokens, error = _parse_token_count(text)
+        assert tokens is None and error
+
+
+    @pytest.mark.asyncio
+    async def test_trigger_sets_a_session_override_and_moves_the_threshold(self):
+        from core import compaction, session
+        from tui.app import _cmd_trigger
+
+        app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
+        async with app.run_test() as pilot:
+            system, errors = _capture(app)
+            _cmd_trigger(app, "80k")
+            await pilot.pause()
+
+        assert not errors
+        assert session.trigger_for("ANTHROPIC", "claude-sonnet-5") == 80_000
+        _, compact_at = compaction.thresholds(
+            "claude-sonnet-5", provider_name="ANTHROPIC")
+        assert compact_at == 80_000
+        assert any("this session only" in line for line in system)
+        session.clear()
+
+
+    @pytest.mark.asyncio
+    async def test_a_trigger_below_its_dependent_floors_is_REFUSED(self):
+        """Eagerly, against the same function the automatic path uses.
+
+        Without this the value is accepted here and raises ValueError later
+        inside should_compact() -- on the hot path, mid-turn, a long way from
+        the command that caused it. The message must name the floor.
+        """
+        from core import session
+        from tui.app import _cmd_trigger
+
+        app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
+        async with app.run_test() as pilot:
+            system, errors = _capture(app)
+            _cmd_trigger(app, "5k")
+            await pilot.pause()
+
+        assert session.trigger_for("ANTHROPIC", "claude-sonnet-5") is None
+        assert errors and "warning_margin" in errors[0]
+        session.clear()
+
+
+    @pytest.mark.asyncio
+    async def test_lowering_the_trigger_under_the_thread_says_a_fold_is_coming(self):
+        """The fold is legitimate and bounded -- compact() returns no-progress
+        on every evaluation after the first -- but arriving unannounced would
+        read as the command having done something it did not."""
+        from core import session
+        from tui.app import _cmd_trigger
+
+        app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
+        async with app.run_test() as pilot:
+            app._memory = SimpleNamespace(last_input_tokens=35_000)
+            system, errors = _capture(app)
+            _cmd_trigger(app, "20k")
+            await pilot.pause()
+
+        assert not errors
+        assert any("expect one compaction" in line for line in system)
+        session.clear()
+
+
+    @pytest.mark.asyncio
+    async def test_a_trigger_above_the_thread_says_nothing_about_folding(self):
+        from core import session
+        from tui.app import _cmd_trigger
+
+        app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
+        async with app.run_test() as pilot:
+            app._memory = SimpleNamespace(last_input_tokens=12_000)
+            system, errors = _capture(app)
+            _cmd_trigger(app, "80k")
+            await pilot.pause()
+
+        assert not any("expect one compaction" in line for line in system)
+        session.clear()
+
+
+    @pytest.mark.asyncio
+    async def test_window_warns_but_does_not_refuse_above_the_reported_window(self):
+        """Raising it is the best reason to have the command -- a gateway or a
+        self-hosted endpoint can report its own default rather than the
+        deployment's real window -- so refusing would block exactly the case
+        it exists for."""
+        from core import client as client_module
+        from core import model_windows
+        from tui.app import _cmd_window
+
+        client_module._context_window_cache[("ANTHROPIC", "claude-sonnet-5")] = 200_000
+
+        app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
+        async with app.run_test() as pilot:
+            system, errors = _capture(app)
+            _cmd_window(app, "1m")
+            await pilot.pause()
+
+        assert model_windows.window_for("ANTHROPIC", "claude-sonnet-5") \
+            == 1_000_000
+        assert errors and "200,000" in errors[0]
+        client_module._context_window_cache.clear()
+
+
+    @pytest.mark.asyncio
+    async def test_a_window_at_or_below_the_backstop_margin_is_REFUSED(self):
+        """compact_at would clamp to its floor of 1 and every evaluation of a
+        research pass would compact."""
+        from core import model_windows
+        from tui.app import _cmd_window
+
+        app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
+        async with app.run_test() as pilot:
+            system, errors = _capture(app)
+            _cmd_window(app, str(config.COMPACTION_PIPELINE_BACKSTOP_TOKENS))
+            await pilot.pause()
+
+        assert model_windows.window_for("ANTHROPIC", "claude-sonnet-5") is None
+        assert errors and "backstop" in errors[0]
+
+
+    @pytest.mark.asyncio
+    async def test_a_remembered_window_is_confirmed_only_when_it_reached_disk(self,
+            mocker):
+        """/theme and /model's rule, applied to the third preference: a
+        failure WARNS inside the store and reaches the transcript through
+        TranscriptLogHandler, so the command must not also claim a save it did
+        not make. The value is still reported; only the claim goes."""
+        from tui.app import _cmd_window
+
+        app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
+        async with app.run_test() as pilot:
+            system, _ = _capture(app)
+            _cmd_window(app, "400k")
+            await pilot.pause()
+            assert any("Remembered for this model" in line for line in system)
+
+            mocker.patch("core.model_windows.remember_window", return_value=False)
+            system2, _ = _capture(app)
+            _cmd_window(app, "500k")
+            await pilot.pause()
+
+        assert any("Context window 500k" in line for line in system2), (
+            "the number is still reported; only the claim that it was saved goes")
+        assert not any("Remembered for this model" in line for line in system2)
+
+
+    @pytest.mark.asyncio
+    async def test_off_clears_the_remembered_window_and_leaves_the_trigger(self):
+        from core import model_windows, session
+        from tui.app import _cmd_window
+
+        app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
+        async with app.run_test() as pilot:
+            model_windows.remember_window("ANTHROPIC", "claude-sonnet-5", 400_000)
+            session.set_trigger("ANTHROPIC", "claude-sonnet-5", 80_000)
+            system, errors = _capture(app)
+            _cmd_window(app, "off")
+            await pilot.pause()
+
+        assert model_windows.window_for("ANTHROPIC", "claude-sonnet-5") is None
+        assert session.trigger_for("ANTHROPIC", "claude-sonnet-5") == 80_000
+        assert any("cleared" in line for line in system)
+        session.clear()
+
+
+    @pytest.mark.asyncio
+    async def test_the_bare_form_reports_the_value_and_its_provenance(self):
+        """Provenance is the point: four sources can answer for the window, and
+        a number with no source attached is what makes someone edit the wrong
+        one."""
+        from core import model_windows
+        from tui.app import _cmd_window
+
+        app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
+        async with app.run_test() as pilot:
+            system, _ = _capture(app)
+            _cmd_window(app, "")
+            await pilot.pause()
+            assert any("MODEL_CONTEXT_WINDOWS" in line for line in system)
+
+            model_windows.remember_window("ANTHROPIC", "claude-sonnet-5", 400_000)
+            system2, _ = _capture(app)
+            _cmd_window(app, "")
+            await pilot.pause()
+
+        assert any("remembered for" in line and "400,000" in line
+                   for line in system2)
+
+
+    @pytest.mark.asyncio
+    async def test_switching_model_clears_the_trigger_but_keeps_the_window(self, mocker):
+        """Batch 44 split what §31 had joined.
+
+        The trigger is cleared and SAID rather than dropped quietly -- a
+        number tuned for one model must not govern the next. The remembered
+        window is NOT cleared: it is a fact about a deployment, kept per pair,
+        and a /model switch simply resolves a different key."""
+        mocker.patch("credentials.load_provider_data", return_value=_TWO_PROVIDERS)
+        from core import model_windows, session
+        from tui.app import _cmd_model
+
+        app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
+        async with app.run_test() as pilot:
+            model_windows.remember_window("ANTHROPIC", "claude-sonnet-5", 400_000)
+            session.set_trigger("ANTHROPIC", "claude-sonnet-5", 80_000)
+            system, _ = _capture(app)
+            _cmd_model(app, "OPENAI gpt-4o")
+            await pilot.pause()
+
+        assert session.state() == {}
+        assert any("cleared by the switch" in line for line in system)
+
+        # The window survives the round trip; the trigger does not.
+        assert session.trigger_for("ANTHROPIC", "claude-sonnet-5") is None
+        assert model_windows.window_for("ANTHROPIC", "claude-sonnet-5") == 400_000
+        session.clear()
+
+
+    @pytest.mark.asyncio
+    async def test_switching_model_says_nothing_when_no_override_was_set(self, mocker):
+        """A switch on a session that never touched these must not print a
+        line about state it did not have."""
+        mocker.patch("credentials.load_provider_data", return_value=_TWO_PROVIDERS)
+        from tui.app import _cmd_model
+
+        app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
+        async with app.run_test() as pilot:
+            system, _ = _capture(app)
+            _cmd_model(app, "OPENAI gpt-4o")
+            await pilot.pause()
+
+        assert not any("cleared by the switch" in line for line in system)
+
+
+    @pytest.mark.asyncio
+    async def test_setting_a_trigger_before_the_first_message_makes_no_thread(self):
+        """Setting one before any message is half of what the command is for.
+
+        `app.memory` is a property that CREATES and persists a
+        ConversationThread row on first use, so reading it here would leave
+        the phantom empty thread its own docstring describes having fixed --
+        launch the TUI, type /trigger, quit, and the Ctrl+T picker fills with
+        a row carrying nothing but an id.
+        """
+        from core import session
+        from tui.app import _cmd_trigger
+
+        app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
+        async with app.run_test() as pilot:
+            assert app._memory is None
+            system, errors = _capture(app)
+            _cmd_trigger(app, "80k")
+            await pilot.pause()
+
+        assert not errors
+        assert session.trigger_for("ANTHROPIC", "claude-sonnet-5") == 80_000
+        assert app._memory is None, "the command created a thread"
+        session.clear()
+
+
+    def test_both_commands_are_registered(self):
+        """/help is generated from the registry, so registration is what makes
+        them discoverable at all."""
+        from tui.commands import registry
+
+        names = {c.name for c in registry.all()}
+        assert {"window", "trigger"} <= names
+
+
+    @pytest.mark.asyncio
+    async def test_switching_model_revalidates_the_effort_level(self, mocker):
+        """Effort is per-MODEL. A level the old model accepted can be rejected
+        outright by the new one, and every later turn would fail with a
+        provider 400 — the exact failure the mount-time check exists to stop,
+        reachable again through a switch."""
+        mocker.patch("credentials.load_provider_data", return_value=_TWO_PROVIDERS)
+        mocker.patch("tui.app.api_initialization", return_value=object())
+        # The NEW model exposes no effort control at all.
+        mocker.patch("tui.app.effort_levels_for_model", return_value=[])
+
+        app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {"tui": {"effort": "high"}})
+        async with app.run_test() as pilot:
+            app.effort = "high"          # survived mount validation in this fake
+            app.query_one("#prompt").value = "/model OPENAI gpt-4o"
+            await pilot.press("enter")
+            assert await settle(pilot, lambda: app.effort is None), \
+                "a stale effort level survived the model switch"
+
+
+    @pytest.mark.asyncio
+    async def test_the_header_shows_which_model_the_next_turn_uses(self, mocker):
+        """The mount banner scrolls away, so after a switch nothing on screen
+        said what the next turn would actually call."""
+        mocker.patch("credentials.load_provider_data", return_value=_TWO_PROVIDERS)
+
+        app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert app.sub_title == "ANTHROPIC | claude-sonnet-5"
+
+            app.query_one("#prompt").value = "/model OPENAI gpt-4o"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.sub_title == "OPENAI | gpt-4o"
+
+
+    @pytest.mark.asyncio
+    async def test_bare_model_reports_without_changing_anything(self, mocker):
+        mocker.patch("credentials.load_provider_data", return_value=_TWO_PROVIDERS)
+        written = []
+
+        app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
+        async with app.run_test() as pilot:
+            mocker.patch.object(type(app._transcript), "write_system",
+                                side_effect=lambda self, t: written.append(t),
+                                autospec=True)
+            app.query_one("#prompt").value = "/model"
+            await pilot.press("enter")
+            await pilot.pause()
+
+        assert (app.provider_name, app.model) == ("ANTHROPIC", "claude-sonnet-5")
+        joined = " ".join(written)
+        assert "ANTHROPIC" in joined and "claude-sonnet-5" in joined
+        # Only providers that actually have a key -- listing LOCAL as ready
+        # would send the user at a provider whose every call 401s.
+        assert "LOCAL" not in joined.split("Providers with a key:")[1]
+
+
+    @pytest.mark.asyncio
+    async def test_the_new_model_reaches_the_next_model_call(self, _mocked_loop):
+        """The switch has to TRAVEL: app -> _run -> call_model_stream. Asserted
+        on the call arguments, because setting the attribute proves only that
+        the attribute was set."""
+        _mocked_loop.patch("credentials.load_provider_data",
+                           return_value=_TWO_PROVIDERS)
+        _mocked_loop.patch("core.loop.registry.approval_needed", return_value=False)
+        stream = _mocked_loop.patch(
+            "core.loop.call_model_stream",
+            side_effect=make_stream_sequence(make_model_response(text="hi")),
+        )
+
+        app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
+        async with app.run_test() as pilot:
+            app.query_one("#prompt").value = "/model OPENAI gpt-4o"
+            await pilot.press("enter")
+            await pilot.pause()
+
+            app.query_one("#prompt").value = "hello"
+            await pilot.press("enter")
+            assert await settle(pilot, lambda: stream.called)
+
+        # call_model_stream(client, provider, model, messages, system, tools, ...)
+        assert stream.call_args[0][1] == "OPENAI"
+        assert stream.call_args[0][2] == "gpt-4o"
 
 
 # ---------------------------------------------------------------------------
 # ---- Thread state and input handling (f43, f44, f45, r1-3) ---------------
 # ---------------------------------------------------------------------------
 
-@pytest.mark.asyncio
-async def test_launching_and_quitting_persists_no_thread(mocker):
-    """Constructing a ConversationMemory persists a ConversationThread
-    row, so building one at mount left a phantom empty thread behind
-    every launch -- and the Ctrl+T picker filled with rows carrying only
-    an id and a timestamp."""
-    made = mocker.patch("tui.app.ConversationMemory")
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        made.assert_not_called()
+class TestThreadStateAndInputHandling:
+    """f43, f44, f45, r1-3. What a thread's state does to the input box."""
 
+    @pytest.mark.asyncio
+    async def test_launching_and_quitting_persists_no_thread(self, mocker):
+        """Constructing a ConversationMemory persists a ConversationThread
+        row, so building one at mount left a phantom empty thread behind
+        every launch -- and the Ctrl+T picker filled with rows carrying only
+        an id and a timestamp."""
+        made = mocker.patch("tui.app.ConversationMemory")
 
-@pytest.mark.asyncio
-async def test_a_turn_still_creates_the_thread(_mocked_loop):
-    """Control: deferring must not mean never."""
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        assert app._memory is None
-        app.query_one("#prompt").value = "hello"
-        await pilot.press("enter")
-        await pilot.pause()
-        assert app._memory is not None
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            made.assert_not_called()
 
 
-@pytest.mark.asyncio
-async def test_a_rejected_mid_turn_submission_is_not_discarded(_mocked_loop):
-    """The input was cleared BEFORE the busy check, so a follow-up typed
-    during a long turn (/research holds _busy for a whole ten-pass
-    pipeline) was wiped and had to be retyped from memory."""
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        app._busy = True
-        app.query_one("#prompt").value = "my carefully typed follow-up"
-        await pilot.press("enter")
-        await pilot.pause()
-
-        assert app.query_one("#prompt").value == "my carefully typed follow-up"
+    @pytest.mark.asyncio
+    async def test_a_turn_still_creates_the_thread(self, _mocked_loop):
+        """Control: deferring must not mean never."""
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            assert app._memory is None
+            app.query_one("#prompt").value = "hello"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app._memory is not None
 
 
-@pytest.mark.asyncio
-async def test_new_thread_is_refused_mid_turn(_mocked_loop):
-    """Swapping memory mid-turn leaves the worker running against the OLD
-    one: its response persists into the abandoned thread while rendering
-    under the new one."""
-    from tui.app import _cmd_new
+    @pytest.mark.asyncio
+    async def test_a_rejected_mid_turn_submission_is_not_discarded(self, _mocked_loop):
+        """The input was cleared BEFORE the busy check, so a follow-up typed
+        during a long turn (/research holds _busy for a whole ten-pass
+        pipeline) was wiped and had to be retyped from memory."""
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app._busy = True
+            app.query_one("#prompt").value = "my carefully typed follow-up"
+            await pilot.press("enter")
+            await pilot.pause()
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        app.query_one("#prompt").value = "hello"
-        await pilot.press("enter")
-        await pilot.pause()
-        before = app._memory
-
-        app._busy = True
-        _cmd_new(app, "")
-        assert app._memory is before, "memory was swapped mid-turn"
+            assert app.query_one("#prompt").value == "my carefully typed follow-up"
 
 
-@pytest.mark.asyncio
-async def test_new_thread_clears_a_stale_goal_banner(_mocked_loop):
-    """The banner is per-thread state, and /goal was the only path that
-    refreshed it -- so after /new it kept showing the previous thread's
-    objective, misrepresenting what governs the session."""
-    from tui.app import _cmd_new
-    from tui.widgets import GoalBanner
+    @pytest.mark.asyncio
+    async def test_new_thread_is_refused_mid_turn(self, _mocked_loop):
+        """Swapping memory mid-turn leaves the worker running against the OLD
+        one: its response persists into the abandoned thread while rendering
+        under the new one."""
+        from tui.app import _cmd_new
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        app.memory.set_extra("goal", "ship the review fixes")
-        app.refresh_goal_banner()
-        await pilot.pause()
-        assert app.query_one("#goal-banner", GoalBanner).goal is not None
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app.query_one("#prompt").value = "hello"
+            await pilot.press("enter")
+            await pilot.pause()
+            before = app._memory
 
-        _cmd_new(app, "")
-        await pilot.pause()
-        assert app.query_one("#goal-banner", GoalBanner).goal is None
-
-
-@pytest.mark.asyncio
-async def test_new_thread_redraws_the_window(_mocked_loop):
-    """§43 (RM2). /new swapped the memory and wrote one line, so the
-    previous conversation stayed on screen underneath it -- two threads
-    concatenated, with only the second of them in context. The resume
-    path had cleared the transcript since §27; this one had not."""
-    from tui.app import _cmd_new
-
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        app.query_one("#prompt").value = "the previous conversation"
-        await pilot.press("enter")
-        await settle(pilot, lambda: not app._busy)
-        assert any("the previous conversation" in text
-                   for _role, text in app._transcript._entries)
-
-        _cmd_new(app, "")
-        await pilot.pause()
-
-        assert not any("the previous conversation" in text
-                       for _role, text in app._transcript._entries), \
-            "the previous thread was still on screen after /new"
-        assert app._transcript.as_text().strip().endswith(
-            "Started a new thread.")
+            app._busy = True
+            _cmd_new(app, "")
+            assert app._memory is before, "memory was swapped mid-turn"
 
 
-@pytest.mark.asyncio
-async def test_new_thread_clears_the_state_that_answers_for_a_thread(
-        _mocked_loop):
-    """switch_to_thread's list, and switch_to_thread's reason: /claims
-    reads these, so leaving them set makes the new thread answer with the
-    old one's content. /copy last is on the list through the transcript
-    reset, which has its own pin above."""
-    from tui.app import _cmd_new
+    @pytest.mark.asyncio
+    async def test_new_thread_clears_a_stale_goal_banner(self, _mocked_loop):
+        """The banner is per-thread state, and /goal was the only path that
+        refreshed it -- so after /new it kept showing the previous thread's
+        objective, misrepresenting what governs the session."""
+        from tui.app import _cmd_new
+        from tui.widgets import GoalBanner
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        app._last_run = object()
-        app._live_claims = {"c1": {"tier": "HIGH"}}
-        app._tool_names["call-1"] = "read"
-        app._file_calls["call-1"] = ("write", {}, "")
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app.memory.set_extra("goal", "ship the review fixes")
+            app.refresh_goal_banner()
+            await pilot.pause()
+            assert app.query_one("#goal-banner", GoalBanner).goal is not None
 
-        _cmd_new(app, "")
-        await pilot.pause()
-
-        assert app._last_run is None
-        assert app._live_claims == {}
-        assert app._tool_names == {}
-        assert app._file_calls == {}
+            _cmd_new(app, "")
+            await pilot.pause()
+            assert app.query_one("#goal-banner", GoalBanner).goal is None
 
 
-@pytest.mark.asyncio
-async def test_the_redrawn_banner_reports_the_switched_model(_mocked_loop):
-    """The banner is REPRINTED, not remembered from mount: a /model
-    switch survives /new (it is session state), so a banner replaying
-    the launch pair would name a model the next turn will not call."""
-    from tui.app import _cmd_model, _cmd_new
+    @pytest.mark.asyncio
+    async def test_new_thread_redraws_the_window(self, _mocked_loop):
+        """§43 (RM2). /new swapped the memory and wrote one line, so the
+        previous conversation stayed on screen underneath it -- two threads
+        concatenated, with only the second of them in context. The resume
+        path had cleared the transcript since §27; this one had not."""
+        from tui.app import _cmd_new
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        _cmd_model(app, "ANTHROPIC switched-model")
-        await pilot.pause()
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app.query_one("#prompt").value = "the previous conversation"
+            await pilot.press("enter")
+            await settle(pilot, lambda: not app._busy)
+            assert any("the previous conversation" in text
+                       for _role, text in app._transcript._entries)
 
-        _cmd_new(app, "")
-        await pilot.pause()
+            _cmd_new(app, "")
+            await pilot.pause()
 
-        assert app.model == "switched-model", "the switch did not survive /new"
-        banner = (f"{app.provider_name} | {app.model} "
-                  f"| theme {app._theme_name}")
-        assert any(text == banner for _role, text in app._transcript._entries), \
-            "the redrawn window never stated the pair the next turn will use"
+            assert not any("the previous conversation" in text
+                           for _role, text in app._transcript._entries), \
+                "the previous thread was still on screen after /new"
+            assert app._transcript.as_text().strip().endswith(
+                "Started a new thread.")
 
 
-@pytest.mark.asyncio
-async def test_same_state_reassignment_does_not_redraw_the_raven():
-    """always_update=True made watch_state fire on every same-value
-    reassignment -- and every token_delta reassigns state to THINKING, so
-    the watcher reset the frame, called Static.update() and re-paused the
-    timer once per token for the whole stream. That is precisely the
-    per-token redraw loop pause_animation exists to eliminate."""
-    from tui import ravens
-    from tui.widgets import RavenPanel
+    @pytest.mark.asyncio
+    async def test_new_thread_clears_the_state_that_answers_for_a_thread(self,
+            _mocked_loop):
+        """switch_to_thread's list, and switch_to_thread's reason: /claims
+        reads these, so leaving them set makes the new thread answer with the
+        old one's content. /copy last is on the list through the transcript
+        reset, which has its own pin above."""
+        from tui.app import _cmd_new
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        raven = app.query_one("#raven", RavenPanel)
-        raven.state = ravens.THINKING
-        await pilot.pause()
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app._last_run = object()
+            app._live_claims = {"c1": {"tier": "HIGH"}}
+            app._tool_names["call-1"] = "read"
+            app._file_calls["call-1"] = ("write", {}, "")
 
-        # Pause the ANIMATION first. _render_state has two callers -- the
-        # watcher and the 0.4s frame timer -- and only the watcher is under
-        # test here. Counting both made this flaky rather than wrong: a
-        # timer tick landing inside the measurement window shows up as a
-        # redraw the reactive did not cause, which happens under full-suite
-        # load and not when the file runs alone. This is also what the TUI
-        # itself does while tokens stream, so it is not an artificial state.
-        raven.pause_animation()
+            _cmd_new(app, "")
+            await pilot.pause()
 
-        # Count re-renders rather than watcher calls: _render_state is
-        # what actually costs a redraw, and it is called by the watcher.
-        calls = []
-        original = raven._render_state
-        raven._render_state = lambda: (calls.append(1), original())[1]
+            assert app._last_run is None
+            assert app._live_claims == {}
+            assert app._tool_names == {}
+            assert app._file_calls == {}
 
-        for _ in range(20):            # 20 token deltas, same state
+
+    @pytest.mark.asyncio
+    async def test_the_redrawn_banner_reports_the_switched_model(self, _mocked_loop):
+        """The banner is REPRINTED, not remembered from mount: a /model
+        switch survives /new (it is session state), so a banner replaying
+        the launch pair would name a model the next turn will not call."""
+        from tui.app import _cmd_model, _cmd_new
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            _cmd_model(app, "ANTHROPIC switched-model")
+            await pilot.pause()
+
+            _cmd_new(app, "")
+            await pilot.pause()
+
+            assert app.model == "switched-model", "the switch did not survive /new"
+            banner = (f"{app.provider_name} | {app.model} "
+                      f"| theme {app._theme_name}")
+            assert any(text == banner for _role, text in app._transcript._entries), \
+                "the redrawn window never stated the pair the next turn will use"
+
+
+    @pytest.mark.asyncio
+    async def test_same_state_reassignment_does_not_redraw_the_raven(self):
+        """always_update=True made watch_state fire on every same-value
+        reassignment -- and every token_delta reassigns state to THINKING, so
+        the watcher reset the frame, called Static.update() and re-paused the
+        timer once per token for the whole stream. That is precisely the
+        per-token redraw loop pause_animation exists to eliminate."""
+        from tui import ravens
+        from tui.widgets import RavenPanel
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            raven = app.query_one("#raven", RavenPanel)
             raven.state = ravens.THINKING
-        await pilot.pause()
-        assert calls == [], f"{len(calls)} redraws for 20 identical deltas"
+            await pilot.pause()
 
-        raven.state = ravens.IDLE      # a genuine transition still fires
-        await pilot.pause()
-        assert calls, "a real state change stopped updating the raven"
+            # Pause the ANIMATION first. _render_state has two callers -- the
+            # watcher and the 0.4s frame timer -- and only the watcher is under
+            # test here. Counting both made this flaky rather than wrong: a
+            # timer tick landing inside the measurement window shows up as a
+            # redraw the reactive did not cause, which happens under full-suite
+            # load and not when the file runs alone. This is also what the TUI
+            # itself does while tokens stream, so it is not an artificial state.
+            raven.pause_animation()
 
+            # Count re-renders rather than watcher calls: _render_state is
+            # what actually costs a redraw, and it is called by the watcher.
+            calls = []
+            original = raven._render_state
+            raven._render_state = lambda: (calls.append(1), original())[1]
 
-@pytest.mark.asyncio
-async def test_grill_me_runs_in_the_current_thread(mocker, tmp_path, fake_storage):
-    """The locked §18 decision: /grill-me reads the LIVE history rather
-    than a digest of it. That lives in run_one_shot, which passes
-    self.memory.thread_id to continue_conversation -- so a version that
-    spawned a fresh thread would grill an empty one.
+            for _ in range(20):            # 20 token deltas, same state
+                raven.state = ravens.THINKING
+            await pilot.pause()
+            assert calls == [], f"{len(calls)} redraws for 20 identical deltas"
 
-    Driven through the real run_one_shot. test_agents' version stubs that
-    method out, so it cannot see this at all.
-    """
-    from core import config_loader
-
-    config_loader.initialize(str(tmp_path))
-    continue_conv = mocker.patch(
-        "core.loop.RunAgentLoop.continue_conversation",
-        return_value=make_model_response(text="grilled"))
-
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        expected = app.memory.thread_id
-        app.query_one("#prompt").value = "/grill-me"
-        await pilot.press("enter")
-
-        assert await settle(pilot, lambda: continue_conv.called), \
-            "/grill-me never ran"
-
-    assert continue_conv.call_args.kwargs["thread_id"] == expected
+            raven.state = ravens.IDLE      # a genuine transition still fires
+            await pilot.pause()
+            assert calls, "a real state change stopped updating the raven"
 
 
-@pytest.mark.asyncio
-async def test_a_one_shot_surfaces_the_notices_its_turn_raised(
-        mocker, tmp_path, fake_storage):
-    """#172. continue_conversation drains _run() through
-    run_to_completion(), which discards every non-final event -- so a
-    compaction firing at the one-shot's boundary used to reach NEITHER
-    route: no event, and a response.notices field nothing read. §21's
-    "no silent compaction, ever" failed on exactly the command whose
-    subject is the state of the thread.
+    @pytest.mark.asyncio
+    async def test_grill_me_runs_in_the_current_thread(self, mocker, tmp_path, fake_storage):
+        """The locked §18 decision: /grill-me reads the LIVE history rather
+        than a digest of it. That lives in run_one_shot, which passes
+        self.memory.thread_id to continue_conversation -- so a version that
+        spawned a fresh thread would grill an empty one.
 
-    The fix carries response.notices on OneShotFinished and renders them
-    through the SAME branch on_loop_event_message uses. Asserted on the
-    transcript, not on a call count -- the failure this guards against is
-    a display failure."""
-    from core import config_loader
+        Driven through the real run_one_shot. test_agents' version stubs that
+        method out, so it cannot see this at all.
+        """
+        from core import config_loader
 
-    config_loader.initialize(str(tmp_path))
-    noticed = make_model_response(text="grilled")
-    noticed.notices = [{"kind": "compaction",
-                        "text": "12 earlier messages compacted into a summary"}]
-    mocker.patch("core.loop.RunAgentLoop.continue_conversation",
-                 return_value=noticed)
+        config_loader.initialize(str(tmp_path))
+        continue_conv = mocker.patch(
+            "core.loop.RunAgentLoop.continue_conversation",
+            return_value=make_model_response(text="grilled"))
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        app.query_one("#prompt").value = "/grill-me"
-        await pilot.press("enter")
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            expected = app.memory.thread_id
+            app.query_one("#prompt").value = "/grill-me"
+            await pilot.press("enter")
 
-        assert await settle(pilot, lambda: app._transcript.last_answer() == "grilled"), \
-            "the one-shot never finished"
+            assert await settle(pilot, lambda: continue_conv.called), \
+                "/grill-me never ran"
 
-        rendered = [txt for _role, txt in app._transcript._entries
-                    if "12 earlier" in txt]
-        assert rendered, (
-            "a compaction during /grill-me was silent -- #172's defect")
+        assert continue_conv.call_args.kwargs["thread_id"] == expected
 
 
-@pytest.mark.asyncio
-async def test_the_one_shot_sees_the_thread_state_the_streaming_turn_sees(
-        mocker, tmp_path, fake_storage):
-    """#109. run_agent_turn applies goal, references and the checklist to
-    every streaming turn; run_one_shot applied none of them -- so the one
-    command whose subject is "what is still open" was the one run that
-    could not see the open items, which live in memory.extra rather than
-    in the message history a one-shot reads.
+    @pytest.mark.asyncio
+    async def test_a_one_shot_surfaces_the_notices_its_turn_raised(self,
+            mocker, tmp_path, fake_storage):
+        """#172. continue_conversation drains _run() through
+        run_to_completion(), which discards every non-final event -- so a
+        compaction firing at the one-shot's boundary used to reach NEITHER
+        route: no event, and a response.notices field nothing read. §21's
+        "no silent compaction, ever" failed on exactly the command whose
+        subject is the state of the thread.
 
-    Asserted on the prompt continue_conversation receives: that string is
-    what the model is actually told, which is exactly what #109 got
-    wrong. The goal banner being on screen above the grill answer is not
-    the model knowing the goal.
-    """
-    from core import config_loader
-    from core.loop import attach_ref
-    from core.memory import ConversationMemory
+        The fix carries response.notices on OneShotFinished and renders them
+        through the SAME branch on_loop_event_message uses. Asserted on the
+        transcript, not on a call count -- the failure this guards against is
+        a display failure."""
+        from core import config_loader
 
-    config_loader.initialize(str(tmp_path))
-    continue_conv = mocker.patch(
-        "core.loop.RunAgentLoop.continue_conversation",
-        return_value=make_model_response(text="grilled"))
+        config_loader.initialize(str(tmp_path))
+        noticed = make_model_response(text="grilled")
+        noticed.notices = [{"kind": "compaction",
+                            "text": "12 earlier messages compacted into a summary"}]
+        mocker.patch("core.loop.RunAgentLoop.continue_conversation",
+                     return_value=noticed)
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        memory = app.memory
-        # extra is a SNAPSHOT (core/memory.py); set_extra is the
-        # write-through path, exactly what /goal and todo_write use.
-        memory.set_extra("goal", "ship the batch")
-        memory.set_extra("todos", [
-            {"content": "pick a storage format", "status": "pending"}])
-        source = ConversationMemory()
-        source.add_user_message("the question about retries")
-        attach_ref(memory, source.thread_id,
-                   "a distilled summary of the retry question",
-                   "first question about retries")
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app.query_one("#prompt").value = "/grill-me"
+            await pilot.press("enter")
 
-        app.query_one("#prompt").value = "/grill-me"
-        await pilot.press("enter")
-        assert await settle(pilot, lambda: continue_conv.called), \
-            "/grill-me never ran"
+            assert await settle(pilot, lambda: app._transcript.last_answer() == "grilled"), \
+                "the one-shot never finished"
 
-    prompt = continue_conv.call_args.kwargs["system_prompt"]
-    assert "ship the batch" in prompt, \
-        "the one-shot ran without the thread's goal"
-    assert "pick a storage format" in prompt, \
-        "the one-shot ran without the checklist"
-    assert "### first question about retries" in prompt, \
-        "the one-shot ran without its references"
+            rendered = [txt for _role, txt in app._transcript._entries
+                        if "12 earlier" in txt]
+            assert rendered, (
+                "a compaction during /grill-me was silent -- #172's defect")
 
 
-@pytest.mark.asyncio
-async def test_the_one_shot_never_adds_the_memories_tier(
-        mocker, tmp_path, fake_storage):
-    """#109's guard rail. The one-shot prompt comes from
-    system_prompt_for(agent), which has already appended this agent's
-    memories (M13) -- so run_one_shot must not call with_memories at all.
-    A streaming turn guards the same call behind `active_agent is None`;
-    here there is no condition to hide behind, because EVERY one-shot
-    prompt was assembled through system_prompt_for."""
-    from core import config_loader
+    @pytest.mark.asyncio
+    async def test_the_one_shot_sees_the_thread_state_the_streaming_turn_sees(self,
+            mocker, tmp_path, fake_storage):
+        """#109. run_agent_turn applies goal, references and the checklist to
+        every streaming turn; run_one_shot applied none of them -- so the one
+        command whose subject is "what is still open" was the one run that
+        could not see the open items, which live in memory.extra rather than
+        in the message history a one-shot reads.
 
-    config_loader.initialize(str(tmp_path))
-    mocker.patch("core.loop.RunAgentLoop.continue_conversation",
-                 return_value=make_model_response(text="grilled"))
-    import core.loop as core_loop
-    mem_calls = []
-    real_with_memories = core_loop.with_memories
+        Asserted on the prompt continue_conversation receives: that string is
+        what the model is actually told, which is exactly what #109 got
+        wrong. The goal banner being on screen above the grill answer is not
+        the model knowing the goal.
+        """
+        from core import config_loader
+        from core.loop import attach_ref
+        from core.memory import ConversationMemory
 
-    def _spy(prompt, *args, **kwargs):
-        mem_calls.append(1)
-        return real_with_memories(prompt, *args, **kwargs)
+        config_loader.initialize(str(tmp_path))
+        continue_conv = mocker.patch(
+            "core.loop.RunAgentLoop.continue_conversation",
+            return_value=make_model_response(text="grilled"))
 
-    mocker.patch("tui.app.with_memories", side_effect=_spy)
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            memory = app.memory
+            # extra is a SNAPSHOT (core/memory.py); set_extra is the
+            # write-through path, exactly what /goal and todo_write use.
+            memory.set_extra("goal", "ship the batch")
+            memory.set_extra("todos", [
+                {"content": "pick a storage format", "status": "pending"}])
+            source = ConversationMemory()
+            source.add_user_message("the question about retries")
+            attach_ref(memory, source.thread_id,
+                       "a distilled summary of the retry question",
+                       "first question about retries")
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        app.query_one("#prompt").value = "/grill-me"
-        await pilot.press("enter")
-        assert await settle(pilot, lambda: app._transcript.last_answer() == "grilled"), \
-            "/grill-me never ran"
+            app.query_one("#prompt").value = "/grill-me"
+            await pilot.press("enter")
+            assert await settle(pilot, lambda: continue_conv.called), \
+                "/grill-me never ran"
 
-    assert not mem_calls, \
-        "with_memories fired on a one-shot turn -- M13 duplication"
+        prompt = continue_conv.call_args.kwargs["system_prompt"]
+        assert "ship the batch" in prompt, \
+            "the one-shot ran without the thread's goal"
+        assert "pick a storage format" in prompt, \
+            "the one-shot ran without the checklist"
+        assert "### first question about retries" in prompt, \
+            "the one-shot ran without its references"
+
+
+    @pytest.mark.asyncio
+    async def test_the_one_shot_never_adds_the_memories_tier(self,
+            mocker, tmp_path, fake_storage):
+        """#109's guard rail. The one-shot prompt comes from
+        system_prompt_for(agent), which has already appended this agent's
+        memories (M13) -- so run_one_shot must not call with_memories at all.
+        A streaming turn guards the same call behind `active_agent is None`;
+        here there is no condition to hide behind, because EVERY one-shot
+        prompt was assembled through system_prompt_for."""
+        from core import config_loader
+
+        config_loader.initialize(str(tmp_path))
+        mocker.patch("core.loop.RunAgentLoop.continue_conversation",
+                     return_value=make_model_response(text="grilled"))
+        import core.loop as core_loop
+        mem_calls = []
+        real_with_memories = core_loop.with_memories
+
+        def _spy(prompt, *args, **kwargs):
+            mem_calls.append(1)
+            return real_with_memories(prompt, *args, **kwargs)
+
+        mocker.patch("tui.app.with_memories", side_effect=_spy)
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app.query_one("#prompt").value = "/grill-me"
+            await pilot.press("enter")
+            assert await settle(pilot, lambda: app._transcript.last_answer() == "grilled"), \
+                "/grill-me never ran"
+
+        assert not mem_calls, \
+            "with_memories fired on a one-shot turn -- M13 duplication"
 
 
 # ===========================================================================
@@ -2534,115 +2594,120 @@ class _ClosableEvents:
         self.closed = True
 
 
-def test_forwarding_stops_at_the_next_event_when_shutting_down():
-    """_forwarding is the consumer §22's abandonment semantics were
-    written for: stopping early leaves the record 'running' with its
-    checkpoints -- provided the underlying generator is actually closed,
-    deterministically, here rather than at GC's leisure."""
-    from types import SimpleNamespace
+class TestQuittingWhileAResearchRunIsGoing:
+    """#105. The forwarding loop stops at the next event once the shell
+    is shutting down, rather than draining into a dead stack.
+    """
 
-    from core.reasoning.events import PipelineEvent
-    from tui.app import _forwarding
+    def test_forwarding_stops_at_the_next_event_when_shutting_down(self):
+        """_forwarding is the consumer §22's abandonment semantics were
+        written for: stopping early leaves the record 'running' with its
+        checkpoints -- provided the underlying generator is actually closed,
+        deterministically, here rather than at GC's leisure."""
+        from types import SimpleNamespace
 
-    def ev(kind):
-        return PipelineEvent(kind=kind)
+        from core.reasoning.events import PipelineEvent
+        from tui.app import _forwarding
 
-    app = SimpleNamespace(_shutting_down=False, post_message=lambda m: None)
-    events = _ClosableEvents([ev("pass_start"), ev("trace_line"),
-                              ev("pass_complete")])
-    outcome = {}
+        def ev(kind):
+            return PipelineEvent(kind=kind)
 
-    got = list(_forwarding(app, events, outcome))
-    assert [e.kind for e in got] == ["pass_start", "trace_line",
-                                     "pass_complete"]
-    assert not outcome.get("abandoned"), "a full drain read as abandoned"
-    assert not events.closed
+        app = SimpleNamespace(_shutting_down=False, post_message=lambda m: None)
+        events = _ClosableEvents([ev("pass_start"), ev("trace_line"),
+                                  ev("pass_complete")])
+        outcome = {}
 
-    # Flip mid-run: nothing further is forwarded, the source IS closed,
-    # and work() can tell this apart from a bug.
-    app._shutting_down = True
-    events2 = _ClosableEvents([ev("pass_start"), ev("trace_line")])
-    outcome2 = {}
-    got2 = list(_forwarding(app, events2, outcome2))
-    assert got2 == [], "events kept flowing after quit"
-    assert outcome2.get("abandoned") is True
-    assert events2.closed, "the pipeline generator was left to the GC"
+        got = list(_forwarding(app, events, outcome))
+        assert [e.kind for e in got] == ["pass_start", "trace_line",
+                                         "pass_complete"]
+        assert not outcome.get("abandoned"), "a full drain read as abandoned"
+        assert not events.closed
 
-
-@pytest.mark.asyncio
-async def test_quitting_mid_run_abandons_it_without_calling_it_a_failure(
-        mocker):
-    """/quit during a ten-pass run must release the terminal within an
-    event of the quit, skip artifacts (there is no finished run), and say
-    what happened -- NOT print '[pipeline failed]'. The flag is set by
-    hand here because THIS property is about the forwarding path reading
-    it; that exit() arms it is pinned in test_review.py's r1-1 rewrite."""
-    from core.reasoning.events import PipelineEvent
-
-    def fake_stream(**kw):
-        def gen():
-            yield PipelineEvent(kind="pass_start", pass_id="Pass 1")
-            for i in range(5000):
-                # A pass takes minutes; a trace line takes ~20ms. The
-                # pacing is what makes "quit mid-run" reachable at all --
-                # unpaced, the whole fake drains before the flag lands.
-                # Safe against close(): the generator executes on the
-                # WORKER's thread (the consumer drives next()), so close()
-                # always lands while it is suspended at this yield.
-                time.sleep(0.02)
-                yield PipelineEvent(kind="trace_line",
-                                    text=f"working {i}")
-            # No run_complete: a real quit lands mid-run.
-        return gen()
-
-    mocker.patch(
-        "core.reasoning.orchestrator.stream_deep_research_pipeline",
-        side_effect=fake_stream)
-    mocker.patch("core.reasoning.output_writer.write_run_artifacts",
-                 side_effect=AssertionError(
-                     "an abandoned run must not write artifacts"))
-
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        from tui.app import _cmd_research
-        _cmd_research(app, "what is entropy")
-        assert await settle(pilot, lambda: app._busy), \
-            "the run never started"
-
-        app._shutting_down = True   # what exit() sets; arming pinned elsewhere
-        assert await settle(pilot, lambda: not app._busy, timeout=10), \
-            "quit did not release the worker within an event"
-        await pump(pilot, 3)
-
-        text = app._transcript.as_text()
-        assert "abandoned" in text, \
-            "the abandoned run went unexplained"
-        assert "pipeline failed" not in text, \
-            "the user's own quit was reported as a failure"
+        # Flip mid-run: nothing further is forwarded, the source IS closed,
+        # and work() can tell this apart from a bug.
+        app._shutting_down = True
+        events2 = _ClosableEvents([ev("pass_start"), ev("trace_line")])
+        outcome2 = {}
+        got2 = list(_forwarding(app, events2, outcome2))
+        assert got2 == [], "events kept flowing after quit"
+        assert outcome2.get("abandoned") is True
+        assert events2.closed, "the pipeline generator was left to the GC"
 
 
-@pytest.mark.asyncio
-async def test_quitting_while_busy_says_what_happens_to_the_work(_mocked_loop):
-    """D4: with a turn running, every exit route says so instead of the
-    window just ending. And when idle, nothing is announced."""
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        app._busy = True
-        app.exit()
-        await pilot.pause()
+    @pytest.mark.asyncio
+    async def test_quitting_mid_run_abandons_it_without_calling_it_a_failure(self,
+            mocker):
+        """/quit during a ten-pass run must release the terminal within an
+        event of the quit, skip artifacts (there is no finished run), and say
+        what happened -- NOT print '[pipeline failed]'. The flag is set by
+        hand here because THIS property is about the forwarding path reading
+        it; that exit() arms it is pinned in test_review.py's r1-1 rewrite."""
+        from core.reasoning.events import PipelineEvent
 
-        busy_lines = app._transcript.as_text()
-        assert "quitting" in busy_lines, \
-            "exit said nothing about the work it abandons"
+        def fake_stream(**kw):
+            def gen():
+                yield PipelineEvent(kind="pass_start", pass_id="Pass 1")
+                for i in range(5000):
+                    # A pass takes minutes; a trace line takes ~20ms. The
+                    # pacing is what makes "quit mid-run" reachable at all --
+                    # unpaced, the whole fake drains before the flag lands.
+                    # Safe against close(): the generator executes on the
+                    # WORKER's thread (the consumer drives next()), so close()
+                    # always lands while it is suspended at this yield.
+                    time.sleep(0.02)
+                    yield PipelineEvent(kind="trace_line",
+                                        text=f"working {i}")
+                # No run_complete: a real quit lands mid-run.
+            return gen()
 
-    idle_app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with idle_app.run_test() as pilot:
-        idle_app.exit()
-        await pilot.pause()
+        mocker.patch(
+            "core.reasoning.orchestrator.stream_deep_research_pipeline",
+            side_effect=fake_stream)
+        mocker.patch("core.reasoning.output_writer.write_run_artifacts",
+                     side_effect=AssertionError(
+                         "an abandoned run must not write artifacts"))
 
-        idle_lines = idle_app._transcript.as_text()
-        assert "quitting" not in idle_lines, \
-            "an idle exit announced an abandonment that never happened"
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            from tui.app import _cmd_research
+            _cmd_research(app, "what is entropy")
+            assert await settle(pilot, lambda: app._busy), \
+                "the run never started"
+
+            app._shutting_down = True   # what exit() sets; arming pinned elsewhere
+            assert await settle(pilot, lambda: not app._busy, timeout=10), \
+                "quit did not release the worker within an event"
+            await pump(pilot, 3)
+
+            text = app._transcript.as_text()
+            assert "abandoned" in text, \
+                "the abandoned run went unexplained"
+            assert "pipeline failed" not in text, \
+                "the user's own quit was reported as a failure"
+
+
+    @pytest.mark.asyncio
+    async def test_quitting_while_busy_says_what_happens_to_the_work(self, _mocked_loop):
+        """D4: with a turn running, every exit route says so instead of the
+        window just ending. And when idle, nothing is announced."""
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app._busy = True
+            app.exit()
+            await pilot.pause()
+
+            busy_lines = app._transcript.as_text()
+            assert "quitting" in busy_lines, \
+                "exit said nothing about the work it abandons"
+
+        idle_app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with idle_app.run_test() as pilot:
+            idle_app.exit()
+            await pilot.pause()
+
+            idle_lines = idle_app._transcript.as_text()
+            assert "quitting" not in idle_lines, \
+                "an idle exit announced an abandonment that never happened"
 
 
 # ===========================================================================
@@ -2654,274 +2719,285 @@ async def test_quitting_while_busy_says_what_happens_to_the_work(_mocked_loop):
 # own comments identify as load-bearing, where the wrong edit currently
 # looks right. Group numbers match the issue.
 
-@pytest.mark.asyncio
-async def test_an_active_agent_still_gets_the_thread_state_tiers(
-        _mocked_loop, mocker):
-    """#110 group 1. run_agent_turn applies refs and todos UNCONDITIONALLY
-    -- M19's rule, whose own comment says the wrong edit looks right.
-    Guarding either behind `active_agent is None` would make an active
-    agent lose its thread state, and until now nothing went red."""
-    import core.loop as core_loop
-    from core.config_loader import AgentDef
 
-    counts = {"refs": 0, "todos": 0}
+class TestAnActiveAgentStillGetsItsTiers:
+    """#110. An active agent is given the thread-state tiers, and is
+    given its memories once rather than twice.
+    """
 
-    def _spy(name):
-        real = getattr(core_loop, name)
+    @pytest.mark.asyncio
+    async def test_an_active_agent_still_gets_the_thread_state_tiers(self,
+            _mocked_loop, mocker):
+        """#110 group 1. run_agent_turn applies refs and todos UNCONDITIONALLY
+        -- M19's rule, whose own comment says the wrong edit looks right.
+        Guarding either behind `active_agent is None` would make an active
+        agent lose its thread state, and until now nothing went red."""
+        import core.loop as core_loop
+        from core.config_loader import AgentDef
 
-        def wrapper(prompt, *a, **kw):
-            counts[name[5:]] += 1
-            return real(prompt, *a, **kw)
+        counts = {"refs": 0, "todos": 0}
 
-        return wrapper
+        def _spy(name):
+            real = getattr(core_loop, name)
 
-    mocker.patch("tui.app.with_refs", side_effect=_spy("with_refs"))
-    mocker.patch("tui.app.with_todos", side_effect=_spy("with_todos"))
+            def wrapper(prompt, *a, **kw):
+                counts[name[5:]] += 1
+                return real(prompt, *a, **kw)
 
-    agent = AgentDef(
-        name="sec", description="d", model=None, provider=None,
-        allowed_tools=None, approval_overrides={},
-        use_project_context=False, use_memory=False, max_steps=None,
-        body="BODY", tier="harness", path="/sec.md")
+            return wrapper
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        app.active_agent = agent
-        app.memory.set_extra("goal", "ship it")
-        type_into_prompt(app, "hello")
-        await pilot.press("enter")
-        assert await settle(pilot, lambda: not app._busy), \
-            "the turn never finished"
+        mocker.patch("tui.app.with_refs", side_effect=_spy("with_refs"))
+        mocker.patch("tui.app.with_todos", side_effect=_spy("with_todos"))
 
-    assert counts["refs"] >= 1, \
-        "an active agent lost its references (M19)"
-    assert counts["todos"] >= 1, \
-        "an active agent lost its checklist"
+        agent = AgentDef(
+            name="sec", description="d", model=None, provider=None,
+            allowed_tools=None, approval_overrides={},
+            use_project_context=False, use_memory=False, max_steps=None,
+            body="BODY", tier="harness", path="/sec.md")
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app.active_agent = agent
+            app.memory.set_extra("goal", "ship it")
+            type_into_prompt(app, "hello")
+            await pilot.press("enter")
+            assert await settle(pilot, lambda: not app._busy), \
+                "the turn never finished"
+
+        assert counts["refs"] >= 1, \
+            "an active agent lost its references (M19)"
+        assert counts["todos"] >= 1, \
+            "an active agent lost its checklist"
 
 
-@pytest.mark.asyncio
-async def test_an_active_agent_is_not_given_its_memories_twice(
-        _mocked_loop, mocker):
-    """#110 group 1, M13's direction. An active agent gets its memories
-    INSIDE system_prompt_for(); appending them again in run_agent_turn
-    would duplicate the tier on every agent turn."""
-    import core.loop as core_loop
-    from core.config_loader import AgentDef
+    @pytest.mark.asyncio
+    async def test_an_active_agent_is_not_given_its_memories_twice(self,
+            _mocked_loop, mocker):
+        """#110 group 1, M13's direction. An active agent gets its memories
+        INSIDE system_prompt_for(); appending them again in run_agent_turn
+        would duplicate the tier on every agent turn."""
+        import core.loop as core_loop
+        from core.config_loader import AgentDef
 
-    mem_calls = []
-    real_with_memories = core_loop.with_memories
+        mem_calls = []
+        real_with_memories = core_loop.with_memories
 
-    def _spy(prompt, *a, **kw):
-        mem_calls.append(1)
-        return real_with_memories(prompt, *a, **kw)
+        def _spy(prompt, *a, **kw):
+            mem_calls.append(1)
+            return real_with_memories(prompt, *a, **kw)
 
-    mocker.patch("tui.app.with_memories", side_effect=_spy)
+        mocker.patch("tui.app.with_memories", side_effect=_spy)
 
-    agent = AgentDef(
-        name="sec", description="d", model=None, provider=None,
-        allowed_tools=None, approval_overrides={},
-        use_project_context=False, use_memory=True, max_steps=None,
-        body="BODY", tier="harness", path="/sec.md")
+        agent = AgentDef(
+            name="sec", description="d", model=None, provider=None,
+            allowed_tools=None, approval_overrides={},
+            use_project_context=False, use_memory=True, max_steps=None,
+            body="BODY", tier="harness", path="/sec.md")
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        app.active_agent = agent
-        type_into_prompt(app, "hello")
-        await pilot.press("enter")
-        assert await settle(pilot, lambda: not app._busy)
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app.active_agent = agent
+            type_into_prompt(app, "hello")
+            await pilot.press("enter")
+            assert await settle(pilot, lambda: not app._busy)
 
-    assert mem_calls == [], \
-        "with_memories fired behind an active agent -- duplicated tier"
+        assert mem_calls == [], \
+            "with_memories fired behind an active agent -- duplicated tier"
 
 
 def type_into_prompt(app, text):
     app.query_one("#prompt").value = text
 
 
-@pytest.mark.asyncio
-async def test_ctrl_t_is_refused_mid_turn(fake_storage):
-    """#110 group 2. Swapping memory mid-turn leaves the worker writing
-    into the abandoned thread while rendering under the new one; /model
-    and /new have their guards pinned and ctrl+t did not."""
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        before = app.memory
-        app._busy = True
-        app.action_pick_thread()
-        await pump(pilot, 3)
+class TestTheFailuresThatMustStayContained:
+    """#110 group 2. Each of these is a failure that has to be reported
+    without taking the turn, the panel or the shell down with it.
+    """
 
-        assert app.memory is before, "memory was swapped mid-turn"
-        assert not isinstance(app.screen, ThreadPickerScreen), \
-            "the picker opened over a running turn"
-        assert any("Still working" in t for _r, t in
-                   app._transcript._entries)
+    @pytest.mark.asyncio
+    async def test_ctrl_t_is_refused_mid_turn(self, fake_storage):
+        """#110 group 2. Swapping memory mid-turn leaves the worker writing
+        into the abandoned thread while rendering under the new one; /model
+        and /new have their guards pinned and ctrl+t did not."""
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            before = app.memory
+            app._busy = True
+            app.action_pick_thread()
+            await pump(pilot, 3)
 
-
-@pytest.mark.asyncio
-async def test_resuming_refreshes_the_todo_panel(fake_storage, mocker):
-    """#110 group 2. §23 added this call for §27's reason ("a resume
-    showed the previous thread's list"); deleting it was green because
-    the test covered the callback and stopped one line short."""
-
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        spy = mocker.spy(app, "refresh_todo_panel")
-        # A REAL thread: an unknown id would stop at the load guard
-        # (#104) and never reach the refresh at all.
-        app.switch_to_thread(app.memory.thread_id)
-        await pump(pilot, 3)
-        assert not [t for _r, t in app._transcript._entries
-                    if "Could not open" in t], "the resume never happened"
-
-    assert spy.called, "a resume kept the previous thread's checklist"
+            assert app.memory is before, "memory was swapped mid-turn"
+            assert not isinstance(app.screen, ThreadPickerScreen), \
+                "the picker opened over a running turn"
+            assert any("Still working" in t for _r, t in
+                       app._transcript._entries)
 
 
-def test_a_worker_error_is_reported_not_swallowed(mocker):
-    """/#110 group 3, AC3's second half. exit_on_error=False keeps the
-    app alive through a worker exception; on_worker_state_changed is what
-    makes that exception VISIBLE. Neutering the body was green."""
-    from textual.worker import WorkerState
+    @pytest.mark.asyncio
+    async def test_resuming_refreshes_the_todo_panel(self, fake_storage, mocker):
+        """#110 group 2. §23 added this call for §27's reason ("a resume
+        showed the previous thread's list"); deleting it was green because
+        the test covered the callback and stopped one line short."""
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    seen = []
-    mocker.patch.object(app, "notify",
-                        side_effect=lambda *a, **k: seen.append(a))
-    # `name` because the handler logs WHICH worker died (batch 78), and a
-    # double missing it fails inside the handler rather than at the
-    # assertion -- which is how it read as a textual problem when it was
-    # not one. The four names run_worker uses are "turn", "one-shot",
-    # "research" and "compact".
-    event = SimpleNamespace(worker=SimpleNamespace(
-        name="turn", state=WorkerState.ERROR,
-        error=RuntimeError("boom")))
-    app.on_worker_state_changed(event)
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            spy = mocker.spy(app, "refresh_todo_panel")
+            # A REAL thread: an unknown id would stop at the load guard
+            # (#104) and never reach the refresh at all.
+            app.switch_to_thread(app.memory.thread_id)
+            await pump(pilot, 3)
+            assert not [t for _r, t in app._transcript._entries
+                        if "Could not open" in t], "the resume never happened"
 
-    assert seen, "the worker's exception was reported nowhere"
-    assert "boom" in str(seen[0])
+        assert spy.called, "a resume kept the previous thread's checklist"
 
 
-@pytest.mark.asyncio
-async def test_an_unknown_copy_target_is_an_error_not_everything():
-    """#110 group 4. The unknown-OPTION check is pinned beside this; the
-    unknown-TARGET check is its twin. `_parse_copy_args` rejecting is what
-    stops `/copy repot` from silently falling through to the whole
-    session."""
-    from tui.app import _cmd_copy
+    def test_a_worker_error_is_reported_not_swallowed(self, mocker):
+        """/#110 group 3, AC3's second half. exit_on_error=False keeps the
+        app alive through a worker exception; on_worker_state_changed is what
+        makes that exception VISIBLE. Neutering the body was green."""
+        from textual.worker import WorkerState
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        sent = []
-        app.copy_to_clipboard = lambda text: sent.append(text)
-        _cmd_copy(app, "repot")
-        await pump(pilot, 3)
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        seen = []
+        mocker.patch.object(app, "notify",
+                            side_effect=lambda *a, **k: seen.append(a))
+        # `name` because the handler logs WHICH worker died (batch 78), and a
+        # double missing it fails inside the handler rather than at the
+        # assertion -- which is how it read as a textual problem when it was
+        # not one. The four names run_worker uses are "turn", "one-shot",
+        # "research" and "compact".
+        event = SimpleNamespace(worker=SimpleNamespace(
+            name="turn", state=WorkerState.ERROR,
+            error=RuntimeError("boom")))
+        app.on_worker_state_changed(event)
 
-        assert any("Unknown copy target" in t for _r, t in
-                   app._transcript._entries), "the typo passed silently"
-        assert sent == [], "/copy repot copied SOMETHING"
-
-
-@pytest.mark.asyncio
-async def test_a_malformed_claims_id_is_contained(fake_storage):
-    """#110 group 4. Narrowing `_stored_claims`' except ValueError was
-    green: a malformed id reaching the message pump would take the app
-    down from a read-only command (#104's shape, one command along)."""
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        app.show_claims("not-a-uuid")
-        await pump(pilot, 3)
-
-        assert any(t.startswith("/claims:") for _r, t in
-                   app._transcript._entries), "the failure was silent"
-        assert app.is_running, \
-            "the malformed id reached the message pump and took the app down"
+        assert seen, "the worker's exception was reported nowhere"
+        assert "boom" in str(seen[0])
 
 
-@pytest.mark.asyncio
-async def test_the_tier_tally_keys_by_claim_id_not_by_event(mocker):
-    """#110 group 4, the app-side seam. The widget keys by claim id and
-    that IS pinned; this pins the handler FEEDING it the claim id. A
-    fresh id per event is exactly §26's stated failure -- 6c re-tiers the
-    same claim once per retry round, so counting reports more claims than
-    the run has and the number keeps climbing."""
-    from core.reasoning.events import PipelineEvent
-    from tui.app import PipelineEventMessage
-    from tui.widgets import ResearchProgress
+    @pytest.mark.asyncio
+    async def test_an_unknown_copy_target_is_an_error_not_everything(self):
+        """#110 group 4. The unknown-OPTION check is pinned beside this; the
+        unknown-TARGET check is its twin. `_parse_copy_args` rejecting is what
+        stops `/copy repot` from silently falling through to the whole
+        session."""
+        from tui.app import _cmd_copy
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        panel = app.query_one(ResearchProgress)
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            sent = []
+            app.copy_to_clipboard = lambda text: sent.append(text)
+            _cmd_copy(app, "repot")
+            await pump(pilot, 3)
 
-        def tiered(cid, tier):
-            return PipelineEventMessage(PipelineEvent(
-                kind="claim_tiered", claim_id=cid, tier=tier))
-
-        app.post_message(tiered("c1", "HIGH"))
-        await pump(pilot, 3)
-        app.post_message(tiered("c2", "HIGH"))
-        await pump(pilot, 3)
-        app.post_message(tiered("c1", "LOW"))   # 6c re-tiers it
-        await pump(pilot, 3)
-
-    assert set(panel._tiers) == {"c1", "c2"}, (
-        f"the tally counted events, not claims: {panel._tiers}")
-    assert panel._tiers["c1"] == "LOW", "a re-tier did not land"
+            assert any("Unknown copy target" in t for _r, t in
+                       app._transcript._entries), "the typo passed silently"
+            assert sent == [], "/copy repot copied SOMETHING"
 
 
-@pytest.mark.asyncio
-async def test_the_one_shot_answer_reloads_the_live_memory(
-        mocker, tmp_path, fake_storage):
-    """#110 group 4. on_one_shot_finished's docstring promises the reload
-    ("so the next streaming turn sees it too"); deleting it was green."""
-    from core import config_loader
+    @pytest.mark.asyncio
+    async def test_a_malformed_claims_id_is_contained(self, fake_storage):
+        """#110 group 4. Narrowing `_stored_claims`' except ValueError was
+        green: a malformed id reaching the message pump would take the app
+        down from a read-only command (#104's shape, one command along)."""
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app.show_claims("not-a-uuid")
+            await pump(pilot, 3)
 
-    config_loader.initialize(str(tmp_path))
-    mocker.patch("core.loop.RunAgentLoop.continue_conversation",
-                 return_value=make_model_response(text="grilled"))
-
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        before = app.memory
-        app.query_one("#prompt").value = "/grill-me"
-        await pilot.press("enter")
-        assert await settle(pilot,
-                            lambda: app._transcript.last_answer() == "grilled")
-
-        assert app.memory is not before, "the live memory was never reloaded"
-        assert app.memory.thread_id == before.thread_id
+            assert any(t.startswith("/claims:") for _r, t in
+                       app._transcript._entries), "the failure was silent"
+            assert app.is_running, \
+                "the malformed id reached the message pump and took the app down"
 
 
-@pytest.mark.asyncio
-async def test_a_failed_artifact_write_does_not_advertise_the_review_record(
-        fake_storage):
-    """#110 group 4, r4-3's transport. ResearchFinished carries
-    artifacts_ok so the summary cannot point at a 07_review.json that was
-    never written; posting without the flag was green."""
-    from core.reasoning.base import PipelineRun
-    from tui.app import ResearchFinished
+    @pytest.mark.asyncio
+    async def test_the_tier_tally_keys_by_claim_id_not_by_event(self, mocker):
+        """#110 group 4, the app-side seam. The widget keys by claim id and
+        that IS pinned; this pins the handler FEEDING it the claim id. A
+        fresh id per event is exactly §26's stated failure -- 6c re-tiers the
+        same claim once per retry round, so counting reports more claims than
+        the run has and the number keeps climbing."""
+        from core.reasoning.events import PipelineEvent
+        from tui.app import PipelineEventMessage
+        from tui.widgets import ResearchProgress
 
-    def run_with_review():
-        run = PipelineRun(user_query="q")
-        run.final_report = "report"
-        run.subagent_reviews = [{"decision": "accept"}]
-        return run
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            panel = app.query_one(ResearchProgress)
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        app.on_research_finished(
-            ResearchFinished(run_with_review(), None, artifacts_ok=False))
-        await pump(pilot, 3)
-        failed_text = app._transcript.as_text()
+            def tiered(cid, tier):
+                return PipelineEventMessage(PipelineEvent(
+                    kind="claim_tiered", claim_id=cid, tier=tier))
 
-        app.on_research_finished(
-            ResearchFinished(run_with_review(), None, artifacts_ok=True))
-        await pump(pilot, 3)
-        ok_text = app._transcript.as_text()
+            app.post_message(tiered("c1", "HIGH"))
+            await pump(pilot, 3)
+            app.post_message(tiered("c2", "HIGH"))
+            await pump(pilot, 3)
+            app.post_message(tiered("c1", "LOW"))   # 6c re-tiers it
+            await pump(pilot, 3)
 
-        assert "artifact write FAILED" in failed_text
-        assert "full record in 07_review.json" not in failed_text, (
-            "the summary pointed at a review record that was never written")
-        assert "no 07_review.json" in failed_text
-        assert "full record in 07_review.json" in ok_text
+        assert set(panel._tiers) == {"c1", "c2"}, (
+            f"the tally counted events, not claims: {panel._tiers}")
+        assert panel._tiers["c1"] == "LOW", "a re-tier did not land"
+
+
+    @pytest.mark.asyncio
+    async def test_the_one_shot_answer_reloads_the_live_memory(self,
+            mocker, tmp_path, fake_storage):
+        """#110 group 4. on_one_shot_finished's docstring promises the reload
+        ("so the next streaming turn sees it too"); deleting it was green."""
+        from core import config_loader
+
+        config_loader.initialize(str(tmp_path))
+        mocker.patch("core.loop.RunAgentLoop.continue_conversation",
+                     return_value=make_model_response(text="grilled"))
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            before = app.memory
+            app.query_one("#prompt").value = "/grill-me"
+            await pilot.press("enter")
+            assert await settle(pilot,
+                                lambda: app._transcript.last_answer() == "grilled")
+
+            assert app.memory is not before, "the live memory was never reloaded"
+            assert app.memory.thread_id == before.thread_id
+
+
+    @pytest.mark.asyncio
+    async def test_a_failed_artifact_write_does_not_advertise_the_review_record(self,
+            fake_storage):
+        """#110 group 4, r4-3's transport. ResearchFinished carries
+        artifacts_ok so the summary cannot point at a 07_review.json that was
+        never written; posting without the flag was green."""
+        from core.reasoning.base import PipelineRun
+        from tui.app import ResearchFinished
+
+        def run_with_review():
+            run = PipelineRun(user_query="q")
+            run.final_report = "report"
+            run.subagent_reviews = [{"decision": "accept"}]
+            return run
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app.on_research_finished(
+                ResearchFinished(run_with_review(), None, artifacts_ok=False))
+            await pump(pilot, 3)
+            failed_text = app._transcript.as_text()
+
+            app.on_research_finished(
+                ResearchFinished(run_with_review(), None, artifacts_ok=True))
+            await pump(pilot, 3)
+            ok_text = app._transcript.as_text()
+
+            assert "artifact write FAILED" in failed_text
+            assert "full record in 07_review.json" not in failed_text, (
+                "the summary pointed at a review record that was never written")
+            assert "no 07_review.json" in failed_text
+            assert "full record in 07_review.json" in ok_text
 
 
 # ===========================================================================
@@ -2970,222 +3046,229 @@ async def _open_picker_and_choose(pilot, app, thread_id):
                                                ThreadPickerScreen))
 
 
-@pytest.mark.asyncio
-async def test_a_replay_failure_while_resuming_does_not_kill_the_tui(mocker):
-    """The CLI's `test_a_replay_failure_does_not_stop_the_session`, in the
-    other shell. The thread is loaded and usable whether or not it can be
-    drawn.
+class TestAStorageFailureDoesNotTakeTheShellDown:
+    """#104. Storage is allowed to fail; the shell is not."""
 
-    The old sequence was: clear the transcript, write "Resumed thread
-    <uuid>.", then die -- so the user was left with a torn-down TUI and the
-    thread they picked still in the picker next launch.
-    """
-    thread_id = uuid4()
-    mocker.patch("tui.app.storage.list_threads",
-                 return_value=_one_thread(thread_id))
-    mocker.patch("tui.app.ConversationMemory")
-    mocker.patch("tui.app.replay_entries",
-                 side_effect=RuntimeError("archive read failed"))
+    @pytest.mark.asyncio
+    async def test_a_replay_failure_while_resuming_does_not_kill_the_tui(self, mocker):
+        """The CLI's `test_a_replay_failure_does_not_stop_the_session`, in the
+        other shell. The thread is loaded and usable whether or not it can be
+        drawn.
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        await _open_picker_and_choose(pilot, app, thread_id)
-        running = app.is_running
+        The old sequence was: clear the transcript, write "Resumed thread
+        <uuid>.", then die -- so the user was left with a torn-down TUI and the
+        thread they picked still in the picker next launch.
+        """
+        thread_id = uuid4()
+        mocker.patch("tui.app.storage.list_threads",
+                     return_value=_one_thread(thread_id))
+        mocker.patch("tui.app.ConversationMemory")
+        mocker.patch("tui.app.replay_entries",
+                     side_effect=RuntimeError("archive read failed"))
 
-    assert running, "a replay failure took the whole app down"
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await _open_picker_and_choose(pilot, app, thread_id)
+            running = app.is_running
 
-
-@pytest.mark.asyncio
-async def test_a_replay_failure_still_leaves_the_thread_switched(mocker):
-    """Contained, not swallowed: the failure is a DISPLAY failure, so the
-    resume itself must still have happened. A guard that also skipped the
-    memory swap would pass the test above while quietly making resume a
-    no-op."""
-    thread_id = uuid4()
-    mocker.patch("tui.app.storage.list_threads",
-                 return_value=_one_thread(thread_id))
-    memory = mocker.patch("tui.app.ConversationMemory")
-    mocker.patch("tui.app.replay_entries",
-                 side_effect=RuntimeError("archive read failed"))
-
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        await _open_picker_and_choose(pilot, app, thread_id)
-        switched = app._memory is memory.return_value
-
-    assert switched, "the thread was not opened at all"
+        assert running, "a replay failure took the whole app down"
 
 
-@pytest.mark.asyncio
-async def test_a_failure_opening_the_thread_leaves_the_session_on_the_old_one(
-        mocker):
-    """The other half, and the reason the two reads are ordered as they
-    are. If the thread cannot be LOADED there is nothing to switch to, so
-    the switch must not happen -- which is only true while that read stays
-    above the transcript reset.
-    """
-    thread_id = uuid4()
-    mocker.patch("tui.app.storage.list_threads",
-                 return_value=_one_thread(thread_id))
-    mocker.patch("tui.app.ConversationMemory",
-                 side_effect=RuntimeError("database is locked"))
+    @pytest.mark.asyncio
+    async def test_a_replay_failure_still_leaves_the_thread_switched(self, mocker):
+        """Contained, not swallowed: the failure is a DISPLAY failure, so the
+        resume itself must still have happened. A guard that also skipped the
+        memory swap would pass the test above while quietly making resume a
+        no-op."""
+        thread_id = uuid4()
+        mocker.patch("tui.app.storage.list_threads",
+                     return_value=_one_thread(thread_id))
+        memory = mocker.patch("tui.app.ConversationMemory")
+        mocker.patch("tui.app.replay_entries",
+                     side_effect=RuntimeError("archive read failed"))
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        before = app._memory
-        await _open_picker_and_choose(pilot, app, thread_id)
-        running, after = app.is_running, app._memory
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await _open_picker_and_choose(pilot, app, thread_id)
+            switched = app._memory is memory.return_value
 
-    assert running, "a failed thread open took the whole app down"
-    assert after is before, "the session switched to a thread it could not open"
+        assert switched, "the thread was not opened at all"
 
 
-@pytest.mark.asyncio
-async def test_a_failure_listing_threads_does_not_kill_the_tui(mocker):
-    """Before the picker even opens, and on the UI thread."""
-    mocker.patch("tui.app.storage.list_threads",
-                 side_effect=RuntimeError("database is locked"))
+    @pytest.mark.asyncio
+    async def test_a_failure_opening_the_thread_leaves_the_session_on_the_old_one(self,
+            mocker):
+        """The other half, and the reason the two reads are ordered as they
+        are. If the thread cannot be LOADED there is nothing to switch to, so
+        the switch must not happen -- which is only true while that read stays
+        above the transcript reset.
+        """
+        thread_id = uuid4()
+        mocker.patch("tui.app.storage.list_threads",
+                     return_value=_one_thread(thread_id))
+        mocker.patch("tui.app.ConversationMemory",
+                     side_effect=RuntimeError("database is locked"))
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        app.action_pick_thread()
-        await pump(pilot, 3)
-        running, screen = app.is_running, app.screen
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            before = app._memory
+            await _open_picker_and_choose(pilot, app, thread_id)
+            running, after = app.is_running, app._memory
 
-    assert running, "a failed thread listing took the whole app down"
-    assert not isinstance(screen, ThreadPickerScreen), \
-        "a picker opened over a listing that failed"
-
-
-@pytest.mark.asyncio
-async def test_a_storage_failure_in_the_claims_view_does_not_kill_the_tui(
-        mocker):
-    """`_stored_claims` caught ValueError only -- a malformed uuid or an
-    unknown run -- so a STORAGE-level failure reached the message pump from
-    a read-only command whose worst honest outcome is "I could not show you
-    that run".
-    """
-    mocker.patch("core.reasoning.pipeline_storage.load_pipeline_run",
-                 side_effect=RuntimeError("database is locked"))
-
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        app.show_claims(str(uuid4()))
-        await pump(pilot, 3)
-        running = app.is_running
-
-    assert running, "a storage failure in /claims took the whole app down"
+        assert running, "a failed thread open took the whole app down"
+        assert after is before, "the session switched to a thread it could not open"
 
 
-@pytest.mark.asyncio
-async def test_a_storage_failure_starting_a_turn_does_not_kill_the_tui(mocker):
-    """The FIRST touch of `self.memory` on the UI thread, which is also
-    where the lazy ConversationMemory() is constructed and its thread row
-    written.
+    @pytest.mark.asyncio
+    async def test_a_failure_listing_threads_does_not_kill_the_tui(self, mocker):
+        """Before the picker even opens, and on the UI thread."""
+        mocker.patch("tui.app.storage.list_threads",
+                     side_effect=RuntimeError("database is locked"))
 
-    Asserts `_busy` was released as well: it is set before this read, and
-    leaving it True wedges the shell into refusing every later turn with
-    "Still working" for a turn that never started.
-    """
-    mocker.patch("tui.app.ConversationMemory",
-                 side_effect=RuntimeError("database is locked"))
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app.action_pick_thread()
+            await pump(pilot, 3)
+            running, screen = app.is_running, app.screen
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        app.query_one("#prompt").value = "hello"
-        await pilot.press("enter")
-        await pump(pilot, 3)
-        running, busy = app.is_running, app._busy
+        assert running, "a failed thread listing took the whole app down"
+        assert not isinstance(screen, ThreadPickerScreen), \
+            "a picker opened over a listing that failed"
 
-    assert running, "a storage failure starting a turn took the whole app down"
-    assert not busy, "the shell was left refusing every later turn"
+
+    @pytest.mark.asyncio
+    async def test_a_storage_failure_in_the_claims_view_does_not_kill_the_tui(self,
+            mocker):
+        """`_stored_claims` caught ValueError only -- a malformed uuid or an
+        unknown run -- so a STORAGE-level failure reached the message pump from
+        a read-only command whose worst honest outcome is "I could not show you
+        that run".
+        """
+        mocker.patch("core.reasoning.pipeline_storage.load_pipeline_run",
+                     side_effect=RuntimeError("database is locked"))
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app.show_claims(str(uuid4()))
+            await pump(pilot, 3)
+            running = app.is_running
+
+        assert running, "a storage failure in /claims took the whole app down"
+
+
+    @pytest.mark.asyncio
+    async def test_a_storage_failure_starting_a_turn_does_not_kill_the_tui(self, mocker):
+        """The FIRST touch of `self.memory` on the UI thread, which is also
+        where the lazy ConversationMemory() is constructed and its thread row
+        written.
+
+        Asserts `_busy` was released as well: it is set before this read, and
+        leaving it True wedges the shell into refusing every later turn with
+        "Still working" for a turn that never started.
+        """
+        mocker.patch("tui.app.ConversationMemory",
+                     side_effect=RuntimeError("database is locked"))
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app.query_one("#prompt").value = "hello"
+            await pilot.press("enter")
+            await pump(pilot, 3)
+            running, busy = app.is_running, app._busy
+
+        assert running, "a storage failure starting a turn took the whole app down"
+        assert not busy, "the shell was left refusing every later turn"
 
 
 # ---------------------------------------------------------------------------
 # ---- /resume <thread-id> (#30/#32 owner follow-up) --------------------------
 # ---------------------------------------------------------------------------
 
-@pytest.mark.asyncio
-async def test_resume_command_opens_a_thread_by_id(mocker):
-    """The by-id path the capped picker leans on. Asserted on the memory
-    swap and the transcript, not on any widget -- same reasoning as AC2:
-    what matters is that the thread actually opened."""
-    from tui.app import _cmd_resume
 
-    thread_id = uuid4()
-    memory = mocker.patch("tui.app.ConversationMemory")
-    mocker.patch("tui.app.replay_entries", return_value=[])
+class TestResumingAThreadById:
+    """#30/#32 owner follow-up. /resume <thread-id>."""
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        await settle(pilot, lambda: app.is_running)
-        _cmd_resume(app, str(thread_id))
-        assert await settle(
-            pilot, lambda: app._memory is memory.return_value), \
-            "/resume did not open the thread"
+    @pytest.mark.asyncio
+    async def test_resume_command_opens_a_thread_by_id(self, mocker):
+        """The by-id path the capped picker leans on. Asserted on the memory
+        swap and the transcript, not on any widget -- same reasoning as AC2:
+        what matters is that the thread actually opened."""
+        from tui.app import _cmd_resume
 
-    kwargs = memory.call_args.kwargs
-    assert kwargs.get("thread_id") == thread_id
+        thread_id = uuid4()
+        memory = mocker.patch("tui.app.ConversationMemory")
+        mocker.patch("tui.app.replay_entries", return_value=[])
 
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await settle(pilot, lambda: app.is_running)
+            _cmd_resume(app, str(thread_id))
+            assert await settle(
+                pilot, lambda: app._memory is memory.return_value), \
+                "/resume did not open the thread"
 
-@pytest.mark.asyncio
-async def test_resume_with_a_malformed_id_says_so_and_switches_nothing(mocker):
-    """A typo must not be silently swallowed into a chat turn (the
-    command registry already refuses unknown names); it names the problem
-    and leaves the session exactly where it was."""
-    from tui.app import _cmd_resume
-
-    mocker.patch("tui.app.ConversationMemory")
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        await settle(pilot, lambda: app.is_running)
-        before = app._memory
-        _cmd_resume(app, "not-a-uuid")
-        await pump(pilot, 3)
-
-    assert app._memory is before
+        kwargs = memory.call_args.kwargs
+        assert kwargs.get("thread_id") == thread_id
 
 
-@pytest.mark.asyncio
-async def test_resume_with_no_argument_shows_usage(mocker):
-    from tui.app import _cmd_resume
+    @pytest.mark.asyncio
+    async def test_resume_with_a_malformed_id_says_so_and_switches_nothing(self, mocker):
+        """A typo must not be silently swallowed into a chat turn (the
+        command registry already refuses unknown names); it names the problem
+        and leaves the session exactly where it was."""
+        from tui.app import _cmd_resume
 
-    mocker.patch("tui.app.ConversationMemory")
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        await settle(pilot, lambda: app.is_running)
-        _cmd_resume(app, "")
-        await pump(pilot, 3)
-        text = app._transcript.as_text()
-    assert "/resume" in text
+        mocker.patch("tui.app.ConversationMemory")
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await settle(pilot, lambda: app.is_running)
+            before = app._memory
+            _cmd_resume(app, "not-a-uuid")
+            await pump(pilot, 3)
 
-
-@pytest.mark.asyncio
-async def test_an_unknown_thread_id_reports_and_stays_put(mocker):
-    """storage raises ValueError for an unknown id; switch_to_thread
-    contains it. /resume inherits both behaviours by construction -- this
-    test exists so that stays true even if someone re-derives the path."""
-    from tui.app import _cmd_resume
-
-    thread_id = uuid4()
-    mocker.patch("tui.app.ConversationMemory",
-                 side_effect=ValueError("No conversation thread found"))
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        await settle(pilot, lambda: app.is_running)
-        _cmd_resume(app, str(thread_id))
-        await settle(pilot, lambda: "Could not open thread" in
-                     (app._transcript.as_text() or ""))
+        assert app._memory is before
 
 
-def test_the_resume_command_is_registered():
-    import tui.commands as commands_module
-    from tui.app import register_builtin_commands
+    @pytest.mark.asyncio
+    async def test_resume_with_no_argument_shows_usage(self, mocker):
+        from tui.app import _cmd_resume
 
-    register_builtin_commands()
-    command = commands_module.registry.get("resume")
-    assert command is not None
-    assert command.usage == "<thread-id>"
+        mocker.patch("tui.app.ConversationMemory")
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await settle(pilot, lambda: app.is_running)
+            _cmd_resume(app, "")
+            await pump(pilot, 3)
+            text = app._transcript.as_text()
+        assert "/resume" in text
+
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_thread_id_reports_and_stays_put(self, mocker):
+        """storage raises ValueError for an unknown id; switch_to_thread
+        contains it. /resume inherits both behaviours by construction -- this
+        test exists so that stays true even if someone re-derives the path."""
+        from tui.app import _cmd_resume
+
+        thread_id = uuid4()
+        mocker.patch("tui.app.ConversationMemory",
+                     side_effect=ValueError("No conversation thread found"))
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await settle(pilot, lambda: app.is_running)
+            _cmd_resume(app, str(thread_id))
+            await settle(pilot, lambda: "Could not open thread" in
+                         (app._transcript.as_text() or ""))
+
+
+    def test_the_resume_command_is_registered(self):
+        import tui.commands as commands_module
+        from tui.app import register_builtin_commands
+
+        register_builtin_commands()
+        command = commands_module.registry.get("resume")
+        assert command is not None
+        assert command.usage == "<thread-id>"
 
 
 # ---------------------------------------------------------------------------
@@ -3251,73 +3334,78 @@ QUESTION = dict(
                 "nobody answered]"))
 
 
-@pytest.mark.parametrize("kind", [PERMISSION, SIGNOFF, CONFIRM, QUESTION])
-def test_a_timeout_dismisses_and_says_what_happened(kind):
-    """Every kind keeps its raw dismissal value and gets ONE truthful
-    'no answer' sentence (#107)."""
-    app = _timeout_app()
-    screen = _Screen()
-    app._stack = [screen]
+class TestOneTimeoutCallbackBothBranches:
+    """#107. One callback, two branches, and a line that is truthful
+    about which of them happened.
+    """
 
-    app._timed_out_ask(screen, **kind)
+    @pytest.mark.parametrize("kind", [PERMISSION, SIGNOFF, CONFIRM, QUESTION])
+    def test_a_timeout_dismisses_and_says_what_happened(self, kind):
+        """Every kind keeps its raw dismissal value and gets ONE truthful
+        'no answer' sentence (#107)."""
+        app = _timeout_app()
+        screen = _Screen()
+        app._stack = [screen]
 
-    assert screen.dismissed == kind["dismiss_with"]
-    assert any(kind["on_timeout_line"] in line
-               for line in app._transcript.lines), (
-        "the no-answer line must name what actually happened")
+        app._timed_out_ask(screen, **kind)
 
-
-@pytest.mark.parametrize("kind", [PERMISSION, SIGNOFF, CONFIRM, QUESTION])
-def test_an_answer_landing_after_the_timeout_is_acknowledged(kind):
-    """The review callback has handled this race since §20; the other
-    kinds said either the wrong thing or nothing. All of them now say
-    the answer went nowhere, without re-dismissing (#107)."""
-    app = _timeout_app()
-    screen = _Screen()
-    app._stack = []                # they clicked between get() and here
-
-    app._timed_out_ask(screen, **kind)
-
-    assert screen.dismissed is None, (
-        "a screen the user already dismissed must not be dismissed again")
-    assert any(kind["after_line"] in line
-               for line in app._transcript.lines), (
-        "silence sends them to the summary to work out that their "
-        "click did nothing")
-    assert not any("no answer" in line for line in app._transcript.lines)
+        assert screen.dismissed == kind["dismiss_with"]
+        assert any(kind["on_timeout_line"] in line
+                   for line in app._transcript.lines), (
+            "the no-answer line must name what actually happened")
 
 
-def test_the_question_timeout_does_not_claim_nothing_was_written():
-    """The old confirm sentence was written for /init and inherited by
-    ask_user, where nothing is ever proposed to be written -- the model
-    is told nobody answered, and the line should say so (#107)."""
-    app = _timeout_app()
-    screen = _Screen()
-    app._stack = [screen]
+    @pytest.mark.parametrize("kind", [PERMISSION, SIGNOFF, CONFIRM, QUESTION])
+    def test_an_answer_landing_after_the_timeout_is_acknowledged(self, kind):
+        """The review callback has handled this race since §20; the other
+        kinds said either the wrong thing or nothing. All of them now say
+        the answer went nowhere, without re-dismissing (#107)."""
+        app = _timeout_app()
+        screen = _Screen()
+        app._stack = []                # they clicked between get() and here
 
-    app._timed_out_ask(screen, **QUESTION)
+        app._timed_out_ask(screen, **kind)
 
-    lines = "\n".join(app._transcript.lines)
-    assert "nobody answered" in lines
-    assert "nothing was written" not in lines
+        assert screen.dismissed is None, (
+            "a screen the user already dismissed must not be dismissed again")
+        assert any(kind["after_line"] in line
+                   for line in app._transcript.lines), (
+            "silence sends them to the summary to work out that their "
+            "click did nothing")
+        assert not any("no answer" in line for line in app._transcript.lines)
 
 
-def test_after_a_quit_the_timeout_narration_stays_silent():
-    """#105's family. exit() releases the channel with a value, so a
-    timeout callback landing after it describes an app that no longer
-    exists -- and writes to widgets that may already be gone. The flag
-    that stops _forwarding silences this narration too."""
-    app = _timeout_app()
-    screen = _Screen()
-    app._stack = [screen]
-    app._shutting_down = True          # what exit() sets before releasing
+    def test_the_question_timeout_does_not_claim_nothing_was_written(self):
+        """The old confirm sentence was written for /init and inherited by
+        ask_user, where nothing is ever proposed to be written -- the model
+        is told nobody answered, and the line should say so (#107)."""
+        app = _timeout_app()
+        screen = _Screen()
+        app._stack = [screen]
 
-    app._timed_out_ask(screen, **PERMISSION)
+        app._timed_out_ask(screen, **QUESTION)
 
-    assert screen.dismissed is None, \
-        "a post-quit timeout must not dismiss into a dead stack"
-    assert app._transcript.lines == [], \
-        "the shutdown narration must stay silent after a quit"
+        lines = "\n".join(app._transcript.lines)
+        assert "nobody answered" in lines
+        assert "nothing was written" not in lines
+
+
+    def test_after_a_quit_the_timeout_narration_stays_silent(self):
+        """#105's family. exit() releases the channel with a value, so a
+        timeout callback landing after it describes an app that no longer
+        exists -- and writes to widgets that may already be gone. The flag
+        that stops _forwarding silences this narration too."""
+        app = _timeout_app()
+        screen = _Screen()
+        app._stack = [screen]
+        app._shutting_down = True          # what exit() sets before releasing
+
+        app._timed_out_ask(screen, **PERMISSION)
+
+        assert screen.dismissed is None, \
+            "a post-quit timeout must not dismiss into a dead stack"
+        assert app._transcript.lines == [], \
+            "the shutdown narration must stay silent after a quit"
 
 REVIEW = dict(
     dismiss_with=("reject", ""),
@@ -3343,44 +3431,49 @@ ASKS = [
 ]
 
 
-@pytest.mark.parametrize("name,ask,expected", ASKS,
-                         ids=[a[0] for a in ASKS])
-def test_every_ask_wires_the_truthful_lines_into_the_callback(
-        name, ask, expected):
-    """The parametrized pins above feed their own line contents, so they
-    say nothing about what the six ask methods ACTUALLY wire (#107).
-    This one captures each real on_timeout through _blocking_modal and
-    fires it against a stacked screen -- both sentences and the raw
-    dismissal value are asserted off production code, not test data."""
-    app = _timeout_app()
-    app._shutting_down = False
-    captured = {}
+class TestEveryAskWiresItsTruthfulLines:
+    """#107 over every ask there is, rather than over the one that was
+    reached first.
+    """
 
-    def fake_blocking(screen, *, on_timeout):
-        captured["screen"] = screen
-        captured["callback"] = on_timeout
-        return None
+    @pytest.mark.parametrize("name,ask,expected", ASKS,
+                             ids=[a[0] for a in ASKS])
+    def test_every_ask_wires_the_truthful_lines_into_the_callback(self,
+            name, ask, expected):
+        """The parametrized pins above feed their own line contents, so they
+        say nothing about what the six ask methods ACTUALLY wire (#107).
+        This one captures each real on_timeout through _blocking_modal and
+        fires it against a stacked screen -- both sentences and the raw
+        dismissal value are asserted off production code, not test data."""
+        app = _timeout_app()
+        app._shutting_down = False
+        captured = {}
 
-    app._blocking_modal = fake_blocking          # instance shadow, not a patch
-    ask(app)
+        def fake_blocking(screen, *, on_timeout):
+            captured["screen"] = screen
+            captured["callback"] = on_timeout
+            return None
 
-    assert captured["callback"] is not None
-    fired = _Screen()
-    app._t = _Rec()
-    app._stack = [fired]
-    captured["callback"](fired)
+        app._blocking_modal = fake_blocking          # instance shadow, not a patch
+        ask(app)
 
-    assert fired.dismissed == expected["dismiss_with"], (
-        f"{name} must keep its raw timeout dismissal value")
-    transcript = "\n".join(app._transcript.lines)
-    assert expected["on_timeout_line"] in transcript, (
-        f"{name} must write its own no-answer sentence")
-    # The gone-screen branch too: swap the stack and fire again.
-    app._t.lines.clear()
-    app._stack = []
-    late = _Screen()
-    captured["callback"](late)
-    assert "\n".join(app._transcript.lines) == expected["after_line"]
+        assert captured["callback"] is not None
+        fired = _Screen()
+        app._t = _Rec()
+        app._stack = [fired]
+        captured["callback"](fired)
+
+        assert fired.dismissed == expected["dismiss_with"], (
+            f"{name} must keep its raw timeout dismissal value")
+        transcript = "\n".join(app._transcript.lines)
+        assert expected["on_timeout_line"] in transcript, (
+            f"{name} must write its own no-answer sentence")
+        # The gone-screen branch too: swap the stack and fire again.
+        app._t.lines.clear()
+        app._stack = []
+        late = _Screen()
+        captured["callback"](late)
+        assert "\n".join(app._transcript.lines) == expected["after_line"]
 
 
 # ---------------------------------------------------------------------------
@@ -3437,91 +3530,96 @@ def _modal_cases():
     ]
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("name,make_screen,dialog_id", _modal_cases(),
-                         ids=[c[0] for c in _modal_cases()])
-async def test_every_modal_is_centred_bounded_and_styled(
-        name, make_screen, dialog_id):
-    """/112's durable half: nothing noticed when a screen shipped without
-    its stylesheet rules -- ReviewScreen had none at all and four more
-    sat pinned to the top-left corner. Every modal must render INSIDE
-    the default 80x24 viewport, centred, with a border and a surface
-    background, so a consent surface's buttons cannot fall off-screen."""
-    from textual.color import Color
-
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        await app.push_screen(make_screen())
-        await pilot.pause()
-
-        dialog = app.screen.query_one(dialog_id)
-        r = dialog.region
-
-        assert r.x >= 0 and r.y >= 0, f"{name} starts off-screen"
-        assert r.x + r.width <= 80, f"{name} overflows to the right"
-        assert r.y + r.height <= 24, (
-            f"{name} is {r.height} rows tall on a 24-row terminal; "
-            "its bottom rows (often the buttons) are unreachable")
-
-        assert abs(r.x - (80 - r.width) / 2) <= 1, f"{name} not centred"
-        assert abs(r.y - (24 - r.height) / 2) <= 1, f"{name} not centred"
-
-        edges = list(dialog.styles.border)
-        assert any(edge[0] for edge in edges), (
-            f"{name} has no border rule at all")
-        assert dialog.styles.background != Color(0, 0, 0, 0), (
-            f"{name} has no background rule")
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("name,make_screen,dialog_id", _modal_cases(),
-                         ids=[c[0] for c in _modal_cases()])
-async def test_every_modal_actually_draws_its_body(
-        name, make_screen, dialog_id):
-    """#112's durable half, one layer in (§46, EP1).
-
-    That test pinned where a dialog SITS. This one pins that the text
-    inside it occupies rows, because four of these did not: `permission`,
-    `signoff-empty`, `confirm` and `project-kind` all share
-    #permission-dialog, whose middle grid row was `1fr` inside a
-    `height: auto` container -- which resolves to zero. Measured against
-    HEAD in a worktree: `#permission-params` at `region.height == 0` and
-    `virtual_size.height == 0` on all four, with 10, 35, 85 and 277
-    characters of content respectively. Every approval prompt, the
-    subagent sign-off, /init's confirmation and /init's project-kind
-    question drew their titles, their buttons and none of their
-    substance.
-
-    Nothing saw it because every other assertion about these screens
-    reads the widget's VISUAL -- the string it was built from, which a
-    widget of zero height still reports in full.
-    A consent surface is a thing a person LOOKS AT, so the assertion
-    has to be about what was drawn.
+class TestEveryModalIsStyledCentredAndFits:
+    """#112. Every modal at its smallest: styled, centred, and inside an
+    80x24 terminal.
     """
-    from textual.widgets import Label, ListView, SelectionList, Static
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        await app.push_screen(make_screen())
-        await pilot.pause()
-        await pilot.pause()
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name,make_screen,dialog_id", _modal_cases(),
+                             ids=[c[0] for c in _modal_cases()])
+    async def test_every_modal_is_centred_bounded_and_styled(self,
+            name, make_screen, dialog_id):
+        """/112's durable half: nothing noticed when a screen shipped without
+        its stylesheet rules -- ReviewScreen had none at all and four more
+        sat pinned to the top-left corner. Every modal must render INSIDE
+        the default 80x24 viewport, centred, with a border and a surface
+        background, so a consent surface's buttons cannot fall off-screen."""
+        from textual.color import Color
 
-        invisible = []
-        for widget in app.screen.query_one(dialog_id).query("*"):
-            if not isinstance(widget, (Static, Label, ListView,
-                                       SelectionList)):
-                continue
-            try:
-                content = _plain(widget)
-            except Exception:  # noqa: BLE001 -- lists carry no visual
-                content = "rows"
-            if content.strip() and widget.region.height == 0:
-                invisible.append(widget.id or type(widget).__name__)
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await app.push_screen(make_screen())
+            await pilot.pause()
 
-    assert not invisible, (
-        f"{name}: {', '.join(invisible)} carries text and was allocated "
-        "no rows -- it is absent from the rendered modal, not merely "
-        "scrolled out of it")
+            dialog = app.screen.query_one(dialog_id)
+            r = dialog.region
+
+            assert r.x >= 0 and r.y >= 0, f"{name} starts off-screen"
+            assert r.x + r.width <= 80, f"{name} overflows to the right"
+            assert r.y + r.height <= 24, (
+                f"{name} is {r.height} rows tall on a 24-row terminal; "
+                "its bottom rows (often the buttons) are unreachable")
+
+            assert abs(r.x - (80 - r.width) / 2) <= 1, f"{name} not centred"
+            assert abs(r.y - (24 - r.height) / 2) <= 1, f"{name} not centred"
+
+            edges = list(dialog.styles.border)
+            assert any(edge[0] for edge in edges), (
+                f"{name} has no border rule at all")
+            assert dialog.styles.background != Color(0, 0, 0, 0), (
+                f"{name} has no background rule")
+
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name,make_screen,dialog_id", _modal_cases(),
+                             ids=[c[0] for c in _modal_cases()])
+    async def test_every_modal_actually_draws_its_body(self,
+            name, make_screen, dialog_id):
+        """#112's durable half, one layer in (§46, EP1).
+
+        That test pinned where a dialog SITS. This one pins that the text
+        inside it occupies rows, because four of these did not: `permission`,
+        `signoff-empty`, `confirm` and `project-kind` all share
+        #permission-dialog, whose middle grid row was `1fr` inside a
+        `height: auto` container -- which resolves to zero. Measured against
+        HEAD in a worktree: `#permission-params` at `region.height == 0` and
+        `virtual_size.height == 0` on all four, with 10, 35, 85 and 277
+        characters of content respectively. Every approval prompt, the
+        subagent sign-off, /init's confirmation and /init's project-kind
+        question drew their titles, their buttons and none of their
+        substance.
+
+        Nothing saw it because every other assertion about these screens
+        reads the widget's VISUAL -- the string it was built from, which a
+        widget of zero height still reports in full.
+        A consent surface is a thing a person LOOKS AT, so the assertion
+        has to be about what was drawn.
+        """
+        from textual.widgets import Label, ListView, SelectionList, Static
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await app.push_screen(make_screen())
+            await pilot.pause()
+            await pilot.pause()
+
+            invisible = []
+            for widget in app.screen.query_one(dialog_id).query("*"):
+                if not isinstance(widget, (Static, Label, ListView,
+                                           SelectionList)):
+                    continue
+                try:
+                    content = _plain(widget)
+                except Exception:  # noqa: BLE001 -- lists carry no visual
+                    content = "rows"
+                if content.strip() and widget.region.height == 0:
+                    invisible.append(widget.id or type(widget).__name__)
+
+        assert not invisible, (
+            f"{name}: {', '.join(invisible)} carries text and was allocated "
+            "no rows -- it is absent from the rendered modal, not merely "
+            "scrolled out of it")
 
 
 
@@ -3615,155 +3713,161 @@ def _overflowing_modal_cases():
 _DECISION_CASES = _modal_cases() + _overflowing_modal_cases()
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("size", [(80, 24), (100, 30), (160, 45)],
-                         ids=["floor", "medium", "large"])
-@pytest.mark.parametrize("name,make_screen,dialog_id", _DECISION_CASES,
-                         ids=[c[0] for c in _DECISION_CASES])
-async def test_every_modal_keeps_its_decision_on_screen(
-        name, make_screen, dialog_id, size):
-    """Batch 49, and the assertion this file did not have.
-
-    #112 pinned where the DIALOG sits and §46 pinned that its body draws
-    rows. Neither could see the buttons, and the buttons are the only
-    part of a consent surface that does anything -- so `shell`'s approval
-    modal shipped with no Allow and no Deny at all, and the user who
-    reported it was looking at an empty band where they had been.
-
-    One defect, nine shapes. A dialog is `height: auto` with a
-    `max-height`, its body could outgrow both, and the buttons are the
-    LAST children -- so the buttons are what the clip takes. Measured
-    before the fix: `shell` and any payload over ~5 lines lost both,
-    /init's confirmation and its project-kind question lost both, the
-    grant picker lost its only confirm, the sign-off lost both, the
-    review modal lost three of four (Refine, Reject, Reject the rest --
-    every answer except Accept), and the question modal lost Answer and
-    Discuss instead.
-
-    A DECISION button must be visible without scrolling. An OPTION
-    button inside a bounded scroll region only has to be REACHABLE --
-    that is what the region is for, and conflating the two would forbid
-    the scrolling that makes four long options fit at all.
+class TestTheSameScreensWithContentThatOverflows:
+    """Batch 49. The same constructors given enough to outgrow the
+    dialog -- the domain the smallest-content cases were too small
+    to reach.
     """
-    from textual.widgets import Button
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test(size=size) as pilot:
-        app.push_screen(make_screen(), lambda _a: None)
-        await pilot.pause()
-        await pilot.pause()
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("size", [(80, 24), (100, 30), (160, 45)],
+                             ids=["floor", "medium", "large"])
+    @pytest.mark.parametrize("name,make_screen,dialog_id", _DECISION_CASES,
+                             ids=[c[0] for c in _DECISION_CASES])
+    async def test_every_modal_keeps_its_decision_on_screen(self,
+            name, make_screen, dialog_id, size):
+        """Batch 49, and the assertion this file did not have.
 
-        dialog = app.screen.query_one(dialog_id)
-        content = dialog.content_region
-        clipped, unreachable = [], []
-        for button in app.screen.query(Button):
-            box, node = None, button.parent
-            while node is not None and node is not dialog:
-                if isinstance(node, ScrollBox):
-                    box = node
-                    break
-                node = node.parent
-            if box is None:
-                if not content.contains_region(button.region):
-                    clipped.append(button.id)
-            elif box.virtual_size.height > box.region.height + box.max_scroll_y:
-                unreachable.append(button.id)
-        app.screen.dismiss(None)
-        await pilot.pause()
+        #112 pinned where the DIALOG sits and §46 pinned that its body draws
+        rows. Neither could see the buttons, and the buttons are the only
+        part of a consent surface that does anything -- so `shell`'s approval
+        modal shipped with no Allow and no Deny at all, and the user who
+        reported it was looking at an empty band where they had been.
 
-    assert not clipped, (
-        f"{name} at {size[0]}x{size[1]}: {', '.join(clipped)} is outside "
-        f"the dialog it belongs to. A modal that asks a question and hides "
-        f"the answers is worse than one that never rendered -- it looks "
-        f"finished.")
-    assert not unreachable, (
-        f"{name} at {size[0]}x{size[1]}: {', '.join(unreachable)} cannot be "
-        f"scrolled to inside its own box, so it is truncated rather than "
-        f"below the fold (§46, EP3)")
+        One defect, nine shapes. A dialog is `height: auto` with a
+        `max-height`, its body could outgrow both, and the buttons are the
+        LAST children -- so the buttons are what the clip takes. Measured
+        before the fix: `shell` and any payload over ~5 lines lost both,
+        /init's confirmation and its project-kind question lost both, the
+        grant picker lost its only confirm, the sign-off lost both, the
+        review modal lost three of four (Refine, Reject, Reject the rest --
+        every answer except Accept), and the question modal lost Answer and
+        Discuss instead.
+
+        A DECISION button must be visible without scrolling. An OPTION
+        button inside a bounded scroll region only has to be REACHABLE --
+        that is what the region is for, and conflating the two would forbid
+        the scrolling that makes four long options fit at all.
+        """
+        from textual.widgets import Button
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=size) as pilot:
+            app.push_screen(make_screen(), lambda _a: None)
+            await pilot.pause()
+            await pilot.pause()
+
+            dialog = app.screen.query_one(dialog_id)
+            content = dialog.content_region
+            clipped, unreachable = [], []
+            for button in app.screen.query(Button):
+                box, node = None, button.parent
+                while node is not None and node is not dialog:
+                    if isinstance(node, ScrollBox):
+                        box = node
+                        break
+                    node = node.parent
+                if box is None:
+                    if not content.contains_region(button.region):
+                        clipped.append(button.id)
+                elif box.virtual_size.height > box.region.height + box.max_scroll_y:
+                    unreachable.append(button.id)
+            app.screen.dismiss(None)
+            await pilot.pause()
+
+        assert not clipped, (
+            f"{name} at {size[0]}x{size[1]}: {', '.join(clipped)} is outside "
+            f"the dialog it belongs to. A modal that asks a question and hides "
+            f"the answers is worse than one that never rendered -- it looks "
+            f"finished.")
+        assert not unreachable, (
+            f"{name} at {size[0]}x{size[1]}: {', '.join(unreachable)} cannot be "
+            f"scrolled to inside its own box, so it is truncated rather than "
+            f"below the fold (§46, EP3)")
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("box_id,short,long", [
-    ("#permission-params-box", {"q": "x"}, {"q": "x" * 900}),
-    ("#permission-command-box", {"q": "x"}, {"q": "x"}),
-], ids=["payload", "command"])
-async def test_a_bounded_box_reserves_its_bound_not_its_content(
-        box_id, short, long):
-    """Batch 49. The toolkit fact the whole fix rests on, pinned on its
-    own so a survivor is legible when the sheet above goes red.
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("box_id,short,long", [
+        ("#permission-params-box", {"q": "x"}, {"q": "x" * 900}),
+        ("#permission-command-box", {"q": "x"}, {"q": "x"}),
+    ], ids=["payload", "command"])
+    async def test_a_bounded_box_reserves_its_bound_not_its_content(self,
+            box_id, short, long):
+        """Batch 49. The toolkit fact the whole fix rests on, pinned on its
+        own so a survivor is legible when the sheet above goes red.
 
-    BOTH boxes, because a definite height on the command block survived
-    the first mutation pass: it reserves four rows for a one-line command
-    and the dialog is still inside itself, so nothing failed -- the waste
-    is real and invisible, and the next person to copy the spelling
-    copies it to the payload box where it is not.
+        BOTH boxes, because a definite height on the command block survived
+        the first mutation pass: it reserves four rows for a one-line command
+        and the dialog is still inside itself, so nothing failed -- the waste
+        is real and invisible, and the next person to copy the spelling
+        copies it to the payload box where it is not.
 
-    §46 bounded the payload with a DEFINITE `height`, having measured a
-    scrollable container at `height: auto` rendering zero rows. The zero
-    was EP1's `1fr` ROW -- measured again with the row `auto`, `height:
-    auto` draws its content and `height: auto; max-height: N` draws N.
+        §46 bounded the payload with a DEFINITE `height`, having measured a
+        scrollable container at `height: auto` rendering zero rows. The zero
+        was EP1's `1fr` ROW -- measured again with the row `auto`, `height:
+        auto` draws its content and `height: auto; max-height: N` draws N.
 
-    A definite height bounds what the box DRAWS and not what its parent
-    RESERVES, so the row kept the payload's full height and pushed the
-    decision bar out of the dialog. `auto` with a `max-height` reports
-    the bound upward instead, and the two halves of that are what this
-    asserts: it SHRINKS below the bound for a short payload -- which the
-    definite height never did, and which is what tells the two spellings
-    apart -- and it STOPS at the bound for a long one, with every hidden
-    row still scrollable.
-    """
-    # The command box only exists when a tool declares a headline, so the
-    # two cases differ in what makes the block long: the payload grows
-    # with `params`, the pinned command with the command itself.
-    headline = "echo hi" if box_id == "#permission-command-box" else None
-    long_headline = ("docker run --rm -v /workspace:/workspace -w "
-                     "/workspace --env-file /workspace/.env --network none "
-                     "python:3.13 bash -c 'pip install -q ruff pytest && "
-                     "ruff check . --output-format concise && python -m "
-                     "pytest -q tests/ -x --tb=short --maxfail=1 && echo "
-                     "the-command-is-long-enough-to-need-five-rows-here'")
-    if headline is None:
-        long_headline = None
+        A definite height bounds what the box DRAWS and not what its parent
+        RESERVES, so the row kept the payload's full height and pushed the
+        decision bar out of the dialog. `auto` with a `max-height` reports
+        the bound upward instead, and the two halves of that are what this
+        asserts: it SHRINKS below the bound for a short payload -- which the
+        definite height never did, and which is what tells the two spellings
+        apart -- and it STOPS at the bound for a long one, with every hidden
+        row still scrollable.
+        """
+        # The command box only exists when a tool declares a headline, so the
+        # two cases differ in what makes the block long: the payload grows
+        # with `params`, the pinned command with the command itself.
+        headline = "echo hi" if box_id == "#permission-command-box" else None
+        long_headline = ("docker run --rm -v /workspace:/workspace -w "
+                         "/workspace --env-file /workspace/.env --network none "
+                         "python:3.13 bash -c 'pip install -q ruff pytest && "
+                         "ruff check . --output-format concise && python -m "
+                         "pytest -q tests/ -x --tb=short --maxfail=1 && echo "
+                         "the-command-is-long-enough-to-need-five-rows-here'")
+        if headline is None:
+            long_headline = None
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test(size=(80, 24)) as pilot:
-        app.push_screen(
-            PermissionScreen("web_search", short, None, "short", headline),
-            lambda _a: None)
-        await pilot.pause()
-        await pilot.pause()
-        small = app.screen.query_one(box_id)
-        small_rows = small.region.height
-        small_content = small.virtual_size.height
-        small_dialog = app.screen.query_one("#permission-dialog").region.height
-        app.screen.dismiss(None)
-        await pilot.pause()
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            app.push_screen(
+                PermissionScreen("web_search", short, None, "short", headline),
+                lambda _a: None)
+            await pilot.pause()
+            await pilot.pause()
+            small = app.screen.query_one(box_id)
+            small_rows = small.region.height
+            small_content = small.virtual_size.height
+            small_dialog = app.screen.query_one("#permission-dialog").region.height
+            app.screen.dismiss(None)
+            await pilot.pause()
 
-        app.push_screen(
-            PermissionScreen("web_search", long, None, "short",
-                             long_headline or headline),
-            lambda _a: None)
-        await pilot.pause()
-        await pilot.pause()
-        big = app.screen.query_one(box_id)
-        rows, content, reachable = (big.region.height,
-                                    big.virtual_size.height, big.max_scroll_y)
-        big_dialog = app.screen.query_one("#permission-dialog").region.height
-        bound = int(big.styles.max_height.value)
-        app.screen.dismiss(None)
-        await pilot.pause()
+            app.push_screen(
+                PermissionScreen("web_search", long, None, "short",
+                                 long_headline or headline),
+                lambda _a: None)
+            await pilot.pause()
+            await pilot.pause()
+            big = app.screen.query_one(box_id)
+            rows, content, reachable = (big.region.height,
+                                        big.virtual_size.height, big.max_scroll_y)
+            big_dialog = app.screen.query_one("#permission-dialog").region.height
+            bound = int(big.styles.max_height.value)
+            app.screen.dismiss(None)
+            await pilot.pause()
 
-    assert small_rows == small_content, (
-        "the box did not shrink to a short payload, so it is carrying a "
-        "definite height again -- which is the spelling that reserves rows "
-        "its parent then cannot give the buttons")
-    assert small_rows < bound and small_dialog <= big_dialog, (
-        "this fixture no longer distinguishes a short block from a long "
-        "one, so it cannot test the shrinking")
-    assert rows == bound, f"a {content}-row payload drew {rows} rows, not {bound}"
-    assert rows + reachable == content, (
-        f"{content} rows of payload, {rows} shown, {reachable} scrollable -- "
-        "the remainder is truncated, not below the fold")
+        assert small_rows == small_content, (
+            "the box did not shrink to a short payload, so it is carrying a "
+            "definite height again -- which is the spelling that reserves rows "
+            "its parent then cannot give the buttons")
+        assert small_rows < bound and small_dialog <= big_dialog, (
+            "this fixture no longer distinguishes a short block from a long "
+            "one, so it cannot test the shrinking")
+        assert rows == bound, f"a {content}-row payload drew {rows} rows, not {bound}"
+        assert rows + reachable == content, (
+            f"{content} rows of payload, {rows} shown, {reachable} scrollable -- "
+            "the remainder is truncated, not below the fold")
 
 
 # ---------------------------------------------------------------------------
@@ -3803,229 +3907,234 @@ def _focus_cases():
     ]
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("name,make_screen,expected", _focus_cases(),
-                         ids=[c[0] for c in _focus_cases()])
-async def test_a_consent_surface_opens_focused_on_the_declining_answer(
-        name, make_screen, expected):
-    """Batch 49. Whichever widget holds focus is what Enter fires, and
-    ConfirmScreen -- /init asking whether to write a set of files --
-    opened focused on its affirmative button, because a plain `Static`
-    body is not focusable and the Yes button was therefore the first
-    thing that was. So Enter said yes.
-
-    The declining answer costs nothing when it is pressed by accident,
-    which is the whole argument, and it is already recorded one door
-    along: GrantPickerScreen ships every option unticked so that "the
-    convenient action must not be the permissive one". A key a person
-    presses without looking is more convenient than a tick.
-
-    Two screens are `None` deliberately. Neither has a declining BUTTON
-    -- escape declines on both -- so there is nothing here to make Enter
-    safe, and the assertion is the weaker one that matters: focus must
-    not be sitting on an answer.
+class TestWhatFocusLooksLikeAndWhereItStarts:
+    """Batch 49. Where focus starts on a consent surface, and what it
+    looks like once it is there.
     """
-    from textual.widgets import Button
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        app.push_screen(make_screen(), lambda _a: None)
-        await pilot.pause()
-        await pilot.pause()
-        focused = app.screen.focused
-        app.screen.dismiss(None)
-        await pilot.pause()
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name,make_screen,expected", _focus_cases(),
+                             ids=[c[0] for c in _focus_cases()])
+    async def test_a_consent_surface_opens_focused_on_the_declining_answer(self,
+            name, make_screen, expected):
+        """Batch 49. Whichever widget holds focus is what Enter fires, and
+        ConfirmScreen -- /init asking whether to write a set of files --
+        opened focused on its affirmative button, because a plain `Static`
+        body is not focusable and the Yes button was therefore the first
+        thing that was. So Enter said yes.
 
-    if expected is None:
-        assert not isinstance(focused, Button), (
-            f"{name} has no declining button, so Enter must not be sitting "
-            f"on an answer -- it is on {focused.id!r}")
-    else:
-        assert focused is not None and focused.id == expected, (
-            f"{name} opens focused on {getattr(focused, 'id', None)!r}, so "
-            f"Enter answers with that. It must be {expected!r}.")
+        The declining answer costs nothing when it is pressed by accident,
+        which is the whole argument, and it is already recorded one door
+        along: GrantPickerScreen ships every option unticked so that "the
+        convenient action must not be the permissive one". A key a person
+        presses without looking is more convenient than a tick.
 
+        Two screens are `None` deliberately. Neither has a declining BUTTON
+        -- escape declines on both -- so there is nothing here to make Enter
+        safe, and the assertion is the weaker one that matters: focus must
+        not be sitting on an answer.
+        """
+        from textual.widgets import Button
 
-@pytest.mark.asyncio
-@pytest.mark.asyncio
-@pytest.mark.parametrize("bar_id,make_screen", [
-    ("#permission-buttons",
-     lambda: PermissionScreen("shell", {"c": "x"}, None, "r", "echo hi")),
-    ("#question-buttons",
-     lambda: QuestionScreen("Which?", ["a", "b"], False, True)),
-], ids=["permission", "question"])
-async def test_the_decision_bar_is_centred_in_its_dialog(bar_id, make_screen):
-    """Batch 49, and the second half of what was reported.
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app.push_screen(make_screen(), lambda _a: None)
+            await pilot.pause()
+            await pilot.pause()
+            focused = app.screen.focused
+            app.screen.dismiss(None)
+            await pilot.pause()
 
-    The dialog was centred and its contents were not. Allow and Deny were
-    two cells of a two-column Grid, and a Grid places a widget at the LEFT
-    of its cell -- so a 16-wide Allow sat flush against the padding while
-    a 16-wide Deny left ~22 dead columns beside it, and the modal read as
-    though its right border were too far out. Measured before the fix at
-    x=8 and x=51 in a region ending at 91.
-
-    The assertion is on the GAPS rather than on the CSS, because `align:
-    center middle` is one of several spellings that would satisfy it and
-    none of them is the claim -- the claim is that the two answers sit
-    symmetrically in the box that asks the question.
-    """
-    from textual.widgets import Button
-
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test(size=(90, 30)) as pilot:
-        app.push_screen(make_screen(), lambda _a: None)
-        await pilot.pause()
-        await pilot.pause()
-        bar = app.screen.query_one(bar_id)
-        buttons = sorted(bar.query(Button), key=lambda b: b.region.x)
-        region = bar.content_region
-        left = buttons[0].region.x - region.x
-        right = region.right - (buttons[-1].region.x + buttons[-1].region.width)
-        app.screen.dismiss(None)
-        await pilot.pause()
-
-    assert abs(left - right) <= 1, (
-        f"{bar_id} has {left} columns to the left of its first button and "
-        f"{right} to the right of its last, so the answers are not centred "
-        f"in the dialog that is centred around them")
+        if expected is None:
+            assert not isinstance(focused, Button), (
+                f"{name} has no declining button, so Enter must not be sitting "
+                f"on an answer -- it is on {focused.id!r}")
+        else:
+            assert focused is not None and focused.id == expected, (
+                f"{name} opens focused on {getattr(focused, 'id', None)!r}, so "
+                f"Enter answers with that. It must be {expected!r}.")
 
 
-@pytest.mark.asyncio
-async def test_a_focused_button_is_not_drawn_in_reverse():
-    """Batch 49. Textual's Button sets `text-style:
-    $button-focus-text-style` when focused and this theme resolves that
-    to `reverse`, which inverts the LABEL and nothing else -- so a
-    focused green Allow drew its word green-on-white and read as a
-    highlighted selection rather than as where the keyboard was. The
-    replacement tints the whole button, which is the thing a person
-    looks at.
+    @pytest.mark.asyncio
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bar_id,make_screen", [
+        ("#permission-buttons",
+         lambda: PermissionScreen("shell", {"c": "x"}, None, "r", "echo hi")),
+        ("#question-buttons",
+         lambda: QuestionScreen("Which?", ["a", "b"], False, True)),
+    ], ids=["permission", "question"])
+    async def test_the_decision_bar_is_centred_in_its_dialog(self, bar_id, make_screen):
+        """Batch 49, and the second half of what was reported.
 
-    Asserted on the RESOLVED style rather than on the stylesheet text,
-    because the rule has to WIN against a DEFAULT_CSS nested `&:focus`
-    -- reading app.tcss would pass whether or not it did.
-    """
-    from textual.widgets import Button
+        The dialog was centred and its contents were not. Allow and Deny were
+        two cells of a two-column Grid, and a Grid places a widget at the LEFT
+        of its cell -- so a 16-wide Allow sat flush against the padding while
+        a 16-wide Deny left ~22 dead columns beside it, and the modal read as
+        though its right border were too far out. Measured before the fix at
+        x=8 and x=51 in a region ending at 91.
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        app.push_screen(
-            PermissionScreen("web_search", {"q": "x"}, None), lambda _a: None)
-        await pilot.pause()
-        allow = app.screen.query_one("#allow", Button)
-        allow.focus()
-        await pilot.pause()
-        style = str(allow.styles.text_style)
-        tint = allow.styles.background_tint
-        app.screen.dismiss(None)
-        await pilot.pause()
+        The assertion is on the GAPS rather than on the CSS, because `align:
+        center middle` is one of several spellings that would satisfy it and
+        none of them is the claim -- the claim is that the two answers sit
+        symmetrically in the box that asks the question.
+        """
+        from textual.widgets import Button
 
-    assert "reverse" not in style, (
-        f"a focused button is drawn with {style!r}; `reverse` swaps the "
-        "label's colours and nothing else, which is the look that was "
-        "reported as an oddly highlighted Allow")
-    assert tint is not None and tint.a > 0, (
-        "dropping `reverse` left nothing in its place, so a focused button "
-        "is now indistinguishable from an unfocused one")
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(90, 30)) as pilot:
+            app.push_screen(make_screen(), lambda _a: None)
+            await pilot.pause()
+            await pilot.pause()
+            bar = app.screen.query_one(bar_id)
+            buttons = sorted(bar.query(Button), key=lambda b: b.region.x)
+            region = bar.content_region
+            left = buttons[0].region.x - region.x
+            right = region.right - (buttons[-1].region.x + buttons[-1].region.width)
+            app.screen.dismiss(None)
+            await pilot.pause()
 
-
-@pytest.mark.asyncio
-async def test_the_answer_box_lines_up_with_the_options():
-    """Batch 49. Textual's Input takes a `tall` border on all four sides
-    and a Button takes one on the top and bottom only, so two widgets at
-    the same `x` drew their left edges a column apart -- close enough to
-    read as a mistake and far enough to see.
-
-    Fixed by taking the Input's side edges off rather than giving the
-    Buttons two they do not want, so the assertion is about both: same
-    box, same edge.
-    """
-    from textual.widgets import Button, Input
-
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test(size=(90, 30)) as pilot:
-        app.push_screen(
-            QuestionScreen("Where should the venv go?",
-                           ["in the workspace", "somewhere ephemeral"],
-                           False, True),
-            lambda _a: None)
-        await pilot.pause()
-        await pilot.pause()
-        option = app.screen.query_one("#question-opt-0", Button)
-        box = app.screen.query_one("#question-text", Input)
-        option_x, box_x = option.region.x, box.region.x
-        edges = (box.styles.border_left[0], box.styles.border_right[0],
-                 option.styles.border_left[0], option.styles.border_right[0])
-        app.screen.dismiss(None)
-        await pilot.pause()
-
-    assert option_x == box_x, (
-        f"the option buttons start at column {option_x} and the answer box "
-        f"at {box_x}")
-    assert not any(edges), (
-        f"one of these two still draws a side border ({edges}), so their "
-        "left edges are a column apart however their boxes line up")
+        assert abs(left - right) <= 1, (
+            f"{bar_id} has {left} columns to the left of its first button and "
+            f"{right} to the right of its last, so the answers are not centred "
+            f"in the dialog that is centred around them")
 
 
-@pytest.mark.asyncio
-async def test_an_option_at_the_cap_still_fits_two_lines():
-    """Batch 49. `ask_user.MAX_OPTION_CHARS` is a claim about GEOMETRY --
-    that an option that long is two wrapped lines on the narrowest
-    terminal this project supports -- so it is measured here rather than
-    asserted from the constant, which would pass for any number at all.
+    @pytest.mark.asyncio
+    async def test_a_focused_button_is_not_drawn_in_reverse(self):
+        """Batch 49. Textual's Button sets `text-style:
+        $button-focus-text-style` when focused and this theme resolves that
+        to `reverse`, which inverts the LABEL and nothing else -- so a
+        focused green Allow drew its word green-on-white and read as a
+        highlighted selection rather than as where the keyboard was. The
+        replacement tints the whole button, which is the thing a person
+        looks at.
 
-    Three shapes, because word length decides where the wrap falls and
-    the cap has to hold for the worst: prose, twenty-character words, and
-    an unbroken run with no break opportunity. Measured at 105
-    characters, the first and third stay at two rows and the second goes
-    to three -- which is where 100 came from.
+        Asserted on the RESOLVED style rather than on the stylesheet text,
+        because the rule has to WIN against a DEFAULT_CSS nested `&:focus`
+        -- reading app.tcss would pass whether or not it did.
+        """
+        from textual.widgets import Button
 
-    Four options, so the scrollbar is present and each button is 58
-    columns rather than 60. That gutter is the difference between the cap
-    holding and not.
-    """
-    from textual.widgets import Button
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app.push_screen(
+                PermissionScreen("web_search", {"q": "x"}, None), lambda _a: None)
+            await pilot.pause()
+            allow = app.screen.query_one("#allow", Button)
+            allow.focus()
+            await pilot.pause()
+            style = str(allow.styles.text_style)
+            tint = allow.styles.background_tint
+            app.screen.dismiss(None)
+            await pilot.pause()
 
-    from tools.builtin.ask_user import MAX_OPTION_CHARS
+        assert "reverse" not in style, (
+            f"a focused button is drawn with {style!r}; `reverse` swaps the "
+            "label's colours and nothing else, which is the look that was "
+            "reported as an oddly highlighted Allow")
+        assert tint is not None and tint.a > 0, (
+            "dropping `reverse` left nothing in its place, so a focused button "
+            "is now indistinguishable from an unfocused one")
 
-    cap = MAX_OPTION_CHARS
-    words = " ".join(f"workspace_directory_{i}" for i in range(8))[:cap]
-    prose = ("Create the virtual environment inside the workspace directory "
-             "and leave it there after the task finishes so it is reused")[:cap]
-    # DIFFERENT lengths, which is the reported symptom: at `width: auto`
-    # four options of the same length are four buttons of the same width,
-    # so a fixture built from equal-length strings cannot fail. Two long,
-    # two short.
-    options = [words, prose, "x" * cap, "leave it"]
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test(size=(80, 24)) as pilot:
-        app.push_screen(QuestionScreen("Where should the venv go?", options,
-                                       False, True), lambda _a: None)
-        await pilot.pause()
-        await pilot.pause()
-        buttons = [app.screen.query_one(f"#question-opt-{i}", Button)
-                   for i in range(len(options))]
-        rows = [b.region.height - 2 for b in buttons]
-        widths = {b.region.width for b in buttons}
-        # scrollable_content_region, not content_region: the scrollbar
-        # takes two columns from what the children actually get, and a
-        # full-width button is as wide as what is left.
-        available = app.screen.query_one(
-            "#question-options").scrollable_content_region.width
-        app.screen.dismiss(None)
-        await pilot.pause()
+    @pytest.mark.asyncio
+    async def test_the_answer_box_lines_up_with_the_options(self):
+        """Batch 49. Textual's Input takes a `tall` border on all four sides
+        and a Button takes one on the top and bottom only, so two widgets at
+        the same `x` drew their left edges a column apart -- close enough to
+        read as a mistake and far enough to see.
 
-    assert all(row <= 2 for row in rows), (
-        f"an option of {cap} characters wrapped to {rows} content rows, so "
-        f"MAX_OPTION_CHARS is claiming a bound the modal does not have -- "
-        f"lower it, or widen #question-dialog")
-    assert widths == {available}, (
-        f"the option buttons are {sorted(widths)} columns wide inside a "
-        f"{available}-column region. They were `width: auto` until batch 49, "
-        f"which is what made a long one truncate at the dialog edge and a "
-        f"set of them ragged -- so the assertion is that each one FILLS the "
-        f"region, not merely that they agree with each other, which they "
-        f"also did when they were all as wide as their labels")
+        Fixed by taking the Input's side edges off rather than giving the
+        Buttons two they do not want, so the assertion is about both: same
+        box, same edge.
+        """
+        from textual.widgets import Button, Input
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(90, 30)) as pilot:
+            app.push_screen(
+                QuestionScreen("Where should the venv go?",
+                               ["in the workspace", "somewhere ephemeral"],
+                               False, True),
+                lambda _a: None)
+            await pilot.pause()
+            await pilot.pause()
+            option = app.screen.query_one("#question-opt-0", Button)
+            box = app.screen.query_one("#question-text", Input)
+            option_x, box_x = option.region.x, box.region.x
+            edges = (box.styles.border_left[0], box.styles.border_right[0],
+                     option.styles.border_left[0], option.styles.border_right[0])
+            app.screen.dismiss(None)
+            await pilot.pause()
+
+        assert option_x == box_x, (
+            f"the option buttons start at column {option_x} and the answer box "
+            f"at {box_x}")
+        assert not any(edges), (
+            f"one of these two still draws a side border ({edges}), so their "
+            "left edges are a column apart however their boxes line up")
+
+
+    @pytest.mark.asyncio
+    async def test_an_option_at_the_cap_still_fits_two_lines(self):
+        """Batch 49. `ask_user.MAX_OPTION_CHARS` is a claim about GEOMETRY --
+        that an option that long is two wrapped lines on the narrowest
+        terminal this project supports -- so it is measured here rather than
+        asserted from the constant, which would pass for any number at all.
+
+        Three shapes, because word length decides where the wrap falls and
+        the cap has to hold for the worst: prose, twenty-character words, and
+        an unbroken run with no break opportunity. Measured at 105
+        characters, the first and third stay at two rows and the second goes
+        to three -- which is where 100 came from.
+
+        Four options, so the scrollbar is present and each button is 58
+        columns rather than 60. That gutter is the difference between the cap
+        holding and not.
+        """
+        from textual.widgets import Button
+
+        from tools.builtin.ask_user import MAX_OPTION_CHARS
+
+        cap = MAX_OPTION_CHARS
+        words = " ".join(f"workspace_directory_{i}" for i in range(8))[:cap]
+        prose = ("Create the virtual environment inside the workspace directory "
+                 "and leave it there after the task finishes so it is reused")[:cap]
+        # DIFFERENT lengths, which is the reported symptom: at `width: auto`
+        # four options of the same length are four buttons of the same width,
+        # so a fixture built from equal-length strings cannot fail. Two long,
+        # two short.
+        options = [words, prose, "x" * cap, "leave it"]
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            app.push_screen(QuestionScreen("Where should the venv go?", options,
+                                           False, True), lambda _a: None)
+            await pilot.pause()
+            await pilot.pause()
+            buttons = [app.screen.query_one(f"#question-opt-{i}", Button)
+                       for i in range(len(options))]
+            rows = [b.region.height - 2 for b in buttons]
+            widths = {b.region.width for b in buttons}
+            # scrollable_content_region, not content_region: the scrollbar
+            # takes two columns from what the children actually get, and a
+            # full-width button is as wide as what is left.
+            available = app.screen.query_one(
+                "#question-options").scrollable_content_region.width
+            app.screen.dismiss(None)
+            await pilot.pause()
+
+        assert all(row <= 2 for row in rows), (
+            f"an option of {cap} characters wrapped to {rows} content rows, so "
+            f"MAX_OPTION_CHARS is claiming a bound the modal does not have -- "
+            f"lower it, or widen #question-dialog")
+        assert widths == {available}, (
+            f"the option buttons are {sorted(widths)} columns wide inside a "
+            f"{available}-column region. They were `width: auto` until batch 49, "
+            f"which is what made a long one truncate at the dialog edge and a "
+            f"set of them ragged -- so the assertion is that each one FILLS the "
+            f"region, not merely that they agree with each other, which they "
+            f"also did when they were all as wide as their labels")
 
 # ---------------------------------------------------------------------------
 # ---- §46 (EP1/EP3): the modal's subject must be ON SCREEN -----------------
@@ -4047,220 +4156,229 @@ def _visible_rows(widget) -> int:
     return widget.region.height
 
 
-@pytest.mark.asyncio
-async def test_the_command_is_visible_without_scrolling():
-    """The regression, reproducing the reported call exactly.
-
-    The command used to live only inside the JSON payload, in a block
-    that rendered at zero height (see
-    test_every_modal_actually_draws_its_body) -- so a user reported that
-    the command was visible in the transcript and nowhere on the modal
-    asking them to approve it. EP1 pins it above that block, outside the
-    scroll region, where no payload length can displace it.
-
-    This measures the one thing that matters: that a person answering
-    the prompt can SEE what they are answering about. Not that the
-    string exists somewhere in the widget tree -- that was true
-    throughout.
+class TestTheModalsSubjectIsOnScreen:
+    """EP1/EP3. The thing a modal is asking about has to be visible
+    without scrolling.
     """
-    from tui.app import VenastineApp
-    from tui.screens import PermissionScreen
 
-    command = "cat /proc/self/mountinfo"
-    notice = ("HOST_READ: reads 'cat' with an argument outside the "
-              "workspace, which no container can see. Runs on the "
-              "HOST, with your own file access.")
-    reason = ("Checking the sandbox mount table to answer the user "
-              "question about whether the host workspace path is "
-              "visible from inside the container.")
+    @pytest.mark.asyncio
+    async def test_the_command_is_visible_without_scrolling(self):
+        """The regression, reproducing the reported call exactly.
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        app.push_screen(
-            PermissionScreen("shell",
-                             {"command": command, "rationale": reason},
-                             notice, reason, command),
-            lambda _a: None)
-        await pilot.pause()
-        await pilot.pause()
+        The command used to live only inside the JSON payload, in a block
+        that rendered at zero height (see
+        test_every_modal_actually_draws_its_body) -- so a user reported that
+        the command was visible in the transcript and nowhere on the modal
+        asking them to approve it. EP1 pins it above that block, outside the
+        scroll region, where no payload length can displace it.
 
-        pinned = app.screen.query_one("#permission-command")
-        box = app.screen.query_one("#permission-command-box")
-        drawn = _plain(pinned)
-        rows = _visible_rows(box)
-        content = box.virtual_size.height
-        dialog = app.screen.query_one("#permission-dialog")
-        region = dialog.region
-        app.screen.dismiss(False)
-        await pilot.pause()
+        This measures the one thing that matters: that a person answering
+        the prompt can SEE what they are answering about. Not that the
+        string exists somewhere in the widget tree -- that was true
+        throughout.
+        """
+        from tui.app import VenastineApp
+        from tui.screens import PermissionScreen
 
-    assert drawn == command, (
-        "the pinned block is not showing the command verbatim")
-    assert rows >= 1, (
-        "the command block was allocated no rows at all -- it is on the "
-        "screen only in the sense the old payload was")
-    assert content <= rows, (
-        f"the command wraps to {content} rows and only {rows} are shown, "
-        "so a reader has to scroll to see the whole of what they are "
-        "approving -- this one is short enough to fit")
+        command = "cat /proc/self/mountinfo"
+        notice = ("HOST_READ: reads 'cat' with an argument outside the "
+                  "workspace, which no container can see. Runs on the "
+                  "HOST, with your own file access.")
+        reason = ("Checking the sandbox mount table to answer the user "
+                  "question about whether the host workspace path is "
+                  "visible from inside the container.")
 
-    # It must still fit the floor the geometry test pins, WITH the extra
-    # row -- adding the block would otherwise buy visibility here and
-    # lose the buttons off the bottom on a small terminal.
-    assert region.y + region.height <= 24, (
-        f"the dialog grew to {region.height} rows on a 24-row terminal")
-    assert region.x + region.width <= 80
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app.push_screen(
+                PermissionScreen("shell",
+                                 {"command": command, "rationale": reason},
+                                 notice, reason, command),
+                lambda _a: None)
+            await pilot.pause()
+            await pilot.pause()
 
+            pinned = app.screen.query_one("#permission-command")
+            box = app.screen.query_one("#permission-command-box")
+            drawn = _plain(pinned)
+            rows = _visible_rows(box)
+            content = box.virtual_size.height
+            dialog = app.screen.query_one("#permission-dialog")
+            region = dialog.region
+            app.screen.dismiss(False)
+            await pilot.pause()
 
-@pytest.mark.asyncio
-async def test_what_does_not_fit_the_payload_block_can_be_scrolled_to():
-    """EP3, and the half of it that is not about focus.
+        assert drawn == command, (
+            "the pinned block is not showing the command verbatim")
+        assert rows >= 1, (
+            "the command block was allocated no rows at all -- it is on the "
+            "screen only in the sense the old payload was")
+        assert content <= rows, (
+            f"the command wraps to {content} rows and only {rows} are shown, "
+            "so a reader has to scroll to see the whole of what they are "
+            "approving -- this one is short enough to fit")
 
-    `Static` + `max-height` + `overflow-y: auto` reads as "clip it and
-    let them scroll", and does neither: a Static's `virtual_size`
-    follows its clamped box rather than its text, so `max_scroll_y` is
-    0 and the hidden rows are not below the fold -- they are gone.
-    Measured before the fix at nine lines of content in a seven-row
-    block with End doing nothing.
-
-    So this asserts the property that matters -- every line of the
-    payload is reachable -- rather than that a widget is focusable,
-    which was true of a block that still truncated.
-    """
-    from tui.app import VenastineApp
-    from tui.screens import PermissionScreen
-
-    notice = ("HOST_READ: reads 'cat' with an argument outside the "
-              "workspace, which no container can see. Runs on the "
-              "HOST, with your own file access.")
-    reason = ("Checking the sandbox mount table to answer the user "
-              "question about whether the host workspace path is "
-              "visible from inside the container.")
-
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        app.push_screen(
-            PermissionScreen("shell",
-                             {"command": "cat /proc/self/mountinfo",
-                              "rationale": reason},
-                             notice, reason, "cat /proc/self/mountinfo"),
-            lambda _a: None)
-        await pilot.pause()
-        await pilot.pause()
-        box = app.screen.query_one("#permission-params-box")
-        visible, content = box.region.height, box.virtual_size.height
-        reachable = box.max_scroll_y
-        box.focus()
-        await pilot.pause()
-        focused = app.screen.focused
-        await pilot.press("end")
-        await pilot.pause()
-        landed = box.scroll_offset.y
-        app.screen.dismiss(False)
-        await pilot.pause()
-
-    assert visible > 0, "the payload block rendered at zero height again"
-    assert content > visible, (
-        "this fixture no longer overflows, so it cannot test overflow")
-    assert visible + reachable == content, (
-        f"{content} rows of payload, {visible} shown, only {reachable} "
-        "scrollable -- the remainder is truncated, not below the fold")
-    assert focused is box, "the payload block cannot take focus"
-    assert landed == reachable, (
-        "End did not reach the bottom of the payload from the keyboard")
+        # It must still fit the floor the geometry test pins, WITH the extra
+        # row -- adding the block would otherwise buy visibility here and
+        # lose the buttons off the bottom on a small terminal.
+        assert region.y + region.height <= 24, (
+            f"the dialog grew to {region.height} rows on a 24-row terminal")
+        assert region.x + region.width <= 80
 
 
-@pytest.mark.asyncio
-async def test_the_consent_surface_is_not_mouse_only():
-    """The narrower half of EP3, pinned separately because it is a fact
-    about the toolkit rather than about this screen: if `Static` ever
-    becomes focusable, the reason these blocks are containers changes
-    and somebody should re-read the decision rather than simplify."""
-    from textual.containers import VerticalScroll
-    from textual.widgets import Static
+    @pytest.mark.asyncio
+    async def test_what_does_not_fit_the_payload_block_can_be_scrolled_to(self):
+        """EP3, and the half of it that is not about focus.
 
-    assert Static.can_focus is False, (
-        "Static became focusable on this textual -- re-read EP3 before "
-        "collapsing the ScrollBox wrappers back into Statics")
-    assert VerticalScroll.can_focus is True
+        `Static` + `max-height` + `overflow-y: auto` reads as "clip it and
+        let them scroll", and does neither: a Static's `virtual_size`
+        follows its clamped box rather than its text, so `max_scroll_y` is
+        0 and the hidden rows are not below the fold -- they are gone.
+        Measured before the fix at nine lines of content in a seven-row
+        block with End doing nothing.
+
+        So this asserts the property that matters -- every line of the
+        payload is reachable -- rather than that a widget is focusable,
+        which was true of a block that still truncated.
+        """
+        from tui.app import VenastineApp
+        from tui.screens import PermissionScreen
+
+        notice = ("HOST_READ: reads 'cat' with an argument outside the "
+                  "workspace, which no container can see. Runs on the "
+                  "HOST, with your own file access.")
+        reason = ("Checking the sandbox mount table to answer the user "
+                  "question about whether the host workspace path is "
+                  "visible from inside the container.")
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app.push_screen(
+                PermissionScreen("shell",
+                                 {"command": "cat /proc/self/mountinfo",
+                                  "rationale": reason},
+                                 notice, reason, "cat /proc/self/mountinfo"),
+                lambda _a: None)
+            await pilot.pause()
+            await pilot.pause()
+            box = app.screen.query_one("#permission-params-box")
+            visible, content = box.region.height, box.virtual_size.height
+            reachable = box.max_scroll_y
+            box.focus()
+            await pilot.pause()
+            focused = app.screen.focused
+            await pilot.press("end")
+            await pilot.pause()
+            landed = box.scroll_offset.y
+            app.screen.dismiss(False)
+            await pilot.pause()
+
+        assert visible > 0, "the payload block rendered at zero height again"
+        assert content > visible, (
+            "this fixture no longer overflows, so it cannot test overflow")
+        assert visible + reachable == content, (
+            f"{content} rows of payload, {visible} shown, only {reachable} "
+            "scrollable -- the remainder is truncated, not below the fold")
+        assert focused is box, "the payload block cannot take focus"
+        assert landed == reachable, (
+            "End did not reach the bottom of the payload from the keyboard")
 
 
-@pytest.mark.asyncio
-async def test_a_tool_with_no_headline_gets_no_pinned_block():
-    """`shell` is the only tool declaring one, and every other modal --
-    web_search, the MCP tools, ConfirmScreen, ProjectKindScreen -- must
-    be untouched.
+    @pytest.mark.asyncio
+    async def test_the_consent_surface_is_not_mouse_only(self):
+        """The narrower half of EP3, pinned separately because it is a fact
+        about the toolkit rather than about this screen: if `Static` ever
+        becomes focusable, the reason these blocks are containers changes
+        and somebody should re-read the decision rather than simplify."""
+        from textual.containers import VerticalScroll
+        from textual.widgets import Static
 
-    It asserted the absence of the `with-headline` class until batch 49,
-    when the dialog stopped being a Grid and the class went with it: a
-    Grid's row count is static and a Vertical's is not, so the template
-    that had to be told how many children there were is gone. What is
-    left to assert is what that class was FOR -- that a tool declaring no
-    headline is not charged the rows one costs."""
-    from tui.app import VenastineApp
-    from tui.screens import PermissionScreen
+        assert Static.can_focus is False, (
+            "Static became focusable on this textual -- re-read EP3 before "
+            "collapsing the ScrollBox wrappers back into Statics")
+        assert VerticalScroll.can_focus is True
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        app.push_screen(
-            PermissionScreen("web_search", {"query": "x"}, None),
-            lambda _a: None)
-        await pilot.pause()
-        await pilot.pause()
-        found = app.screen.query("#permission-command")
-        boxes = app.screen.query("#permission-command-box")
-        app.screen.dismiss(False)
-        await pilot.pause()
 
-    assert len(found) == 0, "a headline-less tool grew a pinned block"
-    assert len(boxes) == 0, (
-        "a headline-less tool grew the container for one, which costs rows "
-        "the payload and the decision bar need")
+    @pytest.mark.asyncio
+    async def test_a_tool_with_no_headline_gets_no_pinned_block(self):
+        """`shell` is the only tool declaring one, and every other modal --
+        web_search, the MCP tools, ConfirmScreen, ProjectKindScreen -- must
+        be untouched.
+
+        It asserted the absence of the `with-headline` class until batch 49,
+        when the dialog stopped being a Grid and the class went with it: a
+        Grid's row count is static and a Vertical's is not, so the template
+        that had to be told how many children there were is gone. What is
+        left to assert is what that class was FOR -- that a tool declaring no
+        headline is not charged the rows one costs."""
+        from tui.app import VenastineApp
+        from tui.screens import PermissionScreen
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app.push_screen(
+                PermissionScreen("web_search", {"query": "x"}, None),
+                lambda _a: None)
+            await pilot.pause()
+            await pilot.pause()
+            found = app.screen.query("#permission-command")
+            boxes = app.screen.query("#permission-command-box")
+            app.screen.dismiss(False)
+            await pilot.pause()
+
+        assert len(found) == 0, "a headline-less tool grew a pinned block"
+        assert len(boxes) == 0, (
+            "a headline-less tool grew the container for one, which costs rows "
+            "the payload and the decision bar need")
 
 
 # ---------------------------------------------------------------------------
 # ---- #113: asking about the goal must not create the thread ---------------
 # ---------------------------------------------------------------------------
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("argv", ["", "clear"],
-                         ids=["bare-goal", "clear-on-fresh-session"])
-async def test_a_goal_read_or_clear_persists_no_thread(mocker, argv):
-    """_cmd_goal's read path went through app.memory -- whose property
-    CONSTRUCTS a ConversationMemory and persists a thread row -- so the
-    command answering "there is no goal" was the one creating a thread to
-    answer about (#113). kind=chat rows are exactly what §27's picker
-    filter cannot remove."""
-    made = mocker.patch("tui.app.ConversationMemory")
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        from agents.tui_commands import _cmd_goal
-        _cmd_goal(app, argv)
-        await pilot.pause()
+class TestAskingAboutTheGoalCreatesNoThread:
+    """#113. Reading or clearing the goal persists nothing."""
 
-        made.assert_not_called()
-        assert app._memory is None
-        assert "No goal set." in app._transcript.as_text()
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("argv", ["", "clear"],
+                             ids=["bare-goal", "clear-on-fresh-session"])
+    async def test_a_goal_read_or_clear_persists_no_thread(self, mocker, argv):
+        """_cmd_goal's read path went through app.memory -- whose property
+        CONSTRUCTS a ConversationMemory and persists a thread row -- so the
+        command answering "there is no goal" was the one creating a thread to
+        answer about (#113). kind=chat rows are exactly what §27's picker
+        filter cannot remove."""
+        made = mocker.patch("tui.app.ConversationMemory")
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            from agents.tui_commands import _cmd_goal
+            _cmd_goal(app, argv)
+            await pilot.pause()
+
+            made.assert_not_called()
+            assert app._memory is None
+            assert "No goal set." in app._transcript.as_text()
 
 
-@pytest.mark.asyncio
-async def test_setting_a_goal_still_creates_the_thread(mocker):
-    """Control for #113: /goal <text> puts state ON a thread, so a thread
-    is warranted and must still be built."""
-    mocker.patch("tui.app.ConversationMemory",
-                 side_effect=__import__("tui.app", fromlist=["x"])
-                 .ConversationMemory)
+    @pytest.mark.asyncio
+    async def test_setting_a_goal_still_creates_the_thread(self, mocker):
+        """Control for #113: /goal <text> puts state ON a thread, so a thread
+        is warranted and must still be built."""
+        mocker.patch("tui.app.ConversationMemory",
+                     side_effect=__import__("tui.app", fromlist=["x"])
+                     .ConversationMemory)
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        from agents.tui_commands import _cmd_goal
-        _cmd_goal(app, "ship the review fixes")
-        await pilot.pause()
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            from agents.tui_commands import _cmd_goal
+            _cmd_goal(app, "ship the review fixes")
+            await pilot.pause()
 
-        assert app._memory is not None
-        assert "Goal set: ship the review fixes" in (
-            app._transcript.as_text())
+            assert app._memory is not None
+            assert "Goal set: ship the review fixes" in (
+                app._transcript.as_text())
 
 
 # ---------------------------------------------------------------------------
@@ -4289,71 +4407,74 @@ def _copy_app(transcript="", run=None, live=None):
     return app
 
 
-def test_copy_all_is_a_superset_of_transcript_report_and_claims():
-    """#140's whole point: the transcript never contains the claims
-    (on_research_finished advertises them as one /claims pointer) and the
-    report only as rendered answer text -- so 'all' carried the least of
-    any target while promising everything."""
-    from tui.app import _copy_payload
+class TestCopyAllCarriesTheReportAndTheClaims:
+    """#140. /copy all is a superset of the targets it replaces."""
 
-    claim = SimpleNamespace(id="c001", text="CLAIM-ONLY-MARKER",
-                            confidence_tier="HIGH")
-    app = _copy_app(
-        transcript="body line TRANSCRIPT-ONLY-MARKER",
-        run=_CopyStubRun(report="REPORT-ONLY-MARKER", claims=[claim]))
+    def test_copy_all_is_a_superset_of_transcript_report_and_claims(self):
+        """#140's whole point: the transcript never contains the claims
+        (on_research_finished advertises them as one /claims pointer) and the
+        report only as rendered answer text -- so 'all' carried the least of
+        any target while promising everything."""
+        from tui.app import _copy_payload
 
-    text, described = _copy_payload(app, "all")
+        claim = SimpleNamespace(id="c001", text="CLAIM-ONLY-MARKER",
+                                confidence_tier="HIGH")
+        app = _copy_app(
+            transcript="body line TRANSCRIPT-ONLY-MARKER",
+            run=_CopyStubRun(report="REPORT-ONLY-MARKER", claims=[claim]))
 
-    assert described == "this session"
-    assert "TRANSCRIPT-ONLY-MARKER" in text
-    assert "## Report\n\nREPORT-ONLY-MARKER" in text
-    assert "CLAIM-ONLY-MARKER" in text          # claim TEXT
-    assert '"confidence_tier": "HIGH"' in text  # and its metadata
-    # Section order: transcript, then report, then claims.
-    assert (text.index("TRANSCRIPT") < text.index("## Report")
-            < text.index("## Claims"))
+        text, described = _copy_payload(app, "all")
 
-
-def test_copy_all_without_a_run_is_unchanged():
-    """No run -> byte-identical with the pre-#140 payload: the sections
-    are additive, never a new wrapper around an old contract."""
-    from tui.app import _copy_payload
-
-    app = _copy_app(transcript="just the session")
-    text, described = _copy_payload(app, "all")
-
-    assert text == "just the session"
-    assert described == "this session"
+        assert described == "this session"
+        assert "TRANSCRIPT-ONLY-MARKER" in text
+        assert "## Report\n\nREPORT-ONLY-MARKER" in text
+        assert "CLAIM-ONLY-MARKER" in text          # claim TEXT
+        assert '"confidence_tier": "HIGH"' in text  # and its metadata
+        # Section order: transcript, then report, then claims.
+        assert (text.index("TRANSCRIPT") < text.index("## Report")
+                < text.index("## Claims"))
 
 
-@pytest.mark.parametrize("kwargs,absent", [
-    (dict(report="R"), "## Claims"),
-    (dict(claims=[SimpleNamespace(id="c001", confidence_tier="HIGH")]),
-     "## Report"),
-], ids=["no-claims", "no-report"])
-def test_copy_all_omits_empty_sections(kwargs, absent):
-    """An empty section must not appear as a heading over nothing."""
-    from tui.app import _copy_payload
+    def test_copy_all_without_a_run_is_unchanged(self):
+        """No run -> byte-identical with the pre-#140 payload: the sections
+        are additive, never a new wrapper around an old contract."""
+        from tui.app import _copy_payload
 
-    app = _copy_app(transcript="t",
-                    run=_CopyStubRun(**kwargs))
-    text, _ = _copy_payload(app, "all")
+        app = _copy_app(transcript="just the session")
+        text, described = _copy_payload(app, "all")
 
-    assert absent not in text
+        assert text == "just the session"
+        assert described == "this session"
 
 
-def test_live_claims_fall_back_when_the_run_has_none():
-    """Mid-run there is no finished run yet; the live tally is what
-    /copy claims serves, so all must serve it too."""
-    from tui.app import _copy_payload
+    @pytest.mark.parametrize("kwargs,absent", [
+        (dict(report="R"), "## Claims"),
+        (dict(claims=[SimpleNamespace(id="c001", confidence_tier="HIGH")]),
+         "## Report"),
+    ], ids=["no-claims", "no-report"])
+    def test_copy_all_omits_empty_sections(self, kwargs, absent):
+        """An empty section must not appear as a heading over nothing."""
+        from tui.app import _copy_payload
 
-    app = _copy_app(
-        transcript="t",
-        run=None,
-        live={"c001": {"id": "c001", "confidence_tier": "LOW"}})
+        app = _copy_app(transcript="t",
+                        run=_CopyStubRun(**kwargs))
+        text, _ = _copy_payload(app, "all")
 
-    text, _ = _copy_payload(app, "all")
-    assert "## Claims" in text and "c001" in text
+        assert absent not in text
+
+
+    def test_live_claims_fall_back_when_the_run_has_none(self):
+        """Mid-run there is no finished run yet; the live tally is what
+        /copy claims serves, so all must serve it too."""
+        from tui.app import _copy_payload
+
+        app = _copy_app(
+            transcript="t",
+            run=None,
+            live={"c001": {"id": "c001", "confidence_tier": "LOW"}})
+
+        text, _ = _copy_payload(app, "all")
+        assert "## Claims" in text and "c001" in text
 
 
 # ===========================================================================
@@ -4373,196 +4494,219 @@ def _providers_file(tmp_path, monkeypatch, entries):
     return path
 
 
-@pytest.mark.asyncio
-async def test_launch_warnings_are_written_to_the_transcript_at_mount(
-        tmp_path, monkeypatch):
-    """#138's TUI half. main() cannot print these -- anything on stdout
-    before Textual takes the screen vanishes when it renders -- so the
-    app computes them itself and on_mount writes each one where the user
-    actually reads. Beside the status line it qualifies, before the
-    /help hint: a warning that arrives after the user typed is a dead
-    end one step later than #138 complained about.
+class TestLaunchTimeProviderWarnings:
+    """#138. A warning raised while the app is still coming up reaches
+    the transcript rather than the log alone.
+    """
 
-    Arranged through providers.json rather than by handing the app a
-    string (batch 44). The old version constructed the finding by hand,
-    which is why it could not see the defect it was named for: the app
-    was never asked to work out WHICH provider the finding was about."""
-    _providers_file(tmp_path, monkeypatch,
-                    {"ANTHROPIC": {"API_KEY": "", "API_URL": ""}})
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        assert await settle(pilot, lambda: bool(app._transcript._entries)), \
-            "the transcript never rendered"
+    @pytest.mark.asyncio
+    async def test_launch_warnings_are_written_to_the_transcript_at_mount(self,
+            tmp_path, monkeypatch):
+        """#138's TUI half. main() cannot print these -- anything on stdout
+        before Textual takes the screen vanishes when it renders -- so the
+        app computes them itself and on_mount writes each one where the user
+        actually reads. Beside the status line it qualifies, before the
+        /help hint: a warning that arrives after the user typed is a dead
+        end one step later than #138 complained about.
 
-        rendered = [txt for _role, txt in app._transcript._entries
-                    if "has no API_KEY" in txt]
-        assert rendered, (
-            "the launch warning never reached the transcript")
-        assert "ANTHROPIC" in rendered[0]
+        Arranged through providers.json rather than by handing the app a
+        string (batch 44). The old version constructed the finding by hand,
+        which is why it could not see the defect it was named for: the app
+        was never asked to work out WHICH provider the finding was about."""
+        _providers_file(tmp_path, monkeypatch,
+                        {"ANTHROPIC": {"API_KEY": "", "API_URL": ""}})
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            assert await settle(pilot, lambda: bool(app._transcript._entries)), \
+                "the transcript never rendered"
 
-
-@pytest.mark.asyncio
-async def test_a_healthy_mount_adds_no_warning_lines(tmp_path, monkeypatch):
-    """Silence is the healthy case's whole UX (#138): an install with a
-    configured provider and key gets no extra lines at all."""
-    _providers_file(tmp_path, monkeypatch,
-                    {"ANTHROPIC": {"API_KEY": "k", "API_URL": ""}})
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        assert await settle(pilot, lambda: bool(app._transcript._entries))
-
-        assert not [txt for _role, txt in app._transcript._entries
-                    if "API_KEY" in txt or "warning" in txt.lower()]
+            rendered = [txt for _role, txt in app._transcript._entries
+                        if "has no API_KEY" in txt]
+            assert rendered, (
+                "the launch warning never reached the transcript")
+            assert "ANTHROPIC" in rendered[0]
 
 
-@pytest.mark.asyncio
-async def test_the_launch_finding_is_about_the_remembered_pair(
-        tmp_path, monkeypatch, isolate_ui_preferences):
-    """Batch 44's defect, and the seam nothing was standing on.
+    @pytest.mark.asyncio
+    async def test_a_healthy_mount_adds_no_warning_lines(self, tmp_path, monkeypatch):
+        """Silence is the healthy case's whole UX (#138): an install with a
+        configured provider and key gets no extra lines at all."""
+        _providers_file(tmp_path, monkeypatch,
+                        {"ANTHROPIC": {"API_KEY": "k", "API_URL": ""}})
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            assert await settle(pilot, lambda: bool(app._transcript._entries))
 
-    §43 restores a remembered /model pair inside __init__; #138 computed
-    its finding in main(), before the app existed. Both features were
-    tested and neither test built the other's state, so a session came up
-    on OpenRouter under a banner saying so and reported that ANTHROPIC --
-    a provider it would never call -- has no key.
+            assert not [txt for _role, txt in app._transcript._entries
+                        if "API_KEY" in txt or "warning" in txt.lower()]
 
-    The two halves are asserted separately on purpose: an assertion that
-    only the OPENROUTER line is absent would also pass if the app stopped
-    warning at all."""
-    from tui import preferences
 
-    _providers_file(tmp_path, monkeypatch, {
-        "ANTHROPIC": {"API_KEY": "", "API_URL": ""},
-        "OPENROUTER": {"API_KEY": "k", "API_URL": "",
-                       "is_v1_compatible": True},
-    })
-    assert preferences.remember_model("OPENROUTER", "minimax-m3", None, None)
+    @pytest.mark.asyncio
+    async def test_the_launch_finding_is_about_the_remembered_pair(self,
+            tmp_path, monkeypatch, isolate_ui_preferences):
+        """Batch 44's defect, and the seam nothing was standing on.
 
-    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
-    assert (app.provider_name, app.model) == ("OPENROUTER", "minimax-m3"), \
-        "the pair was not restored, so this test proves nothing"
+        §43 restores a remembered /model pair inside __init__; #138 computed
+        its finding in main(), before the app existed. Both features were
+        tested and neither test built the other's state, so a session came up
+        on OpenRouter under a banner saying so and reported that ANTHROPIC --
+        a provider it would never call -- has no key.
 
-    async with app.run_test() as pilot:
-        assert await settle(pilot, lambda: bool(app._transcript._entries))
+        The two halves are asserted separately on purpose: an assertion that
+        only the OPENROUTER line is absent would also pass if the app stopped
+        warning at all."""
+        from tui import preferences
 
-        assert not [txt for _role, txt in app._transcript._entries
-                    if "ANTHROPIC" in txt], (
-            "the launch finding named the provider main() resolved, not "
-            "the one the session restored and will actually call")
-        assert [txt for _role, txt in app._transcript._entries
-                if "OPENROUTER" in txt], (
-            "the banner names the restored pair, so something should")
+        _providers_file(tmp_path, monkeypatch, {
+            "ANTHROPIC": {"API_KEY": "", "API_URL": ""},
+            "OPENROUTER": {"API_KEY": "k", "API_URL": "",
+                           "is_v1_compatible": True},
+        })
+        assert preferences.remember_model("OPENROUTER", "minimax-m3", None, None)
+
+        app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
+        assert (app.provider_name, app.model) == ("OPENROUTER", "minimax-m3"), \
+            "the pair was not restored, so this test proves nothing"
+
+        async with app.run_test() as pilot:
+            assert await settle(pilot, lambda: bool(app._transcript._entries))
+
+            assert not [txt for _role, txt in app._transcript._entries
+                        if "ANTHROPIC" in txt], (
+                "the launch finding named the provider main() resolved, not "
+                "the one the session restored and will actually call")
+            assert [txt for _role, txt in app._transcript._entries
+                    if "OPENROUTER" in txt], (
+                "the banner names the restored pair, so something should")
 
 
 # ===========================================================================
 # ---- Batch 25 (#139): the TUI forwards its effort to the pipeline ---------
 # ===========================================================================
 
-@pytest.mark.asyncio
-async def test_the_tui_forwards_its_effort_to_the_pipeline(mocker):
-    """#139. /effort high changed the status bar and the chat turns and
-    silently changed nothing about the ten-pass run. Captured at start
-    (D2): a mid-run /effort affects the next run, like model/provider."""
-    from tui.app import _cmd_research
 
-    captured = {}
-    mocker.patch(
-        "core.reasoning.orchestrator.stream_deep_research_pipeline",
-        side_effect=lambda **kw: (captured.update(kw), _stub_events())[1])
+class TestTheTuiForwardsItsEffortToThePipeline:
+    """Batch 25 (#139). The effort the shell runs at is the effort the
+    pipeline is given.
+    """
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        app.effort = "high"
-        _cmd_research(app, "what is entropy")
-        assert await settle(pilot, lambda: "effort" in captured), \
-            "the pipeline never started"
+    @pytest.mark.asyncio
+    async def test_the_tui_forwards_its_effort_to_the_pipeline(self, mocker):
+        """#139. /effort high changed the status bar and the chat turns and
+        silently changed nothing about the ten-pass run. Captured at start
+        (D2): a mid-run /effort affects the next run, like model/provider."""
+        from tui.app import _cmd_research
 
-    assert captured.get("effort") == "high", (
-        f"the pipeline must run at the session's effort, "
-        f"got {captured.get('effort')!r}")
+        captured = {}
+        mocker.patch(
+            "core.reasoning.orchestrator.stream_deep_research_pipeline",
+            side_effect=lambda **kw: (captured.update(kw), _stub_events())[1])
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app.effort = "high"
+            _cmd_research(app, "what is entropy")
+            assert await settle(pilot, lambda: "effort" in captured), \
+                "the pipeline never started"
+
+        assert captured.get("effort") == "high", (
+            f"the pipeline must run at the session's effort, "
+            f"got {captured.get('effort')!r}")
 
 
 # ===========================================================================
 # ---- Batch 25 (#139): the TUI mount resolves effort from BOTH keys --------
 # ===========================================================================
 
-def test_tui_effort_still_wins_inside_the_tui():
-    """tui.effort predates the top-level key; existing configs must not
-    change meaning. Specific beats general inside this shell."""
-    app = VenastineApp("ANTHROPIC", "test-model",
-                       {"tui": {"effort": "low"}, "effort": "high"})
-    assert app.effort == "low"
+
+class TestTheMountResolvesEffortFromBothKeys:
+    """Batch 25 (#139). Both keys are read at mount, and the TUI's own
+    still wins.
+    """
+
+    def test_tui_effort_still_wins_inside_the_tui(self):
+        """tui.effort predates the top-level key; existing configs must not
+        change meaning. Specific beats general inside this shell."""
+        app = VenastineApp("ANTHROPIC", "test-model",
+                           {"tui": {"effort": "low"}, "effort": "high"})
+        assert app.effort == "low"
 
 
-def test_top_level_effort_reaches_the_mount_without_a_tui_key():
-    app = VenastineApp("ANTHROPIC", "test-model", {"effort": "medium"})
-    assert app.effort == "medium"
+    def test_top_level_effort_reaches_the_mount_without_a_tui_key(self):
+        app = VenastineApp("ANTHROPIC", "test-model", {"effort": "medium"})
+        assert app.effort == "medium"
 
 
-@pytest.mark.asyncio
-async def test_only_a_named_effort_probes_at_mount(mocker):
-    """The mount-time validation is feedback for a DELIBERATE persisted
-    choice (§16). A default-derived level is not that: probing it fired
-    the fallback WARNING on every launch for models without a known
-    table, breaking #138's healthy-mount silence for users who never
-    asked about effort. It validates at call time like every non-TUI
-    caller instead."""
-    import config
-    probes = []
-    mocker.patch.object(VenastineApp, "start_effort_lookup",
-                        side_effect=lambda *a, **k: probes.append(k))
+    @pytest.mark.asyncio
+    async def test_only_a_named_effort_probes_at_mount(self, mocker):
+        """The mount-time validation is feedback for a DELIBERATE persisted
+        choice (§16). A default-derived level is not that: probing it fired
+        the fallback WARNING on every launch for models without a known
+        table, breaking #138's healthy-mount silence for users who never
+        asked about effort. It validates at call time like every non-TUI
+        caller instead."""
+        import config
+        probes = []
+        mocker.patch.object(VenastineApp, "start_effort_lookup",
+                            side_effect=lambda *a, **k: probes.append(k))
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        await pump(pilot, 3)
-        assert app.effort == config.DEFAULT_EFFORT
-        assert probes == [], \
-            "a default-derived level must not probe at mount"
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pump(pilot, 3)
+            assert app.effort == config.DEFAULT_EFFORT
+            assert probes == [], \
+                "a default-derived level must not probe at mount"
 
-    named = VenastineApp("ANTHROPIC", "test-model",
-                         {"tui": {"effort": "high"}})
-    async with named.run_test() as pilot:
-        assert await settle(
-            pilot, lambda: bool(probes)), \
-            "an explicitly named level keeps its early feedback"
+        named = VenastineApp("ANTHROPIC", "test-model",
+                             {"tui": {"effort": "high"}})
+        async with named.run_test() as pilot:
+            assert await settle(
+                pilot, lambda: bool(probes)), \
+                "an explicitly named level keeps its early feedback"
 
 
 # ---- #116: nothing in tui/ paints a colour the palette did not choose -----
 # ---------------------------------------------------------------------------
 
-@pytest.mark.asyncio
-async def test_the_goal_banner_paints_its_hue_from_the_palette(mocker):
-    """The banner is on screen for a whole session, and `yellow` is ANSI
-    3 -- what it looked like was the terminal's choice, not the theme's,
-    which on the light themes is some colour on near-white nobody here
-    picked. `warning` is one of the three roles §26 guarantees mean the
-    same thing on every theme, so the hue resolves against the active
-    palette; the weight stays bold (composing it is what role_styles
-    itself does)."""
-    from tui.widgets import GoalBanner
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        await pump(pilot, 2)
-        # INSTANCE-level patch: Static.update mutates the object it is
-        # handed, and a class-level mock changes the call shape it sees.
-        banner = app.query_one(GoalBanner)
-        captured = []
-        real_update = banner.update
-        mocker.patch.object(
-            banner, "update",
-            side_effect=lambda content="": (
-                captured.append(content), real_update(content))[1])
+class TestTheGoalBannerPaintsFromThePalette:
+    """#116. The banner's hue is the palette's warning role, not a
+    literal.
+    """
 
-        app.memory.set_extra("goal", "ship the batch")
-        app.refresh_goal_banner()
-        await pilot.pause()
+    @pytest.mark.asyncio
+    async def test_the_goal_banner_paints_its_hue_from_the_palette(self, mocker):
+        """The banner is on screen for a whole session, and `yellow` is ANSI
+        3 -- what it looked like was the terminal's choice, not the theme's,
+        which on the light themes is some colour on near-white nobody here
+        picked. `warning` is one of the three roles §26 guarantees mean the
+        same thing on every theme, so the hue resolves against the active
+        palette; the weight stays bold (composing it is what role_styles
+        itself does)."""
+        from tui.widgets import GoalBanner
 
-    assert captured, "the banner never rendered its goal"
-    style = whole_line_style(captured[-1])
-    assert style == "bold #d9a441", \
-        f"banner style {style!r} is not the palette's warning hue " \
-        "(dark-plain's warning) -- a literal is back"
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pump(pilot, 2)
+            # INSTANCE-level patch: Static.update mutates the object it is
+            # handed, and a class-level mock changes the call shape it sees.
+            banner = app.query_one(GoalBanner)
+            captured = []
+            real_update = banner.update
+            mocker.patch.object(
+                banner, "update",
+                side_effect=lambda content="": (
+                    captured.append(content), real_update(content))[1])
+
+            app.memory.set_extra("goal", "ship the batch")
+            app.refresh_goal_banner()
+            await pilot.pause()
+
+        assert captured, "the banner never rendered its goal"
+        style = whole_line_style(captured[-1])
+        assert style == "bold #d9a441", \
+            f"banner style {style!r} is not the palette's warning hue " \
+            "(dark-plain's warning) -- a literal is back"
 
 
 def _syntax_token_theme(syntax) -> str:
@@ -4580,19 +4724,247 @@ def _syntax_token_theme(syntax) -> str:
     return f"other({type(syntax._theme).__name__})"
 
 
-@pytest.mark.asyncio
-async def test_code_blocks_highlight_against_the_active_background(mocker):
-    """`ansi_dark` was applied unconditionally, so on all four light
-    themes every code block was highlighted against the opposite
-    background. Rich ships exactly two token themes and the Theme object
-    already carries the boolean that chooses between them."""
-    from rich.syntax import Syntax
+class TestNothingPaintsAColourThePaletteDidNotChoose:
+    """#116, as the general case: no widget or screen in tui/ carries a
+    literal colour.
+    """
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        await pump(pilot, 2)
-        t = app._transcript
+    @pytest.mark.asyncio
+    async def test_code_blocks_highlight_against_the_active_background(self, mocker):
+        """`ansi_dark` was applied unconditionally, so on all four light
+        themes every code block was highlighted against the opposite
+        background. Rich ships exactly two token themes and the Theme object
+        already carries the boolean that chooses between them."""
+        from rich.syntax import Syntax
 
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pump(pilot, 2)
+            t = app._transcript
+
+            written = []
+            real_write = t.write
+            mocker.patch.object(
+                t, "write",
+                side_effect=lambda r, *a, **k: (
+                    written.append(r), real_write(r, *a, **k))[1])
+
+            t.write_user("before")
+            t.stream_delta("```python\nx = 1\n```")
+            t.flush_stream()
+            dark_blocks = [r for r in written if isinstance(r, Syntax)]
+            assert dark_blocks, "no fenced block reached write as Syntax"
+            assert all(_syntax_token_theme(s) == "ansi_dark"
+                       for s in dark_blocks)
+
+            app.theme = "light-plain"
+            t.rerender()
+            light_blocks = [r for r in written if isinstance(r, Syntax)]
+            assert any(_syntax_token_theme(s) == "ansi_light"
+                       for s in light_blocks), \
+                "after switching to a light theme the replayed code block " \
+                "still highlights against dark"
+
+
+    def test_a_thread_row_without_a_preview_still_renders(self):
+        """Decided rather than smoothed over (#116): created_at and id are
+        INDEXED deliberately -- storage.list_threads() always supplies them,
+        and the id is the row's whole payload on selection. Only preview is
+        optional (.get, added in §27 after these hand-built test rows
+        existed), so its absence degrades to an id-only row instead of a
+        KeyError in a test-only construction."""
+        from datetime import datetime
+
+        from tui.screens import _thread_row
+
+        full = _thread_row({"id": "t-1",
+                            "created_at": datetime(2026, 8, 24, 9, 30),
+                            "preview": "hello there"})
+        assert "2026-08-24" in full and "hello there" in full and "t-1" in full
+
+        thin = _thread_row({"id": "t-2",
+                            "created_at": datetime(2026, 8, 24, 9, 31)})
+        assert "t-2" in thin and "hello" not in thin
+
+
+    def test_no_widget_or_screen_paints_a_literal_colour(self):
+        """§26's rule reaches beyond themes.py (#116): widgets resolve colour
+        against the active Theme object because a RichLog cannot read app.tcss
+        variables. A literal like "bold yellow" is an ANSI slot -- the terminal
+        picks what it looks like, and half the shipped themes disagree with it.
+        After #116 there are ZERO such literals in these two files; this holds
+        the count at zero. (Rich THEME names such as ansi_dark are chosen by
+        lookup from the active theme's dark flag, not painted, and are not
+        caught here.)"""
+        import os
+
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        offenders = []
+        for rel in ("tui/widgets.py", "tui/screens.py"):
+            with open(os.path.join(root, rel), encoding="utf-8") as fh:
+                for lineno, line in enumerate(fh, 1):
+                    if 'style="' in line:
+                        offenders.append(f"{rel}:{lineno}")
+        assert offenders == [], \
+            "hardcoded style literals returned: " + ", ".join(offenders)
+
+
+# ---- #117 group 1: the four consent modals' safe defaults ------------------
+# ---------------------------------------------------------------------------
+
+
+class TestTheFourConsentModalsSafeDefaults:
+    """#117 group 1. What escape does on each of the four consent
+    surfaces.
+    """
+
+    @pytest.mark.asyncio
+    async def test_escape_on_the_grant_picker_cancels_the_run(self):
+        """The app-side half IS tested -- _cmd_research's None branch is
+        pinned by dismissing None BY HAND -- but nothing pinned that ESCAPE
+        produces one. decode(CHOICE, "software") passes a bare string
+        straight through, and set() is a legitimate 'run unattended', so a
+        cancel that dismissed either would START the run instead of stopping
+        it: the permissive direction, on the screen nobody is watching."""
+        from tui.screens import GrantPickerScreen
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            results = []
+            await app.push_screen(
+                GrantPickerScreen([("web_search", "Search the web.")]),
+                results.append)
+            assert await settle(
+                pilot, lambda: isinstance(app.screen, GrantPickerScreen))
+            await pilot.press("escape")
+            assert await settle(pilot, lambda: bool(results)), \
+                "escape produced no dismissal"
+
+        assert results == [None], \
+            f"escape must cancel outright; got {results!r}"
+
+
+    @pytest.mark.asyncio
+    async def test_escape_on_the_project_kind_picker_cancels_init(self):
+        """CHOICE decodes its option strings verbatim, so a cancel that
+        dismissed 'software' would scaffold the software document set when
+        the user meant to abandon /init entirely."""
+        from tui.screens import ProjectKindScreen
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            results = []
+            await app.push_screen(ProjectKindScreen(), results.append)
+            assert await settle(
+                pilot, lambda: isinstance(app.screen, ProjectKindScreen))
+            await pilot.press("escape")
+            assert await settle(pilot, lambda: bool(results)), \
+                "escape produced no dismissal"
+
+        assert results == [None], \
+            f"escape must abandon /init; got {results!r}"
+
+
+    @pytest.mark.asyncio
+    async def test_the_grant_picker_opens_with_every_option_unticked(self):
+        """Both consent lists carry the same docstring sentence -- a
+        pre-ticked list makes the convenient action the permissive one --
+        and neither was pinned. The grant picker exists precisely because
+        nobody will be watching afterwards."""
+        from textual.widgets import SelectionList
+
+        from tui.screens import GrantPickerScreen
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await app.push_screen(GrantPickerScreen([
+                ("web_search", "Search the web."),
+                ("fetch_url", "Fetch a page."),
+            ]))
+            assert await settle(
+                pilot, lambda: isinstance(app.screen, GrantPickerScreen))
+            choices = app.screen.query_one(SelectionList)
+
+            states = [choices.get_option_at_index(i).initial_state
+                      for i in range(choices.option_count)]
+
+        assert states == [False, False], \
+            f"the grant picker opened pre-ticked: {states!r}"
+
+
+    @pytest.mark.asyncio
+    async def test_the_signoff_opens_with_every_option_unticked(self):
+        """Same sentence as the grant picker, same permissive direction: an
+        escape-happy user would delegate every gated tool to the subagent
+        without reading a row of it."""
+        from textual.widgets import SelectionList
+
+        from tui.screens import SubagentSignoffScreen
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await app.push_screen(
+                SubagentSignoffScreen("researcher",
+                                      ["web_search", "fetch_url"]))
+            assert await settle(
+                pilot,
+                lambda: isinstance(app.screen, SubagentSignoffScreen))
+            choices = app.screen.query_one(SelectionList)
+
+            states = [choices.get_option_at_index(i).initial_state
+                      for i in range(choices.option_count)]
+
+        assert states == [False, False], \
+            f"the sign-off opened pre-ticked: {states!r}"
+
+
+# ---- #117 group 3: the transcript trio -------------------------------------
+# ---------------------------------------------------------------------------
+
+
+class TestTheTranscriptTrio:
+    """#117 group 3. The three transcript behaviours that had no test."""
+
+    def test_flush_stream_returns_what_it_committed(self):
+        """§26's contract: the return value is how the app tracks the last
+        response for /copy without keeping a second buffer beside this one.
+        Returning '' silently reroutes /copy last to the PREVIOUS answer."""
+        from tui.widgets import Transcript
+
+        t = Transcript()
+        t.stream_delta("hello ")
+        t.stream_delta("world")
+        assert t.flush_stream() == "hello world"
+        assert t.flush_stream() == "", "an already-committed buffer re-flushed"
+        assert ("assistant", "hello world") in t._entries
+
+
+    def test_as_text_labels_the_speakers(self):
+        """Dropping the label table is green today because nothing pins the
+        shape /copy all produces -- and an unlabeled paste reads as one
+        voice saying both halves of the conversation."""
+        from tui.widgets import Transcript
+
+        t = Transcript()
+        t.write_user("hi there")
+        t.write_answer("hello")
+        text = t.as_text()
+        assert text.startswith("you: hi there"), \
+            f"/copy all lost the user label: {text[:40]!r}"
+        assert "venastine: hello" in text, \
+            f"/copy all lost the assistant label: {text[-40:]!r}"
+
+
+    def test_a_fenced_block_renders_as_syntax_not_plain_text(self, mocker):
+        """Transcript's docstring leads with fenced-code highlighting, and
+        replacing _split_fences with [text] was green -- nothing asserted
+        that the one rendering feature it advertises actually happens."""
+        from rich.syntax import Syntax
+        from rich.text import Text as RichText
+
+        from tui.widgets import Transcript
+
+        t = Transcript()
         written = []
         real_write = t.write
         mocker.patch.object(
@@ -4600,363 +4972,156 @@ async def test_code_blocks_highlight_against_the_active_background(mocker):
             side_effect=lambda r, *a, **k: (
                 written.append(r), real_write(r, *a, **k))[1])
 
-        t.write_user("before")
-        t.stream_delta("```python\nx = 1\n```")
-        t.flush_stream()
-        dark_blocks = [r for r in written if isinstance(r, Syntax)]
-        assert dark_blocks, "no fenced block reached write as Syntax"
-        assert all(_syntax_token_theme(s) == "ansi_dark"
-                   for s in dark_blocks)
-
-        app.theme = "light-plain"
-        t.rerender()
-        light_blocks = [r for r in written if isinstance(r, Syntax)]
-        assert any(_syntax_token_theme(s) == "ansi_light"
-                   for s in light_blocks), \
-            "after switching to a light theme the replayed code block " \
-            "still highlights against dark"
-
-
-def test_a_thread_row_without_a_preview_still_renders():
-    """Decided rather than smoothed over (#116): created_at and id are
-    INDEXED deliberately -- storage.list_threads() always supplies them,
-    and the id is the row's whole payload on selection. Only preview is
-    optional (.get, added in §27 after these hand-built test rows
-    existed), so its absence degrades to an id-only row instead of a
-    KeyError in a test-only construction."""
-    from datetime import datetime
-
-    from tui.screens import _thread_row
-
-    full = _thread_row({"id": "t-1",
-                        "created_at": datetime(2026, 8, 24, 9, 30),
-                        "preview": "hello there"})
-    assert "2026-08-24" in full and "hello there" in full and "t-1" in full
-
-    thin = _thread_row({"id": "t-2",
-                        "created_at": datetime(2026, 8, 24, 9, 31)})
-    assert "t-2" in thin and "hello" not in thin
-
-
-def test_no_widget_or_screen_paints_a_literal_colour():
-    """§26's rule reaches beyond themes.py (#116): widgets resolve colour
-    against the active Theme object because a RichLog cannot read app.tcss
-    variables. A literal like "bold yellow" is an ANSI slot -- the terminal
-    picks what it looks like, and half the shipped themes disagree with it.
-    After #116 there are ZERO such literals in these two files; this holds
-    the count at zero. (Rich THEME names such as ansi_dark are chosen by
-    lookup from the active theme's dark flag, not painted, and are not
-    caught here.)"""
-    import os
-
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    offenders = []
-    for rel in ("tui/widgets.py", "tui/screens.py"):
-        with open(os.path.join(root, rel), encoding="utf-8") as fh:
-            for lineno, line in enumerate(fh, 1):
-                if 'style="' in line:
-                    offenders.append(f"{rel}:{lineno}")
-    assert offenders == [], \
-        "hardcoded style literals returned: " + ", ".join(offenders)
-
-
-# ---- #117 group 1: the four consent modals' safe defaults ------------------
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_escape_on_the_grant_picker_cancels_the_run():
-    """The app-side half IS tested -- _cmd_research's None branch is
-    pinned by dismissing None BY HAND -- but nothing pinned that ESCAPE
-    produces one. decode(CHOICE, "software") passes a bare string
-    straight through, and set() is a legitimate 'run unattended', so a
-    cancel that dismissed either would START the run instead of stopping
-    it: the permissive direction, on the screen nobody is watching."""
-    from tui.screens import GrantPickerScreen
-
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        results = []
-        await app.push_screen(
-            GrantPickerScreen([("web_search", "Search the web.")]),
-            results.append)
-        assert await settle(
-            pilot, lambda: isinstance(app.screen, GrantPickerScreen))
-        await pilot.press("escape")
-        assert await settle(pilot, lambda: bool(results)), \
-            "escape produced no dismissal"
-
-    assert results == [None], \
-        f"escape must cancel outright; got {results!r}"
-
-
-@pytest.mark.asyncio
-async def test_escape_on_the_project_kind_picker_cancels_init():
-    """CHOICE decodes its option strings verbatim, so a cancel that
-    dismissed 'software' would scaffold the software document set when
-    the user meant to abandon /init entirely."""
-    from tui.screens import ProjectKindScreen
-
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        results = []
-        await app.push_screen(ProjectKindScreen(), results.append)
-        assert await settle(
-            pilot, lambda: isinstance(app.screen, ProjectKindScreen))
-        await pilot.press("escape")
-        assert await settle(pilot, lambda: bool(results)), \
-            "escape produced no dismissal"
-
-    assert results == [None], \
-        f"escape must abandon /init; got {results!r}"
-
-
-@pytest.mark.asyncio
-async def test_the_grant_picker_opens_with_every_option_unticked():
-    """Both consent lists carry the same docstring sentence -- a
-    pre-ticked list makes the convenient action the permissive one --
-    and neither was pinned. The grant picker exists precisely because
-    nobody will be watching afterwards."""
-    from textual.widgets import SelectionList
-
-    from tui.screens import GrantPickerScreen
-
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        await app.push_screen(GrantPickerScreen([
-            ("web_search", "Search the web."),
-            ("fetch_url", "Fetch a page."),
-        ]))
-        assert await settle(
-            pilot, lambda: isinstance(app.screen, GrantPickerScreen))
-        choices = app.screen.query_one(SelectionList)
-
-        states = [choices.get_option_at_index(i).initial_state
-                  for i in range(choices.option_count)]
-
-    assert states == [False, False], \
-        f"the grant picker opened pre-ticked: {states!r}"
-
-
-@pytest.mark.asyncio
-async def test_the_signoff_opens_with_every_option_unticked():
-    """Same sentence as the grant picker, same permissive direction: an
-    escape-happy user would delegate every gated tool to the subagent
-    without reading a row of it."""
-    from textual.widgets import SelectionList
-
-    from tui.screens import SubagentSignoffScreen
-
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        await app.push_screen(
-            SubagentSignoffScreen("researcher",
-                                  ["web_search", "fetch_url"]))
-        assert await settle(
-            pilot,
-            lambda: isinstance(app.screen, SubagentSignoffScreen))
-        choices = app.screen.query_one(SelectionList)
-
-        states = [choices.get_option_at_index(i).initial_state
-                  for i in range(choices.option_count)]
-
-    assert states == [False, False], \
-        f"the sign-off opened pre-ticked: {states!r}"
-
-
-# ---- #117 group 3: the transcript trio -------------------------------------
-# ---------------------------------------------------------------------------
-
-def test_flush_stream_returns_what_it_committed():
-    """§26's contract: the return value is how the app tracks the last
-    response for /copy without keeping a second buffer beside this one.
-    Returning '' silently reroutes /copy last to the PREVIOUS answer."""
-    from tui.widgets import Transcript
-
-    t = Transcript()
-    t.stream_delta("hello ")
-    t.stream_delta("world")
-    assert t.flush_stream() == "hello world"
-    assert t.flush_stream() == "", "an already-committed buffer re-flushed"
-    assert ("assistant", "hello world") in t._entries
-
-
-def test_as_text_labels_the_speakers():
-    """Dropping the label table is green today because nothing pins the
-    shape /copy all produces -- and an unlabeled paste reads as one
-    voice saying both halves of the conversation."""
-    from tui.widgets import Transcript
-
-    t = Transcript()
-    t.write_user("hi there")
-    t.write_answer("hello")
-    text = t.as_text()
-    assert text.startswith("you: hi there"), \
-        f"/copy all lost the user label: {text[:40]!r}"
-    assert "venastine: hello" in text, \
-        f"/copy all lost the assistant label: {text[-40:]!r}"
-
-
-def test_a_fenced_block_renders_as_syntax_not_plain_text(mocker):
-    """Transcript's docstring leads with fenced-code highlighting, and
-    replacing _split_fences with [text] was green -- nothing asserted
-    that the one rendering feature it advertises actually happens."""
-    from rich.syntax import Syntax
-    from rich.text import Text as RichText
-
-    from tui.widgets import Transcript
-
-    t = Transcript()
-    written = []
-    real_write = t.write
-    mocker.patch.object(
-        t, "write",
-        side_effect=lambda r, *a, **k: (
-            written.append(r), real_write(r, *a, **k))[1])
-
-    t.write_answer("prose before\n\n```python\nx = 1\n```\n\nprose after")
-    blocks = [r for r in written if isinstance(r, Syntax)]
-    assert blocks, "a fenced block rendered without Syntax"
-    assert getattr(blocks[0], "code", "").strip() == "x = 1"
-    plain = [r for r in written if isinstance(r, RichText)]
-    assert any("prose before" in p.plain for p in plain), \
-        "the prose around the fence vanished"
-    assert any("prose after" in p.plain for p in plain), \
-        "the prose after the fence vanished"
+        t.write_answer("prose before\n\n```python\nx = 1\n```\n\nprose after")
+        blocks = [r for r in written if isinstance(r, Syntax)]
+        assert blocks, "a fenced block rendered without Syntax"
+        assert getattr(blocks[0], "code", "").strip() == "x = 1"
+        plain = [r for r in written if isinstance(r, RichText)]
+        assert any("prose before" in p.plain for p in plain), \
+            "the prose around the fence vanished"
+        assert any("prose after" in p.plain for p in plain), \
+            "the prose after the fence vanished"
 
 
 # ---- #117 group 4: five one-offs --------------------------------------------
 # ---------------------------------------------------------------------------
 
-@pytest.mark.asyncio
-async def test_clearing_the_goal_hides_the_banner():
-    """GoalBanner's reactive-and-hide shape exists because a goal EMPTIES
-    as well as fills; display=True set once cannot take it back."""
-    from tui.widgets import GoalBanner
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        await pump(pilot, 2)
-        banner = app.query_one(GoalBanner)
-        app.memory.set_extra("goal", "ship the batch")
-        app.refresh_goal_banner()
-        await pilot.pause()
-        assert banner.display, "the goal never showed"
+class TestTheFiveOneOffs:
+    """#117 group 4. Five unrelated surfaces, each with one thing to
+    say.
+    """
 
-        app.memory.set_extra("goal", None)
-        app.refresh_goal_banner()
-        await pilot.pause()
-        assert not banner.display, \
-            "a cleared goal left the banner on screen for the session"
+    @pytest.mark.asyncio
+    async def test_clearing_the_goal_hides_the_banner(self):
+        """GoalBanner's reactive-and-hide shape exists because a goal EMPTIES
+        as well as fills; display=True set once cannot take it back."""
+        from tui.widgets import GoalBanner
 
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pump(pilot, 2)
+            banner = app.query_one(GoalBanner)
+            app.memory.set_extra("goal", "ship the batch")
+            app.refresh_goal_banner()
+            await pilot.pause()
+            assert banner.display, "the goal never showed"
 
-@pytest.mark.asyncio
-async def test_refine_carries_the_note_the_reviewer_typed():
-    """The note field is read on EVERY button path before dismissing;
-    dropping that read is green unless something pins Refine's payload --
-    and an empty note sends the reviewer back to fix finding #3 with no
-    idea what was objected to."""
-    from textual.widgets import Input
-
-    from tui.screens import ReviewScreen
-
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        results = []
-        await app.push_screen(
-            ReviewScreen({"kind": "text", "reason": "Overstates.",
-                          "proposed": "Soften."}, 1, 3),
-            results.append)
-        assert await settle(
-            pilot, lambda: isinstance(app.screen, ReviewScreen))
-
-        app.screen.query_one("#review-note", Input).value = \
-            "claim 3 cites the wrong table"
-        await pilot.click("#review-refine")
-        assert await settle(pilot, lambda: bool(results)), \
-            "refine produced no dismissal"
-
-    assert results == [("refine", "claim 3 cites the wrong table")], \
-        f"the note did not ride along: {results!r}"
+            app.memory.set_extra("goal", None)
+            app.refresh_goal_banner()
+            await pilot.pause()
+            assert not banner.display, \
+                "a cleared goal left the banner on screen for the session"
 
 
-@pytest.mark.asyncio
-async def test_an_unknown_slash_command_says_so():
-    """Suppressing the error leaves the user typing into a shell that
-    looks like it hung -- the message is the whole feedback loop."""
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        type_into_prompt(app, "/definitely-not-a-command")
-        await pilot.press("enter")
-        assert await settle(pilot, lambda: any(
-            "Unknown command" in txt
-            for _role, txt in app._transcript._entries)), \
-            "an unknown slash command produced no error line"
+    @pytest.mark.asyncio
+    async def test_refine_carries_the_note_the_reviewer_typed(self):
+        """The note field is read on EVERY button path before dismissing;
+        dropping that read is green unless something pins Refine's payload --
+        and an empty note sends the reviewer back to fix finding #3 with no
+        idea what was objected to."""
+        from textual.widgets import Input
+
+        from tui.screens import ReviewScreen
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            results = []
+            await app.push_screen(
+                ReviewScreen({"kind": "text", "reason": "Overstates.",
+                              "proposed": "Soften."}, 1, 3),
+                results.append)
+            assert await settle(
+                pilot, lambda: isinstance(app.screen, ReviewScreen))
+
+            app.screen.query_one("#review-note", Input).value = \
+                "claim 3 cites the wrong table"
+            await pilot.click("#review-refine")
+            assert await settle(pilot, lambda: bool(results)), \
+                "refine produced no dismissal"
+
+        assert results == [("refine", "claim 3 cites the wrong table")], \
+            f"the note did not ride along: {results!r}"
 
 
-@pytest.mark.asyncio
-async def test_the_skill_precondition_reads_the_active_agents_context(
-        mocker):
-    """/skill reports what the NEXT TURN will enforce, and the next turn
-    runs under the active agent's ToolContext when there is one. Reading
-    the global context instead reports tools as available that the agent
-    cannot call -- the divergence _current_context's docstring exists to
-    prevent."""
-    import skills.tui_commands as skill_cmds
-    from core.config_loader import AgentDef
-    from skills.manager import manager as skills_manager
-
-    mocker.patch.object(skills_manager, "get", return_value=type(
-        "S", (), {"name": "fixer", "description": "d",
-                  "additional_tools": ["web_search"]})())
-    activated = []
-
-    def fake_activate(name, active):
-        activated.append(name)
-        return [*active, name]
-
-    mocker.patch.object(skills_manager, "activate",
-                        side_effect=fake_activate)
-
-    agent = AgentDef(
-        name="locked", description="d", model=None, provider=None,
-        allowed_tools=[], approval_overrides={},
-        use_project_context=False, use_memory=False, max_steps=None,
-        body="BODY", tier="harness", path="/locked.md")
-
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        await pump(pilot, 2)
-        app.active_agent = agent
-        skill_cmds._cmd_skill(app, "fixer")
-        await pilot.pause()
-        entries = [txt for _role, txt in app._transcript._entries]
-
-    assert activated == ["fixer"], "the skill never activated"
-    assert any("expects web_search" in txt for txt in entries), \
-        "no missing-tools note under an agent whose whitelist denies " \
-        "every tool -- the check consulted the GLOBAL context"
+    @pytest.mark.asyncio
+    async def test_an_unknown_slash_command_says_so(self):
+        """Suppressing the error leaves the user typing into a shell that
+        looks like it hung -- the message is the whole feedback loop."""
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            type_into_prompt(app, "/definitely-not-a-command")
+            await pilot.press("enter")
+            assert await settle(pilot, lambda: any(
+                "Unknown command" in txt
+                for _role, txt in app._transcript._entries)), \
+                "an unknown slash command produced no error line"
 
 
-@pytest.mark.asyncio
-async def test_summary_refuses_to_start_mid_turn(mocker):
-    """A model call the user pays for is never silent, and it does not
-    stack on top of a running turn either."""
-    import memories.tui_commands as mem_cmds
+    @pytest.mark.asyncio
+    async def test_the_skill_precondition_reads_the_active_agents_context(self,
+            mocker):
+        """/skill reports what the NEXT TURN will enforce, and the next turn
+        runs under the active agent's ToolContext when there is one. Reading
+        the global context instead reports tools as available that the agent
+        cannot call -- the divergence _current_context's docstring exists to
+        prevent."""
+        import skills.tui_commands as skill_cmds
+        from core.config_loader import AgentDef
+        from skills.manager import manager as skills_manager
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        await pump(pilot, 2)
-        app._busy = True
-        started = []
-        mocker.patch.object(app, "run_worker",
-                            side_effect=lambda *a, **k: started.append(1))
+        mocker.patch.object(skills_manager, "get", return_value=type(
+            "S", (), {"name": "fixer", "description": "d",
+                      "additional_tools": ["web_search"]})())
+        activated = []
 
-        mem_cmds._cmd_summary(app, "")
+        def fake_activate(name, active):
+            activated.append(name)
+            return [*active, name]
 
-        assert any("Still working" in txt
-                   for _role, txt in app._transcript._entries), \
-            "mid-turn /summary gave no refusal"
-        assert started == [], "mid-turn /summary started a worker anyway"
+        mocker.patch.object(skills_manager, "activate",
+                            side_effect=fake_activate)
+
+        agent = AgentDef(
+            name="locked", description="d", model=None, provider=None,
+            allowed_tools=[], approval_overrides={},
+            use_project_context=False, use_memory=False, max_steps=None,
+            body="BODY", tier="harness", path="/locked.md")
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pump(pilot, 2)
+            app.active_agent = agent
+            skill_cmds._cmd_skill(app, "fixer")
+            await pilot.pause()
+            entries = [txt for _role, txt in app._transcript._entries]
+
+        assert activated == ["fixer"], "the skill never activated"
+        assert any("expects web_search" in txt for txt in entries), \
+            "no missing-tools note under an agent whose whitelist denies " \
+            "every tool -- the check consulted the GLOBAL context"
+
+
+    @pytest.mark.asyncio
+    async def test_summary_refuses_to_start_mid_turn(self, mocker):
+        """A model call the user pays for is never silent, and it does not
+        stack on top of a running turn either."""
+        import memories.tui_commands as mem_cmds
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pump(pilot, 2)
+            app._busy = True
+            started = []
+            mocker.patch.object(app, "run_worker",
+                                side_effect=lambda *a, **k: started.append(1))
+
+            mem_cmds._cmd_summary(app, "")
+
+            assert any("Still working" in txt
+                       for _role, txt in app._transcript._entries), \
+                "mid-turn /summary gave no refusal"
+            assert started == [], "mid-turn /summary started a worker anyway"
 
 
 # ===========================================================================
@@ -4999,161 +5164,166 @@ def _plain(widget) -> str:
     return renderable.plain
 
 
-@pytest.mark.asyncio
-async def test_a_bracket_in_a_command_does_not_stop_the_modal_rendering():
-    """The hang, from the direction it actually arrives.
-
-    ARCHITECTURE.md's rule is that every DISMISSAL path produces a
-    boolean. This is the case that rule misses: a screen that raises in
-    compose() never reaches a dismissal path at all, so the invariant
-    held and the worker still waited out ATTENDED_APPROVAL_TIMEOUT_S.
-    `isinstance(app.screen, PermissionScreen)` was TRUE throughout --
-    the screen was pushed, it simply never drew -- which is why a test
-    that watches for the modal appearing could not have seen this.
-
-    WHAT THIS TEST ACTUALLY OBSERVES IS THE EXCEPTION, and that is worth
-    being exact about. Under `run_test` Textual re-raises a compose()
-    error into the test, so reverting the fix fails here on MarkupError
-    before any assertion below runs. The 600s hang is the LIVE
-    behaviour, where the same error reaches Textual's own handler and
-    nothing unblocks the worker. So this test pins the raising half; the
-    silent half -- balanced markup, which never raises anywhere -- is
-    pinned by test_balanced_markup_in_a_payload_stays_literal, and that
-    is the one a regression would slip past first.
+class TestTheModalsShowTextNotMarkup:
+    """Batch 42 (RA1). A bracket in a command is text, and the modal
+    draws it as text.
     """
-    import threading
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        answer = {}
+    @pytest.mark.asyncio
+    async def test_a_bracket_in_a_command_does_not_stop_the_modal_rendering(self):
+        """The hang, from the direction it actually arrives.
 
-        def worker():
-            answer["value"] = app.ask_permission_blocking(
-                "shell", {"command": 'sed -i "s/[/]//" f.txt'}, None)
+        ARCHITECTURE.md's rule is that every DISMISSAL path produces a
+        boolean. This is the case that rule misses: a screen that raises in
+        compose() never reaches a dismissal path at all, so the invariant
+        held and the worker still waited out ATTENDED_APPROVAL_TIMEOUT_S.
+        `isinstance(app.screen, PermissionScreen)` was TRUE throughout --
+        the screen was pushed, it simply never drew -- which is why a test
+        that watches for the modal appearing could not have seen this.
 
-        threading.Thread(target=worker, daemon=True).start()
-        assert await settle(
-            pilot, lambda: isinstance(app.screen, PermissionScreen))
-        body = _plain(app.screen.query_one("#permission-params"))
-        app.screen.dismiss(True)
+        WHAT THIS TEST ACTUALLY OBSERVES IS THE EXCEPTION, and that is worth
+        being exact about. Under `run_test` Textual re-raises a compose()
+        error into the test, so reverting the fix fails here on MarkupError
+        before any assertion below runs. The 600s hang is the LIVE
+        behaviour, where the same error reaches Textual's own handler and
+        nothing unblocks the worker. So this test pins the raising half; the
+        silent half -- balanced markup, which never raises anywhere -- is
+        pinned by test_balanced_markup_in_a_payload_stays_literal, and that
+        is the one a regression would slip past first.
+        """
+        import threading
 
-        assert await settle(pilot, lambda: "value" in answer), (
-            "the worker never unblocked -- the modal was pushed but never "
-            "drew, which is the 600s hang this fix is for")
-    assert answer["value"] is True
-    assert 's/[/]//' in body, (
-        f"the command was not shown as written: {body!r}")
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            answer = {}
 
+            def worker():
+                answer["value"] = app.ask_permission_blocking(
+                    "shell", {"command": 'sed -i "s/[/]//" f.txt'}, None)
 
-@pytest.mark.asyncio
-async def test_balanced_markup_in_a_payload_stays_literal():
-    """The quiet half, and the one a regression would restore first.
+            threading.Thread(target=worker, daemon=True).start()
+            assert await settle(
+                pilot, lambda: isinstance(app.screen, PermissionScreen))
+            body = _plain(app.screen.query_one("#permission-params"))
+            app.screen.dismiss(True)
 
-    An unbalanced tag raises and is impossible to miss. A BALANCED one
-    renders -- as styled text with the tags eaten -- so a payload reading
-    `[bold green]VERIFIED SAFE[/bold green]` would show a person a phrase
-    the harness never wrote, formatted as though it had. On a consent
-    screen that is the whole attack.
-    """
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        app.push_screen(
-            PermissionScreen("shell",
-                             {"command": "ls",
-                              "note": "[bold green]VERIFIED SAFE[/bold green]"},
-                             None),
-            lambda _a: None)
-        assert await settle(
-            pilot, lambda: isinstance(app.screen, PermissionScreen))
-        body = _plain(app.screen.query_one("#permission-params"))
-        app.screen.dismiss(False)
-        await pilot.pause()
-
-    assert "[bold green]" in body and "[/bold green]" in body, (
-        f"the markup was interpreted instead of shown: {body!r}")
+            assert await settle(pilot, lambda: "value" in answer), (
+                "the worker never unblocked -- the modal was pushed but never "
+                "drew, which is the 600s hang this fix is for")
+        assert answer["value"] is True
+        assert 's/[/]//' in body, (
+            f"the command was not shown as written: {body!r}")
 
 
-@pytest.mark.asyncio
-async def test_the_review_title_still_has_its_severity():
-    """`[high]` is a tag. This title carried brackets deliberately and
-    lost its severity to them on every review modal from §20 until batch
-    42 -- no adversary, no unusual input, just a literal in the format
-    string meeting a parser nobody knew was there."""
-    from tui.screens import ReviewScreen
+    @pytest.mark.asyncio
+    async def test_balanced_markup_in_a_payload_stays_literal(self):
+        """The quiet half, and the one a regression would restore first.
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        app.push_screen(
-            ReviewScreen({"kind": "factual", "target": "claim-3",
-                          "severity": "high",
-                          "reason": "r", "proposed": "p"}, 0),
-            lambda _a: None)
-        assert await settle(
-            pilot, lambda: isinstance(app.screen, ReviewScreen))
-        title = _plain(app.screen.query_one("#review-title"))
-        app.screen.dismiss(None)
-        await pilot.pause()
+        An unbalanced tag raises and is impossible to miss. A BALANCED one
+        renders -- as styled text with the tags eaten -- so a payload reading
+        `[bold green]VERIFIED SAFE[/bold green]` would show a person a phrase
+        the harness never wrote, formatted as though it had. On a consent
+        screen that is the whole attack.
+        """
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app.push_screen(
+                PermissionScreen("shell",
+                                 {"command": "ls",
+                                  "note": "[bold green]VERIFIED SAFE[/bold green]"},
+                                 None),
+                lambda _a: None)
+            assert await settle(
+                pilot, lambda: isinstance(app.screen, PermissionScreen))
+            body = _plain(app.screen.query_one("#permission-params"))
+            app.screen.dismiss(False)
+            await pilot.pause()
 
-    assert "[high]" in title, (
-        f"the severity was parsed away as a markup tag: {title!r}")
+        assert "[bold green]" in body and "[/bold green]" in body, (
+            f"the markup was interpreted instead of shown: {body!r}")
 
 
-def test_every_renderable_built_from_a_non_literal_is_wrapped():
-    """The rule, mechanically, over the whole file.
+    @pytest.mark.asyncio
+    async def test_the_review_title_still_has_its_severity(self):
+        """`[high]` is a tag. This title carried brackets deliberately and
+        lost its severity to them on every review modal from §20 until batch
+        42 -- no adversary, no unusual input, just a literal in the format
+        string meeting a parser nobody knew was there."""
+        from tui.screens import ReviewScreen
 
-    Written as an AST walk rather than a list of the sites this batch
-    fixed, because the sites are not the point -- the next screen
-    somebody adds is. A blessed-line-numbers version would pass forever
-    while the file grew past it, which is the vacuity shape this project
-    keeps finding in its own guards.
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app.push_screen(
+                ReviewScreen({"kind": "factual", "target": "claim-3",
+                              "severity": "high",
+                              "reason": "r", "proposed": "p"}, 0),
+                lambda _a: None)
+            assert await settle(
+                pilot, lambda: isinstance(app.screen, ReviewScreen))
+            title = _plain(app.screen.query_one("#review-title"))
+            app.screen.dismiss(None)
+            await pilot.pause()
 
-    A STRING LITERAL IS ALLOWED. It is ours, it is reviewed, and a couple
-    of the help texts would be worse without markup. Anything else --
-    an f-string, a name, a call, a conditional -- is content from a
-    model, a file or the archive, and gets `Text(...)`.
-    """
-    import ast
+        assert "[high]" in title, (
+            f"the severity was parsed away as a markup tag: {title!r}")
 
-    with open("tui/screens.py", encoding="utf-8") as f:
-        tree = ast.parse(f.read())
 
-    # Every Textual renderable-accepting constructor used in this file.
-    # Label subclasses Static, and SelectionList prompts go through
-    # Text.from_markup in Selection's own constructor -- measured, and
-    # `ask_user`'s options are the model's own words.
-    #
-    # `Button` joined them when the textual pin moved, though it was
-    # never safe: measured on 1.0.0 AND on 8.2.8, a Button given a
-    # `str` parses it as markup and raises on an unbalanced tag. The
-    # single-select branch of the question modal was handing it
-    # `ask_user`'s options directly, one line under a multi-select
-    # branch that had wrapped its own since batch 42.
-    WIDGETS = {"Static", "Label", "Selection", "Button"}
-    offenders = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        if getattr(node.func, "id", None) not in WIDGETS or not node.args:
-            continue
-        first = node.args[0]
-        if isinstance(first, ast.Constant) and isinstance(first.value, str):
-            continue
-        if isinstance(first, ast.JoinedStr) or isinstance(first, ast.BinOp):
-            # An f-string or a concatenation is not a literal we reviewed.
+    def test_every_renderable_built_from_a_non_literal_is_wrapped(self):
+        """The rule, mechanically, over the whole file.
+
+        Written as an AST walk rather than a list of the sites this batch
+        fixed, because the sites are not the point -- the next screen
+        somebody adds is. A blessed-line-numbers version would pass forever
+        while the file grew past it, which is the vacuity shape this project
+        keeps finding in its own guards.
+
+        A STRING LITERAL IS ALLOWED. It is ours, it is reviewed, and a couple
+        of the help texts would be worse without markup. Anything else --
+        an f-string, a name, a call, a conditional -- is content from a
+        model, a file or the archive, and gets `Text(...)`.
+        """
+        import ast
+
+        with open("tui/screens.py", encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+
+        # Every Textual renderable-accepting constructor used in this file.
+        # Label subclasses Static, and SelectionList prompts go through
+        # Text.from_markup in Selection's own constructor -- measured, and
+        # `ask_user`'s options are the model's own words.
+        #
+        # `Button` joined them when the textual pin moved, though it was
+        # never safe: measured on 1.0.0 AND on 8.2.8, a Button given a
+        # `str` parses it as markup and raises on an unbalanced tag. The
+        # single-select branch of the question modal was handing it
+        # `ask_user`'s options directly, one line under a multi-select
+        # branch that had wrapped its own since batch 42.
+        WIDGETS = {"Static", "Label", "Selection", "Button"}
+        offenders = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if getattr(node.func, "id", None) not in WIDGETS or not node.args:
+                continue
+            first = node.args[0]
+            if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                continue
+            if isinstance(first, ast.JoinedStr) or isinstance(first, ast.BinOp):
+                # An f-string or a concatenation is not a literal we reviewed.
+                offenders.append((node.func.id, node.lineno))
+                continue
+            if (isinstance(first, ast.Call)
+                    and getattr(first.func, "id", None) == "Text"):
+                continue
             offenders.append((node.func.id, node.lineno))
-            continue
-        if (isinstance(first, ast.Call)
-                and getattr(first.func, "id", None) == "Text"):
-            continue
-        offenders.append((node.func.id, node.lineno))
 
-    assert not offenders, (
-        f"these renderables are built from non-literals and are not wrapped "
-        f"in Text(...), so textual will parse markup out of them: "
-        f"{offenders}. `markup=False` is honoured since the pin moved to "
-        f"8.2.8 and is still not the answer -- Selection and Button take "
-        f"no such flag, and a per-constructor argument is a thing the "
-        f"next screen has to remember. Wrap the value.")
+        assert not offenders, (
+            f"these renderables are built from non-literals and are not wrapped "
+            f"in Text(...), so textual will parse markup out of them: "
+            f"{offenders}. `markup=False` is honoured since the pin moved to "
+            f"8.2.8 and is still not the answer -- Selection and Button take "
+            f"no such flag, and a per-constructor argument is a thing the "
+            f"next screen has to remember. Wrap the value.")
 
 
 # --- batch 54: the prompt box that grows ------------------------------------
@@ -5421,47 +5591,52 @@ class TestEnterSubmitsAndCtrlJDoesNot:
             f"{turn.call_args[0][0]!r}")
 
 
-@pytest.mark.asyncio
-async def test_enter_in_the_review_note_does_not_reach_the_prompt_handler():
-    """Batch 54, and it is a fix that came free rather than a new rule.
-
-    `Input.Submitted` BUBBLES past a modal's own handler to the app's --
-    measured, the screen handler runs and then the app's does. The prompt
-    handled that message until this batch, so Enter in ReviewScreen's note
-    box (a screen with no submit handler of its own) reached it, cleared
-    the note, and dispatched the text as a slash command if it began with
-    one. A distinct message type ends that by construction, and this is
-    what stops the app from handling `Input.Submitted` again.
+class TestEnterInTheReviewNoteStaysThere:
+    """Batch 54. Enter inside the review note does not reach the prompt
+    handler.
     """
-    from textual.widgets import Input
 
-    from tui.screens import ReviewScreen
+    @pytest.mark.asyncio
+    async def test_enter_in_the_review_note_does_not_reach_the_prompt_handler(self):
+        """Batch 54, and it is a fix that came free rather than a new rule.
 
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        # Captured BEFORE the modal goes up: #104's rule -- query_one
-        # searches the ACTIVE screen, and the modal has no transcript.
-        transcript = app.query_one("#transcript")
-        results = []
-        await app.push_screen(
-            ReviewScreen({"kind": "text", "reason": "Overstates.",
-                          "proposed": "Soften."}, 1, 3),
-            results.append)
-        assert await settle(
-            pilot, lambda: isinstance(app.screen, ReviewScreen))
+        `Input.Submitted` BUBBLES past a modal's own handler to the app's --
+        measured, the screen handler runs and then the app's does. The prompt
+        handled that message until this batch, so Enter in ReviewScreen's note
+        box (a screen with no submit handler of its own) reached it, cleared
+        the note, and dispatched the text as a slash command if it began with
+        one. A distinct message type ends that by construction, and this is
+        what stops the app from handling `Input.Submitted` again.
+        """
+        from textual.widgets import Input
 
-        note = app.screen.query_one("#review-note", Input)
-        note.value = "/help is not a command I meant to run"
-        note.focus()
-        await pilot.pause()
-        await pilot.press("enter")
-        await pump(pilot)
+        from tui.screens import ReviewScreen
 
-        assert note.value == "/help is not a command I meant to run", (
-            f"the app's submit handler cleared the reviewer's note: "
-            f"{note.value!r}")
-        assert "Try /help." not in transcript.as_text(), (
-            "the note was dispatched as a slash command")
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            # Captured BEFORE the modal goes up: #104's rule -- query_one
+            # searches the ACTIVE screen, and the modal has no transcript.
+            transcript = app.query_one("#transcript")
+            results = []
+            await app.push_screen(
+                ReviewScreen({"kind": "text", "reason": "Overstates.",
+                              "proposed": "Soften."}, 1, 3),
+                results.append)
+            assert await settle(
+                pilot, lambda: isinstance(app.screen, ReviewScreen))
+
+            note = app.screen.query_one("#review-note", Input)
+            note.value = "/help is not a command I meant to run"
+            note.focus()
+            await pilot.pause()
+            await pilot.press("enter")
+            await pump(pilot)
+
+            assert note.value == "/help is not a command I meant to run", (
+                f"the app's submit handler cleared the reviewer's note: "
+                f"{note.value!r}")
+            assert "Try /help." not in transcript.as_text(), (
+                "the note was dispatched as a slash command")
 
 # --- batch 55: the slash-command suggestion panel ---------------------------
 
@@ -6140,36 +6315,41 @@ class TestTheKeysWhileThePanelIsOpen:
                 "the latch outlived the line it was dismissing")
 
 
-@pytest.mark.asyncio
-async def test_the_panel_opening_does_not_scroll_the_transcript_away():
-    """Measured, and it is the defect a naive implementation ships.
-
-    A panel opening under the transcript takes rows from it, and textual
-    does NOT re-pin the scroll on shrink: `scroll_y` stayed at 41 while
-    `max_scroll_y` grew 41 -> 53, so the newest twelve lines of the
-    conversation left the screen the moment a slash was typed and came
-    back only when the panel closed. Whether the reader was at the bottom
-    is knowable only BEFORE the relayout, which is why app.py captures it
-    there.
+class TestThePanelDoesNotScrollTheTranscriptAway:
+    """Batch 55. Opening the suggestion panel leaves the transcript
+    where it was.
     """
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test(size=(80, 24)) as pilot:
-        await pilot.pause()
-        panel = app.query_one("#slash-suggest")
-        transcript = app.query_one("#transcript")
-        for index in range(60):
-            transcript.write_system(f"line {index:02d}")
-        await pilot.pause()
-        assert transcript.scroll_offset.y >= transcript.max_scroll_y
 
-        await pilot.press("slash")
-        assert await settle(pilot, lambda: panel.display)
-        await pilot.pause()
+    @pytest.mark.asyncio
+    async def test_the_panel_opening_does_not_scroll_the_transcript_away(self):
+        """Measured, and it is the defect a naive implementation ships.
 
-        assert transcript.scroll_offset.y >= transcript.max_scroll_y, (
-            f"the transcript is parked {transcript.max_scroll_y - transcript.scroll_offset.y} "
-            f"rows above its end, so the newest lines of the conversation "
-            f"scrolled out of view when the panel opened")
+        A panel opening under the transcript takes rows from it, and textual
+        does NOT re-pin the scroll on shrink: `scroll_y` stayed at 41 while
+        `max_scroll_y` grew 41 -> 53, so the newest twelve lines of the
+        conversation left the screen the moment a slash was typed and came
+        back only when the panel closed. Whether the reader was at the bottom
+        is knowable only BEFORE the relayout, which is why app.py captures it
+        there.
+        """
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            panel = app.query_one("#slash-suggest")
+            transcript = app.query_one("#transcript")
+            for index in range(60):
+                transcript.write_system(f"line {index:02d}")
+            await pilot.pause()
+            assert transcript.scroll_offset.y >= transcript.max_scroll_y
+
+            await pilot.press("slash")
+            assert await settle(pilot, lambda: panel.display)
+            await pilot.pause()
+
+            assert transcript.scroll_offset.y >= transcript.max_scroll_y, (
+                f"the transcript is parked {transcript.max_scroll_y - transcript.scroll_offset.y} "
+                f"rows above its end, so the newest lines of the conversation "
+                f"scrolled out of view when the panel opened")
 
 # --- batch 56: the window slides instead of wrapping early ------------------
 
@@ -7379,318 +7559,341 @@ TABLE_DELTAS = ["| Domain | Skills |\n", "|---|---|\n",
                 "| prose | editing |\n"]
 
 
-@pytest.mark.asyncio
-async def test_the_figures_move_while_a_table_is_being_withheld(mocker):
-    """THE test for this batch.
-
-    `commit_span` holds a table from its header row, and a table is exempt
-    from HOLD_LIMIT -- so the gap has no upper bound and the screen can sit
-    still for as long as the model keeps writing rows. Both halves are
-    asserted together, because either alone passes with the bug in place:
-    nothing new reaches the transcript, AND the border figures still change.
+class TestTheTurnMeterReachesTheScreen:
+    """Batch 61. The figures move while the table itself is still being
+    withheld.
     """
-    clock = _Clock()
-    mocker.patch("tui.app.monotonic", clock)
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test(size=(84, 24)) as pilot:
-        app._busy = True
-        await pilot.pause()
 
-        drawn_before = len(app._transcript._entries)
-        seen = []
-        for delta in TABLE_DELTAS:
-            clock.advance(1.0)
-            app.post_message(LoopEventMessage(LoopEvent(token_delta=delta)))
+    @pytest.mark.asyncio
+    async def test_the_figures_move_while_a_table_is_being_withheld(self, mocker):
+        """THE test for this batch.
+
+        `commit_span` holds a table from its header row, and a table is exempt
+        from HOLD_LIMIT -- so the gap has no upper bound and the screen can sit
+        still for as long as the model keeps writing rows. Both halves are
+        asserted together, because either alone passes with the bug in place:
+        nothing new reaches the transcript, AND the border figures still change.
+        """
+        clock = _Clock()
+        mocker.patch("tui.app.monotonic", clock)
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(84, 24)) as pilot:
+            app._busy = True
             await pilot.pause()
-            seen.append(_subtitle(app))
 
-        assert len(app._transcript._entries) == drawn_before, \
-            "a table row reached the transcript -- this test is not " \
-            "exercising the hold it was written for"
-        assert len(set(seen)) > 1, \
-            "the figures froze while the table was being withheld, which " \
-            "is the exact silence this batch exists to fill"
-        assert all("s" in text for text in seen)
+            drawn_before = len(app._transcript._entries)
+            seen = []
+            for delta in TABLE_DELTAS:
+                clock.advance(1.0)
+                app.post_message(LoopEventMessage(LoopEvent(token_delta=delta)))
+                await pilot.pause()
+                seen.append(_subtitle(app))
 
-
-@pytest.mark.asyncio
-async def test_the_throughput_figure_counts_what_is_being_withheld(mocker):
-    """The deltas ARRIVE during a hold; it is the renderer that waits. A
-    rate fed from drawn rows would read zero for the whole table."""
-    clock = _Clock()
-    mocker.patch("tui.app.monotonic", clock)
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test(size=(84, 24)) as pilot:
-        app._busy = True
-        for delta in TABLE_DELTAS:
-            clock.advance(0.5)
-            app.post_message(LoopEventMessage(LoopEvent(token_delta=delta)))
-        await pilot.pause()
-
-        assert "tok/s" in _subtitle(app), \
-            "no throughput figure during a table hold"
+            assert len(app._transcript._entries) == drawn_before, \
+                "a table row reached the transcript -- this test is not " \
+                "exercising the hold it was written for"
+            assert len(set(seen)) > 1, \
+                "the figures froze while the table was being withheld, which " \
+                "is the exact silence this batch exists to fill"
+            assert all("s" in text for text in seen)
 
 
-@pytest.mark.asyncio
-async def test_the_prompt_border_shows_uptime_before_any_turn(mocker):
-    """Uptime is the half that says the shell is alive when nothing is
-    running -- and the border TITLE stays the placeholder, which is why
-    the subtitle was free to take."""
-    clock = _Clock()
-    mocker.patch("tui.app.monotonic", clock)
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test(size=(84, 24)) as pilot:
-        clock.advance(300.0)
-        app._refresh_meter()
-        await pilot.pause()
+    @pytest.mark.asyncio
+    async def test_the_throughput_figure_counts_what_is_being_withheld(self, mocker):
+        """The deltas ARRIVE during a hold; it is the renderer that waits. A
+        rate fed from drawn rows would read zero for the whole table."""
+        clock = _Clock()
+        mocker.patch("tui.app.monotonic", clock)
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(84, 24)) as pilot:
+            app._busy = True
+            for delta in TABLE_DELTAS:
+                clock.advance(0.5)
+                app.post_message(LoopEventMessage(LoopEvent(token_delta=delta)))
+            await pilot.pause()
 
-        assert _subtitle(app) == "up 5m"
-        assert app.query_one("#prompt", PromptInput).border_title == \
-            "Message, or /help"
-
-
-@pytest.mark.asyncio
-async def test_the_prompt_hint_renders_once_on_the_frame():
-    """`TextArea` renders its native `placeholder` reactive inside the box
-    when empty, so assigning the hint to both it and `border_title` drew
-    "Message, or /help" twice -- frame and text. The border title is the
-    only placeholder this box has; the reactive stays at its default."""
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        prompt = app.query_one("#prompt", PromptInput)
-
-        assert prompt.text == ""
-        assert prompt.border_title == "Message, or /help"
-        assert prompt.placeholder == "", \
-            "the hint is assigned where TextArea draws it a second time"
+            assert "tok/s" in _subtitle(app), \
+                "no throughput figure during a table hold"
 
 
-@pytest.mark.asyncio
-async def test_a_modal_does_not_count_toward_the_turn(mocker):
-    """Read off the SCREEN STACK, so every modal counts including ones
-    added after this batch -- textual's on_screen_suspend does not reach
-    the App (measured), but the stack depth does."""
-    clock = _Clock()
-    mocker.patch("tui.app.monotonic", clock)
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test(size=(84, 24)) as pilot:
-        app._busy = True
-        clock.advance(2.0)
-        app._refresh_meter()
+    @pytest.mark.asyncio
+    async def test_the_prompt_border_shows_uptime_before_any_turn(self, mocker):
+        """Uptime is the half that says the shell is alive when nothing is
+        running -- and the border TITLE stays the placeholder, which is why
+        the subtitle was free to take."""
+        clock = _Clock()
+        mocker.patch("tui.app.monotonic", clock)
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(84, 24)) as pilot:
+            clock.advance(300.0)
+            app._refresh_meter()
+            await pilot.pause()
 
-        app.push_screen(ConfirmScreen("Title", "Body", "Yes"))
-        await pilot.pause()
-        app._refresh_meter()
-        clock.advance(30.0)          # thirty seconds reading the modal
-        app._refresh_meter()
-        app.pop_screen()
-        await pilot.pause()
-        # Observed HERE rather than after the advance below. The pause is
-        # not a tick -- the 0.4s timer has not come round in test time --
-        # so the refresh that sees the stack back at one is this call, and
-        # writing the assertion the other way round measures how long the
-        # test waited rather than what the meter does.
-        app._refresh_meter()
-        clock.advance(1.0)
-        app._refresh_meter()
+            assert _subtitle(app) == "up 5m"
+            assert app.query_one("#prompt", PromptInput).border_title == \
+                "Message, or /help"
 
-        assert app._meter.elapsed(clock.now) == pytest.approx(3.0, abs=0.01), \
-            "time spent waiting on a human was counted against the model"
+
+    @pytest.mark.asyncio
+    async def test_the_prompt_hint_renders_once_on_the_frame(self):
+        """`TextArea` renders its native `placeholder` reactive inside the box
+        when empty, so assigning the hint to both it and `border_title` drew
+        "Message, or /help" twice -- frame and text. The border title is the
+        only placeholder this box has; the reactive stays at its default."""
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            prompt = app.query_one("#prompt", PromptInput)
+
+            assert prompt.text == ""
+            assert prompt.border_title == "Message, or /help"
+            assert prompt.placeholder == "", \
+                "the hint is assigned where TextArea draws it a second time"
+
+
+    @pytest.mark.asyncio
+    async def test_a_modal_does_not_count_toward_the_turn(self, mocker):
+        """Read off the SCREEN STACK, so every modal counts including ones
+        added after this batch -- textual's on_screen_suspend does not reach
+        the App (measured), but the stack depth does."""
+        clock = _Clock()
+        mocker.patch("tui.app.monotonic", clock)
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(84, 24)) as pilot:
+            app._busy = True
+            clock.advance(2.0)
+            app._refresh_meter()
+
+            app.push_screen(ConfirmScreen("Title", "Body", "Yes"))
+            await pilot.pause()
+            app._refresh_meter()
+            clock.advance(30.0)          # thirty seconds reading the modal
+            app._refresh_meter()
+            app.pop_screen()
+            await pilot.pause()
+            # Observed HERE rather than after the advance below. The pause is
+            # not a tick -- the 0.4s timer has not come round in test time --
+            # so the refresh that sees the stack back at one is this call, and
+            # writing the assertion the other way round measures how long the
+            # test waited rather than what the meter does.
+            app._refresh_meter()
+            clock.advance(1.0)
+            app._refresh_meter()
+
+            assert app._meter.elapsed(clock.now) == pytest.approx(3.0, abs=0.01), \
+                "time spent waiting on a human was counted against the model"
 
 
 # -- the four exits ---------------------------------------------------------
 
-def test_the_busy_flag_is_the_only_way_to_move_the_clock():
-    """Batch 60's shape, one layer up: `_busy` is written at eleven sites
-    with FOUR distinct turn exits, and a clock started at one and stopped
-    at another leaks. The property is the funnel -- so what has to be
-    pinned is that nothing writes the backing field around it.
 
-    Source-level, because no behaviour can see the difference until the
-    fifth exit is added and forgets to call the meter.
+class TestTheBusyFlagIsTheClock:
+    """The four exits from a turn, and the one flag that starts and
+    stops the clock behind them.
     """
-    import ast
-    import inspect
 
-    import tui.app
+    def test_the_busy_flag_is_the_only_way_to_move_the_clock(self):
+        """Batch 60's shape, one layer up: `_busy` is written at eleven sites
+        with FOUR distinct turn exits, and a clock started at one and stopped
+        at another leaks. The property is the funnel -- so what has to be
+        pinned is that nothing writes the backing field around it.
 
-    tree = ast.parse(inspect.getsource(tui.app))
-    stores = [node for node in ast.walk(tree)
-              if isinstance(node, ast.Attribute)
-              and node.attr == "_busy_state"
-              and isinstance(node.ctx, ast.Store)]
-    assert len(stores) == 2, (
-        "_busy_state is written at %d sites; it may be assigned only in "
-        "__init__ and in the property setter, or a turn exit can stop the "
-        "clock without the meter hearing about it" % len(stores))
+        Source-level, because no behaviour can see the difference until the
+        fifth exit is added and forgets to call the meter.
+        """
+        import ast
+        import inspect
 
-    setters = [node for node in ast.walk(tree)
-               if isinstance(node, ast.FunctionDef) and node.name == "_busy"]
-    assert len(setters) == 2, "expected the _busy getter and setter"
+        import tui.app
 
+        tree = ast.parse(inspect.getsource(tui.app))
+        stores = [node for node in ast.walk(tree)
+                  if isinstance(node, ast.Attribute)
+                  and node.attr == "_busy_state"
+                  and isinstance(node.ctx, ast.Store)]
+        assert len(stores) == 2, (
+            "_busy_state is written at %d sites; it may be assigned only in "
+            "__init__ and in the property setter, or a turn exit can stop the "
+            "clock without the meter hearing about it" % len(stores))
 
-@pytest.mark.asyncio
-async def test_setting_busy_starts_and_stops_the_clock(mocker):
-    """The behavioural half of the test above. All four exits clear
-    `_busy`, so proving the setter proves the four."""
-    clock = _Clock()
-    mocker.patch("tui.app.monotonic", clock)
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test(size=(84, 24)) as pilot:
-        assert app._meter.running is False
-        app._busy = True
-        assert app._meter.running is True
-        clock.advance(12.0)
-        app._busy = False
-        await pilot.pause()
-
-        assert app._meter.running is False
-        assert app._last_turn_elapsed == pytest.approx(12.0)
+        setters = [node for node in ast.walk(tree)
+                   if isinstance(node, ast.FunctionDef) and node.name == "_busy"]
+        assert len(setters) == 2, "expected the _busy getter and setter"
 
 
-@pytest.mark.asyncio
-async def test_a_repeated_busy_assignment_does_not_restart_the_clock(mocker):
-    """`_busy = True` is assigned twice on at least one path."""
-    clock = _Clock()
-    mocker.patch("tui.app.monotonic", clock)
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test(size=(84, 24)) as pilot:
-        app._busy = True
-        clock.advance(5.0)
-        app._busy = True
-        clock.advance(5.0)
-        app._busy = False
-        await pilot.pause()
+    @pytest.mark.asyncio
+    async def test_setting_busy_starts_and_stops_the_clock(self, mocker):
+        """The behavioural half of the test above. All four exits clear
+        `_busy`, so proving the setter proves the four."""
+        clock = _Clock()
+        mocker.patch("tui.app.monotonic", clock)
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(84, 24)) as pilot:
+            assert app._meter.running is False
+            app._busy = True
+            assert app._meter.running is True
+            clock.advance(12.0)
+            app._busy = False
+            await pilot.pause()
 
-        assert app._last_turn_elapsed == pytest.approx(10.0)
+            assert app._meter.running is False
+            assert app._last_turn_elapsed == pytest.approx(12.0)
+
+
+    @pytest.mark.asyncio
+    async def test_a_repeated_busy_assignment_does_not_restart_the_clock(self, mocker):
+        """`_busy = True` is assigned twice on at least one path."""
+        clock = _Clock()
+        mocker.patch("tui.app.monotonic", clock)
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(84, 24)) as pilot:
+            app._busy = True
+            clock.advance(5.0)
+            app._busy = True
+            clock.advance(5.0)
+            app._busy = False
+            await pilot.pause()
+
+            assert app._last_turn_elapsed == pytest.approx(10.0)
 
 
 # -- the line that says it is done ------------------------------------------
 
-@pytest.mark.asyncio
-async def test_a_finished_turn_says_how_long_it_took(mocker, _mocked_loop):
-    """The reported problem in one assertion: when the turn ends, the
-    transcript says so."""
-    clock = _Clock()
-    mocker.patch("tui.app.monotonic", clock)
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test(size=(84, 24)) as pilot:
-        app.query_one("#prompt").value = "hello"
-        await pilot.press("enter")
-        assert await settle(pilot, lambda: app._busy is False), \
-            "the turn never finished"
 
-        lines = [text for role, text in app._transcript._entries
-                 if role == "system" and text.startswith("took ")]
-        assert lines, "nothing in the transcript says the turn ended"
+class TestTheLineThatSaysItIsDone:
+    """What a finished turn prints, and what it says about how long it
+    took.
+    """
 
+    @pytest.mark.asyncio
+    async def test_a_finished_turn_says_how_long_it_took(self, mocker, _mocked_loop):
+        """The reported problem in one assertion: when the turn ends, the
+        transcript says so."""
+        clock = _Clock()
+        mocker.patch("tui.app.monotonic", clock)
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(84, 24)) as pilot:
+            app.query_one("#prompt").value = "hello"
+            await pilot.press("enter")
+            assert await settle(pilot, lambda: app._busy is False), \
+                "the turn never finished"
 
-@pytest.mark.asyncio
-async def test_the_completion_line_makes_no_token_claim_without_usage(mocker):
-    """Twelve of the fifteen configured providers report no usage on a
-    streaming call (D21). Printing `0 tokens out` there would say the
-    model wrote nothing."""
-    clock = _Clock()
-    mocker.patch("tui.app.monotonic", clock)
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test(size=(84, 24)) as pilot:
-        app._busy = True
-        clock.advance(3.0)
-        app._busy = False
-        app._write_turn_time()
-        await pilot.pause()
-
-        line = [t for r, t in app._transcript._entries if r == "system"][-1]
-        assert line == "took 3.0s"
-        assert "token" not in line
+            lines = [text for role, text in app._transcript._entries
+                     if role == "system" and text.startswith("took ")]
+            assert lines, "nothing in the transcript says the turn ended"
 
 
-@pytest.mark.asyncio
-async def test_the_exact_count_comes_from_the_output_instrument(mocker):
-    """NOT turn_billed_tokens (a spend meter, which counts the prompt
-    again every step) and NOT turn_new_tokens (a size meter, which adds
-    the input deltas a tool-using turn brings in)."""
-    clock = _Clock()
-    mocker.patch("tui.app.monotonic", clock)
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test(size=(84, 24)) as pilot:
-        response = make_model_response(text="done")
-        response.turn_billed_tokens = 99999
-        response.turn_new_tokens = 5000
-        response.turn_output_tokens = 400
+    @pytest.mark.asyncio
+    async def test_the_completion_line_makes_no_token_claim_without_usage(self, mocker):
+        """Twelve of the fifteen configured providers report no usage on a
+        streaming call (D21). Printing `0 tokens out` there would say the
+        model wrote nothing."""
+        clock = _Clock()
+        mocker.patch("tui.app.monotonic", clock)
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(84, 24)) as pilot:
+            app._busy = True
+            clock.advance(3.0)
+            app._busy = False
+            app._write_turn_time()
+            await pilot.pause()
 
-        app._busy = True
-        app.post_message(LoopEventMessage(
-            LoopEvent(final_response=response, stop_reason="complete")))
-        await pilot.pause()
-        clock.advance(10.0)
-        app._busy = False
-        app._write_turn_time()
-        await pilot.pause()
-
-        line = [t for r, t in app._transcript._entries if r == "system"][-1]
-        assert line == "took 10.0s · 400 tokens out · 40 tok/s", line
+            line = [t for r, t in app._transcript._entries if r == "system"][-1]
+            assert line == "took 3.0s"
+            assert "token" not in line
 
 
-@pytest.mark.asyncio
-async def test_nothing_is_said_when_no_turn_was_running(mocker):
-    """`_busy` is cleared on paths where it was never set -- a starter's
-    early-return error branch. A `took 0.0s` line under an error message
-    is noise."""
-    clock = _Clock()
-    mocker.patch("tui.app.monotonic", clock)
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test(size=(84, 24)) as pilot:
-        before = len(app._transcript._entries)
-        app._write_turn_time()
-        await pilot.pause()
+    @pytest.mark.asyncio
+    async def test_the_exact_count_comes_from_the_output_instrument(self, mocker):
+        """NOT turn_billed_tokens (a spend meter, which counts the prompt
+        again every step) and NOT turn_new_tokens (a size meter, which adds
+        the input deltas a tool-using turn brings in)."""
+        clock = _Clock()
+        mocker.patch("tui.app.monotonic", clock)
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(84, 24)) as pilot:
+            response = make_model_response(text="done")
+            response.turn_billed_tokens = 99999
+            response.turn_new_tokens = 5000
+            response.turn_output_tokens = 400
 
-        assert len(app._transcript._entries) == before
+            app._busy = True
+            app.post_message(LoopEventMessage(
+                LoopEvent(final_response=response, stop_reason="complete")))
+            await pilot.pause()
+            clock.advance(10.0)
+            app._busy = False
+            app._write_turn_time()
+            await pilot.pause()
+
+            line = [t for r, t in app._transcript._entries if r == "system"][-1]
+            assert line == "took 10.0s · 400 tokens out · 40 tok/s", line
+
+
+    @pytest.mark.asyncio
+    async def test_nothing_is_said_when_no_turn_was_running(self, mocker):
+        """`_busy` is cleared on paths where it was never set -- a starter's
+        early-return error branch. A `took 0.0s` line under an error message
+        is noise."""
+        clock = _Clock()
+        mocker.patch("tui.app.monotonic", clock)
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(84, 24)) as pilot:
+            before = len(app._transcript._entries)
+            app._write_turn_time()
+            await pilot.pause()
+
+            assert len(app._transcript._entries) == before
 
 
 # -- the animations setting -------------------------------------------------
 
-@pytest.mark.asyncio
-async def test_animations_off_creates_no_ticking_timer(mocker):
-    """RavenPanel's rule. The figures still update on every loop event --
-    which is what keeps them live through a table hold either way -- so
-    what the setting actually costs is movement during the two silences a
-    delta cannot cover: a long tool call, and pre-first-token latency."""
-    clock = _Clock()
-    mocker.patch("tui.app.monotonic", clock)
-    app = VenastineApp("ANTHROPIC", "test-model",
-                       {"tui": {"animations": False}})
-    async with app.run_test(size=(84, 24)) as pilot:
-        assert app._meter_timer is None
 
-        app._busy = True
-        clock.advance(1.0)
-        app.post_message(LoopEventMessage(
-            LoopEvent(token_delta="| a | b |\n")))
-        await pilot.pause()
+class TestTheAnimationsSetting:
+    """Animations off means no ticking timer, not a timer that ticks
+    invisibly.
+    """
 
-        assert _subtitle(app), "the figures need an event route as well"
+    @pytest.mark.asyncio
+    async def test_animations_off_creates_no_ticking_timer(self, mocker):
+        """RavenPanel's rule. The figures still update on every loop event --
+        which is what keeps them live through a table hold either way -- so
+        what the setting actually costs is movement during the two silences a
+        delta cannot cover: a long tool call, and pre-first-token latency."""
+        clock = _Clock()
+        mocker.patch("tui.app.monotonic", clock)
+        app = VenastineApp("ANTHROPIC", "test-model",
+                           {"tui": {"animations": False}})
+        async with app.run_test(size=(84, 24)) as pilot:
+            assert app._meter_timer is None
+
+            app._busy = True
+            clock.advance(1.0)
+            app.post_message(LoopEventMessage(
+                LoopEvent(token_delta="| a | b |\n")))
+            await pilot.pause()
+
+            assert _subtitle(app), "the figures need an event route as well"
 
 
-@pytest.mark.asyncio
-async def test_the_tick_runs_only_while_a_turn_does(mocker):
-    """A 0.4s tick against an idle shell is the redraw loop
-    RavenPanel.pause_animation exists to avoid."""
-    clock = _Clock()
-    mocker.patch("tui.app.monotonic", clock)
-    app = VenastineApp("ANTHROPIC", "test-model", {})
-    async with app.run_test(size=(84, 24)) as pilot:
-        assert app._meter_timer is not None
-        assert app._meter_timer._active.is_set() is False
+    @pytest.mark.asyncio
+    async def test_the_tick_runs_only_while_a_turn_does(self, mocker):
+        """A 0.4s tick against an idle shell is the redraw loop
+        RavenPanel.pause_animation exists to avoid."""
+        clock = _Clock()
+        mocker.patch("tui.app.monotonic", clock)
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(84, 24)) as pilot:
+            assert app._meter_timer is not None
+            assert app._meter_timer._active.is_set() is False
 
-        app._busy = True
-        await pilot.pause()
-        assert app._meter_timer._active.is_set() is True
+            app._busy = True
+            await pilot.pause()
+            assert app._meter_timer._active.is_set() is True
 
-        app._busy = False
-        await pilot.pause()
-        assert app._meter_timer._active.is_set() is False
+            app._busy = False
+            await pilot.pause()
+            assert app._meter_timer._active.is_set() is False
 
 
 def _bare_app():
@@ -8176,3 +8379,49 @@ class TestTheRestartWaitsForTheRightThings:
             await pilot.pause()
         assert pinned.return_value.model == "test-model"
         assert pinned.return_value.provider == "ANTHROPIC"
+
+
+# ---------------------------------------------------------------------------
+# ---- batch 114 (TECHNICAL_DEBT 30): the file's own scheduling shape -------
+# ---------------------------------------------------------------------------
+
+
+class TestThisFileIsGroupedForLoadscope:
+    """Batch 114. Every test here is inside a class, and that is a
+    SCHEDULING fact rather than a style one.
+
+    `--dist loadscope` groups a test by its CLASS where it has one and by
+    its MODULE where it does not, and a group is what gets handed to one
+    worker. So every classless test in this file was one indivisible unit:
+    183 functions, 292 node ids, a fifth of the suite's measured time, and
+    the floor every other worker waited on. Gathering them into 41 classes
+    along the section banners this file already had is the whole of
+    TECHNICAL_DEBT 30.
+
+    THIS TEST IS INSIDE A CLASS BECAUSE IT IS ITS OWN FIRST SUBJECT. It is
+    the mirror of `test_storage_e2e.py::test_this_file_declares_no_test_class`,
+    which forbids the opposite thing in the file next door for the opposite
+    reason -- that file holds the suite's only module-scoped fixture, and a
+    class there would ask for a second one.
+    """
+
+    def test_every_test_here_is_inside_a_class(self):
+        """A module-level test re-grows the group one commit at a time,
+        and nothing says so until the floor is back."""
+        import ast
+
+        with open(__file__, encoding="utf-8") as handle:
+            tree = ast.parse(handle.read())
+
+        loose = [node.name for node in tree.body
+                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                 and node.name.startswith("test_")]
+
+        assert not loose, (
+            "these tests are at module level, so loadscope schedules them "
+            "as ONE group with every other classless test in this file, "
+            "whatever the worker count:\n  "
+            + "\n  ".join(loose)
+            + "\nPut each one in a Test class -- the section banner it "
+              "sits under names the class it belongs to."
+        )

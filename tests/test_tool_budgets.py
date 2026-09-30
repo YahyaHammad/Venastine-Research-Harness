@@ -308,7 +308,33 @@ class TestAComputeToolIsBoundedByAClockThatCanStopIt:
         """Guards the guard. The test above asserts that a file STOPPED
         growing, which is exactly what it would assert if the child had
         never started. This is the positive control: the same handler,
-        observed while it is still running."""
+        observed while it is still running.
+
+        THE WINDOW STARTS WHEN THE CHILD DOES (batch 114, TECHNICAL_DEBT
+        31). This slept a fixed 1.0s before its first reading, so a cold
+        `python -m tools.isolation` start sat inside the window it was
+        measuring -- and it failed exactly that way once, in batch 112's
+        serial full run, with `assert 0 > 0`. Zero rather than "did not
+        grow": the child had not produced its FIRST tick 2.0s after
+        `Popen` returned, on a box eight minutes into a one-core run. What
+        timed out was an interpreter start, and the message named the
+        budget clock. It polls for the first tick under a deadline now and
+        measures growth from THERE, so what it times is the probe's 50ms
+        interval rather than the interpreter's startup.
+
+        AND A CHILD THAT DIED IS NOT A CHILD THAT WAS SLOW. `proc.stderr`
+        was captured and never read, so a crash and a cold start printed
+        the same sentence. It is in the failure message now -- read AFTER
+        the kill, because `.read()` on a live pipe blocks until EOF, which
+        is also why both failures below go through `pytest.fail` rather
+        than an `assert` whose message would be built while the child is
+        still running.
+
+        The deadline is generous on purpose: it is paid only when this
+        control is about to fail, and what it absorbs is a loaded box, not
+        a defect in `tools.isolation`.
+        """
+        first_tick_deadline_s = 30.0
 
         ticks = tmp_path / "ticks"
         ticks.write_text("", encoding="utf-8")
@@ -322,13 +348,32 @@ class TestAComputeToolIsBoundedByAClockThatCanStopIt:
             "module": "tests._isolation_probe", "function": "tick_forever",
             "params": {"path": str(ticks), "interval": 0.05}}))
         proc.stdin.close()
+
+        def give_up(what):
+            """Kill first, THEN read the pipe -- see the docstring."""
+            proc.kill()
+            proc.wait(timeout=10)
+            pytest.fail("%s\nthe child's stderr was: %r"
+                        % (what, proc.stderr.read()))
+
         try:
+            deadline = time.monotonic() + first_tick_deadline_s
+            first = 0
+            while not first and time.monotonic() < deadline:
+                time.sleep(0.05)
+                first = ticks.stat().st_size
+            if not first:
+                give_up(
+                    "the child wrote no first tick in %.0fs, so nothing was "
+                    "measured -- that is a child which never started, not a "
+                    "budget which failed to stop one"
+                    % first_tick_deadline_s)
+
             time.sleep(1.0)
-            first = ticks.stat().st_size
-            time.sleep(1.0)
-            assert ticks.stat().st_size > first, (
-                "an unkilled child did not keep growing the file, so the "
-                "test above is asserting nothing")
+            if ticks.stat().st_size <= first:
+                give_up(
+                    "an unkilled child did not keep growing the file, so "
+                    "the test above is asserting nothing")
         finally:
             proc.kill()
             proc.wait(timeout=10)

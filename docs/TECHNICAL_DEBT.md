@@ -1370,7 +1370,7 @@ process. The `send` assertion reads its exact message on purpose -- `send` refus
 session on its KIND two lines further down, so "an error came back" would pass with no ownership
 check at all.
 
-## 30. `test_tui.py` is the floor on how fast the suite can run (open, 2026-09-28; cause corrected and the faster mode adopted in batch 110)
+## 30. `test_tui.py` is the floor on how fast the suite can run (closed, batch 114; cause corrected and the faster mode adopted in batch 110)
 
 Batch 109 put the suite on `pytest-xdist` with `--dist loadfile`, which sends a whole file to one
 worker. That mode was chosen for coverage rather than speed -- four places in the suite depend on
@@ -1538,7 +1538,108 @@ test class.**
 `test_config_edit.py` precondition this entry prescribed was never the defect, and the mode
 decision it was blocking is taken.
 
-## 31. A positive control measures interpreter startup as well as the thing it guards (open, 2026-09-30)
+---
+
+### RESOLVED in batch 114
+
+The 183 classless tests are 41 classes now, cut along the section banners the file already carried,
+and `test_tui.py`'s module group is gone: **292 node ids in one indivisible unit before, zero
+after.** Nothing moved and nothing was renamed -- the same 308 test names collect, the file still
+reports 432 tests plus the one guard below, and the only change to a test is `self` and four columns
+of indentation.
+
+**THREE THINGS THIS ENTRY GOT WRONG.** Each was found by running something rather than re-reading
+the entry, which is the same way batch 110 corrected its cause and batch 111 corrected its count.
+
+**1. "Or moving them into a file of their own" is not a second route to the same place.** The
+prescription above offers "gathering them into classes -- or moving them into a file of their own"
+as alternatives. Only the first works. loadscope groups a classless test by its MODULE, so 183
+classless tests in a new file are one group of exactly the same weight under a different name. The
+sentence would have sent the next reader to do the mechanical half of the job for none of the
+benefit, and it is the cheaper-looking of the two.
+
+**2. The lever is not the count of functions.** This entry prices the work as "a 183-site edit" and
+reads as though the floor falls with the count. It does not: the floor is the largest INDIVISIBLE
+group, and a parametrised function's node ids share one group whatever class holds them.
+`test_every_modal_keeps_its_decision_on_screen` is 3 sizes x 18 screens = **54 node ids, 33.5% of
+the entire module group, in one function** that no class boundary can split. It is the floor now,
+and it is why splitting finer was considered and rejected: `-n auto` is 11 workers on this box and
+the serial suite is 572s, so the ideal worker share is ~52s and this group already sits under it.
+Going below a bound that has stopped binding buys nothing.
+
+**3. The 79.7s / 20.7% figures were stale, and re-measuring them needed a control.** Aggregated per
+banner from a `--durations=0` serial run of the file, the module group read 349s and the whole file
+456s against this entry's 79.7s and 127.8s. The file had not tripled: the BOX was **3.07x slow**,
+established by re-timing `test_live_output.py` at 156.92s against the 51.18s batch 113 measured on
+the same machine hours earlier. Corrected to that scale the module group is ~114s and the file
+~148s, which is ordinary growth. The distribution is unaffected, because every banner was timed
+inside the one window -- but no absolute second from that capture should be quoted.
+
+**AND ONE THING IT NEVER SAID: CI GAINS NOTHING FROM THIS.** `-n auto` is 70% of the cores, so a
+4-core runner takes 3 workers and its ideal share is ~190s -- already above the 114s floor, so the
+floor was never what bound CI. The entire payoff is on developer machines, which is where the suite
+runs many times per batch and where 11 workers made the floor the binding constraint. An entry about
+suite speed that does not separate the two audiences invites the next reader to expect a green tick
+to arrive sooner.
+
+**WHAT IT BOUGHT: 1.61x, and the ranges do not overlap.** Measured the way this entry's own
+prescription asks for -- alternated, three runs a side, so drift cancels instead of accumulating in
+whichever side ran second -- with `AGENT_WORKSPACE` unset and the whole suite each time:
+
+| | run 1 | run 2 | run 3 | mean |
+|---|---|---|---|---|
+| before | 2:17.9 | 2:07.9 | 2:28.6 | 138.1s |
+| after | 1:10.7 | 1:40.6 | 1:26.3 | 85.9s |
+
+The slowest run after is still faster than the fastest run before, which is what makes this a result
+rather than two averages. Against a serial run of 8:41 taken the same evening, **6.1x where it was
+3.8x**. This entry guessed "somewhere between 15% and 35%, and the only way to know is to do it and
+run it"; it is **38%**, and the guess was right about the method.
+
+**A FILE-LEVEL BEFORE/AFTER IS THE WRONG INSTRUMENT, and two control runs were needed to see it.**
+Running `test_tui.py` ALONE, the pre-change file leaves ten workers idle once its twenty small
+classes finish, so its 292 pilots run against almost no competition; the post-change file runs
+eleven at once, and `pilot.pause()`'s own docstring measures a **46x** swing in how long it takes
+with a busy sibling. Control runs of the file alone read 6:06 and 3:00 against post runs of 3:42 and
+3:15 -- no signal, with 2x variance inside the control by itself. In the full suite the other
+workers are never idle either way, which is why the table above is full-suite runs and why a
+file-level number should not be quoted for this.
+
+**THE SCATTER IS THE RISK, AND IT WAS CHECKED RATHER THAN ARGUED.** Classing 183 previously
+serialised tests spreads them over workers, so one that depended on a predecessor goes red -- or
+goes quietly vacuous, which is worse and is the reason `loadscope` was chosen over `load` in the
+first place. Batch 110 asserted nothing in this file was an ordered pair; that was a reading. **All
+62 classes were run standing completely alone** -- 62 processes, 251s, every one green. Two tests
+did fail on the first parallel run of the file alone
+(`test_quitting_by_gesture_releases_a_blocked_worker`,
+`test_what_does_not_fit_the_payload_block_can_be_scrolled_to`); both pass alone, both passed on
+re-run, both control runs were green, and six full-suite runs of the changed tree since -- three parallel, one serial, one on Linux and the final one -- have not reproduced either.
+That is the contention lottery this suite has by construction -- `settle` polls against a 10s
+deadline -- and not something the classing introduced.
+
+**WHAT THE PARTITION ACTUALLY IS.** 40 banner lines in the file; 36 of them own module-level tests,
+plus the region above the first one. Four of those sections have a module-level helper, a data
+block or an existing `Test` class sitting BETWEEN their own tests -- `type_into_prompt`,
+`REVIEW`/`ASKS`, `_syntax_token_theme` and `TestEventsUnderAnOpenModal` -- and no single class can
+span one. Nothing was hoisted to make it span: the interloper is the section's own seam, so each of
+those four yields two classes. 37 owners + 4 seams = **41 new classes**, and the file now holds 62
+`Test` classes in all.
+
+**Pinned** by `TestThisFileIsGroupedForLoadscope::test_every_test_here_is_inside_a_class`, which
+parses the file with `ast` and is itself inside a class, because a module-level test there would be
+the thing it forbids. Verified as a real kill rather than assumed: a stray module-level test makes
+it name the stray and tell the reader that the section banner above it names the class to file it
+under. It is the mirror of `test_storage_e2e.py::test_this_file_declares_no_test_class`, which
+forbids the opposite thing in the file next door for the opposite reason.
+
+**`tests/test_themes.py` is the larger remaining classless population, and it was left alone on a
+measurement rather than on a guess.** 319 node ids and not one class -- MORE than test_tui.py's 292,
+so a reader ranking by count would start there. It runs 38.5s on the 3.07x box, which is ~12.5s, far
+under the floor this batch leaves behind, and classing it would lower nothing. `test_math_tools.py`
+(123 classless) is 4.5s and `test_compaction.py` (68) is 6.5s. Recorded so the count does not send
+the next reader at the wrong file.
+
+## 31. A positive control measures interpreter startup as well as the thing it guards (closed, batch 114)
 
 `tests/test_tool_budgets.py::TestAComputeToolIsBoundedByAClockThatCanStopIt::test_the_probe_would_notice_a_child_that_kept_going`
 is the control beside the kill test: the test above it asserts that a file
@@ -1576,3 +1677,34 @@ was found BY that batch's verification and has nothing to do with its
 subject, and a test edit means re-running both full suites; carrying it as
 a register entry keeps it owed without widening a batch that was planned
 around the transcript.
+
+### RESOLVED in batch 114
+
+Folded into the batch that had to re-run both full suites anyway, which is
+the only reason 112 deferred it.
+
+The window starts when the CHILD starts now: the test polls for the first
+tick under a 30s deadline and measures growth from there, so what it times
+is the probe's 50ms interval rather than a cold `python -m tools.isolation`
+start. And `proc.stderr` is in the failure message, read AFTER the kill --
+`.read()` on a live pipe blocks until EOF, which is also why both failure
+paths go through `pytest.fail` rather than an `assert` whose message would
+be built while the child is still running.
+
+Verified by driving the new path rather than by reading it: pointing the
+request at a function the probe module does not have makes the test fail
+with *"the child wrote no first tick in 2s ... that is a child which never
+started, not a budget which failed to stop one"*, followed by the child's
+own `AttributeError` traceback. The old code answered the same situation
+with `assert 0 > 0` and a sentence about the budget clock.
+
+**One thing measured and deliberately left.** The sibling above it,
+`test_a_timed_out_call_is_STOPPED_not_merely_abandoned`, has the same
+cold-start exposure at `assert settled > 0` -- but its window IS the 2.0s
+budget under test, so it cannot poll past it, its message ("the child never
+ran, so nothing was measured") is truthful about what happened, and the
+budget is pinned by `assert "2s limit" in result["error"]` two lines up.
+Raising it would move a number the test asserts on. Named here so the next
+reader finds the exposure recorded rather than discovering it in a full
+run.
+
