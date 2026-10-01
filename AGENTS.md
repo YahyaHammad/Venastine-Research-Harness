@@ -2722,7 +2722,8 @@ All tests run offline: zero network, zero real API keys. The **root** `conftest.
 ### Before calling a change done
 
 - Did you run (or `py_compile`) every file you touched, and run `pytest`?
-- Did you run `ruff check .` and bandit with the CI job's own flags? Neither runs under `pytest` and both gate every push, so a batch that skips them arrives red — which is how the push carrying batch 94 landed six lint errors and two new bandit findings, every one of them mechanical.
+- Did you run `ruff check .`, bandit with the CI job's own flags, and `gitleaks detect --source . --no-git -c .github/gitleaks.toml`? None of the three runs under `pytest` and all three gate every push, so a batch that skips them arrives red — which is how the push carrying batch 94 landed six lint errors and two new bandit findings, every one of them mechanical.
+- **Gitleaks is the one that can sit red for weeks, so run it even when the batch touched no production code.** Lint and bandit are caught the same day because something else usually runs them; gitleaks fires only `on: push`, so a branch held locally banks the surprise for as long as it stays there. `tests/test_session_tools.py`'s `SECRET` fixture was added 2026-09-17 and first went red 2026-10-01, twenty commits and several batches later (batch 115). **A new fake credential in a tracked test needs its fingerprint in `.gitleaksignore`; a real one needs rotation, never a fingerprint.** Scan a clean export rather than the worktree — `git archive HEAD` into a temp dir — or local untracked residue answers for CI, which checks out tracked files only.
 - Did you grep for every other call site sharing the root cause of what you just fixed?
 - Did you trace the fix against the real module, not the fake?
 - Does the new test fail if the fix is reverted, asserting the field/shape that was actually wrong?

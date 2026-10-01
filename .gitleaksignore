@@ -10,3 +10,12 @@ tests/test_policy_enforcement.py:private-key:69
 tests/test_policy_enforcement.py:generic-api-key:81
 tests/test_policy_enforcement.py:generic-api-key:352
 tests/test_policy_enforcement.py:generic-api-key:862
+
+# Same literal, planted again for the session layer: tests/test_session_tools.py
+# writes it into a fake session process and test_output_is_paged_and_redacted
+# asserts shell_output hands it back as [REDACTED]. It fires where the
+# test_policy_enforcement.py copies in prose do not, because generic-api-key
+# wants a keyword-adjacent ASSIGNMENT and `SECRET = "sk-..."` is the textbook
+# shape -- so the count of fake literals in the tree is not the count of
+# findings, and each site is blessed on its own.
+tests/test_session_tools.py:generic-api-key:40

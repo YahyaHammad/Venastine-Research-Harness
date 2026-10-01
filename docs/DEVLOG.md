@@ -17147,3 +17147,115 @@ behind, and classing it would lower nothing. Written into the register
 beside the counts it contradicts.
 
 Counts 6105 -> 6106.
+
+## Batch 115 -- the fixture that waited twenty commits to go red
+
+The twenty unpushed commits went up on 2026-10-01 and every CI job came
+back green except gitleaks. One finding, and it is not a leak.
+
+### What it found
+
+```
+Finding:     the module-level SECRET constant, an sk-style fake
+RuleID:      generic-api-key          Entropy: 4.82
+File:        tests/test_session_tools.py     Line: 40
+Fingerprint: tests/test_session_tools.py:generic-api-key:40
+```
+
+A planted fake. The same literal already sits seven other times across
+`test_policy_enforcement.py` and `test_permission_context.py`, and this
+copy is consumed by `test_output_is_paged_and_redacted`, which writes it
+into a fake session process and asserts `shell_output` hands it back as
+`[REDACTED]`. Nothing to rotate. It is exactly the category
+`.gitleaksignore` exists for and it simply had no fingerprint, so the fix
+is one line.
+
+The finding's value is described above rather than reproduced, and that
+is not tidiness: the first draft of this entry pasted it verbatim and
+**became a finding itself**, flagging `docs/DEVLOG.md:generic-api-key` on
+its own quotation. Caught by scanning the post-change tree rather than
+only the one-line fix -- a verification that checks the patch and not the
+result would have shipped a second red.
+
+Truncating to `sk-abc123...pqr678` did NOT help: entropy 3.91, still
+matched. The rule keys off the keyword-adjacent assignment, so shortening
+the value does not clear it and only describing the value does. And
+describing it beats fingerprinting it -- `.gitleaksignore` is for
+fixtures in tracked TEST files, and a line-pinned fingerprint into a
+17,000-line append-only DEVLOG would re-fire on every entry written after
+it.
+
+### Diagnosed by reproducing the job, not by reading the log
+
+The local `gh` token is expired (`HTTP 401: Bad credentials`), so the run
+was not readable. It did not need to be: the box already has the binary
+the workflow pins, **gitleaks 8.30.1**, so the job was reproduced in its
+own command against a clean `git archive HEAD` export -- not the
+worktree, because CI checks out tracked files only and local untracked
+residue would answer for it. Exit 1, one finding. Adding the fingerprint
+to the same export took it to exit 0, "no leaks found", before anything
+in the repo was touched.
+
+Stated precisely, because the log was never read: what is known is that
+the job's own command, on the binary version it pins, produces that
+finding on this commit. That the OTHER jobs came back green is the
+owner's report rather than a measurement here -- recorded the same way in
+the register, so a later reader does not promote it to something checked.
+
+A pinned CI tool is diagnosable offline. That is worth more than the pin's
+stated reason (D22's exact-pin rule, so a scanner upgrade is deliberate):
+it also means a red tick can be reproduced exactly instead of guessed at,
+which is what made this a ten-minute diagnosis with no CI round-trip.
+
+### Why it fired now, and why that is the interesting part
+
+The job runs `on: push`. `tests/test_session_tools.py` was created in
+`fa214a1` on 2026-09-17 -- the OLDEST of the twenty commits just pushed --
+so 2026-10-01 is the first time CI had ever seen the file. It was
+red-in-waiting for two weeks and several batches, every one of which
+called itself verified.
+
+That is the real finding, and it is not about gitleaks. AGENTS.md's
+"Before calling a change done" names `ruff` and bandit, and cites batch 94
+arriving red for precisely this reason -- but it **never mentioned
+gitleaks at all**. Same class of miss, one gate over, and worse here:
+lint and bandit get caught the same day because something else usually
+runs them, while a push-gated scanner banks the surprise for as long as
+the branch stays local. The checklist now names all three, with the dates
+and the rule that a new fake credential needs a fingerprint while a real
+one needs rotation.
+
+### Seven identical literals, one finding
+
+Worth writing down because it is the thing a reader would get wrong.
+`generic-api-key` wants a keyword-adjacent ASSIGNMENT: `SECRET = "sk-..."`
+is the textbook shape, while `"found key sk-... in the page"` and
+`"leaked: sk-..."` are prose and do not trip the rule. So the count of
+fake literals in the tree is not the count of findings, and anyone
+reasoning "that string is already blessed five times, it must be covered"
+reaches the wrong answer. Each site is blessed on its own.
+
+### The tripwire kept, deliberately
+
+The fingerprint is pinned to a line number, and this one has already
+drifted 31 -> 40 across four commits in an actively edited file, so an
+insertion above line 40 re-fires the job. The obvious tidy-up is to hoist
+the shared literal into one constant and bless it once.
+
+Not done. `gitleaks.yml`'s own comment already decided this -- "a moved
+fixture re-fires until re-blessed, a tripwire, not friction" -- and the
+churn IS the feature: it is what stops a real secret being pasted beside a
+fake one and inheriting its blessing. Hoisting would touch three test
+files for a non-defect and trade that away.
+
+### Register item 18's first bullet, answered
+
+"Confirm the new jobs green on Linux runners" had been open since
+2026-09-10 waiting on exactly this push. Its prediction was half right:
+there WAS a first red, but it was not platform-shaped, and the bandit
+baseline needed nothing -- so the warning not to regenerate it blindly
+held without being used, and bandit's `./`-joined filenames, "verified
+from source, not from a run", are now verified from a run. The other
+three bullets stay open.
+
+Counts unchanged at 6106: no test added.

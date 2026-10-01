@@ -724,13 +724,23 @@ dependabot.yml, codeql.yml, compat.yml, tests.yml hardening) was verified
 locally on Windows only. Each item below is green-elsewhere work, not a
 defect found.
 
-- **Confirm the new jobs green on Linux runners.** Bandit's checked-in
-  baseline uses the `./`-joined filenames Linux produces
-  (`manager.py:253` joins `os.path.join(".", f)`; verified from source,
-  not from a run) and Gitleaks/CodeQL/compat have never executed outside
-  this machine. First red on `push` is expected to be platform-shaped;
-  do not "fix" it by regenerating the baseline blindly (bandit.yml names
-  the procedure and its precondition).
+- ~~**Confirm the new jobs green on Linux runners.**~~ **Answered by the
+  push of 2026-10-01** (batch 115), which took twenty commits up at once
+  and gave every one of these jobs its first run off this machine.
+  Everything green except Gitleaks (the green half is the owner's
+  report; the local `gh` token was expired, so the run log was not
+  read -- the Gitleaks half was reproduced here against the 8.30.1
+  binary the workflow pins) -- and **the prediction in this bullet
+  was half right.** There was a first red, but it was NOT platform-shaped:
+  it was `tests/test_session_tools.py:40`, a planted fake secret added
+  2026-09-17 with no fingerprint in `.gitleaksignore`, which only a `push`
+  could surface because that is the one trigger the job has. The baseline
+  needed nothing, so the warning here held without being used, and
+  bandit's `./`-joined filenames -- "verified from source, not from a
+  run" -- are now verified from a run. The gap it exposed was in
+  AGENTS.md's "Before calling a change done", which named ruff and bandit
+  and not gitleaks; that is fixed there rather than here, because the
+  checklist is where a batch looks.
 - **arXiv feed hardening (Bandit B314/B405, baselined).**
   `tools/builtin/arxiv.py:141` parses an attacker-influenced Atom feed
   with stdlib `ElementTree`. Accepted-risk for the rollout; the fix is
