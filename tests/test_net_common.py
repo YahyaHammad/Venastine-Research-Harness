@@ -321,3 +321,90 @@ class TestTheOtherTwoToolsAreUnaffected:
         stored_at, _ = cache._entries["k"]
 
         assert before <= stored_at <= time.time()
+
+# ===========================================================================
+# ---- TECHNICAL_DEBT 35 (batch 117): the cache the registry said was safe ---
+# ===========================================================================
+
+class TestTwoThreadsCanWriteAtOnce:
+    """`spawn_subagent` is the only tool with `parallel=True`, and the
+    comment beside that field claims "everything the child's run touches was
+    made concurrency-safe first -- the budget's lock, the serialised
+    question, the per-future authorization". The child reaches this cache
+    through `arxiv_search` and `fetch_url`, and it was the one item on that
+    list with no lock.
+
+    A corrupt dict was never the risk -- single dict operations are atomic
+    under CPython. `set` is a read-modify-write (pop, assign, sweep, then
+    evict while over the cap), so the failure is a lost entry and an
+    eviction order nobody asked for.
+    """
+
+    def test_the_cap_holds_under_concurrent_writers(self):
+        """Eight threads filling one cache past its cap. Without the lock
+        the evict loop is `while len > max: pop(first)`, and two threads
+        reading that length between each other's pops can leave the dict
+        over the cap or evict more than either intended.
+        """
+        import threading
+
+        cache = TTLCache(ttl_s=60.0, max_entries=20)
+        start = threading.Barrier(8)
+        errors = []
+
+        def fill(worker):
+            try:
+                start.wait(timeout=10)
+                for index in range(50):
+                    cache.set("w%d-k%d" % (worker, index), index)
+            except Exception as exc:  # noqa: BLE001 -- reported, not raised
+                errors.append(exc)
+
+        threads = [threading.Thread(target=fill, args=(w,)) for w in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+
+        assert not errors, errors
+        assert len(cache._entries) <= 20, (
+            "the cap was exceeded under concurrent writers: %d entries"
+            % len(cache._entries))
+
+    def test_no_writer_loses_its_own_last_key(self):
+        """Distinct keys, one writer each, all inside the cap: every one
+        must be readable afterwards. A lost update here is the arxiv case
+        -- two children searching different terms, one answer surviving.
+        """
+        import threading
+
+        cache = TTLCache(ttl_s=60.0, max_entries=200)
+        start = threading.Barrier(8)
+
+        def fill(worker):
+            start.wait(timeout=10)
+            for index in range(10):
+                cache.set("w%d-k%d" % (worker, index), (worker, index))
+
+        threads = [threading.Thread(target=fill, args=(w,)) for w in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+
+        missing = [(w, i) for w in range(8) for i in range(10)
+                   if cache.get("w%d-k%d" % (w, i)) is None]
+        assert not missing, "lost %d of 80 keys: %r" % (len(missing),
+                                                        missing[:5])
+
+    def test_the_sweep_does_not_deadlock_the_writer(self):
+        """`_sweep` is called from `set` with the lock HELD, so it must not
+        take it. A plain `Lock` is not reentrant, and the test for that is
+        simply that a write with something expired to sweep returns at all.
+        """
+        cache = TTLCache(ttl_s=0.01, max_entries=10)
+        cache.set("old", 1)
+        time.sleep(0.05)
+        cache.set("new", 2)          # hangs forever if _sweep re-locks
+        assert cache.get("old") is None
+        assert cache.get("new") == 2

@@ -330,3 +330,121 @@ class TestTheArxivFeedIsParsedDefused:
         assert "error" in result
         assert "refuses to expand" in result["error"]
         assert secret not in str(result)
+
+# ===========================================================================
+# ---- TECHNICAL_DEBT 33 (batch 117): a malformed feed, not a hostile one ----
+# ===========================================================================
+#
+# The other half of "the feed is attacker-influenced". Batch 116 stopped it
+# declaring ENTITIES; this is the structure. Six omissions each raised out
+# of `_parse_atom_feed` into dispatch()'s generic wrapper, because none of
+# AttributeError or TypeError is a ParseError or a DefusedXmlException --
+# so one malformed entry failed an entire search.
+
+_ID = "<id>http://arxiv.org/abs/2000.00001v1</id>"
+_TITLE = "<title>A Paper</title>"
+_SUMMARY = "<summary>s</summary>"
+_PUBLISHED = "<published>2024-01-01T00:00:00Z</published>"
+_AUTHOR = "<author><name>A. Author</name></author>"
+_WHOLE = _ID + _TITLE + _SUMMARY + _PUBLISHED + _AUTHOR
+
+
+def _entries(*inners):
+    """A feed of N entries, each spelled out by the case under test."""
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<feed xmlns="http://www.w3.org/2005/Atom">'
+        + "".join("<entry>%s</entry>" % inner for inner in inners)
+        + "</feed>"
+    )
+
+
+class TestAMalformedFeedDegradesInsteadOfAborting:
+    """What one bad entry costs: itself, and nothing else.
+
+    Each case below RAISED before batch 117, and the two marked as kept are
+    the ones a reader skips -- `summary` looked guarded by `or ""` and
+    `published` looked guarded by `is not None`, and neither covers both a
+    missing element and a present-but-empty one.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _no_cached_answers(self):
+        from tools.builtin import arxiv
+
+        arxiv._cache.clear()
+        yield
+        arxiv._cache.clear()
+
+    @pytest.mark.parametrize("label,inner,kept", [
+        # Dropped: an entry with no id or no title is not citable.
+        ("no id", _TITLE + _SUMMARY + _PUBLISHED + _AUTHOR, 0),
+        ("no title", _ID + _SUMMARY + _PUBLISHED + _AUTHOR, 0),
+        ("empty title", _ID + "<title></title>" + _SUMMARY + _AUTHOR, 0),
+        # Kept: the missing part is not what makes an entry usable.
+        ("no summary", _ID + _TITLE + _PUBLISHED + _AUTHOR, 1),
+        ("empty published", _ID + _TITLE + _SUMMARY
+         + "<published></published>" + _AUTHOR, 1),
+        ("author with no name", _ID + _TITLE + _SUMMARY + _PUBLISHED
+         + "<author></author>", 1),
+        ("no authors at all", _ID + _TITLE + _SUMMARY + _PUBLISHED, 1),
+    ])
+    def test_an_omission_is_not_an_exception(self, http, label, inner, kept):
+        """Every one of these raised out of the tool before batch 117."""
+        from tools.builtin import arxiv
+
+        http.respond(text=_entries(inner))
+
+        result = arxiv.run({"keywords": "malformed-%s" % label.replace(" ", "-")})
+
+        assert "error" not in result, (
+            "%r aborted the search instead of degrading: %r"
+            % (label, result.get("error")))
+        assert result["result_count"] == kept
+
+    def test_one_unusable_entry_does_not_lose_the_others(self, http):
+        """THE POINT OF THE WHOLE CHANGE. A page of five papers where the
+        third has no title used to return nothing at all.
+        """
+        from tools.builtin import arxiv
+
+        http.respond(text=_entries(
+            _WHOLE, _WHOLE, _SUMMARY + _PUBLISHED, _WHOLE, _WHOLE))
+
+        result = arxiv.run({"keywords": "malformed-one-of-five"})
+
+        assert "error" not in result
+        assert result["result_count"] == 4, (
+            "one malformed entry cost the other four")
+
+    def test_a_dropped_entry_is_logged_with_its_position(self, http, caplog):
+        """The index and not the id, because the id is what may be missing.
+        A silent skip would make a short page look like a short answer.
+        """
+        import logging
+
+        from tools.builtin import arxiv
+
+        http.respond(text=_entries(_WHOLE, _SUMMARY + _PUBLISHED))
+
+        with caplog.at_level(logging.WARNING, logger="tools.builtin.arxiv"):
+            arxiv.run({"keywords": "malformed-logged"})
+
+        # getMessage(), not `.message`: the record carries a template and
+        # its args separately, and formatting them by hand is how this
+        # assertion first failed with a TypeError of its own.
+        assert any("skipped entry 2 of 2" in record.getMessage()
+                   for record in caplog.records), caplog.text
+
+    def test_a_nameless_author_is_dropped_not_rendered_as_None(self, http):
+        """`authors` is rendered into a citation, so a None in the list
+        reads as an author called None."""
+        from tools.builtin import arxiv
+
+        http.respond(text=_entries(
+            _ID + _TITLE + _SUMMARY + _PUBLISHED
+            + "<author><name>Real Name</name></author><author></author>"))
+
+        result = arxiv.run({"keywords": "malformed-nameless-author"})
+
+        assert result["results"][0]["authors"] == ["Real Name"]

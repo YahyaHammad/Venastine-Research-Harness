@@ -17426,3 +17426,112 @@ a CI reader opens. ("28" was the sync-only count; there were 183.) The
 they are still true and still the reason CI passes no `-n`.
 
 Counts 6106 -> 6110.
+
+## Batch 117 -- nine findings from a second pair of eyes
+
+TECHNICAL_DEBT 33-37, plus two notes recorded rather than fixed. An
+independent review of `077cf1b..HEAD` -- 113 files, ~39,000 insertions --
+and then the verification of it, which is where most of this entry comes
+from.
+
+### Everything here predates the recent work
+
+Worth saying first, because it changes how the list should be read. The
+oldest finding's lines date to `7cf0759`, 2026-07-24; the newest to batch
+113. None of it is a regression from batches 114-116. The only reason nine
+items land in one batch is that nobody had looked at this range with fresh
+eyes before.
+
+### Three of the review's descriptions were wrong, and the corrections are the useful part
+
+**The malformed-feed finding was understated.** It reported three
+dereferences in `_parse_atom_feed` and offered `summary` and `published` as
+examples of the GUARDED pattern to copy. Calling the function with each
+omission says otherwise: there are **six** failure modes, and those two are
+both among them. `summary`'s `or ""` guards `.text` being None and not the
+element being absent; `published`'s `is not None` guards the element and not
+empty text, and it raises `TypeError` where the others raise
+`AttributeError`. A seventh shape -- `<title></title>` -- fails on
+`.strip()` rather than on `.text`, which is a different mode from a missing
+title.
+
+That is why the fix is one helper rather than three guards: two shapes
+(absent element, empty text) crossed with five lookups is ten chances to
+spell it slightly differently, and this module had already paid that once.
+
+**The flag-table finding had the right defect and the wrong reason.** It
+said the `=`-spelling gap was unreachable because "find/sort were removed
+from INERT_COMMANDS, so today no inert command consults the table". `diff`
+is inert and IS in the table. The real reason nothing fired is that `diff`'s
+value is an empty `frozenset()`, and `if dangerous:` is falsy for one -- so
+the single reachable row was the dead one and the table did nothing at all.
+
+**And the cache finding was stronger than argued.** It was offered as a
+theoretical race under CPython's atomic dict operations. The decisive fact is
+four lines away in `tools/registry.py`: beside `spawn_subagent`'s
+`parallel=True`, the comment claims "everything the child's run touches was
+made concurrency-safe first -- the budget's lock, the serialised question,
+the per-future authorization". The child reaches this cache through
+`arxiv_search` and `fetch_url`. It was the one item on that list without a
+lock, which makes it a broken promise rather than a hypothetical.
+
+### One finding neither review had
+
+The flag table claims to guard "the entries that have a writing mode". Two
+inert commands write and had no entry -- `tree -o FILE` and `date -s TIME` --
+and a third cannot be guarded by that table at all: GNU `uniq IN OUT` writes
+to its SECOND POSITIONAL argument. There is no flag to catch.
+
+So `uniq` came off `config.INERT_COMMANDS`. The alternative was to teach the
+classifier which argument positions are outputs, which is exactly the
+shell-parsing `_escapes_workspace` spends a paragraph explaining it must
+never become -- and leaving an entry that cannot fire is how `diff`'s empty
+set came to read as coverage in the first place.
+
+**What none of this was.** `_escapes_workspace` reads every token after the
+first as a path, so a write aimed outside the workspace was refused
+throughout -- measured: `uniq in.txt /etc/passwd` is caught. The write that
+got through landed inside the workspace, which is writable by design. The
+defect was the profile asserting `writes=False` about a write, not an
+escape, and the register says so in those words.
+
+### The one change that can alter what runs
+
+`NETWORK_ALLOWED_COMMANDS` is fourteen lowercase bare names, so `curl.exe`
+matched nothing. The review suggested normalising "for prompt accuracy",
+which undersells it in both directions: `network = detected or declared`,
+and `not profile.network` is a condition for SKIPPING approval in
+`tools/builtin/shell.py`. So `curl.exe` was simultaneously denied the egress
+it needed and eligible for a shortcut plain `curl` does not get.
+
+Normalising therefore GRANTS egress where none was granted before, which is
+why it was the one item given the posture matrix rather than a unit test and
+a shrug. It is still the right answer -- one program should get one answer,
+and `curl` is already handled safely -- but it is a permission change and the
+record calls it that.
+
+### The two that were recorded instead
+
+The container's `sudo` refusal says the image "runs as uid 0 and ships no
+`sudo` at all", measured and true of the image it was measured against. But
+`SANDBOX_DOCKER_IMAGE` is user-settable and `sandbox.py` says in its own
+words that "a tag is not an image", so an operator can make that sentence
+false. It fails closed, so it is a wrong reason rather than a hole.
+
+And `defusedxml`'s `forbid_dtd` is off, so `<!DOCTYPE feed SYSTEM "file://...">`
+is accepted -- by stdlib too -- and fetched by neither, because expat does
+not resolve external DTDs by default. Nothing leaks. It is written down
+because "parsed defused" does not mean "no DTD", and what stands between
+that declaration and a read is an expat default rather than anything here.
+
+### Verification
+
+Every guard driven by the input that breaks it, which for the feed meant
+seven parametrised omissions and a five-entry page whose third entry has no
+title. Two mutations on the new helper: strip its guard and nine of ten new
+tests go red; narrow the skip to the id alone and the two title cases go
+red. The cache is tested with eight threads against a cap of twenty, and
+again with eighty distinct keys to catch a lost update. The newline
+rejection is parametrised over four spellings including `\r\n`.
+
+Counts 6111 -> 6141.

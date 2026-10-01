@@ -56,6 +56,7 @@ that other tools needing safe command execution can reuse it.
 
 from __future__ import annotations
 
+import atexit
 import contextlib
 import functools
 import json
@@ -722,7 +723,31 @@ def _write_known_hosts(host_key: str) -> str:
     with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as fh:
         fh.write("\n".join(lines) + "\n")
     _ssh_known_hosts_path = path
+    # REMOVED ON EXIT (batch 117). One file per process, not per call --
+    # `_ssh_known_hosts()` reuses the path once it is set -- so this never
+    # grew unbounded, but every SSH-using run left a
+    # `venastine_known_hosts_*` behind in TMPDIR. The only unlink was in
+    # `_reset_ssh_probe`, which has no production caller: conftest and
+    # test_ssh_backend are the only two files that reach it.
+    #
+    # The key itself is public, so this is hygiene rather than exposure.
+    # Registered per path and ignoring every error: a cleanup that raises
+    # during interpreter shutdown turns a tidy-up into a traceback on exit.
+    atexit.register(_remove_known_hosts, path)
     return path
+
+
+def _remove_known_hosts(path: str) -> None:
+    """Best-effort unlink of one known_hosts file, for `atexit`.
+
+    Swallows everything: the file may already be gone (`_reset_ssh_probe`
+    in tests), the directory may be read-only, and nothing a process can
+    learn at shutdown is worth a traceback on the way out.
+    """
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
 
 
 def _ssh_config_reason() -> str:
@@ -1508,13 +1533,46 @@ def _feed_sudo_password(proc, secret) -> None:
 _SHELL_METACHARACTERS = re.compile(r"""[;|&$`><(){}!#~'"\\]""")
 
 # Dangerous flags for commands that remain in INERT_COMMANDS.
+#
+# BATCH 117 MADE THIS TABLE TRUE, because it was not. The claim beside
+# `writes=False` in `classify_command` is that this table "guards the
+# entries that have a writing mode", and three things were wrong with that:
+#
+#   * `diff` was the ONLY key that is actually in INERT_COMMANDS, and its
+#     value was an empty frozenset -- `if dangerous:` is falsy for one, so
+#     the consumer skipped it. `find` and `sort` are not on the inert list.
+#     The whole table therefore guarded nothing, while reading as though it
+#     guarded three commands.
+#   * `tree -o FILE` and `date -s TIME` are inert and write. Added below.
+#   * `uniq IN OUT` writes through a POSITIONAL argument, which a table of
+#     FLAGS structurally cannot express. It was dropped from
+#     `config.INERT_COMMANDS` instead -- see the note there. Teaching this
+#     table about positional arguments would make it the shell parser
+#     `_escapes_workspace` explains it must never become (G2).
+#
+# `find` and `sort` stay as written: they are defence-in-depth for a future
+# re-addition, which is what the entries were always for, and keeping them
+# costs a dict lookup that already happens.
+#
+# WHAT THIS IS NOT. `_escapes_workspace` reads every token after the first
+# as a path, so a write aimed OUTSIDE the workspace is refused there
+# regardless of this table -- measured: `uniq in.txt /etc/passwd` is caught.
+# What the table decides is whether an in-workspace write is reported as
+# `writes=False`, and the workspace is writable by design. So this is about
+# the profile telling the truth, not about an escape.
 # Even though find/sort were removed, this denylist provides
 # defense-in-depth for any future additions.
 _DANGEROUS_FLAGS: dict[str, frozenset[str]] = {
     "find": frozenset({"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf"}),
     "sort": frozenset({"-o", "--output"}),
-    "diff": frozenset(),  # diff is read-only, no dangerous flags
+    # Inert AND able to write, which is the combination that matters:
+    "tree": frozenset({"-o"}),
+    "date": frozenset({"-s", "--set"}),
 }
+# `diff` had an entry of its own here (an empty frozenset) until batch 117.
+# It needs no guard -- diff has no writing mode -- and an empty set reads
+# as coverage while providing none, which is exactly how the table came to
+# look populated while doing nothing.
 
 
 def _is_inert(command: str) -> bool:
@@ -1551,9 +1609,16 @@ def _is_inert(command: str) -> bool:
     # Check for dangerous flags on specific commands
     dangerous = _DANGEROUS_FLAGS.get(first_word)
     if dangerous:
-        tokens = stripped.split()
-        if any(t in dangerous for t in tokens):
-            return False
+        # THE FLAG HEAD AS WELL AS THE WHOLE TOKEN (batch 117). An exact
+        # match misses the `=` spelling: `sort --output=/tmp/x` is one
+        # token, equal to neither "-o" nor "--output", and would have
+        # passed as INERT. Splitting on the first `=` is the same
+        # concession `_escapes_workspace` already makes to flag syntax and
+        # stops well short of parsing -- it reads a token's head, it does
+        # not learn what a flag MEANS.
+        for token in stripped.split():
+            if token in dangerous or token.split("=", 1)[0] in dangerous:
+                return False
     return True
 
 
@@ -1599,8 +1664,30 @@ def _needs_network(command: str, first_word_only: bool) -> bool:
     if first_word_only:
         tokens = tokens[:1]
     allowed = set(config.NETWORK_ALLOWED_COMMANDS)
-    # Strip path components for matching (e.g. /usr/bin/pip → pip)
-    return any(os.path.basename(token) in allowed for token in tokens)
+    return any(_network_name(token) in allowed for token in tokens)
+
+
+def _network_name(token: str) -> str:
+    """A token reduced to the name NETWORK_ALLOWED_COMMANDS is written in.
+
+    Strips the path (`/usr/bin/pip` -> `pip`), then lowercases and drops a
+    `.exe`, because the list is fourteen lowercase bare names and Windows
+    spells several of them otherwise. Batch 117: `curl.exe` matched nothing,
+    so the same program got network on one platform and `--network none` on
+    the other.
+
+    THE OLD BEHAVIOUR FAILED CLOSED, which is why this was a usability
+    defect and not a hole: an unmatched command runs without egress. But it
+    is not harmless either. `network` has two consumers, and
+    `not profile.network` is a CONDITION FOR SKIPPING APPROVAL in
+    `tools/builtin/shell.py` -- so `curl.exe` was both denied the network it
+    needed and eligible for a shortcut that `curl` is not. Matching it makes
+    one program one answer.
+    """
+    name = os.path.basename(token).lower()
+    if name.endswith(".exe"):
+        name = name[:-len(".exe")]
+    return name
 
 
 # ---------------------------------------------------------------------------

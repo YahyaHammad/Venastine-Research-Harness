@@ -184,6 +184,32 @@ def _total_results(root) -> Optional[int]:
         return None
 
 
+def _text_of(parent, path) -> Optional[str]:
+    """One child element's stripped text, or None.
+
+    EVERY lookup in `_parse_atom_feed` goes through this, because the six
+    ways that function used to raise were six slightly different spellings
+    of the same omission (batch 117, TECHNICAL_DEBT 33):
+
+      * a MISSING element -- `find()` returns None and `.text` raises
+        AttributeError. Three of the six.
+      * a PRESENT but EMPTY element -- `<title></title>` has `.text` of
+        None, so `.strip()` raises AttributeError and `[:10]` raises
+        TypeError. The remaining three, and they are the ones a reader
+        skips, because `summary` looked guarded by `or ""` and `published`
+        looked guarded by `is not None`. Neither covers both halves.
+
+    The feed is attacker-influenced -- this module's header says so, and
+    batch 116 added a parser that refuses hostile ENTITIES one function
+    away -- so its STRUCTURE cannot be trusted either.
+    """
+    element = parent.find(path, ATOM_NS)
+    if element is None or element.text is None:
+        return None
+    stripped = element.text.strip()
+    return stripped or None
+
+
 def _parse_atom_feed(xml_text: str) -> tuple:
     """(entries, how many the query has in total).
 
@@ -195,13 +221,28 @@ def _parse_atom_feed(xml_text: str) -> tuple:
     total = _total_results(root)
 
     results = []
-    for entry in entries:
-        raw_id = entry.find("atom:id", ATOM_NS).text.strip()
+    for index, entry in enumerate(entries):
+        raw_id = _text_of(entry, "atom:id")
+        title_text = _text_of(entry, "atom:title")
+        if raw_id is None or title_text is None:
+            # SKIPPED, NOT RAISED (batch 117). An id and a title are what
+            # make an entry citable; without either there is nothing for
+            # the model to ground a claim on, so the entry is dropped and
+            # the rest of the page is still returned. Raising here aborted
+            # the whole search over one malformed entry, and the raise did
+            # not even reach `run`'s handlers -- AttributeError is neither
+            # a ParseError nor a DefusedXmlException.
+            #
+            # The index, not the id: the id is what might be missing.
+            logger.warning(
+                "arxiv_search skipped entry %d of %d: no %s",
+                index + 1, len(entries),
+                "id" if raw_id is None else "title")
+            continue
         arxiv_id = raw_id.split("/abs/")[-1] if "/abs/" in raw_id else raw_id
 
-        title = entry.find("atom:title", ATOM_NS).text.strip().replace("\n", " ")
-        summary_el = entry.find("atom:summary", ATOM_NS)
-        full_summary = (summary_el.text or "").strip().replace("\n", " ")
+        title = title_text.replace("\n", " ")
+        full_summary = (_text_of(entry, "atom:summary") or "").replace("\n", " ")
         summary = full_summary[:MAX_SUMMARY_CHARS]
         # §51 (PG8/PG4). The cap stays -- it bounds model-facing text from a
         # source nobody here wrote, which is #131's lesson -- but a value cut
@@ -211,12 +252,22 @@ def _parse_atom_feed(xml_text: str) -> tuple:
         # from one it had the first two thirds of.
         summary_truncated = len(full_summary) > MAX_SUMMARY_CHARS
 
-        published_el = entry.find("atom:published", ATOM_NS)
-        published = published_el.text[:10] if published_el is not None else None
+        # `is not None` on the ELEMENT was not enough: `<published></published>`
+        # is present with `.text` of None, and `None[:10]` is a TypeError
+        # rather than an AttributeError -- the same omission wearing a
+        # different exception type, which is why both halves go through
+        # one helper now.
+        published_text = _text_of(entry, "atom:published")
+        published = published_text[:10] if published_text else None
 
+        # A nameless <author> is DROPPED rather than inserted as None: this
+        # list is rendered into a citation, and `None` in it reads as an
+        # author called None.
         authors = [
-            a.find("atom:name", ATOM_NS).text
-            for a in entry.findall("atom:author", ATOM_NS)
+            name for name in (
+                _text_of(author, "atom:name")
+                for author in entry.findall("atom:author", ATOM_NS)
+            ) if name
         ]
         categories = [c.get("term") for c in entry.findall("atom:category", ATOM_NS)]
 

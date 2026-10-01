@@ -577,6 +577,34 @@ class TestTheEntries:
             with pytest.raises(secrets.SecretsError):
                 secrets.put(name, VALUE)
 
+    @pytest.mark.parametrize("value", [
+        "pass\nword",      # the shape a pasted multi-line value takes
+        "pass\r\nword",    # and the Windows spelling of it
+        "trailing\n",      # a newline the shell added, not the user
+        "\nleading",
+    ])
+    def test_a_value_with_a_line_break_is_refused(self, store, value):
+        """A LINE, NOT A BLOB. `sandbox._sudo_password_line` is
+        `reveal() + b"\\n"` and `sudo -S` reads exactly one line, so a
+        stored newline delivers the text BEFORE it and silently drops the
+        rest.
+
+        It failed closed -- wrong password, and `_SUDO_STDIN_GUARD` keeps
+        the remainder off the command line -- so the cost was an auth
+        failure that quarantines the entry for the run and explains none of
+        this. The door is where the constraint can still be said out loud.
+        """
+        with pytest.raises(secrets.SecretsError) as excinfo:
+            secrets.put("wsl.Ubuntu.sudo", value)
+        assert "newline" in str(excinfo.value)
+        assert secrets.get("wsl.Ubuntu.sudo") is None
+
+    def test_a_value_may_still_contain_other_whitespace(self, store):
+        """The guard is the LINE BREAK, not whitespace: a passphrase with
+        spaces or a tab in it survives one line and must keep working."""
+        secrets.put("k", "correct horse\tbattery staple")
+        assert secrets.get("k").reveal() == b"correct horse\tbattery staple"
+
     def test_unlocking_with_no_store_names_the_path(self, tmp_path,
                                                     monkeypatch):
         path = tmp_path / "nothing-here.json"

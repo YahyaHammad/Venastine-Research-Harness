@@ -728,6 +728,24 @@ network_allowed_commands:
 # under `shell_approval_mode: tiered`. Sound as a bare token list only
 # because that tier executes argv with no shell, so the tokens ARE the
 # arguments.
+#
+# WHAT BELONGS HERE, after batch 117 found two things that did not. A
+# command qualifies only if it cannot write, and "cannot write" has to hold
+# for its ARGUMENTS as well as its name:
+#
+#   * A writing FLAG is guarded by `_DANGEROUS_FLAGS` in security/sandbox.py
+#     -- `tree -o FILE` and `date -s TIME` were inert with no entry there
+#     until batch 117, so the tier reported `writes=False` about a write.
+#   * A writing POSITIONAL cannot be guarded at all. `uniq IN OUT` writes to
+#     its second argument with no flag to catch, so `uniq` was REMOVED from
+#     this list rather than given an entry that could not work. Teaching the
+#     classifier which positions are outputs would make it a shell parser,
+#     which security/sandbox.py's own G2 argument forbids.
+#
+# The bound that still held throughout: `_escapes_workspace` reads every
+# token after the first as a path, so a write aimed outside the workspace
+# was refused regardless. What was wrong was the profile's claim, not the
+# containment.
 inert_commands:
   - ls
   - cat
@@ -748,7 +766,6 @@ inert_commands:
   - du
   - df
   - tree
-  - uniq
   - diff
   - md5sum
   - sha256sum

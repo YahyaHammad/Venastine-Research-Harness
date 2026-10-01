@@ -2558,3 +2558,97 @@ class TestTheContainerArgvUsesTheOneTokeniser:
 
         assert self._trailing("cat notes.txt") == ["SENTINEL",
                                                    "cat notes.txt"]
+
+# ===========================================================================
+# ---- TECHNICAL_DEBT 34 (batch 117): the flag table, made true -------------
+# ===========================================================================
+
+class TestTheInertTierDoesNotClaimWritesItCannotSee:
+    """`classify_command` reports `writes=False` for an inert command on the
+    strength of `_DANGEROUS_FLAGS`, and that table was not doing the job its
+    own comment described.
+
+    Measured before the change: `uniq in.txt out.txt`, `tree -o out.txt` and
+    `date -s 2024-01-01` were all inert with `_escapes_workspace` False, and
+    `diff` -- the one table key that WAS inert -- had an empty set, so the
+    check was skipped for it and the table guarded nothing at all.
+    """
+
+    def test_a_writing_flag_on_an_inert_command_is_not_inert(self):
+        """`tree -o FILE` and `date -s TIME` write. Both were inert."""
+        assert _is_inert("tree -o out.txt") is False
+        assert _is_inert("date -s 2024-01-01") is False
+
+    def test_the_reading_forms_of_the_same_commands_still_are(self):
+        """The guard is the FLAG, not the command -- otherwise this is a
+        tier change dressed up as a bug fix."""
+        assert _is_inert("tree notes") is True
+        assert _is_inert("date") is True
+        assert _is_inert("diff a.txt b.txt") is True
+
+    def test_the_equals_spelling_of_a_dangerous_flag_is_caught(self):
+        """`--output=x` is ONE token, equal to neither `-o` nor `--output`,
+        so an exact-match check passed it. `sort` is not on the inert list,
+        so it is added here the way `test_dangerous_flags_rejected` adds
+        `find` -- the denylist logic is what is under test, not the list.
+        """
+        original = list(config.INERT_COMMANDS)
+        config.INERT_COMMANDS.append("sort")
+        try:
+            assert _is_inert("sort notes.txt") is True
+            assert _is_inert("sort -o out.txt notes.txt") is False
+            assert _is_inert("sort --output out.txt notes.txt") is False
+            # The two spellings that used to pass:
+            assert _is_inert("sort --output=out.txt notes.txt") is False
+            assert _is_inert("sort -o=out.txt notes.txt") is False
+        finally:
+            config.INERT_COMMANDS[:] = original
+
+    def test_uniq_is_off_the_list_because_its_write_is_positional(self):
+        """THE STRUCTURAL ONE. GNU `uniq IN OUT` writes to its second
+        positional argument, so no entry in a table of FLAGS can catch it.
+        Removed from `config.INERT_COMMANDS` instead of guarded, because
+        teaching the classifier which positions are outputs is what
+        `_escapes_workspace`'s G2 argument forbids.
+        """
+        assert "uniq" not in config.INERT_COMMANDS
+        assert _is_inert("uniq in.txt out.txt") is False
+
+    def test_a_write_outside_the_workspace_was_always_refused(self):
+        """Why the above was claim-accuracy and not an escape: the path
+        check reads every token after the first as a path, so the dangerous
+        version of the positional write never got out regardless of what
+        the tier called it."""
+        assert _escapes_workspace("uniq in.txt /etc/passwd", "/workspace") is True
+        assert _escapes_workspace("uniq in.txt out.txt", "/workspace") is False
+
+
+class TestTheNetworkListIsNotSpelledTwice:
+    """`NETWORK_ALLOWED_COMMANDS` is fourteen lowercase bare names, and
+    Windows spells several of them with `.exe`.
+
+    `curl.exe` matched nothing, which failed CLOSED -- it ran with
+    `--network none` -- but not harmlessly: `not profile.network` is a
+    condition for skipping approval in this module, so the same program was
+    both denied the egress it needed and eligible for a shortcut the bare
+    spelling is not.
+    """
+
+    def test_an_exe_suffix_still_names_the_same_program(self):
+        assert _needs_network("curl.exe https://example.com", False) is True
+        assert _needs_network("wget.exe https://example.com", False) is True
+
+    def test_case_does_not_decide_it_either(self):
+        assert _needs_network("CURL https://example.com", False) is True
+        assert _needs_network("Curl.EXE https://example.com", False) is True
+
+    def test_a_path_qualified_spelling_still_matches(self):
+        """The behaviour that already worked, kept under test because the
+        normalisation now happens in one helper rather than inline."""
+        assert _needs_network("/usr/bin/pip install x", False) is True
+
+    def test_the_carve_out_is_unchanged(self):
+        """An inert command's arguments still never grant network, which is
+        the one thing the normalisation must not widen."""
+        assert _needs_network("grep curl notes.txt", True) is False
+        assert _needs_network("cat curl.exe", True) is False

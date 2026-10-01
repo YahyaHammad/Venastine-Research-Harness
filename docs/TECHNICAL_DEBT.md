@@ -680,6 +680,26 @@ changes enough that the collision goes away.
 
 ## Accepted risks noted in the review, deliberately not "fixed"
 
+- **The container `sudo` refusal's REASON depends on a user-settable tag**
+  (recorded batch 117). `security/sandbox.py` refuses root in the container
+  because "the pinned image runs as uid 0 and ships no `sudo` at all" --
+  measured, and true of the image it was measured against. But
+  `SANDBOX_DOCKER_IMAGE` is configurable (`config_schema.py` maps
+  `AGENT_SANDBOX_IMAGE`), and `sandbox.py` says in its own words that "a tag
+  is not an image", so an operator pointing it at a non-root image with
+  `sudo` gets a refusal whose stated reason is false. It fails CLOSED -- the
+  call is refused, nothing escalates -- so this is a wrong sentence rather
+  than a hole, and it is recorded instead of fixed because re-probing the
+  image for a uid would buy a correct sentence at the price of a container
+  round trip on a path that is refusing anyway.
+- **`defusedxml`'s `forbid_dtd` is off, so an external DTD DECLARATION is
+  accepted** (recorded batch 117). `<!DOCTYPE feed SYSTEM "file:///etc/passwd">`
+  parses under `defusedxml.ElementTree` -- and under stdlib
+  `ElementTree` -- and is FETCHED by neither on CPython, because expat does
+  not resolve external DTDs by default. So nothing leaks today. It is
+  written down because "parsed defused" does not mean "no DTD", and the
+  thing standing between that declaration and a read is an expat default
+  rather than anything in this repo.
 - `07_review.json` absent on zero-finding reviewed runs — presence-implies-
   reviewed is the documented signal; trace.md still carries the count line.
 - Advisory-only K2 notes after `/agent` switch (f21 fixed to re-notify;
@@ -1822,3 +1842,134 @@ carrying the same incomplete model: `test_pilot_wait.py:133` (a 0.5s
 deadline plus one pause, ceiling 2.0) and `test_tui.py:1263` (one
 `pilot.press`, ceiling 3.0). Named here so the next reader finds them
 written down rather than in a run.
+
+## 33. `_parse_atom_feed` trusts the structure of a feed it calls hostile (closed, batch 117)
+
+**Found by an independent review of `077cf1b..HEAD`; the lines predate the
+epic (`7cf0759`, 2026-07-24).** `tools/builtin/arxiv.py` dereferenced
+`entry.find(...).text` with no guard, on a feed this module's own header
+calls attacker-influenced -- and which batch 116 had just taught to refuse
+hostile ENTITIES, one function away.
+
+**The review reported three failure modes. Measured by calling the
+function, there are six, and the two it cited as GUARDED EXAMPLES are both
+exposed:**
+
+| case | raises |
+|---|---|
+| no `<id>` | `AttributeError` |
+| no `<title>` | `AttributeError` |
+| author with no `<name>` | `AttributeError` |
+| **no `<summary>`** | `AttributeError` -- the `or ""` guards `.text`, not a missing ELEMENT |
+| **empty `<published/>`** | `TypeError: not subscriptable` -- the `is not None` guards the element, not empty text |
+| **empty `<title/>`** | `AttributeError` on `.strip()`, a different mode from a missing title |
+
+Two shapes wearing three exception types, which is why one helper (`_text_of`)
+replaced six inline spellings rather than three guards being added.
+
+**None of them reached `run`'s handlers.** It catches
+`DefusedXmlException` and `(httpx.HTTPError, ET.ParseError)`;
+`AttributeError` and `TypeError` are neither, so all six escaped to
+`dispatch()`'s generic wrapper and failed the whole search over one
+malformed entry.
+
+**An entry with no id or title is now skipped, not raised** -- those two are
+what make it citable -- with one WARNING naming its INDEX, because the id is
+what might be missing. A missing summary, an empty published date and a
+nameless author are kept; the author is dropped from the list rather than
+inserted as `None`, which would render as an author called None.
+
+Driven both ways: a five-entry page whose third entry has no title returns
+four results, and reverting the guard turns nine of the ten new tests red.
+
+## 34. `_DANGEROUS_FLAGS` guarded nothing it claimed to (closed, batch 117)
+
+`security/sandbox.py`'s `classify_command` reports `writes=False` for an
+inert command and says the table "guards the entries that have a writing
+mode". Measured against the shipped `INERT_COMMANDS`, three things were
+wrong, and the one the review found was the least of them.
+
+**The table was entirely dead.** Its three keys were `find`, `sort` and
+`diff`. `find` and `sort` are not on the inert list, and `diff`'s value was
+an empty `frozenset()` -- `if dangerous:` is falsy for one, so the check was
+skipped for the only key that was reachable. The review called the `=`-form
+gap "currently unreachable" because "find/sort were removed from
+INERT_COMMANDS, so today no inert command consults the table"; that reason
+is wrong -- `diff` is inert and IS tabled -- and the true reason is the
+empty set.
+
+**Two inert commands write, and had no entry at all.** `tree -o FILE` and
+`date -s TIME`. Both added.
+
+**And one cannot be expressed by a flag table at any point.** GNU
+`uniq IN OUT` writes to its SECOND POSITIONAL argument. `uniq` was removed
+from `config.INERT_COMMANDS` instead, because teaching the classifier which
+argument positions are outputs is precisely the shell-parsing
+`_escapes_workspace` argues it must never do (G2). The alternative --
+leaving an entry that cannot fire -- is how `diff`'s empty set came to read
+as coverage.
+
+**The `=` spelling is now caught** by comparing a token's head
+(`token.split("=", 1)[0]`) as well as the whole token, so
+`sort --output=/tmp/x` and `sort -o=out.txt` no longer pass.
+
+**WHAT THIS WAS NOT, and the entry should be read with it.**
+`_escapes_workspace` reads every token after the first as a path, so a write
+aimed outside the workspace was refused throughout -- measured:
+`uniq in.txt /etc/passwd` is caught. What the table decides is whether an
+IN-workspace write is reported as `writes=False`, and the workspace is
+writable by design. So this is the profile telling the truth, not an escape,
+and it is filed as such.
+
+## 35. The response cache was the one thing the registry promised and did not have (closed, batch 117)
+
+`tools/builtin/_net_common.py`'s `TTLCache` had no lock. The comment beside
+`spawn_subagent`'s `parallel=True` -- the only tool that declares it --
+claims "everything the child's run touches was made concurrency-safe first:
+the budget's lock, the serialised question, the per-future authorization".
+The child reaches this cache through `arxiv_search` and `fetch_url`, and it
+was the item on that list without one.
+
+A corrupt dict was never the risk: single dict operations are atomic under
+CPython. `set` is a read-modify-write -- pop, assign, sweep, then evict
+while over the cap -- so two children storing at once can lose an entry and
+evict in an order neither asked for. `GrantBudget.take()` is the pattern it
+should have followed from the start, and now does.
+
+`_sweep` is called from `set` with the lock held and must never take it; the
+lock is a plain `Lock`, so re-entering would deadlock the writer. Pinned by
+a test that simply makes a write with something expired to sweep and asserts
+it returns at all.
+
+## 36. The SSH `known_hosts` file was removed only by a test helper (closed, batch 117)
+
+`security/sandbox.py`'s `_write_known_hosts` mkstemps a file and stores the
+path; the only `os.unlink` was in `_reset_ssh_probe`, which no production
+code calls -- `tests/conftest.py` and `tests/test_ssh_backend.py` are its
+only callers. One file per process rather than per call, since the path is
+reused once set, so it never grew unbounded; but every SSH-using run left a
+`venastine_known_hosts_*` in TMPDIR.
+
+Registered with `atexit` now, per path, swallowing every error: the pinned
+host key is public so this is hygiene rather than exposure, and a cleanup
+that raises during interpreter shutdown turns a tidy-up into a traceback on
+the way out.
+
+## 37. A stored secret could contain the newline that ends the sudo line (closed, batch 117)
+
+`security/secrets.py`'s `put()` validated a non-blank name and
+`MIN_SECRET_LENGTH`, and nothing else. `sandbox._sudo_password_line` is
+`secret.reveal() + b"\n"` and `sudo -S` reads exactly one line, so a value
+containing a line break delivered the text BEFORE it and silently dropped
+the rest.
+
+It failed closed -- the wrong password, and `_SUDO_STDIN_GUARD` keeps the
+remainder off the command line, so there was no injection -- but it failed
+*opaquely*: the entry is quarantined for the run by
+`_note_sudo_auth_failure` and nothing says why. `put()` rejects `\n` and
+`\r` with the constraint named, which is the one place it can still be
+explained to whoever is typing. Other whitespace is untouched: a passphrase
+with spaces or a tab survives one line and must keep working.
+
+No stored secret had to change: all 41 `put()` call sites in the suite use
+single-line constants.

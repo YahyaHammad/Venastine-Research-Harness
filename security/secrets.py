@@ -668,6 +668,19 @@ def put(name: str, value: str) -> None:
             "substituted over every occurrence in every tool result and "
             "would destroy the output rather than redact it"
             % MIN_SECRET_LENGTH)
+    if "\n" in value or "\r" in value:
+        # A LINE, NOT A BLOB (batch 117). `sandbox._sudo_password_line` is
+        # `reveal() + b"\n"` and `sudo -S` reads exactly one line, so a
+        # stored newline hands sudo the text BEFORE it and drops the rest.
+        # It fails closed -- wrong password, and `_SUDO_STDIN_GUARD` keeps
+        # the remainder off the command line -- so the cost is an auth
+        # failure that quarantines the entry and names nothing useful.
+        # Refusing at the door is where the constraint can still be
+        # explained to whoever is typing.
+        raise SecretsError(
+            "a secret cannot contain a newline: it is written to a "
+            "subprocess as a single line (sudo -S reads one), so a value "
+            "with a line break in it would be delivered truncated")
     with _state_lock:
         state = _require_unlocked()
         previous = state.entries.get(name)

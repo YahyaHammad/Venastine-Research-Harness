@@ -1432,3 +1432,54 @@ class TestAgainstARealHostWithStoredCredentials:
         assert _env("VEN_TEST_SSH_PASSWORD") not in result["stdout"]
         assert "VEN_ASKPASS_TOKEN" not in result["stdout"]
         assert "SSH_ASKPASS" not in result["stdout"]
+
+# ===========================================================================
+# ---- TECHNICAL_DEBT 36 (batch 117): the known_hosts file nothing removed --
+# ===========================================================================
+
+class TestTheKnownHostsFileIsCleanedUp:
+    """`_write_known_hosts` mkstemps a file and stored the path; the only
+    `os.unlink` was in `_reset_ssh_probe`, which no production code calls --
+    conftest and this file are its only two callers. One file per process
+    rather than per call, so it never grew unbounded, but every SSH-using
+    run left a `venastine_known_hosts_*` behind in TMPDIR.
+
+    The pinned host key is public, so this is hygiene rather than exposure.
+    Registration and removal are asserted separately because an `atexit`
+    handler cannot be watched firing from inside the process that
+    registered it.
+    """
+
+    def test_writing_the_file_registers_its_removal(self, monkeypatch):
+        registered = []
+        monkeypatch.setattr(sandbox.atexit, "register",
+                            lambda fn, *a: registered.append((fn, a)))
+
+        path = sandbox._write_known_hosts("example.com ssh-ed25519 AAAAC3Nz")
+        try:
+            assert registered, "nothing was registered for cleanup"
+            handler, args = registered[-1]
+            assert handler is sandbox._remove_known_hosts
+            assert args == (path,)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_the_handler_removes_the_file(self):
+        path = sandbox._write_known_hosts("example.com ssh-ed25519 AAAAC3Nz")
+        assert os.path.exists(path)
+
+        sandbox._remove_known_hosts(path)
+
+        assert not os.path.exists(path)
+
+    def test_the_handler_is_quiet_about_a_file_already_gone(self):
+        """It runs at interpreter shutdown, where `_reset_ssh_probe` may
+        already have unlinked the file in a test run -- and a cleanup that
+        raises on the way out turns a tidy-up into a traceback.
+        """
+        path = sandbox._write_known_hosts("example.com ssh-ed25519 AAAAC3Nz")
+        sandbox._remove_known_hosts(path)
+
+        sandbox._remove_known_hosts(path)       # must not raise
+        sandbox._remove_known_hosts(path + "-never-existed")

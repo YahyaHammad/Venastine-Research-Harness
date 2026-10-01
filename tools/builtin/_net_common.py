@@ -25,6 +25,7 @@ a factory would make the params class harder to read to save two lines.
 
 from __future__ import annotations
 
+import threading
 import time
 from typing import Any, Optional
 
@@ -79,25 +80,52 @@ class TTLCache:
         self.ttl_s = ttl_s
         self.max_entries = max_entries
         self._entries: dict[str, tuple[float, Any]] = {}
+        # LOCKED BECAUSE THE REGISTRY ALREADY SAYS IT IS (batch 117).
+        # `spawn_subagent` is the one tool with `parallel=True`, and the
+        # comment beside that field claims "everything the child's run
+        # touches was made concurrency-safe first -- the budget's lock, the
+        # serialised question, the per-future authorization". The child
+        # reaches this cache through `arxiv_search` and `fetch_url`, and it
+        # was the one item on that list without a lock.
+        #
+        # Single dict operations are atomic under CPython, so a corrupt
+        # dict was never the risk. `set` is a read-modify-write -- pop,
+        # assign, sweep, then evict while over the cap -- so two children
+        # storing at once could lose one entry and evict in an order
+        # neither asked for. Mirrors `GrantBudget.take()`, which is the
+        # pattern this module should have followed from the start.
+        #
+        # NOT reentrant, and `_sweep` is the reason: it is called from
+        # `set` with the lock already held, so it must never take it.
+        self._lock = threading.Lock()
 
     def get(self, key: str) -> Optional[Any]:
-        entry = self._entries.get(key)
-        if not entry:
-            return None
-        stored_at, value = entry
-        if time.time() - stored_at > self.ttl_s:
-            self._entries.pop(key, None)
-            return None
-        return value
+        with self._lock:
+            entry = self._entries.get(key)
+            if not entry:
+                return None
+            stored_at, value = entry
+            if time.time() - stored_at > self.ttl_s:
+                self._entries.pop(key, None)
+                return None
+            return value
 
     def _sweep(self, now: float) -> None:
-        """Drop everything already expired. Write-side only (§52, RB5)."""
+        """Drop everything already expired. Write-side only (§52, RB5).
+
+        CALLED WITH `self._lock` HELD, and it must not take it: the lock is
+        a plain `Lock`, so re-entering would deadlock the caller.
+        """
         stale = [key for key, (stored_at, _) in self._entries.items()
                  if now - stored_at > self.ttl_s]
         for key in stale:
             del self._entries[key]
 
     def set(self, key: str, value: Any) -> None:
+        with self._lock:
+            self._set_locked(key, value)
+
+    def _set_locked(self, key: str, value: Any) -> None:
         now = time.time()
         # POPPED FIRST so a re-store moves the key to the END of the dict.
         # Assigning to an existing key keeps its original insertion position,
@@ -115,4 +143,5 @@ class TTLCache:
     def clear(self) -> None:
         """Drop everything. For tests, which must not inherit a previous
         test's answers -- the same reason conftest isolates the stores."""
-        self._entries.clear()
+        with self._lock:
+            self._entries.clear()
