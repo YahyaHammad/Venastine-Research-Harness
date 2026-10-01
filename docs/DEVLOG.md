@@ -17535,3 +17535,103 @@ again with eighty distinct keys to catch a lost update. The newline
 rejection is parametrised over four spellings including `\r\n`.
 
 Counts 6111 -> 6141.
+
+## Batch 118 -- the figure that read zero on the turns it was built for
+
+TECHNICAL_DEBT 38, reported from a running session with three candidate
+causes attached. Two were wrong, the third was right and incomplete, and
+sorting that out was most of the work.
+
+### What `~0` actually means
+
+`round((chars / 4) / active)`, so anything below 0.5 tok/s prints as zero.
+And `rate()` returns None at exactly zero characters -- it prints nothing
+rather than a zero -- so **seeing `~0` proves text arrived.** The question is
+therefore not "why is it empty" but "why so little text over so long", which
+is a different question and has a different answer.
+
+The threshold, stated plainly: **fewer than two characters per active
+second.** A three-minute turn shows `~0` with under 360 characters of
+assistant text.
+
+### Two of the three candidates were already handled
+
+**Silent providers** cannot cause it. The live figure never consults
+provider usage -- it divides streamed characters by a constant, which is what
+the tilde admits -- and the completion line, which does use the provider's
+count, prints the time and NO token claim where there is none rather than a
+zero. That distinction was deliberate when it was written and is pinned by a
+test.
+
+**Approval waits** were fixed in batch 61 and the fix holds. `elapsed`
+subtracts blocked time, `rate` divides by it, and two routes drive the pause:
+the tick reads the screen-stack depth so every modal counts, and the
+permission path calls `set_blocked` directly because `tui.animations: false`
+leaves no tick to notice. All human waits funnel through one channel.
+
+Both were worth checking rather than assuming, and the checking is what made
+the third answer precise.
+
+### The third was right, and there were two more behind it
+
+**Thinking is not counted.** `core/loop.py` yields `token_delta` and
+`thinking_delta` as separate events; `add_output_chars` had one call site and
+it was `token_delta`.
+
+**Tool execution is counted as active time.** `start`/`stop` bracket the
+whole turn, the only pause was for a human, so a two-minute fetch was three
+minutes of denominator and nothing else.
+
+**Tool-call arguments are never counted at all.** `StreamToken` carries
+`text_delta`, `thinking_delta` or `final_response`. Tool-call JSON arrives
+whole in the last of those, so generating a large call added denominator with
+no numerator.
+
+### The fault was structural, and naming it chose the fix
+
+The numerator was a SUBSET of generation; the denominator was nearly ALL
+wall clock. Fixing either alone would have left the figure wrong in the same
+direction. And the module's own docstring says it exists because "the screen
+is most static exactly when the harness is busiest" -- thinking and tool
+execution being exactly what busiest means, so the feature was blind to its
+own primary case.
+
+So both sides now mean generation: thinking and tool-call arguments join the
+numerator, and tool time leaves the denominator through `set_tool_running`,
+which mirrors `set_blocked`. `elapsed` is untouched -- a two-minute tool IS
+part of how long the turn took, and the transcript line says `took` -- so
+there are two clocks and the module states which question each answers.
+
+**No new event was needed**, which is why this is a small change.
+`tool_call_start` and `tool_result` already bracket a tool, and
+`tool_call_start` carries `{"id", "name", "input"}` where `input` IS the
+arguments the model generated.
+
+### Two things that would have been bugs
+
+**Depth, not a boolean.** `_dispatch_parallel` runs a response's tool calls
+together, so several starts can be outstanding before the first result; a
+boolean un-pauses on that first one and counts the rest as generation.
+
+**The two pauses must not overlap.** Approval is asked from inside a tool
+call, so a human wait sits inside a tool window -- and `elapsed` already
+removes the human wait. Subtracting the tool window across it would take the
+same seconds twice and could drive the denominator negative. The tool clock
+closes when a modal opens and reopens when it closes, and there is a test
+that asserts the denominator never goes negative even if that ever stops
+being true.
+
+### Tested in the two layers the suite already splits this across
+
+`test_meters.py` for the arithmetic, with no pilot and no clock -- including
+the reported case as arithmetic: 100 characters over 60 seconds of which 50
+were a tool read `round(25/60) == 0` and now reads 2. `test_tui.py` for the
+WIRING, which is where the defect actually was: the meter could always count
+whatever it was handed, and nothing ever handed it any thinking.
+
+Driven both ways. Three mutations, each failing exactly the tests that cover
+it: stop counting thinking and the two thinking tests go red; stop counting
+tool arguments and the tool test's numerator half goes red; stop pausing the
+tool clock and seven of the ten new meter tests go red.
+
+Counts 6141 -> 6155.

@@ -1973,3 +1973,75 @@ with spaces or a tab survives one line and must keep working.
 
 No stored secret had to change: all 41 `put()` call sites in the suite use
 single-line constants.
+
+## 38. The live tok/s figure read `~0` on the turns it exists for (closed, batch 118)
+
+**Owner-reported from a running session**, with three candidate causes
+offered. Two were wrong and the third was right but incomplete, and the
+arithmetic is what sorted them out.
+
+**`~0` means "fewer than two characters per active second".** The figure is
+`round((chars / CHARS_PER_TOKEN) / active)` with `CHARS_PER_TOKEN = 4`, so
+anything under 0.5 tok/s prints as 0. And `rate()` returns None at exactly
+zero characters -- it prints nothing rather than a zero -- so **seeing `~0`
+proves some text arrived.** That rules out the empty cases immediately and
+points at a turn that produced a little text over a long time.
+
+**A: "providers that do not expose tok/s" -- ruled out.** The live figure
+never consults provider usage; it divides streamed characters by a constant,
+which is what the tilde admits. The completion line does use the provider's
+count, and where there is none it prints the time and makes NO token claim
+rather than a zero -- pinned by `test_a_zero_count_is_treated_as_no_count`.
+Neither instrument can show a zero because a provider was silent.
+
+**B: "approval waits are counted in the turn" -- ruled out, and fixed in
+batch 61.** `elapsed()` subtracts blocked time and `rate()` divides by it.
+Two routes drive it: the tick reads `len(screen_stack) > 1`, so every modal
+counts including ones added later, and the permission path calls
+`set_blocked` directly because `tui.animations: false` leaves no tick. Every
+human wait funnels through one `_permission_channel`. Pinned by
+`test_the_rate_ignores_time_spent_waiting_on_a_human`.
+
+**C: "thinking tokens are not counted" -- CONFIRMED.** `core/loop.py` yields
+`LoopEvent(token_delta=...)` and `LoopEvent(thinking_delta=...)` as separate
+events, `add_output_chars` had exactly one call site, and it was
+`token_delta`. Thinking is billed as output by the providers that produce it,
+so the completion line's exact figure already included it while the live
+estimate did not -- the two instruments disagreed about their own numerator.
+
+**And two causes the report did not have, the first of them probably the
+largest.**
+
+* **Tool execution.** `start`/`stop` bracket the whole turn and the only
+  pause was for a human, so a two-minute shell command or fetch was active
+  time with zero generation.
+* **Tool-call arguments.** `StreamToken` carries `text_delta`,
+  `thinking_delta` or `final_response`, so tool-call JSON never streams as a
+  delta -- generating a large call added denominator and no numerator.
+
+**The structural fault, stated once: the numerator was a subset of
+generation and the denominator was nearly all wall clock.** `tui/meters.py`'s
+own docstring says it exists because "the screen is most static exactly when
+the harness is busiest", and thinking plus tool execution is what busiest
+means here. The feature missed its own primary case.
+
+**Fixed on both sides, because fixing one would have left it wrong.**
+Thinking and tool-call arguments join the numerator; tool execution leaves
+the denominator via `set_tool_running`, mirroring `set_blocked`. `elapsed`
+is untouched -- a two-minute tool IS part of how long the turn took and the
+transcript line says `took` -- so there are two clocks now and the module
+says which question each answers.
+
+**Two things that would have been bugs, and are tested as such.**
+
+* **Depth, not a boolean.** `_dispatch_parallel` runs a response's tool
+  calls together, so several `tool_call_start` events can be outstanding
+  before the first result. A boolean un-pauses on the first one.
+* **The two pauses must not overlap.** Approval is asked for from inside a
+  tool call, so a human wait sits inside a tool window; `elapsed` already
+  removes the human wait, and subtracting the tool window across it would
+  take the same seconds twice and could drive the denominator negative. The
+  tool clock closes when a modal opens and reopens when it closes.
+
+The reported case, as arithmetic: 100 characters over 60 seconds of which 50
+were a tool read `round(25/60) == 0` and now reads 2.

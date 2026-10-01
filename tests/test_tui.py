@@ -8425,3 +8425,92 @@ class TestThisFileIsGroupedForLoadscope:
             + "\nPut each one in a Test class -- the section banner it "
               "sits under names the class it belongs to."
         )
+
+# ---------------------------------------------------------------------------
+# ---- TECHNICAL_DEBT 38 (batch 118): what reaches the meter ----------------
+# ---------------------------------------------------------------------------
+
+class TestTheMeterSeesEverythingTheModelGenerated:
+    """The wiring half, which is where the defect was. `tui/meters.py`
+    could always count whatever it was handed; `tui/app.py` handed it
+    `token_delta` and nothing else, so a turn that thought for a minute and
+    called two tools showed `~0 tok/s`.
+
+    These post the events directly, the way
+    `test_loop_events_land_while_a_modal_is_open` already does, because
+    what is under test is the handler and not a provider.
+    """
+
+    @pytest.mark.asyncio
+    async def test_thinking_is_counted_as_output(self):
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._meter.start(time.monotonic())
+            before = app._meter._chars
+
+            app.post_message(LoopEventMessage(
+                LoopEvent(thinking_delta="x" * 120)))
+            await settle(pilot, lambda: app._meter._chars > before)
+
+            assert app._meter._chars - before == 120
+
+    @pytest.mark.asyncio
+    async def test_thinking_is_counted_with_the_display_turned_off(self):
+        """`/thinking off` must not bring the bug back: the model generated
+        those characters whether or not this app draws them, so the count
+        sits OUTSIDE the `_show_thinking` branch."""
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._show_thinking = False
+            app._meter.start(time.monotonic())
+            before = app._meter._chars
+
+            app.post_message(LoopEventMessage(
+                LoopEvent(thinking_delta="y" * 80)))
+            await settle(pilot, lambda: app._meter._chars > before)
+
+            assert app._meter._chars - before == 80
+
+    @pytest.mark.asyncio
+    async def test_a_tool_call_pauses_the_rate_clock_and_counts_its_arguments(self):
+        """Both halves of `tool_call_start`: the clock stops, and the
+        arguments the model generated are counted. They never arrive as a
+        delta -- `StreamToken` carries text, thinking or the final
+        response -- so without this a large call is denominator with no
+        numerator.
+        """
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._meter.start(time.monotonic())
+            before = app._meter._chars
+
+            app.post_message(LoopEventMessage(LoopEvent(tool_call_start={
+                "id": "c1", "name": "shell",
+                "input": {"command": "ls -la"}})))
+            await settle(pilot, lambda: app._meter._tool_depth > 0)
+
+            assert app._meter._chars > before, (
+                "the arguments the model generated were not counted")
+            assert app._meter._tool_depth == 1
+
+            app.post_message(LoopEventMessage(LoopEvent(tool_result={
+                "id": "c1", "result": "ok"})))
+            await settle(pilot, lambda: app._meter._tool_depth == 0)
+
+    @pytest.mark.asyncio
+    async def test_unserialisable_arguments_do_not_drop_the_event(self):
+        """The count is an estimate; a tool whose params do not serialise
+        is not a reason to lose the tool line or the clock."""
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._meter.start(time.monotonic())
+
+            app.post_message(LoopEventMessage(LoopEvent(tool_call_start={
+                "id": "c2", "name": "shell", "input": {"bad": {1, 2, 3}}})))
+            await settle(pilot, lambda: app._meter._tool_depth > 0)
+
+            assert app._meter._tool_depth == 1

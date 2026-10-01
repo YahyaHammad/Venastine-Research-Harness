@@ -3167,6 +3167,21 @@ class VenastineApp(App):
         # would go still during the one silence it exists to cover.
         if event.token_delta:
             self._meter.add_output_chars(len(event.token_delta))
+        # Batch 118. THINKING IS GENERATED OUTPUT, and counting only the
+        # visible answer is why the live figure read `~0 tok/s`: it needs
+        # only fewer than two characters per active second to round to
+        # zero, and a reasoning model emits minutes of thinking and a
+        # sentence of answer. Providers bill it as output tokens too, so
+        # the completion line's exact figure already included it while the
+        # live estimate did not -- the two instruments disagreed about
+        # their own numerator.
+        #
+        # OUTSIDE the `_show_thinking` branch below, deliberately: the
+        # model generated these characters whether or not this app is
+        # drawing them, and metering them behind the display switch would
+        # make `/thinking off` bring the bug back.
+        if event.thinking_delta:
+            self._meter.add_output_chars(len(event.thinking_delta))
         self._refresh_meter()
 
         if event.retract:
@@ -3213,6 +3228,32 @@ class VenastineApp(App):
             transcript.stream_delta(event.token_delta)
 
         if event.tool_call_start:
+            # Batch 118, both halves of the same correction.
+            #
+            # The CLOCK: a tool running is not the model writing, so the
+            # rate's denominator stops here and resumes at `tool_result`.
+            # `elapsed` keeps running -- a two-minute tool IS part of how
+            # long the turn took, and the transcript line says `took`.
+            # Depth-counted inside the meter, because `_dispatch_parallel`
+            # can have several outstanding at once.
+            #
+            # The COUNT: `input` is the arguments the model generated, and
+            # they are output tokens the provider bills. They never arrive
+            # as a delta -- `StreamToken` carries text, thinking, or the
+            # final response, so tool-call JSON lands whole in the last one
+            # -- which made generating a large call pure denominator with no
+            # numerator. Measured by its serialised length, the same rough
+            # instrument `CHARS_PER_TOKEN` already is.
+            self._meter.set_tool_running(1, monotonic())
+            try:
+                self._meter.add_output_chars(
+                    len(json.dumps(event.tool_call_start.get("input") or {},
+                                   ensure_ascii=False)))
+            except (TypeError, ValueError):
+                # A tool whose params do not serialise is not a reason to
+                # drop an event: the figure is an estimate and this one
+                # argument list simply does not get counted.
+                pass
             self._end_thinking()
             transcript.flush_stream()
             self._raven.resume_animation()
@@ -3260,6 +3301,8 @@ class VenastineApp(App):
                     tool_registry.call_links(name, params), opens)
 
         if event.tool_result:
+            # Batch 118. The other end of the tool window opened above.
+            self._meter.set_tool_running(-1, monotonic())
             result = event.tool_result["result"]
             call_id = event.tool_result.get("id")
             # §47, the second of three sources for `_spawn_threads`.
