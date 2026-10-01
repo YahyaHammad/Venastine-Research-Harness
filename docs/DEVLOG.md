@@ -17774,3 +17774,114 @@ green; drop the headroom floor, the cap, the window from the call site, or
 move the `*` onto the window, and each goes red alone.
 
 Counts 6155 -> 6167.
+
+## Batch 120 -- folding inside a turn, because one turn can be the whole thread
+
+TECHNICAL_DEBT 40, the residue batch 119 left and the owner's own worst
+case. Batch 119 made the turn count yield, which unsticks any thread with
+two completed turns. It cannot reach a thread whose only turn is the one
+still running -- and the reported thread was exactly that for most of its
+life: 142 rows and 168,311 proxy tokens inside turn 1, with turn 2 arriving
+only at the very end.
+
+### What the state looks like, measured
+
+With the trigger firing during turn 1, `starts` is `[0, 1]` and the best
+legal turn-aligned fold is turn 0: **253 proxy tokens, 0.1% of the
+thread**, after which `advances()` is satisfied and every later evaluation
+answers `no-progress` forever. A successful compaction that helps nothing
+and cannot be repeated.
+
+With a boundary inside the turn: **163,910 proxy tokens, 97.2%**.
+
+### The amendment, and the half of M5 that survives it
+
+M5 says the current turn is never foldable, because "a summary that
+swallowed the messages the model is reasoning about right now would rewrite
+the question mid-answer." The reason is right and it does not cover the
+whole turn. After forty-six steps the model is not reasoning about step
+three's tool output; what must survive verbatim is the turn's own
+**request** plus the recent steps. Both do -- so the question is not
+rewritten, it is carried unchanged with the middle of the work folded
+between it and the recent steps.
+
+### M4 holds by construction, and it was checked rather than assumed
+
+M4's rule is that a fold must never separate an assistant message carrying
+`tool_calls` from the `tool_result` rows answering them, because a
+`tool_result` with no preceding `tool_use` is an HTTP 400 on Anthropic.
+Inside a turn the archive is `user, (assistant, tool+)*` -- D20 persists the
+assistant row before dispatch and every answering row after it returns,
+including all of a parallel dispatch -- so **cutting immediately before an
+assistant row leaves every earlier call answered.**
+
+Verified against the reported thread's rows rather than argued: 47
+assistant rows inside turn 1, 46 candidate boundaries, and **20 of its
+steps carry between 2 and 5 tool rows** -- which is precisely why the
+boundary is the assistant row and not an arbitrary position. Walking both
+sides of the chosen cut: 89 calls and 89 results folded, 6 and 6 kept,
+nothing unanswered and nothing orphaned either way.
+
+### The request comes back through the function that already answers this
+
+`pinned_through()` exists because "a summary covers a contiguous span but
+one `covers_up_to_message_id` cannot say everything through K except
+these", and #88 already extended it to make a non-turn-aligned span whole.
+That is the same question the turn opener asks, so it is **one index added
+to its existing `keep` list** -- and the existing positional sort places it
+for free.
+
+That mattered more than it looks. The view needs these rows in archive
+order and `_derived_view` has no positions to merge two lists by: a pinned
+row from an older turn belongs BEFORE the request and a pinned row from
+inside this turn belongs AFTER it, so any sibling-function arrangement gets
+one of those wrong. One list and one sort cannot.
+
+**No schema change.** Whether a watermark is mid-turn is derived from the
+rows -- the first KEPT row is an `assistant` row rather than a `user` row,
+because that is the only boundary `_sub_turn_span` places. So there is no
+column, no migration, and no checkpoint written before this that lies about
+its own shape: a pre-batch-120 watermark is always turn-aligned, re-adds
+nothing, and renders exactly as it did.
+
+### Last resort means last
+
+The sub-turn path runs only when the turn-aligned answer is None. A
+turn-aligned boundary needs no row re-added and no amendment to M5 at all,
+so it stays preferred -- which is also what keeps every thread that folded
+before batch 120 folding in the same place, and is pinned by a test that
+would catch the fallback firing eagerly.
+
+### One existing test changed, and the change is the claim
+
+`test_apply_checkpoint_rebuilds_the_view_in_place` went from three messages
+to four. The extra row is the turn's request. Its watermark is synthetic
+and always was -- it splits an assistant row from the tool_result answering
+it, which M4 forbids and production has never produced -- and what the test
+exercises, `apply_checkpoint` re-reading rather than splicing, is
+unchanged. It asserts the request by content now rather than asserting a
+count.
+
+### Tested in two layers, plus the claim neither layer makes
+
+`test_compaction.py` for where the boundary goes, with M4 checked by
+walking both sides for unanswered calls rather than by asserting a row
+index. `test_storage_reads.py` for what comes back, including that a
+turn-aligned watermark re-adds nothing and that a pinned request is not
+re-added twice.
+
+And one test for the thing neither of those says: that the stuck thread
+actually folds and the view can be SENT. It runs `compact()` for real on a
+single-turn thread and asserts the outcome is `folded`, the view opens with
+the summary and then the request verbatim, and no `tool_result` in the view
+is unanswered. It earned its place immediately -- it is the test that
+discriminates two of the five mutations most sharply.
+
+Driven rather than argued. Five mutations: remove the fallback, cut one row
+off the step boundary, drop the re-added request, ignore
+`keep_recent_tokens` in the step walk, or let the fallback fire while a
+turn-aligned fold exists -- each goes red alone, and the boundary mutation
+is caught by the M4 test specifically, which is the one claim that is a
+wire error rather than a quality concern.
+
+Counts 6167 -> 6180.

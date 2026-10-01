@@ -420,6 +420,80 @@ def should_compact(used: int, model: str, mode: str = "working_set",
     return ""
 
 
+def _sub_turn_span(rows, starts, settings, current_turn_start):
+    """A watermark INSIDE one turn, or None. Batch 120, register item 40.
+
+    THE LAST RESORT, reached only when no turn-aligned fold exists at all.
+    Batch 119 made the turn COUNT yield, which unsticks any thread with two
+    completed turns; what it could not reach is a thread whose only turn is
+    the one still running. The reported case was 142 rows and 168,311 proxy
+    tokens inside ONE turn: over the trigger, entirely unfoldable, and
+    answering `no-progress` on every evaluation forever.
+
+    WHAT THIS AMENDS, PRECISELY. M5 says the current turn is never foldable
+    because "a summary that swallowed the messages the model is reasoning
+    about right now would rewrite the question mid-answer." The reason is
+    right and it does not cover the whole turn: after forty-six steps the
+    model is not reasoning about step three's tool output, and what must
+    survive verbatim is the turn's own REQUEST plus the recent steps. Both
+    do. The opening user row is re-added by `pinned_through` (see its
+    docstring) and `keep_recent_tokens` of the tail is held back here, so
+    the question is never rewritten -- it is carried unchanged, with the
+    middle of the work folded between it and the recent steps.
+
+    M4 IS SATISFIED BY CONSTRUCTION, not by checking. Its rule is that a
+    fold must never separate an assistant message carrying `tool_calls`
+    from the `tool_result` rows answering them, because a `tool_result`
+    with no preceding `tool_use` is an HTTP 400 on Anthropic. Inside a turn
+    the archive is `user, (assistant, tool+)*` -- D20 persists the
+    assistant row before dispatch and the answering rows after it returns,
+    including every row of a parallel dispatch -- so **cutting immediately
+    before an assistant row leaves every earlier call answered.** Measured
+    on the reported thread: 47 assistant rows inside the turn, 46 candidate
+    boundaries, and 20 of its steps carry between 2 and 5 tool rows, which
+    is exactly why the boundary is the assistant row and not an arbitrary
+    position.
+
+    Returns None rather than a boundary when the turn holds fewer than two
+    steps. One step cannot be folded without folding all of it, and a turn
+    with no steps is a bare request.
+    """
+    index = (current_turn_start if current_turn_start is not None
+             else len(starts) - 1)
+    if not 0 <= index < len(starts):
+        return None
+    opener = starts[index]
+
+    steps = [i for i in range(opener + 1, len(rows))
+             if rows[i]["role"] == "assistant"]
+    if len(steps) < 2:
+        return None
+
+    # keep_recent_tokens of the tail, WHOLE STEPS at a time -- the same
+    # floor and the same character proxy the turn-aligned path uses, just
+    # counted over steps instead of turns, so the two cannot disagree about
+    # how much verbatim tail a thread is promised.
+    bounds = steps + [len(rows)]
+    kept = 0
+    cut = steps[-1]
+    for position in range(len(steps) - 1, 0, -1):
+        kept += sum(len(rows[i]["content"])
+                    for i in range(bounds[position], bounds[position + 1]))
+        cut = steps[position]
+        if kept // CHARS_PER_TOKEN >= settings["keep_recent_tokens"]:
+            break
+
+    # A BACKSTOP, and it is unreachable: the loop stops at `steps[1]` at the
+    # earliest, so `cut` always exceeds `steps[0]` once there are two steps.
+    # Kept rather than argued away, for `pinned_through`'s reason one file
+    # over -- the failure it guards is a watermark that folds the request
+    # and nothing else, which is the one outcome here that would be wrong
+    # rather than merely unhelpful.
+    if cut <= steps[0]:
+        return None
+    return rows[cut - 1]["id"]
+
+
 def compactable_span(memory, current_turn_start: Optional[int] = None,
                      overrides: Optional[dict] = None):
     """The id of the last message that may be folded, or None if nothing
@@ -554,7 +628,19 @@ def compactable_span(memory, current_turn_start: Optional[int] = None,
             memory.thread_id, settings["keep_recent_turns"], len(starts))
 
     if cutoff < 1:
-        return None
+        # NO TURN-ALIGNED FOLD EXISTS. Batch 120 tries one inside the turn
+        # before giving up -- see _sub_turn_span for what that costs and
+        # why M4 holds. Last, and only here: a turn-aligned boundary is
+        # always preferable, since it needs no row re-added and no
+        # amendment to M5 at all.
+        inside = _sub_turn_span(rows, starts, settings, current_turn_start)
+        if inside is not None:
+            logger.info(
+                "Compaction on thread %s: no turn-aligned fold exists (%d "
+                "turns, all held), so the boundary is inside the current "
+                "turn. Its request and the recent steps stay verbatim.",
+                memory.thread_id, len(starts))
+        return inside
     # Fold everything strictly before turn `cutoff`, so the watermark is
     # the row just before that turn's first row. cutoff >= 1 guarantees
     # there is one.

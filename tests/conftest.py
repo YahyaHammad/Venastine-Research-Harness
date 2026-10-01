@@ -1250,10 +1250,12 @@ class FakeStorage:
 
     def pinned_through(self, thread_id, message_id):
         """Mirrors real storage.py's pinned_through, INCLUDING the
-        tool-result re-inclusion that makes the pinned span whole (#88).
-        A fake that returns the pinned rows alone cannot represent the
-        orphaned tool_use that fix exists to prevent, and a test passing
-        against it would prove only that the fake and the code agree."""
+        tool-result re-inclusion that makes the pinned span whole (#88)
+        and batch 120's turn opener. A fake that returns the pinned rows
+        alone cannot represent the orphaned tool_use that fix exists to
+        prevent, nor the request a sub-turn fold would summarize away, and
+        a test passing against it would prove only that the fake and the
+        code agree."""
         rows = self._messages_by_thread.get(thread_id, [])
         span = rows[:self._split_at(rows, message_id)]
         neutral = self._reconstruct(span)
@@ -1266,8 +1268,22 @@ class FakeStorage:
         keep += [i for i, r in enumerate(span)
                  if not r["pinned"] and r["role"] == "tool"
                  and neutral[i].get("tool_call_id") in need]
+        keep += self._turn_opener_index(rows, span)
 
         return [neutral[i] for i in sorted(set(keep))]
+
+    def _turn_opener_index(self, rows, span):
+        """Mirrors storage._turn_opener_index (batch 120): the user row
+        opening the turn a MID-TURN watermark cut into, identified by the
+        first KEPT row not being a `user` row."""
+        if not span or len(span) >= len(rows):
+            return []
+        if rows[len(span)]["role"] == "user":
+            return []
+        for index in range(len(span) - 1, -1, -1):
+            if span[index]["role"] == "user":
+                return [index]
+        return []
 
     def history_through(self, thread_id, message_id, after_message_id=None):
         rows = self._messages_by_thread.get(thread_id, [])

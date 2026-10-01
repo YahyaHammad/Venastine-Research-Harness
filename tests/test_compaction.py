@@ -15,6 +15,8 @@ holes or as unfireable:
   M10 the ratio is measured by characters, and never compared to a token count
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 import config
@@ -1221,3 +1223,261 @@ class TestTheTurnCountFloorYieldsInsteadOfBlockingEveryFold:
 
         assert ids.index(yielded) > ids.index(one_less), (
             "the count was relaxed by one step instead of yielding")
+
+# ---------------------------------------------------------------------------
+# ---- Batch 120: a fold INSIDE one turn, when nothing else is legal ---------
+# ---------------------------------------------------------------------------
+
+def _stepped_turn(memory, steps=6, body="y" * 400, opening="the long task"):
+    """One user turn followed by `steps` complete steps.
+
+    The archive shape this produces is the one production writes --
+    `user, (assistant, tool)*` -- because D20 persists the assistant row
+    carrying its tool_use before dispatch and the answering row after it
+    returns. Measured against the reported thread: 47 assistant rows inside
+    one turn, 20 of its steps carrying between 2 and 5 tool rows.
+    """
+    memory.add_user_message(opening)
+    for index in range(steps):
+        # ToolCallRequest-SHAPED, as add_assistant_message's contract
+        # requires: it reads `tc.id`, so a dict dies on attribute access.
+        call = SimpleNamespace(id=f"c{index}", name="web_search",
+                               input={"q": str(index)})
+        memory.add_assistant_message(_Resp("", tool_calls=[call]))
+        memory.add_tool_result(f"c{index}", {"result": f"{index} {body}"})
+
+
+def _sides_of(rows, watermark):
+    """`(folded, kept)` row lists either side of a watermark."""
+    ids = [row["id"] for row in rows]
+    cut = ids.index(watermark) + 1
+    return rows[:cut], rows[cut:]
+
+
+def _unanswered(rows):
+    """Tool calls made in `rows` with no result in `rows`, and vice versa.
+
+    M4's rule, CHECKED. A `tool_result` with no preceding `tool_use` is an
+    HTTP 400 on Anthropic, so a boundary that splits a step is a wire error
+    on the next call rather than a quality problem -- and asserting a row
+    index would pin the arithmetic instead of the property.
+    """
+    import json
+
+    called, answered = set(), set()
+    for row in rows:
+        if row["role"] == "assistant":
+            payload = row["content"]
+            # FakeStorage holds already-decoded values because nothing
+            # serialises on its write path, where production reads the JSON
+            # string the column actually holds (see
+            # test_fake_storage_mirror.py's "the one difference that is not
+            # a divergence"). This helper runs against both.
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+            called |= {c["id"] for c in payload.get("tool_calls") or ()}
+        elif row["role"] == "tool":
+            answered.add(row["tool_call_id"])
+    return called - answered, answered - called
+
+
+class TestAFoldInsideOneTurnWhenNothingElseIsLegal:
+    """TECHNICAL_DEBT 40, the residue batch 119 left.
+
+    Batch 119 made the turn COUNT yield, which unsticks any thread with two
+    completed turns. A thread whose only turn is the one still running has
+    no turn-aligned boundary at all: the reported case was 142 rows and
+    168,311 proxy tokens inside ONE turn, and the best legal fold freed 253.
+
+    WHAT WOULD MAKE THIS CLASS VACUOUS: asserting that a boundary exists.
+    The boundary existing was never the hard part -- M4 holding at it is, so
+    every placement test below walks both sides for unanswered calls.
+    """
+
+    def test_a_single_turn_thread_can_now_be_folded(self, fake_storage):
+        memory = ConversationMemory()
+        _stepped_turn(memory, steps=6)
+
+        watermark = compaction.compactable_span(
+            memory, current_turn_start=0, overrides=OVERRIDES)
+
+        assert watermark is not None, (
+            "one turn of six steps is still entirely unfoldable")
+
+    def test_the_boundary_never_splits_a_step(self, fake_storage):
+        """M4 at the new boundary, checked on both sides rather than
+        asserted as an index. This is the claim that makes the batch safe:
+        the archive inside a turn is `user, (assistant, tool+)*`, so
+        cutting immediately before an assistant row leaves every earlier
+        call answered -- and a parallel dispatch writes several tool rows
+        for one assistant row, which is what a naive boundary splits."""
+        memory = ConversationMemory()
+        memory.add_user_message("the long task")
+        for index in range(5):
+            calls = [SimpleNamespace(id=f"c{index}_{n}", name="web_search",
+                                      input={"q": str(n)})
+                     for n in range(3)]
+            memory.add_assistant_message(_Resp("", tool_calls=calls))
+            for n in range(3):
+                memory.add_tool_result(f"c{index}_{n}",
+                                       {"result": "z" * 400})
+
+        watermark = compaction.compactable_span(
+            memory, current_turn_start=0, overrides=OVERRIDES)
+        assert watermark is not None
+
+        rows = fake_storage._messages_by_thread[memory.thread_id]
+        folded, kept = _sides_of(rows, watermark)
+
+        assert kept and kept[0]["role"] == "assistant", (
+            "the kept tail must open on a step, not mid-step")
+        for label, side in (("folded", folded), ("kept", kept)):
+            missing, orphaned = _unanswered(side)
+            assert not missing, f"{label} side has unanswered calls: {missing}"
+            assert not orphaned, f"{label} side has orphaned results: {orphaned}"
+
+    def test_the_turns_own_request_survives_the_fold(self, fake_storage):
+        """The whole of M5's objection, answered. Folding the current turn
+        would 'rewrite the question mid-answer' -- so the question is not
+        rewritten: it falls on the covered side and comes back verbatim
+        through the same mechanism M9 uses for pinned rows."""
+        memory = ConversationMemory()
+        _stepped_turn(memory, steps=6, opening="EXACT WORDING MATTERS HERE")
+
+        watermark = compaction.compactable_span(
+            memory, current_turn_start=0, overrides=OVERRIDES)
+        rows = fake_storage._messages_by_thread[memory.thread_id]
+        folded, _ = _sides_of(rows, watermark)
+
+        assert folded[0]["role"] == "user", "the request is on the folded side"
+        readded = fake_storage.pinned_through(memory.thread_id, watermark)
+        assert [r["role"] for r in readded] == ["user"]
+        assert readded[0]["content"] == "EXACT WORDING MATTERS HERE"
+
+    def test_a_turn_aligned_fold_is_preferred_when_one_exists(
+            self, fake_storage):
+        """LAST RESORT means last. A turn-aligned boundary needs no row
+        re-added and no amendment to M5 at all, so sub-turn folding must
+        not fire while one is available -- which is also what keeps every
+        pre-batch-120 thread folding exactly where it did."""
+        memory = ConversationMemory()
+        _thread(memory, turns=4)
+        rows = fake_storage._messages_by_thread[memory.thread_id]
+        starts = [i for i, row in enumerate(rows) if row["role"] == "user"]
+
+        watermark = compaction.compactable_span(
+            memory, current_turn_start=3, overrides=OVERRIDES)
+
+        ids = [row["id"] for row in rows]
+        cut = ids.index(watermark) + 1
+        assert cut in starts, (
+            "the boundary is not a turn start, so a sub-turn fold fired "
+            "while a turn-aligned one was available")
+
+    def test_a_turn_with_one_step_still_folds_nothing(self, fake_storage):
+        """One step cannot be folded without folding all of it, which
+        leaves the model the request and a summary of the only work it has
+        done -- and nothing to continue from."""
+        memory = ConversationMemory()
+        _stepped_turn(memory, steps=1)
+
+        assert compaction.compactable_span(
+            memory, current_turn_start=0, overrides=OVERRIDES) is None
+
+    def test_a_bare_request_with_no_steps_folds_nothing(self, fake_storage):
+        memory = ConversationMemory()
+        memory.add_user_message("just asked, nothing done yet")
+
+        assert compaction.compactable_span(
+            memory, current_turn_start=0, overrides=OVERRIDES) is None
+
+    def test_the_recent_steps_stay_verbatim(self, fake_storage):
+        """keep_recent_tokens, counted over STEPS instead of turns -- the
+        same floor and the same character proxy, so the two paths cannot
+        promise different amounts of verbatim tail."""
+        memory = ConversationMemory()
+        _stepped_turn(memory, steps=10, body="y" * 400)
+
+        generous = compaction.compactable_span(
+            memory, current_turn_start=0,
+            overrides={**OVERRIDES, "keep_recent_tokens": 900})
+        thrifty = compaction.compactable_span(
+            memory, current_turn_start=0,
+            overrides={**OVERRIDES, "keep_recent_tokens": 1})
+
+        rows = fake_storage._messages_by_thread[memory.thread_id]
+        ids = [row["id"] for row in rows]
+        assert ids.index(generous) < ids.index(thrifty), (
+            "a larger keep_recent_tokens did not hold back more steps")
+
+    def test_a_second_fold_of_the_same_turn_needs_the_turn_to_have_grown(
+            self, fake_storage):
+        """The watermark only ever moves forward, and compact() spends no
+        model call when it would not. A turn that has not advanced must
+        produce the same boundary, so advances() refuses and the outcome is
+        no-progress rather than a summary of a summary."""
+        memory = ConversationMemory()
+        _stepped_turn(memory, steps=8)
+
+        first = compaction.compactable_span(
+            memory, current_turn_start=0, overrides=OVERRIDES)
+        again = compaction.compactable_span(
+            memory, current_turn_start=0, overrides=OVERRIDES)
+        assert first == again
+
+        for index in range(8, 12):
+            call = SimpleNamespace(id=f"c{index}", name="web_search",
+                                   input={"q": str(index)})
+            memory.add_assistant_message(_Resp("", tool_calls=[call]))
+            memory.add_tool_result(f"c{index}", {"result": "y" * 400})
+
+        later = compaction.compactable_span(
+            memory, current_turn_start=0, overrides=OVERRIDES)
+        rows = fake_storage._messages_by_thread[memory.thread_id]
+        ids = [row["id"] for row in rows]
+        assert ids.index(later) > ids.index(first), (
+            "the boundary did not advance as the turn grew")
+
+    def test_the_stuck_thread_folds_and_the_view_can_be_sent(
+            self, fake_storage, summaries):
+        """THE CLAIM THE REST OF THIS CLASS DOES NOT MAKE. Every test above
+        is about where the boundary goes or what comes back; none of them
+        says the thread actually compacts, or that what the model is handed
+        afterwards is a legal request. That is the whole batch, so it runs
+        compact() for real and then reads the rebuilt view.
+
+        The three properties, and each would be a different bug:
+          * the outcome is `folded`, not `blocked` -- the reported state;
+          * the view opens with a summary and the request VERBATIM, so the
+            question was carried rather than paraphrased;
+          * no tool_result in the view is unanswered, which is M4 reaching
+            the derived view rather than just the watermark -- that is an
+            HTTP 400 on Anthropic, on a thread that was working a moment
+            ago.
+        """
+        from core.memory import SUMMARY_PREFIX
+
+        memory = ConversationMemory()
+        _stepped_turn(memory, steps=8, opening="THE ONE LONG REQUEST")
+        summaries("A summary of the folded work.")
+
+        outcome = compaction.compact(
+            memory, "claude-sonnet-5", "ANTHROPIC",
+            current_turn_start=0, overrides=OVERRIDES)
+
+        assert outcome["status"] == "folded", outcome
+        assert fake_storage.latest_checkpoint(memory.thread_id) is not None
+
+        view = memory.messages
+        assert view[0]["content"].startswith(SUMMARY_PREFIX)
+        assert view[1]["content"] == "THE ONE LONG REQUEST", (
+            "the turn's request was summarized away instead of carried")
+        assert len(view) < len(
+            fake_storage._messages_by_thread[memory.thread_id]), (
+            "the view is no smaller than the archive")
+
+        called = {c["id"] for m in view for c in (m.get("tool_calls") or ())}
+        answered = {m["tool_call_id"] for m in view if m["role"] == "tool"}
+        assert answered <= called, (
+            f"the view carries tool_results for calls it cannot see: "
+            f"{answered - called} -- an HTTP 400 on Anthropic")

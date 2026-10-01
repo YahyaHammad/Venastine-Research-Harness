@@ -783,8 +783,38 @@ def archive_history(thread_id: UUID) -> list[dict]:
     return get_session_history(thread_id)
 
 
+def _turn_opener_index(rows: list[dict], span: list[dict]) -> list[int]:
+    """`[i]` for the user row that OPENS the turn a MID-TURN watermark cut
+    into, or `[]`. Batch 120, register item 40.
+
+    A sub-turn fold puts the watermark inside a turn, so the turn's own
+    request falls on the covered side and would be summarized away -- and
+    the model would then read a paraphrase of the question it is answering
+    rather than the question. That is M5's objection to folding the current
+    turn at all, and re-adding the request verbatim is what answers it.
+
+    The TEST IS THE FIRST KEPT ROW, not a flag on the checkpoint. When the
+    watermark is turn-aligned the tail opens with a `user` row and nothing
+    needs re-adding; when it is mid-turn the tail opens with an `assistant`
+    row, because that is the only boundary _sub_turn_span will place. So
+    the state is derivable from the rows, which means no column, no
+    migration, and no checkpoint written before this existed that lies
+    about its own shape.
+    """
+    if not span or len(span) >= len(rows):
+        return []
+    if rows[len(span)]["role"] == "user":
+        return []
+    for index in range(len(span) - 1, -1, -1):
+        if span[index]["role"] == "user":
+            return [index]
+    return []
+
+
 def pinned_through(thread_id: UUID, message_id: Optional[UUID]) -> list[dict]:
-    """Pinned rows at or before the watermark, in neutral shape (§21 M9).
+    """Rows at or before the watermark the derived view must carry
+    verbatim: the pinned set, made whole (§21 M9), plus the opening request
+    of a turn a mid-turn watermark cut into (batch 120).
 
     A summary covers a contiguous span, but §21 AC2 says a pinned message is
     never summarized -- so pinned rows INSIDE the covered span have to
@@ -844,6 +874,16 @@ def pinned_through(thread_id: UUID, message_id: Optional[UUID]) -> list[dict]:
     keep += [i for i, m in enumerate(span)
              if not m["pinned"] and m["role"] == "tool"
              and neutral[i].get("tool_call_id") in need]
+
+    # Batch 120. ONE INDEX, AND THE SORT BELOW PLACES IT -- which is the
+    # whole reason the turn opener lives here rather than in a function of
+    # its own beside this one. The view needs these rows in ARCHIVE ORDER,
+    # and `_derived_view` has no positions to merge two lists by: a pinned
+    # row from an older turn belongs before the request and a pinned row
+    # from inside this turn belongs after it, and either sibling-function
+    # arrangement gets one of those wrong. `set()` covers the opener
+    # already being pinned.
+    keep += _turn_opener_index(rows, span)
 
     return [neutral[i] for i in sorted(set(keep))]
 

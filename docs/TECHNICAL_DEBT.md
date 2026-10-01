@@ -2112,7 +2112,7 @@ always distinguished them; nothing on screen did.
 one still running. The boundary must be a turn start (M4), so a 142-row
 single turn has no legal fold. That is item 40.
 
-## 40. One turn can be the whole thread, and a turn cannot be folded (open)
+## 40. One turn can be the whole thread, and a turn cannot be folded (closed, batch 120)
 
 The residue of item 39, and the owner's own worst case: if the trigger fires
 during turn 1 of the thread above, `starts` is `[0, 1]`, the only legal
@@ -2134,6 +2134,40 @@ by construction -- D20 persists the assistant row carrying its `tool_use`
 before dispatch and the answering rows after, so every earlier call is
 answered there -- and `pinned_through()` is the precedent for re-adding a
 row the watermark swallowed. Owner-approved for batch 120.
+
+**CLOSED, and the shape is the one sketched above.** `_sub_turn_span()`
+runs only when no turn-aligned boundary exists -- a turn-aligned fold needs
+no row re-added and no amendment to M5, so it stays preferred and every
+thread that folded before batch 120 folds in exactly the same place. The
+boundary is an **assistant row**, and M4 holds there by construction rather
+than by checking: inside a turn the archive is `user, (assistant, tool+)*`,
+because D20 persists the assistant row before dispatch and every answering
+row after it returns. The turn's request comes back through
+`pinned_through()`, which already owned "what must be re-added from inside
+the covered span, with the span made whole"; it is **one index added to
+that function's existing `keep` list**, so the existing positional sort
+places the request correctly among any pinned rows -- a sibling function
+would have had to choose an order, and either choice is wrong half the time
+(a pinned row from an older turn belongs before the request, one from
+inside this turn belongs after it).
+
+**Measured on the reported thread**, in the state batch 119 cannot reach --
+the trigger firing during turn 1, `starts == [0, 1]`:
+
+| | folds | share of the thread |
+|---|---|---|
+| batch 119 alone | 253 proxy tokens | 0.1% |
+| with sub-turn folding | 163,910 proxy tokens | **97.2%** |
+
+M4 checked rather than asserted, by walking both sides of the cut: the
+folded span holds 89 calls and 89 results, the kept tail 6 and 6, with
+nothing unanswered and nothing orphaned on either side.
+
+**No schema change, and no checkpoint written before this lies about its
+shape.** Whether a watermark is mid-turn is derived from the rows -- the
+first KEPT row is an `assistant` row rather than a `user` row -- so a
+pre-batch-120 checkpoint, which is always turn-aligned, re-adds nothing and
+renders exactly as it did.
 
 ## 41. `arxiv_search` output is unbounded, and one result was 29k tokens (open)
 

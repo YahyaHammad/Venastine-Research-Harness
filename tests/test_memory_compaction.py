@@ -197,8 +197,22 @@ def test_apply_checkpoint_rebuilds_the_view_in_place(fake_storage):
     fake_storage.save_checkpoint(memory.thread_id, "Summary.", rows[3]["id"])
     memory.apply_checkpoint()
 
-    assert len(memory.messages) == 3
+    # FOUR SINCE BATCH 120, and the extra row is the point rather than an
+    # adjustment. This watermark falls INSIDE turn 2, so the turn's own
+    # request comes back verbatim beside the summary -- otherwise the model
+    # reads a paraphrase of the question it is answering, which is M5's
+    # whole objection to folding a live turn.
+    #
+    # The watermark here is SYNTHETIC and always was: it splits row 3 from
+    # the tool_result answering it, which M4 forbids and no production path
+    # has ever produced. What the test exercises is apply_checkpoint
+    # re-reading rather than splicing, and that is unchanged. A
+    # turn-ALIGNED watermark re-adds nothing, which is what keeps every
+    # checkpoint written before batch 120 rendering exactly as it did --
+    # pinned directly in test_storage_reads.py.
+    assert len(memory.messages) == 4
     assert memory.messages[0]["content"].startswith(SUMMARY_PREFIX)
+    assert memory.messages[1]["content"] == "second question"
 
 
 # ---------------------------------------------------------------------------

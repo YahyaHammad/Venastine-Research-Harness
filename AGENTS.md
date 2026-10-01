@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 6167 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
+pytest                                            # 6180 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -1609,9 +1609,17 @@ what makes an early, frequent trigger safe.
   unpriced counts — plus the TUI usage line (billed-since-resume · ctx) and CLI
   early-stop figures. Do not read EITHER number as a price or the spend figure as
   a size.
-- **The fold boundary is always a turn start** (M4). A summary that swallows an
-  assistant message and leaves its `tool_result` rows is an HTTP 400 on Anthropic — a
-  hard wire error, not a degraded answer.
+- **The fold boundary never splits a step** (M4, as restated by batch 120). A summary
+  that swallows an assistant message and leaves its `tool_result` rows is an HTTP 400
+  on Anthropic — a hard wire error, not a degraded answer. This bullet said "always a
+  turn start" until batch 120, which was the IMPLEMENTATION rather than the rule: a
+  turn start satisfies M4, and so does the row before any **assistant** row inside a
+  turn, because the archive there is `user, (assistant, tool+)*` — D20 persists the
+  assistant row before dispatch and every answering row after it returns, a parallel
+  dispatch included. So the rule is unchanged and the set of positions satisfying it
+  grew. A turn-aligned boundary is still PREFERRED and a sub-turn one is reached only
+  when no turn-aligned fold exists at all; the second boundary `pinned_through()` has
+  always owned is the other place M4 reaches (#88).
 - **Three floors bound what may be folded, earliest wins** (M5): the current turn
   (structural — `_run()` records how many turns were complete when it began), the
   last 3 completed turns, and `keep_recent_tokens`. The current-turn floor is what
@@ -1632,6 +1640,18 @@ what makes an early, frequent trigger safe.
   checkpoint, and then answers `no-progress` forever with `advances()` satisfied
   against a watermark that freed 0.1%. The guarantee is size-based now: the current
   turn verbatim, plus at least `keep_recent_tokens` of completed turns verbatim.
+- **AMENDED AGAIN BY BATCH 120: the current turn's MIDDLE may fold** (TECHNICAL_DEBT
+  40). The structural floor was the one batch 119 left absolute, and a thread whose
+  only turn is the one still running then has no legal fold at all — the reported
+  thread was 142 rows and 168,311 proxy tokens inside ONE turn, where the best
+  turn-aligned boundary freed **253**. M5's reason is that folding the current turn
+  "would rewrite the question mid-answer", and that reason does not cover the whole
+  turn: after forty-six steps the model is not reasoning about step three's tool
+  output. So the request and `keep_recent_tokens` of recent steps stay VERBATIM and
+  the middle folds — the question is carried, not summarized. The request comes back
+  through `pinned_through()`, which already owned exactly this question, as ONE index
+  into its existing `keep` list so its existing sort places it. 97.2% of that thread
+  becomes foldable; measured, with M4 checked by walking both sides of the cut.
 - **Chain is the default; rederive survives as the fidelity option** (M2, as
   amended by batch 16 — an explicit owner decision recorded in DEVLOG). M2's
   original choice was rederive: exactly one summarization step always sits
