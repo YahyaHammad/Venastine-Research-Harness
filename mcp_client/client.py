@@ -277,6 +277,29 @@ class MCPClient:
             )
         raise ValueError(cfg.error or "unusable server configuration")
 
+    @staticmethod
+    def _reason(e: BaseException, budget: Optional[float] = None) -> str:
+        """Why a server is unusable, in one string for BOTH consumers.
+
+        Batch 121, from the owner's log: `MCP server 'joplin' failed to
+        connect: ` and nothing after the colon. The per-server
+        asyncio.timeout raises TimeoutError, whose str() is "" -- so the
+        %s below rendered nothing, and the one message that explains a
+        silent MCP named no cause at all.
+
+        It was also TWO strings: `failures` carried the exception type and
+        the log line did not, so the better of the two never reached the
+        place a user looks first. One copy now, and the timeout names its
+        budget because "it timed out" without a duration leaves the
+        reader unable to tell a dead server from a slow one.
+        """
+        text = str(e)
+        if text:
+            return f"{type(e).__name__}: {text}"
+        if isinstance(e, TimeoutError) and budget is not None:
+            return f"{type(e).__name__} (no handshake within {budget}s)"
+        return type(e).__name__
+
     async def _manager(self):
         """Owns the AsyncExitStack for the whole process lifetime, in ONE
         task. See the module docstring -- this shape is required, not
@@ -315,9 +338,10 @@ class MCPClient:
                         # others, or a single stale entry makes the whole
                         # harness unusable. §17's sketch had no try/except
                         # here at all.
-                        self.failures[name] = f"{type(e).__name__}: {e}"
+                        why = self._reason(e, SERVER_CONNECT_TIMEOUT_S)
+                        self.failures[name] = why
                         logger.warning("MCP server %r failed to connect: %s",
-                                       name, e)
+                                       name, why)
                 self._ready.set()
                 await self._shutdown.wait()
         except Exception:

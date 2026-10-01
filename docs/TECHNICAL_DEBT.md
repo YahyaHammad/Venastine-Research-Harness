@@ -2202,3 +2202,44 @@ with the shipped roster and `DEFAULT_CONTEXT_WINDOW` at 256k; reachable by
 anyone who types `/window 8k` for a small local model. The margin should
 probably scale with the trigger the way the headroom now scales with the
 window.
+
+## 43. The npm launcher reads stdin on first run, then waits with the console inherited (open)
+
+`bin/venastine.mjs` opens a Node `readline` on `process.stdin` for the
+first-run install consent (`ask()`, line 194), then runs the harness under
+`spawnSync` with `stdio: 'inherit'` and stays alive for the child's whole
+session. That is batch 121's shape exactly, one process out: two readers
+on one terminal, with the second one being a Textual app.
+
+PROBABLY BENIGN, which is why it is recorded rather than changed.
+`rl.close()` calls `rl.pause()`, which calls `input.pause()`, so libuv is
+asked to stop reading before the spawn. The residual risk is that on
+Windows libuv's console reader runs on its own thread with a blocking
+read, and `uv_read_stop` cannot cancel one already in flight -- so the
+guarantee is "asked to stop", not "stopped", and it is the same guarantee
+batch 121 declined to rely on for the Python side.
+
+Only reachable on the FIRST run after an install, which is also the launch
+least likely to be diagnosed as this. If it is ever fixed, the fix is
+`process.stdin.pause()` plus `unref()` after `rl.close()`, and the
+measurement is batch 121's: inject keys with `WriteConsoleInputW` and
+count what the app's `on_key` sees.
+
+## 44. `ask()`'s drain can only drop what the pump already took (open)
+
+`ask()` drops stale input before each gated prompt, because "a line typed
+after a question timed out was an answer to THAT question". It does that
+by draining the QUEUE -- so a line still sitting in the terminal's own
+buffer when the pump starts is not stale to it, and can answer the next
+question.
+
+PRE-EXISTING and unchanged by batch 121, which moved `readline` off the
+pump and left `ask` alone. The race was always there at the FIRST `ask()`
+of a process: `_start()` returns before the pump has read anything, and
+the drain that follows sees an empty queue either way.
+
+The honest fix is an OS-level flush -- `termios.tcflush(fd, TCIFLUSH)` and
+`FlushConsoleInputBuffer` -- which would also make the drain
+non-racy rather than best-effort. That is a change to a locked §29 safety
+property and wants its own batch, with the measurement being a line typed
+before the prompt is printed rather than after.

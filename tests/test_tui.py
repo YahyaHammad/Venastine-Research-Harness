@@ -8514,3 +8514,81 @@ class TestTheMeterSeesEverythingTheModelGenerated:
             await settle(pilot, lambda: app._meter._tool_depth > 0)
 
             assert app._meter._tool_depth == 1
+
+
+class TestPreMountNoticesReachTheTranscript:
+    """Batch 121. The third producer of #138's problem: main() learns
+    something before this screen exists, and a print there is erased by
+    Textual the moment it renders while TranscriptLogHandler attaches only
+    at mount.
+
+    #138 answered it by RECOMPUTING at mount and batch 87 by leaving a
+    file. Neither works for "I created your mcp.json" or "something else
+    is reading this terminal" -- facts about this launch that the app
+    cannot rediscover -- so these travel as an argument.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_notice_from_before_the_screen_existed_is_written(
+            self, mocker):
+        from tui import widgets
+
+        written = []
+        mocker.patch.object(widgets.Transcript, "write_system",
+                            side_effect=lambda self, t: written.append(str(t)),
+                            autospec=True)
+
+        app = VenastineApp("ANTHROPIC", "test-model", {}, startup_notices=[
+            "[mcp] created /somewhere/mcp.json -- your own MCP servers go "
+            "in this file"])
+        async with app.run_test() as pilot:
+            await pilot.pause()
+
+        assert any("created /somewhere/mcp.json" in line for line in written), (
+            "the line main() could not print did not reach the one place a "
+            "user reads: %r" % (written,))
+
+    @pytest.mark.asyncio
+    async def test_the_list_is_copied_rather_than_held(self, mocker):
+        """main() appends to it right up to the run() call -- the
+        could-not-free-the-terminal warning is the last thing added -- so a
+        held reference would render whatever the list ended as, which is a
+        different bug for every future producer."""
+        from tui import widgets
+
+        written = []
+        mocker.patch.object(widgets.Transcript, "write_system",
+                            side_effect=lambda self, t: written.append(str(t)),
+                            autospec=True)
+
+        notices = ["[mcp] the one that was passed"]
+        app = VenastineApp("ANTHROPIC", "test-model", {},
+                           startup_notices=notices)
+        notices.append("[mcp] appended after the app was built")
+
+        async with app.run_test() as pilot:
+            await pilot.pause()
+
+        joined = " ".join(written)
+        assert "the one that was passed" in joined
+        assert "appended after the app was built" not in joined
+
+    @pytest.mark.asyncio
+    async def test_no_notices_is_silent(self, mocker):
+        """The healthy case, and it is the common one: nothing was created
+        and the terminal was free. An empty list must add no line at all,
+        not a blank one -- `_startup_warnings` sets that precedent."""
+        from tui import widgets
+
+        written = []
+        mocker.patch.object(widgets.Transcript, "write_system",
+                            side_effect=lambda self, t: written.append(str(t)),
+                            autospec=True)
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+
+        assert not [line for line in written if "[mcp]" in line
+                    or "[warning]" in line], written
+        assert "" not in written, "an empty notice list wrote a blank line"

@@ -995,3 +995,59 @@ def test_colliding_tool_name_is_refused_not_silently_overwritten(monkeypatch):
         assert permissions.requires_approval("mcp__a__b__c", {}) is True
     finally:
         c.disconnect_all()
+
+
+class TestAFailureThatNamesItsCause:
+    """Batch 121, from the owner's log:
+
+        MCP server 'joplin' failed to connect:
+
+    and nothing after the colon. The per-server `asyncio.timeout` raises
+    TimeoutError, whose str() is "" -- so the one line that explains a
+    silent MCP named no cause at all, on a launch where MCP going quiet
+    was the only visible symptom of something else entirely.
+    """
+
+    def test_a_timeout_names_its_budget(self):
+        from mcp_client.client import MCPClient
+
+        why = MCPClient._reason(TimeoutError(), 20.0)
+
+        assert "TimeoutError" in why
+        assert "20.0s" in why, (
+            "a timeout without a duration leaves the reader unable to "
+            "tell a dead server from a slow one")
+
+    def test_an_exception_with_no_message_still_names_its_type(self):
+        class Silent(Exception):
+            pass
+
+        from mcp_client.client import MCPClient
+
+        assert MCPClient._reason(Silent()) == "Silent"
+        assert MCPClient._reason(Silent(), 20.0) == "Silent", (
+            "only a TIMEOUT may claim the timeout's budget as its reason")
+
+    def test_an_ordinary_failure_reads_exactly_as_it_did(self):
+        """The non-empty case is byte-identical to what `failures` carried
+        before, because that half was never wrong."""
+        from mcp_client.client import MCPClient
+
+        e = ValueError("no 'command' (stdio) and no 'url' (http)")
+        assert MCPClient._reason(e, 20.0) == (
+            "ValueError: no 'command' (stdio) and no 'url' (http)")
+
+    def test_the_log_line_and_the_failures_map_are_one_string(self):
+        """They were TWO, and the better of them never reached the place a
+        user looks first: `failures` carried the exception type and the
+        WARNING did not."""
+        import inspect
+
+        from mcp_client import client as client_module
+
+        source = inspect.getsource(client_module.MCPClient._manager)
+        assert source.count("self._reason(") == 1
+        assert 'self.failures[name] = why' in source
+        assert "name, why)" in source, (
+            "the log line is formatting the exception again instead of "
+            "the one reason string")

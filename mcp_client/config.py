@@ -11,6 +11,14 @@ the same rule core/config_loader.py and core/workspace_trust.py follow:
   user     ~/.config/venastine/mcp.json      -- you authored it
   project  <project>/.venastine/mcp.json     -- trust-gated (D17)
 
+THE USER ONE IS CREATED EMPTY AT STARTUP IF IT IS ABSENT (batch 121,
+owner request). "You authored it" was doing double duty: it is the
+security argument for why that tier needs no trust prompt, and it was
+also the reason nothing ever created the file -- which left the path
+discoverable only from this docstring. Two plausible homes (the harness
+root, and here) and no way to tell from inside a session means an edit
+goes into a file nothing reads. See ensure_user_config.
+
 THE PROJECT PATH IS `.venastine/mcp.json`, NOT `<project>/mcp.json`.
 §17/D11 put it at the project root to match Claude Code's convention, but
 workspace_trust hashes only `.venastine/`, and is_trusted() returns True
@@ -135,6 +143,50 @@ def user_config_path() -> str:
 
 def project_config_path(project_path: str) -> str:
     return os.path.join(os.path.realpath(project_path), ".venastine", "mcp.json")
+
+
+def ensure_user_config() -> Optional[str]:
+    """Create the user-level mcp.json if absent. Returns the path, or None.
+
+    Batch 121, owner request: "users don't know whether user-level
+    mcp.json is at the harness root or ~/.config/venastine". A file that
+    exists answers that; a docstring does not.
+
+    BEHAVIOUR-NEUTRAL BY CONSTRUCTION. `{"mcpServers": {}}` loads as zero
+    servers, and it is the one shape _read_file does not warn about -- an
+    empty `{}` trips its "no 'mcpServers' object" branch, so the obvious
+    seed would have printed a warning about the harness's own file at
+    every launch. The skeleton comes from §24's render_mcp() rather than
+    being retyped here, so the two tiers cannot drift.
+
+    NEVER OVERWRITES, and the check is existence rather than content: a
+    file someone emptied by hand is still their file.
+
+    An OSError is a DEBUG line and None. A read-only config directory is
+    a reason not to have the convenience, not a reason not to start --
+    every other store in that directory fails the same way, except the
+    trust store, which raises because a security decision that silently
+    did not persist is worse than a crash. This is not one of those.
+
+    mode=0o600 like its two siblings there: the entries can carry an
+    Authorization header, and on the temp file rather than the
+    destination because os.replace carries the source's mode across
+    (#19). trailing_newline because a human edits this one -- §24's
+    scaffold passes it for exactly that reason.
+    """
+    from project_init.config_files import render_mcp
+
+    path = user_config_path()
+    if os.path.exists(path):
+        return None
+    try:
+        write_json_atomic(path, render_mcp(), mode=0o600,
+                          trailing_newline=True)
+    except OSError as e:
+        logger.debug("Could not create %s: %s", path, e)
+        return None
+    logger.info("Created user-level mcp.json at %s", path)
+    return path
 
 
 def _flag(server: str, key: str, value: Any) -> bool:

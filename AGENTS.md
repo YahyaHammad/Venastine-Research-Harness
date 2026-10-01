@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 6180 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
+pytest                                            # 6204 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -1804,6 +1804,49 @@ Two methods, and the difference is a safety property rather than a preference:
 - `readline(prompt)` — the chat prompt and the one-shot startup prompts. **Keeps** type-ahead, blocks,
   raises `EOFError` on Ctrl+D. Do not add a `drain=` flag; that puts the rule one keyword argument
   away from being switched off at an approval.
+
+**THE RULE IS "ONE READER AT A TIME", AND BATCH 121 IS WHAT IT COST TO LEARN THAT.** N1 above is
+scoped to **this module**, and the biggest reader of this process's stdin is not in it: Textual reads
+the same console from its own thread (`win32.EventMonitor` on Windows, a selector on fd 0 on POSIX).
+So the trust prompt — which fires whenever anything under `.venastine/`, or the root `AGENTS.md`,
+changes — left `_pump` parked in a blocking read, and the TUI that started two lines later lost every
+keystroke to it. Measured with the real app, one flag apart, and the same on both platforms:
+
+| state | the app's `on_key` | shutdown |
+|---|---|---|
+| a reader parked | never fired | **`App.run()` never returned**; the process had to be killed |
+| batch 121 | all five injected keys | exit 0 |
+
+The second column is why the owner's only way out was Alt+F4: `disable_input()` joins an input thread
+stuck in a read whose records the pump had already taken, so even a quit cannot complete. And Ctrl+C
+is no escape because `enable_application_mode` clears `ENABLE_PROCESSED_INPUT` — Ctrl+C is just
+another key event in the queue the wrong reader is draining.
+
+Two changes, and the first is the fix:
+
+- **`readline()` reads on the CALLING THREAD when no pump exists.** It has no deadline (N2), so there
+  is nothing a thread could be abandoned *for*. Once a pump exists the queue path is taken unchanged,
+  which is what keeps #100 fixed — the pump is authoritative the moment it exists, and before that
+  there is nothing to contend with. Type-ahead is unaffected: the **terminal** buffers an early line,
+  and always did; the queue only ever held what the pump had already taken out.
+- **`main.py` hands the terminal over, by name, immediately before `run_tui`.** `_release_terminal()`
+  latches the reader closed, so `_start()` refuses afterwards and every later read answers the way it
+  answers a closed stdin. It returns `False` if a pump is somehow still parked — nothing can produce
+  that today, and it is reported rather than asserted because the alternative symptom is a UI that
+  animates and ignores the keyboard with nothing anywhere saying why.
+
+`ask()` is untouched. A deadline cannot be imposed on a read that cannot be abandoned, which is the
+entire reason the thread exists.
+
+The same release covers `replace_process`: on Windows the waiter keeps this process alive with the
+console inherited, so a parked reader of ours would have read the **replacement's** keystrokes.
+
+**Pre-mount notices travel into the app** (`tui.app.run(startup_notices=...)`). Anything printed
+before Textual renders is erased by it and `TranscriptLogHandler` attaches only at mount — #138 and
+batch 87 each solved that once, by recomputing and by leaving a file. Neither works for a fact
+`main()` established and the app cannot rediscover, which is what these are. This is **not** batch
+44's `startup_warnings` returning: a provider finding is recomputable, and computing it in `main()`
+froze it against the config pair while the app restored a remembered one.
 
 **The deadline belongs to the channel, not the kind.** `build_attended_provider(timeout=…)` decides
 it: run-backed builders pass `ATTENDED_APPROVAL_TIMEOUT_S`, `--init` passes `None`. The default is a

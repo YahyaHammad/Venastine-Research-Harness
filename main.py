@@ -542,6 +542,23 @@ class _StdinReader:
     immediately. A `drain=` flag would put that safety rule one keyword
     argument away from being switched off at an approval prompt, which
     is why these are two methods and not one.
+
+    BATCH 121 AMENDS THE RULE TO "ONE READER AT A TIME", which is what it
+    always meant. N1 is scoped to this MODULE, and the biggest reader of
+    this process's stdin is not in it: Textual's win32.EventMonitor reads
+    the same console from its own thread. A pump parked in a blocking read
+    when the TUI starts therefore takes every keystroke -- the owner's
+    report is a TUI that animates and accepts no input at all, mouse and
+    Ctrl keys included, after the trust prompt. Measured in a console of
+    its own: an EventMonitor-shaped loop saw 0 of 5 injected characters
+    with the pump parked, and 5 of 5 without it.
+
+    So the pump is no longer started for a read that needs no thread.
+    readline() reads INLINE when none exists, which leaves nothing parked
+    for a one-shot startup prompt, and release_terminal() is the named
+    point where this process stops being stdin's reader at all. ask()
+    still starts one: a deadline cannot be imposed on a read that cannot
+    be abandoned, and that is the whole reason the thread exists.
     """
 
     # N3. The end of stdin is invisible to a queue consumer: input()
@@ -558,6 +575,11 @@ class _StdinReader:
         self._lines = queue.Queue()
         self._thread = None
         self._eof = threading.Event()
+        # Batch 121. Set once this process has handed the terminal to
+        # something else, which today means Textual. Separate from _eof
+        # because the reasons differ -- stdin ENDED versus stdin is no
+        # longer ours to read -- even though both answers are the same.
+        self._released = False
 
     def _pump(self):
         try:
@@ -578,10 +600,44 @@ class _StdinReader:
             self._lines.put(self._EOF)
 
     def _start(self) -> None:
+        """Start the pump, unless the terminal is no longer ours.
+
+        Batch 121: the refusal is the half that makes release_terminal()
+        a handover rather than a note. Starting a pump after the TUI has
+        the console is the defect itself, one call site later.
+        """
+        if self._released:
+            return
         if self._thread is None:
             import threading
             self._thread = threading.Thread(target=self._pump, daemon=True)
             self._thread.start()
+
+    def release_terminal(self) -> bool:
+        """Stop being this terminal's reader. Returns whether that is true.
+
+        Batch 121. Called once, immediately before Textual takes the
+        console. Every later read answers the way it answers a closed
+        stdin, because a terminal this process no longer owns is exactly
+        a stdin nobody can type at -- EOFError out of readline() and None
+        out of ask(), both of which already route to a declining default.
+
+        FALSE MEANS A PUMP IS STILL PARKED IN A READ, which cannot be
+        interrupted on any platform this runs on. Nothing can produce
+        that today: the only two prompts that run before the TUI go
+        through readline(), which no longer starts one. It is reported
+        rather than asserted because the symptom it would otherwise
+        produce is a UI that animates and ignores the keyboard, with
+        nothing anywhere saying why.
+        """
+        self._released = True
+        # The latch and the sentinel, for the same reason N3 published
+        # both: anyone already waiting on the queue has to be woken, and
+        # ask()'s drain would swallow a lone sentinel.
+        self._eof.set()
+        self._lines.put(self._EOF)
+        thread = self._thread
+        return thread is None or not thread.is_alive()
 
     def _ended(self) -> bool:
         """stdin is closed AND nothing typed before it closed is left."""
@@ -597,6 +653,12 @@ class _StdinReader:
         """
         import queue as _queue
 
+        if self._released:
+            # Batch 121. Nobody can answer a prompt at a terminal this
+            # process has handed over, and None is this method's existing
+            # word for that -- interaction.decode turns it into the
+            # kind's declining default.
+            return None
         self._start()
         while True:                      # drop anything typed too late
             try:
@@ -626,13 +688,61 @@ class _StdinReader:
         keeps whatever was typed ahead, strips the trailing newline, and
         raises EOFError on Ctrl+D so run_chat's existing handler and
         _ask's default-No path are unchanged.
+
+        BATCH 121: READS ON THE CALLING THREAD WHEN NO PUMP EXISTS. This
+        method needs no thread -- it has no deadline (N2), so there is
+        nothing to abandon a blocked read FOR -- and starting one anyway
+        is what left the trust prompt's pump parked in a read for the
+        life of the process. The TUI then shared the console with it and
+        lost every keystroke.
+
+        Once a pump exists the queue path is taken unchanged, which is
+        what keeps #100 fixed: the chat prompt must never read stdin
+        directly while the approval pump owns it. So the invariant is
+        "one reader at a time", and the branch is how it is kept rather
+        than a special case -- the pump is authoritative the moment it
+        exists, and before that there is nothing to contend with.
+
+        Type-ahead survives the inline path for free: a line typed early
+        is held by the TERMINAL's own buffer, and a read issued later
+        returns it immediately. That was always what buffered it; the
+        queue only ever held what the pump had already taken out.
         """
-        self._start()
+        if self._released:
+            # The terminal belongs to something else now. Same answer as
+            # a closed stdin, and _ask's caller already handles it.
+            raise EOFError
         print(prompt, end="", flush=True)
+        # NO _start() HERE, and that absence is the fix. This method has no
+        # deadline (N2), so there is nothing a thread could be abandoned
+        # FOR -- while starting one leaves a read parked on the terminal
+        # for the life of the process. A pump that already exists is
+        # authoritative, because then it IS the one reader.
+        if self._thread is None:
+            return self._read_inline()
         if self._ended():
             raise EOFError
         line = self._lines.get()
         if line is self._EOF:
+            raise EOFError
+        return line.rstrip("\r\n")
+
+    def _read_inline(self) -> str:
+        """One line, on this thread, leaving no reader behind.
+
+        A stdin that cannot be READ is a stdin that has ENDED, which is
+        _pump's own wording for the same case and the same reason: under
+        pytest's capture the read raises, and the callers of this have
+        one handler for "nobody answered" rather than two.
+        """
+        try:
+            line = sys.stdin.readline()
+        except Exception as e:
+            logger.debug("stdin could not be read: %s", e)
+            self._eof.set()
+            raise EOFError
+        if not line:
+            self._eof.set()
             raise EOFError
         return line.rstrip("\r\n")
 
@@ -759,6 +869,19 @@ def _stdin_reader() -> _StdinReader:
     if _STDIN_READER is None:
         _STDIN_READER = _StdinReader()
     return _STDIN_READER
+
+
+def _release_terminal() -> bool:
+    """Hand stdin over, for a reader that may never have been built.
+
+    Batch 121. Reads the global rather than going through _stdin_reader(),
+    because that function CREATES one -- and a launch with no startup
+    prompt has nothing to release. Returns whether the terminal is
+    genuinely free; see _StdinReader.release_terminal.
+    """
+    if _STDIN_READER is None:
+        return True
+    return _STDIN_READER.release_terminal()
 
 
 def build_attended_provider(honour_run_scope: bool = False,
@@ -2098,6 +2221,24 @@ def _confirm_user_level_servers(configs: dict) -> dict:
     return approved
 
 
+def _ensure_user_mcp_config():
+    """Create the user-level mcp.json when there isn't one. Owner request.
+
+    Returns the path it created, or None. The file is EMPTY -- no example
+    server, no commented-out entry -- because mcp.json is JSON and cannot
+    carry a comment, and a disabled example in a file whose whole purpose
+    is naming a local command to execute is a worse kind of help.
+
+    Here rather than inside setup_mcp() so the created path can become a
+    startup notice: setup_mcp returns the client, and its one except
+    clause reports "setup failed, continuing without MCP", which a file
+    that could not be created is not.
+    """
+    from mcp_client import config as mcp_config
+
+    return mcp_config.ensure_user_config()
+
+
 def setup_mcp(project_path: str):
     """Discover, confirm, connect and register MCP servers (§17).
 
@@ -2270,6 +2411,13 @@ def replace_process(command: list) -> int:
 
     The teardown has already run by the time this is called -- see the
     call site -- so nothing is held open across it either way.
+
+    BATCH 121 NAMES WHAT "SINGLE-OWNER" COSTS ON THIS PATH. The waiter
+    keeps THIS process alive with the console inherited, so anything of
+    ours still reading stdin reads the replacement's keystrokes. The
+    handover before run_tui() is what makes that safe -- it is the same
+    defect as the trust prompt's, one process boundary further along, and
+    it is covered by the same release rather than by a second guard.
     """
     if os.name == "nt":
         import subprocess
@@ -2513,6 +2661,24 @@ def main(argv=None) -> int:
     # it reads.
     _classify_legacy_threads()
 
+    # Batch 121. Pre-mount facts a user has to be told, carried rather
+    # than printed: on the TUI path a print here is erased by Textual the
+    # moment it renders (#138), and the non-TUI branch below prints them
+    # to a stdout nothing erases.
+    startup_notices = []
+
+    # The user tier has TWO plausible homes -- the harness root and
+    # ~/.config/venastine -- and nothing in a running session says which
+    # is real, so an edit goes into a file the harness never reads. Owner
+    # request: create the real one, empty, and name it. The skeleton is
+    # §24's own render_mcp(), not a second copy of it.
+    created = _ensure_user_mcp_config()
+    if created:
+        startup_notices.append(
+            f'[mcp] created {created} -- your own MCP servers go in this '
+            f'file, under "mcpServers". Project servers stay in '
+            f'.venastine/mcp.json, where the trust prompt covers them.')
+
     mcp = setup_mcp(project_path)
     # Batch 84. Set only by a `/config` write the user chose to apply. The
     # relaunch happens AFTER the teardown below, never from inside the TUI:
@@ -2520,6 +2686,8 @@ def main(argv=None) -> int:
     # and a process replaced from in there would never reach that `finally`.
     restart = None
     if not args.tui:
+        for line in startup_notices:
+            print(line)
         # The CLI shells print to a stdout nothing erases, so the launcher's
         # own print of the config merge report already reached the user on
         # this path. Marking it seen here stops a later TUI session replaying
@@ -2553,9 +2721,30 @@ def main(argv=None) -> int:
             # apply. Computed from args rather than by comparing the
             # resolved pair against settings.json, which would read a
             # flag that happens to match the configured value as absent.
+            # BATCH 121, AND IT MUST BE THE LAST THING BEFORE THE APP.
+            # Textual reads this console from its own thread
+            # (win32.EventMonitor, or the selector on POSIX), so a reader
+            # left parked here is a SECOND reader on one terminal and the
+            # parked read wins: measured, an EventMonitor-shaped loop saw
+            # 0 of 5 injected characters with the trust prompt's pump
+            # alive and 5 of 5 without it. That is the owner's report --
+            # a UI that animates and ignores the keyboard, Ctrl included,
+            # because `enable_application_mode` clears
+            # ENABLE_PROCESSED_INPUT and Ctrl+C is just another key event
+            # in the queue the wrong reader is draining.
+            #
+            # Nothing can refuse today -- both pre-TUI prompts go through
+            # readline(), which starts no pump -- and the warning exists
+            # because the alternative symptom is silence.
+            if not _release_terminal():
+                startup_notices.append(
+                    "[warning] something else is still reading this "
+                    "terminal, so keyboard input may be lost. Restart "
+                    "the harness in a fresh terminal.")
             restart = run_tui(provider, model, settings,
                               cli_pinned=args.provider is not None
-                              or args.model is not None)
+                              or args.model is not None,
+                              startup_notices=startup_notices)
         elif args.mode == "research":
             # AFTER setup_mcp: the tools a grant can cover are named at
             # connection time, so asking any earlier would offer a list

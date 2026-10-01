@@ -748,8 +748,15 @@ class VenastineApp(App):
 
     def __init__(self, provider_name: str = DEFAULT_PROVIDER,
                  model: str = None, settings: dict | None = None,
-                 cli_pinned: bool = False):
+                 cli_pinned: bool = False,
+                 startup_notices: "list[str] | None" = None):
         super().__init__()
+        # Batch 121. Lines main() established before this screen existed
+        # and that the app cannot recompute -- a file it created, a
+        # terminal it could not free. COPIED, because the caller's list is
+        # still being appended to right up to the run() call and a shared
+        # reference would read whatever it ended as.
+        self._startup_notices = list(startup_notices or ())
         self.provider_name = provider_name
         self.model = model or config.MODEL_NAME
         self._settings = settings or {}
@@ -1152,6 +1159,12 @@ class VenastineApp(App):
         # provider or a missing key is the same fact at both moments.
         for warning in self._startup_warnings:
             self._transcript.write_error(warning)
+        # Batch 121. Beside batch 87's for the same reason, and ABOVE it
+        # because these are facts about this launch rather than about the
+        # install: "I created your user-level mcp.json" is the first thing
+        # to read if you are about to go looking for it.
+        for line in self._startup_notices:
+            self._transcript.write_system(line)
         # Batch 87. Same rule, one batch later and a different source: an
         # `npm update` replaces config.yaml, config_update.py merges the
         # user's values back in and PRINTS what it kept and dropped -- to a
@@ -6504,13 +6517,18 @@ register_init_commands()  # §24: /init
 
 
 def run(provider_name: str, model: str, settings: dict | None = None,
-        cli_pinned: bool = False):
+        cli_pinned: bool = False, startup_notices: "list[str] | None" = None):
     """Entry point used by main.py --tui.
 
     `cli_pinned` says whether --provider/--model named this launch's
     pair (§43, RM3). main.resolve_runtime_defaults has already collapsed
     the flags into `provider_name`/`model` by here, so the app cannot
     tell by looking -- and a flag has to outrank a remembered choice.
+
+    `startup_notices` is batch 121: pre-mount lines main() could not
+    print, because this screen erases stdout the moment it renders and
+    the log handler that would have carried them attaches at mount. on
+    _mount writes each into the transcript.
 
     RETURNS whatever the app exited with, which is `None` for every exit
     except a `/config` write the user chose to apply (batch 84): that one
@@ -6519,4 +6537,5 @@ def run(provider_name: str, model: str, settings: dict | None = None,
     """
     config_loader_settings = settings if settings is not None else config_loader.get_settings()
     return VenastineApp(provider_name, model, config_loader_settings,
-                        cli_pinned=cli_pinned).run()
+                        cli_pinned=cli_pinned,
+                        startup_notices=startup_notices).run()

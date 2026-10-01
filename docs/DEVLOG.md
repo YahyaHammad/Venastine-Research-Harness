@@ -17885,3 +17885,128 @@ is caught by the M4 test specifically, which is the one claim that is a
 wire error rather than a quality concern.
 
 Counts 6167 -> 6180.
+
+## Batch 121 -- the terminal had two readers, and the trust prompt handed it the second
+
+Owner report: with `.venastine/` content changed, the trust prompt fires
+correctly, accepting it opens the TUI, and the TUI then takes **no
+keyboard or mouse input at all** -- Ctrl keys included -- while the crow
+and the prompt cursor keep animating. Only Alt+F4 or killing the terminal
+gets out. Suspected MCP, because both occurrences followed an `mcp.json`
+edit and neither printed `MCP server 'NAME' connected`.
+
+### MCP is a correlate, not the cause
+
+`mcp.json` lives at `.venastine/mcp.json`, so editing it changes the trust
+hash -- which is what fires the prompt. Any file under `.venastine/`, or
+the root `AGENTS.md`, does the same. The cause is the prompt.
+
+From the reporting instance's own files:
+
+| evidence | reading |
+|---|---|
+| `trusted_projects.json` mtime **01:17** | trust was granted in that run, so the prompt fired |
+| `logs/app.log` **01:17:52** `MCP server 'joplin' failed to connect: ` | that run, and the reason string is empty |
+| **01:17:52 -> 01:32:50**: not one log line | ~15 minutes of a session nobody could type into |
+| **01:32:50** `'joplin' connected (11 tools)` | the next launch: trust already granted, no prompt, no freeze |
+
+### The mechanism, and the half of it that was a surprise
+
+`_StdinReader._pump` is `for line in sys.stdin:` on a daemon thread. It is
+started by the first prompt and cannot be stopped, so after the trust
+prompt answers `y` it loops straight back into a blocking read and stays
+there for the life of the process. `main()` then hands the same terminal
+to Textual, which reads that console from its own thread.
+
+Two readers, one input queue, and the parked read wins. Measured with the
+real app, one flag apart -- Windows in a console of its own, driven with
+`WriteConsoleInputW`, and Linux under a pty:
+
+| state | the app's `on_key` | shutdown |
+|---|---|---|
+| a reader parked | **never fired** | **`App.run()` never returned**; killed |
+| batch 121 | all five injected keys | exit 0 |
+| no prompt (control) | all five | exit 0 |
+
+And at the console layer, running EventMonitor's own loop body against the
+pre-batch-121 code: **0 of 5** characters with the pump parked, **5 of 5**
+without it.
+
+THE SECOND COLUMN WAS NOT PREDICTED AND IT IS THE REST OF THE REPORT.
+`disable_input()` joins an input thread stuck inside a read whose records
+the pump had already taken, so the app cannot shut down either -- which is
+exactly why the owner's only way out was Alt+F4. Ctrl+C is no escape for a
+separate reason: `enable_application_mode` sets the input mode to
+`ENABLE_VIRTUAL_TERMINAL_INPUT` alone, clearing `ENABLE_PROCESSED_INPUT`,
+so Ctrl+C is just another key event in the queue the wrong reader holds.
+
+### The fix is one absent call
+
+`readline()` no longer starts the pump. It has no deadline (N2), so there
+is nothing a thread could be abandoned FOR -- and starting one anyway is
+the whole defect. It reads on the calling thread instead, which leaves
+nothing parked; once a pump exists for any reason the queue path is taken
+unchanged, so #100 stays fixed. `ask()` is untouched, because a deadline
+cannot be imposed on a read that cannot be abandoned.
+
+Type-ahead survives for free, and the old reasoning about it was slightly
+wrong: a line typed early is held by the TERMINAL's buffer, and always
+was. The queue only ever held what the pump had already taken out of it.
+
+`_release_terminal()` is the named handover, immediately before
+`run_tui`. §29 N1's own words about the bug it fixed were that the other
+callers "were safe only because setup_mcp happens to run before run_chat
+-- an ordering coincidence between two functions rather than a property
+anyone stated". This batch is that sentence coming true somewhere else, so
+the property gets a place to live. It returns `False` if a pump is
+somehow still parked; nothing can produce that today, and the test is what
+keeps it so.
+
+It also covers `replace_process`: on Windows the waiter keeps this process
+alive with the console inherited, so a parked reader of ours would have
+read the RELAUNCHED TUI's keystrokes -- the same defect one process
+boundary along.
+
+### Three things the report turned up on the way
+
+**The empty MCP reason.** `failed to connect: ` and nothing after the
+colon: the per-server `asyncio.timeout` raises `TimeoutError`, whose
+`str()` is `""`. It was also two strings -- `failures` carried the
+exception type and the WARNING did not, so the better of them never
+reached the place a user looks first. One `_reason()` now, and a timeout
+names its budget, because "it timed out" without a duration cannot
+distinguish a dead server from a slow one.
+
+**The user-level `mcp.json` is created at startup.** Owner request: "users
+don't know whether user-level mcp.json is at the harness root or
+~/.config/venastine". Created empty, never overwriting, and announced once
+with its path. `{"mcpServers": {}}` rather than `{}` is load-bearing --
+`{}` trips `_read_file`'s "has no 'mcpServers' object" branch, so the
+obvious seed would have warned about the harness's own file at every
+launch forever. The skeleton is §24's `render_mcp()` rather than a second
+copy.
+
+**The suite was writing to the developer's HOME.** Found by that feature:
+`startup`'s docstring says "every side effect stubbed", which was true
+only while nothing in the startup sequence wrote to the user tier. The
+redirect is in the fixture rather than in the tests, because stubbing the
+one function would have left the next user-tier write to find this the
+same way.
+
+### Tested at the layer each claim lives in
+
+The one that matters drives the real startup -- an untrusted project, the
+trust prompt answered through the real reader over a real pipe with the
+write end left open, so a read genuinely blocks -- and asserts the state
+of the terminal at the moment Textual would take it. It fails on the
+pre-121 tree with the message it was written for. A `StringIO` would have
+hit EOF and let the pump exit, which is the one thing it must not do: the
+defect is a reader that never finishes.
+
+Beside it: a live pump still owns stdin (#100's own claim, with a stdin
+that raises if anyone reads it directly), the inline path still ends at
+EOF and still treats an unreadable stdin as an ended one, the handover
+refuses every later read, and it reports `False` for a pump it could not
+retire.
+
+Counts 6180 -> 6204.

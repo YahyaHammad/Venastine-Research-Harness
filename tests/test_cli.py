@@ -556,6 +556,14 @@ class TestOneReaderForEveryRead:
         run_chat -- an ordering coincidence between two functions rather
         than a property anyone stated, and it would break the first time
         a startup prompt moved. So: no live input() in this module.
+
+        BATCH 121 READS THIS AS "ONE READER AT A TIME", not "one object".
+        `_StdinReader` reads sys.stdin directly on the calling thread when
+        no pump exists, which is not a second reader -- there is nothing
+        to be second to -- and it is what stops a startup prompt leaving a
+        read parked for the TUI to collide with. input() stays banned
+        because it cannot tell whether a pump already owns the stream;
+        this class's other tests are what hold that line.
         """
         import re
 
@@ -567,6 +575,321 @@ class TestOneReaderForEveryRead:
         assert not re.search(r"(?<![\w.])input\s*\(", code), (
             "a bare input() is a second reader on the stdin the approval "
             "pump owns -- that is audit #100")
+
+
+class TestTheTuiIsTheOtherReaderOfThisTerminal:
+    """Batch 121. §29 N1 is scoped to main.py, and the biggest reader of
+    this process's stdin is not in main.py: Textual reads the same console
+    from its own thread. So a pump parked in a blocking read when the TUI
+    starts is #100 again, with the TUI in the chat prompt's place.
+
+    Measured, real app, one flag apart -- Windows in a console of its own
+    and Linux under a pty, both the same:
+
+        reader parked   on_key never fired, and App.run() never RETURNED
+                        either (disable_input joins an input thread stuck
+                        in a read the pump drained), so the process had to
+                        be killed -- the owner's "only Alt+F4 works"
+        batch 121       all five injected keys arrived, exit 0
+
+    The owner's report is the first row: a TUI that animates, because
+    timers never touch stdin, and ignores the keyboard including Ctrl+C,
+    because enable_application_mode clears ENABLE_PROCESSED_INPUT and
+    Ctrl+C is just another key event in the queue the wrong reader holds.
+    """
+
+    @staticmethod
+    def _tty_pipe(text):
+        """A real pipe that claims to be a terminal, with the write end
+        LEFT OPEN -- so a read genuinely blocks. A StringIO would hit EOF
+        and let the pump exit, which is the one thing this must not do:
+        the defect is a reader that never finishes.
+        """
+        import os
+
+        read_fd, write_fd = os.pipe()
+        os.write(write_fd, text.encode())
+        handle = os.fdopen(read_fd, "r", encoding="utf-8")
+
+        class _TtyPipe:
+            def isatty(self):
+                return True
+
+            def readline(self):
+                return handle.readline()
+
+            def __iter__(self):
+                return iter(handle)
+
+        return _TtyPipe(), write_fd
+
+    def test_nothing_is_reading_stdin_when_the_tui_takes_the_terminal(
+            self, tmp_path, monkeypatch):
+        """THE ONE THAT FAILS ON THE PRE-121 TREE.
+
+        Drives the real startup: an untrusted project, so the trust prompt
+        fires, answered through the real `_StdinReader` over a real pipe.
+        The assertion is about the state of the terminal at the moment
+        Textual would take it, which is the only place the hazard lives.
+        """
+        import main
+        import tui.app
+        from core import workspace_trust
+
+        home = tmp_path / "home"
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))
+        proj = tmp_path / "proj"
+        (proj / ".venastine").mkdir(parents=True)
+        (proj / ".venastine" / "settings.json").write_text(
+            '{"default_model": "m"}', encoding="utf-8")
+        monkeypatch.chdir(proj)
+
+        # `startup` is the wrong fixture here: it stubs
+        # load_project_config, which is where the trust prompt lives, and
+        # the prompt is the whole point. So only the parts that would
+        # touch a database or a network are stubbed, by hand.
+        monkeypatch.setattr(main, "configure_logging", lambda *a, **k: None)
+        monkeypatch.setattr(main, "create_db_and_tables", lambda *a, **k: None)
+        monkeypatch.setattr(main, "_classify_legacy_threads",
+                            lambda *a, **k: None)
+        monkeypatch.setattr(main, "resolve_runtime_defaults",
+                            lambda *a, **k: ("ANTHROPIC", "m"))
+        monkeypatch.setattr(main, "setup_mcp", lambda *a, **k: None)
+        monkeypatch.setattr(main, "teardown_mcp", lambda *a, **k: None)
+        monkeypatch.setattr(main, "_close_sessions", lambda *a, **k: None)
+        # THE CWD IS THE PROJECT, SAID RATHER THAN ASSUMED. main() reads
+        # config.WORKSPACE_DIR when WORKSPACE_DIR_EXPLICIT is set, and a
+        # developer box with AGENT_WORKSPACE in the environment has it
+        # set -- so chdir decided nothing and this test described, and
+        # trusted, a real project of the developer's. Found by the prompt
+        # printing somebody's actual mcp.json.
+        monkeypatch.setattr(main.config, "WORKSPACE_DIR_EXPLICIT", False)
+
+        stdin, write_fd = self._tty_pipe("y\n")
+        monkeypatch.setattr(main.sys, "stdin", stdin)
+        # A fresh global, restored by monkeypatch -- the reader is a
+        # process singleton and this test releases the one it builds.
+        monkeypatch.setattr(main, "_STDIN_READER", None)
+
+        seen = {}
+        monkeypatch.setattr(
+            tui.app, "run",
+            lambda *a, **k: seen.update(
+                reader=main._STDIN_READER,
+                thread=getattr(main._STDIN_READER, "_thread", "no reader")))
+
+        main.main(["--tui"])
+
+        assert workspace_trust.is_trusted(str(proj)), (
+            "the trust prompt did not run, so this test proves nothing "
+            "about the state it leaves behind")
+        assert seen["reader"] is not None, (
+            "the prompt bypassed the one reader; see N1")
+        assert seen["thread"] is None, (
+            "a reader is still parked on this terminal as Textual takes "
+            "it -- that is the freeze: two readers, one console, and the "
+            "parked read wins every keystroke")
+        assert main._STDIN_READER._released is True, (
+            "the handover never happened, so a later prompt could start "
+            "a pump behind the TUI's back")
+        import os
+        os.close(write_fd)
+
+    def test_a_one_shot_prompt_leaves_no_reader_behind(self, monkeypatch):
+        """The mechanism, without main(): readline answers from the
+        calling thread and starts nothing."""
+        import main
+
+        stdin, write_fd = self._tty_pipe("y\n")
+        monkeypatch.setattr(main.sys, "stdin", stdin)
+        reader = main._StdinReader()
+
+        assert reader.readline("Trust? ") == "y"
+        assert reader._thread is None, (
+            "a pump was started for a read that has no deadline, so there "
+            "was nothing it could be abandoned for")
+        import os
+        os.close(write_fd)
+
+    def test_an_inline_read_still_ends_at_eof(self, monkeypatch):
+        """N3's contract on the new path. Ctrl+D has to stay the way out
+        of the chat loop and the default-No at a startup prompt."""
+        import io
+
+        import main
+
+        class _Empty(io.StringIO):
+            def isatty(self):
+                return True
+
+        monkeypatch.setattr(main.sys, "stdin", _Empty(""))
+        reader = main._StdinReader()
+        with pytest.raises(EOFError):
+            reader.readline("You: ")
+
+    def test_an_inline_read_that_raises_is_an_ended_stdin(self, monkeypatch):
+        """_pump's own rule, on the inline path: a stdin that cannot be
+        READ is, to the caller, a stdin that has ENDED. Under pytest's
+        capture the read raises, which is how the pump found this."""
+        import main
+
+        class _Explodes:
+            def isatty(self):
+                return True
+
+            def readline(self):
+                raise OSError("reading from stdin while output is captured")
+
+        monkeypatch.setattr(main.sys, "stdin", _Explodes())
+        reader = main._StdinReader()
+        with pytest.raises(EOFError):
+            reader.readline("You: ")
+
+    def test_a_live_pump_still_owns_stdin(self, monkeypatch):
+        """#100 STAYS FIXED, and this is the test that says so.
+
+        Once the approval pump exists it is the one reader, and the chat
+        prompt must not read the descriptor itself -- that was the wedge.
+        So the inline path is conditional on there being no pump, and the
+        proof is a stdin that raises if anyone reads it directly after the
+        pump has started.
+        """
+        import main
+
+        stdin, write_fd = self._tty_pipe("")
+        monkeypatch.setattr(main.sys, "stdin", stdin)
+        reader = main._StdinReader()
+        reader._start()                        # as ask() would
+
+        class _Forbidden:
+            def isatty(self):
+                return True
+
+            def readline(self):
+                raise AssertionError(
+                    "read stdin directly while the pump owns it -- #100")
+
+        monkeypatch.setattr(main.sys, "stdin", _Forbidden())
+        import os
+        os.write(write_fd, b"typed at the pump\n")
+        assert reader.readline("You: ") == "typed at the pump"
+        os.close(write_fd)
+
+    def test_releasing_the_terminal_refuses_every_later_read(self, monkeypatch):
+        """The handover's other half. A read after it would be a read of a
+        terminal this process no longer owns, which is exactly a stdin
+        nobody can type at -- EOFError and None, the two answers the
+        callers already handle."""
+        import main
+
+        class _Forbidden:
+            def isatty(self):
+                return True
+
+            def readline(self):
+                raise AssertionError("read a terminal we handed over")
+
+            def __iter__(self):
+                raise AssertionError("pumped a terminal we handed over")
+
+        monkeypatch.setattr(main.sys, "stdin", _Forbidden())
+        reader = main._StdinReader()
+        assert reader.release_terminal() is True
+
+        with pytest.raises(EOFError):
+            reader.readline("You: ")
+        assert reader.ask("Allow? ", 0.05) is None
+        reader._start()
+        assert reader._thread is None, (
+            "a pump started after the handover, which is the defect one "
+            "call site later")
+
+    def test_the_handover_reports_a_reader_it_could_not_retire(
+            self, monkeypatch):
+        """FALSE is not decoration. A blocking read cannot be interrupted
+        on any platform this runs on, so if a future prompt ever starts a
+        pump before the TUI, the only thing left is to SAY so -- the
+        alternative symptom is a UI that animates and ignores the
+        keyboard with nothing anywhere explaining it."""
+        import main
+
+        stdin, write_fd = self._tty_pipe("")
+        monkeypatch.setattr(main.sys, "stdin", stdin)
+        reader = main._StdinReader()
+        reader._start()
+        assert reader._thread.is_alive()
+
+        assert reader.release_terminal() is False, (
+            "a pump parked in a read was reported as a free terminal")
+        import os
+        os.close(write_fd)
+
+    def test_the_module_level_handover_tolerates_a_reader_never_built(
+            self, monkeypatch):
+        """A launch with no startup prompt has nothing to release, and
+        asking _stdin_reader() would CREATE one just to release it."""
+        import main
+
+        monkeypatch.setattr(main, "_STDIN_READER", None)
+        assert main._release_terminal() is True
+        assert main._STDIN_READER is None
+
+
+class TestTheUserTierFileIsAnnouncedOnBothShells:
+    """Batch 121, owner request. The file is only half the answer -- a file
+    created in silence is as undiscoverable as no file -- so the path is
+    said once, where the shell in use can show it.
+    """
+
+    @staticmethod
+    def _user_mcp():
+        import os
+
+        return os.path.expanduser("~/.config/venastine/mcp.json")
+
+    def test_the_tui_carries_it_because_a_print_would_be_erased(
+            self, startup, monkeypatch):
+        import os
+
+        import main
+        import tui.app
+
+        seen = {}
+        monkeypatch.setattr(
+            tui.app, "run",
+            lambda *a, **k: seen.update(notices=list(
+                k.get("startup_notices") or ())))
+
+        main.main(["--tui"])
+
+        assert os.path.exists(self._user_mcp()), "no file was created"
+        assert [line for line in seen["notices"]
+                if "mcp.json" in line and "created" in line], seen
+        assert ".venastine/mcp.json" in " ".join(seen["notices"]), (
+            "the notice names the user tier without distinguishing it from "
+            "the project tier, which is the confusion it exists to end")
+
+    def test_the_cli_prints_it_to_a_stdout_nothing_erases(
+            self, startup, capsys):
+        import main
+
+        main.main([])
+
+        out = capsys.readouterr().out
+        assert "mcp.json" in out and "created" in out, out
+
+    def test_the_second_launch_says_nothing(self, startup, capsys):
+        """It is a first-run convenience, not a status line. Saying it
+        every time would train the user to stop reading startup output,
+        which is where the provider warnings live."""
+        import main
+
+        main.main([])
+        capsys.readouterr()
+        main.main([])
+
+        assert "created" not in capsys.readouterr().out
 
 
 class TestTheDeadlineBelongsToTheChannel:
@@ -909,8 +1232,21 @@ def startup(monkeypatch, tmp_path):
     could reach the four parser.error validations, the ordering of the
     early-exit commands, or the `finally: teardown_mcp`. N7 is what makes
     it callable; this is what calls it.
+
+    BATCH 121 ADDS HOME TO THE LIST, and it belongs in the fixture rather
+    than in the tests: "every side effect stubbed" was true only while
+    nothing in the startup sequence wrote to the USER tier, and
+    mcp_client.config.ensure_user_config() does -- it creates
+    ~/.config/venastine/mcp.json when there isn't one. Unredirected, this
+    fixture ran that against the developer's own config directory, which
+    is how it was noticed. Stubbing that one function instead would have
+    left the next user-tier write to find this the same way.
     """
     import main
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("HOME", str(home))
 
     order = []
 
@@ -1440,8 +1776,10 @@ class TestTheLaunchProviderCheck:
         # wiring break with this test still green.
         monkeypatch.setattr(
             tui.app, "run",
-            lambda provider, model, settings, cli_pinned=False:
-                seen.update(provider=provider, cli_pinned=cli_pinned))
+            lambda provider, model, settings, cli_pinned=False,
+            startup_notices=None:
+                seen.update(provider=provider, cli_pinned=cli_pinned,
+                            notices=list(startup_notices or ())))
 
         with open("providers.json", "w", encoding="utf-8") as f:
             json.dump({"OPENAI": {"API_KEY": "k", "API_URL": "",
@@ -1458,6 +1796,17 @@ class TestTheLaunchProviderCheck:
             tui.app.run).parameters, (
             "the parameter is what let a stale finding travel; removing it "
             "is the fix, so its absence is the assertion")
+        # BATCH 121's `startup_notices` IS NOT THAT PARAMETER COMING BACK,
+        # and the difference is the whole of batch 44's finding: a provider
+        # finding is RECOMPUTABLE, and computing it in main() froze it
+        # against the config pair while the app went on to restore a
+        # remembered one. These are facts main() established and the app
+        # cannot rediscover -- a file it created, a terminal it could not
+        # free. So the test for them is that no provider finding is in
+        # here, not that the list is empty.
+        assert not [line for line in seen["notices"]
+                    if "provider" in line.lower() or "API_KEY" in line], (
+            "a provider finding travelled again, by another name")
         assert seen["cli_pinned"] is False, (
             "no --provider/--model was given, so nothing pinned this launch")
 
@@ -1521,6 +1870,13 @@ def test_main_resolves_and_passes_effort_to_run_chat(monkeypatch, tmp_path):
     import main
 
     monkeypatch.chdir(tmp_path)
+    # Batch 121, and for the reason the paragraph above gives about
+    # AGENT_WORKSPACE: main() creates the user-level mcp.json when there
+    # isn't one, and the `startup` fixture this test deliberately does
+    # without is where that redirect otherwise lives.
+    home = tmp_path / "home"
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("HOME", str(home))
 
     captured = {}
 

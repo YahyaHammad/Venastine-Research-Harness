@@ -477,3 +477,96 @@ def test_list_args_still_accepted(roots):
     cfg = mcp_config.load_server_configs(str(roots["project"]),
                                          trusted=False)["srv"]
     assert cfg.args == ["-y", "pkg"]
+
+
+# ---------------------------------------------------------------------------
+# ---- Batch 121: the user tier is created, so its location is not a guess ---
+# ---------------------------------------------------------------------------
+
+class TestTheUserTierGetsARealFile:
+    """Owner request, from a session where an mcp.json edit went into a
+    file the harness never reads: "users don't know whether user-level
+    mcp.json is at the harness root or ~/.config/venastine". A file that
+    exists answers that. A docstring does not.
+    """
+
+    def test_it_creates_the_skeleton_and_says_where(self, roots):
+        import json
+
+        path = mcp_config.ensure_user_config()
+
+        assert path == str(roots["user"] / "mcp.json"), (
+            "the created path is the return value because it is what the "
+            "launcher prints -- naming the file IS the feature")
+        with open(path, encoding="utf-8") as f:
+            assert json.load(f) == {"mcpServers": {}}
+
+    def test_the_skeleton_is_the_one_shape_that_warns_about_nothing(
+            self, roots, caplog):
+        """BEHAVIOUR-NEUTRAL, and that is a property of the CONTENT. An
+        empty `{}` trips _read_file's "has no 'mcpServers' object" branch,
+        so the obvious seed would have warned about the harness's own file
+        at every launch for the rest of time.
+
+        ASSERTS ON WARNING+ RECORDS, NOT ON `caplog.text` BEING EMPTY.
+        That is the claim -- the seeded shape warns about nothing -- and it
+        is also the only version that does not depend on what configured
+        logging earlier in the process: ensure_user_config logs its own
+        creation at INFO, and whether caplog has that record already
+        depends on the run. WSL caught it serially while Windows passed it,
+        which is TECHNICAL_DEBT 27's shape in a new place.
+        """
+        import logging
+
+        mcp_config.ensure_user_config()
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            cfgs = mcp_config.load_server_configs(
+                str(roots["project"]), trusted=True)
+
+        assert cfgs == {}
+        assert [r for r in caplog.records
+                if r.levelno >= logging.WARNING] == [], caplog.text
+
+    def test_it_never_overwrites_a_file_someone_wrote(self, roots):
+        _write(roots["user"] / "mcp.json",
+               {"mine": {"command": "npx", "args": ["-y", "pkg"]}})
+
+        assert mcp_config.ensure_user_config() is None, (
+            "None is how the caller knows not to announce anything")
+        cfgs = mcp_config.load_server_configs(
+            str(roots["project"]), trusted=False)
+        assert "mine" in cfgs, "it overwrote a real configuration"
+
+    def test_an_emptied_file_is_still_that_persons_file(self, roots):
+        """The check is EXISTENCE, not content. Someone who cleared the
+        file out meant to clear it out, and re-seeding would be the
+        harness arguing with them."""
+        path = roots["user"] / "mcp.json"
+        path.write_text("", encoding="utf-8")
+
+        assert mcp_config.ensure_user_config() is None
+        assert path.read_text(encoding="utf-8") == ""
+
+    def test_a_directory_it_cannot_write_is_not_a_failed_startup(
+            self, roots, monkeypatch):
+        """A convenience that cannot be delivered is not a reason to
+        refuse to start. The trust store raises on a failed write because
+        a security decision that silently did not persist is worse than a
+        crash; this is not one of those."""
+        from json_store import write_json_atomic as real
+
+        def _explodes(*a, **k):
+            raise OSError("read-only file system")
+
+        monkeypatch.setattr(mcp_config, "write_json_atomic", _explodes)
+        assert mcp_config.ensure_user_config() is None
+        assert real is not None            # the import is the point
+
+    def test_the_skeleton_comes_from_the_one_that_already_existed(self):
+        """§24's /init writes the project tier's skeleton. Two copies of
+        "what an empty mcp.json looks like" is two things to keep in
+        agreement, so this asserts they ARE one."""
+        from project_init.config_files import render_mcp
+
+        assert render_mcp() == {"mcpServers": {}}

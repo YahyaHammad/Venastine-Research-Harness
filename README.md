@@ -575,7 +575,7 @@ An agent's or a skill's `name` and `description` go straight into the system pro
 
 ### MCP servers
 
-Configured in `mcp.json`, at `~/.config/venastine/mcp.json` or `.venastine/mcp.json` — `/init --config` creates an empty project one to fill in. Claude Code compatible, and unrecognised keys are ignored so a config shared with another client works as-is:
+Configured in `mcp.json`, at `~/.config/venastine/mcp.json` or `.venastine/mcp.json`. **The user-level one is created empty on startup if it is absent**, and the launch says where it is — two plausible homes and no way to tell from inside a session meant an edit could land in a file the harness never reads. `/init --config` creates an empty project one to fill in. Claude Code compatible, and unrecognised keys are ignored so a config shared with another client works as-is:
 
 ```json
 {"mcpServers": {"files": {"command": "npx", "args": ["-y", "@example/server"]}}}
@@ -912,7 +912,7 @@ note that shell approval is governed solely by `shell_approval_mode` -- `tool_ap
 deliberately has no `shell` key, so an old file carrying one is refused at startup
 naming the key — see `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 6180 tests, fully offline, no API keys needed. It runs in parallel by default (`pytest-xdist`, 70% of your cores): **1:26 on a 16-core machine, against 9:06 single-process.** `pytest -n0` forces the old serial run, which is what you want under a debugger or when something is parsing the output. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+Run the test suite with `pytest` — 6204 tests, fully offline, no API keys needed. It runs in parallel by default (`pytest-xdist`, 70% of your cores): **1:26 on a 16-core machine, against 9:06 single-process.** `pytest -n0` forces the old serial run, which is what you want under a debugger or when something is parsing the output. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
 ## Documentation
 
