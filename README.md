@@ -854,6 +854,8 @@ Deliberately not settings.json keys: editing these means editing the harness's o
 | `subagent_max_depth` | 2 | `spawn_subagent` nesting limit |
 | `subagent_max_parallel` | 3 | How many subagents of one model response run at once; 1 makes them sequential again |
 | `pin_max_trigger_fraction` | 0.5 | Largest share of the trigger one pin may protect |
+| `compaction_trigger_fraction` | 0.90 | Share of the context window a thread may fill before it folds. Applied to the HEADROOM, which is clamped by the two keys below — so it is exact at 160k and up, and a floor beneath that |
+| `compaction_min_headroom_tokens` / `compaction_max_headroom_fraction` | 16,000 / 0.25 | Floor and cap on the room left between the trigger and the window. Nothing recovers from a prompt that overflows the window, and one capped read is 12,500 tokens, so a 64k model keeps 16,000 rather than the 6,553 a bare share leaves |
 | `max_injected_memories` / `max_injected_refs` / `max_todo_items` | 50 / 3 / 50 | Prompt-injection caps; refs and todos refuse past the cap rather than trimming silently |
 | `summary_target_chars` | 2000 | Size cap on whole-thread summaries injected via `/ref` |
 | `max_catalog_text_chars` | 300 | Cap on an agent/skill `name` + `description` entering system prompts |
@@ -910,7 +912,7 @@ note that shell approval is governed solely by `shell_approval_mode` -- `tool_ap
 deliberately has no `shell` key, so an old file carrying one is refused at startup
 naming the key — see `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 6155 tests, fully offline, no API keys needed. It runs in parallel by default (`pytest-xdist`, 70% of your cores): **1:26 on a 16-core machine, against 9:06 single-process.** `pytest -n0` forces the old serial run, which is what you want under a debugger or when something is parsing the output. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+Run the test suite with `pytest` — 6167 tests, fully offline, no API keys needed. It runs in parallel by default (`pytest-xdist`, 70% of your cores): **1:26 on a 16-core machine, against 9:06 single-process.** `pytest -n0` forces the old serial run, which is what you want under a debugger or when something is parsing the output. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
 ## Documentation
 

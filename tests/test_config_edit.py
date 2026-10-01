@@ -263,7 +263,10 @@ class TestTheRoundTripIsLossless:
         # 142 since batch 102: the SSH backend's one authority flag and
         # its seven host scalars (ROADMAP_v3 §49 slice 4, SS46).
         # 143 since batch 111: `workspace_is_project` (TECHNICAL_DEBT 28).
-        assert touched == 143, f"{touched} settable scalars, expected 143"
+        # 145 since batch 119: `compaction_min_headroom_tokens` and
+        # `compaction_max_headroom_fraction`, which clamp the headroom the
+        # trigger fraction names (TECHNICAL_DEBT 39).
+        assert touched == 145, f"{touched} settable scalars, expected 145"
         assert config_edit._dump(tree) == text
 
     def test_a_one_value_change_is_a_one_line_diff(self, tmp_path,

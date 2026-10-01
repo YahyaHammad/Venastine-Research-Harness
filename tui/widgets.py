@@ -443,17 +443,30 @@ class UsageLine(Static):
         self.update("")
 
     def update_usage(self, billed: int, ctx: int,
-                     ceiling: int = 0, overridden: bool = False) -> None:
+                     ceiling: int = 0, overridden: bool = False,
+                     window: int = 0) -> None:
         """`ceiling` is the compaction trigger this thread is measured
-        against, shown as a denominator so `ctx` has a scale. `overridden`
-        marks it with a `*` when a session /trigger set it -- ephemeral
-        state that changes when compaction fires should not be invisible,
-        which is the same rule M14 states for injected memories.
+        against and `window` is the model's actual context limit.
+        `overridden` marks the trigger with a `*` when a session /trigger
+        set it -- ephemeral state that changes when compaction fires should
+        not be invisible, which is the same rule M14 states for injected
+        memories.
 
-        Both are optional so a caller that has no threshold to hand still
+        THE DENOMINATOR IS THE WINDOW SINCE BATCH 119, and the trigger is
+        annotated beside it. It used to be the trigger alone, which was
+        defensible -- that is the number `ctx` is compared against, and the
+        line existed to give `ctx` a scale -- and was still the wrong
+        choice, because a denominator is read as a LIMIT. `ctx 230k/223k`
+        says "over budget" about a thread with 32k of window left, and the
+        window appeared nowhere in the TUI but `/window`. An owner read that
+        line and concluded the harness treats the window and the trigger as
+        one value; the blocked-compaction notice saying "Context is full"
+        was the other half, and batch 119 corrects both.
+
+        All three are optional so a caller with no threshold to hand still
         gets the batch-27 two-instrument line unchanged.
         """
-        key = (billed, ctx, ceiling, overridden)
+        key = (billed, ctx, ceiling, overridden, window)
         if key == self._last or not (billed or ctx):
             # Change-guard: on_loop_event fires per token delta during a
             # stream; both figures only move at step boundaries, so this
@@ -465,7 +478,19 @@ class UsageLine(Static):
             return f"{n / 1000:.0f}k" if n >= 1000 else str(n)
 
         self.display = True
-        scale = f"/{_k(ceiling)}{'*' if overridden else ''}" if ceiling else ""
+        mark = "*" if overridden else ""
+        if window:
+            # The limit as the scale, the fold point named as what it is.
+            scale = f"/{_k(window)}"
+            scale += f" (fold {_k(ceiling)}{mark})" if ceiling else ""
+        elif ceiling:
+            # No window resolved -- context_limit() always answers, so this
+            # is the bare-built widget and the pre-batch-119 callers that
+            # pass four arguments. The old shape exactly, rather than a
+            # blank scale, because a trigger is still better than nothing.
+            scale = f"/{_k(ceiling)}{mark}"
+        else:
+            scale = ""
         # `system` is the harness-talking-about-itself role -- the right
         # meaning for a usage line, and the palette route the batch-26
         # guard test demands (it caught this line as a literal within one

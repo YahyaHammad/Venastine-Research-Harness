@@ -414,3 +414,87 @@ class TestTheTuiUsageLine:
             assert line.display, "a finished turn produced no usage line"
             body = line.content.plain
             assert "billed 70k" in body and "ctx 40k" in body, body
+
+    @pytest.mark.asyncio
+    async def test_the_denominator_is_the_window_and_the_trigger_is_named(
+            self):
+        """Batch 119. The scale used to be the compaction TRIGGER with the
+        window appearing nowhere in the TUI but `/window`, so the line read
+        `ctx 230k/223k` about a thread with 32k of window left. A
+        denominator is read as a LIMIT: an owner traced a stuck thread from
+        that line and concluded the harness treats the window and the
+        trigger as one value.
+
+        The WIRING is what is under test. tui/widgets.py could always
+        render whatever scale it was handed; tui/app.py handed it one
+        number, so no widget-only test could have caught this.
+        """
+        from types import SimpleNamespace
+
+        from core import compaction
+        from tui.app import VenastineApp
+        from tui.widgets import UsageLine
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pump(pilot, 2)
+            app._memory = SimpleNamespace(billed_tokens=118_000,
+                                          last_input_tokens=41_000)
+            app.refresh_usage_line()
+            await pilot.pause()
+
+            window = compaction.context_limit("test-model", "ANTHROPIC")
+            _, trigger = compaction.thresholds(
+                "test-model", provider_name="ANTHROPIC")
+            assert trigger < window, (
+                "this test cannot distinguish them if they are equal")
+
+            body = app.query_one("#usage-line", UsageLine).content.plain
+            assert f"/{round(window / 1000)}k" in body, body
+            assert f"fold {round(trigger / 1000)}k" in body, body
+
+    @pytest.mark.asyncio
+    async def test_a_session_trigger_is_marked_on_the_fold_figure(self):
+        """The `*` marks ephemeral state, M14's rule -- and it has to move
+        with the number it qualifies. Left on the denominator it would now
+        be claiming the WINDOW was overridden, which /window does and
+        /trigger does not."""
+        from types import SimpleNamespace
+
+        from core import session
+        from tui.app import VenastineApp
+        from tui.widgets import UsageLine
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pump(pilot, 2)
+            session.set_trigger("ANTHROPIC", "test-model", 90_000)
+            app._memory = SimpleNamespace(billed_tokens=118_000,
+                                          last_input_tokens=41_000)
+            app.refresh_usage_line()
+            await pilot.pause()
+
+            body = app.query_one("#usage-line", UsageLine).content.plain
+            assert "fold 90k*" in body, body
+
+    @pytest.mark.asyncio
+    async def test_an_unresolvable_window_keeps_the_old_shape(self):
+        """context_limit() always answers, so this is the contained path:
+        refresh_usage_line swallows a failure to resolve either figure and
+        a usage line must never be the reason a turn dies. The trigger
+        alone is still a better scale than none, so the pre-batch-119
+        shape is what the fallback renders rather than a bare count."""
+
+        from tui.app import VenastineApp
+        from tui.widgets import UsageLine
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pump(pilot, 2)
+            line = app.query_one("#usage-line", UsageLine)
+            line.update_usage(118_000, 41_000, 230_400, False, 0)
+            await pilot.pause()
+
+            body = line.content.plain
+            assert "ctx 41k/230k" in body, body
+            assert "fold" not in body, body

@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 6155 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
+pytest                                            # 6167 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -1563,10 +1563,24 @@ what makes an early, frequent trigger safe.
   thread never reaches" — arithmetic about `MAX_TOKEN_BUDGET`, then a default spend
   ceiling of 250k. **Batch 27 deleted that ceiling**, so nothing competes with a
   large trigger and the constant outlived its own argument: a 1M-window thread was
-  folding at 4% of its window. `compaction.derived_trigger()` is
-  `COMPACTION_TRIGGER_FRACTION` (0.85) × `context_limit()`. A FRACTION, not
-  `window - margin` — that shape is the BACKSTOP's and cannot be right at both ends
-  of the roster, since 40k below 1M is a rounding error and 40k below 64k leaves 24k.
+  folding at 4% of its window. Still not `window - margin` — that shape is the
+  BACKSTOP's and cannot be right at both ends of the roster, since 40k below 1M is a
+  rounding error and 40k below 64k leaves 24k.
+- **What the fraction NAMES is the headroom, and batch 119 clamped it at both ends**
+  (TECHNICAL_DEBT 39). `compaction.derived_trigger()` is now `context_limit()` minus
+  `headroom_for()`, where the headroom is `COMPACTION_TRIGGER_FRACTION` (0.90)
+  applied to the window, held at or above `COMPACTION_MIN_HEADROOM_TOKENS` (16,000)
+  and at or below `COMPACTION_MAX_HEADROOM_FRACTION` (0.25) of it. **Exactly the
+  fraction at every window at or above ~160k**, so a 262k or 1M thread gets what the
+  number says; a floor below that. The reason is the mirror image of batch 44's
+  against a flat margin: a bare SHARE holds the percentage constant while the thing
+  the headroom must contain does not scale with the window at all — one
+  `max_read_chars` result is 12,500 proxy tokens whether the model holds 64k or a
+  million, and one measured `arxiv_search` result was 29k. **There is no
+  context-overflow handler anywhere in `core/`** (grep for one): the provider raises,
+  the loop retries the identical oversized prompt three times, the turn dies. This
+  number is the only thing between a thread and that, which is why it is the thing
+  with the floor on it rather than the trigger.
   The derived value is a DEFAULT and sits LAST: an explicit `/compact` override, a
   session `/trigger` bound to its `(provider, model)`, and settings.json's
   `trigger_tokens` all outrank it, arriving at `thresholds()` through D27's existing
@@ -1603,6 +1617,21 @@ what makes an early, frequent trigger safe.
   last 3 completed turns, and `keep_recent_tokens`. The current-turn floor is what
   makes the mid-turn valve safe by construction rather than by hoping the threshold
   is far enough away.
+- **AMENDED BY BATCH 119: the turn COUNT is a preference, the other two are
+  absolute** (TECHNICAL_DEBT 39). Only two of M5's floors can measure what they hold.
+  The current turn is structural. `keep_recent_tokens` is a SIZE, so it holds exactly
+  what it says and can never be what holds a thread that is over the trigger.
+  `keep_recent_turns` is a COUNT, and a count cannot tell three small turns from
+  three enormous ones — **measured at 230k tokens held behind `3 - 3 = 0` on a
+  thread 92.5% of which was foldable**, with no way out from inside the app: this
+  function takes no model, so a 1M-context model recomputes the same zero; it reads
+  the archive, so a restart re-reads the same rows; `/compact` parses only
+  `--strength`. So the count applies while it still leaves something foldable and
+  otherwise yields — ALL the way to the size-aware floors, not one turn at a time,
+  because one step of relaxation on that thread folds 253 tokens, writes a
+  checkpoint, and then answers `no-progress` forever with `advances()` satisfied
+  against a watermark that freed 0.1%. The guarantee is size-based now: the current
+  turn verbatim, plus at least `keep_recent_tokens` of completed turns verbatim.
 - **Chain is the default; rederive survives as the fidelity option** (M2, as
   amended by batch 16 — an explicit owner decision recorded in DEVLOG). M2's
   original choice was rederive: exactly one summarization step always sits

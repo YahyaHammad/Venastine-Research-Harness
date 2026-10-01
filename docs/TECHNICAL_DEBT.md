@@ -2045,3 +2045,126 @@ says which question each answers.
 
 The reported case, as arithmetic: 100 characters over 60 seconds of which 50
 were a tool read `round(25/60) == 0` and now reads 2.
+
+## 39. A turn COUNT could hold a thread of any size, with no way out (closed, batch 119)
+
+**Owner-reported from a running session, and reproduced against that
+session's own database** -- `C:\Software\...\app.db`, thread
+`b652eb71-9a79-48b5-a8e8-8cc6767d770a`, with the two blocked attempts in
+`logs/app.log` at 23:09:15 and 23:15:39 on 2026-10-01. The report: a 262k
+window on `OPENROUTER/qwen/qwen3.8-27b:free`, the thread crossed 230k, and
+both automatic and manual compaction answered *"Context is full but the most
+recent turns fill it entirely"* -- through a switch to a 1M-window model and
+through a restart. No way to compact the thread and no way to continue it.
+
+**THE THREAD, MEASURED.** 182 rows, 728,953 chars, and exactly **three**
+user turns:
+
+| turn | rows | chars | proxy tokens |
+|---|---|---|---|
+| 0 | 0..3 (4) | 1,013 | 253 |
+| 1 | 4..145 (**142**) | 673,246 | **168,311** |
+| 2 | 146..181 (36) | 54,694 | 13,673 |
+
+`compactable_span()` opened with `cutoff = len(starts) - keep_recent_turns`
+= `3 - 3 = 0`, then `if cutoff < 1: return None`. **The token floor on its
+own would have folded everything before turn 2: 168,564 proxy tokens, 92.5%
+of the thread**, leaving the last completed turn and the current one
+verbatim. A good fold existed and a turn count vetoed it.
+
+**WHY NOTHING THE OWNER TRIED COULD HAVE WORKED, which is the part worth
+keeping.** `compactable_span(memory, current_turn_start, overrides)` takes
+no model, no provider and no window -- so a 1M-context model recomputes the
+identical `3 - 3 = 0`. A restart re-reads the same archive. `/compact`
+accepts only `--strength`, so no invocation can reach the floors, and
+`keep_recent_turns` is settings-only. The state was genuinely terminal from
+inside the app, and the owner's observation that it survived a restart was a
+correct reading of a structural fact rather than a cache bug.
+
+**AND THE ONE ESCAPE THAT LOOKS LIKE ONE IS A TRAP.** `keep_recent_turns: 2`
+in settings.json yields `cutoff = 1`, which folds turn 0's **253 tokens**,
+writes a checkpoint, and then answers `no-progress` forever, because
+`advances()` is satisfied against a watermark that freed 0.1%. A successful
+compaction that cannot be repeated.
+
+**THE FIX IS AN AMENDMENT TO M5, not a correction of it.** M5 names three
+floors and says the earliest wins; only two of them can measure what they
+hold. The current turn is **structural** -- folding it rewrites the question
+mid-answer. `keep_recent_tokens` is a **size**, so it holds exactly what it
+says and can never be what holds a thread that is over the trigger.
+`keep_recent_turns` is a **count**, and a count cannot tell three small
+turns from three enormous ones. So the count applies while it still leaves
+something foldable and otherwise yields -- all the way to the size-aware
+floors, not one turn at a time, for the no-progress reason above. The
+guarantee becomes size-based: the current turn verbatim, plus at least
+`keep_recent_tokens` of completed turns verbatim.
+
+**Two things that lied, fixed in the same batch because they are why the
+report named the wrong cause.** The notice said *"Context is full"* where
+the trigger is a fraction of the window and 32k was unspent; and it blamed
+SIZE where a count was responsible, so its only diagnostic pointed away from
+itself. The TUI usage line read `ctx 230k/223k` -- the denominator was the
+TRIGGER and the window appeared nowhere outside `/window`, which is what led
+the owner to conclude the harness treats the two as one number. The logic
+always distinguished them; nothing on screen did.
+
+**Still blocked afterwards, deliberately:** a thread whose only turn is the
+one still running. The boundary must be a turn start (M4), so a 142-row
+single turn has no legal fold. That is item 40.
+
+## 40. One turn can be the whole thread, and a turn cannot be folded (open)
+
+The residue of item 39, and the owner's own worst case: if the trigger fires
+during turn 1 of the thread above, `starts` is `[0, 1]`, the only legal
+boundary folds turn 0's 253 tokens, and every later evaluation answers
+`no-progress`. 142 rows and 168k tokens inside one turn, unfoldable, because
+M4 requires the fold boundary to be a turn start and M5 forbids folding the
+current turn at all.
+
+Both rules have reasons that survive. M4's is a wire error: a `tool_result`
+with no preceding `tool_use` is an HTTP 400 on Anthropic. M5's is that
+summarizing what the model is reasoning about right now rewrites the
+question mid-answer.
+
+What makes a fix possible is that M5's reason does not cover the whole turn.
+A 142-step turn is not reasoning about step 3's tool output, and the thing
+that must survive verbatim is the turn's own **user message** plus the
+recent steps. A boundary immediately before an `assistant` row satisfies M4
+by construction -- D20 persists the assistant row carrying its `tool_use`
+before dispatch and the answering rows after, so every earlier call is
+answered there -- and `pinned_through()` is the precedent for re-adding a
+row the watermark swallowed. Owner-approved for batch 120.
+
+## 41. `arxiv_search` output is unbounded, and one result was 29k tokens (open)
+
+Found while measuring item 39's per-step growth. `max_read_chars` (50,000
+chars = 12,500 proxy tokens) bounds reads and sandboxed stdout, and the
+thread's file reads respect it -- the largest is 31,940 chars. The largest
+tool row in the thread is **116,996 chars, ~29,249 proxy tokens**, and it is
+an `arxiv_search` result: `{'results': [{'arxiv_id': ...`.
+
+That single step added **31,733 proxy tokens** to the prompt, which is what
+the compaction headroom has to absorb and is the measurement that set
+`compaction_min_headroom_tokens`. It is also larger than the headroom a bare
+0.90 fraction leaves under a 262k window, which is why the fraction is
+clamped rather than bare (see `compaction.headroom_for`).
+
+No cap, no truncation notice, no paging. The fix is presumably the shape
+`max_read_chars` already has, applied where the results are assembled.
+
+## 42. A window under ~9.4k makes `effective_compaction()` raise (open)
+
+Pre-existing, and found while tabling batch 119's trigger against small
+windows. `warning_margin_tokens` is 8,000 and the loader refuses a pair
+where it is not strictly below `trigger_tokens` -- correctly, since
+otherwise the warning arrives after the compaction it warns about. But the
+trigger is now derived from the window, so any window small enough to put
+the derived trigger at or below 8,000 turns every `thresholds()` call into a
+`ValueError`: `should_compact()` runs at the top of every step.
+
+True before batch 119 as well (a 8,192-token window derived 6,963 against
+the same 8,000) and not made materially worse by it (6,144). Unreachable
+with the shipped roster and `DEFAULT_CONTEXT_WINDOW` at 256k; reachable by
+anyone who types `/window 8k` for a small local model. The margin should
+probably scale with the trigger the way the headroom now scales with the
+window.

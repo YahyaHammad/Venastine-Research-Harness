@@ -3008,12 +3008,18 @@ class VenastineApp(App):
         try:
             _, ceiling = compaction.thresholds(
                 self.model, provider_name=self.provider_name)
+            # Batch 119. The same function thresholds() derives from, so
+            # the two figures on this line cannot disagree about which
+            # window they mean -- and it is cache-only plus a dict lookup,
+            # with the fallback WARNING already deduplicated per model, so
+            # asking per repaint costs nothing new.
+            window = compaction.context_limit(self.model, self.provider_name)
         except Exception:  # noqa: BLE001 -- see above
-            ceiling = 0
+            ceiling = window = 0
         overridden = session.trigger_for(self.provider_name, self.model) is not None
         self._usage_line.update_usage(
             self._memory.billed_tokens, self._memory.last_input_tokens,
-            ceiling, overridden)
+            ceiling, overridden, window)
 
     def on_agent_stack_changed(self, message: AgentStackChanged) -> None:
         """The sink spoke. Runs on the UI thread."""

@@ -425,6 +425,8 @@ class HarnessConfig(_Model):
 
     # -- Compaction --------------------------------------------------------
     compaction_trigger_fraction: Unit
+    compaction_min_headroom_tokens: PositiveInt
+    compaction_max_headroom_fraction: Unit
     compaction_trigger_tokens: PositiveInt
     compaction_warning_margin_tokens: NonNegativeInt
     compaction_keep_recent_tokens: NonNegativeInt

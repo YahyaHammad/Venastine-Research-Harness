@@ -17635,3 +17635,142 @@ tool arguments and the tool test's numerator half goes red; stop pausing the
 tool clock and seven of the ten new meter tests go red.
 
 Counts 6141 -> 6155.
+
+## Batch 119 -- a turn count that could hold 230k tokens, and two instruments that lied about it
+
+TECHNICAL_DEBT 39, reported from a running session and reproduced against
+that session's own database rather than argued from the code. The report
+came with one hypothesis attached, and the hypothesis was wrong in a way
+worth recording: the harness does not conflate the window with the trigger,
+but the only two places the owner could have seen them both said it did.
+
+### What was stuck, and why nothing could unstick it
+
+182 rows, 728,953 chars, 230k tokens by the provider's own count, and
+exactly **three** user turns -- one of which, turn 1, was 142 rows and
+168,311 proxy tokens on its own. `compactable_span()` opens with
+`len(starts) - keep_recent_turns`, which is `3 - 3 = 0`, and returns None
+below 1. The token floor alone would have folded everything before turn 2:
+**92.5% of the thread**, with the last completed turn and the current one
+untouched.
+
+The part that makes this more than an off-by-one is that there was no way
+out. `compactable_span` takes no model and no window, so switching to a
+1M-context model recomputes the same zero; it reads the archive, so a
+restart re-reads the same rows; `/compact` parses only `--strength`, so no
+invocation can reach the floors. And the one setting that looks like an
+escape is a trap: `keep_recent_turns: 2` folds turn 0's **253 tokens**,
+writes a checkpoint, and then answers `no-progress` forever, with
+`advances()` permanently satisfied against a watermark that freed 0.1%.
+
+### The amendment, and why it is one
+
+M5 names three floors and says the earliest wins. That is right for two of
+them, because only two can measure what they are holding:
+
+* the current turn is **structural** -- folding it rewrites the question
+  mid-answer -- and never yields;
+* `keep_recent_tokens` is a **size**: it holds exactly what it says and
+  stops, so it can never be what holds a thread that is over the trigger;
+* `keep_recent_turns` is a **count**, and a count is blind. Three turns can
+  be 2k tokens or 230k.
+
+Blind is harmless until the thread is over the trigger, and then it is the
+one floor that can hold everything while claiming to hold "the last three
+exchanges" -- at which point the alternative to folding is not keeping the
+recent turns, it is the provider refusing the next prompt. So the count
+applies while it still leaves something foldable, and otherwise yields all
+the way to the size-aware floors. Not one turn at a time, for the
+no-progress reason above.
+
+Verified by calling the real `compactable_span` against the real rows, with
+the shipped settings and nothing stubbed but the row loader: 0 -> folds rows
+0..145, 168,564 proxy tokens, on both the mid-turn path and manual
+`/compact`.
+
+### The fraction became a clamped headroom, which is the opposite error from batch 44's
+
+The owner asked for 0.85 -> 0.90 and the measurement argued back. Their own
+thread's worst single step added **31,733 proxy tokens** -- one 116,996-char
+`arxiv_search` result. A 262k window leaves 39,322 at 0.85 and 26,215 at a
+bare 0.90, and there is **no context-overflow handler anywhere in `core/`**:
+the provider raises, the loop retries the identical oversized prompt three
+times, the turn dies. So the headroom is the only protection, and a bare
+0.90 puts it below one observed step.
+
+What the fraction really names is the headroom, and a bare share gets that
+wrong at both ends for the mirror-image reason batch 44 gave against a flat
+margin. Batch 44 was right that 40k is a rounding error under 1M and
+strangling under 64k. A share has the opposite defect, because the thing the
+headroom must contain does not scale with the window at all -- one
+`max_read_chars` result is 12,500 proxy tokens whether the model holds 64k
+or a million. 0.10 of 1M is 100k; 0.10 of 64k is 6,553, which one ordinary
+file read overflows.
+
+Hence a floor and a cap, and the owner's own constraint decided the shape:
+local inference users with 64k and 128k windows must not be pushed out, and
+a flat reserve would have been far worse for them than the status quo (40k
+under 64k leaves a 24k trigger). The floor binds below ~160k and nowhere
+above it:
+
+| window | 0.85 | bare 0.90 | shipped | binds |
+|---|---|---|---|---|
+| 32,768 | 27,852 | 29,491 | 24,576 | cap |
+| 65,536 | 55,705 | 58,982 | 49,536 | floor |
+| 131,072 | 111,411 | 117,964 | 115,072 | floor |
+| 262,144 | 222,822 | 235,929 | **235,929** | fraction |
+| 1,000,000 | 850,000 | 900,000 | **900,000** | fraction |
+
+So the owner gets 0.90 exactly where they said the priority was, and a 64k
+model keeps 16,000 tokens of headroom instead of 6,553. The cap is
+load-bearing rather than decorative: 16k of a 32k window is half of it, and
+without it a small window derives a trigger at or below zero.
+
+The headroom is `window - int(fraction * window)` rather than
+`(1 - fraction) * window`, so the unclamped case reproduces the fraction
+EXACTLY. Truncating the headroom down put the trigger one token above
+`int(0.90 * window)`, which is harmless as a number and not harmless as an
+identity -- every table above would have been off by one with nothing to
+point at.
+
+### Two instruments that lied, which is why the report named the wrong cause
+
+The notice said *"Context is full but the most recent turns fill it
+entirely."* Both halves were false. It is not full -- the trigger is a
+fraction of the window, so it is read with the headroom unspent -- and "the
+most recent turns fill it" names SIZE, where a turn COUNT was responsible
+on a thread 92.5% of which was foldable. The one diagnostic the message
+offered pointed away from its own cause, which is worse than offering none.
+
+The TUI usage line read `ctx 230k/223k`. The denominator was the compaction
+TRIGGER and the window appeared nowhere in the TUI outside `/window`. That
+was defensible -- the trigger is the number `ctx` is compared against, and
+the line exists to give `ctx` a scale -- and still wrong, because a
+denominator is read as a LIMIT. `230k/223k` says "over budget" about a
+thread with 32k of window left. It now reads
+`ctx 230k/262k (fold 236k)`, and the `*` that marks a session `/trigger`
+moved onto the fold figure, since it is the trigger that was overridden.
+
+### Tested in the two layers, and the wiring is where the second half was
+
+`test_compaction.py` for the arithmetic: the three headroom regimes as
+regimes rather than as a table of literals, monotonicity across the clamps
+where a piecewise rule would hide a step, and the yielding floor from both
+sides -- the thread that must now fold AND the thread that must still be
+protected, because a fix that simply deleted the floor would pass every
+test that only checks the first. `test_spend_and_size.py` for the usage
+line, driven through `refresh_usage_line` rather than the widget, because
+`tui/widgets.py` could always render whatever scale it was handed and
+`tui/app.py` handed it one number.
+
+Two existing tests were rewritten rather than appended to, since both
+asserted the defect as the contract. Each now pins what still folds
+nothing, so the blocked outcome stays reachable -- an outcome no input can
+produce is an outcome nobody maintains.
+
+Driven rather than argued. Five mutations: restore the veto and four of the
+five yielding tests go red while the no-regression one correctly stays
+green; drop the headroom floor, the cap, the window from the call site, or
+move the `*` onto the window, and each goes red alone.
+
+Counts 6155 -> 6167.

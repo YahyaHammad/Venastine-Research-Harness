@@ -798,9 +798,27 @@ max_review_refinements: 3
 # ======================================================================
 
 # How much of the model's context window a thread may fill before
-# compaction folds it. MULTIPLIED by the resolved context limit, so it is
-# 850k on a 1M model and 170k on a 200k one.
-compaction_trigger_fraction: 0.85
+# compaction folds it. What the fraction really names is the HEADROOM --
+# the remainder, which the step after the trigger fires has to fit inside,
+# because nothing in the harness recovers from a prompt that overflows the
+# window. A bare share gets that wrong at both ends of the roster: 0.10 of
+# 1M is 100k and 0.10 of 64k is 6.4k, while ONE capped tool read is 12,500
+# proxy tokens. Hence the two clamps below.
+compaction_trigger_fraction: 0.90
+
+# The headroom never shrinks below this, however small the window. Sized
+# from max_read_chars (50,000 chars = 12,500 proxy tokens, the largest a
+# single bounded read can return) plus the assistant turn that asked for
+# it. Binds under a ~160k window and nowhere above one, so a 262k or 1M
+# thread gets exactly the fraction above and a 64k thread keeps a usable
+# margin instead of 6.4k.
+compaction_min_headroom_tokens: 16000
+
+# ...and never grows past this share of the window, which is what stops
+# the floor above from eating a small window whole -- 16k of a 32k window
+# is half of it. This is the clamp that keeps the trigger positive and
+# above keep_recent_tokens at the bottom of the range.
+compaction_max_headroom_fraction: 0.25
 
 # The trigger used when NO MODEL IS IN SCOPE. A settings.json
 # `compaction.trigger_tokens` overrides it.

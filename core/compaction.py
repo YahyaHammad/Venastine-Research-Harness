@@ -261,26 +261,78 @@ def context_limit(model: str, provider_name: Optional[str] = None) -> int:
     return window
 
 
+def headroom_for(window: int) -> int:
+    """Tokens held between the trigger and `window` -- a CLAMPED share.
+
+    THE HEADROOM IS THE POINT, and batch 119 is where that got said out
+    loud. The trigger's job is not to cap the thread at a tidy percentage;
+    it is to leave room for the step that runs AFTER it fires, because
+    nothing in this harness recovers from a prompt that overflows the
+    window. There is no context_length_exceeded handler anywhere in
+    core/ -- grep for one. The provider raises, core/loop.py retries the
+    identical oversized prompt three times, and the turn dies. This number
+    is the only thing standing between a thread and that.
+
+    SO A BARE SHARE IS WRONG AT BOTH ENDS, which is the same shape of
+    error batch 44 corrected in the other direction. Batch 44 replaced a
+    flat 40k margin with a share because 40k is a rounding error under 1M
+    and strangling under 64k; a bare share has the mirror-image defect,
+    because what it holds CONSTANT is the percentage while the thing the
+    headroom must contain -- one step's growth -- does not scale with the
+    window at all. A single `max_read_chars` result is 12,500 proxy tokens
+    whether the model holds 64k or a million. 0.10 of 1M is 100k, which is
+    more than any step needs; 0.10 of 64k is 6,553, which one ordinary file
+    read overflows.
+
+    Hence a floor AND a cap, and each has a different job:
+
+      * COMPACTION_MIN_HEADROOM_TOKENS keeps a small window usable. It
+        binds under roughly 160k and nowhere above it, so a 262k or 1M
+        thread gets the fraction exactly as configured.
+      * COMPACTION_MAX_HEADROOM_FRACTION keeps the floor from eating a
+        small window whole -- 16k of a 32k window is half of it -- and it
+        is what keeps the resulting trigger positive and above
+        keep_recent_tokens at the bottom of the range, where
+        effective_compaction() would otherwise raise.
+
+    MEASURED, not reasoned: the thread that produced this batch grew by
+    31,733 proxy tokens in ONE step (a single 117k-character arxiv_search
+    result). At 0.85 its 262k window left 39,322 and that step fit; a bare
+    0.90 leaves 26,215 and it does not.
+    """
+    # `window - int(fraction * window)` rather than
+    # `(1 - fraction) * window`, so the unclamped case reproduces the
+    # fraction EXACTLY. The two differ by the truncation: 0.10 * 262144 is
+    # 26214.4, and truncating the headroom down put the trigger one token
+    # ABOVE int(0.90 * 262144). One token is harmless and an arithmetic
+    # identity that holds only approximately is not -- every documented
+    # table would be off by one with nothing to point at.
+    share = window - int(config.COMPACTION_TRIGGER_FRACTION * window)
+    floor = config.COMPACTION_MIN_HEADROOM_TOKENS
+    cap = config.COMPACTION_MAX_HEADROOM_FRACTION * window
+    return int(min(max(share, floor), cap))
+
+
 def derived_trigger(model: str, provider_name: Optional[str] = None) -> int:
-    """The working-set trigger for this model: a share of its window.
+    """The working-set trigger for this model: its window less headroom.
 
-    config.COMPACTION_TRIGGER_FRACTION x context_limit(), which is 850k on
-    a 1M model and 170k on a 200k one. Batch 44's reversal of M1; the
-    argument is on the constant.
+    Batch 44's reversal of M1, as corrected by batch 119. The argument for
+    deriving this from the window at all is on COMPACTION_TRIGGER_FRACTION;
+    the argument for the clamps is on headroom_for() above.
 
-    A FRACTION AND NOT `window - margin`, which was the shape considered
-    first and is what the research backstop below actually uses. A fixed
-    margin cannot be right at both ends of the roster: 40k below a 1M
-    window is a rounding error, and 40k below a 64k window leaves 24k,
-    which is not a working thread. A share scales by construction.
+    STILL NOT `window - margin`, which is the BACKSTOP's shape and is what
+    batch 44 rejected: that is a FIXED margin, right at neither end of the
+    roster. This is a share that may not shrink below an absolute nor grow
+    past a share -- which is the same number at every window above ~160k
+    and a floor below it.
 
     Floored at 1 rather than validated: context_limit() can only return a
     positive number, and effective_compaction() raises on a trigger below
     1, so this exists to keep an absurd window from turning into a
     confusing error two layers away from the value that caused it.
     """
-    return max(1, int(config.COMPACTION_TRIGGER_FRACTION
-                      * context_limit(model, provider_name)))
+    window = context_limit(model, provider_name)
+    return max(1, window - headroom_for(window))
 
 
 def _trigger_is_configured() -> bool:
@@ -373,16 +425,28 @@ def compactable_span(memory, current_turn_start: Optional[int] = None,
     """The id of the last message that may be folded, or None if nothing
     may be.
 
-    THREE FLOORS, AND THE EARLIEST WINS (M5):
+    THREE FLOORS, AND THE EARLIEST WINS (M5) -- WITH ONE AMENDMENT, batch
+    119, argued in full at the `preferred` line below:
 
       * the current turn -- structural, never foldable at all. A summary
         that swallowed the messages the model is reasoning about right now
-        would rewrite the question mid-answer.
+        would rewrite the question mid-answer. ABSOLUTE.
+      * keep_recent_tokens, the token floor §21 specifies. ABSOLUTE, and
+        it can be absolute safely because it is a SIZE: it holds exactly
+        what it says and then stops.
       * the last N COMPLETED turns, verbatim. A single tool-heavy turn can
         consume the whole keep-token budget by itself, leaving the
         immediately preceding exchange summarized, and a follow-up like
-        "no, the other one" then has no referent.
-      * keep_recent_tokens, the token floor §21 specifies.
+        "no, the other one" then has no referent. A PREFERENCE SINCE BATCH
+        119: it is a COUNT, so it cannot tell three small turns from three
+        enormous ones, and it applies only while it still leaves something
+        foldable. Measured at 230k tokens held by `3 - 3 = 0` on a thread
+        92.5% of which could have been folded.
+
+    So the guarantee this function makes is size-based rather than
+    count-based: the current turn verbatim, plus at least
+    keep_recent_tokens of completed turns verbatim, plus the last N
+    completed turns whenever that is affordable.
 
     THE BOUNDARY IS ALWAYS A TURN START (M4). Every floor resolves to one,
     so a fold can never separate an assistant message carrying tool_calls
@@ -417,10 +481,7 @@ def compactable_span(memory, current_turn_start: Optional[int] = None,
     # Every candidate boundary is "fold everything strictly before turn i".
     # The floors each veto some suffix of the turn list; the surviving
     # boundary is the earliest turn any of them still allows.
-    cutoff = len(starts) - settings["keep_recent_turns"]
-    if current_turn_start is not None:
-        cutoff = min(cutoff, current_turn_start)
-
+    #
     # The token floor: keep whole turns, walking back from the end, until
     # keep_recent_tokens is covered. Sized from the persisted content,
     # which is the same character proxy M10 uses everywhere else.
@@ -433,7 +494,64 @@ def compactable_span(memory, current_turn_start: Optional[int] = None,
         token_cutoff = index
         if kept // CHARS_PER_TOKEN >= settings["keep_recent_tokens"]:
             break
-    cutoff = min(cutoff, token_cutoff)
+
+    # THE TWO FLOORS THAT CAN MEASURE WHAT THEY PROTECT, intersected first.
+    cutoff = token_cutoff
+    if current_turn_start is not None:
+        cutoff = min(cutoff, current_turn_start)
+
+    # ...and then keep_recent_turns, WHICH YIELDS RATHER THAN VETOES.
+    # Batch 119, and this is an amendment to M5 rather than a fix to a
+    # mistake in it.
+    #
+    # M5 names three floors and says the earliest wins. That is right for
+    # two of them, because only two can measure what they are holding:
+    #
+    #   * the current turn is STRUCTURAL -- folding it would rewrite the
+    #     question being answered -- and is never negotiable;
+    #   * keep_recent_tokens is a SIZE, so it protects exactly as much as
+    #     it says and then stops;
+    #   * keep_recent_turns is a COUNT, and a count is blind. Three turns
+    #     can be 2k tokens or 230k.
+    #
+    # Blind is harmless until the thread is over the trigger. Then it is
+    # the one floor that can hold EVERYTHING while claiming to hold "the
+    # last three exchanges" -- and at that point the alternative to folding
+    # is not "keep the recent turns", it is the provider refusing the next
+    # prompt. There is no context-overflow handler anywhere in core/, so
+    # nothing downstream recovers.
+    #
+    # MEASURED, on the owner-reported thread that produced this batch: 182
+    # rows, 729k chars, 230k tokens by the provider's own count, and
+    # exactly THREE user turns. `3 - 3 = 0`, cutoff < 1, blocked -- while
+    # the token floor on its own would have folded everything before turn 2:
+    # 168,564 proxy tokens, 92.5% of the thread, with the last completed
+    # turn and the current one untouched. A good fold existed and a turn
+    # count vetoed it: on every evaluation, through a switch to a 1M-window
+    # model (this function takes no model and never did), and through a
+    # restart (it reads the archive, which does not change). There was no
+    # way out of that state from inside the app.
+    #
+    # NOT A WALK-DOWN from 3 to 2 to 1 taking the first count that works.
+    # On that same thread `keep_recent_turns=2` yields cutoff 1, which folds
+    # turn 0's 253 tokens, writes a checkpoint, and then answers no-progress
+    # forever -- a compaction that succeeds, frees 0.1%, and leaves
+    # advances() permanently satisfied against a watermark that helped
+    # nothing. Yielding all the way to the size-aware floors is what makes
+    # the model call worth spending.
+    #
+    # Still guaranteed afterwards: the current turn verbatim, plus at least
+    # keep_recent_tokens of completed turns verbatim. A size-based promise,
+    # which is the right kind to make in answer to size pressure.
+    preferred = min(cutoff, len(starts) - settings["keep_recent_turns"])
+    if preferred >= 1:
+        cutoff = preferred
+    elif cutoff >= 1:
+        logger.info(
+            "Compaction on thread %s: keep_recent_turns=%d would have held "
+            "all %d turns and blocked every fold, so it yielded. The current "
+            "turn and keep_recent_tokens still hold.",
+            memory.thread_id, settings["keep_recent_turns"], len(starts))
 
     if cutoff < 1:
         return None
@@ -651,8 +769,24 @@ def compact(memory, model: str, provider_name: str,
         return {
             "status": "blocked",
             "kind": "compaction_blocked",
-            "text": ("Context is full but the most recent turns fill it "
-                     "entirely -- nothing could be compacted."),
+            # TWO FALSE CLAIMS IN ONE LINE, both corrected in batch 119.
+            #
+            # "Context is full" -- it is not. The trigger is a fraction of
+            # the window, so this is read with the headroom still unspent,
+            # and the owner who reported it reasonably concluded the harness
+            # treats the window and the trigger as one number. The usage
+            # line showing the TRIGGER as its only denominator is the other
+            # half of that impression; batch 119 fixes both.
+            #
+            # "the most recent turns fill it entirely" -- names SIZE, and
+            # what actually blocked the one reported occurrence was a turn
+            # COUNT on a thread 92.5% of which was foldable. The single
+            # diagnostic this message offered pointed away from its cause,
+            # which is worse than offering none.
+            "text": ("Over the compaction trigger, but every turn is held "
+                     "by the keep floors -- nothing could be folded. The "
+                     "thread keeps running uncompacted; a fold becomes "
+                     "possible once this turn completes."),
         }
 
     agent = manager.get(config.COMPACTOR_AGENT)

@@ -1215,8 +1215,67 @@ writing `compaction: {trigger_fraction: 0.9}` is a startup error rather
 than an override. `README.md`'s compaction table lists the seven.
 
 How much of the model's context window a thread may fill before
-compaction folds it. thresholds() multiplies this by context_limit(),
-so it is 850k on a 1M model and 170k on a 200k one.
+compaction folds it. `thresholds()` reaches it through
+`derived_trigger()`, which is `context_limit()` minus `headroom_for()` --
+so it is 900k on a 1M model and 180k on a 200k one.
+
+**BATCH 119 MADE IT A CLAMPED HEADROOM RATHER THAN A BARE SHARE, and
+raised it from 0.85 to 0.90.** What the fraction really names is the
+REMAINDER: the room the step after the trigger has to fit inside, because
+nothing recovers from a prompt that overflows the window -- there is no
+context-overflow handler anywhere in `core/`, so the provider raises, the
+loop retries the same oversized prompt three times, and the turn dies.
+
+A bare share gets that wrong at both ends, for the mirror image of the
+reason batch 44 gave against a flat margin. Batch 44 was right that 40k is
+a rounding error under 1M and strangling under 64k. A share has the
+opposite defect, because what the headroom must contain does not scale
+with the window at all: one `max_read_chars` result is 12,500 proxy tokens
+whether the model holds 64k or a million, and one measured `arxiv_search`
+result was 29,249. 0.10 of 1M is 100k; 0.10 of 64k is 6,553, which one
+ordinary file read overflows.
+
+So `compaction_min_headroom_tokens` and `compaction_max_headroom_fraction`
+clamp it, and the floor binds below roughly 160k and nowhere above:
+
+| window | 0.85 (pre-119) | bare 0.90 | shipped | which clamp |
+|---|---|---|---|---|
+| 32,768 | 27,852 | 29,491 | 24,576 | cap |
+| 65,536 | 55,705 | 58,982 | 49,536 | floor |
+| 131,072 | 111,411 | 117,964 | 115,072 | floor |
+| 262,144 | 222,822 | 235,929 | 235,929 | fraction |
+| 1,000,000 | 850,000 | 900,000 | 900,000 | fraction |
+
+The headroom is computed as `window - int(fraction * window)` rather than
+`(1 - fraction) * window`, so the unclamped case reproduces the fraction
+exactly. The two differ by the truncation, and truncating the headroom
+down put the trigger one token ABOVE `int(fraction * window)` -- harmless
+as a number, not harmless as an identity, since every table above would
+have been off by one with nothing to point at.
+
+### `compaction_min_headroom_tokens`
+
+The floor on the headroom above. Sized from `max_read_chars` (50,000
+chars = 12,500 proxy tokens, the largest a single bounded read returns)
+plus the assistant turn that asked for it. It binds under a ~160k window
+and nowhere above one, which is the whole point: a 262k or 1M thread gets
+`compaction_trigger_fraction` exactly as written, and a 64k local model
+keeps a usable margin instead of the 6,553 tokens a bare share leaves it.
+
+Not every tool respects `max_read_chars` -- `arxiv_search` does not, and
+one of its results measured 29,249 proxy tokens (TECHNICAL_DEBT 41). This
+floor does not cover that, and above ~160k the fraction leaves more room
+than it anyway; what it covers is the bounded case at the bottom of the
+roster, where nothing else would.
+
+### `compaction_max_headroom_fraction`
+
+The cap on the headroom, and it is load-bearing rather than defensive:
+16,000 tokens of a 32,768-token window is half of it, and an unclamped
+floor under a small window derives a trigger at or below zero -- or one
+under `keep_recent_tokens`, where `effective_compaction()` raises on every
+evaluation and `should_compact()` runs at the top of every step. This is
+the clamp that keeps the bottom of the range working at all.
 
 BATCH 44 REVERSED M1, AND THE REASON M1 GAVE HAS EXPIRED. M1 rejected a
 window-derived trigger because "a window-derived trigger sits at a size
