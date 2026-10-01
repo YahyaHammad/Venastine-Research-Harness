@@ -159,3 +159,174 @@ class TestTheTwoTailsSayTheSameThingAboutDifferentSources:
 
         assert built.startswith(system_prompts.UNTRUSTED_CONTENT_CORE)
         assert built.endswith("TAIL-SENTINEL")
+
+# ===========================================================================
+# ---- TECHNICAL_DEBT 18 (batch 116): the Atom feed is parsed DEFUSED -------
+# ===========================================================================
+#
+# `arxiv_search` is permission=True, approval=False -- the paragraph above
+# exists because its output reaches the model unattended. That output comes
+# from XML this project did not write, and until batch 116 it was parsed
+# with stdlib ElementTree, which EXPANDS declared entities. Bandit said so
+# twice (B405 at the import, B314 at the call) and both were baselined as
+# accepted risk for the CI rollout rather than decided to be safe.
+
+_CANARY = "XXE-CANARY-DO-NOT-LEAK"
+
+_ENTRY = (
+    "<entry><id>http://arxiv.org/abs/2000.00001v1</id>"
+    "<title>{title}</title><summary>s</summary>"
+    "<published>2024-01-01T00:00:00Z</published>"
+    "<author><name>A. Author</name></author>"
+    '<category term="cs.AI"/></entry>'
+)
+
+
+def _feed(title, doctype=""):
+    """arXiv's feed shape with a chosen title and an optional DOCTYPE."""
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        + doctype
+        + '<feed xmlns="http://www.w3.org/2005/Atom">'
+        + _ENTRY.format(title=title)
+        + "</feed>"
+    )
+
+
+_DECLARED_ENTITIES = (
+    "<!DOCTYPE feed ["
+    '<!ENTITY lol "lol">'
+    '<!ENTITY lol2 "&lol;&lol;&lol;">'
+    "]>"
+)
+
+
+class TestTheArxivFeedIsParsedDefused:
+    """What a hostile feed can and cannot make this tool do.
+
+    A billion laughs with the zeroes taken out: three expansions rather
+    than a billion, because the claim being pinned is that expansion
+    happens AT ALL, and a test that needs a gigabyte of RAM to fail is a
+    test nobody runs.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _no_cached_answers(self):
+        """`arxiv._cache` is module-level and nothing clears it between
+        tests -- `clear_scholar_cache` in conftest.py does this for §45's
+        cache and says exactly why, but arXiv's has no equivalent. Without
+        this, a neighbour's cached answer is served and the parse under
+        test never runs.
+        """
+        from tools.builtin import arxiv
+
+        arxiv._cache.clear()
+        yield
+        arxiv._cache.clear()
+
+    def test_a_declared_entity_is_refused_rather_than_expanded(self, http):
+        """THE PROVER. Revert the import in tools/builtin/arxiv.py and this
+        fails: stdlib ElementTree expands `&lol2;` to "lollollol" and the
+        tool returns it as a paper title.
+        """
+        from tools.builtin import arxiv
+
+        http.respond(text=_feed("&lol2;", _DECLARED_ENTITIES))
+
+        result = arxiv.run({"keywords": "defused-entity-expansion"})
+
+        assert "lollollol" not in str(result), (
+            "the entity was expanded -- this is stdlib ElementTree, not "
+            "defusedxml")
+        assert "error" in result
+        assert "refuses to expand" in result["error"]
+
+    def test_the_refusal_is_not_retried_as_a_network_failure(self, http):
+        """The handler is separate from the retry tuple on purpose. A
+        declared entity refuses identically every time, so retrying spends
+        two more round trips to reach the same place and then reports
+        "failed after 3 attempts" -- a network problem that is not there.
+        """
+        from tools.builtin import arxiv
+
+        http.respond(text=_feed("&lol2;", _DECLARED_ENTITIES))
+
+        result = arxiv.run({"keywords": "defused-no-retry"})
+
+        assert len(http.requests) == 1, (
+            "a hostile feed was retried %d times; it refuses the same way "
+            "every time" % len(http.requests))
+        assert "attempts" not in result["error"], (
+            "reported as exhausted retries, which names the wrong cause")
+
+    def test_an_external_entity_never_reaches_the_model(self, http, tmp_path):
+        """PINS A PROPERTY; IT DOES NOT PROVE THE FIX -- and saying so is
+        the point, because this project has paid for tests that could not
+        fail.
+
+        CPython's expat does not resolve external entities, so stdlib
+        ElementTree ALSO refuses this one, with `ParseError: undefined
+        entity` where defusedxml raises `EntitiesForbidden`. Reverting the
+        import leaves this test GREEN. It is here because "a file on disk
+        never reaches the model" is the claim worth a regression test, and
+        because the stdlib's refusal is an implementation detail of one
+        parser on one runtime rather than a guarantee this code is owed.
+        """
+        from tools.builtin import arxiv
+
+        secret = tmp_path / "secret.txt"
+        secret.write_text(_CANARY)
+        doctype = ('<!DOCTYPE feed [<!ENTITY xxe SYSTEM "%s">]>'
+                   % secret.as_uri())
+        http.respond(text=_feed("&xxe;", doctype))
+
+        result = arxiv.run({"keywords": "defused-external-entity"})
+
+        assert _CANARY not in str(result), "the feed read a local file"
+        assert "error" in result
+        # Batch 116's review. Not just the file's CONTENTS -- the URI the
+        # feed chose must not come back either, or a hostile feed gets a
+        # sentence into the model's context through an error message.
+        assert secret.as_uri() not in str(result)
+        assert "file:" not in str(result)
+
+    def test_an_ordinary_feed_still_parses(self, http):
+        """The hardening is not bought by breaking the tool, and a DOCTYPE
+        on its own is not hostile -- defusedxml's ElementTree leaves
+        `forbid_dtd` off, so a feed that merely declares a doctype and no
+        entities still parses. Measured, not assumed.
+        """
+        from tools.builtin import arxiv
+
+        http.respond(text=_feed("Attention Is All You Need",
+                                "<!DOCTYPE feed>"))
+
+        result = arxiv.run({"keywords": "defused-ordinary-feed"})
+
+        assert result["result_count"] == 1
+        assert result["results"][0]["title"] == "Attention Is All You Need"
+
+    def test_a_parameter_entity_is_refused_too(self, http):
+        """A SECOND PROVER, and the vector an attacker actually reaches for.
+
+        `<!ENTITY % pe SYSTEM "...">` in the internal subset is classic
+        blind XXE: the parameter entity is expanded while the DTD is being
+        read, so it fires before any element is seen. Measured both ways --
+        stdlib ElementTree PARSES this and defusedxml raises
+        `EntitiesForbidden` -- so reverting the import turns this red, the
+        same as the declared-entity test above. It is here because the
+        internal-subset spelling is the one that works where the
+        external-entity spelling below does not.
+        """
+        from tools.builtin import arxiv
+
+        secret = "PARAM-ENTITY-CANARY"
+        doctype = ('<!DOCTYPE feed ['
+                   '<!ENTITY %% pe SYSTEM "data:,%s">%%pe;]>' % secret)
+        http.respond(text=_feed("t", doctype))
+
+        result = arxiv.run({"keywords": "defused-parameter-entity"})
+
+        assert "error" in result
+        assert "refuses to expand" in result["error"]
+        assert secret not in str(result)

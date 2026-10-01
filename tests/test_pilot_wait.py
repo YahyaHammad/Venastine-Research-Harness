@@ -20,13 +20,46 @@ AGENTS.md, with `pause` in the production role.
 """
 
 import asyncio
+import inspect
 import time
 
 import pytest
+from textual._wait import wait_for_idle
 from textual.app import App
 from textual.widgets import Static
 
 from tests.conftest import pump, settle
+
+#: What ONE `pilot.pause()` can cost, read from textual rather than
+#: restated. Batch 116 restated it as "1000ms" and set two ceilings from
+#: that number; batch 116's own correction is that `Pilot.pause` is
+#: `_wait_for_screen(timeout=30.0)` followed by `wait_for_idle(0)`, so the
+#: cap is the idle half ALONE. Reading the signature means a textual
+#: release that moves the cap moves these ceilings with it, and a textual
+#: release that renames the parameter fails here loudly instead of leaving
+#: a stale constant behind.
+#:
+#: `textual._wait` is private, and that is accepted: `settle`'s own
+#: docstring already names this module, so the coupling exists either way.
+PAUSE_CAP = inspect.signature(wait_for_idle).parameters["max_sleep"].default
+
+#: Slack for the swing BETWEEN two consecutive pauses, which is the one
+#: thing a calibration cannot predict: `settle`'s docstring measures 21ms
+#: idle against 1021ms with a busy sibling, so the calibration pause and
+#: the measured pause can land 46x apart in either direction.
+PAUSE_SLACK_S = 0.5
+
+
+async def _one_pause(pilot) -> float:
+    """How long one bare `pilot.pause()` costs on THIS machine, now.
+
+    The ceilings below are relative to this rather than to a constant,
+    because the constant is textual's and this repo got it wrong once by
+    writing it down.
+    """
+    started = time.monotonic()
+    await pilot.pause()
+    return time.monotonic() - started
 
 
 class _Tiny(App):
@@ -162,12 +195,41 @@ class TestItWaitsOnTime:
         """A generous timeout is not a slow suite: the deadline bounds
         failures, and a satisfied predicate returns at once. This is why
         raising the ceiling from ~2.5s to 10s did not change the suite's
-        runtime."""
+        runtime.
+
+        THE CEILING IS MEASURED, NOT WRITTEN DOWN, and the difference is
+        two CI failures' worth of lesson. A satisfied predicate costs
+        exactly one `pilot.pause()` -- `settle` checks, pauses to quiesce,
+        returns -- so the ceiling is "one pause plus slack", and the only
+        honest way to spend one pause is to time one.
+
+        It was `< 1.0` until 2026-10-01, when CI read 1.010s: `wait_for_idle`
+        reaches `max_sleep=1` and then overshoots by one 20ms
+        `SLEEP_GRANULARITY` tick before it checks, so 1.0 was below the cap
+        of the thing being timed. Batch 116 replaced it with a flat 2.0 and
+        called that "one full capped pause plus margin" -- which was still
+        wrong, because `Pilot.pause` is `_wait_for_screen(timeout=30.0)`
+        AND `wait_for_idle(0)`, and 1000ms is only the second half.
+
+        So: no absolute. `PAUSE_CAP` comes from textual's signature and the
+        rest is measured here. Still 20x clear of the 30s timeout this
+        exists to prove is not paid, which is what keeps it a test.
+        """
         async with _Tiny().run_test() as pilot:
+            one_pause = await _one_pause(pilot)
+
             started = time.monotonic()
             await settle(pilot, lambda: True, timeout=30.0)
             elapsed = time.monotonic() - started
-        assert elapsed < 1.0, f"paid for the timeout it did not need: {elapsed:.3f}s"
+
+        budget = one_pause + PAUSE_CAP + PAUSE_SLACK_S
+        assert budget < 30.0 / 2, (
+            "the budget stopped discriminating against the timeout: "
+            "%.3fs against a 30.0s deadline" % budget)
+        assert elapsed < budget, (
+            "paid for the timeout it did not need: %.3fs against a budget "
+            "of %.3fs (one measured pause %.3fs + cap %.3fs + slack %.1fs)"
+            % (elapsed, budget, one_pause, PAUSE_CAP, PAUSE_SLACK_S))
 
 
 # ---------------------------------------------------------------------------
@@ -189,13 +251,33 @@ class TestPump:
         so there is no predicate and nothing to wait for. Giving it a
         timeout instead would make each of those sites pay the full
         deadline and prove nothing extra. Pinned on the runtime, because
-        that is the cost that would regress."""
+        that is the cost that would regress.
+
+        THREE PAUSES, SO THREE CAPS. This one never failed; it was found by
+        grepping for the root cause of the one above that did, and it was
+        the MORE exposed of the two -- `pump(3)` is three `pilot.pause()`
+        calls, worst case ~3.0s, against a ceiling that was 2.0. Batch 116
+        raised it to a flat 4.0 on the same wrong arithmetic corrected
+        above; it is relative now for the same reason.
+
+        Still discriminates against the regression it names: a `pump` that
+        grew a deadline would pay `settle`'s 10s default.
+        """
+        pumped = 3
         async with _Tiny().run_test() as pilot:
+            one_pause = await _one_pause(pilot)
+
             started = time.monotonic()
-            await pump(pilot, 3)
+            await pump(pilot, pumped)
             elapsed = time.monotonic() - started
-        assert elapsed < 2.0, \
-            f"pump({3}) took {elapsed:.3f}s -- has it grown a deadline?"
+
+        budget = one_pause + pumped * PAUSE_CAP + PAUSE_SLACK_S
+        assert budget < 10.0 / 2, (
+            "the budget stopped discriminating against a grown deadline: "
+            "%.3fs against settle's 10.0s default" % budget)
+        assert elapsed < budget, (
+            "pump(%d) took %.3fs against a budget of %.3fs -- has it grown "
+            "a deadline?" % (pumped, elapsed, budget))
 
 
 # ---------------------------------------------------------------------------

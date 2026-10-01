@@ -741,11 +741,30 @@ defect found.
   AGENTS.md's "Before calling a change done", which named ruff and bandit
   and not gitleaks; that is fixed there rather than here, because the
   checklist is where a batch looks.
-- **arXiv feed hardening (Bandit B314/B405, baselined).**
-  `tools/builtin/arxiv.py:141` parses an attacker-influenced Atom feed
-  with stdlib `ElementTree`. Accepted-risk for the rollout; the fix is
-  `defusedxml` (or `defuse_stdlib`), with `tests/test_mcp_client.py`-style
-  version-pinned re-verification.
+- ~~**arXiv feed hardening (Bandit B314/B405, baselined).**~~ **Done in
+  batch 116.** `tools/builtin/arxiv.py` parses the Atom feed with
+  `defusedxml.ElementTree` now, pinned `defusedxml==0.7.1`. Two things
+  were measured first and both changed the code. (1)
+  `defusedxml.ElementTree.ParseError` IS the stdlib `ParseError` -- the
+  same object -- so the empty-redirect-body path and the retry loop's
+  `except` are untouched. (2) `EntitiesForbidden` and its siblings
+  subclass **ValueError, not ParseError**, so they would have escaped
+  that `except` and propagated out of `run()`; they get their own handler
+  that returns immediately rather than joining the retry tuple, because a
+  declared entity refuses identically every time and "failed after 3
+  attempts" would name a network problem that is not there.
+  **The two baselined rows were removed from
+  `.github/bandit-baseline.json` BY HAND** -- 40 deleted lines, nothing
+  else touched, verified by a round-trip that reproduces the file byte
+  for byte before editing it. Never regenerate it here.
+  **Two things found in the baseline while doing it.** Its B314 row says
+  `arxiv.py:141` and the call was at line 182 -- bandit matches anyway,
+  so baseline line numbers are not an index into the file. And the file
+  is a HYBRID: all 138 `results` are `./` (Linux, the half bandit
+  compares, correct) while 199 of 200 `metrics` keys are `.\` (Windows).
+  The metrics block is not used for baseline comparison, so it is
+  cosmetic and was left exactly as found; "fixing" it by regenerating
+  would break the half that works.
 - **pip-audit threshold.** The job fails on any finding because 2.10.1
   has no severity filter and the tree was clean at all levels. Revisit
   HIGH+-only if a LOW advisory starts taxing PRs; the escape hatch is a
@@ -1718,3 +1737,88 @@ Raising it would move a number the test asserts on. Named here so the next
 reader finds the exposure recorded rather than discovering it in a full
 run.
 
+## 32. A wall-clock ceiling set below the worst case of the thing it times (closed, batch 116)
+
+**Found by CI, on a commit that changed only documentation.** The `tests`
+job went red on `de4bcac` with:
+
+```
+FAILED tests/test_pilot_wait.py::TestItWaitsOnTime::test_a_passing_wait_costs_only_what_it_needs
+AssertionError: paid for the timeout it did not need: 1.010s
+```
+
+**The test was wrong, not the suite.** A satisfied predicate costs exactly
+one `pilot.pause()` -- `settle` checks the predicate, pauses once to
+quiesce, returns -- and `settle`'s own docstring, fifty lines above the
+implementation, measures a pause at **21ms idle and 1021ms with a busy
+sibling, floored at 20ms and capped at 1000ms**. The ceiling was `< 1.0`,
+below the cap of the thing it timed. It has been that way since the test
+was written (`46772fd`), which is why this is not a batch 114 regression.
+
+**AND THE FIRST FIX WAS WRONG IN THE SAME WAY, which is why this entry was
+rewritten.** Batch 116 replaced 1.0 with a flat 2.0 and called it "one
+full capped pause plus margin". `Pilot.pause()` is
+`await self._wait_for_screen()` -- **timeout 30.0s**, raising
+`WaitForScreenTimeout` -- followed by `wait_for_idle(0)`, so 1000ms is the
+IDLE HALF ONLY and one pause is bounded at ~31s. 2.0 fixed the observed
+failure and was not a derived bound. The ceilings are relative now:
+each test times one bare `pilot.pause()` and takes the cap from
+`inspect.signature(wait_for_idle)` rather than restating a number this
+repo has now got wrong twice.
+
+**The mechanism is simpler than the figure that was cited, too.** CI's
+1.010s is not the 1021ms busy-sibling measurement: `wait_for_idle` checks
+`elapsed_time >= max_sleep` only AFTER sleeping one 20ms
+`SLEEP_GRANULARITY` tick, so reaching the 1.0s cap costs 1.0s plus part of
+a tick. That is checkable from six lines of textual's source, where the
+46x figure needed a load test.
+
+**What batch 114 did do is raise the odds.** Classing `test_tui.py` turned
+one serialised group into 41 schedulable ones, so on a 3-worker runner TUI
+work now overlaps where it used to queue. The defect was always reachable;
+114 made it likely enough to see. That is also the honest limit of batch
+114's "every class green standing alone" check: standing alone proves no
+test depended on a PREDECESSOR, which is the opposite of proving that
+tests which never ran at the same time are safe to run at the same time.
+
+**The grep found a worse one that had never failed.** AGENTS.md's "grep
+for every other call site sharing the root cause" turned up
+`test_it_stays_a_count_and_not_a_deadline`: `pump(pilot, 3)` is THREE
+pauses, worst case ~3.0s, against a 2.0s ceiling. More exposed than the
+one that fell over, and silent.
+
+| test | operation | original | batch 116's first try | now |
+|---|---|---|---|---|
+| `test_a_passing_wait_costs_only_what_it_needs` | 1 pause | **1.0** | 2.0 | `one_pause + PAUSE_CAP + 0.5` |
+| `test_it_stays_a_count_and_not_a_deadline` | 3 pauses | **2.0** | 4.0 | `one_pause + 3*PAUSE_CAP + 0.5` |
+
+`PAUSE_CAP` is `wait_for_idle`'s `max_sleep` default, read from the
+signature. The additive slack is for the swing BETWEEN two consecutive
+pauses -- 21ms against 1021ms -- which is the one thing a calibration
+cannot predict. Note what a flat `one_pause + 1.0` would have been: an
+idle calibration against a capped measured pause gives 1.021s, THINNER
+than the 2.0 it replaced.
+
+**A third site was checked and left.** `test_tui.py:1263`
+(`test_effort_lookup_does_not_block_the_ui_thread`) budgets 3.0s for one
+`pilot.press`, which is 3x one capped pause, and its sibling thread blocks
+on an `Event` rather than burning CPU. It does not share the defect.
+
+**Neither ceiling was widened into uselessness, and that was driven rather
+than argued.** Each was mutated against the regression its own message
+names: `settle` made to pay its timeout reads 30.004s against the new 2.0,
+and `pump` given a deadline reads ~10s against the new 4.0. Both go red.
+
+**The rule this leaves, in the form the second attempt earned.** A
+wall-clock upper bound should not restate a constant it does not own.
+Prose beside a helper is a snapshot of one measurement, and this entry is
+the proof: the 1000ms figure was accurate about `wait_for_idle` and was
+read twice as though it described `Pilot.pause`. Measure the operation in
+the test, read the library's bound from the library, and keep the written
+figure for explaining WHY rather than for arithmetic.
+
+**Two sites knowingly left**, both passing, neither implicated, and both
+carrying the same incomplete model: `test_pilot_wait.py:133` (a 0.5s
+deadline plus one pause, ceiling 2.0) and `test_tui.py:1263` (one
+`pilot.press`, ceiling 3.0). Named here so the next reader finds them
+written down rather than in a run.

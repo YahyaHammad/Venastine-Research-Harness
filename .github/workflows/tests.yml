@@ -106,18 +106,28 @@ jobs:
       # re-measured under loadscope in batch 110). pytest.ini's `-n auto`
       # gives 70% of the cores; the obvious CI move is `-n logical` for the
       # other 30%, since a runner has nothing else to do with itself. It
-      # buys nothing, under EITHER distribution mode. This suite is
-      # FLOOR-BOUND: the slowest single GROUP sets the wall time, and under
-      # `--dist loadscope` that is test_tui.py's 28 module-level tests at
-      # 20.7% of the suite, so past about a quarter of the cores extra
-      # workers only contend.
+      # buys nothing, under EITHER distribution mode.
       #
       # Measured twice. Under loadfile: `-n auto` 2:15 / 2:17 / 2:18 / 2:21
       # against `-n logical` 2:37 / 3:01 / 3:06. Under loadscope, alternated
       # on the same commit: `-n auto` 2:09 / 2:10 against `-n logical`
-      # 2:13 / 2:13 / 2:14. Lowering the floor narrowed the gap and did not
-      # change its sign. So CI runs exactly what a contributor runs.
-      # Raising the ceiling means the 28 classless tests in test_tui.py
-      # (docs/TECHNICAL_DEBT.md 30), not turning a dial.
+      # 2:13 / 2:13 / 2:14. So CI runs exactly what a contributor runs.
+      #
+      # THE FLOOR THAT USED TO BIND IS GONE, AND THIS RUNNER NEVER FELT IT
+      # (batch 114; TECHNICAL_DEBT 30 closed, and this comment said
+      # otherwise until batch 116). Until then the slowest single GROUP set
+      # the wall time, and under `--dist loadscope` that was test_tui.py's
+      # 183 module-level tests as ONE group -- a test outside a class is
+      # grouped by its MODULE -- at 292 node ids. (This comment used to say
+      # "28", which was the sync-only count and was wrong before 114 made
+      # it obsolete.) They are 41 classes now, and the developer-machine
+      # suite went 138.1s -> 85.9s, 1.61x, alternated three runs a side.
+      #
+      # DO NOT READ THAT 1.61x AS A CI NUMBER. `-n auto` is 70% of the
+      # cores, so this 4-core runner takes 3 workers and its ideal share
+      # was already above the old floor -- CI was worker-bound, not
+      # floor-bound, and gained nothing from the change. What it did gain
+      # is more concurrency between TUI groups that used to be serialised
+      # on one worker, which is how batch 116's flake surfaced here first.
       - name: Run the suite
         run: python -m pytest -q

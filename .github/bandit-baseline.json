@@ -5119,46 +5119,6 @@
       "test_name": "hardcoded_password_funcarg"
     },
     {
-      "code": "16 import logging\n17 import xml.etree.ElementTree as ET\n18 from typing import Optional\n",
-      "col_offset": 0,
-      "end_col_offset": 34,
-      "filename": "./tools/builtin/arxiv.py",
-      "issue_confidence": "HIGH",
-      "issue_cwe": {
-        "id": 20,
-        "link": "https://cwe.mitre.org/data/definitions/20.html"
-      },
-      "issue_severity": "LOW",
-      "issue_text": "Using xml.etree.ElementTree to parse untrusted XML data is known to be vulnerable to XML attacks. Replace xml.etree.ElementTree with the equivalent defusedxml package, or make sure defusedxml.defuse_stdlib() is called.",
-      "line_number": 17,
-      "line_range": [
-        17
-      ],
-      "more_info": "https://bandit.readthedocs.io/en/1.9.4/blacklists/blacklist_imports.html#b405-import-xml-etree",
-      "test_id": "B405",
-      "test_name": "blacklist"
-    },
-    {
-      "code": "140 def _parse_atom_feed(xml_text: str) -> list[dict]:\n141     root = ET.fromstring(xml_text)\n142     entries = root.findall(\"atom:entry\", ATOM_NS)\n",
-      "col_offset": 11,
-      "end_col_offset": 34,
-      "filename": "./tools/builtin/arxiv.py",
-      "issue_confidence": "HIGH",
-      "issue_cwe": {
-        "id": 20,
-        "link": "https://cwe.mitre.org/data/definitions/20.html"
-      },
-      "issue_severity": "MEDIUM",
-      "issue_text": "Using xml.etree.ElementTree.fromstring to parse untrusted XML data is known to be vulnerable to XML attacks. Replace xml.etree.ElementTree.fromstring with its defusedxml equivalent function or make sure defusedxml.defuse_stdlib() is called",
-      "line_number": 141,
-      "line_range": [
-        141
-      ],
-      "more_info": "https://bandit.readthedocs.io/en/1.9.4/blacklists/blacklist_calls.html#b313-b320-xml-bad-elementtree",
-      "test_id": "B314",
-      "test_name": "blacklist"
-    },
-    {
       "code": "144                 result = result.evalf(parsed.precision)\n145         except Exception:\n146             pass\n147 \n",
       "col_offset": 8,
       "end_col_offset": 16,

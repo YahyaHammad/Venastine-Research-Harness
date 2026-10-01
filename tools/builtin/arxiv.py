@@ -14,10 +14,21 @@ tools use.
 from __future__ import annotations
 
 import logging
-import xml.etree.ElementTree as ET
 from typing import Optional
 
+# TECHNICAL_DEBT 18, batch 116. This feed is attacker-influenced -- arXiv
+# echoes the query back and the entries are third-party text -- and stdlib
+# ElementTree expands internal entities, which is Bandit B405/B314 and was
+# an accepted risk for the CI rollout rather than a decision that it was
+# safe. `defusedxml.ElementTree` is the drop-in: `fromstring` refuses
+# declared entities and external references, and it re-exports the SAME
+# `ParseError` object as the stdlib, so the empty-redirect-body path below
+# and the retry loop's except clause are unaffected. Measured, not assumed:
+# stdlib expands `&lol2;` to "lollollol" where this raises
+# EntitiesForbidden.
+import defusedxml.ElementTree as ET
 import httpx
+from defusedxml import DefusedXmlException
 from pydantic import BaseModel, Field, field_validator
 
 from tools.builtin._net_common import TTLCache
@@ -263,6 +274,46 @@ def run(params: dict) -> dict:
                 results, total = _parse_atom_feed(xml_text)
                 _cache.set(cache_key, (results, total))
                 break
+            except DefusedXmlException as e:
+                # NOT folded into the tuple below, and that is the point.
+                # A malformed body is transient and worth three attempts;
+                # a feed that DECLARES an entity is not -- it refuses the
+                # same way every time, so retrying spends two more round
+                # trips to reach the same place and then reports "failed
+                # after 3 attempts", which describes a network problem
+                # that is not there.
+                #
+                # Returned rather than raised, for the reason the retry
+                # exhaustion below is returned: a search tool that cannot
+                # answer is a result the model can work around. These do
+                # NOT subclass ParseError -- they are ValueError -- so
+                # without this clause they would propagate out of run().
+                logger.warning(
+                    "arxiv_search refused a hostile feed for %r: %s",
+                    parsed.keywords, e)
+                # THE FEED'S OWN TEXT STOPS HERE (batch 116's review).
+                # `e`'s repr carries the entity's `system_id` verbatim from
+                # the feed, so interpolating `{e}` would put a string the
+                # ATTACKER chose into the model's context -- the one place
+                # §32's untrusted-content paragraph exists to bound. The
+                # log above keeps the whole exception, because it is
+                # operator-facing and the formatter redaction sink guards
+                # app.log; the model gets the category and, where the
+                # exception carries one, the entity NAME, which XML's Name
+                # production cannot make into a sentence.
+                #
+                # getattr, not `e.name`: ExternalReferenceForbidden has no
+                # `.name`, and an AttributeError raised while building an
+                # error message would replace a handled refusal with a
+                # crash on the hostile path.
+                declared = getattr(e, "name", None)
+                named = (" -- it declared the entity %r"
+                         % str(declared)[:40]) if declared else ""
+                return {
+                    "error": "arXiv returned a feed this parser refuses to "
+                             "expand, so nothing was read from it: %s%s"
+                             % (type(e).__name__, named)
+                }
             except (httpx.HTTPError, ET.ParseError) as e:
                 last_exc = e
                 logger.warning(

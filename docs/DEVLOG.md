@@ -17259,3 +17259,170 @@ from source, not from a run", are now verified from a run. The other
 three bullets stay open.
 
 Counts unchanged at 6106: no test added.
+
+## Batch 116 -- a ceiling under its own floor, and a feed parsed defused
+
+TECHNICAL_DEBT 32 (new, found by CI) and 18's arXiv bullet.
+
+### The red, and what it was not
+
+CI's `tests` job failed on `de4bcac` -- batch 115, a commit that touched
+`.gitleaksignore` and three documentation files and no code at all. The
+first job was to prove 115 innocent rather than assume it:
+
+* the `docs-consistency` job PASSED; only the full `pytest` job failed
+* nothing outside `tests/test_docs_consistency.py` opens `AGENTS.md`,
+  `docs/DEVLOG.md` or `docs/TECHNICAL_DEBT.md`, and **no test in the tree
+  mentions gitleaks at all** -- both greps empty
+* the job ran **5:31 and completed**, against 4:43 green, so it failed on
+  an assertion and not on the 30-minute timeout
+
+Then the log, which needed a re-authenticated `gh`: the anonymous Actions
+API gives run and job conclusions for a public repo but answers
+`403 Must have admin rights` for logs. Worth knowing -- the public API is
+enough to see WHICH job failed and for how long, which is most of the
+triage.
+
+```
+FAILED tests/test_pilot_wait.py::TestItWaitsOnTime::test_a_passing_wait_costs_only_what_it_needs
+AssertionError: paid for the timeout it did not need: 1.010s
+```
+
+### The test was wrong, and the measurement that says so was already in the file
+
+A satisfied predicate costs exactly one `pilot.pause()`: `settle` checks
+the predicate, pauses once to quiesce, returns. And `settle`'s own
+docstring -- fifty lines above its implementation in the same file --
+measures a pause at **21ms idle and 1021ms with a busy sibling, floored at
+20ms and capped at 1000ms**.
+
+The ceiling was `assert elapsed < 1.0` -- below the cap of the thing it
+timed. The test has said `< 1.0` since it was written (`46772fd`), so this
+is not a batch 114 regression and it was checked rather than assumed.
+
+**AND THE FIRST FIX READ THE SAME NUMBER THE SAME WRONG WAY.** This entry
+originally justified a flat 2.0 as "one full capped pause plus margin".
+`Pilot.pause()` is `await self._wait_for_screen()` -- **timeout 30.0s** --
+and only then `wait_for_idle(0)`, so 1000ms is the idle half alone and one
+pause is bounded at ~31s. The ceilings are relative now: each test times a
+real `pilot.pause()` and reads the cap from
+`inspect.signature(wait_for_idle)`, so a textual release moves them and a
+renamed parameter fails loudly instead of leaving a stale constant.
+
+The mechanism is also cleaner than the figure cited: `wait_for_idle` tests
+`elapsed_time >= max_sleep` only after sleeping one 20ms
+`SLEEP_GRANULARITY` tick, so hitting the cap costs 1.0s plus part of a
+tick -- which is where 1.010s comes from, readable in six lines of source
+rather than inferred from a load measurement.
+
+What batch 114 DID do is raise the odds. Classing `test_tui.py` turned one
+serialised group into 41 schedulable ones, so on a 3-worker runner TUI work
+overlaps where it used to queue. And that is the honest limit of 114's
+"every class green standing alone" check: standing alone proves no test
+depended on a PREDECESSOR. It is the opposite of proving that tests which
+never ran at the same time are safe to run at the same time.
+
+### The grep found the worse one
+
+AGENTS.md's "grep for every other call site sharing the root cause" is the
+rule that earned its place again. `test_it_stays_a_count_and_not_a_deadline`
+times `pump(pilot, 3)` -- THREE pauses, worst case ~3.0s -- against a 2.0s
+ceiling. More exposed than the one that fell over, and it had never failed.
+
+| test | operation | original | first try | now |
+|---|---|---|---|---|
+| `test_a_passing_wait_costs_only_what_it_needs` | 1 pause | 1.0 | 2.0 | `one_pause + PAUSE_CAP + 0.5` |
+| `test_it_stays_a_count_and_not_a_deadline` | 3 pauses | 2.0 | 4.0 | `one_pause + 3*PAUSE_CAP + 0.5` |
+
+A flat `one_pause + 1.0` was considered and rejected on the arithmetic: an
+idle calibration (~21ms) against a capped measured pause (~1.02s) gives a
+ceiling of 1.021s, thinner than the 2.0 it would replace.
+
+A third site was checked and left alone: `test_tui.py:1263` budgets 3.0s
+for one `pilot.press`, which is 3x one capped pause, and the sibling
+thread it runs against blocks on an `Event` rather than burning CPU.
+
+**Widening a ceiling is how a test stops being one, so both were driven
+against the regression they name.** Re-driven after the rewrite: `settle`
+made to pay its timeout reads 30.02s against a budget of 1.53s, and `pump`
+given a deadline goes red too. Each test also asserts that its own budget
+stays well under the deadline it guards, so a pathological calibration
+cannot quietly turn the ceiling into "anything".
+
+The rule left behind: **a wall-clock bound should not restate a constant it
+does not own.** The 1000ms figure was accurate about `wait_for_idle` and
+was read twice as though it described `Pilot.pause`. Measure the operation
+in the test, read the library's bound from the library, and keep the
+written figure for explaining why.
+
+### The second half: an Atom feed parsed defused
+
+Item 18's arXiv bullet. `tools/builtin/arxiv.py` parsed an
+attacker-influenced feed with stdlib ElementTree -- Bandit B405 at the
+import and B314 at the call, both baselined as accepted risk for the CI
+rollout rather than decided to be safe.
+
+Two things were measured before a line changed, and both changed the code:
+
+* **`defusedxml.ElementTree.ParseError` IS the stdlib `ParseError`** --
+  the same object. So the empty-redirect-body comment's behaviour and the
+  retry loop's `except ... ET.ParseError` survive untouched.
+* **`EntitiesForbidden` and its siblings subclass `ValueError`, not
+  `ParseError`.** They would have sailed straight through that `except`
+  and out of `run()`. This was the predicted bug of the batch and it was
+  there.
+
+So they get their own handler, placed BEFORE the retry tuple and returning
+at once. A malformed body is transient and worth three attempts; a
+declared entity is not -- it refuses identically every time, so retrying
+spends two more round trips to arrive at "failed after 3 attempts", which
+names a network problem that is not there.
+
+### One of the four new tests cannot fail, and says so
+
+Measured, not assumed: stdlib ElementTree expands `&lol2;` to
+`"lollollol"` and hands it back as a paper title, while defusedxml raises
+`EntitiesForbidden`. That is the prover, and reverting the import turns it
+red.
+
+The external-entity test is a different matter. **CPython's expat does not
+resolve external entities, so stdlib ALSO refuses that payload** -- with
+`ParseError: undefined entity` rather than `EntitiesForbidden`. Reverting
+the import leaves that test GREEN. It is kept, because "a file on disk
+never reaches the model" is worth a regression test and because the
+stdlib's refusal is an implementation detail of one parser on one runtime
+rather than a guarantee this code is owed -- but its docstring says
+plainly that it pins a property and does not prove the fix. This project
+has already paid once for a batch of tests that could not fail; the
+difference is whether the file admits it.
+
+Verified by running the revert and asserting the SHAPE of the result: two
+tests red, two green, exactly as documented.
+
+### Two things the bandit baseline turned out to be
+
+The two dead rows came out by hand -- 40 deleted lines, nothing else
+touched -- after a round-trip check proved re-dumping the JSON reproduces
+the file byte for byte. That check paid for itself immediately: the first
+attempt refused, because the baseline is **CRLF** and a naive rewrite
+would have reformatted 5,519 lines.
+
+And the file is a hybrid. All 138 `results` are `./`-prefixed Linux paths
+-- the half bandit actually compares, and correct -- while 199 of its 200
+`metrics` keys are `.\`, Windows form. Metrics play no part in baseline
+comparison, so it is cosmetic and was left exactly as found; regenerating
+to tidy it would break the half that works. Also worth recording: the
+B314 row says `arxiv.py:141` and the call is at line 182. Bandit matches
+anyway, so a baseline line number is not an index into the file.
+
+### And the CI comment that still described the old floor
+
+`.github/workflows/tests.yml` still called the suite FLOOR-BOUND on
+"test_tui.py's 28 module-level tests at 20.7%" and pointed at
+TECHNICAL_DEBT 30 as open work. Batch 114 updated AGENTS.md,
+ARCHITECTURE.md, README.md and pytest.ini and missed this file -- the one
+a CI reader opens. ("28" was the sync-only count; there were 183.) The
+`-n auto` versus `-n logical` measurements in it are untouched, because
+they are still true and still the reason CI passes no `-n`.
+
+Counts 6106 -> 6110.

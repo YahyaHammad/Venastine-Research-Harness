@@ -169,6 +169,20 @@ google-re2==1.1.20251105
 # still covers this project's platforms.
 cryptography>=42.0,<52
 
+# TECHNICAL_DEBT 18, batch 116. A PRODUCTION dependency, and it sits above
+# the test block deliberately: `tools/builtin/arxiv.py` imports it at
+# module load, pyproject.toml reads this file for its dependency list via
+# `dynamic = ["dependencies"]`, and packages have already been moved OUT of
+# here into the `documents` extra once. Filed under "Test dependencies" --
+# where batch 116 first put it -- a later tidy of that block would drop it
+# from the shipped set and break `arxiv_search` at import.
+#
+# stdlib ElementTree expands declared entities on a feed this project does
+# not write (Bandit B405/B314). Pinned exactly rather than floored, the way
+# textual is: item 18 asks for "version-pinned re-verification", and a
+# parser's refusals are exactly what a silent minor bump could change.
+defusedxml==0.7.1
+
 # --- Test dependencies -------------------------------------------------
 # Previously absent, which the docs recorded as a known open item since
 # §14: the suite has always needed pytest and pytest-mock, and §16's TUI
@@ -190,3 +204,4 @@ pytest-asyncio>=1.0
 # rather than by a version. Brings `execnet` (MIT), which is its only
 # transitive.
 pytest-xdist>=3.6
+

@@ -247,7 +247,17 @@ async def settle(pilot, predicate, timeout: float = 10.0) -> bool:
        process-wide CPU heuristic (`process_time()` deltas), floored at
        20ms and capped at 1000ms. Measured: 21ms per pause with nothing
        burning CPU in-process, 1021ms with one busy sibling thread -- a
-       46x swing. So `tries=120` was worth anywhere from 2.5s to 122s,
+       46x swing.
+
+       THAT CAP IS THE IDLE HALF ONLY, AND READING IT AS THE WHOLE PAUSE
+       COST TWO CI FAILURES (batch 116). `Pilot.pause()` awaits
+       `self._wait_for_screen()` FIRST, whose own timeout is 30.0s and
+       which raises `WaitForScreenTimeout` rather than returning, and only
+       then `wait_for_idle(0)`. So one pause is bounded at ~31s, not at
+       1.0s, and nothing here should be read as a budget for one. Batch
+       116 set two ceilings from "capped at 1000ms" as though it were the
+       whole operation; `test_pilot_wait.py` measures a real pause now and
+       reads the cap off textual's signature instead of restating it. So `tries=120` was worth anywhere from 2.5s to 122s,
        set by something entirely unrelated to what was being waited for.
        Instrumenting a clean full run found the real need: 44 calls, max
        0.304s, median 45ms. The default below is ~33x the observed
