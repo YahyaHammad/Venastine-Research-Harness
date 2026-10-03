@@ -41,6 +41,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§57. One model for the subagents** — **(NOT BUILT: requested batch 122, specified, not designed)** (an agent definition can pin a model and nothing can set one for the subagents as a class, so a cheap child runs on the parent's expensive model)
 - **§58. Who the agent is when you ask it** — **(NOT BUILT: requested batch 122, specified, not designed)** (the chat system prompt is "You are a helpful assistant.", so the model knows nothing about the harness it is running in)
 - **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
+- **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)** (there is no way to drive this harness except by sitting in front of it, and the open standard that would change that has no concept of the approval gate this project is built around)
 
 ---
 
@@ -1292,3 +1293,190 @@ exactly-typed string with a selection, and both reuse a widget that already exis
 - Whether the memory modal shows scope and category as columns, and whether it can filter.
 - Whether `shift+tab` is bound at the app level with `priority=True` -- which is what `ctrl+c`
   needs in order to beat the focused text box -- and what that does under a modal.
+
+---
+
+## §60. The Unified Harness Protocol
+
+**Added in batch 123, from the owner's request** to find out what UHP compliance would take and to
+record it if it is appropriate and possible. It is both, with one caveat large enough that it is
+stated here rather than discovered during implementation: **UHP has no concept of approval**, and
+the approval gate is the most heavily designed subsystem in this repository.
+
+Specified in slices, none of them built. The design round that locks the remaining shapes happens
+when a slice is picked up, which is the §49 cycle.
+
+### What UHP is, verified against the specification
+
+It is the **Unified** Harness Protocol, not Universal -- HarnessRouter's open standard, Apache-2.0.
+Version **`2026-09-28`**, marked *"Draft standard -- stable enough to build on, versioned so it can
+change safely"*. Three versions exist (`2026-08-11`, `2026-09-12`, `2026-09-28`): the standard is
+days old and has moved twice in under two months, which is why UH6 slices it the way it does.
+
+Eleven chapters plus a schema chapter carrying OpenAPI 3.1 and JSON Schema 2020-12, and a runnable
+conformance suite of **76 checks in three cumulative classes**:
+
+| class | checks | what it covers |
+|---|---|---|
+| **core** | 40 | capability discovery, version negotiation, authentication, the error envelope, harnesses, models, task execution streaming and not, the event stream, sessions, cancellation, reserved request fields |
+| extended | +8 | session listing and inspection, file input, artifacts, download headers, path-traversal probes |
+| full | +26 | harness create / update / delete, skill-folder round trip, MCP and disabled-tool persistence, session sharing, plugins |
+
+The task surface is deliberately OpenAI-Responses-compatible: `POST /v1/responses`,
+`GET /v1/responses/{id}`, `POST /v1/responses/{id}/cancel`, `DELETE /v1/responses/{id}`,
+`GET /v1/harnesses`, and `GET /v1/uhp`, which is the one endpoint a server may serve unauthenticated.
+
+### Why it fits this codebase unusually well
+
+`core/events.py`'s `LoopEvent` maps almost field for field onto the SSE vocabulary a conformant
+server MUST emit. This is not a coincidence worth leaning on -- both are descriptions of the same
+loop -- but it does mean the translation is a mapping rather than a redesign.
+
+| `LoopEvent` | UHP |
+|---|---|
+| `token_delta` | `response.output_text.delta` |
+| `thinking_delta` | `response.reasoning_summary_text.delta` |
+| `tool_call_start` `{id, name, input}` | `response.output_item.added` carrying a `function_call`, then `response.function_call_arguments.delta` / `.done` |
+| `tool_result` `{id, result}` | a `function_call_output` item, matched by `call_id` |
+| `stop_reason: "max_steps_reached"` / `"token_budget_exceeded"` | `status: "incomplete"` -- UHP's budget-truncation status, exactly |
+| `final_response` | `response.completed` |
+| `notice`, `retract` | nothing; both are display-only by their own decisions and correctly drop |
+| **`permission_request`** | **nothing, and there is no equivalent to add it to** |
+
+The harness descriptor is the shape of an `AgentDef`: `systemPrompt`, `mcpServers`, `skills`,
+`plugins`, `disabledTools`, `maxStep`, `timeoutSeconds`, `environment`, `defaultModel`. UHP's
+`environment` is §49's backend concept. A UHP session continued with `previous_response_id` is a
+thread. UHP's "a server MUST NOT run two tasks concurrently in the same session" is `_busy`.
+
+### The caveat, which is the whole of the risk
+
+UHP's lifecycle defines exactly five statuses -- `in_progress`, `completed`, `failed`, `incomplete`,
+`cancelled` -- with no pause, no awaiting-input, no `requires_action`, and terminal states are one
+way. `security.md` says outright that the specification provides no human-in-the-loop system:
+*"Tool calls are visible as they happen; a client can surface or gate them."*
+
+**A UHP task cannot stop to ask.** Compliance therefore means serving the headless posture, and UH2
+is the honest response to that rather than a fix for it.
+
+### What was measured before any of this was written (2026-10-03)
+
+Every line was run.
+
+- **Per-child isolation works.** Four children spawned in parallel with distinct `AGENT_WORKSPACE`
+  each resolved their own `WORKSPACE_DIR`, `OUTPUT_DIR` and `DB_PATH`, all four reporting
+  `WORKSPACE_DIR_EXPLICIT: true`. **`OUTPUT_DIR` is DERIVED from `AGENT_WORKSPACE`** with no second
+  variable (`config_schema.py:771`), `DB_PATH` takes `APP_DB_PATH`, and the log file takes
+  `AGENT_LOG_FILE` (`logging_setup.py:133`). Three environment variables give a child complete path
+  isolation, and that is what UH3 rests on.
+- **Child cold start is ~3.8 s** for the full headless import set: `config` 0.46 s, plus storage
+  1.1 s, plus `core.loop` 2.4 s, plus `tools.registry` 2.3 s, all of them together 3.8 s. UH4 is
+  what turns that into a per-SESSION cost rather than a per-task one.
+- **Two tools go dark headless under the shipped posture** -- `remember` and `write_project_doc` --
+  and **both are grantable**, so a client can pre-authorise them per task. Thirty tools are
+  registered and twenty-eight are reachable headless as shipped. The shipped posture disables
+  `shell`, `write` and `edit` outright, so this picture changes when a user enables them; that has
+  to be measured in the design round rather than assumed from this number.
+- **`starlette`, `uvicorn` AND `sse-starlette` are already hard requirements of `mcp==2.0.0`** --
+  `pip show mcp` lists all three, and `starlette 1.3.1` / `uvicorn 0.51.0` are installed in this
+  environment now, by that path. Declaring them would add nothing to an install, which is exactly
+  the argument `requirements.txt` already makes for `cryptography`.
+- **SSE throughput, both candidate stacks, loopback, 2,000 events per client:**
+
+  | | 1 connection | 4 connections | 16 connections |
+  |---|---|---|---|
+  | stdlib `ThreadingHTTPServer` | 14,529 ev/s, TTFB 37 ms | 12,067 ev/s, TTFB 9 ms | 19,688 ev/s, **TTFB 18 ms** |
+  | `starlette` + `uvicorn` | 25,811 ev/s, TTFB 49 ms | 57,065 ev/s, TTFB 29 ms | 49,376 ev/s, **TTFB 244 ms** |
+
+  uvicorn is 2.5 to 4.7 times faster in raw throughput and **thirteen times worse on tail latency at
+  sixteen connections**, because one event loop serialises connection setup where threads accept in
+  parallel. Against the real workload neither figure matters: sixteen sessions each streaming at
+  500 tokens per second -- faster than any current model -- is 8,000 events per second, under the
+  stdlib floor of 12,067. The HTTP layer is not the bottleneck in either stack. The model is, by
+  orders of magnitude.
+- **There is no HTTP server anywhere in the tree** -- no fastapi, flask, aiohttp or uvicorn import,
+  no `http.server`, no `BaseHTTPRequestHandler`, in any module.
+- **There is no cancellation of an in-flight turn.** `shell_kill` ends a shell session and ctrl+c
+  quits the process; nothing stops a running chat turn or research pass. UHP core requires
+  `POST /v1/responses/{id}/cancel` ending in `status: "cancelled"`, never `failed`, with partial
+  output retained. **It is the one core capability with no existing machinery at all**, which is why
+  it is slice 0.
+- **One process is one project, one posture, one workspace.** `file_ops.WORKSPACE_ROOT` is captured
+  at import; `security.posture` latches on first read ("reading is what closes the door"); the
+  container-runtime probe, the tool registry and the agent, skill and memory managers are all
+  module-level singletons. That is what makes the supervisor the right shape rather than a taste.
+
+### The slices
+
+**Slice 0 -- cancellation, and it is not UHP-specific.** A cooperative cancel token checked at the
+loop's step boundary and threaded into `core/client.py`'s stream; partial output retained; a
+terminal reason distinct from failure. One mechanism, three consumers: the TUI's stop key, the CLI,
+and later the endpoint. It ships useful whether or not anything above it is ever built.
+
+**Slice 1 -- the child protocol.** A headless run that emits `LoopEvent`s as JSON Lines on stdout
+and takes a control channel for cancellation, isolated by the three environment variables measured
+above. The child must not read stdin, which batch 121 made expressible: `_release_terminal()` is the
+named handover, and a child that never starts a pump cannot deafen anything.
+
+**Slice 2 -- the server, core conformance.** `GET /v1/uhp`, `GET /v1/harnesses`,
+`GET /v1/harnesses/{id}`, `POST /v1/responses` streaming and not, `GET /v1/responses/{id}`,
+`POST /v1/responses/{id}/cancel`, `DELETE /v1/responses/{id}`, the error envelope, bearer
+authentication, `Idempotency-Key`, `session_busy`, and the event vocabulary with `sequence_number`
+strictly monotonic and no gaps. Verified by running the suite's own `--class core`.
+
+**Slice 3 -- extended conformance.** File input, artifacts, download headers, path-traversal probes,
+session listing and inspection. The research pipeline's `output/<run_id>/` tree is already the
+artifact store. **Full is out of scope and recorded as out of scope**: harness CRUD, plugins and
+session sharing are a product, not a protocol obligation.
+
+### Decisions (UH1-UH12)
+
+| # | Decision |
+|---|---|
+| **UH1** | **A native server, core class first** (owner decision), with extended as slice 3 and full explicitly out of scope. The alternative was a separate runner wrapping the CLI, which is what HarnessRouter already does for other harnesses -- less work, and it leaves this harness non-compliant while something else speaks for it |
+| **UH2** | **UHP mode is HEADLESS, and the operator is told so in words.** Approval-gated tools are hidden by the rule that already exists -- `response_channel is None`, §18's headless filter -- and a client pre-authorises per task through `metadata`, which is the `--grant-tools` route that already works with no terminal. The server says at startup what that means and names the tools it is withholding. The warning is the owner's explicit requirement rather than a nicety: serving the gate's headless behaviour over a network without saying so is exactly the invisibility this project keeps refusing, and the headless notice (§18) already exists for the same reason one level down |
+| **UH3** | **A supervisor with one child process per session**, isolated by `AGENT_WORKSPACE`, `APP_DB_PATH` and `AGENT_LOG_FILE`. Measured rather than hoped: four parallel children, distinct workspaces, `OUTPUT_DIR` derived for free. Every singleton keeps its current meaning, the posture latch and D17's trust gate are untouched, and sessions genuinely run in parallel -- which is the owner's condition for the architecture being worth having. The alternative, unwinding the singletons, reaches into the three subsystems carrying the most locked decisions |
+| **UH4** | **One child per SESSION, not per task.** The 3.8 s cold start is then paid once per session, and a `previous_response_id` continuation reuses a live child -- which is also what UHP requires in its own words: the new task runs "in the same session, with the same working directory and its files" |
+| **UH5** | **stdlib `http.server` with threads, decided on architecture rather than on speed.** The server is a thin relay in front of the supervisor, and keeping it synchronous keeps true the property AGENTS.md states ("synchronous throughout, except the MCP bridge and the Textual event loop"). Recorded with both measurement tables above and with the fact that `starlette`, `uvicorn` and `sse-starlette` are ALREADY in `mcp`'s hard closure -- so this is reversible at zero install cost the day hand-rolled SSE proves the wrong trade, and the measurement that would justify reversing it is tail latency, where stdlib currently wins |
+| **UH6** | **Cancellation is slice 0 and is not UHP-specific.** It ships usable from the TUI and the CLI whether or not the server is ever built. That is the deliberate hedge against a draft standard that has moved twice in two months: if UHP disappears, slice 0 was still worth doing, and no other slice is |
+| **UH7** | **A UHP harness object is an `AgentDef`,** with `base: "venastine"`. `systemPrompt`, `mcpServers`, `skills`, `disabledTools`, `maxStep` and `environment` already exist here as agent frontmatter, §17's MCP config, §19's skills, `ToolPermissions`, `max_steps` and §49's backends. Nothing new is invented to answer discovery |
+| **UH8** | **One translation point from `LoopEvent` to the SSE vocabulary,** not one per endpoint and not one per consumer. Fix at the producer; `param_digest` with its three readers is the standing example of what the alternative costs |
+| **UH9** | **The capability document is GENERATED from what is wired, never hand-written.** The specification's own MUST, and the reason is its own: *"A server MUST NOT advertise a capability it does not implement -- advertising is a promise, and a client that trusts it and receives a `404` has been lied to in a way it cannot recover from."* A hand-written capabilities object is a second source of truth for what the code does |
+| **UH10** | **The protocol version is pinned and re-verified deliberately** -- D22's reasoning applied to a specification instead of a package. The conformance suite runs at a named version, and moving it is a step someone takes on purpose, because a draft that changes underneath CI makes CI's result depend on when it ran |
+| **UH11** | **Off by default, and loopback by default.** It is a network listener on a machine that runs agent code. It is not in the npm default path, it does not start without being asked, and the posture badge says it is running (UN3's rule: a badge describes what this process may do, and a user who reads it afterwards has read it too late) |
+| **UH12** | **The trust store is the one piece of shared mutable state between children.** `~/.config/venastine/trusted_projects.json` is a read-modify-write through `write_json_atomic`, and atomic replacement does not make concurrent read-modify-write safe -- two children granting trust can lose one update. Grants are serialised, and a child never grants trust on its own: the server is handed trusted projects or refuses, because D17's prompt is a human decision and there is no human on this path |
+
+### What must be settled before any slice is built
+
+- **TLS.** `architecture.md` says "All requests MUST be HTTP/1.1 or later over TLS", and no loopback
+  exemption was found in the chapters read for this section. Read it out of the machine-readable
+  schema first: it decides whether a local deployment needs a certificate story, and that is a large
+  difference in what slice 2 costs.
+- The exact `GET /v1/uhp` response body and the capabilities object, from the schema rather than
+  from prose.
+- Whether any core check requires CROSS-session concurrency. It decides whether UH3's supervisor is
+  required for conformance or merely better, and `session_busy` is defined only for the same session.
+- What `--mode research` is in this model. A ten-pass run is a task, but its artifacts and trace do
+  not fit `output[]` cleanly. Probably a second harness `base`, and probably not in core.
+- Whether `shell` under a headless run is denied at call time or hidden up front once a user enables
+  it. Measured for the shipped posture, not for an enabled one.
+- Who issues the bearer token and where it is stored. Not `providers.json`, which holds OUTBOUND
+  credentials; this is an inbound one, and the two have different threat models.
+
+### Gap register
+
+- **The approval gate has no representation in the protocol, and a client gating by watching the
+  stream is advisory rather than enforcing.** By the time a `function_call` event is visible the
+  tool has already run. This is the protocol's gap and not this harness's, and it cannot be closed
+  from inside a conformant server: the five statuses are closed and terminal states are one way.
+  UH2 is the honest response, not a fix.
+- **The standard is days old and has moved twice in two months.** UH6's slicing is the hedge and the
+  only one available; a locked decision record written against a moving draft is the thing this
+  project's conventions exist to prevent, so UH1-UH12 are deliberately about THIS codebase's shape
+  rather than about the protocol's wording.
+- **3.8 s cold start is client-visible on the first task of a session.** UH4 makes it once per
+  session rather than once per task; it does not make it disappear, and a warm pool is the obvious
+  later answer.
+- **A `harness_error` is a `200` carrying `status: "failed"`.** This loop deliberately lets
+  exceptions propagate -- `core/events.py`: "there is deliberately no error variant" -- so the server
+  is where an exception becomes a status, and that boundary has to be exactly one place or the two
+  will disagree about what failed.

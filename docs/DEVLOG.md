@@ -18143,3 +18143,135 @@ batch should produce. No WSL leg and no mutation pass over production code: noth
 changed, so there is no POSIX path to exercise and nothing to mutate.
 
 Counts unchanged at 6204.
+
+## Batch 123 -- the protocol with no word for the thing this harness is built around
+
+**Owner request:** find out what it would take to make the harness Unified Harness Protocol
+compliant, check the specification online, and add it to the roadmap if it is appropriate and
+possible -- raising anything that had to be decided before the record was extended.
+
+**Documentation only**, like batch 122. One section, `§60`, with `UH1`-`UH12`, four slices and a
+gap register. It is appropriate and it is possible; the caveat is large enough that it is the first
+thing the section says.
+
+### The name, and the standard
+
+It is the **Unified** Harness Protocol, not Universal. HarnessRouter's open standard, Apache-2.0,
+version `2026-09-28`, marked "Draft standard -- stable enough to build on, versioned so it can
+change safely". Three versions exist (`2026-08-11`, `2026-09-12`, `2026-09-28`), so it is days old
+and has moved twice in under two months -- which is the single most important fact about building
+against it, and the reason UH6 puts the one independently valuable piece first.
+
+Eleven chapters plus a schema chapter (OpenAPI 3.1, JSON Schema 2020-12), and a conformance suite of 76 checks in
+three cumulative classes: **core** 40 (discovery, version negotiation, auth, the error envelope,
+harnesses, models, task execution streaming and not, the event stream, sessions, cancellation,
+reserved request fields), **extended** +8, **full** +26.
+
+### Why it fits, and the one place it does not
+
+`core/events.py`'s `LoopEvent` maps almost field for field onto the SSE vocabulary a conformant
+server MUST emit -- `token_delta` to `response.output_text.delta`, `thinking_delta` to
+`response.reasoning_summary_text.delta`, `tool_call_start` to a `function_call` item plus its
+argument deltas, `tool_result` to `function_call_output`. The sharpest coincidence is
+`stop_reason: "max_steps_reached"`, which is precisely UHP's `status: "incomplete"` -- a harness
+that stopped at a budget with partial output. The harness descriptor is an `AgentDef`:
+`systemPrompt`, `mcpServers`, `skills`, `disabledTools`, `maxStep`, `environment`.
+
+`permission_request` maps to nothing, and there is nothing to map it to. UHP's lifecycle defines
+exactly five statuses -- `in_progress`, `completed`, `failed`, `incomplete`, `cancelled` -- with no
+pause, no awaiting-input, no `requires_action`, and terminal states are one way. `security.md` says
+it outright: the specification provides no human-in-the-loop system, and "Tool calls are visible as
+they happen; a client can surface or gate them." By the time a `function_call` event is visible the
+tool has run. **A UHP task cannot stop to ask**, so compliance means serving the headless posture,
+and UH2 is the honest response rather than a fix.
+
+### What was measured
+
+Seven measurements, two of which decided an owner question outright.
+
+- **Per-child isolation works, which was the owner's condition for the architecture.** Four children
+  spawned in parallel with distinct `AGENT_WORKSPACE` each resolved their own `WORKSPACE_DIR`,
+  `OUTPUT_DIR` and `DB_PATH`, all four `WORKSPACE_DIR_EXPLICIT: true`. Better than the question
+  assumed: **`OUTPUT_DIR` is DERIVED from `AGENT_WORKSPACE`** (`config_schema.py:771`) with no second
+  variable, `DB_PATH` takes `APP_DB_PATH`, the log file takes `AGENT_LOG_FILE`. Three environment
+  variables, complete path isolation.
+- **Child cold start is ~3.8 s** for the full headless import set (`config` 0.46 s, plus storage
+  1.1 s, plus `core.loop` 2.4 s, plus `tools.registry` 2.3 s). UH4 makes that a per-session cost
+  rather than a per-task one.
+- **Two tools go dark headless under the shipped posture** -- `remember` and `write_project_doc` --
+  and both are grantable. Thirty registered, twenty-eight reachable headless. The shipped posture
+  disables `shell`, `write` and `edit` outright, so an enabled posture has to be measured separately
+  rather than inferred from this.
+- **`starlette`, `uvicorn` and `sse-starlette` are already hard requirements of `mcp==2.0.0`.**
+  `pip show mcp` lists all three; `starlette 1.3.1` and `uvicorn 0.51.0` are installed by that path
+  now. Declaring them would add nothing to an install -- `cryptography`'s argument exactly. This
+  arrived after the owner had already chosen, and it is recorded in UH5 so the choice stays
+  re-openable with the evidence beside it.
+- **SSE throughput, both candidate stacks, loopback, 2,000 events per client.** stdlib
+  `ThreadingHTTPServer`: 14,529 / 12,067 / 19,688 ev/s at 1 / 4 / 16 connections, median TTFB
+  37 / 9 / **18** ms. `starlette` + `uvicorn`: 25,811 / 57,065 / 49,376 ev/s, TTFB 49 / 29 /
+  **244** ms. uvicorn is 2.5 to 4.7 times faster in raw throughput and **thirteen times worse on
+  tail latency at sixteen connections**, because one event loop serialises connection setup where
+  threads accept in parallel. Against the workload neither matters: sixteen sessions at 500 tokens
+  per second -- faster than any current model -- is 8,000 ev/s, under the stdlib floor of 12,067.
+  The model is the bottleneck by orders of magnitude, so UH5 is decided on architecture instead.
+- **There is no HTTP server anywhere in the tree** and **no cancellation of an in-flight turn.**
+  `shell_kill` ends a shell session and ctrl+c quits the process; nothing stops a running chat turn
+  or research pass. UHP core requires `POST /v1/responses/{id}/cancel` ending `cancelled`, never
+  `failed`, with partial output kept. It is the one core capability with no existing machinery at
+  all, which is why it is slice 0 -- and why slice 0 is worth building even if UHP disappears.
+- **One process is one project, one posture, one workspace:** `file_ops.WORKSPACE_ROOT` captured at
+  import, `security.posture` latching on first read, and the runtime probe, tool registry and
+  agent / skill / memory managers all module-level singletons. That is what makes UH3's supervisor
+  the right shape rather than a taste.
+
+### Owner decisions locked in this batch
+
+Four questions were put before anything was written; two came back conditional and both conditions
+were then measured.
+
+| | |
+|---|---|
+| Target | A native server implementing core, over a separate runner that wraps the CLI |
+| Approvals | Headless with request-time grants -- **and the operator is warned in words that this is how it works**, which is the owner's addition and is UH2's second half |
+| Architecture | Supervisor with one child per session, *conditional on children taking distinct workspaces in parallel*. Measured: they can |
+| HTTP stack | stdlib *if the performance gap is not large*. Measured: in the dimension that matters it is nil, so the recommendation stood |
+
+### Full is out of scope, and said so rather than left open
+
+Harness create / update / delete, plugins and session sharing are a product rather than a protocol
+obligation. Extended -- file input, artifacts, download headers, path-traversal probes, session
+listing -- is slice 3, and the research pipeline's `output/<run_id>/` tree is already its artifact
+store.
+
+### The first full run went red, and it was the machine
+
+Recorded because "the suite is green" is a claim about a tree, and the first run of it on this tree
+was not.
+
+Four failures, every one a time-sensitive Textual pilot test:
+`test_ctrl_c_reaches_the_app_while_the_prompt_has_focus`,
+`test_a_second_press_inside_the_window_quits`,
+`test_a_shell_that_mounts_with_sessions_live_sees_them` and
+`test_effort_lookup_does_not_block_the_ui_thread`. The run took **772 s against 77 s for the
+identical suite forty minutes earlier** -- ten times slower, which is the finding rather than the
+failures themselves. All four pass serially in 8.4 s, and a re-run of the whole suite on the same
+tree is 6158 passed, 46 skipped in 131 s. The diff is four documentation files, so nothing it
+touches is importable by any of them.
+
+AGENTS.md already names the mechanism: `pilot.pause()` "is not a fixed unit of time (21 ms with
+nothing burning CPU in-process, 1021 ms with one busy sibling thread -- its exit condition is a
+process-wide CPU heuristic)". A loaded machine moves all four.
+
+**Found while chasing it, and worth more than the flake was.** Two of the developer's own
+`main.py --tui` processes were still alive from the previous day, and one had accumulated
+**2,704 s of user CPU while spinning at 11.5% of a core**, with nobody able to type into it. That
+is batch 121's bug observed in the wild, and it adds something the diagnosis did not predict: a
+wedged instance does not merely go deaf, it SPINS. `EventMonitor` loops on
+`wait_for_handles([hIn], 100)` and then `ReadConsoleInputW`; with the pump holding the records the
+wait keeps returning signalled with nothing left to read, so the loop never blocks. It is not
+enough load to explain a ten-fold slowdown on a sixteen-core machine and it is not claimed as the
+cause -- it is recorded because the CPU profile of the pre-121 failure mode was not known before,
+and because it is one more reason the fix mattered.
+
+Counts unchanged at 6204.
