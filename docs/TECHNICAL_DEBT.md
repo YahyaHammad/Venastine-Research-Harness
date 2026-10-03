@@ -807,6 +807,16 @@ together, or the next fix creates the next finding). The tier pin in
 `tests/test_docs_consistency.py` waits on the answer, which is an owner
 call about what a tier is, not a measurement.
 
+**A FIFTH member is now specified** (batch 122). ROADMAP_v3 §58 (PR1, PR5)
+adds `with_persona` beside the four, for the same reason the other four are
+outside `with_catalogs`: it is a session fact rather than a pass's
+instruction, and it names the live model, which `/model` changes. So the
+answer here is no longer "four or five" but "five or six", and PR5 says
+explicitly that this item moves with it rather than the family quietly
+gaining a member. ROADMAP_v3 §54 (AT7) is the other claimant: an `@` file
+mention is thread state and must not reach `pass_prompt()` either, which
+makes §19's K6 trap five instances deep.
+
 ## 20. Restart-required config editor (closed, batch 84)
 
 `config_schema.load(path)` now never touches the live cache -- `path`

@@ -18010,3 +18010,136 @@ refuses every later read, and it reports `False` for a pump it could not
 retire.
 
 Counts 6180 -> 6204.
+
+## Batch 122 -- nine requested features, three of which the code had already answered
+
+**Owner request:** a list of nine features for discussion -- whether each fits, whether it belongs
+on the roadmap -- with the explicit scope *"we only need to add it to the roadmap"* and an invitation
+to raise anything that had to be settled before the record was extended rather than during
+implementation.
+
+**Documentation only.** No production file changed. Seven sections were added to `ROADMAP_v3.md`
+as §53-§59, each marked NOT BUILT, each carrying what was verified about the code today, the
+decisions the owner's answers lock, and the forks left for its own design round. That is the
+§49 cycle rather than a shortcut around it: §49 itself was "designed across six question rounds",
+and §50 and §51 were both "recorded rather than built" in the batch that raised them.
+
+### Three of the nine premises did not survive the check
+
+This is the reason the batch is worth a DEVLOG entry at all. Each was checked against the tree
+before anything was written, and each would have produced a section specifying work that is either
+already done or unnecessary.
+
+**Feature 5, chained commands.** The request asked whether `;` was a loophole, since "we made it so
+chained commands with `&&` get evaluated separately". **Nothing splits on `&&` anywhere in the
+tree.** Both characters are in `_SHELL_METACHARACTERS` (`security/sandbox.py:1533`), so both force
+`_is_inert` to False. What Q2 actually changed is that `_needs_network` reads EVERY whitespace token
+of a non-inert command rather than its first word -- tokens, never segments -- and
+`_escapes_workspace` already reads every token after the first as a path. Measured: `echo hi && curl
+http://evil` and `echo hi; curl http://evil` both classify `SANDBOXED_NET / network=True /
+writes=True`; `ls -la && rm -rf /tmp/x` and the `;` spelling both classify `SANDBOXED / writes=True`.
+`tests/test_shell.py:1156` already parametrises the `;` spelling beside the `&&` one. No section; the
+finding is recorded inside §56, which is the classifier's own section, so the question is answered
+in the record instead of being re-opened.
+
+**Feature 6, per-agent models.** The request said all agents and subagents share one model. The
+per-agent half is BUILT: `AgentDef` carries `model` and `provider` (`core/config_loader.py:228-229`)
+and both are honoured for a `/agent` turn (`tui/app.py:2659`), for a spawned subagent
+(`agents/subagent_tool.py:238`) and in compaction (`core/compaction.py:1196`), and `/model` already
+prints a note when the active agent pins its own (`tui/app.py:4786`). §57 is therefore `/submodel`
+and the failover question, and it opens by saying what already exists.
+
+**Feature 3, the shell transcript.** The one-line collapse is real -- `" ".join(text.split())` in
+`param_digest` (`safety/policy_enforcement.py:500`, batch 96), read by three consumers. But a
+successful tool result is **never rendered at all**: `tui/app.py:3322-3360` writes only failures and
+the `write`/`edit` diff. So "show the output" is new rendering rather than an un-hiding, and §55
+says so before it says anything else.
+
+### Measured for the sections that needed numbers
+
+- **`git ls-files --cached --others --exclude-standard` on this repository: 326 files in 18 ms**,
+  against 985 without `--exclude-standard`. The ignore filter removes two thirds of the tree and the
+  read costs eighteen milliseconds, which settles §54's "read it once at startup" budget rather
+  than leaving it to be felt. It also honours nested `.gitignore`, `.git/info/exclude` and the global
+  excludesfile in one call, none of which a hand-rolled matcher gets for free.
+- **`ddgs.DDGS.__init__` is `(proxy, timeout, *, verify, api_url, spawn_api)`** on the pinned
+  9.14.4 -- no client and no transport. Three of the four network tools go through this process's own
+  `httpx`; `web_search` does not, so §53 (IO3) counts three at the byte and labels the fourth an
+  estimate.
+- **`RichLog` cannot rewrite a row it has drawn**, which `Transcript`'s own docstring states and
+  `_entries` exists for. An in-place expand is a whole-transcript `reflow()`, not a repaint. §55
+  (TR4) records the measurement and deliberately leaves the verdict to the design round.
+- **`RichLog.can_focus` and `TextArea.can_focus` are both True** on the pinned textual 8.2.8, so the
+  transcript is a focus stop and `shift+tab` means reverse focus today. §59 (UI2) spends a key that
+  does something, and says so.
+- **Nothing in the tree shells out to `git`.** §54's call is the first, which is why AT8 states the
+  dependency and AT3 makes it optional by construction.
+- **Eleven built-in agents** in `agents/builtin/`, so a `shift+tab` cycle over `manager.names()` is
+  twelve-plus stops. UI3 refuses the full catalogue for that reason.
+
+### Verified against the world, not the request
+
+§56 describes Jev, which nothing in this repository has ever heard of. Checked against current
+sources rather than taken from the request: TypeSafe AI's System One model, released 2026-09-15, wire
+`POST <base>/v1/systemone` with `{model, state, questions}`, question types Choice / Score / Noul,
+70-500 ms. Ollama 0.35 serves `/v1/systemone` beside `/v1/chat/completions` on one base, and OpenJev
+and openjev-sglang implement the same wire -- so one URL shape covers hosted, self-hosted and local,
+and the coexistence case the owner raised falls out rather than needing a rule.
+
+The vendor's "mathematically impossible to hallucinate" claim is about TYPE conformance and says
+nothing about the judgement being right. JV9 requires the `config.yaml` warning to state that
+distinction rather than repeat either side of it, which is the owner's asked-for warning made
+precise.
+
+### Owner decisions locked in this batch
+
+Four questions were put before anything was written, and all four changed what got recorded.
+
+| | |
+|---|---|
+| §53 scope | Meter the network tools by default; the provider API and MCP HTTP are each separately opt-in. The owner's reason is IO1 verbatim: *"networked tools always pull data from the internet, provider and mcp might actually be local."* A single switch would charge a local Ollama against a cap bought for a tether |
+| §54 ignore source | `git ls-files`, over a hand-rolled matcher and over adding `pathspec` |
+| §57 precedence | An agent's own pin outranks `/submodel`, which outranks the session model |
+| §56 endpoint | An explicit `classifier_style`; no startup probe |
+
+### The title moved
+
+`ROADMAP_v3.md` read "Command execution: sessions, runtimes and backends", which §51 and §52
+already were not, and §53-§59 are not at all. Widened to "Everything after §48" rather than
+opening a v4: SS21's argument for a third document was that appending to v2 would read as more of
+the same revision, and a fourth buys nothing a reader of the index does not already get while
+costing a second place for a `§N` to live.
+
+### Two claims in this batch's own prose were wrong, and were fixed before the commit
+
+Recorded because a record that only ever reports other people's errors is not being read closely
+enough by the person writing it.
+
+**UI4 said a deletion "still confirms".** `/forget` does NOT confirm today -- `_cmd_forget` parses
+the uuid and deletes. Reading a uuid out of the transcript and typing it back IS the deliberation,
+and UI1 exists to take exactly that away, so the confirmation is a NEW requirement the modal
+creates rather than an existing property it preserves. Written the other way it would have put a
+false statement about current behaviour into a locked record -- the one thing the record is for.
+
+**§54's AT7 and §58's PR2 both called themselves §19 K6's FIFTH instance.** §54 comes
+first, so PR2 is the sixth. A duplicated ordinal in a counted series is how E13 and E14 came to sit
+outside the index that says where decisions live, which is what
+`test_a_claimed_range_covers_its_whole_family` was written after.
+
+### The gate was exercised, not merely passed
+
+A documentation batch whose only check is a documentation test needs that test driven, or "37
+passed" is a statement about the files being parseable rather than about the claims being true.
+Three mutations, each red alone and each restored: the map claiming `IO1-IO6` against a record
+holding `IO7` (`test_a_claimed_range_covers_its_whole_family`); the `UI` family dropped from the map
+entirely (`test_the_map_names_every_family_the_record_defines`); an index row stripped of its
+status marker (`test_every_roadmap_v3_index_entry_carries_a_status_marker`).
+
+Verification: ruff clean; bandit exit 0 in its CI shape against a path-corrected throwaway copy with
+the committed baseline proven unmoved (`8ad8781c85e1...`); gitleaks exit 0 on 326 tracked paths of
+the POST-change tree; docs gate 37 passed, 1 skipped. Windows full suite 6158 passed, 46 skipped
+(1:17) with `AGENT_WORKSPACE` unset -- identical to batch 121, which is what a documentation-only
+batch should produce. No WSL leg and no mutation pass over production code: nothing executable
+changed, so there is no POSIX path to exercise and nothing to mutate.
+
+Counts unchanged at 6204.

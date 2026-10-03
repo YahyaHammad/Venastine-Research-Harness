@@ -1,9 +1,17 @@
-# Roadmap v3 — Command execution: sessions, runtimes and backends
+# Roadmap v3 — Everything after §48
 
 **Purpose of this document:** the specification and locked decision record for work begun after
 `ROADMAP_v2.md` §48. It opens with §49, the shell-sessions work: background and monitor sessions that
 outlive a turn and wake the agent, interactive sessions, a second container runtime, WSL and SSH
 backends, and harness-held secrets.
+
+**The title was narrower than the document for two sections before it was widened** (batch 122).
+It read "Command execution: sessions, runtimes and backends", which §49 and §50 are and §51 and
+§52 are not -- those are network-tool paging and redaction ordering. §53-§59 are further still:
+a network budget, the prompt box, the transcript, the shell classifier, model selection, the system
+prompt and two TUI affordances. The alternative was a fourth document, and it was declined for
+SS21's own reason in reverse: a `§N` already names one section across three documents, and a fourth
+buys nothing a reader of the index does not already get. v3 is "after §48", and the title says so.
 
 **Why a third document rather than §49 in `ROADMAP_v2.md`** (owner decision, SS21). The owner judged
 that appending to v2 after its long run would read as more of the same revision, which this is not.
@@ -26,6 +34,13 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§50. Declared network for a shell command** — **(BUILT in batch 99)** (the network detector reads command TEXT against a fourteen-word list, so a command it cannot see is auto-approved into `--network none` and fails with no way for the user to have allowed it)
 - **§51. Paging for network tool results** — **(BUILT in batch 105)** (`fetch_url` and `arxiv_search` truncate with no offset, so the agent cannot reach past the first page without shelling out to a raw HTTP request)
 - **§52. Redact before the cut, and a bound on the held body** — **(BUILT in batch 106)** (§51 cut the page out of the body before the redactor saw it, so a credential straddling character 5,000 reached the corpus whole; and the body it began holding was unredacted, in a cache whose entry count nothing bounded)
+- **§53. A rolling bound on what the harness pulls and pushes** — **(NOT BUILT: requested batch 122, specified, not designed)** (nothing anywhere counts a byte over the wire, so a user on a metered connection has no ceiling and a tool that fetches something enormous is bounded only by one tool's own per-request cap)
+- **§54. `@` names a file, and the tree is read once** — **(NOT BUILT: requested batch 122, specified, not designed)** (naming a file in the prompt means typing its path exactly, from memory, with no completion and no way to say "this folder")
+- **§55. The whole command, and what it printed** — **(NOT BUILT: requested batch 122, specified, not designed)** (a shell call shows a 140-character digest and its output is never rendered at all, so what the agent ran and what came back are both off screen)
+- **§56. A decision model as the shell classifier** — **(NOT BUILT: requested batch 122, specified, not designed)** (the gate decides from a word list and a token scan, so every judgement it cannot express as a rule costs an approval prompt, and the rules cannot be tuned per user)
+- **§57. One model for the subagents** — **(NOT BUILT: requested batch 122, specified, not designed)** (an agent definition can pin a model and nothing can set one for the subagents as a class, so a cheap child runs on the parent's expensive model)
+- **§58. Who the agent is when you ask it** — **(NOT BUILT: requested batch 122, specified, not designed)** (the chat system prompt is "You are a helpful assistant.", so the model knows nothing about the harness it is running in)
+- **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 
 ---
 
@@ -896,3 +911,384 @@ one of them states the exact mechanism that defeats the redactor:
   once and then only read holds its entries until each is read past its TTL -- better than before, and
   still not a timer. Deliberate: a background sweeper is a thread, and a thread is a lifecycle this
   module does not have.
+
+---
+
+## §53. A rolling bound on what the harness pulls and pushes
+
+**Added in batch 122, from the owner's request** for rolling-window network I/O limits, unlimited by
+default: a ceiling for users on a metered connection, and defence in depth against a tool pulling or
+pushing something enormous. Specified here to the depth the owner's answers support; the design
+round that locks the remaining shapes happens when it is picked up (the §49 cycle).
+
+### What the code does today
+
+- **Nothing counts a byte.** There is no rate limiter, quota, budget or byte accounting anywhere in
+  the tree. `tools/builtin/fetch_url.py`'s `MAX_CONTENT_BYTES = 65_536` is a per-request read cap on
+  one tool, and `_net_common.MAX_ENTRIES = 128` bounds a cache's entry count. Neither is a window and
+  neither is a total.
+- **Four callers reach the network through this process**, and all four already import
+  `tools/builtin/_net_common.py`: `fetch_url` (`httpx.stream`), `arxiv` (`httpx.get`),
+  `core/reasoning/scholar.py` (`httpx.get`) and `web_search` (`ddgs`). That shared import is the
+  seam, and it exists for the cache rather than for this.
+- **`ddgs` accepts no client.** Measured against the pinned 9.14.4: `DDGS.__init__` is
+  `(proxy, timeout, *, verify, api_url, spawn_api)`. There is a proxy argument and no transport and
+  no client, so `web_search`'s bytes cannot be counted at the socket without standing up a local
+  proxy -- which is a process, not a counter.
+- **The provider SDKs are three different answers.** `anthropic` and `openai` accept a custom
+  `httpx` client; `google-genai==1.0.0` is the pin whose `ThinkingConfig` this project already works
+  around, and what it accepts has to be measured rather than assumed.
+- **Everything a shell command does is invisible here.** A container, WSL or SSH command opens its
+  own sockets; `stdio` MCP servers are separate processes. The only existing lever is the binary one
+  §50 built: `--network none` or not.
+
+### Decisions (IO1-IO7)
+
+| # | Decision |
+|---|---|
+| **IO1** | **Unlimited by default, and a limit is THREE meters that are enabled separately** -- tool traffic, provider API traffic, and MCP HTTP/SSE traffic. The owner's reason is the whole of it and it is not a preference: *"networked tools always pull data from the internet, provider and mcp might actually be local."* A single switch over all three would charge a local Ollama and a local MCP server against a cap bought for a mobile tether. Tool traffic is the one that is on when a limit is set at all; the other two are opt-in |
+| **IO2** | **The meter lives in `tools/builtin/_net_common.py`, beside `TTLCache`.** It is the one module every network-backed tool already imports, including `core/reasoning/scholar.py`, which reaches across package boundaries to get it. A second home would be a second place to forget, which is this project's canonical bug shape stated as a placement rule |
+| **IO3** | **Three tools are counted at the byte and `web_search` is an ESTIMATE that says so.** `fetch_url`, `arxiv_search` and the scholar lookup go through this process's own `httpx` and can be counted exactly. `ddgs` has no client seam (measured, above), so its figure is the size of what it returned and is labelled an estimate wherever it is shown. Stating the weaker number as an estimate is the point: a cap that silently undercounts one of its four inputs is a cap a user will discover is wrong by overrunning their data |
+| **IO4** | **The provider meter is per-SDK and names which of its figures are exact.** Exact where a custom `httpx` client can be passed; derived from token counts, and announced as derived, where it cannot. One number presented as the same kind of fact for three SDKs that cannot all produce it is the instrument-that-lies shape batches 118 and 119 already paid for twice |
+| **IO5** | **What CANNOT be metered is written down rather than discovered** -- in the `config.yaml` comment, in `SECURITY.md` and in the message a user sees when they set a limit. Subprocess traffic (container, WSL, SSH), `stdio` MCP children, and anything else with its own socket. A control that reads as a total and is not one is worse than no control, which is the argument `SS44` already makes about a `ulimit` the command can remove |
+| **IO6** | **Exceeding the window REFUSES the call**, with a reason the model can read and a transcript line the user can see. Never a silent truncation and never a quiet stall: a truncated body is the spliced-document failure `PG5` exists to prevent, and a stall is indistinguishable from a hung network |
+| **IO7** | **The window ROLLS; it does not reset per run or per turn.** A per-run reset is defeated by a loop of short runs, and the thing being protected -- a data allowance -- is measured against wall-clock time rather than against this process's idea of a unit of work |
+
+### What must be settled before this is built
+
+- The window's length, and whether it is one number or one per meter.
+- Whether ingress and egress get separate ceilings or share one.
+- Whether the budget is process-wide or per agent / per run, and what a subagent inherits.
+- Whether the figure joins `UsageLine` in the sidebar, which is where the two existing
+  "how much has this cost" instruments already live.
+- Whether a refusal stops the one tool or every network tool for the rest of the window.
+
+### Gap register
+
+- **The estimate and the exact figure are added together.** IO3 is honest about which input is which,
+  and the total is still a mixed quantity. Accepted for now: the alternative is two totals, and a user
+  reading a data cap wants one number.
+- **A limit protects the allowance, not the machine.** It cannot stop a shell command, which is where
+  an agent would reach for a large download if the tool route refused it. §50's declared-network flag
+  is the control on that path and it is binary.
+
+---
+
+## §54. `@` names a file, and the tree is read once
+
+**Added in batch 122, from the owner's request:** `@` in the prompt box offers the project's files
+with completion, carries the path relative to the project root, allows folders, hides gitignored
+files by default, and does **not** load the file into context -- it tells the agent to read what was
+named.
+
+### What the code does today
+
+- **The completion machinery already exists and is good.** `tui/widgets.py`'s `SlashSuggest` (batch
+  55, window sliding added in 56) does a row-budgeted, keyboard-navigable, sliding-window suggestion
+  panel above the prompt, and `PromptInput` drives it through `SuggestionsChanged` /
+  `SuggestionsMoved` / `_complete()` with a dismiss latch and the api-edit-versus-keystroke seam in
+  `load_text`. `SlashCommand.complete` (batch 84) is the hook a second namespace plugs into: it
+  already offers rows whose `name` is the whole line after the slash.
+- **The root is `tools/builtin/file_ops.WORKSPACE_ROOT`**, which is `os.path.realpath(config.WORKSPACE_DIR)`
+  captured at import -- the project itself when `workspace_is_project` is true.
+- **Nothing in this tree shells out to `git`.** Not once, in any module. There is no gitignore parser
+  and no dependency that provides one.
+- **The prompt-fragment pattern exists**: `with_refs` (`core/loop.py:167`) appends thread state to a
+  system prompt at turn time, announcing what it is and what it is not.
+
+### What was measured (2026-10-03)
+
+- **`git ls-files --cached --others --exclude-standard` on this repository: 326 files in 18 ms.**
+  Without `--exclude-standard` it is 985. So the ignore filter removes two thirds of the tree, and
+  the whole read costs eighteen milliseconds -- which settles the "read it once at startup" budget
+  rather than leaving it to be felt.
+- The same call answers tracked AND untracked-but-not-ignored files in one invocation, and honours
+  nested `.gitignore` files, `.git/info/exclude` and the user's global excludesfile, none of which a
+  hand-rolled matcher gets for free.
+
+### Decisions (AT1-AT8)
+
+| # | Decision |
+|---|---|
+| **AT1** | **`@` is a SECOND TRIGGER into the panel that exists, not a second panel.** One widget, one row budget, one set of keys, one place where a resize is pinned against the transcript's scroll. Two panels would be two answers to "how many entries fit", which is the split `SlashSuggest`'s own docstring refuses for the slash list |
+| **AT2** | **The tree is read ONCE at startup, and refreshed only when the agent's `write` tool creates a file.** The owner's rule and the reason is latency: probing on every `@` keystroke, or walking on every prompt, pays for a directory the user is not browsing. A file the USER creates mid-session needs a restart to appear in the panel, and the tool still reads it fine -- the agent has live filesystem access either way, so the staleness costs completion, never capability |
+| **AT3** | **The ignore list comes from `git ls-files --cached --others --exclude-standard`** (owner decision), measured at 326 files in 18 ms here. Exact git semantics, including the three ignore sources a hand-rolled matcher would silently disagree with. Off git -- no binary, no repository, or a non-zero exit -- an `os.walk` with a small built-in skip list answers instead, and the panel SAYS which source answered. A user who thinks a file is hidden and is wrong about why is the failure this names rather than hides |
+| **AT4** | **Ignored files are hidden by default and there is an option to show them.** The default is the owner's; the option exists because `.gitignore` is not an access-control list and a user who wants `dist/` has a real reason |
+| **AT5** | **Every entry is the path relative to the root, never the bare basename.** A basename repeats across subfolders and the panel would offer two identical rows. Folders are offerable as entries in their own right |
+| **AT6** | **A mention does NOT load the file.** The path stays in the user's message text and a short fragment tells the model to read what was named -- `with_refs`'s shape, appended at turn time. The owner's reason is the size of the files, and there is a second: forcing a read makes `@` cost tokens the user did not ask to spend, which makes it the wrong affordance for "I mean this one" |
+| **AT7** | **The fragment is assembled where the other thread-state tiers are** (`with_goal` / `with_refs` / `with_todos` in `core/loop.py`) and MUST NOT move into `with_catalogs`. That function feeds `pass_prompt()`, so a file mentioned in a chat session would land in all ten research passes. §19's K6, and this is its fifth instance -- see TECHNICAL_DEBT 19 |
+| **AT8** | **`git` is a new external dependency on this path, and that is stated.** It is the first subprocess call to git this project makes. It is also optional by construction (AT3's fallback), so the dependency is on the QUALITY of the list, never on the feature working |
+
+### What must be settled before this is built
+
+- Whether the startup read is eager or lazy on the first `@` -- 18 ms here, and this repository is
+  326 files.
+- The cap on offered entries, and what the panel does in a 50,000-file checkout.
+- Whether `@` matches on the basename, on the whole relative path, or on both.
+- What a mention of a since-deleted file does: pass through, or say so in the prompt box.
+- Whether a folder mention expands to its files in the fragment or is named as a folder.
+
+---
+
+## §55. The whole command, and what it printed
+
+**Added in batch 122, from the owner's request**, after seeing another TUI render a shell call in
+full with its output beneath it: a way to see the whole command -- and ideally what it returned --
+without leaving the transcript, retracted by default and unmistakably part of the tool call rather
+than of the model's prose.
+
+### What the code does today, and the premise it corrects
+
+- **The one-line collapse is real and it is ONE producer.** `safety/policy_enforcement.py:500`
+  (batch 96) does `text = " ".join(text.split())` inside `param_digest`, after the redaction and
+  before the truncation, with a 60-character cap per value and 140 overall. Three consumers read it:
+  the TUI's `▸ name  digest` line, `core/replay.py`'s replay of the archive, and the research
+  pipeline's tool rows.
+- **The output is not collapsed -- it is NEVER RENDERED.** `tui/app.py:3322-3360` handles
+  `tool_result` and writes to the transcript only on FAILURE (`✗ name error`) and, for `write` and
+  `edit`, a diff block. A successful tool's result goes to the model and nowhere else. So the half of
+  this section that reads as "un-hide what is collapsed" is in fact new rendering.
+- **Two of the four shell tools are already openable.** `registry.opens()` returns `("thread",)` or
+  `("session",)` and arms a ctrl+click (§47 NA6, §49 SS14), so `shell_background` and `shell_monitor`
+  lines can already be opened into a view. Plain `shell` cannot.
+- **Thinking is a global switch, not a per-block fold.** `tui.show_thinking` and `/thinking` turn
+  reasoning on or off for the session; there is no expand/retract on an individual span. So the
+  analogy in the request describes a behaviour this TUI does not have yet in either place.
+
+### What was measured
+
+- **`RichLog` cannot rewrite a row it has drawn.** `Transcript`'s own docstring states it and the
+  widget is built around it -- `_entries` exists precisely because a `/theme` switch needs
+  `rerender()` to replay the whole log. `reflow()` is the variant that leaves a streaming span open,
+  added in batch 112 for resize. So an in-place expand/retract is not a repaint; it is a full replay,
+  and a replay moves the scroll position.
+
+### Decisions (TR1-TR5)
+
+| # | Decision |
+|---|---|
+| **TR1** | **This is TWO problems and both are in scope.** The command is abbreviated and the output is absent. Shipping the first alone leaves the more useful half missing, and the owner's request names both |
+| **TR2** | **`param_digest` does not change.** Whatever is built is a SECOND rendering beside the digest, never a loosening of it. Three consumers read that function and the multi-line command it collapses once drew its remaining lines at column 0 underneath the tool line, outside the indent -- in all three. One producer, one job |
+| **TR3** | **Retracted by default, and unmistakably the tool call's.** The owner's reason is that the user has already seen a complex command in the approval modal. The attribution half is the harder half and it is a requirement rather than a nicety: a block of shell output that reads as the model's own prose is the untrusted-content confusion the system prompt spends a paragraph on |
+| **TR4** | **The mechanism is deliberately NOT chosen here, and the constraint that bounds the choice is now measured.** The owner deferred it, and the measurement above is what the two candidates have to be judged against: an inline expand costs a `reflow()` of the whole transcript and moves the reader's position, while a ctrl+click view reuses `registry.opens()` and the view surface §47 and SS14 already built. The second is the owner's own fallback proposal. Recording the measurement rather than the verdict is the point -- the decision is cheap to make with it and was being made without it |
+| **TR5** | **Whatever is chosen applies to all four shell tools, or the record says why not.** `shell`, `shell_background`, `shell_monitor` and `shell_interactive` differ in when their output exists, not in whether a user wants to see it, and four surfaces for one question is the drift EP6 names |
+
+### What must be settled before this is built
+
+- Inline expand against a ctrl+click view, with TR4's measurement in hand.
+- How much output is kept and where. `core/shell_sessions.py` already keeps a session's first 10,000
+  and last 190,000 characters in memory (SS12); a one-shot `shell` keeps nothing today.
+- Whether the retained output survives a restart, and what SS18's "what the agent was given" header
+  means for a one-shot call.
+- Whether `core/replay.py` renders the same thing from the archive, which is the drift TR2 guards.
+
+---
+
+## §56. A decision model as the shell classifier
+
+**Added in batch 122, from the owner's request:** an optional System One decision model as a second
+opinion on shell approval, so the gate is not limited to what can be written as a rule. The owner's
+own security constraint arrived with the request and is locked below as JV4.
+
+### What the model is
+
+Verified against current sources rather than from the request. **Jev** is TypeSafe AI's "System One"
+decision model, released 2026-09-15: it takes a piece of state plus named, typed questions and
+returns typed values with calibrated probabilities, never prose. The wire is
+`POST <base>/v1/systemone` with `{"model": ..., "state": ..., "questions": {...}}` and bearer auth;
+the question types are **Choice** (categorical), **Score** (bounded numeric) and **Noul** (yes/no
+probability). Published latency is 70-500 ms.
+
+The ecosystem matters for the configuration shape. **Ollama 0.35 serves `/v1/systemone` beside
+`/v1/chat/completions` on the same base**, and **OpenJev** and **openjev-sglang** implement the same
+wire against open models. So one URL shape -- base plus `/systemone` -- covers hosted, self-hosted
+and local, and the coexistence case the owner raised falls out of it rather than needing a rule.
+A provider that exposes the capability only through an OpenAI-shaped chat endpoint is a different
+request body, which is what JV7 is for.
+
+### What the code does today
+
+- **`_shell_approval_check` (`tools/builtin/shell.py:450`) is already a ladder read top to bottom**,
+  with the mode switch first, then the refusals and the always-asks (`UNAVAILABLE`, SS40's
+  protected-segment refusal, SSH, root, protected path segments), then the two visible opt-ins
+  (`AUTO_APPROVE_SANDBOX_FALLBACK` and `contained`), then the capability rule. Both opt-ins sit
+  BELOW the protected-segment check, deliberately, so one opt-in cannot cover the directory the
+  read-only mount exists to protect.
+- **`capability.APPROVAL_MODES` is a validated enum** (`always`, `tiered`, `contained`, `never`),
+  validated at import by whoever owns the setting.
+- **`classify_command` is ONE object with TWO consumers** -- the gate reads it to decide whether to
+  ask, and `run_sandboxed` reads the same object to decide how to run. Audit #157 is what it cost
+  when those two asked separately.
+- **The owner's `;` question, answered by measurement rather than by reading.** There is no
+  `&&`-splitting anywhere in the tree to extend to `;`: both characters are in
+  `_SHELL_METACHARACTERS` (`security/sandbox.py:1533`), so both force `_is_inert` to False. What Q2
+  actually changed is that `_needs_network` reads EVERY whitespace token of a non-inert command
+  rather than its first word, and `_escapes_workspace` already reads every token after the first as
+  a path. **Measured 2026-10-03:** `echo hi && curl http://evil` and `echo hi; curl http://evil`
+  both classify `SANDBOXED_NET`, `network=True`, `writes=True`; `ls -la && rm -rf /tmp/x` and the
+  `;` spelling both classify `SANDBOXED`, `writes=True`. `tests/test_shell.py:1156` already
+  parametrises the `;` spelling beside the `&&` one. **There is no loophole and nothing to build**,
+  and it is recorded here rather than left as a question someone re-opens.
+
+### Decisions (JV1-JV10)
+
+| # | Decision |
+|---|---|
+| **JV1** | **It is a NEW `shell_approval_mode`, not a rewrite of the gate.** `APPROVAL_MODES` is already the enum the ladder switches on, and a second switch over the same ladder is the ratchet G3 removed. One mode, validated at import like its four siblings, and every existing mode behaves exactly as it does today |
+| **JV2** | **Everything above the opt-ins stays above this one.** `UNAVAILABLE`, SS40's refusal, the protected-segment check, SS48's SSH-always-asks and SS65/SS67's root-always-asks all answer BEFORE the decision model is consulted. This is not caution added for a new feature; it is where the two existing opt-ins already sit, and it is the whole reason a prompt-injected verdict cannot reach `.venastine/` or `sudo` |
+| **JV3** | **The hardcoded classifier still decides what RUNS.** The decision model answers one question -- "must a human say yes" -- and never picks the backend, the containment or the `--network` flag. `classify_command` is one object with two consumers for #157's reason, and a second opinion that chose the runtime would reopen exactly that gap in the module written to close it |
+| **JV4** | **The classifier is given the command and the project path, and NEVER the rationale.** The owner's constraint, and the threat is concrete: a sufficiently capable rogue agent writes a rationale that argues a dangerous command into a safe verdict, and a verdict that auto-approves is arbitrary execution on the host. The project path is included because containedness is not answerable without it. Nothing the agent wrote as prose reaches the classifier |
+| **JV5** | **Four metrics, extensible: containedness, general risk, workspace modification, networkedness.** They are separate because they come apart -- `rm -rf` in the workspace is high modification and may be low risk, and a networked command may be perfectly contained. Each gets its own threshold. `Score` for the graded ones and `Noul` for networkedness, which is a yes/no the model still answers with a probability |
+| **JV6** | **The user sets each threshold and chooses what a failure means:** auto-reject, or raise the approval modal. Both are the owner's, and the second is the one that makes the feature adoptable -- a user can run it as a filter long before they trust it as a decision |
+| **JV7** | **`classifier_style` is EXPLICIT (`systemone` or `openai_json`) and nothing is probed** (owner decision). A startup probe is a network call at launch and a guess about a security control, and it guesses wrong exactly when a proxy answers 200 to everything. The native style sends the real body; the OpenAI style sends a schema-constrained chat request and parses it into the same verdict object |
+| **JV8** | **Thresholds and endpoint live in `config.yaml` under `HARNESS_AUTHORITY_KEYS`; the API key lives in `providers.json`.** The split already exists and this respects it: a number that decides whether a human is asked is harness authority, and a credential belongs in the gitignored file. Neither file learns the other's job |
+| **JV9** | **The `config.yaml` warning states the distinction precisely rather than repeating either side of it.** The vendor's "mathematically impossible to hallucinate" claim is about TYPE conformance -- constrained decoding cannot emit a value outside the schema -- and says nothing about the judgement being correct. The model still reads text an attacker may have influenced, and a confident wrong number is exactly the failure mode a threshold acts on. The warning says that, in those terms |
+| **JV10** | **A classifier that is slow, unreachable or malformed NEVER auto-approves.** It falls back to asking. Which mode it falls back to is open; that it fails closed is not, and it is the one property this whole section rests on: an attacker who can make the endpoint unreachable must not thereby widen what runs unasked |
+
+### What must be settled before this is built
+
+- The TUI command's name. `/classifier` is the obvious parallel to `/model`; something naming the
+  decision rather than the mechanism may read better.
+- Which mode JV10 falls back to -- `tiered` is the shipped default and asks about anything that can
+  run code.
+- Whether the verdict is shown inside the approval modal when one is raised, and whether it is
+  persisted with the call so `core/replay.py` can render it.
+- Whether a per-call latency of 70-500 ms on every shell command is acceptable, and whether the
+  verdict is cached per exact command string.
+- Whether the four metrics are fixed or user-extensible in config.
+
+### Gap register
+
+- **This widens what runs unasked, by design, and the widening is the feature.** JV2's ordering is
+  what bounds it. Anyone adding a step to `_shell_approval_check` later has to decide where it sits
+  relative to this one, and the answer for every refusal and every always-ask is "above".
+- **A local model's judgement is not the hosted one's.** The same thresholds against a 0.8B local
+  model and against `jev-latest` are two different policies wearing one set of numbers. Worth saying
+  in the config comment beside JV9's warning.
+
+---
+
+## §57. One model for the subagents
+
+**Added in batch 122, from the owner's request** for a `/submodel` command so subagents can run on a
+cheaper model than the main agent, and for per-agent model and provider selection.
+
+### What the code does today -- the second half is already built
+
+- **`AgentDef` carries `model` and `provider`** (`core/config_loader.py:228-229`) and both are
+  honoured in three places: a `/agent` chat turn (`tui/app.py:2659-2660`), a spawned subagent
+  (`agents/subagent_tool.py:238-240`) and compaction (`core/compaction.py:1196`). The rule is the
+  same in all three: `agent.model or <inherited> or config.MODEL_NAME`.
+- **`/model` already knows about the conflict** and prints a note when the active agent pins its own
+  pair (`tui/app.py:4786`), naming what the switch does and does not reach.
+- **There is no failover anywhere.** `core/provider_errors.py` classifies transients and backs off;
+  nothing in the tree ever answers on a different provider than the one that was asked.
+
+So the per-agent half of the request exists. What is new is `/submodel` and the question of what
+happens when a provider is down.
+
+### Decisions (SM1-SM4)
+
+| # | Decision |
+|---|---|
+| **SM1** | **Per-agent model and provider are BUILT, and this section says so rather than rebuilding them.** The request described them as missing; they are honoured in three call sites. Recording that is the useful half of this section |
+| **SM2** | **Precedence: an agent's own pin, then `/submodel`, then the session model.** (Owner decision.) It is the rule already written at every one of those three call sites, and the alternative would mean a session command silently downgrading an agent that was pinned to a strong model for a stated reason |
+| **SM3** | **`/submodel` names the agents it does not reach**, exactly as `/model` already does for the active agent. A command whose effect is invisible for the agents that pin their own is the silent-no-op shape this project keeps closing |
+| **SM4** | **No automatic cross-provider failover.** A run that answers on a model the transcript does not name is the drift class this record is full of, and the existing behaviour -- retry the transient, then fail with the provider's own reason -- is both honest and already built. A user whose provider is down switches with `/model`, which takes effect on the next turn |
+
+### What must be settled before this is built
+
+- Whether `/submodel` is remembered across launches. `/model` is (RM3), in the user-tier store beside
+  `settings.json`, never in it.
+- What a submodel with no API key does. `/model` warns rather than refuses, for the local-endpoint
+  case, and the same argument applies.
+- Whether `/submodel` also applies to the compactor and the pipeline reviewer, which are agents that
+  run without being spawned by a chat turn.
+- Whether the sidebar's agent panel shows the submodel.
+
+---
+
+## §58. Who the agent is when you ask it
+
+**Added in batch 122, from the owner's request:** a short persona so the model knows what harness it
+is in -- name, purpose, that a research mode exists, and which model is underneath -- without being
+told to deny or conceal what it actually is, and without bloating the system prompt.
+
+### What the code does today
+
+- **The chat system prompt is one sentence.** `DEFAULT_SYSTEM_PROMPT` (`core/loop.py:81`) is
+  literally `"You are a helpful assistant."` plus the shared untrusted-content paragraph. §32's A8
+  (#72) already records why: everything else in a chat prompt is generated or thread state -- the two
+  catalogs, `with_goal`, `with_memories`, `with_refs`, `with_todos`, active skill bodies -- so the one
+  paragraph a chat turn most needs was the one part no tier supplied.
+- **It is a module constant, evaluated at import.** The live model is not: `/model` changes it
+  mid-session and an agent definition can pin its own (§57).
+- **The research passes have their own opening line**, `prompts/universal_system_prompt`, which begins
+  "You are one stage in a multi-pass, self-critiquing research pipeline."
+- **Five sites assemble a chat system prompt**: the TUI chat turn, `core/loop.py`,
+  `agents/subagent_tool.py`, `core/compaction.py` and `core/reasoning/review.py`.
+
+### Decisions (PR1-PR5)
+
+| # | Decision |
+|---|---|
+| **PR1** | **Composed at TURN TIME, never baked into the constant.** The persona names the live model and the live model is a session fact, so a string built at import is wrong the moment `/model` is used or an agent pins its own. It is a `with_persona(...)` beside `with_goal` / `with_refs` / `with_todos`, which is where the thread-and-session tiers already live |
+| **PR2** | **Chat only.** The ten research passes open with "you are one stage in a pipeline", and a persona there would contradict the first line of their own prompt. §19's K6 -- the SIXTH instance, after memories (M13), refs (M19), todos (J11's fourth) and §54's AT7, which is this batch's other one |
+| **PR3** | **A few sentences, and leanness beats completeness.** The owner's rule: better to miss a detail than to grow the system prompt. The token cost is measured against a real turn before the wording is fixed, not estimated |
+| **PR4** | **It does not tell the model to deny or conceal its underlying identity.** The owner's rule, and it is also the right one: an instruction to misdescribe itself is the one thing in a persona that a user discovering it would read as deception, and the underlying model's name is already in the sidebar and the status line |
+| **PR5** | **`with_persona` is the FIFTH `with_*`,** and TECHNICAL_DEBT 19 -- the unresolved question of whether the convergence counts four tiers or five -- moves with it rather than gaining a sixth member in silence |
+
+### What must be settled before this is built
+
+- The exact wording, and its measured token cost on a real turn.
+- Whether an agent with its own body gets it too. `system_prompt_for` already appends
+  `## Agent: <name>` plus the body, which is an identity of its own.
+- Whether the compactor and the reviewer get it. They are chat-shaped runs that nobody converses
+  with.
+
+---
+
+## §59. Pick it instead of typing it
+
+**Added in batch 122, from the owner's request:** a multi-select modal for removing memories instead
+of typing uuids, and `shift+tab` to cycle the active agent. Two requests, one idea -- both replace an
+exactly-typed string with a selection, and both reuse a widget that already exists for exactly that.
+
+### What the code does today
+
+- **`/memories` prints uuids into the transcript and `/forget` takes one** (`memories/tui_commands.py`).
+  By id and not by substring, deliberately: a substring matching two memories would have to pick one,
+  and picking silently deletes something the user did not name. **It does not confirm**, and it does
+  not need to: reading a uuid out of the transcript and typing it back IS the deliberation, which is
+  exactly the friction this section removes.
+- **Multi-select modals already exist.** `GrantPickerScreen` and `SubagentSignoffScreen`
+  (`tui/screens.py:344`, `:403`) both build a `SelectionList` and return the ticked subset.
+- **`shift+tab` is reverse focus today, and focus means something here.** `RichLog.can_focus` and
+  `TextArea.can_focus` are both True (measured against the pinned textual 8.2.8), so the transcript
+  is a focus stop and `RichLog` binds the scrolling keys -- tabbing to it is how the transcript is
+  scrolled from the keyboard. `app.tcss` records that batch 59 refused a `VerticalScroll` sidebar
+  partly because it "would add a tab stop", so tab stops are already treated as scarce here.
+- **`PromptInput` already claims `tab` conditionally** -- `Binding("tab", "complete")` with
+  `check_action` returning `None` when the panel is shut, so the key reaches the focus system the rest
+  of the time. That is the precedent for taking a key only while it means something.
+- **The roster is long.** Eleven built-in agents (`agents/builtin/`), plus the user and project tiers,
+  plus "default", so a blind cycle over `manager.names()` is twelve or more stops.
+  `/agent` lists them and `ctrl+g` opens a picker already.
+
+### Decisions (UI1-UI4)
+
+| # | Decision |
+|---|---|
+| **UI1** | **`/forget` gains a multi-select modal and the command keeps working.** `SelectionList` through `ModalScreen`, the `GrantPickerScreen` shape, returning the ticked set to the same `storage.forget_memory`. The by-id command is not replaced: it is what a script and a transcript-reader use, and it is the only route that works when the list is long |
+| **UI2** | **`shift+tab` cycles the active agent, and it SPENDS reverse focus.** Stated rather than discovered: the transcript is a focus stop and keyboard scrolling goes through it. `tab` is left alone, so the transcript stays reachable forward -- which is what makes the trade acceptable rather than a loss |
+| **UI3** | **The cycle walks a SHORT ORDERED roster, not `manager.names()`.** Twelve-plus stops is a list, not a cycle, and the thing the request describes is moving between two or three working modes. What the roster is and where it is configured is open; that it is not the full catalogue is not |
+| **UI4** | **The modal confirms, and `/forget <id>` does not start to.** A new requirement rather than a preserved one: today the uuid is the confirmation, and UI1 exists to take that away. Ticking five rows and pressing enter is one keystroke away from deleting five durable memories with no second thought, where the command it replaces cost a careful copy each. The command keeps its current behaviour, because nothing about it changed |
+
+### What must be settled before this is built
+
+- UI3's roster: a config list, the agents the user has used this session, or a declared field on
+  `AgentDef`.
+- Whether the cycle includes "default" as a stop, and where it sits in the order.
+- Whether the memory modal shows scope and category as columns, and whether it can filter.
+- Whether `shift+tab` is bound at the app level with `priority=True` -- which is what `ctrl+c`
+  needs in order to beat the focused text box -- and what that does under a modal.
