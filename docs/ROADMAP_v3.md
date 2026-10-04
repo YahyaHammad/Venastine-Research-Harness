@@ -41,7 +41,8 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§57. One model for the subagents** — **(NOT BUILT: requested batch 122, specified, not designed)** (an agent definition can pin a model and nothing can set one for the subagents as a class, so a cheap child runs on the parent's expensive model)
 - **§58. Who the agent is when you ask it** — **(NOT BUILT: requested batch 122, specified, not designed)** (the chat system prompt is "You are a helpful assistant.", so the model knows nothing about the harness it is running in)
 - **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
-- **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)** (there is no way to drive this harness except by sitting in front of it, and the open standard that would change that has no concept of the approval gate this project is built around)
+- **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
+- **§61. Stopping a turn that is already running** — **(BUILT in batch 124)** (a turn going the wrong way is watched to its end or the harness is killed: nothing anywhere stops one, and both keys that look like they would end the process instead) (there is no way to drive this harness except by sitting in front of it, and the open standard that would change that has no concept of the approval gate this project is built around)
 
 ---
 
@@ -1437,7 +1438,7 @@ session sharing are a product, not a protocol obligation.
 | **UH3** | **A supervisor with one child process per session**, isolated by `AGENT_WORKSPACE`, `APP_DB_PATH` and `AGENT_LOG_FILE`. Measured rather than hoped: four parallel children, distinct workspaces, `OUTPUT_DIR` derived for free. Every singleton keeps its current meaning, the posture latch and D17's trust gate are untouched, and sessions genuinely run in parallel -- which is the owner's condition for the architecture being worth having. The alternative, unwinding the singletons, reaches into the three subsystems carrying the most locked decisions |
 | **UH4** | **One child per SESSION, not per task.** The 3.8 s cold start is then paid once per session, and a `previous_response_id` continuation reuses a live child -- which is also what UHP requires in its own words: the new task runs "in the same session, with the same working directory and its files" |
 | **UH5** | **stdlib `http.server` with threads, decided on architecture rather than on speed.** The server is a thin relay in front of the supervisor, and keeping it synchronous keeps true the property AGENTS.md states ("synchronous throughout, except the MCP bridge and the Textual event loop"). Recorded with both measurement tables above and with the fact that `starlette`, `uvicorn` and `sse-starlette` are ALREADY in `mcp`'s hard closure -- so this is reversible at zero install cost the day hand-rolled SSE proves the wrong trade, and the measurement that would justify reversing it is tail latency, where stdlib currently wins |
-| **UH6** | **Cancellation is slice 0 and is not UHP-specific.** It ships usable from the TUI and the CLI whether or not the server is ever built. That is the deliberate hedge against a draft standard that has moved twice in two months: if UHP disappears, slice 0 was still worth doing, and no other slice is |
+| **UH6** | **Cancellation is slice 0 and is not UHP-specific.** It ships usable from the TUI and the CLI whether or not the server is ever built. That is the deliberate hedge against a draft standard that has moved twice in two months: if UHP disappears, slice 0 was still worth doing, and no other slice is. **BUILT in batch 124, and recorded as §61 rather than here** -- this sentence is the reason: a capability both shells wanted anyway does not belong inside a protocol section, and §60 would otherwise read as part-built while none of the protocol exists |
 | **UH7** | **A UHP harness object is an `AgentDef`,** with `base: "venastine"`. `systemPrompt`, `mcpServers`, `skills`, `disabledTools`, `maxStep` and `environment` already exist here as agent frontmatter, §17's MCP config, §19's skills, `ToolPermissions`, `max_steps` and §49's backends. Nothing new is invented to answer discovery |
 | **UH8** | **One translation point from `LoopEvent` to the SSE vocabulary,** not one per endpoint and not one per consumer. Fix at the producer; `param_digest` with its three readers is the standing example of what the alternative costs |
 | **UH9** | **The capability document is GENERATED from what is wired, never hand-written.** The specification's own MUST, and the reason is its own: *"A server MUST NOT advertise a capability it does not implement -- advertising is a promise, and a client that trusts it and receives a `404` has been lied to in a way it cannot recover from."* A hand-written capabilities object is a second source of truth for what the code does |
@@ -1480,3 +1481,133 @@ session sharing are a product, not a protocol obligation.
   exceptions propagate -- `core/events.py`: "there is deliberately no error variant" -- so the server
   is where an exception becomes a status, and that boundary has to be exactly one place or the two
   will disagree about what failed.
+
+---
+
+## §61. Stopping a turn that is already running
+
+**Built in batch 124**, from §60's UH6 -- which locked that cancellation ships first and on its own
+merits, as *"the one slice worth building even if UHP disappears tomorrow"*. It is recorded here
+rather than inside §60 for UH6's own reason: this is not UHP-specific, and a protocol section
+claiming credit for a capability both shells wanted anyway would read as part-built while none of
+the protocol exists.
+
+UHP's requirement is met on the way past -- a cancelled task ends `cancelled`, never `failed`, with
+partial output kept -- but nothing here is shaped by it.
+
+### What the code did before this
+
+- **Nothing could stop a turn.** Measured: no occurrence of `cancel` anywhere in `core/loop.py` or
+  `core/client.py`. `shell_kill` ends a shell session (SS13) and that was the whole of it.
+- **Both keys that looked like they would ended the process instead.** `tui/app.py` bound `ctrl+c`
+  to `arm_quit` / `confirm_quit` and `escape` to `close_thread_view`. In the CLI a
+  `KeyboardInterrupt` during a turn is not caught by that turn's `except Exception`, so it unwound
+  to `main()`'s `finally` and exited 130 -- which the banner advertised, because exiting was the
+  only thing the key did.
+- **Abandoning the generator already worked, and was already correct.** `_run` catches `Exception`
+  and not `BaseException`, because *"a GeneratorExit is an ABANDONED generator (#42, a TUI quitting
+  mid-turn), not a failed run"*. `tests/test_pipeline_events.py` pins the pipeline half of the same
+  behaviour. It is insufficient for three reasons and only three: it fires at a yield, so it cannot
+  reach a socket read waiting for a first token or a tool call in progress; it leaves the thread
+  with a user message and no reply; and it leaves a pipeline record at `running` for ever.
+
+### What was measured (2026-10-04)
+
+- **A cooperative token is FORCED, not preferred.** A turn runs in
+  `run_worker(..., thread=True, name="agent-turn")` and Textual cannot cancel a thread worker. The
+  key is pressed on the UI thread while the generator is mid-`next()` on the worker, and calling
+  `close()` on a running generator from another thread raises
+  `ValueError: generator already executing`. A flag is the only thing that can cross.
+- **Closing the stream early already releases the connection.** `core/client.py` yields from inside
+  `with client.messages.stream(...) as stream:`, so breaking the `for` unwinds the context manager.
+  Nothing had to be written to avoid leaking a socket.
+- **The loop had to grow its own accumulator.** That same branch builds its text from
+  `stream.get_final_message()`, which a stream broken off part way never produces. There was no
+  partial answer anywhere to keep until `_run_steps` began keeping one, which is why CN4 is a change
+  to the loop and not merely to what it reports.
+- **A fourth `stop_reason` is a new VALUE, not a tenth field.** `tests/test_pipeline_events.py`'s
+  nine-field pin is untouched, and `main.py` and `tui/app.py` already print
+  `[stopped early: <reason>]` for anything that is not `"complete"` -- so two display sites needed no
+  change at all.
+- **Escape was already expected.** `PromptInput` gates its own escape binding with `check_action` and
+  says why: *"with no panel open they are the keys they have always been: tab moves focus, escape
+  reaches whoever wants it."* CN8 is that sentence being taken at its word, so no `priority=True`
+  was needed and the suggestion panel keeps the key while it is open.
+
+### Decisions (CN1-CN12)
+
+| # | Decision |
+|---|---|
+| **CN1** | **A cooperative `CancelToken` in `core/cancel.py`**, passed down beside `response_channel`, `activity` and `grant_budget` -- the shape this project already uses for an out-of-band object a run needs where a LoopEvent cannot reach. A LEAF module with no project imports, for `core/approval.py`'s reason. **Not a ContextVar:** threads do not inherit their parent's context, which `_dispatch_parallel` and `tui/app.py`'s `_consume` both already pay for, and a token the tool pool could not see would be a stop switch that silently missed the longest part of a turn. SET-ONCE, so the reason kept is the one that actually stopped the run |
+| **CN2** | **Read at FOUR sites** -- the step boundary, inside the stream's token loop, between tool groups, and each shell's own drain. The step-boundary check sits ABOVE `response = None`, so what it reports is the previous step's real response rather than an empty one; the stream check is guarded on `response is None`, so a call that completed is never discarded; the group check is CN6. **Before the first token the SDK is blocked in a socket read and nothing cooperative can reach it** -- a stated limit, surfaced as "stopping", never discovered |
+| **CN3** | **`stop_reason: "cancelled"`, and never `"failed"`.** `mark_turn_failed` is not reused and nothing raises: an exception would reach `_run`'s frame and stamp a failure on a turn nobody saw fail, which is the distinction that frame already draws for a GeneratorExit |
+| **CN4** | **The partial answer is kept, text only.** `_run_steps` accumulates the deltas itself, because no provider branch can supply them after a cut. A half-formed tool call is DROPPED -- a truncated arguments blob is not a call. Empty text persists nothing: a turn stopped before its first token said nothing, and an empty assistant row is one every later request has to carry. This honours D20 rather than carving an exception out of it, and it keeps the transcript and the thread saying the same thing |
+| **CN5** | **A synthesised response reports an EMPTY usage dict, not zeros.** The provider sends usage with its final message and a cut stream has none, so the honest statement is "not measured" -- and the two stay distinguishable, since `"input_tokens" in usage` is False here and True for a step that genuinely cost nothing. A zero is the instrument that lies, which batches 118 and 119 each paid for once. The CLI's stopped-early line reads that same empty dict and says the stopped step is not counted |
+| **CN6** | **A tool call already running finishes, and the turn stops after it settles.** Nothing gains the power to kill a tool. The alternative was instant for `shell`, which has `KILL_USER`, and not for anything else -- one gesture with two speeds depending on which tool happened to be running. The shells say "anything already running finishes first" rather than pretending otherwise |
+| **CN7** | **A child inherits the switch.** `cancel` joins `_INJECTABLE_PARAMS`, so `spawn_subagent` receives the parent's token and a stop reaches a run that happens INSIDE a tool call -- the one place a LoopEvent cannot. That list is `activity`'s own argument, one line up |
+| **CN8** | **TUI: `escape`, app level, no `priority=True`.** The SECOND app-level binding on the key, working the way the `ctrl+c` pair does: whichever `check_action` refuses with **`False`** gives up the slot. `False` and never `None` is measured rather than stylistic -- `active_bindings` is keyed by KEY and skips a binding only on `is False`. Precedence falls out of machinery that already exists: suggestion panel, then thread view, then cancel. The one-sentence rule survives -- escape means back to the conversation, and stopping a turn is that |
+| **CN9** | **The predicate is the live token, not `_busy`.** `_busy` is also true through the post-turn session wait, where SS2 keeps `ctrl+b` reachable precisely so the user can stop what is running there. Two keys meaning adjacent things would make neither clear, so escape stops the CONVERSATION and `ctrl+b` stops the SESSIONS, and neither quietly does the other's job |
+| **CN10** | **CLI: Ctrl+C stops the turn; at the prompt it still exits.** A signal HANDLER rather than an `except KeyboardInterrupt`, and the difference is what the thread looks like afterwards: an interrupt unwinds from wherever it lands, which can be between a `tool_use` D20 has persisted and the `tool_result` that pairs with it. Installed per turn and restored in a `finally`, so `_await_sessions` keeps catching its own interrupt and Ctrl+C there still stops the SESSIONS -- the aim of that key in that place was already right |
+| **CN11** | **Cancelling under an open approval modal needs no new path.** `core/interaction.decode()` already substitutes the declining default for *"a modal torn down by shutdown"*, so the call is denied and the token is seen at the next boundary |
+| **CN12** | **The research pipeline is DEFERRED, not out of scope** (owner), and so are compaction and the `/grill-me` one-shot. See the next section for what the pipeline has to learn first |
+
+### The decision that is a correctness property rather than a preference
+
+CN4's `unrun` is the part of this section that would have been a defect rather than a missing
+feature, and the repository had already named it from the other side.
+
+D20 persists the assistant turn, with every one of its `tool_use` blocks, **before** anything runs.
+A cancel that stopped between two tool groups would therefore leave a response whose calls were
+recorded and whose results were not -- and `_settle_one`'s own comment says what that is:
+
+> an abandoned generator left the `tool_use` D20 already wrote with no matching `tool_result`, which
+> is M4's pairing broken from the other side and an unresumable thread.
+
+So a cancelled turn **answers every call the model made**, including the ones it declined to run,
+with the `{"error": ...}` shape a denied call already takes. `tests/test_cancel.py` asserts three
+`tool_use` blocks produce three rows when only the first ever ran.
+
+### What the deferral has to learn before it is lifted
+
+`core/reasoning/orchestrator.py`'s `_check_truncation` reads
+
+```python
+stop = getattr(response, "stop_reason", None)
+if stop in (None, "complete"):
+    return
+```
+
+-- so **every** other value is truncation: with text, trace it and run the next pass; with no text,
+raise. A pass returning `"cancelled"` would be read as degraded rather than stopped, and the
+pipeline would continue into the next pass on a run the user had ended.
+
+That reader is correct exactly as long as CN12 holds, because no pass can return the new value
+today. It is written here, and in `core/events.py` beside the value itself, so that lifting the
+deferral starts from the gap rather than finding it.
+
+`tests/test_pipeline_events.py::test_abandoning_the_generator_leaves_the_record_running` moves with
+it. Its assertion -- that an abandoned run honestly stays `running`, because *"flipping it to
+'failed' would make an interrupted run indistinguishable from a broken one"* -- is the right answer
+for abandonment and the wrong one for a cancellation, which has a status of its own to go to.
+
+### Gap register
+
+- **A cancel cannot interrupt a blocked socket read.** The window is from the request leaving to the
+  first token arriving, which on a thinking model is tens of seconds and is exactly when a user is
+  most likely to change their mind. Cooperative cancellation cannot close it; what the shells do is
+  say they are stopping, so a slow stop reads as a stop rather than as a dead key.
+- **A long tool call delays the stop by its own duration** (CN6). A `shell` call running a test suite
+  is the realistic worst case, and `shell_kill` is the existing control for it.
+- **A cancel during a retry backoff costs one more model call.** Batch 91's retry sleeps in
+  `provider_errors.wait(delay)` and nothing checks the token across it, so the next attempt starts
+  and the stop lands on its first token. Not a correctness problem -- the extra call is accounted
+  and persisted like any other -- and deliberately left rather than fixed here, because the obvious
+  fix interacts with the retraction: `partial` holds the failed attempt's text, which batch 113
+  already told the screen to take back, so a stop that broke out of the backoff would have to
+  discard it explicitly or persist something the reader watched disappear.
+- **The cancelled step's spend is unmeasured and stays unmeasured** (CN5). It is reported as absent
+  rather than as zero, which is the most that can honestly be said.
+- **The TUI binding has no footer entry.** `show=False` is forced: the footer would need `None` from
+  `check_action` to grey rather than reflow, and `None` would keep the key slot and shadow
+  `close_thread_view`. One of the two had to give, and a wrong label on a live key is worse than no
+  label.

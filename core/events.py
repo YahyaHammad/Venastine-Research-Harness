@@ -86,4 +86,27 @@ class LoopEvent:
     # the research pipeline translates it into nothing at all.
     retract: Optional[dict] = None
     final_response: Optional[Any] = None          # ModelResponse on terminal event
-    stop_reason: Optional[str] = None             # "complete" | "max_steps_reached" | "token_budget_exceeded"
+    # "complete" | "max_steps_reached" | "token_budget_exceeded" |
+    # "cancelled"
+    #
+    # ROADMAP_v3 §61 (CN3) added the fourth, and added NO field: this
+    # comment is the only place the set is written down, so a value
+    # missing from here is a reader's silent gap -- which is why
+    # tests/test_cancel.py asserts all four appear in this file.
+    #
+    # "cancelled" is NEVER "failed". A failed run is recorded on the
+    # thread by mark_turn_failed and reads as something broken; a
+    # cancelled one is a person changing their mind. The loop RETURNS on
+    # it rather than raising, for the reason the module docstring above
+    # gives about exceptions -- an exception here would reach _run's
+    # frame and stamp a failure on a turn nobody saw fail, which is the
+    # same argument that frame already makes for GeneratorExit.
+    #
+    # A CONSUMER THAT TREATS EVERY NON-"complete" VALUE AS TRUNCATION IS
+    # NOW WRONG, and there is one: core/reasoning/orchestrator.py's
+    # _check_truncation continues the pipeline on a truncated pass with
+    # text. No research pass can return "cancelled" today (§61 CN12
+    # defers the pipeline deliberately), so that reader is correct as it
+    # stands -- and it has to be taught the difference before the
+    # deferral is lifted.
+    stop_reason: Optional[str] = None

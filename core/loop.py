@@ -45,6 +45,7 @@ from uuid import UUID
 import config
 import prompts.system_prompts as system_prompts
 from core import agent_activity, interaction, provider_errors
+from core.cancel import is_cancelled
 from core.client import (
     ModelResponse,
     api_initialization,
@@ -741,7 +742,7 @@ def _parallel_groups(calls) -> list:
 
 
 def _dispatch_one(call, *, context, run_info, response_channel, memory,
-                  activity, gate=_NO_GATE):
+                  activity, cancel=None, gate=_NO_GATE):
     """Decide, ask about and dispatch ONE tool call.
 
     A GENERATOR that yields the call's own narration -- the permission
@@ -1102,6 +1103,11 @@ def _dispatch_one(call, *, context, run_info, response_channel, memory,
                 signoff=signoff,
                 memory=memory,
                 activity=activity,
+                # §61 CN7. A child run is this run continuing, so it is
+                # handed the same switch -- the argument that
+                # `response_channel` and `activity` beside it already
+                # make, for the same reason.
+                cancel=cancel,
             )
         except ToolCallDenied as e:
             result = {"error": str(e)}
@@ -1110,7 +1116,7 @@ def _dispatch_one(call, *, context, run_info, response_channel, memory,
 
 
 def _dispatch_parallel(calls, *, context, run_info, response_channel,
-                       memory, activity):
+                       memory, activity, cancel=None):
     """Run several calls of one response at once (NA9, NA10, NA15).
 
     A GENERATOR yielding every worker's narration as it arrives, and
@@ -1174,7 +1180,7 @@ def _dispatch_parallel(calls, *, context, run_info, response_channel,
         gen = _dispatch_one(
             call, context=context, run_info=run_info,
             response_channel=response_channel, memory=memory,
-            activity=activity, gate=_GATE_LOCK)
+            activity=activity, cancel=cancel, gate=_GATE_LOCK)
         try:
             while True:
                 conduit.put(("event", next(gen)))
@@ -1290,6 +1296,59 @@ def _settle_one(call, outcome, memory, granted_calls, notices):
     yield LoopEvent(tool_result={"id": call.id, "result": result})
 
 
+def _finish_cancelled(memory, response, *, partial_text, unrun, reason,
+                      granted_calls, notices, totals):
+    """Everything a cancelled turn leaves behind, in ONE place (§61 CN3).
+
+    Three sites reach it -- the step boundary, a stream cut part way
+    through, and the gap between two tool groups -- and they differ only
+    in what they have in hand. Writing the terminal event at each would
+    be three chances to forget one of the three things below, and the
+    last of them is what keeps the thread resumable.
+
+    `partial_text` is the accumulated deltas when the stream was cut, and
+    None otherwise. It is the only case that PERSISTS, because it is the
+    only one holding an assistant turn D20 has not already written. Empty
+    text persists nothing: a turn stopped before its first token said
+    nothing, and an empty assistant row is one every later request has to
+    carry.
+
+    `unrun` is every tool call of this response that will not get a
+    result. #42 is the same lesson from the other side -- a `tool_use`
+    persisted with no matching `tool_result` is M4's pairing broken and
+    an UNRESUMABLE thread -- so a cancelled turn answers every call the
+    model made, including the ones it declined to run. The answer is an
+    `error`, which is the shape a denied call already takes.
+
+    CN5: a SYNTHESISED response reports an EMPTY usage dict, not zeros.
+    The provider sends usage with its final message and a cut stream has
+    none, so the honest statement is "not measured" -- and the two stay
+    distinguishable, since `"input_tokens" in usage` is False here and
+    True for a step that genuinely cost nothing. A zero would be the
+    instrument that lies, which batches 118 and 119 each paid for once.
+
+    CANCELLED IS NOT FAILED. Nothing here calls `mark_turn_failed`: the
+    frame above draws exactly that distinction for an abandoned
+    generator, and §60's UH6 records UHP arriving at it independently.
+    """
+    if partial_text is not None:
+        response = ModelResponse(text=partial_text, usage={})
+        if partial_text:
+            memory.add_assistant_message(response)
+    elif response is None:
+        response = ModelResponse(text="", usage={})
+    for call in unrun:
+        result = {"error": reason}
+        memory.add_tool_result(call.id, result)
+        yield LoopEvent(tool_result={"id": call.id, "result": result})
+    response.stop_reason = "cancelled"
+    response.granted_calls = granted_calls
+    response.notices = notices
+    (response.turn_billed_tokens, response.turn_new_tokens,
+     response.turn_output_tokens) = totals
+    yield LoopEvent(final_response=response, stop_reason="cancelled")
+
+
 class RunAgentLoop:
 
     @staticmethod
@@ -1343,6 +1402,7 @@ class RunAgentLoop:
         grant_budget=None,
         compaction_mode: Optional[str] = None,
         activity=None,
+        cancel=None,
     ):
         """Generator yielding LoopEvent objects as the loop progresses.
 
@@ -1384,6 +1444,16 @@ class RunAgentLoop:
         caller silently ran on the chat trigger: a pass's JSON retry and
         the §20 reviewer evaluated a threshold their own threads were
         never meant to answer to.
+
+        cancel (§61): an optional core.cancel.CancelToken. None -- every
+        caller that has not opted in, which is every caller predating
+        §61 -- means nothing can stop this run, exactly as before. Set,
+        it is read at the three sites inside this function that CN2
+        names (the fourth is the shell's own drain), and the run then
+        ENDS on `stop_reason: "cancelled"` rather than raising. It must
+        not raise: the frame above records a failure on the thread for
+        any exception that is not a GeneratorExit, and a person changing
+        their mind is not a failed run.
         """
         # §29/#45 belt. `_run` is a generator, so this fires on the first
         # next() -- which for every production caller is immediate, since
@@ -1507,6 +1577,23 @@ class RunAgentLoop:
 
         response = None
         for _ in range(max_steps):
+            # §61 CN2, the step boundary -- and ABOVE the reset below,
+            # which is the whole reason it sits here rather than at the
+            # foot of the body. The response it reads is the PREVIOUS
+            # step's: already counted, already persisted, and the last
+            # thing the model actually said. That is the shape
+            # "max_steps exhausted" already has at the end of this loop.
+            # Below the reset it would read None on every iteration and
+            # report an empty answer for a turn that had produced
+            # several.
+            if is_cancelled(cancel):
+                yield from _finish_cancelled(
+                    memory, response, partial_text=None, unrun=(),
+                    reason=cancel.reason, granted_calls=granted_calls,
+                    notices=notices,
+                    totals=(total_tokens_used, turn_new_tokens,
+                            turn_output_tokens))
+                return
             response = None
             # Batch 91. ONE model call, attempted up to
             # 1 + MODEL_CALL_MAX_RETRIES times. The SDKs retry a request that
@@ -1533,21 +1620,43 @@ class RunAgentLoop:
             # attempt that succeeded is counted or persisted (D20). A failed
             # stream reports no usage to count in any case.
             retry = 0
+            # §61 CN4. The deltas are accumulated HERE because no
+            # provider branch can supply them after a cut: the Anthropic
+            # one builds its text from `stream.get_final_message()`,
+            # which a stream broken off part way never produces. Reset
+            # per ATTEMPT, beside `shown`, so a retry that retracts what
+            # was drawn does not also keep it.
+            cut_short = False
             while True:
                 shown = False
+                partial = []
                 try:
                     for token in call_model_stream(
                         client, provider_name, model, memory.messages,
                         system_prompt, tool_schemas, temperature, effort,
                     ):
+                        if token.final_response is not None:
+                            response = token.final_response
+                        # §61 CN2, and guarded on `response is None`
+                        # rather than placed by line order, because
+                        # placement alone was not enough: a cancel
+                        # arriving in the gap before the final-response
+                        # token still cut a call that had already been
+                        # made and paid for, and its usage went with it.
+                        # A step holding a complete response is
+                        # FINISHED -- it is accounted and persisted
+                        # exactly as always, and the stop lands at the
+                        # next site instead.
+                        if response is None and is_cancelled(cancel):
+                            cut_short = True
+                            break
                         if token.text_delta:
                             shown = True
+                            partial.append(token.text_delta)
                             yield LoopEvent(token_delta=token.text_delta)
                         if token.thinking_delta:
                             shown = True
                             yield LoopEvent(thinking_delta=token.thinking_delta)
-                        if token.final_response is not None:
-                            response = token.final_response
                     break
                 except Exception as e:  # noqa: BLE001 -- re-raised unless it qualifies
                     retry += 1
@@ -1583,6 +1692,20 @@ class RunAgentLoop:
                             "attempts": attempts,
                         })
                     provider_errors.wait(delay)
+
+            # §61 CN2/CN4. Leaving the `for` above closed the
+            # provider stream: every branch yields from inside its own
+            # context manager, so the connection is already released by
+            # the time this runs. What is left to decide is the
+            # half-answer, and CN4 keeps it.
+            if cut_short:
+                yield from _finish_cancelled(
+                    memory, None, partial_text="".join(partial), unrun=(),
+                    reason=cancel.reason, granted_calls=granted_calls,
+                    notices=notices,
+                    totals=(total_tokens_used, turn_new_tokens,
+                            turn_output_tokens))
+                return
 
             if response is None:
                 raise RuntimeError(
@@ -1635,7 +1758,24 @@ class RunAgentLoop:
             # other call is a group of one in its original position. A response
             # with nothing parallel in it therefore takes the same path it
             # always did, one group of one at a time.
-            for group in _parallel_groups(response.tool_calls):
+            groups = _parallel_groups(response.tool_calls)
+            for index, group in enumerate(groups):
+                # §61 CN2/CN6. BETWEEN groups, never inside one. A call
+                # already running finishes and settles: nothing here has
+                # the power to kill a tool, and a cancel that threw away
+                # a completed call's result would discard work already
+                # done. Every group NOT reached still needs its rows --
+                # #42's lesson from the other side -- which is what
+                # `unrun` carries.
+                if is_cancelled(cancel):
+                    yield from _finish_cancelled(
+                        memory, response, partial_text=None,
+                        unrun=[c for rest in groups[index:] for c in rest],
+                        reason=cancel.reason, granted_calls=granted_calls,
+                        notices=notices,
+                        totals=(total_tokens_used, turn_new_tokens,
+                                turn_output_tokens))
+                    return
                 # In call order, and BEFORE anything is submitted, so a batch
                 # announces its whole membership at once rather than in
                 # whatever order three threads happen to reach their first
@@ -1653,12 +1793,12 @@ class RunAgentLoop:
                     settled = [(group[0], (yield from _dispatch_one(
                         group[0], context=context, run_info=run_info,
                         response_channel=response_channel, memory=memory,
-                        activity=activity)))]
+                        activity=activity, cancel=cancel)))]
                 else:
                     settled = yield from _dispatch_parallel(
                         group, context=context, run_info=run_info,
                         response_channel=response_channel, memory=memory,
-                        activity=activity)
+                        activity=activity, cancel=cancel)
 
                 # NA11. In the MODEL'S order, whatever order they finished in.
                 for call, outcome in settled:
@@ -1718,6 +1858,7 @@ class RunAgentLoop:
         thread_parent: Optional[UUID] = None,
         thread_parent_call: Optional[str] = None,
         thread_agent: Optional[str] = None,
+        cancel=None,
     ) -> ModelResponse:
         """Regular conversation — full tool set, default system prompt,
         one continuous thread. Pass thread_id to resume an existing
@@ -1814,6 +1955,7 @@ class RunAgentLoop:
             max_steps, _resolve_spend_cap(max_total_tokens),
             temperature=temperature, effort=effort,
             response_channel=response_channel, activity=activity,
+            cancel=cancel,
             **auth_kwargs,
         ))
         response.thread_id = memory.thread_id

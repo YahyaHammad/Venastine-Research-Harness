@@ -18275,3 +18275,184 @@ cause -- it is recorded because the CPU profile of the pre-121 failure mode was 
 and because it is one more reason the fix mattered.
 
 Counts unchanged at 6204.
+
+## Batch 124 -- a turn you can stop, and the rows a stopped turn still owes
+
+**ROADMAP_v3 §61**, built from §60's UH6 and recorded as its own section rather than inside §60,
+because UH6's own sentence is that cancellation is not UHP-specific. First production-code batch
+since 121.
+
+Nothing in this harness could stop a running turn. Measured before anything was written: no
+occurrence of `cancel` in `core/loop.py` or `core/client.py`, and the only two keys that looked
+like they would end the PROCESS -- `ctrl+c` arms a quit, and in the CLI a `KeyboardInterrupt`
+during a turn is not caught by that turn's `except Exception`, so it unwinds to `main()`'s
+`finally` and exits 130. A turn going the wrong way was watched to the end or the harness was
+killed.
+
+### The mechanism was forced, and one measurement settled it
+
+A turn runs in `run_worker(..., thread=True)`. Textual cannot cancel a THREAD worker, the key is
+pressed on the UI thread while the generator is mid-`next()` on the worker, and calling `close()`
+on a running generator from another thread raises `ValueError: generator already executing`. A
+cooperative flag is the only thing that can cross, which is what UH6 already said and what this
+confirmed rather than assumed.
+
+Abandonment already existed and was already right -- `_run` catches `Exception` and not
+`BaseException` precisely so that a GeneratorExit is not recorded as a failure (#42). It is
+insufficient for three reasons and only three: it fires at a yield, so it cannot reach a socket
+read waiting for a first token or a tool call in progress; it leaves the thread with a user message
+and no reply; and it leaves a pipeline record at `running` for ever.
+
+### The part that would have been a defect rather than a missing feature
+
+D20 persists the assistant turn, with every one of its `tool_use` blocks, BEFORE anything runs. So
+a cancel that stopped between two tool groups would leave a response whose calls were recorded and
+whose results were not -- and `_settle_one`'s own comment already names what that is, from the
+abandoned-generator side: *"a `tool_use` D20 already wrote with no matching `tool_result`, which is
+M4's pairing broken from the other side and an unresumable thread."*
+
+CN4's `unrun` is the answer. **A cancelled turn answers every call the model made**, including the
+ones it declined to run, with the `{"error": ...}` shape a denied call already takes.
+`test_every_call_of_a_cancelled_response_gets_a_result_row` drives three calls, lets one run, and
+asserts three rows. Without it this batch would have shipped a key that quietly made threads
+unresumable, and the symptom would have been a provider 400 on the NEXT turn.
+
+### Two things the tests found before a user could
+
+**A completed model call was being thrown away.** The first cut of CN2 checked the token at the top
+of the stream's token loop, which reads correctly and is wrong: a cancel arriving in the gap before
+the final-response token still cut a call that had already been made and paid for, and its usage
+went with it. `test_a_stream_whose_last_token_completed_it_is_not_treated_as_cut` caught it. The
+guard is now `response is None and is_cancelled(cancel)` -- the rule stated rather than approximated
+by line order: a step holding a complete response is FINISHED, and the stop lands at the next site.
+
+**The loop had to grow its own accumulator.** `core/client.py`'s Anthropic branch builds its text
+from `stream.get_final_message()`, which a stream broken off part way never produces -- so there
+was no partial answer anywhere to keep until `_run_steps` started keeping one. The good half of the
+same reading: every branch yields from inside its own `with ... as stream:`, so breaking the `for`
+already closes the connection and nothing had to be written to avoid leaking a socket.
+
+### What it cost in surface, which is less than expected
+
+A fourth `stop_reason` is a new VALUE and not a tenth `LoopEvent` field, so
+`tests/test_pipeline_events.py`'s nine-field pin is untouched -- and `main.py` and `tui/app.py`
+already print `[stopped early: <reason>]` for anything that is not `"complete"`, so two display
+sites needed no change at all.
+
+Escape needed no arbitration either. `PromptInput` gates its own escape binding with `check_action`
+and says why: *"with no panel open they are the keys they have always been: tab moves focus, escape
+reaches whoever wants it."* CN8 takes that at its word -- an ordinary app binding, no
+`priority=True`, which is the opposite of ctrl+c and deliberately so, since priority would reach
+past the prompt and break the panel rather than cooperate with it. Precedence falls out: suggestion
+panel, then thread view, then cancel.
+
+The `False`-never-`None` rule came along with it. `active_bindings` is keyed by KEY and skips a
+binding only on `is False`, so a `None`-refused `cancel_turn` would keep the slot and
+`close_thread_view` would never fire again. That also forces `show=False`: greying a footer entry
+instead of reflowing it needs `None`, and `None` is the thing that cannot be used here. A wrong
+label on a live key is worse than no label, so there is no label.
+
+### Owner decisions locked in this batch
+
+| | |
+|---|---|
+| Scope | Chat turns only, subagents by inheritance. The research pipeline, compaction and `/grill-me` are **deferred, not out of scope** |
+| Gesture | **escape**, *"pretty standard for most harnesses"*. ctrl+c keeps both its meanings untouched |
+| Partial text | Persisted and marked, so the model sees what it was cut off saying and the transcript matches the thread |
+| A live tool call | Finishes and settles; the turn stops after it. Nothing gains the power to kill a tool |
+| CLI | Ctrl+C stops the turn and returns to the prompt; at the prompt it exits as before |
+| Record | A new §61 with its own family, cross-referenced from UH6, rather than UH13 onward inside §60 |
+
+### What the deferral has to learn before it is lifted, written down twice
+
+`core/reasoning/orchestrator.py`'s `_check_truncation` reads `if stop in (None, "complete"): return`
+and treats everything else as truncation -- with text, trace it and run the next pass. A pass
+returning `"cancelled"` would be read as degraded rather than stopped, and the pipeline would
+continue into the next pass on a run the user had ended.
+
+That reader is correct exactly as long as CN12 holds, since no pass can return the value today. It
+is recorded in §61 and again in `core/events.py` beside the value itself, so that lifting the
+deferral starts from the gap rather than finding it. `test_abandoning_the_generator_leaves_the_
+record_running` moves with it: *"'running' is honest for an abandoned run"* is the right answer for
+abandonment and the wrong one for a cancellation, which has a status of its own to go to.
+
+### The full run found a fourth pinned site, and three flakes that were the machine
+
+**4 failed, 6182 passed, 46 skipped in 704 s.** One of the four was real and three were not, and
+the difference was settled by re-running rather than by reading.
+
+**The real one: `test_e2e.py::test_chat_mode_e2e_multi_turn_with_tool_use`.** Three tests in
+`test_loop_tool_dispatch.py` pin `registry.dispatch`'s exact kwargs and were updated when the
+parameter was added. There is a FOURTH, in a file this batch had no reason to look at, and it is
+the one that says something: it drives the real CLI chat turn, so the value arriving at dispatch
+is not `None` but **the shell's own CancelToken**. CN7 and CN10 compose there without either
+having been written with the other in mind -- Ctrl+C during a CLI turn reaches a subagent spawned
+inside that turn -- and an existing test proves it, so it is pinned by TYPE rather than absorbed
+into a `**kwargs`.
+
+That is AGENTS.md's "grep for every other call site sharing the root cause" catching a miss: three
+sites were found by running the obvious file, and the fourth only by running everything.
+
+**The three that were not:** `test_storage_e2e.py::test_eight_concurrent_writers_all_land`,
+`test_live_output.py::...test_a_drag_re_arms_rather_than_stacking` and
+`test_tui.py::...test_effort_lookup_does_not_block_the_ui_thread`. All three are time-sensitive,
+all three pass serially in **14.9 s together**, and the run that failed them took **704 s against
+a 131 s baseline on this same tree** -- 5.4x, which is the finding rather than the failures.
+Batch 123 recorded the identical shape at ten times slower, and AGENTS.md already names the
+mechanism: `pilot.pause()` is a process-wide CPU heuristic, 21 ms idle against 1021 ms with one
+busy sibling. Recorded rather than quietly re-run, for the second batch running.
+
+### The mutation pass found a hole, and the hole became a test
+
+Eleven mutations over the three production files, in three foreground chunks, green-unmutated
+confirmed before each. **Ten died immediately. One did not, and it was the most important one in
+the set.**
+
+**MJ set `registry.dispatch`'s `available["cancel"]` to None -- the single line that decides
+whether a spawned child can be stopped -- and all 28 tests stayed green.** Both CN7 tests stop
+short of the real thing: `test_the_token_reaches_dispatch_so_a_spawned_child_can_see_it` mocks
+`registry.dispatch` away, so it never reaches the map, and
+`test_every_injectable_name_has_a_value_in_dispatch` greps dispatch's source for the key -- which
+the mutation left in place while changing its value. Two tests about the same wiring, and the
+mutation walked between them.
+
+The fix is `test_the_injection_actually_hands_a_handler_the_token`: a throwaway `ToolSpec` whose
+handler declares `cancel`, registered, dispatched through the REAL registry, unregistered in a
+`finally`. It asserts both halves -- that `_declared_injections` read the parameter off the
+signature at `register()`, and that `available` supplied the value at `dispatch()`. MJ is red now,
+and the pass is 11 of 11.
+
+A throwaway tool rather than `spawn_subagent` because dispatching the real one spawns a real
+agent, and what is under test is the registry's machinery rather than the subagent's.
+
+### Linux is where CN10 is actually tested
+
+A WSL leg earns its place this batch rather than by habit. `signal.signal` is main-thread-only on
+both platforms, but **Windows synthesises SIGINT from a console control event on a separate
+thread while POSIX delivers a real signal** -- so the handler, and the restore in its `finally`,
+are only properly exercised here. The probe raises an actual `SIGINT` at the process rather than
+calling the handler:
+
+```
+token set by a real SIGINT: True
+reason: stopped from the keyboard
+handler restored to the original: True
+second press sets anything new: False
+```
+
+The last line is CN1's set-once rule and CN10's shape together: the owner chose cancel-then-
+exit-at-the-prompt over a double tap, so a second press during a turn is deliberately a no-op.
+
+589 passed serially over the new file and the changed ones. The full parallel suite is **3 failed,
+6201 passed, 29 skipped in 141 s**, and the three are *exactly* the set documented since batch
+107 -- `test_re_importing_config_re_reads_the_file` and the two in `test_output_writer.py`.
+Unchanged by this batch, named rather than counted, which is the only way that set stays useful.
+
+### Gaps, stated rather than discovered
+
+A cooperative token cannot interrupt a blocked socket read, so the window from the request leaving
+to the first token arriving -- tens of seconds on a thinking model, and exactly when a user is most
+likely to change their mind -- is unreachable. A long tool call delays the stop by its own duration
+(CN6). The cancelled step's spend is unmeasured and is reported as ABSENT rather than as zero
+(CN5), which is the most that can honestly be said. What both shells do about the first two is say
+they are stopping, so that a slow stop reads as a stop rather than as a dead key.

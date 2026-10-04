@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 6204 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
+pytest                                            # 6233 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -172,7 +172,7 @@ made the move free: no import changed, and `tests/test_docs_consistency.py` is t
 opens any of these files (its `DOCS` constant is where the path now comes from).
 
 - **docs/ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49–§52 built; §53–§60 recorded from the owner's requests in batches 122 and 123, specified and not yet designed) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A15 from §32, W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 SS1–SS72 from §49, NW1–NW5 from §50, PG1–PG9 from §51, RB1–RB7 from §52, IO1–IO7 from §53, AT1–AT8 from §54, TR1–TR5 from §55, JV1–JV10 from §56, SM1–SM4 from §57, PR1–PR5 from §58 UI1–UI4 from §59 and UH1–UH12 from §60). Section and D-numbers are stable and cross-referenced everywhere.
+- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49–§52 and §61 built; §53–§60 recorded from the owner's requests in batches 122 and 123, specified and not yet designed) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A15 from §32, W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 SS1–SS72 from §49, NW1–NW5 from §50, PG1–PG9 from §51, RB1–RB7 from §52, IO1–IO7 from §53, AT1–AT8 from §54, TR1–TR5 from §55, JV1–JV10 from §56, SM1–SM4 from §57, PR1–PR5 from §58 UI1–UI4 from §59, UH1–UH12 from §60 and CN1–CN12 from §61). Section and D-numbers are stable and cross-referenced everywhere.
 
 **Six namespaces use the same `LETTER+NUMBER` shape, and only the first is the
 record.** An id that resolves to two places is a cross-reference that fails
@@ -912,6 +912,23 @@ never quits, in either state, so no sequence of copies can end the session. `ctr
 textual's own priority binding and already quit from everywhere, modals included; it is
 untouched and now documented.
 
+**escape is the SECOND key with two app bindings, and it is also the key the prompt may want**
+(ROADMAP_v3 §61, CN8, batch 124). `close_thread_view` and `cancel_turn` share it, and the pair
+works exactly as the ctrl+c pair above does — including **`False`, never `None`**, for the reason
+spelled out there. What is different is the third claimant: `PromptInput` binds escape to
+dismissing its suggestion panel and gates that with `check_action`, whose own comment is the
+licence this took — *"with no panel open they are the keys they have always been: tab moves focus,
+escape reaches whoever wants it."* So **no `priority=True`**, which is the opposite of ctrl+c and
+for a reason that is not a preference: priority would reach past the prompt and break the panel
+instead of cooperating with it. Precedence is therefore suggestion panel, then thread view, then
+cancel, and it needed no arbitration written anywhere. The one-sentence rule §47 set for this key
+survives: escape means back to the conversation, and stopping a turn is that.
+
+`cancel_turn` is also the one binding here that **cannot show a footer entry**. Greying rather than
+reflowing needs `None` from `check_action`, `None` keeps the key slot, and keeping the slot would
+shadow `close_thread_view` — so `show=False` is forced, and a wrong label on a live key would be
+worse than no label.
+
 **An alias is a field on the command, and the LISTS stay canonical** (batch 57).
 `SlashCommand.aliases` plus a second index in the registry; `get()` falls back to it so
 `dispatch` needed no change. `all()` and `names()` are canonical, and `matching()` returns
@@ -1236,6 +1253,14 @@ input, which is why it is a key at all — `/kill` is typed into the prompt, and
 the block is felt — and why `check_action` returns **None** rather than False while nothing is
 running: False drops the footer entry and reflows, None greys it, and a control a blocked user
 needs has to stay visible.
+
+**ctrl+b stops the SESSIONS and escape stops the CONVERSATION** (ROADMAP_v3 §61, CN9, batch 124),
+and the two must not be collapsed. `_busy` is true through the post-turn session wait as well as
+through the turn, so a cancel binding reading `_busy` would arm escape in the one place ctrl+b
+already means something adjacent. It reads the live `CancelToken` instead — present only while
+there is a turn to stop. A cancel landing during the wait ends the WAIT and leaves the sessions
+running, with their results held for the user's next message (SS19), which is the suspension path
+arriving by a second route rather than a new behaviour.
 
 **The permission modal names the asking run, and the harness fact is written LAST.** A subagent's
 approvals have always surfaced on the parent's screen — the channel is inherited — and the modal

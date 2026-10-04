@@ -103,6 +103,12 @@ _INJECTABLE_PARAMS = (
     # threaded through params because it is a run-scoped value, exactly
     # like response_channel beside it.
     "activity",
+    # ROADMAP_v3 §61 (CN7): the turn's CancelToken, for spawn_subagent. A
+    # child run is the parent's turn continuing, so stopping the parent
+    # stops it -- and the only way a value reaches a run that happens
+    # INSIDE a tool call is this list, which is `activity`'s own argument
+    # one line up.
+    "cancel",
     # ROADMAP_v2 §47: the model's own id for THIS call. A tool that
     # creates something durable can then record which call created it,
     # which is what lets one line in a transcript find one row in the
@@ -694,6 +700,7 @@ class ToolRegistry:
         memory=None,
         activity=None,
         call_id=None,
+        cancel=None,
     ) -> dict:
         # Unknown-tool guard: ValueError, deliberately NOT ToolCallDenied.
         # The two exception types separate "you misnamed it" from "policy
@@ -768,6 +775,7 @@ class ToolRegistry:
             "memory": memory,
             "activity": activity,
             "call_id": call_id,
+            "cancel": cancel,
         }
         injected = {p: available[p] for p in self._injectable.get(tool_name, ())}
         try:

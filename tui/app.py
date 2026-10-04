@@ -56,6 +56,7 @@ from agents.tui_commands import register_agent_commands
 from core import config_loader, session_wake, shell_sessions
 from core.agent_activity import AgentActivity
 from core.approval import RunAuthorization
+from core.cancel import CancelToken
 from core.client import api_initialization, effort_levels_for_model
 from core.loop import (
     DEFAULT_PROVIDER,
@@ -678,6 +679,21 @@ class VenastineApp(App):
         # means "back to the conversation", never "up one level", which
         # is what the crumb's clickable segments are for.
         Binding("escape", "close_thread_view", "Back", show=False),
+        # ROADMAP_v3 §61 (CN8). The SECOND app-level binding on escape,
+        # and the pair works the way the ctrl+c pair does: whichever
+        # `check_action` refuses with False gives up the slot, so one
+        # key reaches two actions without either shadowing the other.
+        #
+        # NOT priority=True. The prompt binds escape to dismissing its
+        # suggestion panel and gates that with check_action -- "with no
+        # panel open they are the keys they have always been: tab moves
+        # focus, escape reaches whoever wants it" -- so this IS whoever
+        # wants it, and taking priority would break the panel instead.
+        #
+        # The resulting rule is still one sentence: escape means back to
+        # the conversation. Closing a read-only view and stopping a turn
+        # that is running are both that.
+        Binding("escape", "cancel_turn", "Stop", show=False),
         # Batch 63. ctrl+UP/DOWN, and the pair was chosen by
         # elimination rather than by taste. ctrl+p is textual's
         # COMMAND_PALETTE_BINDING, bound priority=True, and the
@@ -745,6 +761,16 @@ class VenastineApp(App):
     _last_turn_elapsed = None
     _turn_output_tokens = None
     _history = None
+    # ROADMAP_v3 §61 (CN9). The live turn's CancelToken, or None between
+    # turns. A CLASS attribute for `_pending_restart`'s reason: the
+    # binding's check_action reads it, and that runs on bare-built apps
+    # across the suite.
+    #
+    # THIS, not `_busy`, is what the binding asks. `_busy` is also true
+    # through the post-turn session wait, where SS2 keeps ctrl+b
+    # reachable precisely so the user can stop what is running there --
+    # a second key meaning something adjacent would make neither clear.
+    _cancel = None
 
     def __init__(self, provider_name: str = DEFAULT_PROVIDER,
                  model: str = None, settings: dict | None = None,
@@ -2720,6 +2746,12 @@ class VenastineApp(App):
                 config_loader.spend_cap(),
                 effort=self.effort,
                 response_channel=channel,
+                # ROADMAP_v3 §61. Beside the channel, because it is the
+                # same kind of thing: an out-of-band object this turn
+                # needs where a LoopEvent cannot reach. A wake turn is
+                # this turn continuing (SS5) and is built from this same
+                # closure, so it inherits the switch for free.
+                cancel=self._cancel,
                 # Batch 59. Rides beside the response channel because it is the
                 # same kind of thing: an out-of-band object handed down to a
                 # run that happens inside a tool call, where a LoopEvent cannot
@@ -2733,6 +2765,18 @@ class VenastineApp(App):
             memory.add_harness_message(text, record)
             return _turn()
 
+        # ROADMAP_v3 §61. One token per turn, and built HERE rather than
+        # at the top: the early return above leaves `_busy` False for a
+        # turn that never started, and a token built before it would
+        # outlive that turn -- arming escape with nothing to stop, and
+        # staying armed until the next turn replaced it. Past every
+        # return in this function, so the token exists only once a worker
+        # is about to. Cleared in on_turn_finished beside
+        # `_permission_channel`, which has exactly this lifetime.
+        #
+        # `_turn()` reads it when the WORKER calls it, below, so building
+        # it here rather than above changes nothing about the handoff.
+        self._cancel = CancelToken()
         thread_id = getattr(memory, "thread_id", None)
         self.run_worker(
             lambda: self._consume(_turn(), thread_id=thread_id, wake=_wake),
@@ -2797,6 +2841,24 @@ class VenastineApp(App):
         sessions = shell_sessions.sessions
         while True:
             if not sessions.live_for(thread_id) and not sessions.pending(thread_id):
+                return
+            # ROADMAP_v3 §61 (CN2), this shell's drain. A turn that was
+            # stopped must not be followed by a wake turn answering the
+            # sessions it started -- that is the same turn continuing
+            # (SS5), and the user asked for it to end.
+            #
+            # The sessions are LEFT RUNNING and their results HELD, which
+            # is the suspension path immediately below arriving by a
+            # different route: escape stops the conversation, ctrl+b
+            # stops the sessions, and neither quietly does the other's
+            # job. SS19 then delivers what they produced with the user's
+            # next message.
+            if self._cancel is not None and self._cancel.cancelled:
+                self.post_message(SessionNote(
+                    "system",
+                    "— stopped; background sessions are still running "
+                    "and their results will arrive with your next "
+                    "message —"))
                 return
             if sessions.closing:
                 # The harness is on its way out and `_close_sessions` is
@@ -3558,7 +3620,44 @@ class VenastineApp(App):
             # contend, and this is what makes that true rather than
             # lucky.
             return self._viewing is not None
+        if action == "cancel_turn":
+            # §61 CN8. FALSE, never None, for close_thread_view's reason
+            # one line up and ctrl+c's two above that: `active_bindings`
+            # is keyed by KEY and skips a binding only on `is False`, so
+            # a None-refused one keeps the slot and the other escape
+            # action never fires. This binding has no footer entry to
+            # grey out either, so there is nothing on the other side of
+            # the trade.
+            #
+            # Already-cancelled counts as unavailable: the run is
+            # winding down and a second press has nothing left to ask
+            # for, which also lets escape fall back through to the
+            # thread view underneath.
+            return self._cancel is not None and not self._cancel.cancelled
         return True
+
+    def action_cancel_turn(self) -> None:
+        """escape, while a turn is running: ask it to stop (§61 CN8).
+
+        The line is written HERE rather than when the loop notices,
+        because the gap between the two is the whole user-visible cost
+        of a cooperative stop: a tool call already running finishes
+        first (CN6), and a model call still waiting on its first token
+        cannot be reached at all until it arrives. Saying so is what
+        makes a slow stop read as a stop rather than as a dead key.
+
+        `cancel()` returning False means someone already asked -- the
+        binding refuses in that state, so this is belt and braces for a
+        press that raced the refresh rather than a case to report.
+        """
+        token = self._cancel
+        if token is None or not token.cancel("stopped from the keyboard"):
+            return
+        self._transcript.write_system(
+            "— stopping; anything already running finishes first —")
+        # The footer and the binding map both read check_action, and
+        # this is the moment its answer changes.
+        self.refresh_bindings()
 
     def action_recall_previous(self) -> None:
         """ctrl+up: the prompt before this one."""
@@ -4212,6 +4311,10 @@ class VenastineApp(App):
     def on_turn_finished(self, message: TurnFinished) -> None:
         self._busy = False
         self._permission_channel = None
+        # ROADMAP_v3 §61 (CN9). Same lifetime as the channel above: with
+        # no turn to stop, escape goes back to meaning only what it
+        # meant before, and check_action says so.
+        self._cancel = None
         self._tool_names.clear()
         self._file_calls.clear()
         # §38: close a thinking span before the answer's, so a turn that

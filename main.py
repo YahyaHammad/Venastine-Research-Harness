@@ -23,6 +23,7 @@ the permanent fallback entry point.
 import argparse
 import logging
 import os
+import signal
 import sys
 from uuid import UUID
 
@@ -44,6 +45,7 @@ import core.reasoning.pipeline_storage  # noqa: F401 -- registers PipelineRunRec
 # first research run died on "no such table". Do not "tidy" these away.
 import storage  # noqa: F401 -- registers ConversationThread, MessageLog
 from core import config_loader, shell_sessions, workspace_trust
+from core.cancel import CancelToken
 from core.loop import DEFAULT_PROVIDER, RunAgentLoop
 from core.reasoning.authorization import GRANT_PICKER
 from core.replay import replay_entries
@@ -309,7 +311,12 @@ def run_chat(
         _print_replay(current_thread_id)
     else:
         print("Starting a new conversation thread.")
-    print("Ctrl+C or Ctrl+D to exit.\n")
+    # ROADMAP_v3 §61 (CN10). The key did only one thing before and now
+    # does two, so the banner says which is which. A control whose
+    # meaning depends on state and does not announce it is the thing
+    # this project keeps closing.
+    print("Ctrl+C stops the current turn; Ctrl+C or Ctrl+D at the "
+          "prompt exits.\n")
 
     while True:
         if first_message is not None:
@@ -344,6 +351,32 @@ def run_chat(
             _deliver_held(current_thread_id)
             sessions.note_user_input(current_thread_id)
 
+        # ROADMAP_v3 §61 (CN10). A HANDLER rather than an `except
+        # KeyboardInterrupt`, and the difference is what the thread
+        # looks like afterwards. An interrupt unwinds from wherever it
+        # lands -- which can be between a `tool_use` D20 has persisted
+        # and the `tool_result` that pairs with it, leaving a thread the
+        # provider will refuse to continue (#42, M4). The token lets the
+        # loop stop at a boundary it chose and write every row it owes.
+        #
+        # Installed per turn and restored in the `finally`, so Ctrl+C at
+        # the prompt still exits and Ctrl+C during the session wait
+        # still stops the SESSIONS -- `_await_sessions` catches the
+        # interrupt itself, and the aim of the key there is already
+        # right.
+        #
+        # `signal.signal` is main-thread only, which is where this runs.
+        # The CLI drains through run_to_completion, so nothing else is
+        # writing to stdout during a turn and the one line below cannot
+        # interleave with streamed output.
+        cancel = CancelToken()
+
+        def _stop_this_turn(_signum, _frame, _token=cancel):
+            if _token.cancel():
+                print("\n[stopping — the current step finishes first]",
+                      flush=True)
+
+        previous_sigint = signal.signal(signal.SIGINT, _stop_this_turn)
         try:
             # SS17. The CLI chat turn is a wake consumer: a session started
             # here is reported by the loop below, which is what makes
@@ -356,11 +389,14 @@ def run_chat(
                     thread_id=current_thread_id,
                     authorization=authorization,
                     effort=effort,
+                    cancel=cancel,
                 )
         except Exception as e:
             logger.exception("Chat turn failed")
             print(f"\n[Error: {e}]")
             continue
+        finally:
+            signal.signal(signal.SIGINT, previous_sigint)
 
         current_thread_id = response.thread_id
 
@@ -392,6 +428,13 @@ def run_chat(
                     "last_input_tokens") or 0)
             figures = f" — billed {billed:,} this turn · ctx ~{ctx:,}" \
                 if billed is not None else ""
+            # ROADMAP_v3 §61 (CN5). An empty usage dict means the loop
+            # synthesised this response because the stream was cut, so
+            # the step that was interrupted reported no usage at all and
+            # `billed` is short by it. Stated, because a figure that is
+            # quietly incomplete is worse than one that admits it.
+            if response.stop_reason == "cancelled" and not response.usage:
+                figures += " (the stopped step is not counted)"
             print(f"[stopped early: {response.stop_reason}{figures}]")
         print()
 

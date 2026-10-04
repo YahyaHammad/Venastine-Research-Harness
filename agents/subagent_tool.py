@@ -188,7 +188,7 @@ def request_payload(params: dict, context=None) -> dict:
 
 def run(params: dict, parent_context=None, parent_run=None,
         response_channel=None, signoff=None, activity=None,
-        memory=None, call_id=None) -> dict:
+        memory=None, call_id=None, cancel=None) -> dict:
     from agents.manager import manager
     from core.loop import (
         DEFAULT_PROVIDER,
@@ -289,6 +289,12 @@ def run(params: dict, parent_context=None, parent_run=None,
         # for the same reason: the child is a run in its own right and
         # whatever is watching this stack is watching that one too.
         activity=activity,
+        # ROADMAP_v3 §61 (CN7). Inherited exactly as `activity` above is,
+        # and for a sharper version of the same reason: the child is a
+        # run in its own right, and a stop aimed at the turn that spawned
+        # it has to reach it, or the parent waits out a child it has
+        # already asked to end.
+        cancel=cancel,
     )
     with agent_activity.span(activity, agent.name, child.subagent_depth,
                              call_id) as span:
