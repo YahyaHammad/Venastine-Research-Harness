@@ -20,6 +20,7 @@ works, not that the app wires it up.
 from uuid import uuid4
 
 import pytest
+from textual.widgets import ContentSwitcher
 
 from core import agent_activity
 from tests.conftest import settle
@@ -859,10 +860,22 @@ class TestTheSpawnLineIsTheInlineAnchor:
             assert app._viewing is None
 
     @pytest.mark.asyncio
-    async def test_a_spawn_with_no_run_says_so(self):
+    async def test_a_spawn_with_no_run_says_so(self, mocker):
         """A refused spawn -- an unknown agent, the depth limit -- made no
         thread. A deliberate ctrl+click that produces silence reads as a
-        broken feature rather than as an answer."""
+        broken feature rather than as an answer.
+
+        THE SENTENCE CHANGED IN §55 (TR12) AND THE PROPERTY DID NOT. The
+        click now falls through to the call view, which is where a refused
+        spawn's own `{"error": ...}` actually is -- so the refusal left
+        here is the narrower one it should always have been: not "that
+        spawn made no thread" but "that call is not in the record at all",
+        which is this case, because `_spawn_event` never wrote one.
+
+        `call_entries` is stubbed at `tui.app`, as
+        `test_a_refusal_lands_in_the_pane_on_screen` explains.
+        """
+        mocker.patch("tui.app.call_entries", return_value=[])
         app = VenastineApp("ANTHROPIC", "test-model", {})
         async with app.run_test() as pilot:
             await pilot.pause()
@@ -877,7 +890,7 @@ class TestTheSpawnLineIsTheInlineAnchor:
             await pilot.pause()
 
             assert app._viewing is None
-            assert any("no thread to open" in t for _, t in
+            assert any("not in this conversation's record" in t for _, t in
                        transcript._entries)
 
 
@@ -1093,9 +1106,23 @@ class TestDescendingThroughTheViewer:
                                                           mocker):
         """`#transcript` is HIDDEN while the viewer is up, so a refusal
         written there is not quieter than intended -- it is invisible,
-        which is the silence `on_spawn_selected` exists to avoid."""
+        which is the silence `on_spawn_selected` exists to avoid.
+
+        §55 (TR12) moved which refusal this is -- the call view's, not the
+        spawn's -- and left the property under test exactly where it was:
+        whichever pane is on screen is the one that has to speak. Both
+        routes read `_visible_transcript`, so one fact still decides it.
+
+        `call_entries` is stubbed at `tui.app` for the same reason
+        `replay_entries` is, which this file has always done: these cases
+        are about what a CLICK does, and reaching real storage for a
+        thread the fixture never wrote makes the answer depend on the
+        database rather than on the handler. core/call_view.py's own
+        behaviour is pinned in tests/test_call_view.py.
+        """
         mocker.patch("tui.app.replay_entries",
                      return_value=[_tool_entry("call_9")])
+        mocker.patch("tui.app.call_entries", return_value=[])
         app = VenastineApp("ANTHROPIC", "test-model", {})
         async with app.run_test() as pilot:
             await pilot.pause()
@@ -1113,10 +1140,11 @@ class TestDescendingThroughTheViewer:
             seen = [t for _, t in app._thread_view._entries]
             hidden = [t for _, t in app._transcript._entries]
 
-        assert any("no thread to open" in t for t in seen), (
+        assert any("not in this conversation's record" in t for t in seen), (
             f"the viewer showed {seen}; the refusal has to be where the "
             "reader is looking")
-        assert not any("no thread to open" in t for t in hidden), (
+        assert not any("not in this conversation's record" in t
+                       for t in hidden), (
             "the refusal went to the hidden pane as well as the visible "
             "one")
 
@@ -1216,9 +1244,14 @@ class TestTheRegistryIsWhatDecides:
         calls = [entry[3] for entry in replay_entries(uuid4())
                  if entry[0] == "tool"]
 
-        assert calls == [("thread", "t1"), ()], (
-            f"replay carried {calls}; only a tool that opens something "
-            "has an id worth carrying, and it carries WHICH")
+        # §55 (TR7) gave `opens()` a fallback kind, so `fetch_url` now
+        # carries `("call", ...)` where it carried `()`. The property is
+        # unchanged and is the only one this test was ever about: replay
+        # carries WHICH kind, and it got the answer from the registry
+        # rather than from a tool name spelled here.
+        assert calls == [("thread", "t1"), ("call", "t2")], (
+            f"replay carried {calls}; a tool line carries WHICH kind it "
+            "opens, and the registry is what said so")
 
 # ---------------------------------------------------------------------------
 # ---- the keyboard route ----------------------------------------------------
@@ -2077,13 +2110,23 @@ class TestTheLiveTranscriptWritesAtTheOnScreenWidth:
                 f"opened and {wide} when the row was written")
 
     @pytest.mark.asyncio
-    async def test_both_panes_measure_the_same_width_when_shown(
+    async def test_the_panes_measure_the_same_width_when_shown(
             self, lineage, mocker):
-        """The borrow is only right because the two panes are the same box
+        """The borrow is only right because the panes are the same box
         -- identical border and padding in app.tcss, and RichLog's
         `overflow-y: scroll` keeping the scrollbar gutter constant. Give one
         of them a different gutter and every row written behind the other
-        is off by the difference."""
+        is off by the difference.
+
+        WAS `test_both_panes_...` UNTIL §55 (TR10), and the rename is the
+        point rather than tidying: "both" was already wrong when SS14
+        added `#session-view` in batch 98 and the assertion was never
+        widened, so a third pane with a different gutter would have
+        shipped behind a green test whose name said it was covered. All
+        four are measured now, and EVERY pane in the switcher is asked
+        rather than a list spelled out here -- a fifth pane fails this
+        test by existing, which is the only way the set stays complete.
+        """
         mocker.patch("tui.app.replay_entries",
                       return_value=_entries("hi"))
         app = VenastineApp("ANTHROPIC", "test-model", {})
@@ -2093,11 +2136,23 @@ class TestTheLiveTranscriptWritesAtTheOnScreenWidth:
                 "#transcript", Transcript).scrollable_content_region.width
             app.open_agent_thread(str(lineage.child))
             await pilot.pause()
-            view_width = app.query_one(
-                "#thread-view", Transcript).scrollable_content_region.width
+
+            panes = app.query_one("#pane", ContentSwitcher).query(Transcript)
+            assert len(list(panes)) == 4, (
+                "a pane was added or removed -- widen the switch below and "
+                "give the new one app.tcss's shared box")
+            app.close_thread_view()
+            await pilot.pause()
+            for pane in panes:
+                app._pane.current = pane.id
+                await pilot.pause()
+                assert pane.scrollable_content_region.width == live_width, (
+                    f"#{pane.id} measures "
+                    f"{pane.scrollable_content_region.width} where "
+                    f"#transcript measures {live_width}")
+            app._pane.current = "transcript"
 
             assert live_width
-            assert live_width == view_width
 
 
 # ---------------------------------------------------------------------------

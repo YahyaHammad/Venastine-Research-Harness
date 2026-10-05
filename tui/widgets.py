@@ -2862,13 +2862,17 @@ class Transcript(RichLog):
         after the pane comes back -- the answer down the left half of a
         wide panel, healed only by a restart's replay.
 
-        Equal by construction rather than by hope: the two panes are the
-        same box in app.tcss (`border: solid`, `padding: 0 1`) and RichLog
-        is `overflow-y: scroll`, so the scrollbar gutter is the same on
-        both. `test_both_panes_measure_the_same_width_when_shown` holds
-        that. Measured at every write, so there is nothing to set when the
-        viewer opens, nothing to clear when it closes, and a resize with the
-        viewer up is simply the next measurement.
+        Equal by construction rather than by hope: every pane in the
+        switcher is the same box in app.tcss (`border: solid`,
+        `padding: 0 1`) and RichLog is `overflow-y: scroll`, so the
+        scrollbar gutter is the same on all of them.
+        `test_the_panes_measure_the_same_width_when_shown` holds that, and
+        it asks the switcher for its children rather than naming them --
+        there were two when this was written, three after §49's SS14 and
+        four after §55's TR10, and the sentence above was the one that had
+        to keep up. Measured at every write, so there is nothing to set
+        when the viewer opens, nothing to clear when it closes, and a
+        resize with the viewer up is simply the next measurement.
 
         Raises where the widget cannot be measured at all (built bare in the
         suite); callers guard, as `_wrap_width` always has.

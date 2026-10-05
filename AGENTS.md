@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 6233 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
+pytest                                            # 6273 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -172,7 +172,7 @@ made the move free: no import changed, and `tests/test_docs_consistency.py` is t
 opens any of these files (its `DOCS` constant is where the path now comes from).
 
 - **docs/ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49–§52 and §61 built; §53–§60 recorded from the owner's requests in batches 122 and 123, specified and not yet designed) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A15 from §32, W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 SS1–SS72 from §49, NW1–NW5 from §50, PG1–PG9 from §51, RB1–RB7 from §52, IO1–IO7 from §53, AT1–AT8 from §54, TR1–TR5 from §55, JV1–JV10 from §56, SM1–SM4 from §57, PR1–PR5 from §58 UI1–UI4 from §59, UH1–UH12 from §60 and CN1–CN12 from §61). Section and D-numbers are stable and cross-referenced everywhere.
+- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49–§52, §55 and §61 built; §53, §54 and §56–§60 recorded from the owner's requests in batches 122 and 123, specified and not yet designed) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A15 from §32, W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 SS1–SS72 from §49, NW1–NW5 from §50, PG1–PG9 from §51, RB1–RB7 from §52, IO1–IO7 from §53, AT1–AT8 from §54, TR1–TR15 from §55, JV1–JV10 from §56, SM1–SM4 from §57, PR1–PR5 from §58 UI1–UI4 from §59, UH1–UH12 from §60 and CN1–CN12 from §61). Section and D-numbers are stable and cross-referenced everywhere.
 
 **Six namespaces use the same `LETTER+NUMBER` shape, and only the first is the
 record.** An id that resolves to two places is a cross-reference that fails
@@ -1300,7 +1300,8 @@ the safe answer is "this line opens nothing".
 
 **A SESSION line is armed the same way, and the slot carries WHICH KIND** (ROADMAP_v3 §49, SS14,
 batch 98). `shell_background` and `shell_monitor` declare `opens_session`, and consumers ask one
-question — `registry.opens(name)` → `("thread",)`, `("session",)` or `()`. The fourth slot of a
+question — `registry.opens(name)` → `("thread",)`, `("session",)` or, since §55's TR7 in batch 125,
+`("call",)`. The fourth slot of a
 `ReplayEntry`, and the transcript's side table, carry `(kind, call id)` rather than a bare id, and
 that is load-bearing rather than tidy: a drawn line is text and metadata by the time anyone can
 click it, so the tool name that decided the kind is gone. Before batch 98 the slot was armed only
@@ -1311,6 +1312,23 @@ in the same step the call was made (D20), so there is no window where the line e
 does not. It is an optimisation for the common case — the manager answers a live session and
 `core/session_view.stored_entries` rebuilds a finished one from the archive, both keyed by the call
 id the line already carries, so `open_session_call` works with the map empty.
+
+**`registry.opens()` HAS NO EMPTY ANSWER SINCE §55 (TR7, batch 125), AND THE GATE IS NOW THE CALL
+ID.** It returned `()` for a line that opened nothing, and both consumers paired that falsy tuple
+with an id as their test — `opens and call_id`. Every call now opens ITSELF: its whole command,
+un-collapsed, and the result that nothing rendered before. So an unarmed tool line is one whose call
+the archive cannot be asked about, never one whose tool declared nothing, and `core/replay.py`'s
+surviving `if opens` is a guard with nothing left to guard.
+
+Two things about that are deliberate and are the parts worth not re-deriving. **`OPENS_CALL` is
+answered without a registry lookup**, unlike its two siblings: `opens_thread` and `opens_session`
+are False for a tool this registry has never seen, which is what a runtime-registered MCP tool is
+and what a tool removed between a thread being written and being replayed is for ever — and neither
+is a reason to hide a stored result. The fallback is a property of the ARCHIVE, not of the registry.
+And **there is no exception list**, including the two `DIFFED_TOOLS`: §41's X4 kept `content` off the
+transcript line and the diff that replaced it shows the CHANGE rather than the call, so the pane is
+the only place the untruncated call can be read. The cost is stated rather than discovered — arming
+no longer means "this line started something".
 
 **Two side tables on the transcript, one rule.** `_links` (batch 65) and `_opens` (§47, renamed and
 widened in batch 98) are both keyed by entry index, both dropped by `reset()`, both replayed by
@@ -2549,13 +2567,18 @@ independent bugs, both found by using the app.
    stderr. In a pilot test, holding the widget before opening a modal still works and is
    still the clearer spelling; `#thinking-indicator` and `#prompt` are still queries, so
    their `NoMatches` guards are still load-bearing.
-- **The held set is eleven now, and the two that forced it were on the crash
+- **The held set is twelve now, and the two that forced it were on the crash
   path** (batch 76; §47's thread viewer added three more: the read-only
   `Transcript`, the `ThreadCrumb` and the `#pane` switcher, and ROADMAP_v3
   §49's SS14 two more in batch 98: the `#session-view` pane and the
   `SessionPanel`. Both follow the same pattern and both have the occasion
   this bullet is about -- the panel is redrawn from a sink called on the
-  session manager's own threads, which can speak while a modal is up).
+  session manager's own threads, which can speak while a modal is up.
+  ROADMAP_v3 §55's TR10 added the twelfth in batch 125, the `#call-view`
+  pane, which has NO such occasion -- nothing polls it and nothing writes
+  to it from another thread -- and is held anyway, because a pane that is
+  queried on one route and held on the three beside it is the asymmetry a
+  reader has to check rather than know).
   A `permission_request` event is posted BEFORE the worker
   pushes the modal it announces (`post_message` only enqueues for a later
   pump; the push is a direct loop callback), so the first gated call of a

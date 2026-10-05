@@ -56,6 +56,7 @@ from agents.tui_commands import register_agent_commands
 from core import config_loader, session_wake, shell_sessions
 from core.agent_activity import AgentActivity
 from core.approval import RunAuthorization
+from core.call_view import call_entries
 from core.cancel import CancelToken
 from core.client import api_initialization, effort_levels_for_model
 from core.loop import (
@@ -88,7 +89,7 @@ from safety.policy_enforcement import (
 from security import posture
 from skills.manager import manager as skills
 from skills.tui_commands import register_skill_commands
-from tools.base import OPENS_SESSION
+from tools.base import OPENS_SESSION, OPENS_THREAD
 from tools.builtin import file_ops
 from tools.registry import registry as tool_registry
 from tui import diffs, history, meters, preferences, ravens, themes
@@ -147,6 +148,15 @@ DIFFED_TOOLS = ("write", "edit")
 #: again, so the tag is what keeps the poll off it.
 _VIEW_LIVE = "live"
 _VIEW_STORED = "stored"
+
+#: ROADMAP_v3 §55 (TR10/TR11). The third tag `_viewing` can carry: one
+#: tool call, rebuilt from the archive and never re-read. It joins the
+#: tagged tuples rather than becoming a second flag beside `_viewing`,
+#: for the reason that attribute's own comment gives -- two facts about
+#: which pane is open can be true at once, and one of them gets stale.
+#: `_viewing_live_session` already answers None for it, which is what
+#: keeps the poll off a view that has nothing to re-read (TR11).
+_VIEW_CALL = "call"
 
 #: How much of a file the TUI will hold in order to diff it. NOT
 #: `config.MAX_FILE_SIZE_BYTES`, which is 25 MB -- that is the bound on
@@ -878,6 +888,7 @@ class VenastineApp(App):
         # screen. None until mounted.
         self._thread_view_widget: Transcript | None = None
         self._session_view_widget: Transcript | None = None
+        self._call_view_widget: Transcript | None = None
         self._crumb_widget: ThreadCrumb | None = None
         self._pane_widget = None
         # The sidebar usage line and the raven, held for the transcript's
@@ -914,6 +925,12 @@ class VenastineApp(App):
         # holds it and `(_VIEW_STORED, call id)` when it is rebuilt from
         # the archive. `_viewing_thread` and `_viewing_live_session` are
         # the two accessors that ask, so nothing else type-sniffs.
+        #
+        # §55 (TR10) ADDS A THIRD TAG, `(_VIEW_CALL, call id)`, for one
+        # tool call. It needed no new accessor: `_viewing_thread` is
+        # already None for any tuple and `_viewing_live_session` already
+        # tests the tag, so the poll stays off it by the rule that was
+        # written for a rebuilt session (TR11).
         self._viewing = None
         self._view_timer = None
         # How many ARCHIVE entries the viewer last drew, which is what the
@@ -1070,6 +1087,16 @@ class VenastineApp(App):
                     # modal that would hide the sidebar saying what
                     # else is running.
                     yield Transcript(id="session-view")
+                    # ROADMAP_v3 §55 (TR10). A FOURTH child, and the
+                    # reason is not the one the third had. `#session-view`
+                    # exists separately because the thread poll would
+                    # wipe anything drawn into `#thread-view`; this view
+                    # is never polled, so that argument does not apply.
+                    # What applies is that a pane named for sessions
+                    # holding a tool call is a name that lies, and
+                    # `close_thread_view` resetting every pane stays a
+                    # statement rather than a hope.
+                    yield Transcript(id="call-view")
                 # §38. Between the transcript and the prompt, so the
                 # collapsed thinking line reads as the bottom of the
                 # conversation. Hidden until a span starts, TodoPanel-style,
@@ -1133,6 +1160,7 @@ class VenastineApp(App):
         self._thread_view_widget = self.query_one("#thread-view", Transcript)
         self._session_view_widget = self.query_one(
             "#session-view", Transcript)
+        self._call_view_widget = self.query_one("#call-view", Transcript)
         self._crumb_widget = self.query_one("#thread-crumb", ThreadCrumb)
         self._pane_widget = self.query_one("#pane", ContentSwitcher)
         self._session_panel_widget = self.query_one(
@@ -1990,7 +2018,7 @@ class VenastineApp(App):
 
     def on_call_selected(self, message: CallSelected) -> None:
         """A tool line in the transcript was ctrl+clicked (§47, widened
-        by §49 SS14).
+        by §49 SS14 and again by §55 TR7/TR12).
 
         RESOLVED HERE, at press time, which is the whole reason the
         line carries a call id rather than a thread or a session: it is
@@ -1999,29 +2027,36 @@ class VenastineApp(App):
 
         ONE HANDLER, branching on the kind the line carried, rather than
         a message type per kind. What a click does is this app's
-        question either way, and the two answers differ only in which
+        question either way, and the three answers differ only in which
         pane they open.
 
-        A call with no thread is SAID rather than ignored. It is a real
-        state -- a spawn refused for an unknown agent or a depth limit
-        never made one -- and a deliberate ctrl+click that produces
-        silence reads as a broken feature rather than as an answer.
+        A SPAWN WITH NO THREAD NOW FALLS BACK TO ITS CALL (TR12) rather
+        than to the sentence that used to end this method. That state is
+        real -- a spawn refused for an unknown agent, or a depth limit
+        that never made one -- and the call's own `{"error": ...}` result
+        is precisely what a reader is asking for when they click it. The
+        old refusal said "it was refused" and then showed nothing of the
+        refusal. A line carries exactly ONE kind, so without this
+        fallback the three tools that open a thread or a session would
+        have had no route to their own params and results at all.
         """
+        call_id = str(message.call_id)
         if message.kind == OPENS_SESSION:
-            self.open_session_call(str(message.call_id))
+            self.open_session_call(call_id)
             return
-        thread_id = self._spawn_threads.get(str(message.call_id))
-        if thread_id:
-            self.open_agent_thread(thread_id)
-            return
-        # THE PANE ON SCREEN, not the live transcript. This click can come
-        # from a spawn line inside the VIEWER -- a stored run's own
-        # `▸ spawn_subagent` -- and the switcher is hiding `#transcript`
-        # then, so a refusal written there is the silence this docstring
-        # says must not happen, reached by the one route that produces it.
-        self._visible_transcript.write_system(
-            "That spawn has no thread to open — it was refused, or it "
-            "has not started writing yet.")
+        if message.kind == OPENS_THREAD:
+            thread_id = self._spawn_threads.get(call_id)
+            if thread_id:
+                self.open_agent_thread(thread_id)
+                return
+        # `OPENS_CALL` lands here, and so does either kind above whose
+        # target could not be resolved (TR12). A kind this handler has
+        # never heard of lands here too, and that is the right answer for
+        # any kind that can be added later rather than an oversight: every
+        # call has ITSELF, so there is no fourth kind for which "show the
+        # call" is wrong. The constant is deliberately not imported --
+        # naming it would read as a branch, and this is the floor.
+        self.open_tool_call(call_id)
 
     def open_agent_thread(self, thread_id) -> None:
         """Show a stored thread, read-only (§47).
@@ -2087,12 +2122,14 @@ class VenastineApp(App):
         `/new` and a thread switch both, because a trail pointing into
         the thread you just left is worse than no trail.
 
-        CLOSES WHATEVER IS OPEN since §49 (SS14), thread or session, and
-        keeps the name: every caller means "put the live conversation
-        back", and a second closer per kind would be two places that
-        have to agree about the crumb, the prompt and the timer. Both
-        panes are reset, not the one that was up -- resetting the other
-        costs nothing and removes the branch that could get it wrong.
+        CLOSES WHATEVER IS OPEN since §49 (SS14) -- thread, session or,
+        since §55 (TR10), one tool call -- and keeps the name: every
+        caller means "put the live conversation back", and a second
+        closer per kind would be three places that have to agree about
+        the crumb, the prompt and the timer. EVERY pane is reset, not
+        the one that was up -- resetting the others costs nothing and
+        removes the branch that could get it wrong, which is what makes
+        a fourth pane cost one line here rather than a decision.
         """
         if self._viewing is None:
             return
@@ -2103,6 +2140,7 @@ class VenastineApp(App):
         self._pane.current = "transcript"
         self._thread_view.reset()
         self._session_view.reset()
+        self._call_view.reset()
         self._set_prompt_enabled(True)
         self.refresh_bindings()
 
@@ -2175,9 +2213,11 @@ class VenastineApp(App):
                     f"Could not open that session: {e}")
                 return
         if not entries:
-            self._visible_transcript.write_system(
-                "That session has nothing to show — it was refused, or it "
-                "has not started yet.")
+            # §55 (TR12). The call, rather than the sentence that used to
+            # end here. "It was refused" is exactly the case where the
+            # call's own result says WHY, and this method had it in the
+            # same archive it had just read and declined to show it.
+            self.open_tool_call(str(call_id))
             return
         self._paint_session_entries(entries)
         self._viewing = (_VIEW_STORED, str(call_id))
@@ -2187,6 +2227,63 @@ class VenastineApp(App):
         self._sync_view_poll()
         self.refresh_bindings()
 
+    # -- one tool call (§55, TR6-TR15) ---------------------------------------
+
+    def open_tool_call(self, call_id: str) -> None:
+        """Show one tool call: the whole command, and what it printed.
+
+        THE ARCHIVE IS THE ONLY SOURCE, and that is TR8 rather than a
+        simplification. `memory.add_tool_result` persists the exact
+        string the provider was handed, so there is no live copy that
+        would be better and no retention to manage -- which is also why
+        this view needs no poll and no live/stored split of its own.
+
+        NOT FOUND IS SAID, `open_session_call`'s rule and the last
+        resort TR12 leaves standing: every other branch of
+        `on_call_selected` now falls back HERE, so this is where a click
+        on a call that is not in the thread at all has to stop.
+
+        The thread asked is the one whose transcript was clicked, not
+        the live conversation -- a tool line inside the thread VIEWER
+        belongs to the run being read, and asking the live thread for it
+        would answer "no such call" with complete confidence.
+        """
+        thread_id = self._viewing_thread or getattr(
+            self._memory, "thread_id", None)
+        entries = []
+        if thread_id is not None:
+            try:
+                entries = call_entries(thread_id, str(call_id))
+            except Exception as e:                          # noqa: BLE001
+                # THE PANE ON SCREEN, `open_agent_thread`'s rule.
+                self._visible_transcript.write_error(
+                    f"Could not open that call: {e}")
+                return
+        if not entries:
+            self._visible_transcript.write_system(
+                "That call is not in this conversation's record — there is "
+                "nothing stored to show.")
+            return
+        self._paint_call_entries(entries)
+        self._viewing = (_VIEW_CALL, str(call_id))
+        self._crumb.show(self._session_chain("call"))
+        self._pane.current = "call-view"
+        self._set_prompt_enabled(False)
+        self._sync_view_poll()
+        self.refresh_bindings()
+
+    def _paint_call_entries(self, entries) -> None:
+        """Draw `(role, text)` entries into the call pane.
+
+        IT RESETS, `_paint_session_entries`' rule, even though nothing
+        repaints this pane: the reset is what makes opening a second
+        call show the second call rather than both.
+        """
+        view = self._call_view
+        view.reset()
+        for role, text in entries:
+            view.write_role(role, text)
+
     def _session_chain(self, label: str) -> list:
         """The crumb for a session view: where you are, and the way back.
 
@@ -2195,6 +2292,11 @@ class VenastineApp(App):
         where you already are. Built from the chat thread rather than
         from `_thread_chain`, because a session hangs off the run that
         started it and has no lineage of its own to walk.
+
+        §55 (TR10) PASSES `"call"` AS THE LABEL and keeps the name: a
+        tool call hangs off its run in exactly the same way and wants
+        exactly the same trail, so a `_call_chain` would have been a
+        second copy differing in one string.
         """
         thread_id = self._viewing_thread or getattr(
             self._memory, "thread_id", None)
@@ -2451,6 +2553,21 @@ class VenastineApp(App):
         return self.query_one("#session-view", Transcript)
 
     @property
+    def _call_view(self) -> Transcript:
+        """The one-call pane (§55, TR10). HELD, for `_transcript`'s reason.
+
+        A FOURTH PANE, and NOT for the reason above it. Nothing polls
+        this view -- a one-shot call has nothing to stream (TR11) -- so
+        the timer collision that forced `#session-view` apart does not
+        arise. The reason here is naming: a pane called `#session-view`
+        holding a `fetch_url` call is a name that lies, and the drift
+        this record keeps closing starts exactly there.
+        """
+        if self._call_view_widget is not None:
+            return self._call_view_widget
+        return self.query_one("#call-view", Transcript)
+
+    @property
     def _visible_transcript(self) -> Transcript:
         """Whichever pane the switcher is showing.
 
@@ -2463,10 +2580,18 @@ class VenastineApp(App):
         Derived from `_viewing`, like the switcher's `current`, the
         crumb's rows and the prompt's `disabled` flag, so it cannot drift
         into disagreeing with them about which pane is up.
+
+        THREE-WAY SINCE §55 (TR10), and the call arm is tested FIRST of
+        the two tuple kinds: `_viewing_thread` already discriminates the
+        UUID, so the only thing left to tell apart is which tag a tuple
+        carries, and naming the new one rather than defaulting to it
+        keeps the session arm reading as it did.
         """
         if self._viewing is None:
             return self._transcript
-        return (self._thread_view if self._viewing_thread is not None
+        if self._viewing_thread is not None:
+            return self._thread_view
+        return (self._call_view if self._viewing_call is not None
                 else self._session_view)
 
     @property
@@ -2490,6 +2615,19 @@ class VenastineApp(App):
         """
         seen = self._viewing
         return (seen[1] if isinstance(seen, tuple) and seen[0] == _VIEW_LIVE
+                else None)
+
+    @property
+    def _viewing_call(self):
+        """The id of the CALL the viewer is showing, or None (§55, TR10).
+
+        `_viewing_live_session`'s sibling, asked by the one site that has
+        to tell the two tuple kinds apart. It is not a second fact: both
+        read `_viewing`, which is still the only thing that knows what is
+        open.
+        """
+        seen = self._viewing
+        return (seen[1] if isinstance(seen, tuple) and seen[0] == _VIEW_CALL
                 else None)
 
     @property
@@ -3350,9 +3488,19 @@ class VenastineApp(App):
                 # `new_text` -- which is the thing the diff replaces,
                 # and printing both would be the truncated payload back
                 # again, above a block that says it properly.
+                #
+                # ARMED ANYWAY SINCE §55 (TR7), and these two are the
+                # case that makes TR7's no-exception-list rule earn
+                # itself: X4 kept the payload off this line, and the
+                # diff that replaced it shows the CHANGE rather than
+                # the call -- so the pane is the only place the
+                # untruncated `content` can be read, and it is exactly
+                # the kind of thing a reader goes looking for.
                 self._file_calls[call_id] = (
                     name, params or {}, self._snapshot(params))
-                transcript.write_role("tool", f"▸ {name}")
+                transcript.write_role(
+                    "tool", f"▸ {name}", (),
+                    (tool_registry.opens(name)[0], str(call_id)))
             else:
                 # §42 (RA3): the registry's digest, not param_digest
                 # direct -- a tool's declared rationale is prose for

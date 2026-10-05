@@ -17,15 +17,24 @@ GRANT_NEVER = "never"
 GRANT_POLICIES = frozenset({GRANT_ANYWHERE, GRANT_SIGNOFF_ONLY, GRANT_NEVER})
 
 
-# ROADMAP_v2 §47, extended by ROADMAP_v3 §49 (SS14). What a tool call's
-# line in the transcript OPENS, as `registry.opens()` answers it.
+# ROADMAP_v2 §47, extended by ROADMAP_v3 §49 (SS14) and again by §55
+# (TR7). What a tool call's line in the transcript OPENS, as
+# `registry.opens()` answers it.
 #
 # Named here beside the flags they are derived from, so the two consumers
 # that carry the answer -- core/replay.py into a stored line, tui/ into a
 # live one -- compare against a constant rather than against a literal
 # each spelled in its own file.
+#
+# OPENS_CALL IS THE FALLBACK AND IS NOT DERIVED FROM A FLAG (§55, TR7).
+# The other two are declared per tool because only some tools start a run
+# or a session; EVERY call has itself, so there is nothing for a ToolSpec
+# to declare and no tool that can decline. That is why `registry.opens()`
+# no longer has an empty answer -- see its docstring for what replaced the
+# falsy-tuple contract.
 OPENS_THREAD = "thread"
 OPENS_SESSION = "session"
+OPENS_CALL = "call"
 
 
 # ROADMAP_v2 §31 (H1). What a call to this tool is allowed to COST, and

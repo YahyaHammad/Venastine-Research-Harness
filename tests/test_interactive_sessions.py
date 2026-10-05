@@ -1069,11 +1069,20 @@ class TestTheDisplaySurfacesKnowTheKind:
         assert KIND_FOR_TOOL["shell_interactive"] == ss.KIND_INTERACTIVE
         assert KIND_FOR_TOOL == {v: k for k, v in TOOL_FOR_KIND.items()}
 
-    def test_only_the_open_arms_a_clickable_line(self):
+    def test_only_the_open_arms_a_session_line(self):
         """Arming every input line would put one session on twenty lines,
-        which is why `shell_output` and `shell_kill` are not armed either."""
+        which is why `shell_output` and `shell_kill` do not open one
+        either.
+
+        SINCE §55 (TR7) THEY OPEN THEIR OWN CALL instead of nothing, and
+        that does not reopen what this test guards: twenty `shell_input`
+        lines now open twenty DIFFERENT things -- each its own keystroke
+        and what it returned -- rather than one session twenty times.
+        The property is that no line claims a target it did not create.
+        """
         assert registry.opens("shell_interactive") == ("session",)
-        assert registry.opens("shell_input") == ()
+        assert registry.opens("shell_input") == ("call",)
+        assert registry.opens_session("shell_input") is False
 
 
 class TestAControlKeyDoesNotCarryText:

@@ -52,6 +52,15 @@ material the conversation was about. The call is what says what happened,
 and `param_digest` says WHICH url or query -- redacted, because a tool
 argument can carry a credential and this is now the third place one could
 surface.
+
+T4 IS UNCHANGED BY §55, AND §55 IS WHY IT CAN STAY. A result is still not
+replayed into the conversation; it is now REACHABLE from the line that
+produced it, because every tool line carries `(OPENS_CALL, call id)` and
+`core/call_view.py` reads the same archive on demand (TR6/TR7). That is
+the distinction worth keeping straight if either side is ever revisited:
+T4 is about what a replay PUTS IN FRONT of a reader, and §55 is about what
+a reader can ask for. A feature that inlined the output would be T4 undone
+rather than extended.
 """
 
 from __future__ import annotations
@@ -77,12 +86,17 @@ from tools.registry import registry
 #: which is the one conversation rendered two ways that Section 44 removed
 #: for thinking spans. Empty for every entry that is not a tool call.
 #:
-#: `opens` is §47's, widened by ROADMAP_v3 §49 (SS14): `(kind, call id)`
-#: for a line that opens something, and `()` for one that does not. The
-#: id is the model's own id for the call that drew the line, and the
-#: kind is `OPENS_THREAD` or `OPENS_SESSION` -- the registry is asked, so
-#: this file does not have to know that `spawn_subagent` is special and
-#: cannot come to disagree with the TUI about which lines are openable.
+#: `opens` is §47's, widened by ROADMAP_v3 §49 (SS14) and again by §55
+#: (TR7): `(kind, call id)` for a tool line, and `()` only where there is
+#: no call id to carry. The id is the model's own id for the call that
+#: drew the line, and the kind is `OPENS_THREAD`, `OPENS_SESSION` or
+#: `OPENS_CALL` -- the registry is asked, so this file does not have to
+#: know that `spawn_subagent` is special and cannot come to disagree with
+#: the TUI about which lines are openable.
+#:
+#: SINCE §55 THE GATE IS THE ID, NOT THE KIND. `registry.opens()` has no
+#: empty answer any more, so an unarmed line is one whose call the archive
+#: cannot be asked about rather than one whose tool declared nothing.
 #: It does not widen the sentence above either: a caller is still
 #: rendering rather than reasoning about history, and what a line opened
 #: is a fact about the LINE. Without it a resumed conversation would draw
@@ -207,11 +221,16 @@ def _tool_marker(call: dict) -> tuple[str, tuple[str, ...], str]:
     # (batch 65): a resumed thread that armed fewer URLs than the live
     # turn would be the archive disagreeing with the screen it came from.
     line = f"▸ {name}  {digest}".rstrip() if digest else f"▸ {name}"
-    # §47, widened by §49 (SS14). The id ONLY where the call opened
-    # something, and the registry is what says what -- naming
-    # `spawn_subagent` here would be a second copy of a fact the tool
-    # already declares, free to disagree with the TUI's copy. `str()`
-    # because it crosses into style metadata.
+    # §47, widened by §49 (SS14) and §55 (TR7). The registry is what says
+    # WHICH kind -- naming `spawn_subagent` here would be a second copy of
+    # a fact the tool already declares, free to disagree with the TUI's
+    # copy. `str()` because it crosses into style metadata.
+    #
+    # `if opens` SURVIVES AS A GUARD WITH NOTHING LEFT TO GUARD: TR7 gave
+    # `opens()` a fallback kind, so it is never empty now and the id below
+    # is the only thing that can leave a line unarmed. Kept rather than
+    # deleted because the tuple is indexed on the next line, and a reader
+    # who has not met TR7 should find the shape intact.
     opens = registry.opens(name)
     call_id = str(call.get("id") or "") if opens else ""
     return (line, registry.call_links(name, params),

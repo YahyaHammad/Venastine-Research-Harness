@@ -40,6 +40,7 @@ from core import shell_sessions as ss
 from core.session_view import NOT_KEPT, live_entries, stored_entries
 from tools.registry import registry
 from tui.app import (
+    _VIEW_CALL,
     _VIEW_LIVE,
     _VIEW_STORED,
     SessionRowsChanged,
@@ -115,6 +116,9 @@ def _bare_app(thread_id=THREAD):
     app._spawn_threads = {}
     app._session_view_widget = _Pane()
     app._thread_view_widget = _Pane()
+    # §55 (TR10/TR12). `open_session_call` falls back to the call view, so
+    # a bare app that can reach one route can reach the other.
+    app._call_view_widget = _Pane()
     app._session_panel_widget = MagicMock(spec=SessionPanel)
     app._crumb_widget = MagicMock()
     app._pane_widget = SimpleNamespace(current="transcript")
@@ -147,14 +151,23 @@ class TestWhatAToolLineOpensIsDeclared:
         assert registry.opens_session("shell_sessions") is False
 
     def test_one_question_with_three_answers(self):
+        """ROADMAP_v3 §55 (TR7) replaced the empty answer with a third
+        KIND. A one-shot `shell` opens its own call -- its whole command
+        and what it printed -- so there is no longer a tool whose line
+        opens nothing, and the call id is what gates an armed line."""
         assert registry.opens("shell_background") == ("session",)
         assert registry.opens("spawn_subagent") == ("thread",)
-        assert registry.opens("shell") == ()
+        assert registry.opens("shell") == ("call",)
 
-    def test_an_unknown_tool_opens_nothing(self):
-        """What an MCP tool registered at runtime is until it says
-        otherwise."""
-        assert registry.opens("mcp__probe__whatever") == ()
+    def test_an_unknown_tool_still_opens_its_call(self):
+        """An MCP tool registered at runtime is unknown to this registry,
+        and so is one removed between a thread being written and being
+        replayed. Neither is a reason to hide a stored result: §55 (TR7)
+        answers OPENS_CALL without a lookup, because the archive holds
+        the call whatever this process knows about the tool."""
+        assert registry.opens("mcp__probe__whatever") == ("call",)
+        assert registry.opens_thread("mcp__probe__whatever") is False
+        assert registry.opens_session("mcp__probe__whatever") is False
 
     def test_no_tool_claims_both(self):
         """A line opens one thing. Two flags on one spec would make
@@ -186,7 +199,14 @@ class TestReplayCarriesTheKindTooNotJustTheId:
         opens = [entry[3] for entry in replay_entries(uuid4())
                  if entry[0] == "tool"]
 
-        assert opens == [("session", "t1"), ("thread", "t2"), ()]
+        # §55 (TR7): `shell_output` is the third kind now rather than the
+        # empty answer. It still opens no SESSION -- arming it with `s1`
+        # would put one session on three lines, which is what
+        # `test_reading_and_killing_do_not` above holds -- and it opens
+        # the one thing that is genuinely its own: the call, with the
+        # output it returned. The kinds stay distinct, which is the
+        # property this test is actually about.
+        assert opens == [("session", "t1"), ("thread", "t2"), ("call", "t3")]
 
 
 # ---------------------------------------------------------------------------
@@ -754,12 +774,42 @@ class TestOpeningFromTheLine:
         assert app._viewing == (_VIEW_STORED, "c1")
 
     def test_a_call_with_nothing_behind_it_is_said(self, manager, mocker):
+        """§55 (TR12) narrowed what this refuses. `open_session_call` no
+        longer ends in a sentence of its own: it falls through to the call
+        view, which is where a session the tool refused keeps its
+        `{"error": ...}`. So BOTH archives have to be empty for a refusal
+        to be the right answer, and the one left is the call view's."""
         mocker.patch("core.session_view.archive_history", return_value=[])
+        mocker.patch("core.call_view.archive_history", return_value=[])
         app = _bare_app(thread_id=uuid4())
         app.open_session_call("c-unknown")
 
         assert app._viewing is None
-        assert "nothing to show" in app.transcript.systems[0]
+        assert "not in this conversation's record" in app.transcript.systems[0]
+
+    def test_a_session_the_tool_refused_opens_its_call_instead(
+            self, manager, mocker):
+        """§55 (TR12), the half the refusal above used to swallow. The old
+        message said "it was refused" and then showed nothing OF the
+        refusal, while the reason sat in the same archive it had just
+        read."""
+        mocker.patch("core.session_view.archive_history", return_value=[])
+        mocker.patch("core.call_view.archive_history", return_value=[
+            {"role": "assistant", "text": "", "tool_calls": [
+                {"id": "c-refused", "name": "shell_background",
+                 "input": {"command": "pytest -q"}}]},
+            {"role": "tool", "tool_call_id": "c-refused",
+             "content": str({"error": "the sandbox is unavailable"})},
+        ])
+        app = _bare_app(thread_id=uuid4())
+        app._thread_chain = lambda tid: [("chat", str(tid))]
+        app.open_session_call("c-refused")
+
+        assert app._viewing == (_VIEW_CALL, "c-refused")
+        drawn = [t for _r, t in app._call_view_widget.entries]
+        assert any("the sandbox is unavailable" in t for t in drawn), (
+            f"the pane showed {drawn}; the reason the session never "
+            "started is the whole point of the fallback")
 
     def test_the_thread_asked_is_the_one_on_screen(self, manager, mocker):
         """A session line inside the thread VIEWER belongs to the run

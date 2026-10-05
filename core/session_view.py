@@ -92,7 +92,7 @@ def _clean(tool: str, command: str, rationale: str, output: str = "") -> dict:
         tool, {"command": command, "rationale": rationale, "output": output})
 
 
-def _lines(text: str) -> list[ViewEntry]:
+def output_lines(text: str) -> list[ViewEntry]:
     """Program output as one entry per line (`output` role).
 
     ONE ENTRY EACH, not one entry holding newlines: a transcript indents
@@ -100,6 +100,13 @@ def _lines(text: str) -> list[ViewEntry]:
     column zero, so a single multi-line entry would shear its own left
     edge. It also keeps `/copy` and a `/theme` rerender working line by
     line, as every other role already does.
+
+    PUBLIC SINCE §55 (TR9), because `core/call_view.py` paints the same
+    kind of thing and the paragraph above is exactly the rule a second
+    copy would be free to get wrong -- it is a fact about how a
+    Transcript draws, not about sessions. Renamed from `_lines` rather
+    than re-implemented there, so there is one answer to "how does
+    program output become entries" and one place to fix it.
     """
     return [("output", line) for line in text.rstrip("\n").split("\n")]
 
@@ -134,7 +141,7 @@ def live_entries(row: SessionRow, tail: str = "",
     if clean["output"]:
         entries.append(("system", "Output (earlier output omitted):"
                         if truncated else "Output:"))
-        entries.extend(_lines(clean["output"]))
+        entries.extend(output_lines(clean["output"]))
     else:
         entries.append(("system", "It has written no output."))
     return entries
@@ -209,7 +216,7 @@ def stored_entries(thread_id: UUID, call_id: str) -> list[ViewEntry]:
         head, _, body = text.partition("\n")
         entries.append(("wake", head.strip()))
         if body.strip():
-            entries.extend(_lines(body))
+            entries.extend(output_lines(body))
     return entries
 
 

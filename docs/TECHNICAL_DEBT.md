@@ -2253,3 +2253,33 @@ The honest fix is an OS-level flush -- `termios.tcflush(fd, TCIFLUSH)` and
 non-racy rather than best-effort. That is a change to a locked §29 safety
 property and wants its own batch, with the measurement being a line typed
 before the prompt is printed rather than after.
+
+## 45. A view policy module in `core/` that only one shell reads (open)
+
+Found while building ROADMAP_v3 §55 (TR14), and PRE-EXISTING: it is §49's,
+not this batch's.
+
+`core/session_view.py` is in `core/` for an explicit reason, stated in its
+own docstring and inherited from `core/replay.py`: *"D12 makes the CLI a
+permanent fallback, so what may be shown for a session is a policy decision
+that must not differ between the two shells. Each shell decides how to
+paint the entries; this decides what they are."*
+
+**`main.py` has never imported it.** There is no CLI route to a session
+view at all -- not for a live session, not for SS18's rebuilt one -- so the
+placement currently buys the ARGUMENT rather than the behaviour. Batch 125
+added `core/call_view.py` beside it on the same terms, with the same gap.
+
+RECORDED RATHER THAN FIXED, and the reason is scope rather than
+indifference. `core/replay.py` genuinely has two readers, which is what
+makes the convention real; closing this one means designing what a CLI
+session or call view IS -- a slash command, a `--show-call` flag, something
+printed at the end of a turn -- and that is a decision about the CLI's
+surface rather than a wiring job. Doing it inside §55 would have made that
+section partly a §49 repair.
+
+The honest statement of the current state, for anyone reading the
+convention and believing it: `ViewEntry` is a shell-independent shape, the
+policy is in one place and is correct, and exactly one shell asks for it.
+A second shell can be added without moving anything, which is the whole
+value the placement was bought for.

@@ -62,11 +62,23 @@
 /* ROADMAP_v3 §49 (SS14). THE SAME BOX as #transcript and #thread-view --
    `border: solid` and `padding: 0 1` -- and that is load-bearing rather
    than tidy: a hidden pane measures 0 and borrows the on-screen pane's
-   width (Transcript._region_width), so three panes that are not the same
+   width (Transcript._region_width), so four panes that are not the same
    box would each write at another one's width. The accent border is
    #thread-view's affordance, for #thread-view's reason: at a glance this
    is not the conversation you are having. */
 #session-view {
+    height: 1fr;
+    border: solid $accent;
+    padding: 0 1;
+}
+
+/* ROADMAP_v3 §55 (TR10). One tool call: the whole command and what it
+   printed. The FOURTH pane, and the same box for the paragraph above --
+   `test_the_panes_measure_the_same_width_when_shown` holds that, and a
+   different gutter here would silently rewrap every row the live
+   transcript wrote while this one was up. Accent border, same reason:
+   this is not the conversation you are having. */
+#call-view {
     height: 1fr;
     border: solid $accent;
     padding: 0 1;

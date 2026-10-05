@@ -36,7 +36,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§52. Redact before the cut, and a bound on the held body** — **(BUILT in batch 106)** (§51 cut the page out of the body before the redactor saw it, so a credential straddling character 5,000 reached the corpus whole; and the body it began holding was unredacted, in a cache whose entry count nothing bounded)
 - **§53. A rolling bound on what the harness pulls and pushes** — **(NOT BUILT: requested batch 122, specified, not designed)** (nothing anywhere counts a byte over the wire, so a user on a metered connection has no ceiling and a tool that fetches something enormous is bounded only by one tool's own per-request cap)
 - **§54. `@` names a file, and the tree is read once** — **(NOT BUILT: requested batch 122, specified, not designed)** (naming a file in the prompt means typing its path exactly, from memory, with no completion and no way to say "this folder")
-- **§55. The whole command, and what it printed** — **(NOT BUILT: requested batch 122, specified, not designed)** (a shell call shows a 140-character digest and its output is never rendered at all, so what the agent ran and what came back are both off screen)
+- **§55. The whole command, and what it printed** — **(BUILT in batch 125)** (a shell call shows a 140-character digest and its output is never rendered at all, so what the agent ran and what came back are both off screen)
 - **§56. A decision model as the shell classifier** — **(NOT BUILT: requested batch 122, specified, not designed)** (the gate decides from a word list and a token scan, so every judgement it cannot express as a rule costs an approval prompt, and the rules cannot be tuned per user)
 - **§57. One model for the subagents** — **(NOT BUILT: requested batch 122, specified, not designed)** (an agent definition can pin a model and nothing can set one for the subagents as a class, so a cheap child runs on the parent's expensive model)
 - **§58. Who the agent is when you ask it** — **(NOT BUILT: requested batch 122, specified, not designed)** (the chat system prompt is "You are a helpful assistant.", so the model knows nothing about the harness it is running in)
@@ -1065,6 +1065,44 @@ than of the model's prose.
   added in batch 112 for resize. So an in-place expand/retract is not a repaint; it is a full replay,
   and a replay moves the scroll position.
 
+### What batch 125 measured, which changed three of this section's own premises
+
+Every line was run before anything was written.
+
+- **THE OUTPUT IS ALREADY STORED, IN FULL, AND IT IS BYTE FOR BYTE WHAT THE MODEL RECEIVED.**
+  `core/memory.add_tool_result` persists `str(result)` to the `messages` table keyed by
+  `tool_call_id`, and `core/client.py:536` hands the provider that same `msg["content"]` -- the
+  Anthropic, Google and OpenAI-compatible branches all send the string unchanged. So the retention
+  question this section opened with does not exist: the archive is the record, it was redacted at
+  dispatch by `check_output_policy`, and it survives a restart by construction. `SS18`'s promise
+  reaches a one-shot call for free rather than needing a second mechanism. TR8.
+- **WHAT IT COSTS INSTEAD IS READABILITY.** `str()` of a dict is a Python repr, so a shell result is
+  stored as `{'stdout': 'hello\n', 'stderr': '', 'return_code': 0}` and the newline a reader came
+  for is two characters. That is the whole of the price, and TR9 is what pays it.
+- **THE VIEW SURFACE WAS MORE COMPLETE THAN TR4 KNEW.** `core/session_view.py` is already the
+  shell-independent "what may be shown" policy module, returning `(role, text)` entries from two
+  sources -- the live manager, or the archive keyed by CALL ID -- and `open_session_call` already
+  resolves a tool line into a pane at press time, with the crumb, the disabled prompt and
+  escape-to-close. THREE of the four shell tools reach it; the one-shot `shell` is the hole. So the
+  ctrl+click half of TR4's choice was most of the way built and TR4 did not say so.
+- **The `opens` plumbing is entirely generic.** `Transcript._arm_call` stylizes with
+  `meta={"opens": (kind, id)}` and `on_click` posts `CallSelected(kind, id)`; neither inspects the
+  kind. A third kind reaches the handler with **zero** widget changes.
+- **`registry.opens()` was pinned as returning `()` in three tests** --
+  `test_session_display.py` twice (`shell`, an unknown MCP name) and
+  `test_interactive_sessions.py` once (`shell_input`) -- plus two more asserting the tuple a replay
+  carries. Found by reading before the full run rather than by it, which is the batch-124 lesson
+  about a fourth pinned site applied one batch later.
+- **The archive's depth is already bounded, which is why TR9's fallback is not a hazard.**
+  `check_output_policy`'s `_MAX_SCAN_DEPTH = 12` fails CLOSED, substituting a sentence rather than
+  descending, so the repr `ast.literal_eval` is handed was depth-bounded before it was written.
+- **`core/replay.py`'s `T4` is the constraint this section never cited, and it is the strongest
+  one.** Tool results are skipped on a replay because "a grounding-heavy thread carries hundreds of
+  kilobytes of fetched page text in its `tool_result` rows; replaying that would bury the
+  conversation in the material the conversation was about." T4 is about what a replay PUTS IN FRONT
+  of a reader; this section is about what a reader can ASK FOR. An inline expand would have been T4
+  undone by a feature.
+
 ### Decisions (TR1-TR5)
 
 | # | Decision |
@@ -1072,17 +1110,60 @@ than of the model's prose.
 | **TR1** | **This is TWO problems and both are in scope.** The command is abbreviated and the output is absent. Shipping the first alone leaves the more useful half missing, and the owner's request names both |
 | **TR2** | **`param_digest` does not change.** Whatever is built is a SECOND rendering beside the digest, never a loosening of it. Three consumers read that function and the multi-line command it collapses once drew its remaining lines at column 0 underneath the tool line, outside the indent -- in all three. One producer, one job |
 | **TR3** | **Retracted by default, and unmistakably the tool call's.** The owner's reason is that the user has already seen a complex command in the approval modal. The attribution half is the harder half and it is a requirement rather than a nicety: a block of shell output that reads as the model's own prose is the untrusted-content confusion the system prompt spends a paragraph on |
-| **TR4** | **The mechanism is deliberately NOT chosen here, and the constraint that bounds the choice is now measured.** The owner deferred it, and the measurement above is what the two candidates have to be judged against: an inline expand costs a `reflow()` of the whole transcript and moves the reader's position, while a ctrl+click view reuses `registry.opens()` and the view surface §47 and SS14 already built. The second is the owner's own fallback proposal. Recording the measurement rather than the verdict is the point -- the decision is cheap to make with it and was being made without it |
-| **TR5** | **Whatever is chosen applies to all four shell tools, or the record says why not.** `shell`, `shell_background`, `shell_monitor` and `shell_interactive` differ in when their output exists, not in whether a user wants to see it, and four surfaces for one question is the drift EP6 names |
+| **TR4** | **The mechanism is deliberately NOT chosen here, and the constraint that bounds the choice is now measured.** The owner deferred it, and the measurement above is what the two candidates have to be judged against: an inline expand costs a `reflow()` of the whole transcript and moves the reader's position, while a ctrl+click view reuses `registry.opens()` and the view surface §47 and SS14 already built. The second is the owner's own fallback proposal. Recording the measurement rather than the verdict is the point -- the decision is cheap to make with it and was being made without it. **RESOLVED in batch 125 as the ctrl+click pane -- see TR6**, and the deferral earned itself: the measurement that decided it was `T4`, which this section had not cited |
+| **TR5** | **Whatever is chosen applies to all four shell tools, or the record says why not.** `shell`, `shell_background`, `shell_monitor` and `shell_interactive` differ in when their output exists, not in whether a user wants to see it, and four surfaces for one question is the drift EP6 names. **Overtaken by TR7**, which applies it to all THIRTY: the gap named here is not shell-specific, and four tools was the smallest honest scope rather than the right one |
 
-### What must be settled before this is built
+### Decisions (TR6-TR15), batch 125
 
-- Inline expand against a ctrl+click view, with TR4's measurement in hand.
-- How much output is kept and where. `core/shell_sessions.py` already keeps a session's first 10,000
-  and last 190,000 characters in memory (SS12); a one-shot `shell` keeps nothing today.
-- Whether the retained output survives a restart, and what SS18's "what the agent was given" header
-  means for a one-shot call.
-- Whether `core/replay.py` renders the same thing from the archive, which is the drift TR2 guards.
+Four of these are the owner's, taken in the design round on 2026-10-05: the ctrl+click pane over an inline expand (TR6); every tool call rather than the four shell tools (TR7); parse the stored repr when it round-trips and fall back to it verbatim (TR9); and the TUI only, with the `D12` divergence recorded rather than fixed (TR14).
+
+| # | Decision |
+|---|---|
+| **TR6** | **TR4's parked mechanism is the ctrl+click pane.** Decided on `T4` rather than on the `rerender()` cost, which is the measurement TR4 named and the weaker of the two: an inline expand moves the reader's scroll, but it ALSO puts tool results in the transcript, which `core/replay.py` refuses by name and for a reason that has not changed. The pane also answers both halves of TR1 with one affordance, because it draws the command through `check_output_policy` rather than through `param_digest` -- so TR2 holds without the pane having to work around it |
+| **TR7** | **Every tool call opens its own call. No exception list.** `registry.opens()` returns a new `OPENS_CALL` as its FALLBACK, so the answer is never empty. The gap TR1 names -- a successful result is rendered nowhere -- was never shell-specific: `fetch_url`'s body, `arxiv_search`'s results and every MCP tool's output were equally invisible. Answered WITHOUT a registry lookup, deliberately, because `opens_thread` and `opens_session` are False for a tool this registry has never seen -- a runtime-registered MCP tool, or one removed between a thread being written and being replayed -- and neither is a reason to hide a stored result. The fallback is a property of the ARCHIVE, not of the registry. The cost is stated: arming no longer means "this line started something". The two `DIFFED_TOOLS` lines are armed too, and they are what makes the no-exception rule earn itself -- `§41`'s `X4` kept `content` off the transcript line and the diff that replaced it shows the CHANGE rather than the call, so the pane is the only place the untruncated call can be read |
+| **TR8** | **Nothing new is retained.** Measured above: the archive already holds the exact string the provider was handed. There is no cap to choose, no eviction policy, no live-versus-stored split, and a restart costs nothing. `tests/test_call_view.py` pins BOTH halves of that measurement, so a change to `add_tool_result` or to a client translation branch fails there rather than in a pane quietly showing something the model never read |
+| **TR9** | **`ast.literal_eval`, falling back to the raw string.** On success the dict's keys are drawn as labelled sections with strings exploded one entry per line; on failure the stored string is drawn verbatim, which is never WRONG because it is what the model read -- so the fallback needs no second mechanism behind it and is not a degraded answer. `literal_eval` evaluates nothing, and a hostile nesting cannot exhaust the stack because `_MAX_SCAN_DEPTH` already failed closed on depth before the string was written; what the fallback is actually for is a repr that was never a literal, `<Foo object at 0x7f...>`. Caught broadly on `_as_text`'s precedent: a display surface that raises on one odd row takes the whole pane with it |
+| **TR10** | **A fourth pane, `#call-view`, and NOT for the reason the third had.** `#session-view` exists separately because the thread poll repaints `#thread-view` from the archive and would wipe anything else drawn there; nothing polls this one (TR11), so that argument does not apply and is not borrowed. The reason here is naming -- a pane called `#session-view` holding a `fetch_url` call is a name that lies -- and that `close_thread_view` resetting EVERY pane stays a statement rather than a hope, which is what makes a fourth pane cost one line. Same box in `app.tcss`, which is load-bearing: a hidden pane borrows the on-screen one's width |
+| **TR11** | **No poll, and a running call says so.** A one-shot call produces nothing until it exits, so there is nothing to stream and the one view timer gains no third subject -- `_viewing_live_session` already answers None for any tag that is not `_VIEW_LIVE`, so the discipline was already written. `D20` persists the assistant turn with its `tool_use` blocks BEFORE anything runs, so a call clicked mid-flight shows its command and the sentence that its result is not in the archive yet, which is `open_agent_thread`'s said-rather-than-ignored rule |
+| **TR12** | **An unresolvable thread or session falls back to the call view.** Two refusal sentences used to end those paths -- "that spawn has no thread to open -- it was refused" and its session sibling -- and both described exactly the state in which the call's own `{"error": ...}` answers the question, from the same archive the handler had just read. A line carries exactly ONE kind, so without this the three tools that open a thread or a session would have had no route to their own params and results at all. The refusal survives as the last resort, for a call that is not in the record |
+| **TR13** | **Bounded at `session_view.tail_chars()`, which is `MAX_READ_CHARS`** -- already "how much output is one read" for `shell_output` and for a wake, so a second number here would be a second answer to one question. TWO BUDGETS of that one number, params and result separately, because a `write` whose `content` is a large file would otherwise eat the allowance before the result -- the half the reader opened the pane for. A cut section says HOW MANY characters are missing rather than that it was truncated, which is `PG4`'s complaint |
+| **TR14** | **The entry-building lives in `core/call_view.py` for `D12`, and the CLI is not wired.** `core/session_view.py` is in `core/` precisely so both shells can render what a view shows, and `main.py` has never imported it -- the session view has been TUI-only since §49. This batch follows the rule for its own module and RECORDS the pre-existing divergence (TECHNICAL_DEBT 45) rather than quietly matching it or silently widening its own scope to fix it |
+| **TR15** | **Params are redacted at view time; the result is re-run idempotently.** The two halves are NOT symmetric and that is the decision. The result was redacted inside `registry.dispatch`, so a second pass finds nothing and costs one walk -- run anyway, because that is what keeps the promise true of both sources rather than of one plus an assumption. The params were NEVER redacted at rest: `param_digest` redacts for DISPLAY and the archive keeps what the model sent, so this pane is the first place the raw arguments reach a screen. The tool name handed to `check_output_policy` for that pass is decorated `(call params)`, because its one WARNING says "result" and a credential found in the arguments would otherwise be reported as having been in the output |
+
+### What settled the open questions
+
+Each of the four was answered by a measurement rather than by a preference, which is why none of
+them needed a second design round.
+
+- **Inline expand against a ctrl+click view** -- the pane, TR6, on `T4` rather than on `reflow()`.
+- **How much output is kept and where** -- nothing is kept, TR8. The question assumed a retention
+  design because `core/shell_sessions.py` needs one for a LIVE session's in-memory buffer (SS12). A
+  finished call has no live buffer to keep; it has an archive row that already holds the whole thing.
+- **Whether the retained output survives a restart, and what SS18 means for a one-shot call** --
+  it survives because it is the archive, and SS18's `NOT_KEPT` sentence turns out to be unnecessary
+  here. That header exists because a live session's output is in memory and nowhere else, so a
+  rebuilt session view genuinely cannot show what the session printed. A one-shot call's result was
+  never anywhere but the archive, so there is nothing a restart loses and nothing to apologise for.
+- **Whether `core/replay.py` renders the same thing** -- it renders the same LINE, armed with the
+  same `(kind, call id)` from the same `registry.opens()`, so a replayed tool line opens exactly
+  what a live one does. It still does not render the result inline, which is `T4` and is the point.
+
+### Gap register
+
+- **Ctrl+click is a mouse gesture and there is no keyboard route to a call.** The same is true of
+  every `opens()` target since §47, so this batch inherits the gap rather than adding it -- but it
+  inherits it for thirty tools instead of three, which makes it worth stating. A `/calls`-style
+  picker over the current thread's calls is the obvious later answer, and `ThreadPickerScreen` is
+  the shape.
+- **Arming no longer means "this line started something".** TR7's stated cost. Every tool line is
+  now underlined, and a reader who learned the old meaning has to learn a new one.
+- **A result whose repr is not a literal reads badly and the header cannot say whether it failed.**
+  TR9's fallback is honest and it is not pretty, and `_status` deliberately answers "finished"
+  rather than searching the raw text for `error` -- a guess wearing the clothes of a fact is the
+  instrument-that-lies shape batches 118 and 119 each paid for once.
+- **`param_digest` is still the only thing the research pipeline's tool rows show.** It has three
+  consumers (TR2) and this batch gave a second rendering to one of them. The pipeline trace and
+  `core/replay.py`'s own CLI rendering are unchanged, which is TR14's divergence in its other form.
 
 ---
 

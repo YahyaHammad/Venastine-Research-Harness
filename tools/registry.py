@@ -45,6 +45,7 @@ from tools.base import (
     GRANT_ANYWHERE,
     GRANT_NEVER,
     GRANT_SIGNOFF_ONLY,
+    OPENS_CALL,
     OPENS_SESSION,
     OPENS_THREAD,
     ToolSpec,
@@ -576,8 +577,8 @@ class ToolRegistry:
         return bool(spec is not None and spec.opens_session)
 
     def opens(self, tool_name: str) -> tuple:
-        """What a call to this tool OPENS: `("thread",)`, `("session",)`, or
-        `()` for a line that opens nothing (§47, extended by §49 SS14).
+        """What a call to this tool OPENS: `("thread",)`, `("session",)` or
+        `("call",)` (§47, extended by §49 SS14, widened by §55 TR7).
 
         THE ONE QUESTION A CONSUMER ASKS, and the reason the two flags above
         are not read directly outside this class. core/replay.py and the TUI
@@ -587,14 +588,35 @@ class ToolRegistry:
         disagree about what is clickable -- the exact divergence
         `opens_thread`'s own docstring exists to prevent, one kind over.
 
-        A tuple rather than a string so the empty answer is falsy and the
-        caller pairs it with a call id without a sentinel.
+        THERE IS NO LONGER AN EMPTY ANSWER, and the contract that replaced
+        it is the one thing to read here before changing a caller. Until
+        §55 this returned `()` for a line that opened nothing, and the two
+        consumers paired that falsy tuple with a call id as their gate:
+        `opens and call_id`. TR7 makes every call openable -- its own
+        params and its own result, which is the half of a tool call nothing
+        rendered -- so the kind is always present and THE CALL ID IS THE
+        ONLY GATE. A call the model made without an id cannot be looked up
+        in the archive and is the one unarmed line.
+
+        OPENS_CALL IS ANSWERED WITHOUT A REGISTRY LOOKUP, deliberately.
+        `opens_thread` and `opens_session` are False for a tool this
+        registry has never seen -- which is what an MCP tool registered at
+        runtime is until it says otherwise, and what a tool removed between
+        a thread being written and being replayed is for ever. Neither of
+        those is a reason to hide a stored result: the archive holds the
+        call and its result whatever this process knows about the tool, so
+        the fallback is a property of the ARCHIVE rather than of the
+        registry, and asking would only teach it to lie about old threads.
+
+        A tuple rather than a string because the two consumers carry
+        `(kind, call id)` into style metadata as one unit, and because the
+        shape outlived the falsy contract that first chose it.
         """
         if self.opens_thread(tool_name):
             return (OPENS_THREAD,)
         if self.opens_session(tool_name):
             return (OPENS_SESSION,)
-        return ()
+        return (OPENS_CALL,)
 
     def parallel(self, tool_name: str) -> bool:
         """Whether several calls to this tool in one response may run at
