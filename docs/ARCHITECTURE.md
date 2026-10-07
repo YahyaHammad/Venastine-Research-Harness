@@ -77,7 +77,7 @@ Venastine Research Harness/
 ├── scripts/
 │   └── prepublish-check.mjs        # batch 35: package.json's `prepublishOnly` gate, so a non-zero exit aborts the publish. Checks the two things that fail SILENTLY and cannot be undone once a version is on the registry -- the two version numbers agreeing, and no secret in the tarball while LICENSE/NOTICE are in it
 │
-├── tests/                          # 6273 tests, all offline, parallel by default since batch 109 and one group per CLASS since batch 114: ~1:26 on 16 cores against ~9:06 serial (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 6293 tests, all offline, parallel by default since batch 109 and one group per CLASS since batch 114: ~1:26 on 16 cores against ~9:06 serial (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 113 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow + §29 N1-N8 the one stdin reader, N2's channel deadline, every request kind rendered, and the startup block main(argv) made reachable + #102's four declining defaults + §47's asker line on the three kinds a run can raise, which this shell dropped while the TUI drew it (batch 76); batch 121 adds the reader that must NOT survive into the TUI -- driven over a real pipe with the write end left open, because a StringIO would hit EOF and let the pump exit, which is the one thing the defect never does
@@ -86,7 +86,7 @@ Venastine Research Harness/
 │   ├── test_logging_setup.py       # 7 tests -- configure_logging fallback on bad log path, stderr=False, and #132's redacting formatter (message, traceback, and a real dispatch)
 │   ├── test_credentials.py         # 21 tests -- audit #19: providers.json and the trust store created 0600, asserted under umask 0. The mode cases skip off POSIX; the round-trip cases do not. Plus batch 35's resolution pins: a .env in the working directory, AGENT_ENV_FILE over it, and the absent-file message on an absolute path
 │   ├── test_output_writer.py       # 12 tests -- ROADMAP §12 artifact file layout, contents, chart PNG, None guard, tier counts
-│   ├── test_paging.py              # 74 tests -- ROADMAP_v3 §51 (PG1-PG9): paging for the three network tools. Its two central assertions are about what did NOT leave the process -- a second page issues no request, because a re-fetch was measured to splice two different versions of a news front page together -- and about what the corpus does with the pages, since `_store` was measured DROPPING page 2 before any of this was written. Two of its provider tests drive the real `_call_arxiv_api` and the real `_call_ddgs` rather than mocks, because a mutation pass showed the mocked versions could not see a hardcoded page number living inside the function they replaced
+│   ├── test_paging.py              # 94 tests -- ROADMAP_v3 §51 (PG1-PG9): paging for the three network tools. Its two central assertions are about what did NOT leave the process -- a second page issues no request, because a re-fetch was measured to splice two different versions of a news front page together -- and about what the corpus does with the pages, since `_store` was measured DROPPING page 2 before any of this was written. Two of its provider tests drive the real `_call_arxiv_api` and the real `_call_ddgs` rather than mocks, because a mutation pass showed the mocked versions could not see a hardcoded page number living inside the function they replaced. Batch 126 added the two bounds §51 left off `arxiv_search` (TECHNICAL_DEBT 41): the author list, which was 91.8% of a measured 223,191-char result, and the feed read itself, which buffered without a ceiling. Its wire tests drive the real `_call_arxiv_api` for the same reason the paging ones do
 │   ├── test_redact_before_cut.py   # 37 tests -- ROADMAP_v3 §52 (RB1-RB4): `fetch_url` redacts the whole body before it is cut into pages, so a credential straddling character 5,000 is replaced while it is still one string. The defect is an ORDERING between two calls, not a broken redactor, so every assertion is driven through the real `registry.dispatch` and a real `SourceCorpus` -- a test that invoked the redactor itself could not see it, which is the trap batch 105 hit twice. Ten patterns swept at every interior cut position, because measured they do not behave alike: the fixed-length tokens and both credential shapes are defeated by every cut, the open-quantifier ones only near their head
 │   ├── test_net_common.py          # 28 tests -- ROADMAP_v3 §52 (RB5-RB6): the TTL cache the three network tools share, which had no direct tests at all before this. A sweep on write and an entry cap, with time injected by rewriting stored timestamps rather than slept through, and WHICH entry is evicted asserted rather than just how many survive -- evicting the newest would keep the cap and destroy the point
 │   ├── test_project_path_guard.py  # 20 tests -- TECHNICAL_DEBT 26: the harness's own install tree may not be the PROJECT. Naming it was already refused; with AGENT_WORKSPACE unset `main()` fell back to `os.getcwd()` and reached the same state by saying nothing, so the harness asked to trust its own AGENTS.md. The fix is a POSITION as much as a comparison -- above `create_db_and_tables` so a refused launch leaves no database, and above `load_project_config` so it lands before the trust prompt it prevents -- so both orderings are asserted at `main()`, where a unit test of the comparison cannot see them. Three controls stand against a guard that would refuse everything, and the one that matters has the working directory INSIDE the harness and an explicit AGENT_WORKSPACE rescuing it. Batch 111 adds the second rescue, `workspace_is_project` in config.yaml with no variable anywhere (TECHNICAL_DEBT 28) -- driven through `config_schema` rather than by patching the derived boolean, because the sibling test beside it passes with that key deleted from the codebase entirely
@@ -358,7 +358,7 @@ Venastine Research Harness/
         ├── load_skill.py          # ROADMAP_v2 §14: view a skill's full body on request (progressive disclosure; view-only, activation is §19)
         ├── pin.py                 # ROADMAP_v2 §21a/D26: mark recent turns compaction-exempt. Ungated (thread-scoped, reversible) and ordinal (last_n turns), so MessageLog.id stays out of the neutral shape
         ├── remember.py            # ROADMAP_v2 §21b: write a durable fact that outlives this conversation. APPROVAL-GATED (D26) where `pin` is not, and GRANT_NEVER in both grant paths (M17/#67) -- a memory outlives the thread and silently shapes conversations the user has not started yet
-        ├── arxiv.py               # arXiv paper search
+        ├── arxiv.py               # arXiv paper search. Bounded in both directions since batch 126 (TECHNICAL_DEBT 41): `MAX_FEED_BYTES` streams and refuses the feed past 2 MiB (§31 H7's shape, derived from a measured 838,560-byte worst case), and `_MAX_AUTHORS`/`MAX_TITLE_CHARS`/`MAX_CATEGORIES` bound the three result fields §51 never capped
         ├── symbolic_math.py       # algebra, calculus, trig, arithmetic (SymPy)
         ├── linear_algebra.py      # matrices, vectors, low-order tensors (SymPy)
         ├── probability_stats.py   # descriptive stats + probability distributions
@@ -1765,7 +1765,7 @@ Validated by **shape only** — provider names and API keys are not checked (E6)
 | `web_search` | `web_search.py` | Working | DuckDuckGo via `ddgs` package, cached, retried. Results filtered through `is_url_permitted(..., resolve=False)` — the same checker `fetch_url` uses, minus the DNS lookup a filter does not need |
 | `fetch_url` | `fetch_url.py` | Working | Raw HTML text, truncated. Follows redirects **by hand**, checking `is_url_permitted` before each hop and reporting the URL that *answered* (#53/#54). Denied on every call until §15/D24 added its `ToolPermissions`/`ToolApprovals` fields — see §11 |
 | `get_time` | `get_time.py` | Working | No args, UTC only |
-| `arxiv_search` | `arxiv.py` | Working | Keyword + optional category, Atom XML parsed |
+| `arxiv_search` | `arxiv.py` | Working | Keyword + optional category, Atom XML parsed. Pages via `start` (§51 PG3); feed read streamed and bounded, author list capped with its real count reported (batch 126) |
 | `symbolic_math` | `symbolic_math.py` | Working | Algebra/calculus/trig/arithmetic via SymPy, exact by default |
 | `linear_algebra` | `linear_algebra.py` | Working | Matrices/vectors/low-order tensors via SymPy |
 | `probability_stats` | `probability_stats.py` | Working | Descriptive stats (stdlib) + distributions (sympy.stats) |
@@ -2035,3 +2035,16 @@ The single-payload test (`__import__('os').system(...)`) is kept, and was itself
   name that lies — and because `close_thread_view` resetting *every* pane unconditionally is what
   makes a fourth one cost a single line. Worth recording as the case where the mechanical reason and
   the naming reason came apart and the naming reason won.
+
+- **A register entry that is wrong is harder to act on than one that is missing** (batch 126,
+  closing TECHNICAL_DEBT 41). The entry carried a real measurement — a 116,996-char `arxiv_search`
+  row that sized `compaction_min_headroom_tokens` — and a diagnosis in which three of four claims
+  were already false on the day it was written, because §51 had shipped the paging and the
+  truncation notice fourteen batches earlier. It therefore described the pre-§51 tool, named no
+  field, and proposed the one fix shape PG5 and PG8 had already ruled out. Two consequences worth
+  generalising. **A measurement and the diagnosis attached to it have different shelf lives**: the
+  number stayed true for seven batches while the sentences around it rotted, so a register entry
+  should be re-read against the code before it is acted on, not just before it is written. And
+  **the arithmetic was available without a network call** — the capped fields ceiling near 16,900
+  characters at `max_results=20`, against a 116,996-char row, which proves the cause is elsewhere
+  from the constants alone. The field was `authors`, at 91.8% of a re-measured 223,191-char result.

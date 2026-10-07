@@ -560,19 +560,38 @@ class TestTheCorpusHoldsWhatTheModelRead:
 # ---- PG3/PG9: arXiv pages, and the cache key knows it ---------------------
 # ===========================================================================
 
-def _feed(n_entries, start_at=0, summary_chars=100, total=None):
+def _feed(n_entries, start_at=0, summary_chars=100, total=None,
+          n_authors=1, title_chars=None, n_categories=1):
     """An Atom feed in arXiv's own shape, including the OpenSearch elements
-    the real API returns -- measured against it in batch 105."""
-    entries = "".join(
-        f"""<entry>
-          <id>http://arxiv.org/abs/{2000 + start_at + i}.00001v1</id>
-          <title>Paper {start_at + i}</title>
+    the real API returns -- measured against it in batch 105.
+
+    `n_authors`, `title_chars` and `n_categories` were added in batch 126
+    and DEFAULT TO WHAT THIS BUILT BEFORE THEM, so none of the dozen
+    existing callers changed. `title_chars=None` keeps the short
+    `Paper <n>` title rather than substituting a padded one, because a test
+    about paging should not have to think about a title at all.
+    """
+    def one(i):
+        number = 2000 + start_at + i
+        title = (f"Paper {start_at + i}" if title_chars is None
+                 else "T" * title_chars)
+        # Distinct names: an identical one repeated would not catch a cut
+        # that kept the LAST n rather than the first n.
+        authors = "".join(f"<author><name>Author {a}</name></author>"
+                          for a in range(n_authors))
+        categories = "".join(f'<category term="cs.A{c}"/>'
+                             for c in range(n_categories))
+        return f"""<entry>
+          <id>http://arxiv.org/abs/{number}.00001v1</id>
+          <title>{title}</title>
           <summary>{'s' * summary_chars}</summary>
           <published>2024-01-0{(i % 9) + 1}T00:00:00Z</published>
-          <author><name>A. Author</name></author>
-          <category term="cs.AI"/>
-          <link title="pdf" href="http://arxiv.org/pdf/{2000 + start_at + i}.00001v1"/>
-        </entry>""" for i in range(n_entries))
+          {authors}
+          {categories}
+          <link title="pdf" href="http://arxiv.org/pdf/{number}.00001v1"/>
+        </entry>"""
+
+    entries = "".join(one(i) for i in range(n_entries))
     total_el = (f'<opensearch:totalResults>{total}</opensearch:totalResults>'
                 if total is not None else "")
     return f"""<?xml version="1.0" encoding="UTF-8"?>
@@ -728,6 +747,312 @@ class TestArxivSaysWhenAnAbstractWasCut:
         assert arxiv.MAX_SUMMARY_CHARS == 600, (
             "PG8 marks a cut value; it does not raise the cap. The cap "
             "bounds model-facing text from a source nobody here wrote")
+
+
+class TestArxivBoundsTheFieldsNobodyCapped:
+    """Batch 126, closing TECHNICAL_DEBT 41 -- whose diagnosis was wrong.
+
+    The register said `arxiv_search` had "no cap, no truncation notice, no
+    paging". All three were already false when it was written: §51 shipped
+    the paging and the abstract's notice fourteen batches earlier, and the
+    abstract has been capped at 600 since before that. What it never named
+    is the field that actually grew.
+
+    Measured live (batch 126), `all:LHCb observation branching fraction` at
+    max_results=20: `str(result)` was 223,191 characters, of which 204,871
+    -- 91.8% -- were the author list, one entry carrying 2,832 authors and
+    eleven of twenty over the cap. Everything the tool already bounds
+    ceilings near 16,900 characters at that max_results, so the capped
+    fields could never have accounted for the 116,996-char row the register
+    recorded, and the register's own figure was itself only half of what an
+    ordinary physics query produces today.
+    """
+
+    def test_a_long_author_list_is_cut_and_says_so(self, mocker):
+        mocker.patch.object(arxiv, "_call_arxiv_api",
+                            return_value=_feed(1, n_authors=100))
+
+        entry = arxiv.run({"keywords": "x"})["results"][0]
+
+        assert len(entry["authors"]) == arxiv._MAX_AUTHORS
+        assert entry["authors_truncated"] is True
+        assert entry["author_count"] == 100
+        assert entry["full_authors_url"].endswith(entry["arxiv_id"])
+
+    def test_the_authors_kept_are_the_FIRST_ones(self, mocker):
+        """A cut that kept the LAST n passes every count-based assertion
+        above and loses the first author, which is the one a citation
+        leads with."""
+        mocker.patch.object(arxiv, "_call_arxiv_api",
+                            return_value=_feed(1, n_authors=40))
+
+        authors = arxiv.run({"keywords": "x"})["results"][0]["authors"]
+
+        assert authors[0] == "Author 0"
+        assert authors[-1] == "Author %d" % (arxiv._MAX_AUTHORS - 1)
+
+    def test_the_author_count_is_the_real_total_not_the_kept_count(
+            self, mocker):
+        """The measured number, because the whole point of the key is that
+        the model can tell a 2,832-author paper from a 25-author one -- and
+        a count derived from the cut list would say 25 for both."""
+        mocker.patch.object(arxiv, "_call_arxiv_api",
+                            return_value=_feed(1, n_authors=2832))
+
+        entry = arxiv.run({"keywords": "x"})["results"][0]
+
+        assert entry["author_count"] == 2832
+        assert len(entry["authors"]) == arxiv._MAX_AUTHORS
+
+    def test_a_short_author_list_carries_none_of_the_three_keys(self, mocker):
+        mocker.patch.object(arxiv, "_call_arxiv_api",
+                            return_value=_feed(1, n_authors=3))
+
+        entry = arxiv.run({"keywords": "x"})["results"][0]
+
+        assert entry["authors"] == ["Author 0", "Author 1", "Author 2"]
+        assert "authors_truncated" not in entry
+        assert "author_count" not in entry
+        assert "full_authors_url" not in entry
+
+    def test_an_author_list_exactly_at_the_cap_is_not_called_cut(self, mocker):
+        mocker.patch.object(
+            arxiv, "_call_arxiv_api",
+            return_value=_feed(1, n_authors=arxiv._MAX_AUTHORS))
+
+        entry = arxiv.run({"keywords": "x"})["results"][0]
+
+        assert len(entry["authors"]) == arxiv._MAX_AUTHORS
+        assert "authors_truncated" not in entry
+
+    def test_a_long_title_is_flagged_and_given_NO_route(self, mocker):
+        """The asymmetry is the decision, not an omission. #49 says nothing
+        is altered silently, so the flag is owed; PG4 exists so the model
+        can reach what it WANTED, and a title past 300 characters is a
+        malformed feed rather than a long paper -- measured, the longest
+        title in sixty real entries was 188. Completing the pattern here
+        would point the model at the abs page of a hostile entry."""
+        mocker.patch.object(arxiv, "_call_arxiv_api",
+                            return_value=_feed(1, title_chars=400))
+
+        entry = arxiv.run({"keywords": "x"})["results"][0]
+
+        assert len(entry["title"]) == arxiv.MAX_TITLE_CHARS
+        assert entry["title_truncated"] is True
+        assert not any(key.startswith("full_title") for key in entry)
+
+    def test_a_real_length_title_is_untouched(self, mocker):
+        """188 is the longest title measured over sixty real entries."""
+        mocker.patch.object(arxiv, "_call_arxiv_api",
+                            return_value=_feed(1, title_chars=188))
+
+        entry = arxiv.run({"keywords": "x"})["results"][0]
+
+        assert len(entry["title"]) == 188
+        assert "title_truncated" not in entry
+
+    def test_a_title_exactly_at_the_cap_is_not_called_cut(self, mocker):
+        mocker.patch.object(
+            arxiv, "_call_arxiv_api",
+            return_value=_feed(1, title_chars=arxiv.MAX_TITLE_CHARS))
+
+        entry = arxiv.run({"keywords": "x"})["results"][0]
+        assert "title_truncated" not in entry
+
+    def test_too_many_categories_are_cut_and_flagged(self, mocker):
+        mocker.patch.object(arxiv, "_call_arxiv_api",
+                            return_value=_feed(1, n_categories=30))
+
+        entry = arxiv.run({"keywords": "x"})["results"][0]
+
+        assert len(entry["categories"]) == arxiv.MAX_CATEGORIES
+        assert entry["categories_truncated"] is True
+
+    def test_an_ordinary_category_list_carries_no_flag(self, mocker):
+        mocker.patch.object(arxiv, "_call_arxiv_api",
+                            return_value=_feed(1, n_categories=3))
+
+        entry = arxiv.run({"keywords": "x"})["results"][0]
+
+        assert entry["categories"] == ["cs.A0", "cs.A1", "cs.A2"]
+        assert "categories_truncated" not in entry
+
+    def test_a_category_list_exactly_at_the_cap_is_not_called_cut(
+            self, mocker):
+        """ADDED BY A SURVIVING MUTATION (F10, batch 126), and the hole was
+        in this file rather than in the code.
+
+        `authors` and `title` each got an exactly-at-the-cap test and
+        `categories` did not, so changing its `>` to `>=` survived the
+        whole pass: the cut case used 30 and the uncut case 3, and neither
+        can see a boundary at 20. The defect it was hiding is PG8's own
+        complaint inverted -- a value flagged as cut when nothing was cut,
+        which sends the model to the abs page for a list it already has in
+        full.
+        """
+        mocker.patch.object(
+            arxiv, "_call_arxiv_api",
+            return_value=_feed(1, n_categories=arxiv.MAX_CATEGORIES))
+
+        entry = arxiv.run({"keywords": "x"})["results"][0]
+
+        assert len(entry["categories"]) == arxiv.MAX_CATEGORIES
+        assert "categories_truncated" not in entry
+
+    def test_the_bound_is_what_actually_shrinks_the_row(self, mocker):
+        """The property the register was about, end to end.
+
+        Twenty entries of 1,000 authors each is the shape measured live.
+        Asserted as a RATIO against the unbounded size rather than an
+        absolute, so the test says "the row is bounded" rather than
+        memorising one serialisation's length.
+        """
+        mocker.patch.object(arxiv, "_call_arxiv_api",
+                            return_value=_feed(20, n_authors=1000))
+
+        result = arxiv.run({"keywords": "heavy"})
+
+        rendered = len(str(result))
+        unbounded = sum(
+            len(str("Author %d" % a)) + 4
+            for a in range(1000)) * 20
+        assert rendered < unbounded / 10, (
+            "the author list is still carrying the row: %d chars rendered "
+            "against %d unbounded" % (rendered, unbounded))
+        assert all(e["author_count"] == 1000 for e in result["results"])
+
+    def test_the_caps_are_what_the_record_says(self):
+        """Pinned because each number has a reason, and a later author
+        raising one to "fix" a truncated value is what PG8 refused."""
+        assert arxiv._MAX_AUTHORS == 25, (
+            "25 is scholar.py's _MAX_AUTHORS for the same question -- "
+            "enough to find the strongest name on a paper")
+        assert arxiv.MAX_TITLE_CHARS == 300, (
+            "measured: the longest of sixty real titles was 188, so 300 "
+            "is inert for real papers and bounds the malformed one")
+        assert arxiv.MAX_CATEGORIES == 20
+
+
+class TestArxivBoundsWhatItReadsOffTheWire:
+    """Batch 126, ROADMAP_v2 §31 (H7) and #55 applied to the second tool
+    that had the same defect.
+
+    `_call_arxiv_api` was `httpx.get(...)` then `return response.text`,
+    which is the exact shape fetch_url.py's own comment calls out: httpx
+    buffers the ENTIRE body before anything slices it, and a
+    Content-Length check is not the fix because a hostile server can omit
+    it or lie about it. It was the last `httpx.get` in the project.
+
+    Every test here drives the REAL `_call_arxiv_api` through the fake
+    httpx, because the bound lives INSIDE that function -- a mocked
+    `_call_arxiv_api` puts the needle in its own haystack, which is the
+    trap `test_start_reaches_the_PROVIDER_instead_of_a_constant` was
+    rewritten for. The fake's `iter_bytes` yields small chunks on purpose,
+    so a cap checked once per body rather than per chunk cannot pass here.
+    """
+
+    def test_a_feed_over_the_cap_is_refused_and_names_the_lever(
+            self, http, monkeypatch):
+        monkeypatch.setattr(arxiv, "MAX_FEED_BYTES", 2048)
+        http.respond(text=_feed(20, n_authors=200))
+
+        result = arxiv.run({"keywords": "huge"})
+
+        assert "error" in result
+        assert "max_results" in result["error"], (
+            "a refusal that names no lever is §32 A7's burn-a-turn shape")
+        assert "2048" in result["error"]
+
+    def test_the_refusal_is_not_retried(self, http, monkeypatch):
+        """A feed this large is this large again, so three attempts reach
+        the same place and then report a network failure that is not
+        there -- the reasoning already written for a declared entity."""
+        monkeypatch.setattr(arxiv, "MAX_FEED_BYTES", 2048)
+        for _ in range(arxiv.MAX_RETRIES + 1):
+            http.respond(text=_feed(20, n_authors=200))
+
+        arxiv.run({"keywords": "huge"})
+
+        assert len(http.requests) == 1, (
+            "the oversized feed was retried %d times; MAX_RETRIES+1 is %d"
+            % (len(http.requests), arxiv.MAX_RETRIES + 1))
+
+    def test_the_refusal_carries_no_text_from_the_feed(
+            self, http, monkeypatch):
+        """§32's untrusted-content bound. The feed's own text stops here,
+        the way it stops in the declared-entity branch beside it."""
+        monkeypatch.setattr(arxiv, "MAX_FEED_BYTES", 2048)
+        http.respond(text=_feed(20, n_authors=200, title_chars=300))
+
+        error = arxiv.run({"keywords": "huge"})["error"]
+
+        assert "<" not in error and "entry" not in error
+        assert "TTTT" not in error
+
+    def test_a_feed_at_exactly_the_cap_is_accepted(self, http, monkeypatch):
+        """`>` and not `>=`. A bound that refuses the body it was sized
+        for is a false refusal, which is the failure mode that matters
+        here: the tool reporting it read nothing for a query arXiv
+        answered correctly."""
+        feed = _feed(2, n_authors=5)
+        monkeypatch.setattr(arxiv, "MAX_FEED_BYTES",
+                            len(feed.encode("utf-8")))
+        http.respond(text=feed)
+
+        result = arxiv.run({"keywords": "exact"})
+
+        assert "error" not in result
+        assert result["result_count"] == 2
+
+    def test_an_ordinary_feed_is_read_whole(self, http):
+        """The streamed path reassembles the body it used to buffer."""
+        http.respond(text=_feed(3, summary_chars=120, n_authors=2,
+                                total=99))
+
+        result = arxiv.run({"keywords": "ordinary"})
+
+        assert result["result_count"] == 3
+        assert result["total_results"] == 99
+        assert result["results"][0]["summary"] == "s" * 120
+        assert result["results"][0]["authors"] == ["Author 0", "Author 1"]
+
+    def test_a_feed_that_is_not_what_its_encoding_claims_does_not_escape(
+            self, mocker):
+        """The decode must not introduce a NEW exception type.
+
+        A bare `.decode()` raises UnicodeDecodeError, which is a
+        ValueError -- covered by NEITHER except clause in `run()` -- so a
+        hostile non-UTF-8 feed would escape as a crash on precisely the
+        path the rest of this module is careful about. With
+        errors="replace" it fails as a ParseError instead, which is
+        handled and retried.
+        """
+        class _Streamed:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def raise_for_status(self):
+                return None
+
+            def iter_bytes(self):
+                yield b"\xff\xfe\x00\x80not utf-8 and not xml"
+
+        mocker.patch.object(arxiv.httpx, "stream",
+                            side_effect=lambda *a, **kw: _Streamed())
+
+        result = arxiv.run({"keywords": "hostile"})
+
+        assert "error" in result, "the bad decode escaped run()"
+
+    def test_the_cap_is_the_measured_one(self):
+        assert arxiv.MAX_FEED_BYTES == 2_097_152, (
+            "measured live: the heaviest LEGITIMATE feed this tool can ask "
+            "for was 838,560 bytes (max_results=20 over an LHCb query, "
+            "13,859 author elements), so 2 MiB clears it by 2.5x. A cap "
+            "under the largest real feed is a false refusal")
 
 
 # ===========================================================================

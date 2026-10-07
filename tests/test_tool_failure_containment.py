@@ -210,20 +210,41 @@ class TestTheArxivEndpoint:
         """Belt and braces beside https://. httpx defaults to NOT
         following redirects -- unlike requests -- so if arXiv moves the
         endpoint again this keeps working instead of failing as an
-        unparseable empty body."""
+        unparseable empty body.
+
+        REWRITTEN IN BATCH 126, and it was a real pin rather than a
+        formality. §31 (H7) moved `_call_arxiv_api` from `httpx.get` to
+        `httpx.stream` so the feed is bounded as it arrives, and this test
+        patched `get` -- so the patch went inert and `captured` stayed
+        empty. It failed loudly (`assert None is True`) rather than going
+        quietly green, which is the only reason it is a cheap fix and not
+        a silent hole: the assertion reads the dict the patch fills, so an
+        unreached patch has nothing to report.
+
+        The double has to be a CONTEXT MANAGER with `iter_bytes` now,
+        because that is the shape the bound is implemented against -- the
+        `with` is where the connection is dropped early.
+        """
         from tools.builtin import arxiv
 
         captured = {}
 
-        class _Resp:
-            text = "<feed xmlns='http://www.w3.org/2005/Atom'></feed>"
+        class _Streamed:
+            def __enter__(inner):
+                return inner
 
-            def raise_for_status(self):
+            def __exit__(inner, *exc):
+                return False
+
+            def raise_for_status(inner):
                 return None
 
+            def iter_bytes(inner):
+                yield b"<feed xmlns='http://www.w3.org/2005/Atom'></feed>"
+
         mocker.patch.object(
-            arxiv.httpx, "get",
-            side_effect=lambda *a, **kw: (captured.update(kw), _Resp())[1])
+            arxiv.httpx, "stream",
+            side_effect=lambda *a, **kw: (captured.update(kw), _Streamed())[1])
 
         arxiv._call_arxiv_api("all:x", 1, "relevance")
 

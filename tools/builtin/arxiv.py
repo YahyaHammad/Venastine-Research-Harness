@@ -59,6 +59,54 @@ REQUEST_TIMEOUT_S = 10.0
 MAX_RETRIES = 2
 CACHE_TTL_S = 300
 
+# ROADMAP_v2 §31 (H7), #55, applied to the second tool that had the defect.
+# `httpx.get(...).text` buffers the ENTIRE body before anything looks at it,
+# and fetch_url.py's own comment rules out the shortcut: a Content-Length
+# check is not the fix, because a hostile server can omit it or lie about
+# it, so the only thing that bounds this is refusing to read past a cap.
+# This feed is attacker-influenced -- the module header says so -- and this
+# was the last `httpx.get` in the project.
+#
+# DERIVED FROM A MEASUREMENT, and the first derivation was wrong. It guessed
+# "roughly 100 KB of Atom per hyperauthorship entry" and therefore 2 MiB for
+# twenty of them; measured live, `all:LHCb observation branching fraction`
+# answers max_results=20 with 838,560 bytes carrying 13,859 <author>
+# elements, about 42 KB an entry, and four consecutive pages of it stayed
+# under 839 KB. So 2 MiB clears the heaviest LEGITIMATE feed this tool can
+# ask for by 2.5x -- which is the number that matters, because a cap under
+# it is a FALSE REFUSAL: the tool reporting it read nothing for a query
+# arXiv answered correctly.
+#
+# Loose next to fetch_url's 65,536 on purpose. That tool's URL is chosen by
+# the model and can point anywhere; this endpoint is fixed and its response
+# shape is known, so the bound's job here is the refusal rather than the
+# tightness.
+MAX_FEED_BYTES = 2_097_152
+
+# ROADMAP_v3 §51 (PG8) for the shape, #131 for the reason: these bound
+# model-facing text from a source nobody here wrote. The abstract was the
+# only field anyone capped and it is not the field that grew -- measured
+# (TECHNICAL_DEBT 41, re-measured in batch 126) a `str(result)` of 223,191
+# characters, of which 204,871 (91.8%) were the author list, with one entry
+# carrying 2,832 authors and eleven of twenty over the cap below. Everything
+# the tool already bounds ceilings at about 16,900 characters even at
+# max_results=20, so the capped fields could never have accounted for it.
+#
+# 25 is `core/reasoning/scholar.py`'s `_MAX_AUTHORS`, answering the same
+# question the same way -- enough to find the strongest name on a paper
+# without carrying a hyperauthorship record. NOT imported: tools/ does not
+# import core/reasoning/, and one constant reaching across two layers would
+# be worse than two constants with one reason each.
+_MAX_AUTHORS = 25
+
+# Measured over sixty real entries from three queries: the longest title was
+# 188 characters ("Measurements of the Higgs boson production and decay
+# rates..."). So this is inert for every real paper and bounds the malformed
+# one -- which is why both of these get a FLAG and no recovery route. See
+# `_parse_atom_feed`.
+MAX_TITLE_CHARS = 300
+MAX_CATEGORIES = 20
+
 # One instance per tool, never shared: an equal key string from an
 # arXiv query and a web query would otherwise collide.
 _cache = TTLCache(CACHE_TTL_S)
@@ -125,6 +173,22 @@ class ArxivSearchError(Exception):
     public surface and something outside the repo may catch it."""
 
 
+class _FeedTooLarge(Exception):
+    """The feed passed MAX_FEED_BYTES and was dropped UNREAD.
+
+    PRIVATE, and it never escapes `run()`. Deliberately not
+    `ArxivSearchError`: that one is documented above as part of this
+    module's public surface and as no longer raised, and quietly starting
+    to raise it again would make that docstring false.
+
+    A separate exception rather than a sentinel return because the two
+    outcomes are not the same shape -- every other path returns a feed to
+    parse, and this one has nothing to parse. `fetch_url` can `break` and
+    keep a truncated body because a cut page of prose is still prose; a cut
+    Atom document does not parse at all, so there is nothing to hand back.
+    """
+
+
 # ---- Query construction -----------------------------------------------------
 
 def _build_search_query(keywords: str, category: Optional[str]) -> str:
@@ -143,7 +207,15 @@ def _build_search_query(keywords: str, category: Optional[str]) -> str:
 
 def _call_arxiv_api(search_query: str, max_results: int, sort_by: str,
                     start: int = 0) -> str:
-    response = httpx.get(
+    """The raw Atom XML, or `_FeedTooLarge` if it would not fit the bound.
+
+    STREAMED since batch 126 (§31 H7), so the connection is dropped inside
+    the `with` the moment the cap is passed rather than after the whole body
+    is already in memory. Returns `str` as it always did, so every test that
+    patches this function is unaffected by the change underneath it.
+    """
+    with httpx.stream(
+        "GET",
         ARXIV_API_URL,
         params={
             "search_query": search_query,
@@ -161,9 +233,30 @@ def _call_arxiv_api(search_query: str, max_results: int, sort_by: str,
         # endpoint again, following the redirect keeps this working
         # instead of failing as an unparseable empty body.
         follow_redirects=True,
-    )
-    response.raise_for_status()
-    return response.text  # raw Atom XML
+    ) as response:
+        # Streamed, so status and headers are available before the body --
+        # the same ordering fetch_url relies on.
+        response.raise_for_status()
+        chunks = []
+        total = 0
+        for chunk in response.iter_bytes():
+            total += len(chunk)
+            if total > MAX_FEED_BYTES:
+                raise _FeedTooLarge(total)
+            chunks.append(chunk)
+        encoding = getattr(response, "encoding", None) or "utf-8"
+
+    # errors="replace", and it is not laziness. A bare decode raises
+    # UnicodeDecodeError on a feed that is not what its header claims, and
+    # that is a ValueError -- which NEITHER except clause in `run()` covers,
+    # so it would escape as a crash on precisely the hostile path the rest
+    # of this module is careful about. Replacing instead makes a nonsense
+    # body fail as a ParseError, which IS handled and IS retried.
+    #
+    # §51's PG5 concern about a cut multi-byte character does not apply:
+    # these bytes are always a COMPLETE document, because an incomplete one
+    # was refused above rather than truncated.
+    return b"".join(chunks).decode(encoding, errors="replace")
 
 
 # ---- Atom XML parsing --------------------------------------------------
@@ -241,7 +334,9 @@ def _parse_atom_feed(xml_text: str) -> tuple:
             continue
         arxiv_id = raw_id.split("/abs/")[-1] if "/abs/" in raw_id else raw_id
 
-        title = title_text.replace("\n", " ")
+        full_title = title_text.replace("\n", " ")
+        title = full_title[:MAX_TITLE_CHARS]
+        title_truncated = len(full_title) > MAX_TITLE_CHARS
         full_summary = (_text_of(entry, "atom:summary") or "").replace("\n", " ")
         summary = full_summary[:MAX_SUMMARY_CHARS]
         # §51 (PG8/PG4). The cap stays -- it bounds model-facing text from a
@@ -263,13 +358,23 @@ def _parse_atom_feed(xml_text: str) -> tuple:
         # A nameless <author> is DROPPED rather than inserted as None: this
         # list is rendered into a citation, and `None` in it reads as an
         # author called None.
-        authors = [
+        #
+        # BOUNDED SINCE BATCH 126, and this is the field TECHNICAL_DEBT 41
+        # was about without naming it. The count is kept before the cut
+        # because `author_count` reports the real total -- the point of the
+        # key is that the model can tell a 2,832-author paper from a
+        # 25-author one, which the truncated list alone cannot say.
+        all_authors = [
             name for name in (
                 _text_of(author, "atom:name")
                 for author in entry.findall("atom:author", ATOM_NS)
             ) if name
         ]
-        categories = [c.get("term") for c in entry.findall("atom:category", ATOM_NS)]
+        author_count = len(all_authors)
+        authors = all_authors[:_MAX_AUTHORS]
+        all_categories = [c.get("term")
+                          for c in entry.findall("atom:category", ATOM_NS)]
+        categories = all_categories[:MAX_CATEGORIES]
 
         pdf_url = None
         for link in entry.findall("atom:link", ATOM_NS):
@@ -292,6 +397,28 @@ def _parse_atom_feed(xml_text: str) -> tuple:
             # will take.
             entry_result["summary_truncated"] = True
             entry_result["full_summary_url"] = f"https://arxiv.org/abs/{arxiv_id}"
+        if author_count > _MAX_AUTHORS:
+            # PG8's shape exactly, including the recovery route PG4 asks
+            # for: the abs page lists every author and `fetch_url` will
+            # take it. `full_authors_url` rather than reusing
+            # `full_summary_url` -- same URL, but a key named for the
+            # summary carrying the author route is a name that lies, and
+            # the summary's key is absent whenever the abstract fit.
+            entry_result["authors_truncated"] = True
+            entry_result["author_count"] = author_count
+            entry_result["full_authors_url"] = f"https://arxiv.org/abs/{arxiv_id}"
+        # THESE TWO GET A FLAG AND NO ROUTE, and the asymmetry is deliberate
+        # rather than an omission to be tidied up later. #49's rule is that
+        # nothing is altered silently, so the flag is owed. But PG4 exists so
+        # the model can reach what it WANTED, and a title past 300 characters
+        # or a twenty-first category is a malformed feed rather than a long
+        # paper -- measured, the longest title in sixty real entries was 188.
+        # Pointing the model at the abs page of a hostile entry would be
+        # answering a question nobody asked.
+        if title_truncated:
+            entry_result["title_truncated"] = True
+        if len(all_categories) > MAX_CATEGORIES:
+            entry_result["categories_truncated"] = True
         results.append(entry_result)
 
     return results, total
@@ -325,6 +452,33 @@ def run(params: dict) -> dict:
                 results, total = _parse_atom_feed(xml_text)
                 _cache.set(cache_key, (results, total))
                 break
+            except _FeedTooLarge:
+                # NOT RETRIED, for the reason spelled out one clause down
+                # for a declared entity: a feed this large is this large
+                # again, so two more round trips reach the same place and
+                # then report "failed after 3 attempts", which describes a
+                # network problem that is not there.
+                #
+                # Returned rather than raised, like every other dead end in
+                # this function: a search tool that cannot answer is a
+                # result the model can work around.
+                logger.warning(
+                    "arxiv_search dropped a feed over %d bytes for %r "
+                    "(max_results=%d, start=%d)",
+                    MAX_FEED_BYTES, parsed.keywords, parsed.max_results,
+                    parsed.start)
+                # "more than", not a size. `total` stopped at the first
+                # chunk past the cap, so printing it would be an instrument
+                # reporting a magnitude it did not measure -- the
+                # instrument-that-lies shape batches 118 and 119 each paid
+                # for once. The lever IS named, because the model controls
+                # it and a smaller page really does fit.
+                return {
+                    "error": "arXiv returned more than %d bytes for this "
+                             "query, so nothing was read from it. Retry "
+                             "with a smaller max_results."
+                             % MAX_FEED_BYTES
+                }
             except DefusedXmlException as e:
                 # NOT folded into the tuple below, and that is the point.
                 # A malformed body is transient and worth three attempts;

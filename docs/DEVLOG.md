@@ -18589,3 +18589,133 @@ the raw text for `error`, because a guess wearing the clothes of a fact is the i
 shape batches 118 and 119 each paid for once. And **`param_digest` still has three consumers and
 only one of them gained a second rendering** -- the research pipeline's tool rows and the CLI's own
 replay are unchanged, which is TR14's divergence in its other form.
+
+
+## Batch 126 -- the register entry was wrong, and the field it named was not the field that grew (2026-10-06)
+
+**TECHNICAL_DEBT 41, closed.** The entry read *"`arxiv_search` output is unbounded, and one result
+was 29k tokens"*, and it carried a real measurement: a **116,996-char** tool row, **29,249** proxy
+tokens, a single step that added **31,733** to the prompt, and the number that sized
+`compaction_min_headroom_tokens`. Everything after the measurement was wrong.
+
+THREE OF ITS FOUR CLAIMS WERE ALREADY FALSE ON THE DAY THEY WERE WRITTEN. The entry dates to batch
+119/120 and says *"No cap, no truncation notice, no paging."* §51 shipped in batch **105**, fourteen
+batches earlier: `start`/`total_results`/`"Use start=N to see more"` (PG3, PG9), `summary_truncated`
++ `full_summary_url` (PG8, PG4), and `MAX_SUMMARY_CHARS = 600` on the one field anyone would expect
+to be large. It described the pre-§51 tool. Its proposed fix -- *"the shape `max_read_chars` already
+has, applied where the results are assembled"* -- was the wrong SHAPE as well as the wrong place: a
+character cap over an assembled dict cuts it mid-structure, which is PG5's spliced document, and PG8
+had already settled that per-item caps with a named route are this tool's answer.
+
+**THE ARITHMETIC WAS AVAILABLE WITHOUT A NETWORK CALL.** `max_results` is `le=20`, summary 600,
+`published` 10, the ids and URLs about 90, the dict's own keys about 110 -- so everything the tool
+already bounds ceilings near **16,900 characters** at the schema's maximum, against a 116,996-char
+row. That alone proves the cause is a field nobody capped, from the constants, before any probe. The
+field is `authors`.
+
+Re-measured live against `all:LHCb observation branching fraction` at `max_results=20`:
+`str(result)` was **223,191** characters, **204,871 of them (91.8%)** the author list, with one entry
+(`1411.4413v2`) carrying **2,832** authors and eleven of twenty over the new cap. With the caps:
+**24,004**, a 89.2% reduction, and the predicted figure matched the live run exactly. So the
+register's own number was about HALF of what an ordinary physics query produces today -- the entry
+understated the defect it misdiagnosed.
+
+Hyperauthorship also does not arrive the way it was first looked for, and the probe corrected its
+own author. The most-authored paper on arXiv (`1503.07589`) returns **two** `<author>` elements,
+because arXiv lists it under its collaborations; the thousands-of-individuals shape is LHCb-style
+entries. A probe aimed only at the famous paper would have reported the defect absent.
+
+A SECOND DEFECT THE ENTRY DID NOT SEE AT ALL. `_call_arxiv_api` was `httpx.get(...)` then
+`return response.text`, which is precisely the shape `fetch_url.py`'s own comment calls out as what
+ROADMAP_v2 §31 (H7)/#55 exists to prevent: *"`response.text` had no ceiling AT ALL: httpx.get buffers
+the entire body before the slice happens... the only thing that actually bounds this is refusing to
+read past a cap"*, and the same comment rules out a Content-Length check because a hostile server can
+omit it or lie about it. It was the **last `httpx.get` in production code**. This feed is
+attacker-influenced -- the module's own header says so, and batch 116 added a defused parser one
+function away -- so the tool had a hardened parser behind an unbounded read.
+
+**`MAX_FEED_BYTES = 2_097_152`, and the first derivation of it was wrong.** The plan derived 2 MiB
+from a guess -- "roughly 100 KB of Atom per hyperauthorship entry, twenty of them" -- which the probe
+killed: one entry averages 42 KB and the heaviest LEGITIMATE feed this tool can ask for is
+**838,560 bytes** (`max_results=20`, 13,859 `<author>` elements), with four consecutive pages all
+under 839 KB. So the right number is the same but for a different reason, and the reason is the one
+that matters: a cap under the largest real feed is a **false refusal**, the tool reporting it read
+nothing for a query arXiv answered correctly. 2 MiB clears the measured worst case by 2.5x. Loose
+next to `fetch_url`'s 65,536 on purpose -- that tool's URL is chosen by the model and can point
+anywhere, this endpoint is fixed -- so the bound's job here is the refusal, not the tightness.
+
+AN OVERSIZED FEED IS REFUSED, NOT TRUNCATED, AND NOT RETRIED. `fetch_url` can keep a cut body because
+a cut page of prose is still prose; a cut Atom document does not parse, so `ET.fromstring` raises
+`ParseError`, the loop runs three identical attempts and reports *"failed after 3 attempts"* -- the
+HTTPS-redirect incident's exact shape, describing a network problem that is not there. So a private
+`_FeedTooLarge` is caught ABOVE the retry clauses and returned as an error dict naming `max_results`,
+the lever the model actually controls. Verified live: **one** request issued where `MAX_RETRIES + 1`
+is three. The message says "more than N bytes" rather than a size, because `total` stops at the first
+chunk past the cap and printing it would be an instrument reporting a magnitude it never measured.
+
+THE DECODE COULD HAVE OPENED A NEW ESCAPE AND DOES NOT. A bare `.decode()` raises
+`UnicodeDecodeError`, which is a `ValueError` -- covered by NEITHER `except` clause in `run()` -- so a
+feed that is not what its header claims would have crashed out of the tool on exactly the hostile path
+the rest of the module is careful about. `errors="replace"` makes it fail as a `ParseError` instead,
+which is handled and retried. §51's PG5 concern about a cut multi-byte character does not apply: the
+bytes are always a complete document, because an incomplete one is refused rather than cut.
+
+THE FIELD CAPS, AND ONE ASYMMETRY THAT IS A DECISION RATHER THAN AN OMISSION. `_MAX_AUTHORS = 25`
+takes PG8's full shape -- `authors_truncated`, `author_count` carrying the REAL total, and
+`full_authors_url`. The count is the genuinely new information: a truncated list cannot say whether
+it came from 26 authors or 2,832, and `full_authors_url` rather than reusing `full_summary_url`
+because the same URL under a key named for the summary is a name that lies. 25 is `scholar.py`'s
+`_MAX_AUTHORS` for the same question, NOT imported -- `tools/` does not import `core/reasoning/`, and
+one constant reaching across two layers is worse than two with one reason each.
+`MAX_TITLE_CHARS = 300` and `MAX_CATEGORIES = 20` get a flag and **no route**: #49 says nothing is
+altered silently so the flag is owed, but PG4 exists so the model can reach what it WANTED, and
+measured over sixty real entries the longest title was 188 characters -- so a title past 300 is a
+malformed feed rather than a long paper, and pointing the model at its abs page answers a question
+nobody asked. Recorded so a later author does not complete the pattern.
+
+Also measured and acted on: `result["authors"]` has **no production consumer**. `source_corpus.
+_add_arxiv` reads `arxiv_id`, `title` and `summary` only, and nothing in `core/` or `tools/` touches
+the list -- the code comment about it being "rendered into a citation" means the MODEL renders it. So
+the cap could not break a scored path, which is what made capping `title` (which the corpus does
+read) the only part needing a generous bound rather than a tight one.
+
+TWO FINDINGS RECORDED RATHER THAN FOLDED IN. `check_output_policy`'s `_walk` bounds DEPTH
+(`_MAX_SCAN_DEPTH = 12`, failing closed) and not BREADTH, so the 2,832-author entry was 2,832 leaf
+redaction passes in one tool result; bounding the producer removes this instance and is not a fix for
+the shared walk, which also sees MCP `structured_content` -- item 46, with the measurement to take
+first named. And `categories` keeps a `None` for a `<category>` with no `term` where `authors` drops a
+nameless author with a comment saying why -- item 47, trivial and deliberately not given a ride.
+
+TWO PINNED SITES, BOTH FOUND BY READING BEFORE THE RUN. `test_redirects_are_followed` patched
+`arxiv.httpx.get` and drove the real `_call_arxiv_api`, so the switch to `stream` made the patch inert
+-- it failed loudly (`assert None is True`) rather than going quietly green, which is the only reason
+it was cheap. And `test_httpx_get_does_not_follow_redirects_by_default` asserts against the real
+package and names *"arxiv's explicit follow_redirects"* in its own message; with `arxiv.py` moved,
+nothing in production called `httpx.get` at all, so the conformance check was pointed at an API the
+project no longer uses. It now checks `get` AND `stream`, the one both network tools call.
+`test_untrusted_content.py` needed no change, and that was verified by running it rather than
+reasoned about: the fake httpx's `stream` shares `_get`'s queue and request recording by design.
+
+No ROADMAP section. Batches 115-121 are the precedent for a register closure, and batch 119
+introduced config SETTINGS that way; a section would also need a new decision family in `AGENTS.md`'s
+map, an index row and a status marker -- three things the docs gate checks -- for decisions that are
+all applications of ids that already resolve.
+
+VERIFICATION. 20 new tests in `tests/test_paging.py` (74 -> 94), every wire test driving the real
+`_call_arxiv_api` because the bound lives inside it -- the M29 lesson this file already teaches. The
+fake httpx's `iter_bytes` yields small chunks on purpose, so a cap checked once per body rather than
+per chunk cannot pass. Three live probes against `export.arxiv.org`, HOME redirected: the field
+measurement, the wire sizing that killed the plan's own derivation, and the new code end to end
+through REAL httpx -- which a green suite cannot evidence, since the suite runs against a fake.
+Counts 6273 -> 6293.
+
+ONE MUTATION SURVIVED, AND THE HOLE WAS IN THE TESTS RATHER THAN THE CODE. Changing `categories`'
+`len(all_categories) > MAX_CATEGORIES` to `>=` survived the whole pass: `authors` and `title` each
+had an exactly-at-the-cap test and `categories` did not, so the cut case used 30 and the uncut case
+3, and neither can see a boundary at 20. The defect it hid is PG8's own complaint inverted -- a
+value flagged as cut when nothing was cut, sending the model to an abs page for a list it already
+holds in full. `test_a_category_list_exactly_at_the_cap_is_not_called_cut` closes it, and the row
+then died. Worth recording because the asymmetry was in work written in this batch, by someone who
+had just written the same boundary test twice: 22 of 22 rows as expected on the re-run, 21 killed
+by the test named for each and the twenty-second an equivalence rewrite declared GREEN so the pass
+is shown capable of saying green.

@@ -1268,6 +1268,15 @@ floor does not cover that, and above ~160k the fraction leaves more room
 than it anyway; what it covers is the bounded case at the bottom of the
 roster, where nothing else would.
 
+Both halves of that stay true and the ITEM is closed (batch 126).
+`arxiv_search` still does not consult `max_read_chars` -- it should not, a
+character cap over an assembled dict cuts it mid-structure -- but it now
+carries its own bounds, per field and on the wire, so the row that sized
+this floor can no longer occur. The floor's derivation is unchanged: it was
+sized from `max_read_chars` plus the turn that asked for it, never from
+this row. What the row did was prove the fraction had to be CLAMPED, and
+that argument does not depend on the tool staying unbounded.
+
 ### `compaction_max_headroom_fraction`
 
 The cap on the headroom, and it is load-bearing rather than defensive:

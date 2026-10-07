@@ -2179,7 +2179,7 @@ first KEPT row is an `assistant` row rather than a `user` row -- so a
 pre-batch-120 checkpoint, which is always turn-aligned, re-adds nothing and
 renders exactly as it did.
 
-## 41. `arxiv_search` output is unbounded, and one result was 29k tokens (open)
+## 41. `arxiv_search` output is unbounded, and one result was 29k tokens (closed, batch 126)
 
 Found while measuring item 39's per-step growth. `max_read_chars` (50,000
 chars = 12,500 proxy tokens) bounds reads and sandboxed stdout, and the
@@ -2193,8 +2193,82 @@ the compaction headroom has to absorb and is the measurement that set
 0.90 fraction leaves under a 262k window, which is why the fraction is
 clamped rather than bare (see `compaction.headroom_for`).
 
-No cap, no truncation notice, no paging. The fix is presumably the shape
-`max_read_chars` already has, applied where the results are assembled.
+**THE MEASUREMENT ABOVE IS SOUND AND THE DIAGNOSIS BELOW IT WAS WRONG IN
+FOUR WAYS.** It read: *"No cap, no truncation notice, no paging. The fix is
+presumably the shape `max_read_chars` already has, applied where the results
+are assembled."* Three of those four claims were already false on the day
+they were written. This entry dates to batch 119/120; §51 shipped in batch
+**105**, fourteen batches earlier:
+
+| The entry said | Already true since batch 105 |
+|---|---|
+| no paging | `start`, `total_results`, and `"Use start=N to see more"` (PG3, PG9) |
+| no truncation notice | `summary_truncated` + `full_summary_url` (PG8, PG4) |
+| no cap | `MAX_SUMMARY_CHARS = 600` caps the one field anyone would expect to be large |
+
+It described the **pre-§51 tool**. And the fix it proposed was the wrong
+*shape*, not merely aimed at the wrong place: a character cap over the
+assembled result cuts a structured dict mid-structure, which is PG5's
+spliced-document failure, and PG8 had already settled that **per-item** caps
+with a named recovery route are the answer for this tool.
+
+### What was actually unbounded, measured in batch 126
+
+**The field it never named was `authors`.** Everything the tool already
+bounds -- summary 600, `published` 10, the ids and URLs, the dict's own keys
+-- ceilings near **16,900 characters** at the schema's maximum
+`max_results=20`, against the 116,996-char row recorded above. The capped
+fields could not have accounted for it, which is a thing the entry could
+have derived from the constants without a network call.
+
+Re-measured live against `all:LHCb observation branching fraction` at
+`max_results=20`:
+
+| | before | after |
+|---|---|---|
+| `len(str(result))` | **223,191** | **24,004** (-89.2%) |
+| characters in `authors` alone | 204,871 (**91.8%** of the row) | -- |
+| highest author count in one entry | **2,832** (`1411.4413v2`) | 25 kept, real total reported |
+| entries over the cap, of twenty | 11 | 11, each flagged |
+
+So the register's own figure was **about half** of what an ordinary physics
+query produces today. Hyperauthorship is routine on arXiv, and it does not
+arrive the way it was first looked for: the most-authored paper
+(`1503.07589`) returns **two** `<author>` elements, because arXiv lists it
+under its collaborations, while LHCb-style entries list every individual.
+
+**A second defect the entry did not see at all.** `_call_arxiv_api` was
+`httpx.get(...)` then `return response.text`, which is the exact shape
+`fetch_url.py`'s own comment calls out as what ROADMAP_v2 §31 (H7)/#55
+exists to prevent -- httpx buffers the entire body before anything slices
+it, and a Content-Length check is not the fix because a hostile server can
+omit it or lie about it. It was the **last `httpx.get` in production code**.
+
+### The fix
+
+`tools/builtin/arxiv.py` only. `MAX_FEED_BYTES = 2_097_152` with the read
+streamed and refused past the cap -- derived from the heaviest *legitimate*
+feed measured, 838,560 bytes, so the bound clears it 2.5x, because a cap
+under the largest real feed is a false refusal. The refusal is **not
+retried**, for the reason already written beside it for a declared entity.
+`_MAX_AUTHORS = 25` (`scholar.py`'s number for the same question) with
+PG8's full shape: `authors_truncated`, `author_count` carrying the real
+total, and `full_authors_url`. `MAX_TITLE_CHARS = 300` and
+`MAX_CATEGORIES = 20` get a flag and **no** recovery route, which is a
+decision rather than an omission -- measured, the longest of sixty real
+titles was 188, so a title past 300 is a malformed feed and pointing the
+model at its abs page answers a question nobody asked.
+
+### Not fixed here, and recorded rather than widened into
+
+- `safety/policy_enforcement.py`'s `_walk` bounds DEPTH (`_MAX_SCAN_DEPTH`,
+  failing closed) and not BREADTH, so a 2,832-author list was 2,832 leaf
+  redaction passes per call. Bounding at the producer removes this instance;
+  whether the walk itself should bound breadth is a separate question about
+  a shared safety path, and is item 46.
+- `categories` keeps a `None` for a `<category>` with no `term`, where
+  `authors` drops a nameless entry with a comment saying why `None` in a
+  rendered list reads as a value. Pre-existing and left alone; item 47.
 
 ## 42. A window under ~9.4k makes `effective_compaction()` raise (open)
 
@@ -2283,3 +2357,38 @@ convention and believing it: `ViewEntry` is a shell-independent shape, the
 policy is in one place and is correct, and exactly one shell asks for it.
 A second shell can be added without moving anything, which is the whole
 value the placement was bought for.
+
+## 46. `check_output_policy`'s walk bounds depth and not breadth (open)
+
+Found while closing item 41, and PRE-EXISTING. `_walk` descends into lists
+and dicts with `_MAX_SCAN_DEPTH = 12`, which fails CLOSED on depth -- a
+deliberate decision with a test behind it. Nothing bounds how WIDE a level
+may be, so every string in a container is one leaf call running the full
+pattern set: measured, one `arxiv_search` entry carried **2,832** author
+names, so one tool result was 2,832 redaction passes.
+
+Batch 126 removed that instance by bounding the producer, which is the right
+fix for `arxiv_search` and not a fix for this. The walk runs on every tool
+result, including `structured_content` from an MCP server nobody here wrote,
+and that is the case where a wide level is not a quirk of one feed.
+
+NOT OBVIOUSLY A DEFECT, which is why it is recorded rather than changed. The
+cost is linear and the work is real -- a credential in element 5,000 is
+exactly as much a leak as one in element 1 -- so a breadth cap would have to
+fail closed the way the depth one does, and "refuse a result for being wide"
+needs its own argument. The measurement to take first is the wall-clock cost
+of a deliberately wide result, which nobody has.
+
+## 47. `categories` keeps a `None` where `authors` drops one (open)
+
+Found while closing item 41. `_parse_atom_feed` builds `categories` as
+`[c.get("term") for c in ...]`, so a `<category>` with no `term` attribute
+contributes `None`. Two lines above it, `authors` drops a nameless
+`<author>` with a comment stating the reason: the list is rendered into a
+citation and `None` in it reads as a value.
+
+Both lists come from the same attacker-influenced feed and reach the model
+the same way, so the two should not disagree about this. Trivial to fix and
+deliberately NOT folded into batch 126, whose scope was the two bounds --
+a one-line change to an untested branch is still a change to what the model
+is handed, and it wants its own test rather than a ride.

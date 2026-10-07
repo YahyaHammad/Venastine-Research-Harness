@@ -384,14 +384,30 @@ def test_httpx_get_does_not_follow_redirects_by_default():
     suite can hold this. If the default flips, `fetch_url`'s pre-flight
     blocklist check (#53) and arxiv's explicit `follow_redirects` both need
     rereading against the new behaviour.
+
+    BOTH ENTRY POINTS ARE CHECKED SINCE BATCH 126, because by then this
+    test was guarding an API the project no longer calls. `fetch_url` moved
+    to `httpx.stream` for §31 (H7), and batch 126 moved `arxiv.py` for the
+    same reason -- it held the LAST `httpx.get` in production code. A
+    conformance check whose subject nothing imports is an instrument
+    reporting on something it is not pointed at, which is the shape batches
+    118 and 119 each paid for once.
+
+    `get` is kept rather than replaced: it is still the default a reader
+    reaches for, the two functions share httpx's redirect handling, and a
+    divergence between them is itself worth failing on.
     """
     with real_package("httpx"):
         import httpx
-        default = inspect.signature(httpx.get).parameters["follow_redirects"].default
-    assert default is False, (
-        "httpx.get now follows redirects by default. Re-read #53 "
+        defaults = {
+            name: inspect.signature(fn).parameters["follow_redirects"].default
+            for name, fn in (("get", httpx.get), ("stream", httpx.stream))
+        }
+    assert defaults == {"get": False, "stream": False}, (
+        "httpx now follows redirects by default somewhere: %r. Re-read #53 "
         "(fetch_url checks the blocklist pre-flight only) and arxiv's "
-        "explicit follow_redirects against the new default.")
+        "explicit follow_redirects against the new default. `stream` is the "
+        "one BOTH network tools actually call." % (defaults,))
 
 
 # ===========================================================================
