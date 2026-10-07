@@ -1898,3 +1898,278 @@ def test_the_cited_test_name_guard_can_actually_fail():
     assert invented not in names and invented not in stems
     assert _CITED_TEST.findall(f"pinned by `{invented}`") == [invented]
     assert not any(real.startswith(invented) for real in names)
+# ===========================================================================
+# ---- Batch 128: the numbers AGENTS.md states about the tree ---------------
+# ===========================================================================
+#
+# The two gates above this -- test_every_decision_id_cited_in_production_code_resolves
+# and test_every_test_name_cited_in_production_code_resolves -- are PRODUCTION
+# ONLY, deliberately, because "the suite's own prose legitimately names tests
+# and files that no longer exist". That reasoning is right about test prose and
+# wrong about AGENTS.md, which is not prose about tests: it is the file CLAUDE.md
+# calls not-optional reading because its decisions "have already been broken
+# once by someone who reasoned from the code alone".
+#
+# Swept by hand in batch 128, AGENTS.md was clean on everything mechanical --
+# 529 of 529 cited identifiers resolved, no dangling test name, no file:line
+# citation anywhere -- and wrong on SEVEN NUMBERS, every one of them a count of
+# something in this tree that nothing checked. So the counts get what
+# ARCHITECTURE's per-file counts got in audit #121, and for the reason that
+# document states about itself: a figure "was written as 113 in batch 84 and
+# left there through five batches that added thirty keys; the test counts, this
+# sentence did not".
+#
+# Each of these reads the figure back OUT of AGENTS.md rather than hardcoding
+# it, so the failure names the sentence to edit rather than a constant in here.
+
+
+def _agents_md() -> str:
+    with open(os.path.join(ROOT, "AGENTS.md"), encoding="utf-8") as handle:
+        return handle.read()
+
+
+def _one_number(pattern, what):
+    """The single integer AGENTS.md states for *what*, or a failure naming it."""
+    found = re.findall(pattern, _agents_md())
+    assert len(found) == 1, (
+        f"AGENTS.md should state {what} exactly once in the shape "
+        f"{pattern!r}; found {len(found)}: {found[:4]}. Editing that sentence "
+        f"means editing this pattern too -- which is the point: the number and "
+        f"the thing that checks it are supposed to move together.")
+    return int(found[0].replace(",", ""))
+
+
+#: Relative to the project root, and the same depth window AGENTS.md's sentence
+#: names. `read_project_doc` resolves anywhere under the project; the window is
+#: what makes the figure a figure rather than an unbounded walk.
+_DOC_BOUND_MAX_DEPTH = 3
+
+
+def _readable_docs_on_a_clean_checkout():
+    """(count, bytes) for what `read_project_doc` would admit, TRACKED ONLY.
+
+    Tracked only, and that is the deliberate narrowing. This worktree holds
+    untracked `output/`, `.qwen/reviews/` and `.ipynb_checkpoints/` files that
+    `is_readable_doc` accepts quite correctly, so a plain walk would make this
+    gate answer differently on every machine. `git ls-files` is how
+    test_no_notebook_checkpoint_file_is_committed asks the same question, with
+    the same two skips when git cannot answer at all.
+
+    Measured through the tool's OWN predicate. `tools/builtin/project_docs.py`
+    records what happened the last time this rule had a second implementation:
+    the two "disagreed in both directions -- six advertised paths the tool
+    refused, and four it accepted that never appeared".
+    """
+    from tools.builtin import project_docs
+
+    root = _project_root()
+    try:
+        listed = subprocess.run(["git", "ls-files"], cwd=root,
+                                capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):  # pragma: no cover
+        pytest.skip("git is not available to ask what is tracked")
+    if listed.returncode != 0:  # pragma: no cover
+        pytest.skip("not a git checkout")
+
+    count = 0
+    total = 0
+    for line in listed.stdout.splitlines():
+        rel = line.strip()
+        if not rel:
+            continue
+        # Depth IS the slash count of the project-relative path: a root file
+        # is 0, `docs/X.md` is 1, `agents/builtin/x.md` is 2. Written as the
+        # bound rather than `- 1`, which dropped every depth-3 file and made
+        # this gate report 46 against a measured 60 on its first run.
+        if rel.count("/") > _DOC_BOUND_MAX_DEPTH:
+            continue
+        if not project_docs.is_readable_doc(root, rel):
+            continue
+        full = os.path.join(root, rel.replace("/", os.sep))
+        if not os.path.exists(full):  # pragma: no cover -- deleted but staged
+            continue
+        count += 1
+        total += os.path.getsize(full)
+    return count, total
+
+
+def test_the_documented_doc_read_bound_is_not_understated():
+    """THE ONE NUMBER HERE WHOSE ERROR HAS A DIRECTION.
+
+    `read_project_doc` is registered with permission True, so it is advertised
+    to every run -- plain chat and all ten research passes, not just an agent
+    that declared it. AGENTS.md states how much that reaches, and the sentence
+    after it says why the figure is written down at all: "ARCHITECTURE.md used
+    to say the most a prompt-injected pass gains is the README (audit #97);
+    understating a security bound is the one direction that costs something."
+
+    It then understated it by 3.3x. Batch 128 measured 60 files and 3.58 MB
+    against a stated 40 files and ~1.1 MB, and almost all of the growth was
+    this record -- DEVLOG.md alone is 1.2 MB. Nobody widened the tool; the
+    documents it can read got bigger, which is exactly the drift no reader
+    would think to re-check.
+
+    SO THE TWO FIGURES ARE GATED DIFFERENTLY, on purpose. The file COUNT is
+    exact: it moves only when a document is added or removed, which is rare and
+    worth being told about. The SIZE is a CEILING: this record grows every
+    batch, so an equality would go red on the next commit and be retyped
+    without being read, which is how a gate becomes a formality. A ceiling goes
+    red when the bound crosses a round number, and that is when noticing is
+    the correct outcome.
+    """
+    stated_count = _one_number(r"\*\*(\d+) files\n\s*and under \d+ MB at depths 0-3\*\*",
+                               "the readable-document count")
+    stated_mb = _one_number(r"\*\*\d+ files\n\s*and under (\d+) MB at depths 0-3\*\*",
+                            "the readable-document size ceiling")
+
+    count, total = _readable_docs_on_a_clean_checkout()
+    megabytes = total / (1024.0 * 1024.0)
+
+    assert count == stated_count, (
+        f"AGENTS.md says `read_project_doc` reaches {stated_count} files on a "
+        f"clean checkout; it reaches {count}. Update the sentence in the "
+        f"read_project_doc paragraph -- and if the number went UP, read it "
+        f"first: that paragraph is about a security bound, and the direction "
+        f"that costs something is the one you are in.")
+
+    assert megabytes < stated_mb, (
+        f"AGENTS.md says `read_project_doc` reaches under {stated_mb} MB on a "
+        f"clean checkout; it reaches {megabytes:.2f} MB. The bound genuinely "
+        f"grew -- raise the ceiling in that sentence deliberately rather than "
+        f"to the nearest number that passes, because the figure exists to be "
+        f"read by someone deciding whether this tool is safe to advertise.")
+
+
+def test_agents_md_states_the_real_test_tui_class_count():
+    """AGENTS.md said 41 classes from batch 114 until batch 128, when there
+    were 64.
+
+    The number is load-bearing where it sits: the paragraph is the argument
+    that classing `test_tui.py` is what unbound the suite's loadscope floor,
+    and `TestThisFileIsGroupedForLoadscope::test_every_test_here_is_inside_a_class`
+    makes every new test join a class. So the count rising is the rule
+    WORKING, and the sentence saying 41 made it look like a one-off.
+
+    `ast`, not a `grep`: a `^class ` count also takes the seven helper classes
+    in that file, and `Test*` is what pytest collects.
+    """
+    stated = _one_number(r"are \*\*(\d+)\*\* now, which is the rule working",
+                         "test_tui.py's class count")
+
+    import ast
+    path = os.path.join(ROOT, "tests", "test_tui.py")
+    with open(path, encoding="utf-8") as handle:
+        tree = ast.parse(handle.read())
+    live = sum(1 for node in tree.body
+               if isinstance(node, ast.ClassDef) and node.name.startswith("Test"))
+
+    assert live == stated, (
+        f"AGENTS.md says tests/test_tui.py is {stated} classes; it declares "
+        f"{live} `Test*` classes at module level. One digit, in the "
+        f"FLOOR-BOUND paragraph.")
+
+
+def test_agents_md_states_the_real_modal_parametrisation(request):
+    """AGENTS.md said 3 x 18 = 54 until batch 128, when it was 3 x 19 = 57.
+
+    Counted from the COLLECTED NODE IDS, because `_DECISION_CASES` is
+    `_modal_cases() + _overflowing_modal_cases()` -- computed, so there is no
+    literal list to read and a reimplementation of those two functions here
+    would be the parallel-implementation mistake `project_docs` records.
+
+    Narrowing is already solved in this file: `_collected_nodeids` falls back
+    to a subprocess collection when the invocation filtered the session, and
+    `test_the_default_invocation_is_not_treated_as_narrowed` guards the guard.
+    """
+    sizes = _one_number(r"is (\d+) sizes \u00d7 \d+ cases = \*\*\d+\*\* of them",
+                        "the modal size count")
+    cases = _one_number(r"is \d+ sizes \u00d7 (\d+) cases = \*\*\d+\*\* of them",
+                        "the modal case count")
+    product = _one_number(r"is \d+ sizes \u00d7 \d+ cases = \*\*(\d+)\*\* of them",
+                          "the modal node-id count")
+
+    assert sizes * cases == product, (
+        f"AGENTS.md states {sizes} x {cases} = {product}, which is not a "
+        f"product. Fix the arithmetic before trusting either factor.")
+
+    name = "test_every_modal_keeps_its_decision_on_screen"
+    live = sum(1 for node in _collected_nodeids(request) if name in node)
+    if not live:  # pragma: no cover -- a collection that cannot see test_tui.py
+        pytest.skip("the modal test was not collected in this invocation")
+
+    assert live == product, (
+        f"AGENTS.md says {name} is {sizes} x {cases} = {product} node ids; "
+        f"pytest collects {live}. A size or a screen was added -- update that "
+        f"sentence in the parametrised-floor paragraph.")
+
+
+def test_agents_md_states_the_real_sympy_allowlist_sizes():
+    """Three of the `safe_parse` figures, and the fourth left ungated on purpose.
+
+    GATED: the two MODULE CONSTANTS -- `_ALLOWED_NAMES` at 230 and
+    `_ALLOWED_NODES` at 39. Both are literals in `_math_common`, so both are
+    deterministic in any process that imports it.
+
+    NOT GATED, and the second one is the more interesting reason.
+
+    "out of the ~130 Python defines" is not gated because the interpreter is
+    not pinned: the floor is 3.11, 3.13 counts 132 `ast.AST` subclasses, and
+    the original sentence said 118. A gate would go red on an upgrade, which
+    is not a defect in anything.
+
+    `dir(sympy)` is not gated because **it is not a fixed number at all**, and
+    this test is how that was found. It read 926 when the four new gates ran
+    alone and 927 when the whole file ran. The extra name is `stats`:
+    `tools/builtin/probability_stats.py` does `import sympy.stats`, and
+    importing a submodule binds it as an attribute of the package, so
+    `dir(sympy)` grows by whatever any module happened to import first. WSL's
+    unpinned 1.14.0 reads 928 again. Pinning `sympy` exactly does not make
+    `dir()` on it stable, which is what the first draft of this test assumed.
+
+    THE CONSEQUENCE IS REAL AND IT IS INERT, which is worth having written
+    down rather than rediscovered. `_SAFE_GLOBALS` is built from `dir(sympy)`
+    at import time, so importing `probability_stats` first puts the `stats`
+    MODULE OBJECT into it -- and the module docstring's own rule is that "no
+    module object is ever permitted". It is unreachable anyway: `stats` is not
+    in `_ALLOWED_NAMES`, so `_validate_ast` never resolves the name, and the
+    implicit-multiplication transform turns the bare word into `a*s**2*t**2`
+    rather than a lookup. `stats.__class__` and `stats.Die` are refused
+    because `ast.Attribute` is absent from the node allowlist. Measured, all
+    four. The name gate is what makes the globals dict's contents not matter.
+
+    THE OFF-BY-ONE THAT STARTED THIS: AGENTS.md said "231 of 927 exposed" from
+    the day it was written -- the allowlist literal has held 230 words, none
+    duplicated, since #52 created it, and nothing has edited that region since.
+    Not drift. Wrong on arrival, for three years of batches, in the sentence
+    that says which names can reach the parser.
+    """
+    import sympy
+
+    from tools.builtin import _math_common
+
+    stated_names = _one_number(r"\(\*\*(\d+)\*\* of the ~\d+", "the allowlist size")
+    stated_exposed = _one_number(r"\(\*\*\d+\*\* of the ~(\d+)", "SymPy's exposed count")
+    stated_nodes = _one_number(r"allowlist of \*\*(\d+)\*\* node types",
+                               "the AST node allowlist size")
+
+    assert len(_math_common._ALLOWED_NAMES) == stated_names, (
+        f"AGENTS.md says `_ALLOWED_NAMES` holds {stated_names} names; it holds "
+        f"{len(_math_common._ALLOWED_NAMES)}.")
+    assert len(_math_common._ALLOWED_NODES) == stated_nodes, (
+        f"AGENTS.md says the AST allowlist is {stated_nodes} node types; it is "
+        f"{len(_math_common._ALLOWED_NODES)}.")
+
+    # APPROXIMATE, for the import-order reason in the docstring: a window, not
+    # an equality, so the sentence stays honest without claiming a stability
+    # `dir()` on a package does not have.
+    exposed = [name for name in dir(sympy) if not name.startswith("_")]
+    assert abs(len(exposed) - stated_exposed) <= 5, (
+        f"AGENTS.md says SymPy exposes ~{stated_exposed} public names; this "
+        f"SymPy ({sympy.__version__}) exposes {len(exposed)}, which is outside "
+        f"the few names import order can account for. If the pin moved, the "
+        f"sentence about what the allowlist admits is a claim about the new "
+        f"surface and needs re-reading, not just a new denominator.")
+
+    # The claim the two numbers are FOR: an allowlist, not a denylist.
+    assert stated_names < stated_exposed, (
+        "the allowlist cannot admit more names than SymPy exposes")

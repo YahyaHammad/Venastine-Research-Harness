@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 6312 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
+pytest                                            # 6316 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -65,11 +65,11 @@ Test dependencies (`pytest`, `pytest-mock`, `pytest-asyncio`, and `pytest-xdist`
 
 **`--dist loadscope` is a coverage decision, not a performance one, and it is the one thing here not to "optimise".** xdist's default `load` hands out individual tests, and three places depend on one test running immediately after another in the same process: `test_probe_isolation.py::TestWhatOneTestLeavesForTheNext` (two ordered pairs, and its docstring says so), `test_config_edit.py::TestTheLoaderCacheDoesNotLeakBetweenTests`, and `test_storage_e2e.py`'s module-scoped `real_storage` plus the tests that read what earlier ones wrote to its database. Split across workers **none of them fails** — the autouse fixtures in `tests/conftest.py` reinstall the clean state for every test, so "and the next one does not inherit it" passes whoever ran before it, and the file goes silently vacuous. `loadscope` keeps all three **structurally**: it groups by CLASS for a test inside one and by MODULE for a test that is not, and each of the three is a single class or a module of plain functions.
 
-**And a file is no longer one unit, which is the trap loadscope adds.** A file holding both module-level tests and a class is TWO groups, so a non-function-scoped fixture in it is set up twice on any worker that takes both — found by measuring, not by reading, when a `-n logical` run put `test_storage_e2e.py`'s two groups on one worker and the second `real_storage` raised `Table 'conversationthread' is already defined`. Five `-n auto` runs had been green, so it is a scheduling lottery. `real_storage` is the suite's ONLY non-function-scoped fixture (`grep -rn 'scope="module"' tests/`), and its file now declares no test class, pinned by `test_this_file_declares_no_test_class`. **If you add a module- or session-scoped fixture, its file must hold no test class.**
+**And a file is no longer one unit, which is the trap loadscope adds.** A file holding both module-level tests and a class is TWO groups, so a non-function-scoped fixture in it is set up twice on any worker that takes both — found by measuring, not by reading, when a `-n logical` run put `test_storage_e2e.py`'s two groups on one worker and the second `real_storage` raised `Table 'conversationthread' is already defined`. Five `-n auto` runs had been green, so it is a scheduling lottery. `test_storage_e2e.py` holds the suite's ONLY two non-function-scoped fixtures -- `real_storage` and the `_schema_cache_is_put_back` it requests (batch 110) -- and that grep is how to check: `grep -rn 'scope="module"' tests/` returns those two and nothing else. **This sentence said ONE until batch 128**, which is the register's own defect in the document that warns about it: a count written when it was true, beside a rule that did not need it. The rule is what matters, and it is unchanged -- one FILE still has the problem, so that file declares no test class, pinned by `test_this_file_declares_no_test_class`. **If you add a module- or session-scoped fixture, its file must hold no test class.**
 
-**The suite was FLOOR-BOUND and is not any more, and batch 114 is why.** The slowest single GROUP sets the wall time whatever the worker count, and under loadscope that was `tests/test_tui.py`'s 183 module-level tests — one group, because a test outside a class is grouped by MODULE — at 292 node ids and about a fifth of the suite's measured time. They are 41 classes now, cut along the section banners the file already had (TECHNICAL_DEBT 30). Measured properly: three runs a side, ALTERNATED on one box so drift cancels instead of landing on whichever side ran second — **2:17.9 / 2:07.9 / 2:28.6 before against 1:10.7 / 1:40.6 / 1:26.3 after, a mean of 138.1s against 85.9s, 1.61×**, and the two ranges do not overlap, which is the part that makes it a result rather than a pair of averages. Against a serial run that read 8:41 the same evening, 6.1× where it was 3.8×.
+**The suite was FLOOR-BOUND and is not any more, and batch 114 is why.** The slowest single GROUP sets the wall time whatever the worker count, and under loadscope that was `tests/test_tui.py`'s 183 module-level tests — one group, because a test outside a class is grouped by MODULE — at 292 node ids and about a fifth of the suite's measured time. They were cut into 41 classes along the section banners the file already had (TECHNICAL_DEBT 30) and are **64** now, which is the rule working rather than drifting. That number is read back out of this sentence by `test_agents_md_states_the_real_test_tui_class_count` (batch 128), so a batch that adds a class here also edits this digit. Measured properly: three runs a side, ALTERNATED on one box so drift cancels instead of landing on whichever side ran second — **2:17.9 / 2:07.9 / 2:28.6 before against 1:10.7 / 1:40.6 / 1:26.3 after, a mean of 138.1s against 85.9s, 1.61×**, and the two ranges do not overlap, which is the part that makes it a result rather than a pair of averages. Against a serial run that read 8:41 the same evening, 6.1× where it was 3.8×.
 
-**What is left as the floor is one PARAMETRISED function**, and it cannot be split by any class boundary: loadscope groups every node id of a parametrised test together, and `test_every_modal_keeps_its_decision_on_screen` is 3 sizes × 18 screens = 54 of them. Splitting it further was measured and declined — `-n auto` is 11 workers here and the serial suite is ~520s, so the ideal worker share is ~47s and that group already sits under it. Below a bound that has stopped binding there is nothing to win.
+**What is left as the floor is one PARAMETRISED function**, and it cannot be split by any class boundary: loadscope groups every node id of a parametrised test together, and `test_every_modal_keeps_its_decision_on_screen` is 3 sizes × 19 cases = **57** of them, pinned against the collected node ids by `test_agents_md_states_the_real_modal_parametrisation` (batch 128) because `_DECISION_CASES` is computed and cannot be counted by reading. Splitting it further was measured and declined — `-n auto` is 11 workers here and the serial suite is ~520s, so the ideal worker share is ~47s and that group already sits under it. Below a bound that has stopped binding there is nothing to win.
 
 **Two things not to re-derive from the above.** CI gains nothing: `-n auto` is 70% of the cores, so a 4-core runner takes 3 workers and its ideal share was already above the old floor — the payoff is on developer machines, which is where the suite runs many times a batch. And extra workers still buy nothing: alternated on the same commit, `-n auto` (11 workers) ran 2:09 / 2:10 and `-n logical` (16) ran 2:13 / 2:13 / 2:14, about 3% SLOWER, which is the same answer batch 109 got under loadfile.
 
@@ -134,11 +134,11 @@ identical in a checkout, wrong everywhere else. It is `find_dotenv(usecwd=True)`
 `AGENT_ENV_FILE` as the override. Do not simplify it back.
 
 **Three lists exclude local secrets from three channels, and they must agree**: `.gitignore` for
-`git push`, `.gitattributes export-ignore` for `git archive` (H3/C2), and `files` in `package.json`
+`git push`, `.gitattributes export-ignore` for `git archive`, and `files` in `package.json`
 for npm. npm's is the one that fails *open* — with no `files` key it falls back to `.gitignore`, so
 `providers.json` would be excluded by accident rather than decision. It is an allowlist for that
 reason, and it needs its `!**/__pycache__` / `!**/*.pyc` / `!**/.ipynb_checkpoints` guards because a
-directory entry sweeps in whatever is inside it.
+directory entry sweeps in whatever is inside it. The three-channel rule itself is stated in `docs/PRIVACY.md` and recorded in `docs/DEVLOG.md`, and **it has no decision id** -- batch 128 removed a cited `H3/C2`, which named §31's `RLIMIT_CPU`/`RLIMIT_AS` decision and an id the record does not define at all.
 
 **Never vendor wheels into the tarball.** The package is first-party source and the launcher has
 zero npm dependencies, which is what lets `THIRD_PARTY_NOTICES.md` say the npm channel adds no
@@ -196,6 +196,7 @@ the gate. A seventh use of `C1`–`C10` is the research pipeline's **claim ids**
 which are run data rather than references; see the C table in `ROADMAP_v2.md`.
 - **CONFIG_ARCHITECTURE.md** — why every value in `config.yaml` is what it is. `config.py`'s 788 lines of rationale, carried over verbatim when the values moved into YAML, keyed by the YAML's own names. Read the entry for a key before changing it; several of these numbers have already been "corrected" back to a value they were deliberately moved away from.
 - **docs/DEVLOG.md** — per-section implementation notes: what was followed verbatim, what was deviated from (every deviation was an explicit user decision — do not silently override).
+- **docs/TECHNICAL_DEBT.md** — the register: what a review found and what was deliberately left, each item open or closed with the batch that closed it. **This is where the last nine batches of work came from**, and it was missing from this map until batch 128 while being cited a dozen times in the body below. Cite an item as `TECHNICAL_DEBT 42`, bare — one form, since three were in use. An entry is evidence, not instruction: batches 126 and 127 each found the ENTRY itself wrong about where its own defect came from, so measure the claim before building the fix it proposes.
 - **tests/BREAKING_CHANGES.md** — what breaks each test when production code changes, the symptom, and the fix.
 - **CLAUDE.md / QWEN.md** — pointers to this file, nothing more. They exist so a harness that looks for one filename finds it without searching; the content has one copy.
 
@@ -247,7 +248,7 @@ Three stop conditions, all in `_run()`: no tool calls (`complete`), `max_steps` 
 
 **A model call is retried, and since batch 113 the screen is no longer the boundary** (batch 91, amended by batch 113 / TECHNICAL_DEBT 25). The attempt loop in `_run_steps` re-sends one step's call when `core/provider_errors.is_transient` says the failure can pass: a connection error, a 408/409/429/5xx, or an error event inside a stream that opened with 200 — which both the openai and anthropic SDKs raise unretried, and which is how OpenRouter reports an overloaded upstream. Up to `model_call_max_retries` more attempts, `model_call_retry_base_delay_s` doubling with jitter; the SDKs' own pre-stream retries stay on inside each attempt. **One rule for every caller**: batch 91 split them, retrying a *drained* run whatever it had streamed and refusing a *drawn* one after its first delta, because a RichLog row could not be taken back. Batch 112 made one retractable, so the loop now yields `LoopEvent(retract=...)` before the backoff wait — only when the attempt had drawn something — and the shell deletes its own rows. **`drained` is gone**; do not reintroduce a two-speed retry, which `test_one_rule_for_every_caller` guards by reading the source. The loop sits below the wrappers that write the user row, so a retry never writes it twice, and above the accounting, so only the attempt that succeeded is billed or persisted (D20).
 
-**A retraction is bounded by a MARK, not by the open span** (batch 113). `Transcript._retract_mark` is armed by the first delta of a span and cleared by `flush_stream`; `retract_to_mark(note)` truncates `_entries` back to it, clears both pending buffers, replays and writes the note. A second retraction keeps the first line for free, because `write_system` flushes — which clears the mark — and the next delta re-arms it after the note. Not the open span, because `_write_thinking_chunk` closes an open ANSWER before it draws — one attempt with interleaved reasoning is three entries with only the last open. Not taken at the flush either, though that was tried: every `write_*` opens with `flush_stream()`, so a line written mid-span moved the mark PAST the attempt's own text and the retraction then deleted the foreign line and kept the half-answer. `Transcript` is the only surface in this repository that draws model text — the research orchestrator translates a character COUNT and `cli.py` drains — so it is the only consumer of this event.
+**A retraction is bounded by a MARK, not by the open span** (batch 113). `Transcript._retract_mark` is armed by the first delta of a span and cleared by `flush_stream`; `retract_to_mark(note)` truncates `_entries` back to it, clears both pending buffers, replays and writes the note. A second retraction keeps the first line for free, because `write_system` flushes — which clears the mark — and the next delta re-arms it after the note. Not the open span, because `_write_thinking_chunk` closes an open ANSWER before it draws — one attempt with interleaved reasoning is three entries with only the last open. Not taken at the flush either, though that was tried: every `write_*` opens with `flush_stream()`, so a line written mid-span moved the mark PAST the attempt's own text and the retraction then deleted the foreign line and kept the half-answer. `Transcript` is the only surface in this repository that draws model text — the research orchestrator translates a character COUNT and the CLI shell (`main.py`, never a `cli.py` -- there has never been one) ignores `retract` entirely, which `core/events.py` states is still correct about failures — so it is the only consumer of this event.
 
 **`_run` is a thin frame; the loop is `_run_steps`** (batch 91). On an `Exception` escaping it, the frame stores `redact_secrets(describe(e))` on the thread's newest user row (`MessageLog.error`, via `mark_turn_failed`) and re-raises unchanged — `core/events.py` still has no error variant. Not on `GeneratorExit`: an abandoned generator (#42) is not a failed run. **A column, not an `error` ROLE, is the decision:** provider translation and the compactor's `_as_text` read a user row's `content` alone, so the failure reaches `replay_entries` (an `error` entry right after its user entry) and nothing that sends or summarizes the conversation — a role would have been M8's mistake. `test_grants.py` walks `core.loop`'s AST for exactly one function named `_run` with no `authorized_call` in it; the frame satisfies both, so do not "simplify" it back into the body without re-reading that test.
 
@@ -396,8 +397,7 @@ already takes.
 58). `tui/markdown.py` grew the rest of the grammar it was going to grow, curated rather than
 completed. What renders now: a table, a heading, `**strong**`, `` `code` ``, `*emphasis*`,
 `~~strike~~`, a list item with a hanging indent, and a bare URL. What does not, deliberately:
-block quotes (a bar down the left collides with the thinking span's own bar — `TECHNICAL_DEBT.md`
-17), horizontal rules (drawing one is inventing furniture nobody typed), heading LEVELS (`#` and
+block quotes (a bar down the left collides with the thinking span's own bar — TECHNICAL_DEBT 17), horizontal rules (drawing one is inventing furniture nobody typed), heading LEVELS (`#` and
 `######` still draw identically, because a ladder that reads as arbitrary is worse than none),
 setext headings, indented code as a *highlighted* block, nested marks composing, and anything at
 all inside a reasoning span. `rich.markdown.Markdown` is still the thing not to reach for, for
@@ -423,7 +423,7 @@ the very end of a line is not a row**: `plain_split` hands one back when a trail
 the width by its own cell, Rich folds that space into the row it ends, and drawing the remainder put
 a bare bar under every chunk committed that way.
 
-**And the COMMIT side of that same shape is batch 112** (`TECHNICAL_DEBT.md` 24). `plain_wrap`
+**And the COMMIT side of that same shape is batch 112** (TECHNICAL_DEBT 24). `plain_wrap`
 refuses to DRAW the empty remainder; `_commit_ready` and `thinking_delta` now refuse to COMMIT a
 cut that keeps nothing back, which is the only way the width rule can drain the buffer -- a row
 that filled exactly, then a space that overflows by its own cell. Committing there buys nothing,
@@ -458,11 +458,11 @@ lost four characters that were never markup) and it is STATELESS on purpose: GFM
 code from a nested list item by the surrounding list context, and tracking that would put state
 across the commit boundary. The price, named and tested: an item nested with four spaces renders
 flat, two-space nesting renders. `verbatim()` is asked in exactly three places — `_scan`,
-`_is_row`, `list_item` — and **fences are exempt**, which is `TECHNICAL_DEBT.md` 14 rather than a
+`_is_row`, `list_item` — and **fences are exempt**, which is TECHNICAL_DEBT 14 rather than a
 silence.
 
 **A terminal resize re-lays the transcript, and the route is `reflow()` rather than `rerender()`**
-(batch 112, closing `TECHNICAL_DEBT.md` 23 and 15). RichLog renders at write time and stores
+(batch 112, closing TECHNICAL_DEBT 23 and 15). RichLog renders at write time and stores
 Strips, so nothing re-wraps itself and every row drawn before a drag kept the width it was drawn
 at. `rerender()` cannot be the handler: it opens with `flush_stream()`, which ENDS an open answer
 span, so a resize mid-turn would split the live answer into two entries under two `venastine ›`
@@ -489,7 +489,7 @@ outlives the text that made it. Textual dispatches on `style.meta`, not on Rich'
 was left off, since a terminal that honours it would double-open what we already handle.
 
 **A tool line arms its URLs too, and takes a DIFFERENT scanner** (batch 65, closing
-`TECHNICAL_DEBT.md` 16). `LINKED_ROLES` — `tool`, `pipeline_tool`, `tool_error` — go through
+TECHNICAL_DEBT 16). `LINKED_ROLES` — `tool`, `pipeline_tool`, `tool_error` — go through
 `markdown.link_spans`, which recognises URLs and nothing else. Not the prose grammar: a
 digest is a shell command or a JSON argument, and `inline_spans` does not merely
 over-decorate one, it **eats characters** — `# \`date\`` loses its backticks to a code span
@@ -625,7 +625,7 @@ that spot; it does not reverse the pause.
 - **`turn_output_tokens` is a THIRD instrument, not a convenience.** `turn_billed_tokens` is
   a spend meter (the prompt is counted again every step) and `turn_new_tokens` a size meter
   (it adds the input deltas a tool-using turn brings in). Divide either by a duration and
-  the result looks like tok/s and is not -- which is TECHNICAL_DEBT item 9's misreading
+  the result looks like tok/s and is not -- which is TECHNICAL_DEBT 9's misreading
   exactly.
 - **Updates are EVENT-DRIVEN first and timed second**, which is what makes
   `tui.animations: false` cheap to honour: a token delta arrives per chunk even while the cap
@@ -686,7 +686,7 @@ did not, and says so below.
   newline on shift+enter. **`alt+enter` is the obvious third guess and is a dead
   end**: fed `ESC CR` the parser yields no key at all, and a second one behind it
   degrades to `escape`, `enter`.
-- **`value` is an alias over `.text`, and it is why this batch edited no tests.** Roughly
+- **`value` is an alias over `.text`, and it is why batch 54 edited no tests.** Roughly
   sixty sites across five files say `app.query_one("#prompt").value = …`; none queries it
   by class. A one-line property is cheaper than sixty edits made to land a rendering
   change — see `tests/BREAKING_CHANGES.md` for what deleting it looks like.
@@ -699,7 +699,7 @@ did not, and says so below.
 `tab_behavior` stays at its `"focus"` default deliberately: under `"indent"`,
 `TextArea._on_key` also swallows `escape`. `ctrl+k` is still bound by the prompt (both
 widgets bind it), so §26's `ctrl+l` note above is unchanged. `ctrl+c` was ALREADY shadowed
-before this batch — `Input` and `TextArea` both bind it to `copy`, and measured, an app-level
+before batch 54 — `Input` and `TextArea` both bind it to `copy`, and measured, an app-level
 `ctrl+c → quit` fired under neither while the box had focus. Batch 57 is what fixed that; see
 **ctrl+c is one key with two bindings** below.
 
@@ -814,7 +814,7 @@ with nowhere to go is noise, and the rule keeps every case shipped in batch 55 r
 as it did.
 
 **Prompt recall is on `ctrl+↑`/`ctrl+↓`, and the pair was chosen by elimination** (batch 63).
-Until this batch a submitted prompt existed nowhere a person could reach — `on_prompt_input_submitted`
+Until batch 63 a submitted prompt existed nowhere a person could reach — `on_prompt_input_submitted`
 cleared the box and that was that — so a misfire on a long `/research --attended --grant …` cost the
 typing. The keys were picked by enumerating `screen.active_bindings` with the prompt focused, which
 is App, Screen and `TextArea`'s forty-odd editing bindings in one list rather than a docs page.
@@ -972,7 +972,7 @@ that reflows a paragraph.
 
 Two things in `tui/app.py` are load-bearing and easy to break silently:
 - **`run_worker(..., exit_on_error=False)` + `on_worker_state_changed`.** Textual's default tears the whole app down on a transient worker exception.
-- **Every permission dismissal path must put a boolean on the channel.** The worker blocks inside `_run()` on `permission_channel.get()`; a dismissal carrying `None`, or one that puts nothing, hangs it forever. That is why the AC2 tests assert on the *dispatched tool*, not on the modal rendering.
+- **Every permission dismissal path must put a boolean on the channel.** The worker blocks inside `_run()` on `permission_channel.get()`; a dismissal carrying `None`, or one that puts nothing, hangs it forever. That is why §16's AC2 tests assert on the *dispatched tool*, not on the modal rendering.
 
 **A modal's LAYOUT is part of its contract, and asserting on its text is not testing it**
 (§46, EP1/EP3). This cost four consent surfaces at once. `#permission-dialog` had
@@ -1444,7 +1444,7 @@ would never clear.
 
 **The package is `mcp_client/`, never `mcp/`.** The project root is on `sys.path`, so a top-level `mcp/` shadows the installed SDK — the `logging.py` incident again. §17's spec sketches `mcp/client.py`; don't follow it there. Every SDK symbol lives inside this package so a version migration touches one directory.
 
-**Pinned to `mcp>=2.0,<3`.** v2 is not v1: fields are snake_case (`.content` / `.structured_content` / `.is_error`), `Tool.input_schema`, timeouts are `float`, the exception is `MCPError`, and `Client(server)` replaces `ClientSession` + a separate transport CM. Reading the v1 spellings against v2 doesn't crash — `getattr` returns `None` and every failed call silently looks successful.
+**Pinned to `mcp==2.0.0`, EXACTLY, and the range is what it was pinned away FROM.** `requirements.txt` carries the reason: under `>=2.0,<3` a minor release went red on main while every local run stayed green, so CI's result depended on WHEN it ran and CI was not testing what anyone runs locally. This file said `mcp>=2.0,<3` until batch 128, which is the one error shape that invites a reader to "fix" the code back to the defect. Moving it is deliberate: read 2.1.0's split first. v2 is not v1: fields are snake_case (`.content` / `.structured_content` / `.is_error`), `Tool.input_schema`, timeouts are `float`, the exception is `MCPError`, and `Client(server)` replaces `ClientSession` + a separate transport CM. Reading the v1 spellings against v2 doesn't crash — `getattr` returns `None` and every failed call silently looks successful.
 
 **The manager task is required.** `AsyncExitStack` cannot be entered in `connect_all()` and closed in `disconnect_all()`: anyio binds cancel scopes to the **task**, and `run_coroutine_threadsafe()` makes a new task per call, so the right *loop* is necessary but not sufficient. One long-lived `_manager()` task enters every context, signals ready, and parks until shutdown. If `RuntimeError: Attempted to exit cancel scope in a different task` appears, something moved an enter/exit across a task boundary.
 
@@ -1520,7 +1520,7 @@ Anthropic, OpenAI-compatible (any `is_v1_compatible` provider), and Google are a
 Invariants that look like simplification opportunities but are not:
 
 - **Each pass gets its own fresh thread.** Passes share distilled JSON, never raw history. Do not merge into one thread.
-- **Pass 5, D0, D1, D2, and Pass 6c make zero LLM calls.** Thresholds, routing, retry caps, dedup, and annotation are pure Python. Adding a model call to any of them is a rearchitecture, not a fix.
+- **Pass 5, the gates D0, D1 and D2, and Pass 6c make zero LLM calls.** Thresholds, routing, retry caps, dedup, and annotation are pure Python. Adding a model call to any of them is a rearchitecture, not a fix.
 - **The scoring formula caps before subtracting the assumption penalty**, not after. Cap-after was a real bug, caught by a test comparing a flagged and unflagged claim landing on the same tier.
 - **Pass 6b does not re-run Pass 4.** Assumption-flagged claims exhaust retries and fall to UNVERIFIED. Known design gap, not a bug.
 - **The 6a/6b loop counts the ROUND, not the revision** (#74). `retry_count` is incremented for every claim still in `flagged` after Pass 6a returns; the per-revision write sets `revision_text` only. Incrementing inside the loop over 6a's response — which is how it shipped — makes D2's cap reachable only with the model's cooperation, and 6a is one batched call across every flagged claim, exactly the shape a model drops an item from. A claim it omits then never exhausts and `while flagged:` has no bound at all. Do not *add* a per-round increment beside the per-revision one; it must replace it, or a named claim counts twice. And because `flagged` only ever shrinks, every claim in it exhausts on the same round — which is what keeps a fallback from being undone by a later one.
@@ -1600,7 +1600,7 @@ The research pipeline can now review its own finished output and correct it, one
 
 A long thread is now condensed rather than left to hit a wall. Compaction adds a
 `CompactionCheckpoint` row and **never edits the archive** — `storage.archive_history()`
-returns every message ever written however many times this has run (AC1), which is
+returns every message ever written however many times this has run (§21 AC1), which is
 what makes an early, frequent trigger safe.
 
 - **The trigger is a SHARE of the model's window** (WS5, reversing M1). M1 made it a
@@ -1810,7 +1810,7 @@ MessageLog writer so a message cannot persist without its thread moving to the t
 of an activity-ordered picker. `advances()` checks containment even when no
 checkpoint exists yet (#27): "first compaction" is exactly when nothing else catches
 a foreign watermark. The TUI picker caps at 200 and says so; `/resume <thread-id>`
-is the by-id path that keeps older conversations reachable (Q7/#30).
+is the by-id path that keeps older conversations reachable (#30).
 
 ### Durable memory (`memories/`, §21b)
 
@@ -1829,7 +1829,7 @@ parsed since §14 with no consumer at all — this is its first.
   `config_loader.get_project_path()` is `None` exactly when `initialize()` has not run,
   and that is "there is no session". Same convention as `get_agents()`.
 - **`UserMemory.project_path` is M12's addition to §21's schema.** D25 keys project
-  memories to the resolved path; with only a `scope` string, AC6 is unwriteable.
+  memories to the resolved path; with only a `scope` string, §21's AC6 is unwriteable.
 - **Injection is capped and says so** (M14). `MAX_INJECTED_MEMORIES`, newest first,
   with "showing the 50 most recent of 73" in the fragment the model reads — not only
   in a log, which reaches nobody mid-conversation.
@@ -2119,7 +2119,7 @@ Slice 5a (batch 103) -- the harness-held secret store (SS56-SS64):
   and again in `logging_setup`'s formatter. `redact_tool_outputs` governs guesses about other
   people's credentials; this is the harness leaking its own, and no switch asks for that. The values
   never leave `security/secrets.py` -- the redactor calls IT rather than asking for a list.
-* **A new AC1 kind needs a branch in BOTH shells** (SS59), and the parity test in `test_cli.py`
+* **A new §23 AC1 request kind needs a branch in BOTH shells** (SS59), and the parity test in `test_cli.py`
   enforces it. The TUI got this project's first masked modal; the CLI got `readline_masked` on the
   ONE stdin reader -- `getpass` is refused because it reads stdin itself, which is the second reader
   audit #100 exists to prevent. `SAFE_DEFAULTS[SECRET]` is None, not `""`: an empty password is an
@@ -2155,7 +2155,7 @@ And slice 4 (batch 102) -- SSH, a command on another machine (SS46-SS55):
   reading a user config this harness cannot even redirect.
 * **A kill does not reach the remote command** (SS53), measured. The in-guest `timeout -k` is the
   bound. `-tt` would fix it and merge stderr into stdout and CRLF every line, so it is not used.
-* `uncontained_refusal` (renamed from `wsl_refusal` this batch) is the one funnel for the gate,
+* `uncontained_refusal` (renamed from `wsl_refusal` in batch 101) is the one funnel for the gate,
   `run` and the session start handler, and now answers for both uncontained backends.
 
 And slice 3 (batch 101) -- WSL, a backend with no isolation at all (SS35-SS45):
@@ -2541,7 +2541,7 @@ independent bugs, both found by using the app.
   §21a exists to serve. It is labelled `subagent` with `spawn_subagent` and §20's
   reviewer; the reviewer gets no kind of its own, since §20 already calls it a subagent.
 - **Classification is separate from `ensure_columns()`, and idempotent by construction**
-  (AC3). M7's migration is additive and never backfills, so the column arrives with
+  (§27 AC3). M7's migration is additive and never backfills, so the column arrives with
   every existing row defaulted to `chat`.
   `pipeline_storage.classify_legacy_pass_threads()` runs at every launch over a DBAPI
   connection (the `ensure_columns` seam) and works in TWO TIERS (#82): every thread id
@@ -2563,7 +2563,7 @@ independent bugs, both found by using the app.
 - **`/new` redraws, through the same reset** (§43, RM2). `switch_to_thread` cleared the
   transcript and the per-thread state; `_cmd_new` did neither, so a new thread inherited
   the previous conversation's screen, its `/copy all` and its `/claims` — §27's bug 1 and
-  AC4, surviving on the path §27 did not touch. The `_busy` refusal stays first, so a
+  §27's AC4, surviving on the path that section did not touch. The `_busy` refusal stays first, so a
   refused `/new` clears nothing, and the banner is REPRINTED (`_write_session_banner`)
   rather than replayed: a `/model` switch survives `/new`, so the launch pair would name a
   model the next turn will not call.
@@ -2692,7 +2692,7 @@ worker, and how a malformed answer decodes.
 - **Both tools are UNGATED** (J12/J9), and for `ask_user` the deciding reason is
   not "asking is harmless" — it is that §13 stops *advertising* a gated tool
   where nothing can ask, so gated it would be invisible rather than deniable and
-  AC2's "an error result it can work around" would be unreachable.
+  §23's AC2 -- "an error result it can work around" -- would be unreachable.
 - **A tool result's `notice` is forwarded as a `LoopEvent` and STRIPPED** (J10),
   generically — the alternative was the loop recognising `todo_write` by name.
   This is also how P1's deferred event-shape decision was discharged with
@@ -2746,9 +2746,18 @@ is gone outright, not kept as a fallback. `doc_path()` is one join now.
   and source files are out of scope entirely — widening to those turns it into
   `read` with no gate. But the set is not small: the tool takes a PATH, resolves
   anywhere under the project, and admits `.md`/`.markdown`/`.rst`/`.txt` plus ten
-  named build files, which on this repository is **40 files and ~1.1 MB at depths
-  0-3**, including every agent and skill body under `agents/builtin/` and
-  `skills/builtin/`. ARCHITECTURE.md used to say the most a prompt-injected pass
+  named build files, which on a clean checkout of this repository is **60 files
+  and under 4 MB at depths 0-3**, including every agent and skill body under
+  `agents/builtin/` and `skills/builtin/` and the whole of `docs/`. **It said 40
+  files and ~1.1 MB until batch 128**, when it was re-measured through the
+  tool's own `is_readable_doc` at 60 files and 3.58 MB -- a 3.3x
+  understatement, and almost all of the growth is this record: `DEVLOG.md`
+  alone is 1.2 MB, and `BREAKING_CHANGES.md`, `ROADMAP_v2.md`,
+  `ARCHITECTURE.md` and this file are another 1.6 MB between them. Both
+  figures are read back out of this sentence by
+  `test_the_documented_doc_read_bound_is_not_understated`, which fails only in
+  the understating direction, because that is the direction the next sentence
+  says costs something. ARCHITECTURE.md used to say the most a prompt-injected pass
   gains is the README (audit #97); understating a security bound is the one
   direction that costs something.
 - **The hub is the map of the documents it links** (I9, as relocated by WS8). All
@@ -2844,6 +2853,8 @@ Progressive disclosure: system prompts list skills as name + one-line descriptio
 
 **Ask before implementing.** Every built ROADMAP section followed the same cycle: read referenced files → verify claims against actual code → surface ambiguities as explicit questions with options and a recommendation *before* writing code → lock decisions → implement. New sections follow it too.
 
+**Closing a `docs/TECHNICAL_DEBT.md` item is a DEVLOG entry and NOT a new ROADMAP section.** Batches 115–121, 126 and 127 are the precedent, and the reason is mechanical rather than stylistic: a section needs a decision family in this file's map, an index row and a `(BUILT)` status marker, and all three are gated — `test_the_map_names_every_family_the_record_defines`, `test_the_roadmap_v3_index_covers_every_section` and `test_an_index_status_marker_agrees_with_its_own_section`. So a closure that adds no config key and moves no documented threshold is an APPLICATION of ids that already resolve, and inventing a family for it would put three gated claims in the record to describe a fix that needed none. **The register entry is evidence and not instruction**: batch 126 found the entry naming the wrong field, and 127 found one naming a route that was already covered and a fix shape that could not bound the function. Measure the entry's claim before building what it proposes, and correct the entry in the same batch.
+
 **Fix at the producer, not the consumer.** The project's canonical bug: `add_assistant_message()` persisted a redundant `"role"` key, was fixed with a read-side special case for `role == "assistant"`, and the identical bug in `add_tool_result()` survived because the fix lived one layer above where the divergence was produced. When you fix a shared root cause, grep every other call site sharing it. A per-case branch added to a normalizer/dispatcher usually means the fix belongs one layer down.
 
 **Verify against production code, not the test double.** `tests/conftest.py`'s `FakeStorage` is a simplified model of `storage.py`, not the real thing — its `save_checkpoint` has none of the real one's watermark-advance guard, so a test that arranged a backwards checkpoint through the fake would see it applied, and `latest_checkpoint` is a dict lookup there rather than "newest row wins by timestamp". A passing test proves the fake and the code agree — not that either is right. If you change `storage.py`'s reconstruction, change the fake identically.
@@ -2866,9 +2877,11 @@ A tool that should not always be *offered* (as opposed to not allowed) supplies 
 
 **`safe_parse` is an ALLOWLIST at the token boundary, not a blanked namespace (#52).** This file used to say "`__builtins__` blanked, injection-tested"; both halves were false. Blanking cannot work — `_SAFE_GLOBALS` is built from `dir(sympy)`, so SymPy's own `sympify`/`parse_expr`/`var`/`S`/`lambdify` are in scope by construction, and `sympify`'s inner parse gets **real** builtins back because Python inserts them into any globals dict handed to `exec`/`eval` that lacks them; separately, `().__class__.__bases__[0].__subclasses__()` needs no name lookup at all, so no namespace pruning reaches it. And "injection-tested" was one payload that was blocked by `auto_symbol` Symbol-izing the bare name `__import__`, for a reason unrelated to the defence it was named for. **A token filter was the first fix and it was wrong.** It rejected dunder and non-allowlisted NAME tokens, and was bypassed within the hour by `f"{sympify('__import__(chr(111)+chr(115)).getpid()')}"` — on Python 3.11 an f-string is a **single `STRING` token** (PEP 701 split it up only in 3.12), so a NAME filter is structurally blind to it while the code inside evaluates with `_SAFE_GLOBALS` in scope. `str.format`'s mini-language reaches dunder attributes the same way. The general lesson: **a token stream is not the language**, and which constructs the tokenizer hides is a property of the Python version, not of this code.
 
-The guard is now `_validate_ast`: `parse_expr` is split into its two halves (`stringify_expr` → `eval_expr`) and the AST of **exactly the string that will be evaluated** is checked against a closed allowlist of ~39 node types out of Python's 118. **`ast.Attribute` is absent, and that is the load-bearing omission** — attribute traversal *is* mechanism 2, and it is also how `str.format`, `.mro()` and every bound-method route are reached; no transformation emits an attribute for a legitimate expression. `JoinedStr`, `Lambda`, the comprehensions, `NamedExpr`, `Starred` and `Dict`/`Set` are all absent too, by being unlisted rather than by being recognised. Names are checked against `_ALLOWED_NAMES` (231 of 927 exposed) or the caller's `symbols=`. Widening either list is a decision about a *kind* of thing; anything that parses, evaluates, compiles, renders or executes stays out, and no module object is ever permitted (`evalf` is a module, not the method — it was allowlisted by mistake once).
+The guard is now `_validate_ast`: `parse_expr` is split into its two halves (`stringify_expr` → `eval_expr`) and the AST of **exactly the string that will be evaluated** is checked against a closed allowlist of **39** node types out of the ~130 Python defines. **`ast.Attribute` is absent, and that is the load-bearing omission** — attribute traversal *is* mechanism 2, and it is also how `str.format`, `.mro()` and every bound-method route are reached; no transformation emits an attribute for a legitimate expression. `JoinedStr`, `Lambda`, the comprehensions, `NamedExpr`, `Starred` and `Dict`/`Set` are all absent too, by being unlisted rather than by being recognised. Names are checked against `_ALLOWED_NAMES` (**230** of the ~926 `sympy` exposes) or the caller's `symbols=`. Widening either list is a decision about a *kind* of thing; anything that parses, evaluates, compiles, renders or executes stays out, and no module object is ever permitted (`evalf` is a module, not the method — it was allowlisted by mistake once).
 
-**117 of the 213 allowlisted callables evaluate a string handed to them** — measured by blackbox probe, not by reading source, because 214 of them are C extensions with no retrievable source (the source audit could read 15). So the string-licensing rule is load-bearing rather than defence in depth, and `test_the_licensed_string_constructors_do_not_evaluate_their_argument` is the obligation it rests on. There is also one check on the OUTPUT: `_reject_escaped_value` refuses a result that is a module, a plain function/method, or a non-SymPy class, recursing through returned containers. It is a DENY of the escape signature rather than an allowlist of return types, deliberately — an allowlist can only catch escapes whose shape was already imagined, and four of this issue's five mechanisms were not. SymPy classes are values (`sin` is a `FunctionClass`); `Function('f')` is refused by the string rule, which is a recorded cost.
+**Both of those figures are gated, and the denominator is a tilde for a reason.** `test_agents_md_states_the_real_sympy_allowlist_sizes` reads 230 and 39 back out of this paragraph; the sentence said 231 of 927 from the day it was written, and the allowlist literal has held 230 words, none duplicated, since #52 created it. The 926 is approximate because **`dir()` on a PACKAGE is not a fixed number**: `tools/builtin/probability_stats.py` imports `sympy.stats`, which binds `stats` onto the package, so the count moves by a name or two with import order and reads 926 or 927 in one checkout. **And `_SAFE_GLOBALS` is built from that same `dir()` at import time, which is how a module object gets into it** -- against the rule stated just above. Inert, and measured so: `stats` is not in `_ALLOWED_NAMES`, so the name is never resolved, the bare word splits into `a*s**2*t**2`, and `stats.Die` is refused with every other attribute. The NAME gate is what makes the globals dict's contents not matter.
+
+**117 of the 213 allowlisted callables evaluate a string handed to them** — measured by blackbox probe, not by reading source, because of the **229 allowlisted names that resolve** only 15 had retrievable source and the other 214 were C extensions. **The two figures count two different populations**, which is why 214 reads as larger than 213 and is not: 117/213 is over the CALLABLES, 15+214=229 is over the RESOLVABLE NAMES. Batch 128 named the populations rather than changing a number, having re-taken the measurement in WSL -- the probe needs `SIGALRM` and is skipped on Windows -- and got 117 of 213 back, with the control that proves the probe still detects a known evaluator run first. So the string-licensing rule is load-bearing rather than defence in depth, and `test_the_licensed_string_constructors_do_not_evaluate_their_argument` is the obligation it rests on. There is also one check on the OUTPUT: `_reject_escaped_value` refuses a result that is a module, a plain function/method, or a non-SymPy class, recursing through returned containers. It is a DENY of the escape signature rather than an allowlist of return types, deliberately — an allowlist can only catch escapes whose shape was already imagined, and four of this issue's five mechanisms were not. SymPy classes are values (`sin` is a `FunctionClass`); `Function('f')` is refused by the string rule, which is a recorded cost.
 
 **String literals are licensed, not filtered.** Auditing the allowlist's own source found that seven permitted functions — `factor`, `cancel`, `together`, `apart`, `roots`, `degree`, `nsolve` — call `sympify()` on their arguments, so handing one a string literal re-enters the parser with SymPy's default globals and real builtins: `factor(" __import__(chr(111)+chr(115)).getpid() ")` returned the pid. A dunder tripwire on the string did not help, because it matched prefix/suffix and one leading space walked past it — the same category of mistake as `chr(111)+chr(115)` defeating a search for `"os"`. `stringify_expr` emits a string argument in exactly two places (`Symbol('x')`, `Float('1.5')`), so `_STRING_ARG_CONSTRUCTORS` licenses those two positions and every other string literal is refused. That closes the class without needing to know which functions sympify — which is the difference between a closure and a filter.
 
@@ -2884,7 +2897,8 @@ All tests run offline: zero network, zero real API keys. The **root** `conftest.
 
 - Did you run (or `py_compile`) every file you touched, and run `pytest`?
 - Did you run `ruff check .`, bandit with the CI job's own flags, and `gitleaks detect --source . --no-git -c .github/gitleaks.toml`? None of the three runs under `pytest` and all three gate every push, so a batch that skips them arrives red — which is how the push carrying batch 94 landed six lint errors and two new bandit findings, every one of them mechanical.
-- **Gitleaks is the one that can sit red for weeks, so run it even when the batch touched no production code.** Lint and bandit are caught the same day because something else usually runs them; gitleaks fires only `on: push`, so a branch held locally banks the surprise for as long as it stays there. `tests/test_session_tools.py`'s `SECRET` fixture was added 2026-09-17 and first went red 2026-10-01, twenty commits and several batches later (batch 115). **A new fake credential in a tracked test needs its fingerprint in `.gitleaksignore`; a real one needs rotation, never a fingerprint.** Scan a clean export rather than the worktree — `git archive HEAD` into a temp dir — or local untracked residue answers for CI, which checks out tracked files only.
+- **The bandit baseline is in LINUX path form, so locally every entry misses and all 129 baselined issues read as new.** It is generated in CI, where filenames are `./x.py`; bandit on Windows reports `.\x.py`. Rewrite a THROWAWAY copy, changing only the leading `./`, and run against that — **never regenerate the committed file**, which would relocate the baseline onto one machine's paths and make CI the thing that disagrees. The regeneration command in `.github/workflows/bandit.yml` is for CI, not for a developer box. Second trap in the same command: piping bandit to `tail` makes `$?` TAIL's exit code, so a run with new findings reads as green — capture the output and read bandit's own status.
+- **Gitleaks is the one that can sit red for weeks, so run it even when the batch touched no production code.** Lint and bandit are caught the same day because something else usually runs them; gitleaks fires only `on: push`, so a branch held locally banks the surprise for as long as it stays there. `tests/test_session_tools.py`'s `SECRET` fixture was added 2026-09-17 and first went red 2026-10-01, twenty commits and several batches later (batch 115). **A new fake credential in a tracked test needs its fingerprint in `.gitleaksignore`; a real one needs rotation, never a fingerprint.** Scan a clean export rather than the worktree — `git archive HEAD` into a temp dir — or local untracked residue answers for CI, which checks out tracked files only. **`cd` into that export and scan `.`**: a `.gitleaksignore` fingerprint is `file:rule:line`, so an ABSOLUTE `--source` makes every one of them unmatchable and a clean tree reports all of its own deliberate test credentials as leaks (measured in batch 128: 7 findings absolute, 0 relative, same bytes).
 - Did you grep for every other call site sharing the root cause of what you just fixed?
 - Did you trace the fix against the real module, not the fake?
 - Does the new test fail if the fix is reverted, asserting the field/shape that was actually wrong?

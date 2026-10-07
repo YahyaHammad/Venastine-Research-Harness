@@ -200,7 +200,9 @@ pytest-asyncio>=1.0
 # `>=` like its three siblings above rather than an exact pin. D22's
 # argument for pinning is about packages whose behaviour CI's RESULT
 # depends on; this one decides how the run is scheduled, and the three
-# ordered sites that care are pinned by `--dist loadfile` in pytest.ini
+# ordered sites that care are pinned by `--dist loadscope` in pytest.ini
+# -- loadfile until batch 110 switched it, and this comment said loadfile
+# for eighteen batches after that
 # rather than by a version. Brings `execnet` (MIT), which is its only
 # transitive.
 pytest-xdist>=3.6

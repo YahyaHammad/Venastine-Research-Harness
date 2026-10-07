@@ -18842,3 +18842,234 @@ Batches 115-121 and 126 are the precedent: a register closure gets a DEVLOG entr
 config key and changes no documented threshold, so it is an application of ids that already resolve
 rather than a new decision family -- which would need a map entry in `AGENTS.md`, an index row and a
 status marker, all three gated.
+## Batch 128 -- the context file's own claims, measured (2026-10-08)
+
+`AGENTS.md` is the document this project calls load-bearing, and nothing audited
+it. The two gates written for exactly this failure --
+`test_every_decision_id_cited_in_production_code_resolves` and
+`test_every_test_name_cited_in_production_code_resolves` -- are PRODUCTION ONLY,
+and the second one's docstring says why: "The suite's own prose legitimately
+names tests and files that no longer exist." That reasoning is right about test
+prose and wrong about this file, which is not prose about tests. It is the file
+`CLAUDE.md` calls not-optional reading because its decisions "have already been
+broken once by someone who reasoned from the code alone."
+
+So the whole file was swept mechanically before anything was proposed, and the
+result is the reason this batch is corrections and gates rather than a rewrite.
+
+### What came back clean, recorded so nobody re-sweeps it
+
+**Zero `file.py:NNN` citations anywhere in 2,891 lines.** That is a convention,
+not an accident, and it is why none of the drift here was a line number. Do not
+introduce one.
+
+**529 identifier-shaped backticked names cited, 529 resolve** in the tracked
+tree. The seven that appear in no `.py` file are three GitHub-Actions keys
+(`NPM_TOKEN`, `dry_run`, `workflow_dispatch`), a stdlib module (`py_compile`),
+and three names used correctly in the PAST tense -- `PIPELINE_UNGRANTABLE`,
+`ask_project_kind_blocking`, `wsl_refusal`. **Zero dangling test names**, by the
+production gate's own regex and resolver run over this file instead. **Zero
+repeated sentences.** The ROADMAP_v3 built/not-built clause matches the index
+exactly.
+
+**Four claims traced, found CORRECT, and deliberately not touched.**
+`tools/registry.py` really is the only file importing both permissions and tool
+modules -- `mcp_client/registration.py` imports `permissions` and `tools.base`,
+not `tools.builtin`, which is a near-miss a grep would report and a reader
+should not "fix". `test_docs_consistency.py` really is the only module that
+opens these documents; `project_init/doc_sets.py` merely WRITES stubs bearing
+those names. Windows Terminal on this box is still 1.24.11911.0, so the
+shift+enter paragraph's "the claim stays unmade" is still true. And the PEP 701
+sentence is correct HISTORY explaining why the AST guard replaced a token
+filter -- this box runs 3.13 and the guard is version-independent.
+
+### The understated security bound, which is the finding that mattered
+
+`read_project_doc` is registered with permission True, so it is advertised to
+every run. `AGENTS.md` said the set it reaches "on this repository is **40 files
+and ~1.1 MB at depths 0-3**", and the sentence immediately after it says why the
+figure is written down: "understating a security bound is the one direction that
+costs something."
+
+Measured through the tool's own `is_readable_doc`: **60 tracked files and 3.58
+MB** -- 1.5x the count and **3.3x the bytes**. Nobody widened the tool. The
+documents it can read got bigger, and almost all of the growth is this record:
+`DEVLOG.md` alone is 1.19 MB, with `BREAKING_CHANGES.md` (595 KB),
+`ROADMAP_v2.md` (446 KB), `ARCHITECTURE.md` (352 KB) and `AGENTS.md` (287 KB)
+another 1.6 MB between them. The drift nobody would think to re-check is the one
+where the tool stands still and its world grows.
+
+### Six more numbers, and the two that were right
+
+**`real_storage` is no longer the suite's only non-function-scoped fixture.**
+Batch 110 added `_schema_cache_is_put_back`, `scope="module"` in the same file,
+and the sentence's OWN parenthetical -- `grep -rn 'scope="module"' tests/` --
+returns both. The identical sentence sat in `tests/BREAKING_CHANGES.md` too,
+which is the hand-maintained-duplicate defect this file opens by warning about.
+**The rule is unchanged and was never wrong**: one FILE has the problem, so that
+file declares no test class.
+
+`test_tui.py` is **64** classes, not the 41 batch 114 cut -- the count rising is
+the loadscope rule WORKING, and saying 41 made it read as a one-off. The modal
+sweep is **3 x 19 = 57**, not 3 x 18 = 54. `_ALLOWED_NAMES` holds **230**, not
+231: the literal has held 230 words, none duplicated, since #52 created it and
+nothing has edited that region since -- so that one was wrong on arrival, in the
+sentence that says which names can reach the parser.
+
+**Two figures were right and the sentence around them was not.** "117 of the 213
+allowlisted callables evaluate a string handed to them ... because 214 of them
+are C extensions (the source audit could read 15)" reads as impossible, because
+214 > 213. It is not: 117/213 is over the CALLABLES and 15 + 214 = **229** is
+over the allowlisted names that RESOLVE, a population the sentence never named.
+Batch 128 named it rather than changing a number -- and re-took the measurement
+in WSL first, because the probe needs `SIGALRM` and is skipped on Windows. It
+returned 117 of 213, with the control that proves the probe still detects a
+known evaluator run first. The first attempt returned **0 of 213**, which was a
+missing `sys` in the lifted probe's globals and not a SymPy change; the control
+is the only reason that was not written down as a finding.
+
+### The denominator that cannot be gated, and what it exposed
+
+`dir(sympy)` read 926 when the four new gates ran alone and 927 when the whole
+file ran. **`dir()` on a PACKAGE is not a fixed number**: `probability_stats.py`
+does `import sympy.stats`, which binds `stats` onto the package, so the count
+moves with whatever imported first. WSL's unpinned 1.14.0 reads 928. Pinning
+`sympy` exactly does not make this stable, which is what the first draft of the
+gate assumed.
+
+The consequence is real and it is inert, which is worth having written down.
+`_SAFE_GLOBALS` is built from that same `dir(sympy)` at import time, so
+importing `probability_stats` first puts the `stats` MODULE OBJECT into it --
+against the module's own rule that "no module object is ever permitted." It is
+unreachable: `stats` is not in `_ALLOWED_NAMES`, so the name is never resolved,
+and the implicit-multiplication transform turns the bare word into `a*s**2*t**2`
+rather than a lookup; `stats.Die` and `stats.__class__` are refused with every
+other attribute because `ast.Attribute` is absent from the node allowlist.
+Measured, all four. **The name gate is what makes the globals dict's contents
+not matter.** So the denominator is approximate in the document and bounded, not
+equalled, in the gate.
+
+### What was wrong in the citations
+
+`cli.py` -- a module that has never existed in this repository, while this
+file's own §29 section says the CLI shell is `main.py`. The substance was right:
+`main.py` handles no `retract` at all, which `core/events.py` states is still
+correct about failures.
+
+`(H3/C2)` on the three-channel secret-exclusion rule. `H3` is §31's
+`RLIMIT_CPU`/`RLIMIT_AS` decision and **`C2` is defined nowhere** -- the C family
+is C1/C3/C6/C8/C10, and `ROADMAP_v2.md` uses "C1, C2, C3..." only as example
+CLAIM-ID shapes in a Pass 5 payload. `export-ignore` appears nowhere in the
+record at all; the rule lives in `docs/PRIVACY.md`. Both ids were dropped rather
+than replaced with a plausible one.
+
+`(Q7/#30)`. `Q7` is a DEVLOG question id, numbered WITHIN its own section, so it
+is unresolvable from outside by construction -- a reader who greps it lands on a
+sandbox-limits answer about `CPU_TIME_LIMIT_SECONDS`. `#30` already carried the
+sentence, so `Q7` was dropped. `ROADMAP_v2.md`'s Y3 had already recorded the
+rule this broke: "declare the namespaces; qualify the citations."
+
+**Eight criterion citations carried no qualifier.** `ROADMAP_v2.md` locks the
+grammar as LINE-scoped -- the section must appear "somewhere earlier on the same
+line" -- and all eight had it nowhere, AC4's own `§27` sitting AFTER its id,
+which is precisely what the same passage says `(D23, AC6)` got wrong. Each was
+traced to the numbered Acceptance-criteria list of its own section before being
+written: §16 AC2, `gate D0`, §21 AC1 and AC6, §23 AC1 and AC2, §27 AC3 and AC4.
+
+**And `mcp>=2.0,<3` is the pin this project pinned away FROM.**
+`requirements.txt` has `mcp==2.0.0` and explains it: under the range a minor
+release went red on main while every local run stayed green, so "CI's result
+depended on WHEN it ran, and CI was not testing what anyone runs locally." A
+document stating the abandoned shape is the one error that invites a reader to
+"fix" the code back to the defect.
+
+Four `this batch`es, each meaning a different unnamed past batch, now name it --
+54, 54, 63 and 101 -- in a file that names every other batch it cites.
+
+### Three additions
+
+`docs/TECHNICAL_DEBT.md` was **cited 15 times in the body and absent from the
+Documentation map**, while being in `ARCHITECTURE.md`'s tree. `CLAUDE.md` and
+`QWEN.md` both omitted it from the list they exist to carry. Its map bullet also
+settles the citation form, which was spelled three ways, and states what batches
+126, 127 and 128 all found the hard way: **a register entry is evidence, not
+instruction** -- measure its claim before building the fix it proposes.
+
+The **register-closure convention** was recorded nowhere but inside individual
+DEVLOG entries, although it governed batches 115-121, 126 and 127. It is now a
+Conventions bullet with its mechanical reason: a section needs a decision family
+in the map, an index row and a `(BUILT)` marker, and all three are gated.
+
+The **bandit baseline trap** joins the pre-push checklist. "With the CI job's own
+flags" was correct and omitted the part that costs an hour: the committed
+baseline is Linux path form, so locally all 129 entries miss. Rewrite a
+throwaway copy; never regenerate the committed file. Second trap in the same
+command: piping bandit to `tail` makes `$?` tail's.
+
+### Why gates rather than corrected numbers
+
+Owner decision, asked before any edit: gate every mechanically checkable figure.
+The precedent is this project's own voice in `ARCHITECTURE.md`, about a count
+that "was written as 113 in batch 84 and left there through five batches that
+added thirty keys; the test counts, this sentence did not." Seven stale numbers
+in `AGENTS.md`, none of them gated, is the same sentence about a different file.
+
+Four gates, built from helpers the docs file already had -- `_collected_nodeids`,
+`_was_narrowed`, `_project_root`, and the `git ls-files` + skip-guard shape from
+`test_no_notebook_checkpoint_file_is_committed`. Each reads the figure back OUT
+of `AGENTS.md`, so the failure names the sentence to edit rather than a constant
+in the test. **The stated cost**: a batch that adds a `Test*` class to
+`test_tui.py` or a modal case now also edits one digit here.
+
+**The doc-read bound is gated asymmetrically on purpose.** The file COUNT is
+exact -- it moves only when a document is added or removed, which is rare and
+worth being told about. The SIZE is a CEILING, because this record grows every
+batch and an equality would go red on the next commit and be retyped without
+being read, which is how a gate becomes a formality. And it counts TRACKED files
+only: this worktree holds untracked `output/`, `.qwen/reviews/` and
+`.ipynb_checkpoints/` files that `is_readable_doc` accepts quite correctly, so a
+plain walk would answer differently on every machine.
+
+### No ROADMAP section
+
+The convention this batch wrote down applies to itself: no config key, no moved
+threshold, no new decision family. Batches 115-121, 126 and 127 are the
+precedent.
+
+### Verification
+
+The four gates proved able to FAIL, not merely to pass: six negative controls,
+each breaking one figure, each red alone, the file restored from bytes held in
+memory rather than `git checkout` -- which would have destroyed the uncommitted
+batch.
+
+**12 of 12 mutation rows as expected**, and the pass had to be designed
+differently because this batch's executable half is gates. Mutating a gate
+leaves the tree and the document agreeing, so every row would read as a
+survivor. Rows split in two: TYPE A mutates what the gate MEASURES and must go
+red alone (narrowing the walk to depth 0, dropping the readability predicate,
+counting every class instead of `Test*`, counting every collected node id); TYPE
+B mutates the gate's ability to REJECT, where the kill is red-with-a-broken-
+document before and GREEN-with-the-same-broken-document after. G1 is an
+equivalence rewrite declared GREEN so the pass is shown capable of saying green.
+
+**Two of the TYPE B controls were wrong before they were right**, and the pass is
+what said so. The modal row read EQUIVALENT because its broken document said
+`3 x 19 = 54` and the product assertion fired first -- fixed by using a
+self-consistent `3 x 18 = 54`, which is the exact sentence the file carried
+until this batch. The uniqueness row read EQUIVALENT because its duplicate
+carried a DIFFERENT number, so the count assertion caught it instead of the
+refusal-to-guess the row was aimed at -- fixed by duplicating the same figures,
+leaving `== 1` as the only thing that can object.
+
+**And one row exposed a harness defect worth more than the row.** It scored
+KILLED alone and EQUIVALENT in sequence, deterministically both ways -- and a
+real survivor does not depend on what ran before it. Every mutation in this pass
+is byte-length identical to what it replaces (`==` to `>=`), CPython validates a
+cached `.pyc` on `(mtime, size)`, and two writes inside one filesystem mtime tick
+leave the stale bytecode valid. **The mutation applied to the file and never ran
+in the interpreter**, which passes every guard this project has for a mutation
+that failed to apply. Fixed by deleting the target's `.pyc` before each
+invocation and passing `PYTHONDONTWRITEBYTECODE=1` into the child.
+
+Counts 6312 -> 6316.
