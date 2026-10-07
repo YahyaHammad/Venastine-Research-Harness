@@ -1096,7 +1096,23 @@ class TestTheHeadroomIsWhatTheTriggerActuallyReserves:
         decorative: 16k of a 32k window is half of it, and an unclamped
         floor under a tiny window produces a trigger at or below zero --
         or one under keep_recent_tokens, where effective_compaction()
-        raises on every evaluation."""
+        raises on every evaluation.
+
+        THE LAST CLAUSE WAS A CLAIM THIS TEST CANNOT MAKE, and it is
+        TECHNICAL_DEBT 42. It asserted `trigger > 0` while naming
+        effective_compaction() raising, which are different claims, and of
+        the TWO dependent floors that function validates it named the one
+        that never bites first. 8,192 is in the list above and its raw
+        trigger is 6,144 -- under warning_margin_tokens (8,000), so
+        effective_compaction refused it for the whole life of this test.
+
+        The clause is now gone rather than asserted, because the cap
+        CANNOT deliver it: at 0.75*window the raw trigger clears 8,000
+        only from 10,667 up, so no clamp on headroom_for makes a small
+        window acceptable. That is derived_trigger's floor, and the claim
+        lives with it in
+        TestTheDerivedTriggerStaysAboveWhatTheValidatorsDemand below.
+        """
         for window in (8_192, 16_384, 32_768):
             headroom = compaction.headroom_for(window)
             trigger = window - headroom
@@ -1115,6 +1131,185 @@ class TestTheHeadroomIsWhatTheTriggerActuallyReserves:
 
         assert headrooms == sorted(headrooms)
         assert all(w - h > 0 for w, h in zip(windows, headrooms))
+
+
+# ---------------------------------------------------------------------------
+# ---- Batch 127: TECHNICAL_DEBT 42, the trigger's dependent floor -----------
+# ---------------------------------------------------------------------------
+
+class TestTheDerivedTriggerStaysAboveWhatTheValidatorsDemand:
+    """effective_compaction() validates the trigger against TWO settings of
+    identical form, and the derivation could produce a value that fails one
+    of them. `should_compact()` runs at the top of every step and both
+    `_maybe_compact` call sites are bare `yield from`, so that was not a
+    mistimed fold -- it was every turn on the model dying before the first
+    model call.
+
+    MEASURED, not reasoned. The raw derivation is 0.75*window at the small
+    end, so it clears keep_recent_tokens (4,000) from a window of 5,334 up
+    and warning_margin_tokens (8,000) only from 10,667 up. Bisected against
+    the code: the largest window that raises is 10,666.
+
+    THE ROUTE MATTERS AND THE REGISTER NAMED THE WRONG ONE. /window refuses
+    anything at or below 20,000, which is stricter than 10,666, so the
+    command the entry blamed is the one route that was covered. The
+    unguarded source is what the PROVIDER reported -- and 8,192 is the
+    commonest real window a self-hosted or gateway endpoint returns.
+    """
+
+    def test_a_provider_reported_small_window_no_longer_kills_every_turn(self):
+        """THE TEST THAT WOULD HAVE CAUGHT IT, and it has to drive
+        should_compact rather than headroom_for: the defect was not in the
+        arithmetic, it was in what the arithmetic was then handed to. A
+        unit test on the derivation puts the needle inside its own
+        haystack.
+
+        8,192 primed into the window cache is source 1 of context_limit --
+        what the provider said -- which is the one source with no guard in
+        front of it."""
+        from core import client
+
+        client._context_window_cache[("probe-provider", "small-model")] = 8_192
+
+        # Before batch 127 this raised ValueError out of a function that
+        # runs at the top of every step.
+        action = compaction.should_compact(
+            5_000, "small-model", provider_name="probe-provider")
+
+        assert action in ("", "warn", "compact")
+
+    def test_the_raw_derivation_is_still_refused_and_the_floor_is_why(
+            self, mocker):
+        """The floor is doing the work, not a change in the arithmetic.
+        Asserted as BOTH halves so a later author cannot read the pass as
+        'the derivation got bigger': the raw value is still rejected by the
+        validator, and derived_trigger no longer returns it."""
+        mocker.patch.object(compaction, "context_limit", return_value=8_192)
+
+        raw = 8_192 - compaction.headroom_for(8_192)
+        assert raw == 6_144
+        with pytest.raises(ValueError, match="warning_margin_tokens"):
+            config_loader.effective_compaction({"trigger_tokens": raw})
+
+        trigger = compaction.derived_trigger("small-model")
+
+        assert trigger > raw
+        config_loader.effective_compaction({"trigger_tokens": trigger})
+
+    @pytest.mark.parametrize("window", [1, 4_096, 8_192, 10_666, 10_667,
+                                        16_384, 20_001, 32_768, 65_536])
+    def test_no_window_derives_a_trigger_the_validator_refuses(
+            self, window, mocker):
+        """The claim the old clamp test NAMED and could not make, now
+        asserted through effective_compaction itself rather than against
+        whichever of the two floors the author had in mind. Parametrized
+        across the boundary so a failure names the window."""
+        mocker.patch.object(compaction, "context_limit", return_value=window)
+
+        trigger = compaction.derived_trigger("any-model")
+
+        config_loader.effective_compaction({"trigger_tokens": trigger})
+
+    def test_the_boundary_between_derived_and_floored_is_exact(self, mocker):
+        """10,666 / 10,667, bisected against the code. Exactness matters
+        because this is where the value stops being a derivation: one side
+        honours the fraction and the other returns the floor, and a record
+        that names the wrong boundary is what this batch is about.
+
+        THE TWO CURVES MEET EXACTLY HERE, with no gap and no jump -- at
+        10,667 the derivation is 8,001, which IS the floor. That is not a
+        coincidence to be asserted loosely: the floor is margin + 1 and the
+        boundary is the first window whose 0.75 share reaches margin + 1,
+        so they are the same number by construction. Written as a
+        continuity check, because a floor that overlapped would hide a
+        range where the trigger moved without the window moving, and one
+        that left a gap would hide a window with no acceptable trigger at
+        all.
+
+        AND THE RAW CURVE IS FLAT IN PLACES, which is why the first window
+        strictly above the floor is 10,669 and not 10,668. headroom_for
+        truncates, so the raw trigger gains 3 tokens every 4 of window and
+        repeats a value at each step: 10,667 and 10,668 both derive 8,001.
+        Measured, not predicted -- the first draft of this test asserted
+        10,668 and was wrong twice."""
+        floor = compaction._dependent_floor()
+
+        def derived_for(window):
+            mocker.patch.object(compaction, "context_limit",
+                                return_value=window)
+            return compaction.derived_trigger("m")
+
+        def raw_for(window):
+            return max(1, window - compaction.headroom_for(window))
+
+        assert raw_for(10_666) == 8_000 < floor
+        assert derived_for(10_666) == floor
+
+        assert raw_for(10_667) == floor
+        assert derived_for(10_667) == floor
+
+        assert raw_for(10_668) == floor          # flat: the truncation
+        assert derived_for(10_668) == floor
+
+        assert raw_for(10_669) == 8_002 > floor
+        assert derived_for(10_669) == 8_002
+
+    def test_the_floor_is_read_from_the_settings_and_not_written_in(
+            self, mocker):
+        """8,001 would be correct today and wrong the moment someone edited
+        config.yaml:830. The floor must follow the validator it exists to
+        satisfy, so this MOVES the setting and re-derives rather than
+        asserting the shipped number."""
+        mocker.patch.object(
+            config_loader, "get_settings",
+            return_value={"compaction": {"warning_margin_tokens": 20_000}})
+        mocker.patch.object(compaction, "context_limit", return_value=8_192)
+
+        assert compaction._dependent_floor() == 20_001
+        assert compaction.derived_trigger("m") == 20_001
+
+    def test_the_floor_tracks_whichever_dependent_floor_is_larger(
+            self, mocker):
+        """BOTH validators, not the one that bites today. keep_recent_tokens
+        never bites first under the shipped numbers, which is exactly what
+        made checking only it read as covered -- so the floor is asserted
+        against the case where it is the larger of the two."""
+        mocker.patch.object(
+            config_loader, "get_settings",
+            return_value={"compaction": {"keep_recent_tokens": 30_000,
+                                         "warning_margin_tokens": 8_000}})
+        mocker.patch.object(compaction, "context_limit", return_value=8_192)
+
+        assert compaction._dependent_floor() == 30_001
+        config_loader.effective_compaction(
+            {"trigger_tokens": compaction.derived_trigger("m")})
+
+    def test_a_large_window_is_untouched_by_the_floor(self, mocker):
+        """The floor must not become a second trigger policy. Above the
+        boundary the fraction has to survive EXACTLY -- the owner asked for
+        0.90 and a 262k thread still gets 0.90, which is the property
+        test_a_large_window_gets_the_fraction_exactly guards for
+        headroom_for and this guards for the value callers actually read."""
+        for window in (163_840, 200_000, 262_144, 1_000_000):
+            mocker.patch.object(compaction, "context_limit",
+                                return_value=window)
+
+            assert (compaction.derived_trigger("m")
+                    == int(config.COMPACTION_TRIGGER_FRACTION * window)), window
+
+    def test_the_floor_falls_back_rather_than_becoming_the_blocker(
+            self, mocker):
+        """A floor that cannot be computed must never be the reason a
+        thread cannot compact. effective_compaction() cannot raise under
+        the shipped default, but a settings.json naming a small
+        trigger_tokens makes it raise on the way to reporting the margins,
+        and derived_trigger has callers outside thresholds()."""
+        mocker.patch.object(config_loader, "effective_compaction",
+                            side_effect=ValueError("settings are incoherent"))
+
+        assert compaction._dependent_floor() == max(
+            config.COMPACTION_WARNING_MARGIN_TOKENS,
+            config.COMPACTION_KEEP_RECENT_TOKENS) + 1
 
 
 # ---------------------------------------------------------------------------

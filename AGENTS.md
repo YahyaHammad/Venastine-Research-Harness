@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 6293 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
+pytest                                            # 6312 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -1632,6 +1632,25 @@ what makes an early, frequent trigger safe.
   per-invocation slot rather than as a fifth tier. `COMPACTION_TRIGGER_TOKENS`
   survives as the trigger for the one caller with no model in scope,
   `pin_measurements`, so #89's cap is unchanged.
+- **And there is a THIRD clamp, below the two above: the dependent floor**
+  (TECHNICAL_DEBT 42, batch 127). `effective_compaction()` validates the trigger
+  against two settings of identical form — `warning_margin_tokens` and
+  `keep_recent_tokens`, each of which must be STRICTLY below it — so
+  `derived_trigger()` floors at `max(margin, keep_recent) + 1`. Without it the cap
+  above held the trigger at `0.75*window` at the small end, which clears
+  `keep_recent_tokens` from a window of 5,334 up but `warning_margin_tokens` only
+  from **10,667** up: a provider reporting **8,192** derived 6,144, and
+  `should_compact()` raised `ValueError` at the top of every step with both
+  `_maybe_compact` call sites bare, so **every turn on that model died before the
+  first model call**. Reachable by what the PROVIDER reports, never by `/window`,
+  which refuses anything at or below 20,000.
+  **The floor is READ, through `effective_compaction()` itself, and a literal here is
+  a defect** — it must be the same resolution the validator uses or it drifts from the
+  number it exists to satisfy the moment someone edits `config.yaml`. **Below ~10,667
+  the returned value is the floor rather than the share, so the fraction stops
+  describing it**; that is stated rather than discovered. Do not "fix" this by
+  catching the `ValueError` at the call sites: compaction would then silently never
+  run on that model.
 - **`context_limit()` now decides when every thread folds, so its sources matter**
   (WS6, WS10). Order: a REMEMBERED window (`core/model_windows.py`, written by
   `/window`, kept per `(provider, model)` across launches) → the provider's own

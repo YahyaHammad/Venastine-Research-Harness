@@ -291,9 +291,19 @@ def headroom_for(window: int) -> int:
         thread gets the fraction exactly as configured.
       * COMPACTION_MAX_HEADROOM_FRACTION keeps the floor from eating a
         small window whole -- 16k of a 32k window is half of it -- and it
-        is what keeps the resulting trigger positive and above
-        keep_recent_tokens at the bottom of the range, where
-        effective_compaction() would otherwise raise.
+        is what keeps the resulting trigger positive at the bottom of the
+        range.
+
+    AND THAT IS NOT SUFFICIENT, which is TECHNICAL_DEBT 42 and the reason
+    derived_trigger() now floors below. This bullet used to end "and above
+    keep_recent_tokens at the bottom of the range, where
+    effective_compaction() would otherwise raise" -- true, and it names
+    ONE of the two dependent floors that function validates. The cap holds
+    the trigger at 0.75*window down here, so it clears keep_recent_tokens
+    (4,000) from a window of 5,334 up and clears warning_margin_tokens
+    (8,000) only from 10,667 up. Measured: keep_recent_tokens never bites
+    first anywhere in the range, which is exactly what made checking only
+    it read as covered.
 
     MEASURED, not reasoned: the thread that produced this batch grew by
     31,733 proxy tokens in ONE step (a single 117k-character arxiv_search
@@ -313,6 +323,50 @@ def headroom_for(window: int) -> int:
     return int(min(max(share, floor), cap))
 
 
+def _dependent_floor() -> int:
+    """The smallest trigger effective_compaction() will accept.
+
+    TECHNICAL_DEBT 42. That function validates the trigger against two
+    settings of identical form -- `warning_margin_tokens` and
+    `keep_recent_tokens`, each of which must be STRICTLY below it -- so the
+    smallest acceptable trigger is one above the larger of the two.
+
+    READ, NEVER HARDCODED, and that is the whole point of the helper. The
+    numbers are 8,000 and 4,000 today; a literal 8,001 here would be
+    correct until someone edited config.yaml:830, and then it would be a
+    floor that no longer matches the validator it exists to satisfy. This
+    reads the SAME resolution the validator reads, so the two cannot drift
+    apart -- which is item 41's lesson applied to the fix and not only to
+    the register entry.
+
+    Bare, with no overrides, deliberately: a per-invocation
+    `trigger_tokens` is the value being floored and must not decide its own
+    floor, while the two margins resolve identically either way.
+
+    COSTS ONE MERGE on should_compact()'s path. Measured: 3.267us against
+    thresholds()'s 4.918us, so 66% of it in relative terms and 0.065ms per
+    step of a research run in absolute ones -- against 4.696ms for one
+    ordinary tool result's redaction pass. The relative figure is the one
+    that looks alarming and the absolute figure is the one that is true.
+
+    DEFENSIVE ABOUT ITS OWN READ. effective_compaction() cannot raise under
+    config.yaml's 40,000 default, but a user settings.json naming a small
+    `trigger_tokens` makes it raise on the way to telling us the margins --
+    and derived_trigger() has callers outside thresholds(). A floor that
+    cannot be computed must never become the reason a thread cannot
+    compact, so this falls back to the config.py constants, which are the
+    same numbers one tier down.
+    """
+    try:
+        settings = config_loader.effective_compaction()
+        margin = settings["warning_margin_tokens"]
+        keep_recent = settings["keep_recent_tokens"]
+    except Exception:  # noqa: BLE001 -- see above
+        margin = config.COMPACTION_WARNING_MARGIN_TOKENS
+        keep_recent = config.COMPACTION_KEEP_RECENT_TOKENS
+    return max(margin, keep_recent) + 1
+
+
 def derived_trigger(model: str, provider_name: Optional[str] = None) -> int:
     """The working-set trigger for this model: its window less headroom.
 
@@ -330,9 +384,32 @@ def derived_trigger(model: str, provider_name: Optional[str] = None) -> int:
     positive number, and effective_compaction() raises on a trigger below
     1, so this exists to keep an absurd window from turning into a
     confusing error two layers away from the value that caused it.
+
+    AND FLOORED AGAIN, above the dependent floors (TECHNICAL_DEBT 42).
+    Headroom's cap holds the trigger at 0.75*window down here, so a window
+    of 10,666 or less derives a trigger at or below warning_margin_tokens
+    and effective_compaction() raises -- on should_compact()'s path, which
+    runs at the top of every step, with both _maybe_compact call sites bare
+    `yield from`. Every turn on such a model died before the first model
+    call.
+
+    REACHED BY A PROVIDER, NOT BY A COMMAND, which is what the register
+    entry got wrong. /window refuses anything at or below the pipeline
+    backstop margin (20,000), which is stricter than 10,666 and covers that
+    route by coincidence; MODEL_CONTEXT_WINDOWS's smallest entry is 200,000
+    and DEFAULT_CONTEXT_WINDOW is 256,000. Source 1 -- what the provider
+    SAID -- has no guard at all, and 8,192 is the commonest real window a
+    self-hosted or gateway endpoint reports.
+
+    BELOW ~10,667 THIS STOPS BEING A DERIVATION, and that is said out loud
+    rather than left to be discovered. The returned value is the floor, not
+    0.75*window, so the fraction no longer describes it. A derivation that
+    silently stops deriving is the drift class this record is full of; the
+    alternative was distrusting the provider's own number, which is a
+    larger claim for a smaller gain.
     """
     window = context_limit(model, provider_name)
-    return max(1, window - headroom_for(window))
+    return max(1, window - headroom_for(window), _dependent_floor())
 
 
 def _trigger_is_configured() -> bool:

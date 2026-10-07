@@ -355,15 +355,27 @@ def _parse_atom_feed(xml_text: str) -> tuple:
         published_text = _text_of(entry, "atom:published")
         published = published_text[:10] if published_text else None
 
-        # A nameless <author> is DROPPED rather than inserted as None: this
-        # list is rendered into a citation, and `None` in it reads as an
-        # author called None.
+        # A NAMELESS ELEMENT IS DROPPED RATHER THAN INSERTED AS None, and
+        # this is one rule for BOTH lists below (TECHNICAL_DEBT 47). Both
+        # come from the same attacker-influenced feed and both reach the
+        # model the same way, so they must not disagree about it: a `None`
+        # in a list rendered into a citation reads as an author called None
+        # and as a category called None.
         #
-        # BOUNDED SINCE BATCH 126, and this is the field TECHNICAL_DEBT 41
-        # was about without naming it. The count is kept before the cut
-        # because `author_count` reports the real total -- the point of the
-        # key is that the model can tell a 2,832-author paper from a
-        # 25-author one, which the truncated list alone cannot say.
+        # `categories` kept its None until batch 127. The rule was stated
+        # here, two lines above the list that did not follow it, which is
+        # why the comment now names both instead of being copied.
+        #
+        # BOUNDED SINCE BATCH 126, and `authors` is the field
+        # TECHNICAL_DEBT 41 was about without naming it. The count is kept
+        # before the cut because `author_count` reports the real total --
+        # the point of the key is that the model can tell a 2,832-author
+        # paper from a 25-author one, which the truncated list alone cannot
+        # say.
+        #
+        # DROPPED BEFORE THE CUT for both, so the cap counts values the
+        # model can actually use: filtering after the slice would let a
+        # nameless element consume one of the 25 or 20 places.
         all_authors = [
             name for name in (
                 _text_of(author, "atom:name")
@@ -372,8 +384,12 @@ def _parse_atom_feed(xml_text: str) -> tuple:
         ]
         author_count = len(all_authors)
         authors = all_authors[:_MAX_AUTHORS]
-        all_categories = [c.get("term")
-                          for c in entry.findall("atom:category", ATOM_NS)]
+        all_categories = [
+            term for term in (
+                c.get("term")
+                for c in entry.findall("atom:category", ATOM_NS)
+            ) if term
+        ]
         categories = all_categories[:MAX_CATEGORIES]
 
         pdf_url = None

@@ -2270,7 +2270,7 @@ model at its abs page answers a question nobody asked.
   `authors` drops a nameless entry with a comment saying why `None` in a
   rendered list reads as a value. Pre-existing and left alone; item 47.
 
-## 42. A window under ~9.4k makes `effective_compaction()` raise (open)
+## 42. A small window makes `effective_compaction()` raise (closed, batch 127)
 
 Pre-existing, and found while tabling batch 119's trigger against small
 windows. `warning_margin_tokens` is 8,000 and the loader refuses a pair
@@ -2281,11 +2281,64 @@ the derived trigger at or below 8,000 turns every `thresholds()` call into a
 `ValueError`: `should_compact()` runs at the top of every step.
 
 True before batch 119 as well (a 8,192-token window derived 6,963 against
-the same 8,000) and not made materially worse by it (6,144). Unreachable
-with the shipped roster and `DEFAULT_CONTEXT_WINDOW` at 256k; reachable by
-anyone who types `/window 8k` for a small local model. The margin should
-probably scale with the trigger the way the headroom now scales with the
-window.
+the same 8,000) and not made materially worse by it (6,144).
+
+### The diagnosis was right and two of its details were wrong (batch 127)
+
+The defect is real, reachable and worse than the entry implies. Both
+`_maybe_compact` call sites are bare `yield from` (`core/loop.py:1571`,
+`:1828`), so this is not a mistimed fold: **every turn on such a model dies
+at the turn boundary before the first model call.** The harness is unusable
+there, which the entry's "turns every `thresholds()` call into a
+`ValueError`" states without drawing the conclusion.
+
+**The boundary is `w <= 10,666`, not "~9.4k".** Bisected against the code.
+`headroom_for`'s cap holds the trigger at `0.75*window` at the small end, so
+the raw derivation clears 8,000 only from 10,667 up. The heading carried the
+wrong number; it now carries none.
+
+**The route was the one route that was covered.** The entry says *"reachable
+by anyone who types `/window 8k`"*. `/window` **refuses** anything at or
+below `compaction_pipeline_backstop_tokens` = 20,000 (`tui/app.py:5561`),
+which is stricter than 10,666 -- so that path was guarded, by a check
+written for a different reason. Of `context_limit`'s four sources,
+`MODEL_CONTEXT_WINDOWS`' smallest entry is 200,000 and
+`DEFAULT_CONTEXT_WINDOW` is 256,000. **Source 1 -- what the provider SAID --
+has no guard at all,** and 8,192 is the commonest real window a self-hosted
+or gateway endpoint reports. The eager validation existed on the command a
+human types (`/trigger`, `tui/app.py:5635`, whose comment describes this
+exact failure) and was absent on the value a server asserts.
+
+**And the test that covered this region checked the other floor.**
+`test_the_floor_cannot_eat_a_small_window_whole` iterates 8,192 -- the
+failing window -- and asserted `trigger > 0` while its docstring named
+`effective_compaction()` raising *"or one under keep_recent_tokens"*. Of the
+two dependent floors, it named the one that **never bites first**: the cap
+clears `keep_recent_tokens` (4,000) from a window of 5,334 up and
+`warning_margin_tokens` (8,000) only from 10,667 up. One field checked where
+two had the same shape, which is item 41's error in a different file.
+
+### The fix
+
+`derived_trigger` floors above `max(warning_margin_tokens,
+keep_recent_tokens) + 1`, **read** through `effective_compaction()` -- the
+same resolution the validator reads, so a literal cannot drift from the
+number it exists to satisfy. Both validators are covered, including the one
+shielded today, because the defect is the class and not the instance.
+
+The margin-scaling the entry proposed was **not** taken: it changes the
+meaning of a setting a human may have written an absolute into, and the
+floor answers the defect without that. Containment at the `_maybe_compact`
+sites was rejected outright -- compaction would then silently never run on
+that model, which is the quiet-failure class this project keeps closing.
+
+Below ~10,667 the returned value is the floor rather than `0.75*window`, so
+the fraction stops describing it; that is stated in `derived_trigger`'s
+docstring rather than left to be discovered. Cost: one extra
+`effective_compaction()` merge on `should_compact()`'s path, measured at
+**3.267us** against `thresholds()`'s 4.918us -- 66% of it in relative terms,
+**0.065ms per step** of a research run in absolute ones, against **4.696ms**
+for one ordinary tool result's redaction pass.
 
 ## 43. The npm launcher reads stdin on first run, then waits with the console inherited (open)
 
@@ -2358,7 +2411,7 @@ policy is in one place and is correct, and exactly one shell asks for it.
 A second shell can be added without moving anything, which is the whole
 value the placement was bought for.
 
-## 46. `check_output_policy`'s walk bounds depth and not breadth (open)
+## 46. `check_output_policy`'s walk bounds depth and not breadth (closed, batch 127 -- breadth is the wrong axis)
 
 Found while closing item 41, and PRE-EXISTING. `_walk` descends into lists
 and dicts with `_MAX_SCAN_DEPTH = 12`, which fails CLOSED on depth -- a
@@ -2379,7 +2432,45 @@ fail closed the way the depth one does, and "refuse a result for being wide"
 needs its own argument. The measurement to take first is the wall-clock cost
 of a deliberately wide result, which nobody has.
 
-## 47. `categories` keeps a `None` where `authors` drops one (open)
+### The measurement, and why BREADTH is the wrong axis (batch 127)
+
+Taken. The measured instance is **negligible**: 2,832 leaves of an ordinary
+author name cost **4.70ms**, against a network call that took hundreds of
+milliseconds to produce them. Per-leaf cost is **1.66us** for a short string.
+
+But the per-leaf figure is not a constant, and that is the finding. Holding
+the payload at **2,000,000 bytes** and varying only the shape:
+
+| leaves | chars/leaf | cost |
+|---|---|---|
+| 20 | 100,000 | 19.65ms |
+| 200 | 10,000 | 19.58ms |
+| 2,000 | 1,000 | 24.40ms |
+| 20,000 | 100 | 59.74ms |
+| 200,000 | 10 | **351.20ms** |
+
+And holding leaves at 2,832 while varying bytes: 4.89ms at 10 chars each,
+**289.58ms** at 10,000 each. So the cost is `a*leaves + b*bytes` with **both
+terms real** -- an 18x spread at constant bytes, and a 59x spread at constant
+breadth.
+
+**That is what makes a breadth cap the wrong instrument, and it is a
+stronger objection than the cost one this entry anticipated.** A breadth cap
+does not bound the function: 20 leaves of arbitrary length passes any
+breadth cap and is unbounded in cost. A **total-size** bound does bound it,
+because leaves cannot exceed bytes -- so one instrument closes both terms
+and the other closes neither. The entry proposed the cap that cannot work,
+which is item 41's error again: the right defect, the wrong fix shape.
+
+CLOSED AS RECORDED. The depth bound stays as it is, no breadth bound is
+added, and `_walk` is unchanged. What the measurement actually found is a
+**producer-side** gap -- `structured_content` from an MCP server has no size
+bound of any kind, which is where the unbounded cost enters and is item 48
+rather than a widening of this one. "Fix at the producer" is what this
+module's own docstring says, and batch 126 did exactly that for the feed
+that produced the 2,832 names.
+
+## 47. `categories` keeps a `None` where `authors` drops one (closed, batch 127)
 
 Found while closing item 41. `_parse_atom_feed` builds `categories` as
 `[c.get("term") for c in ...]`, so a `<category>` with no `term` attribute
@@ -2392,3 +2483,51 @@ the same way, so the two should not disagree about this. Trivial to fix and
 deliberately NOT folded into batch 126, whose scope was the two bounds --
 a one-line change to an untested branch is still a change to what the model
 is handed, and it wants its own test rather than a ride.
+
+### Fixed in batch 127
+
+`all_categories` gained the filter `all_authors` already had, and the
+comment above both now states the rule ONCE for the pair rather than being
+copied -- the rule was already written two lines above the list that did not
+follow it, which is how they came to disagree.
+
+Both lists drop the malformed element **before** the cut, so the cap counts
+values the model can use: filtering after the slice would let a nameless
+element consume one of the 25 or 20 places.
+
+TESTED IN `test_untrusted_content.py`, NOT `test_paging.py`, because the
+author half of the same claim has lived in that file's malformed-feed table
+since batch 117 -- a table row for the category case, a direct test beside
+`test_a_nameless_author_is_dropped_not_rendered_as_None`, and a third test
+asserting the RULE over both lists so that fixing one and not the other
+fails. That third test is the one this item would have been caught by.
+
+## 48. An MCP result has no size bound of any kind (open)
+
+Found while measuring item 46, and PRE-EXISTING: it is §17's, not batch
+127's.
+
+`mcp_client/client.py:209` puts a server's `structured_content` into
+`out["result"]` untouched, and `mcp_client/` contains **no size constant at
+all** -- not a byte cap, not a breadth cap, not a depth cap. Every other
+model-facing third-party text in this project is bounded at the producer:
+`fetch_url`'s `MAX_CONTENT_BYTES` (§31 H7, #55), `arxiv_search`'s
+`MAX_FEED_BYTES` and field caps (batch 126), `MAX_SUMMARY_CHARS` (§51 PG8).
+MCP is the one producer that is not, and it is the one whose payload is
+written by a third party nobody here reviewed.
+
+**Measured, as part of item 46.** `check_output_policy` costs
+`a*leaves + b*bytes`, and both terms are unbounded here: 200,000 short
+leaves cost **351ms** and 2,832 leaves of 10,000 chars cost **290ms**, so an
+unbounded result is unbounded redaction time on the dispatch path, before
+the text is also unbounded context. A total-size bound is the one instrument
+that closes both terms, since leaves cannot exceed bytes.
+
+RECORDED RATHER THAN FIXED, and the reason is that the bound's SHAPE is a
+real decision rather than a wiring job. #131 requires bounding this; PG8 and
+§31 H7 give two different answers for how (per-item caps with a named route,
+versus refusing to read past a ceiling), and neither transfers cleanly to
+arbitrary JSON from an arbitrary server. Batch 126's own argument applies:
+truncating a structured document is PG5's splice, and refusing one outright
+is a tool the user configured becoming unusable. The measurement to take
+first is what real MCP servers actually return, which nobody here has.

@@ -388,6 +388,11 @@ class TestAMalformedFeedDegradesInsteadOfAborting:
         ("author with no name", _ID + _TITLE + _SUMMARY + _PUBLISHED
          + "<author></author>", 1),
         ("no authors at all", _ID + _TITLE + _SUMMARY + _PUBLISHED, 1),
+        # TECHNICAL_DEBT 47, batch 127. The author row above has been here
+        # since batch 117 and its category twin had not -- which is how the
+        # two lists came to disagree about the same malformation.
+        ("category with no term", _ID + _TITLE + _SUMMARY + _PUBLISHED
+         + _AUTHOR + "<category/>", 1),
     ])
     def test_an_omission_is_not_an_exception(self, http, label, inner, kept):
         """Every one of these raised out of the tool before batch 117."""
@@ -448,3 +453,42 @@ class TestAMalformedFeedDegradesInsteadOfAborting:
         result = arxiv.run({"keywords": "malformed-nameless-author"})
 
         assert result["results"][0]["authors"] == ["Real Name"]
+
+    def test_a_termless_category_is_dropped_the_way_a_nameless_author_is(
+            self, http):
+        """TECHNICAL_DEBT 47. The SAME malformation in the sibling list, two
+        lines away in `_parse_atom_feed`, and until batch 127 the two
+        disagreed: `authors` dropped a nameless entry with a comment stating
+        why, and `categories` kept the None.
+
+        Both lists come from the same attacker-influenced feed and reach the
+        model the same way, so a reader of either one must not have to know
+        which. Asserted as the list rather than as `None not in ...`, so a
+        future cut that kept the wrong elements cannot pass."""
+        from tools.builtin import arxiv
+
+        http.respond(text=_entries(
+            _ID + _TITLE + _SUMMARY + _PUBLISHED + _AUTHOR
+            + '<category term="cs.AI"/><category/><category term="cs.LG"/>'))
+
+        result = arxiv.run({"keywords": "malformed-termless-category"})
+
+        assert result["results"][0]["categories"] == ["cs.AI", "cs.LG"]
+
+    def test_the_two_lists_agree_about_a_malformed_element(self, http):
+        """The RULE, not the two instances of it -- a test that fails if
+        someone fixes one list and not the other, which is exactly the
+        state batch 127 found. Both lists carry one usable value and one
+        malformed sibling, and neither may surface a None."""
+        from tools.builtin import arxiv
+
+        http.respond(text=_entries(
+            _ID + _TITLE + _SUMMARY + _PUBLISHED
+            + "<author><name>Real Name</name></author><author></author>"
+            + '<category term="cs.AI"/><category/>'))
+
+        entry = arxiv.run({"keywords": "malformed-both-lists"})["results"][0]
+
+        assert entry["authors"] == ["Real Name"]
+        assert entry["categories"] == ["cs.AI"]
+        assert None not in entry["authors"] + entry["categories"]

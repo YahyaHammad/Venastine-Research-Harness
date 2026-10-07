@@ -18719,3 +18719,126 @@ then died. Worth recording because the asymmetry was in work written in this bat
 had just written the same boundary test twice: 22 of 22 rows as expected on the re-run, 21 killed
 by the test named for each and the twenty-second an equivalence rewrite declared GREEN so the pass
 is shown capable of saying green.
+
+## Batch 127 -- three bounds, each checked against one of two siblings (2026-10-07)
+
+**TECHNICAL_DEBT 42, 46 and 47, closed.** Batch 126 closed item 41 and recorded two findings rather
+than widening into them; reviewing the register for the next batch found a third item with the same
+defect **in the entry itself**. So this batch is the measurements three entries deferred, and the
+shape they share is one bound written and a sibling of equal standing left unchecked:
+`warning_margin_tokens` against `keep_recent_tokens`, `authors` against `categories`, depth against
+breadth. In each case the gap is invisible from the side that was looked at.
+
+### Item 42 was right about the defect and wrong about where it comes from
+
+The entry read *"A window under ~9.4k makes `effective_compaction()` raise"*, and both of its
+specifics were wrong while the defect was worse than it said.
+
+**THE BOUNDARY IS `w <= 10,666`, not ~9.4k.** Bisected against the code rather than re-derived from
+my own arithmetic, which is also what caught the plan's figure being right by luck.
+`headroom_for`'s cap holds the trigger at `0.75*window` at the small end, so the raw derivation
+clears `warning_margin_tokens` only from 10,667 up.
+
+**THE ROUTE IT NAMED WAS THE ONE ROUTE THAT WAS COVERED.** It says *"reachable by anyone who types
+`/window 8k`"*. `/window` **refuses** anything at or below `compaction_pipeline_backstop_tokens` =
+20,000 (`tui/app.py:5561`) -- stricter than 10,666, by a guard written for the pipeline backstop and
+not for this. Of `context_limit`'s four sources, `MODEL_CONTEXT_WINDOWS`' smallest entry is 200,000
+and `DEFAULT_CONTEXT_WINDOW` is 256,000. **Source 1 -- what the provider SAID -- has no guard at
+all**, and 8,192 is the commonest real window a self-hosted or gateway endpoint reports. So the
+eager validation existed on the command a human types (`/trigger`, `tui/app.py:5635`, whose comment
+describes this failure exactly: *"accepted here and raises ValueError later inside should_compact()
+-- on the hot path, mid-turn, a long way from the command that caused it"*) and was absent on the
+value a server asserts.
+
+**AND IT IS WORSE THAN "RAISES".** Both `_maybe_compact` call sites are bare `yield from`
+(`core/loop.py:1571`, `:1828`). Measured end to end with 8,192 primed into the window cache:
+`ValueError` out of `should_compact`, which runs at the top of every step -- so **every turn on such
+a model died before the first model call.** The harness is unusable there, which the entry stated
+without drawing.
+
+**THE TEST THAT COVERED THIS REGION CHECKED THE OTHER FLOOR.**
+`test_the_floor_cannot_eat_a_small_window_whole` iterates **8,192** -- the failing window -- and
+asserted `trigger > 0` while its own docstring named `effective_compaction()` raising *"or one under
+`keep_recent_tokens`"*. Of the two dependent floors, it named the one that **never bites first**: the
+cap clears `keep_recent_tokens` (4,000) from a window of 5,334 up and `warning_margin_tokens`
+(8,000) only from 10,667 up. One field checked where two had the same shape, which is item 41's
+error in a different file. The clause is now **removed rather than asserted**, because no clamp on
+`headroom_for` can deliver it; the claim lives with `derived_trigger`, where the floor is.
+
+**The fix is a floor, READ and not written in.** `derived_trigger` returns
+`max(1, window - headroom_for(window), _dependent_floor())`, where the floor is
+`max(warning_margin_tokens, keep_recent_tokens) + 1` resolved through `effective_compaction()` --
+the same resolution the validator reads, so a literal `8_001` cannot drift from the number it exists
+to satisfy. Both validators are covered, including the one shielded today, because the thesis is the
+class and not the instance. The margin-scaling the entry proposed was **not** taken: it changes the
+meaning of a setting a human may have written an absolute into, and the floor answers the defect
+without it. Containment at the `_maybe_compact` sites was rejected outright -- compaction would then
+silently never run on that model, which is the quiet-failure class this project keeps closing.
+
+**THE TWO CURVES MEET AT EXACTLY ONE WINDOW, and the raw one is flat in places.** At 10,667 the
+derivation is 8,001, which IS the floor -- not a coincidence, since the floor is `margin + 1` and the
+boundary is the first window whose 0.75 share reaches `margin + 1`. Asserted as a **continuity**
+check, because an overlap would hide a range where the trigger moved without the window moving and a
+gap would hide a window with no acceptable trigger at all. The first window strictly above the floor
+is **10,669**, not 10,668: `headroom_for` truncates, so the trigger gains 3 tokens per 4 of window
+and repeats a value at each step. That test asserted 10,668 first and was wrong twice before it was
+measured.
+
+**The cost, measured because the plan required it before it shipped.** One extra
+`effective_compaction()` merge on `should_compact()`'s path: **3.267us** against `thresholds()`'s
+**4.918us**. That is 66% of it in relative terms and **0.065ms per step** of a research run in
+absolute ones, against **4.696ms** for one ordinary tool result's redaction pass. The relative figure
+is the one that looks alarming and the absolute figure is the one that is true, so both are recorded.
+
+### Item 46: the measurement was taken, and BREADTH is the wrong axis
+
+The entry asked for *"the wall-clock cost of a deliberately wide result, which nobody has"*. Taken,
+and the measured instance is **negligible**: 2,832 leaves of an ordinary author name cost **4.70ms**,
+against a network call that took hundreds of milliseconds to produce them.
+
+But the per-leaf cost is not a constant, and that is the finding. Holding the payload at **2,000,000
+bytes** and varying only the shape: 20 leaves of 100,000 chars cost **19.65ms**, and 200,000 leaves
+of 10 chars cost **351.20ms** -- an 18x spread at constant bytes. Holding leaves at 2,832 and varying
+bytes: **4.89ms** at 10 chars each, **289.58ms** at 10,000 each -- a 59x spread at constant breadth.
+The cost is `a*leaves + b*bytes` with **both terms real**.
+
+**That is a stronger objection to a breadth cap than the cost one the entry anticipated.** A breadth
+cap does not BOUND the function: 20 leaves of arbitrary length passes any breadth cap and is
+unbounded. A **total-size** bound does bound it, because leaves cannot exceed bytes -- so one
+instrument closes both terms and the other closes neither. The entry proposed the cap that cannot
+work, which is item 41's error again: the right defect, the wrong fix shape. `_walk` is unchanged,
+the depth bound stays, and no breadth bound was added.
+
+What the measurement actually found is a **producer-side** gap, and it is recorded as **item 48**
+rather than folded in: `mcp_client/client.py:209` puts a server's `structured_content` into
+`out["result"]` untouched and `mcp_client/` contains **no size constant at all** -- grepped, zero
+`MAX_` names. Every other model-facing third-party text here is bounded at the producer
+(`MAX_CONTENT_BYTES`, `MAX_FEED_BYTES`, `MAX_SUMMARY_CHARS`); MCP is the one that is not, and it is
+the one whose payload a third party nobody here reviewed writes. "Fix at the producer" is what
+`policy_enforcement.py`'s own docstring says, and batch 126 did exactly that for the feed that
+produced the 2,832 names.
+
+### Item 47: one rule, stated above the list that did not follow it
+
+`_parse_atom_feed` built `categories` as `[c.get("term") for c in ...]`, so a `<category>` with no
+`term` contributed `None`. Two lines above, `authors` dropped a nameless `<author>` **with a comment
+stating why** -- the list is rendered into a citation and a `None` in it reads as a value. Both lists
+come from the same attacker-influenced feed and reach the model the same way.
+
+`all_categories` gained the filter, and the comment now states the rule **once for the pair** rather
+than being copied. Both drop before the cut, so the cap counts values the model can use: filtering
+after the slice would let a nameless element consume one of the 25 or 20 places.
+
+**Tested in `test_untrusted_content.py`, not `test_paging.py`,** because the author half of the same
+claim has lived in that file's malformed-feed table since batch 117 -- which is how the two came to
+disagree in the first place. A table row for the category case, a direct test beside
+`test_a_nameless_author_is_dropped_not_rendered_as_None`, and a third asserting the RULE over both
+lists so that fixing one and not the other fails. That third test is the one this item would have
+been caught by.
+
+### No ROADMAP section
+
+Batches 115-121 and 126 are the precedent: a register closure gets a DEVLOG entry. The fix adds no
+config key and changes no documented threshold, so it is an application of ids that already resolve
+rather than a new decision family -- which would need a map entry in `AGENTS.md`, an index row and a
+status marker, all three gated.
