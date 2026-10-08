@@ -197,6 +197,7 @@ which are run data rather than references; see the C table in `ROADMAP_v2.md`.
 - **CONFIG_ARCHITECTURE.md** — why every value in `config.yaml` is what it is. `config.py`'s 788 lines of rationale, carried over verbatim when the values moved into YAML, keyed by the YAML's own names. Read the entry for a key before changing it; several of these numbers have already been "corrected" back to a value they were deliberately moved away from.
 - **docs/DEVLOG.md** — per-section implementation notes: what was followed verbatim, what was deviated from (every deviation was an explicit user decision — do not silently override).
 - **docs/TECHNICAL_DEBT.md** — the register: what a review found and what was deliberately left, each item open or closed with the batch that closed it. **This is where the last nine batches of work came from**, and it was missing from this map until batch 128 while being cited a dozen times in the body below. Cite an item as `TECHNICAL_DEBT 42`, bare — one form, since three were in use. An entry is evidence, not instruction: batches 126 and 127 each found the ENTRY itself wrong about where its own defect came from, so measure the claim before building the fix it proposes.
+- **docs/REVIEW_MARATHON.md** — the pre-merge review marathon: 19 independent review scopes covering every production module, the finding format every report uses, and the rules of engagement for a read-only reviewer. **Open while it is open** — the run log at the bottom says which scopes have been reviewed. The per-scope reports are NOT in the repository: they go to a gitignored `review/`, because a tracked `.md` moves the gated readable-doc count and because `read_project_doc` would advertise a list of open defects to every run.
 - **tests/BREAKING_CHANGES.md** — what breaks each test when production code changes, the symptom, and the fix.
 - **CLAUDE.md / QWEN.md** — pointers to this file, nothing more. They exist so a harness that looks for one filename finds it without searching; the content has one copy.
 
@@ -2746,9 +2747,13 @@ is gone outright, not kept as a fallback. `doc_path()` is one join now.
   and source files are out of scope entirely — widening to those turns it into
   `read` with no gate. But the set is not small: the tool takes a PATH, resolves
   anywhere under the project, and admits `.md`/`.markdown`/`.rst`/`.txt` plus ten
-  named build files, which on a clean checkout of this repository is **60 files
+  named build files, which on a clean checkout of this repository is **61 files
   and under 4 MB at depths 0-3**, including every agent and skill body under
-  `agents/builtin/` and `skills/builtin/` and the whole of `docs/`. **It said 40
+  `agents/builtin/` and `skills/builtin/` and the whole of `docs/`. The 61st is
+  `docs/REVIEW_MARATHON.md` (batch 129), and the per-scope review reports it
+  governs are deliberately NOT tracked, so they do not move this figure at
+  all -- that decision is recorded there and this is the number it was taken
+  against. **It said 40
   files and ~1.1 MB until batch 128**, when it was re-measured through the
   tool's own `is_readable_doc` at 60 files and 3.58 MB -- a 3.3x
   understatement, and almost all of the growth is this record: `DEVLOG.md`

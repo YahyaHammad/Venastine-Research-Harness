@@ -62,6 +62,7 @@ Venastine Research Harness/
 │   ├── ROADMAP_v3.md               # §49 onward (batch 93) -- the same record, a third file by owner decision SS21; numbering continues so a § means one section across all three
 │   ├── DEVLOG.md                   # implementation notes for built ROADMAP sections -- see §0
 │   ├── TECHNICAL_DEBT.md           # open debt items from reviews, with what was fixed and what was left by design
+│   ├── REVIEW_MARATHON.md          # batch 129: the pre-merge review marathon -- 19 independent scopes over every production module, the finding format, and the read-only rules of engagement. Reports are NOT here: they go to a gitignored review/, since a tracked .md moves the gated readable-doc count and read_project_doc advertises every tracked doc to every run
 │   ├── CONTRIBUTING.md             # inbound licence (Apache-2.0 + DCO), the contributor workflow, and the "what lives where" table the PR template points at
 │   ├── SECURITY.md                 # private vulnerability reporting, scope, and the coordinated-disclosure timeline
 │   ├── CODE_OF_CONDUCT.md          # Contributor Covenant 2.1

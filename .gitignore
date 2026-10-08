@@ -22,6 +22,14 @@ providers.json
 secrets.json
 .qwen/
 .zcode/
+# docs/REVIEW_MARATHON.md's per-scope reports. Untracked for two measured
+# reasons, both in that file: a tracked .md at depths 0-3 is counted EXACTLY
+# by test_the_documented_doc_read_bound_is_not_understated, so a reviewer
+# adding a report would turn the suite red for every other reviewer; and
+# read_project_doc is permission True, so a tracked file is advertised to
+# every run -- and a prioritised list of this harness's open defects is the
+# worst possible document to put inside that reach while they are open.
+review/
 output/
 CLAUDE-SECURITY-*/
 .pytest_cache/

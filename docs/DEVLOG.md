@@ -19073,3 +19073,150 @@ that failed to apply. Fixed by deleting the target's `.pyc` before each
 invocation and passing `PYTHONDONTWRITEBYTECODE=1` into the child.
 
 Counts 6312 -> 6316.
+
+## Batch 129 -- a review marathon that nineteen readers can run at once (2026-10-08)
+
+`navigable-agents` is 91 commits and 250 files ahead of `main` (+84,929 / -10,560),
+so the merge brings essentially the whole harness with it and a diff against the
+branch point is not the thing to review. The owner asked for a stability and
+security marathon first, scoped so that several models can review different
+parts of the tree SIMULTANEOUSLY, none of them waiting on another's output and
+none of them able to break another's work, with every finding in one shape so
+that ONE agent can apply the fixes sequentially afterwards.
+
+This batch builds that and reviews nothing. No production change, no new test,
+`6316` unmoved in all three documents. What it adds is
+**`docs/REVIEW_MARATHON.md`**: nineteen independent scopes covering every
+production module, what to look for in each, the finding format, and the rules
+of engagement for a reviewer that may read and run tests and may not edit.
+
+### Nothing here is a new vocabulary, and that was the first finding
+
+The instinct was to invent a severity scheme. Tracing first found four of them
+already in the tree. `.github/ISSUE_TEMPLATE/audit-finding.yml` has a severity
+dropdown (`S1`-`S4`) and an eight-value `area` enum; `docs/CONTRIBUTING.md`
+documents the four-section body those map onto (*What happens* / *Why it's wrong
+/ Severity* / *Suggested shape (not a patch)* / *Not doing*); `AGENTS.md`'s
+namespace table already DECLARES "audit severities | `S1`-`S4`" as one of six
+`LETTER+NUMBER` namespaces; and `.qwen/reviews/2026-08-04-223903-local.md` is a
+marathon-scale report in that shape from August. A fifth vocabulary would have
+been this project's own recurring defect -- a value derived in two places, where
+the bug is not that they drift but that nothing can tell you they have -- filed
+by the document whose job is to catch it.
+
+So severity is `S1`-`S4` and area is the existing eight. **Owner decision: a
+second, orthogonal field carries the merge question** -- `BLOCKS-MERGE` /
+`FIX-NOW` / `DEFER` / `ACCEPTED` / `OWNER-DECISION`. Two fields because they are
+two questions: "only `S3` but I want it fixed before main" and "`S2` and I
+accept it" are both sayable, and one field can say neither.
+
+The same reuse runs through the rest. `agents/builtin/review.md` and
+`skills/builtin/software/code-review.md` already hold the doctrine (a finding
+needs a failure path; a finding without one is a hypothesis and must not be
+reported in the same voice; rank by consequence; **say when it is fine**), so
+the protocol cites them instead of restating them. And
+`docs/ARCHITECTURE.md` section 11 -- 45 real bugs, each with the general shape
+it belongs to -- is distilled into a nine-item **defect-shape checklist**, which
+is the single most useful thing in the brief: hunting a shape this codebase has
+already produced finds more than hunting generically.
+
+### Why the reports are NOT in the repository
+
+Owner decision, and both halves of it were measured rather than argued.
+
+A tracked `.md` at depths 0-3 is counted EXACTLY by
+`test_the_documented_doc_read_bound_is_not_understated`, which batch 128 shipped
+four commits ago. Nineteen reviewers adding nineteen report files would turn the
+suite red for every one of them, and a reviewer cannot edit `AGENTS.md` to fix
+the count. That alone settles it.
+
+The second reason is the one worth keeping. `read_project_doc` is registered
+with permission `True`, so it is advertised to EVERY run -- plain chat and all
+ten research passes, not only an agent that asked for it. The whole argument for
+its readable set being documentation rather than source is that "the most a
+prompt-injected research pass gains is the project's own README". **An itemised,
+prioritised, severity-ranked list of this harness's open defects is the worst
+possible document to put inside that reach while the defects are open.** The
+precedent was already in the tree and in that gate's own docstring: `.qwen/reviews/`
+is gitignored, and the gate names it as a directory it deliberately does not count.
+
+So `review/` is gitignored and holds the per-scope reports, the launch prompts
+and the triage index. What gets committed is the protocol, and later the fix
+batches -- the record a reader needs, not the exploit list.
+
+### `review/` is gitignored, and that is not the same as invisible
+
+Found while writing the rules, and it changed two of them.
+`tests/test_docs_consistency.py` walks the WORKTREE in three places through
+`_walk_project()`, whose `_SKIP_DIRS` is
+`{.git, __pycache__, node_modules, .venv, venv, .pytest_cache, output, logs, build, dist, .ipynb_checkpoints}`.
+`review/` is not in it, and `.gitignore` has no bearing on `os.walk`.
+
+Two ways a strictly read-only reviewer can therefore turn the suite red for
+everyone else. `test_no_source_file_carries_double_encoded_text` reads every
+`.md` it finds, so a report carrying mojibake -- which a pasted terminal dump
+can be -- fails the owner's suite in a file the owner did not write. And
+`_production_python()` yields every `.py` outside `tests/`, feeding
+`test_every_decision_id_cited_in_production_code_resolves` and
+`test_every_test_name_cited_in_production_code_resolves`: **a probe script left
+inside the repository is scanned as production code**, so a probe mentioning
+`D14` or naming a test counts as a citation from production and has to resolve.
+
+Hence two rules that read like tidiness and are not: probes live OUTSIDE the
+repository, and a report is plain UTF-8. Both are written down with this
+measurement beside them, because the next reader's instinct will be that
+gitignore covers it.
+
+### Three drifts measured while scoping, and the first one is batch 128's
+
+Batch 128's entire subject was the claim that `real_storage` is "the suite's
+only non-function-scoped fixture", false since batch 110. It corrected the
+sentence in `AGENTS.md` and in `tests/BREAKING_CHANGES.md`. **It missed three
+more copies**: `pytest.ini` says it twice -- once in the `loadscope` rationale
+and once in that comment's own "two things it costs" list -- and
+`tests/test_tui.py` says it a third time. The scope chosen for that batch was
+"AGENTS.md plus the duplicates", and the duplicates were found by grepping the
+sentence rather than the CLAIM, so two files that phrase it differently
+survived. Recorded here rather than fixed here: this batch reviews nothing and
+fixes nothing, and the marathon's own S19 scope carries it as a seeded finding
+with the shape named.
+
+Two more, both the same shape -- a claim in a comment made false by a change
+somewhere else. `pytest.ini` says `tests/test_tui.py` "is 62 classes and so 62
+groups, where it was 21"; it is 71, of which 64 are `Test*`. And
+`tools/registry.py`'s comment arguing for isolating compute tools at dispatch
+says "the 123 tests in `test_math_tools.py`" while `ARCHITECTURE.md`'s GATED
+tree says 131. The last one is left for S06's reviewer to resolve, because which
+figure is stale is less interesting than whether the number is load-bearing for
+the argument the comment makes.
+
+### One plan error, corrected before it reached the protocol
+
+The draft scope for the maths tools asked what bounds a runaway expression on
+Windows "since the compute timeout is `SIGALRM`-based". It is not.
+`tools/registry.py` routes every `BUDGET_COMPUTE` handler through
+`isolation.run_isolated`, a killable SUBPROCESS, and `tools/isolation.py`'s
+docstring is explicit about why a thread was rejected: "a watchdog that times
+out returns an error while the core stays busy", which is the class of mechanism
+this project keeps deciding against. `SIGALRM` belongs to a TEST that skips on
+Windows, not to the bound. The real asymmetry is the one H3 already records --
+`RLIMIT_CPU` inside the child on POSIX, the outer wall clock alone on Windows --
+so the question written into the protocol is whether the clock alone actually
+reclaims the work, which is a different and answerable question.
+
+### What the scaffold costs, stated rather than discovered
+
+The gated readable-doc count moves `60` -> `61`, and the sentence now says which
+file the 61st is and that the review reports deliberately do not move it at all.
+Measured size went `3.58` -> `3.66` MB against a stated ceiling of 4, so there
+is roughly 340 KB of headroom; the fix batches will spend some of it, and the
+ceiling gets raised when it goes red and is read, not pre-emptively.
+
+Proved by negative control rather than by a green run, because a green run with
+`61` in the file shows the number AGREES with the tree and not that the gate
+would have objected to `60`: both figures put back wrong, both RED, with the
+message naming the sentence to edit, and `AGENTS.md` restored byte-identically
+from bytes held in memory -- never `git checkout`, which would have discarded
+the rest of this uncommitted batch.
+
+Counts 6316 -> 6316.
