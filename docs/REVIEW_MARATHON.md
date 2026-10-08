@@ -59,6 +59,9 @@ reasoned from the code alone." A finding that contradicts a locked decision is a
 
 - Read any file in the repository, and any git history: `git log`, `git show`, `git grep`,
   `git diff <sha>..<sha>`.
+- Read the issue history, which is where the last review pass went: `gh issue list --state all`,
+  `gh issue view <n>`. 126 of those issues are severity-tagged findings against this code, and
+  the four still open are listed below.
 - Run **narrowed** tests:
   `python -m pytest tests/test_X.py -n0 -p no:cacheprovider -k "<expr>"`.
   `-n0` because the suite's default is `-n auto` (70% of cores) and several reviewers share this
@@ -119,6 +122,22 @@ each one is a way a read-only reviewer can still break the suite for everyone el
 
 ## The finding format
 
+**Where it comes from, since none of it is invented here.** The severity namespace, the `area` enum
+and the four body sections are `.github/ISSUE_TEMPLATE/audit-finding.yml` and
+`docs/CONTRIBUTING.md` § *Issue format*. The report-FILE shape — a machine-readable summary
+line, prefixed finding ids, an explicit coverage statement — is
+`.qwen/reviews/2026-08-04-223903-local.md`, the one prior marathon-scale review in this tree. And
+the structural precedent for this whole document is **issue #15, still open**: *"[tracker] Audit
+Pass 1 — coverage tracker (read this first)"*, a 22-unit review whose body states the same rule
+this one does — *"Findings are documented here as issues. Nothing is fixed during this pass."*
+Its `[unit N]` issues are what the 19 scopes below are, and the run log at the bottom of this file
+is what its checklist was.
+
+What the template does NOT tell you is what the issues actually look like, which was measured
+against all 126 severity-tagged ones rather than assumed. See § *Filing a finding as a GitHub
+issue*: the body convention in practice is a bolded provenance line, the violated invariant quoted,
+then descriptive `##` sections carrying driven output.
+
 A report is markdown. It opens with **one machine-readable line**, so the triage index can be built
 without parsing prose:
 
@@ -132,7 +151,7 @@ finding can be cited across scopes and in a commit message without ambiguity.
 ````markdown
 ### [S03-02] S2 | security | BLOCKS-MERGE | demonstrated
 
-**Where** — `security/permissions.py`, `is_tool_allowed()`, L142 @ <base sha>
+**Where** — `security/permissions.py:142`, `is_tool_allowed()`
 **Measured against** — <base sha> on navigable-agents
 
 **What happens** — the concrete trigger. The exact call, the `file:line`, and the filesystem /
@@ -210,22 +229,90 @@ enter the fixing agent's queue.** The reason is in `CLAUDE.md`: these decisions 
 broken once by someone reasoning from the code alone, and a single reviewer's reading is not the
 right authority to reverse one.
 
-### `KNOWN` — already in the register
+### `KNOWN` — already recorded, in EITHER of two places
 
-Before reporting, check `docs/TECHNICAL_DEBT.md`. If the finding is already there — open or in the
-*Accepted risks* section — report it as `KNOWN` with the item number and stop:
+Before reporting, check both. If the finding is already known, report it as `KNOWN` with its
+identifier and stop:
 
 ```
 ### [S13-03] KNOWN | TECHNICAL_DEBT 48
+### [S16-02] KNOWN | issue #8
 ```
 
-**Open items as of this document: 11, 14, 17, 18, 19, 21, 43, 44, 45, 48.** Nineteen reviewers
-independently rediscovering item 48 is nineteen findings of no value, and a report that says
-"`KNOWN`, item 48, and here is the one thing the entry gets wrong" is worth more than either.
+**`docs/TECHNICAL_DEBT.md`, open items: 11, 14, 17, 18, 19, 21, 43, 44, 45, 48** (plus its
+*Accepted risks* section).
+
+**And four audit findings are still OPEN as GitHub issues** — which the first version of this
+document did not say, so nineteen reviewers would each have rediscovered them:
+
+| issue | title | scope it lands in | register |
+|---|---|---|---|
+| **#6** | `[S3][correctness]` Two provider facts about sampling parameters are unverified | S10 | **the same finding as `TECHNICAL_DEBT 11`**, word for word |
+| **#8** | `[S3][ux]` The CLI has no slash-command layer | S16 | not in the register. **Still true, measured:** `main.py` dispatches no `/command` at all, and three of its own comments cite the absence as the reason `--memories` and `--ref` are flags |
+| **#9** | `[S3][coherence]` Four `with_*` prompt tiers repeat one pattern with four signatures (J11) | S10 | same J11 family as `TECHNICAL_DEBT 19`, which is about `with_goal` being uncounted rather than about the four signatures |
+| **#12** | `[S3][coherence]` Ensemble disagreement is scored rather than routed to verification | S12 | not in the register; see §10's revisit (E1—E14) |
+
+All four are `S3` and labelled `enhancement`, and that is not a coincidence — it is exactly the
+class this marathon will file and not fix. See § *Filing a finding as a GitHub issue*.
+
+Nineteen reviewers independently rediscovering item 48 is nineteen findings of no value, and a
+report that says "`KNOWN`, item 48, and here is the one thing the entry gets wrong" is worth more
+than either.
 
 One warning about the register, learned twice: **an entry is evidence, not instruction.** Batches
 126 and 127 each found the entry itself wrong about where its own defect came from. Measure the
 claim before building on it.
+
+### Filing a finding as a GitHub issue
+
+**Nothing is filed until after the merge, and then only the tail.** Owner decision, and it follows
+from the disposition field: anything `BLOCKS-MERGE` or `FIX-NOW` is fixed before `main` sees it, so
+filing it would open and close an issue in the same week. What gets filed is the part that outlives
+the marathon — `DEFER`, and `ACCEPTED` where the argument is worth a public record. **The
+disposition decides the destination:**
+
+| disposition | destination |
+|---|---|
+| `BLOCKS-MERGE` | fixed in the fix pass, before the merge. Not filed |
+| `FIX-NOW` | fixed in the fix pass. Not filed |
+| `DEFER` | a new `docs/TECHNICAL_DEBT.md` item now, and an issue after the merge |
+| `ACCEPTED` | an *Accepted risks* entry with its argument; an issue only if a later decision is wanted |
+| `OWNER-DECISION` | the owner. Never filed by an agent |
+
+The four findings still open from Pass 1 — #6, #8, #9, #12 — are all `S3` and all
+`enhancement`. That is the shape of what gets filed.
+
+**The mapping, field by field.** A report finding converts mechanically; it does not need rewriting:
+
+| in the report | in the issue |
+|---|---|
+| severity + area | the title prefix: `[S2][security]` |
+| the one-line claim | the rest of the title, as a concise *imperative-mood* summary |
+| **Where** | the bolded lead line, in `file.py:142` form. `docs/CONTRIBUTING.md` calls that convention "exact and expected in an issue body", and the corpus uses it everywhere — `safety/policy_enforcement.py:198-212`, `sandbox.py:134`. The live idiom also names the unit: **"Unit 5 (dispatch, permissions, safety)."** — write the scope id and name there instead |
+| **What happens** | `## What happens`, or — as every issue in the corpus actually does it — a section with a *descriptive* name and the driven output pasted in a fence: `## Driven, through the real check_output_policy`, `## Hole 1 ` + the hole, `## The three routes, measured` |
+| **Evidence** | folded into that same section. The house idiom for a probe is "driven through the **real** `registry.dispatch` with nothing monkeypatched", and an inputs-to-outputs table is the house form for the result |
+| **Why it's wrong / severity** | `## Why it's wrong / Severity`, opening with the invariant quoted verbatim from the docstring, `AGENTS.md` or the decision record it violates |
+| **Suggested shape (not a patch)** | `## Suggested shape (not a patch)` |
+| **Not doing** | `## Not doing` |
+| **Measured against** | the footer: `Measured against <sha> on navigable-agents.` |
+| **Disposition**, **Confidence** | marathon-local. Not filed |
+
+**Two values in the corpus are historical, and dated:** `[S0]` (issues #13, #18, #36, #52, all
+2026-08-09/10) and `[S3][complexity]` (#23, #38, #39, #56, #65, #84, all 2026-08-09/12). The issue
+template that defines the dropdowns was added **2026-08-27**, after every one of them, and it
+enumerates `S1`—`S4` and the eight areas only. So the template is the arbiter: use `S1` where
+the old corpus would have said `S0`, and the nearest live area — usually `coherence` — where it
+would have said `complexity`. Knowing they exist is for reading the old issues, not for writing new
+ones.
+
+**The label, from the corpus rather than from the rule.** `docs/CONTRIBUTING.md` says `enhancement`
+is for "`S3`/`S4` polish" and that "most open findings sit here". Measured across the 126 tagged
+issues, that is not what happened: `S3` + `bug` is **51** of them, the single largest combination,
+against `S3` + `enhancement` at 9 and `S3` + `documentation` at 16; four carry no label at all. So
+label on whether behaviour is **wrong today** (`bug`), whether it is drift between code and docs
+(`documentation`), or whether nothing misbehaves yet (`enhancement`) — and treat the severity
+as independent of it. The divergence between that rule and the corpus is itself a finding, and it
+belongs to S18.
 
 ### Two closing sections, both required
 
@@ -733,6 +820,15 @@ pages, file contents, an MCP server's reply.
 - `package.json`'s `files` allowlist is the **third** copy of "keep local secrets out of a
   distribution", after `.gitignore` (→ `git push`) and `.gitattributes export-ignore`
   (→ `git archive`). Three copies of one rule is three chances to disagree.
+- **`docs/CONTRIBUTING.md` says it is the prose source and `.github/ISSUE_TEMPLATE/` its
+  "machine-readable copy", with "change both together, or the taxonomy drifts".** Both halves are
+  checkable and one is already drifting. **Seeded, measured, do not re-derive:** the file's label
+  rule says `enhancement` is where "most open findings sit", and across the 126 severity-tagged
+  issues `S3` + `bug` is 51 of them against `S3` + `enhancement` at 9. Separately, the corpus
+  contains an `[S0]` severity and a `complexity` area that the template's dropdowns do not offer
+  — both only on issues predating the template, which is the defensible answer, and it is
+  written down nowhere. Nothing mechanically checks the template against the prose, or either
+  against what people filed.
 - Dependency floors and ceilings versus what `pip-audit` reaches, and whether `requires-python` is
   enforced at install time rather than discovered at runtime.
 - `pytest.ini` is shared with S19. Own the CI invocation; let S19 own the suite semantics.

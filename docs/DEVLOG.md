@@ -19219,4 +19219,79 @@ message naming the sentence to edit, and `AGENTS.md` restored byte-identically
 from bytes held in memory -- never `git checkout`, which would have discarded
 the rest of this uncommitted batch.
 
+### The format matched the TEMPLATE, and the template is not what the issues look like
+
+Asked to confirm the finding format was compatible with the repository's own
+issues, rather than with the template they are supposed to follow. It was
+derived from `.github/ISSUE_TEMPLATE/audit-finding.yml` and
+`docs/CONTRIBUTING.md` -- the prose source and its machine-readable copy -- and
+checking it against the 126 severity-tagged issues that actually exist found
+three mismatches and one gap. The gap was the expensive one.
+
+**FOUR AUDIT FINDINGS ARE STILL OPEN AS ISSUES, and the protocol pointed
+reviewers only at `docs/TECHNICAL_DEBT.md`.** #6 (two unverified provider facts
+about sampling parameters) is `TECHNICAL_DEBT 11` word for word. #8 (the CLI has
+no slash-command layer) is in neither document and is still TRUE: `main.py`
+dispatches no `/command` at all, and three of its own comments cite the absence
+as the reason `--memories` and `--ref` are flags. #9 is the same J11 family as
+item 19 without being the same sentence, and #12 (ensemble disagreement scored
+rather than routed) is nowhere in the register. Nineteen reviewers would each
+have rediscovered four known findings. They are now a table in the `KNOWN`
+section with the scope each lands in, and they are named in all nineteen launch
+blocks.
+
+**THE BODY SHAPE. The template demands four fixed headings and not one issue
+uses them.** What the corpus does, consistently, from #13 to #172: a bolded
+provenance line naming the unit and the `file:line` sites, then the violated
+invariant QUOTED -- from a docstring, from `AGENTS.md`, from the decision record
+-- then descriptive `##` sections carrying driven output. "## Driven, through
+the real check_output_policy". "## Hole 1 -- inert runs on the HOST, and only
+the first word is checked". "## The three routes, measured". "## Why the list's
+own rule covers it". The evidence idiom is "driven through the REAL
+registry.dispatch with nothing monkeypatched", and the result is an
+inputs-to-outputs table. That is a better convention than the template's, and
+the report format now maps onto it field by field rather than pretending the
+four headings are what gets filed.
+
+Two smaller ones. The citation form is `safety/policy_enforcement.py:198-212`,
+which `CONTRIBUTING.md` calls "exact and expected in an issue body"; the draft
+had invented `L142 @ <sha>`, and the commit belongs in the footer where
+`CONTRIBUTING.md` already puts it. And the reviewers' permitted commands now
+include `gh issue list` / `gh issue view`, because the last review pass's
+reasoning lives there and nowhere else.
+
+**TWO VALUES IN THE CORPUS ARE NOT IN THE TEMPLATE, AND THE DATES SETTLE IT.**
+`[S0]` appears on #13, #18, #36 and #52, and `[S3][complexity]` on #23, #38,
+#39, #56, #65 and #84. The template that defines the dropdowns was added
+**2026-08-27** -- after every one of them -- and it offers `S1`-`S4` and eight
+areas, with `complexity` among them nowhere. So they are pre-template
+conventions the template dropped, the template is the arbiter, and the protocol
+says to use `S1` where the old corpus said `S0` and the nearest live area
+(usually `coherence`) where it said `complexity`. Worth knowing for READING the
+old issues, which is why it is written down rather than left as a trap.
+
+**AND THE LABEL RULE DOES NOT DESCRIBE THE CORPUS.** `CONTRIBUTING.md` says
+`enhancement` is for "S3/S4 polish" and that "most open findings sit here".
+Measured across the 126: `S3` + `bug` is **51**, the single largest combination,
+against `S3` + `enhancement` at 9 and `S3` + `documentation` at 16, with four
+carrying no label at all. The same file says it is the prose source and the
+template its "machine-readable copy" and that changing one without the other
+drifts the taxonomy -- and nothing mechanically checks either against what was
+filed. Seeded into S18, which owns `.github/`, rather than fixed here.
+
+**WHAT GETS FILED, AND WHEN.** Owner decision, and it falls out of the
+disposition field rather than needing a new one: nothing is filed until after
+the merge, and then only the tail. `BLOCKS-MERGE` and `FIX-NOW` are fixed before
+`main` sees them, so filing them would open and close an issue in the same week;
+`DEFER` becomes a register item now and an issue after the merge; `ACCEPTED`
+becomes an *Accepted risks* entry and an issue only if a later decision is
+wanted; `OWNER-DECISION` is never filed by an agent. The evidence that this is
+the right cut is the four findings still open from Pass 1 -- every one of them
+`S3`, every one labelled `enhancement`.
+
+No tracker issue was created. The run log in `docs/REVIEW_MARATHON.md` is the
+cross-session memory while the tree is frozen and the reports are local, and
+whether 19 scopes' worth of findings earns a public index is a decision worth
+taking once the triage index exists and the count is known.
+
 Counts 6316 -> 6316.
