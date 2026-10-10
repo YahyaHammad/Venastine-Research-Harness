@@ -18,6 +18,13 @@ below. One copy, several filenames.
 # via `dynamic`, so there is one list, not two. markitdown and protobuf are in
 # the `documents` extra, not the default install (#144).
 pip install -r requirements.txt
+# The SUITE's packages are a separate file since batch 136 (S18-07): they were
+# in requirements.txt, which pyproject reads, so `pip install` of the
+# distribution resolved a test runner and the npm launcher put one in every
+# end user's venv. requirements.txt alone RUNS the harness; this is what makes
+# `pytest` work. (`pip install -e ".[test]"` is the same four packages for
+# anyone who never clones.)
+pip install -r requirements-test.txt
 
 python main.py                                    # chat mode, new thread
 python main.py --thread <uuid>                    # resume a thread
@@ -48,7 +55,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 6336 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
+pytest                                            # 6338 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure

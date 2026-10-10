@@ -169,13 +169,19 @@ google-re2==1.1.20251105
 # still covers this project's platforms.
 cryptography>=42.0,<52
 
-# TECHNICAL_DEBT 18, batch 116. A PRODUCTION dependency, and it sits above
-# the test block deliberately: `tools/builtin/arxiv.py` imports it at
-# module load, pyproject.toml reads this file for its dependency list via
-# `dynamic = ["dependencies"]`, and packages have already been moved OUT of
-# here into the `documents` extra once. Filed under "Test dependencies" --
-# where batch 116 first put it -- a later tidy of that block would drop it
-# from the shipped set and break `arxiv_search` at import.
+# TECHNICAL_DEBT 18, batch 116. A PRODUCTION dependency: `arxiv.py` imports
+# it at module load, and pyproject.toml reads this file for its dependency
+# list via `dynamic = ["dependencies"]`.
+#
+# THE TIDY THIS COMMENT WARNED ABOUT HAS NOW HAPPENED, and the warning was
+# right about the risk and wrong about the mechanism. It said a tidy of the
+# test block "would drop it from the shipped set", as though the shipped set
+# were something other than this file -- it was not, which is why the test
+# block itself shipped. Batch 136 (S18-07) moved that block to
+# requirements-test.txt, so the distinction is real now and defusedxml is
+# unambiguously on the shipped side of it. It stayed because this paragraph
+# said why; that is the comment earning its place rather than the claim it
+# happened to get wrong.
 #
 # stdlib ElementTree expands declared entities on a feed this project does
 # not write (Bandit B405/B314). Pinned exactly rather than floored, the way
@@ -183,27 +189,8 @@ cryptography>=42.0,<52
 # parser's refusals are exactly what a silent minor bump could change.
 defusedxml==0.7.1
 
-# --- Test dependencies -------------------------------------------------
-# Previously absent, which the docs recorded as a known open item since
-# §14: the suite has always needed pytest and pytest-mock, and §16's TUI
-# pilot tests add pytest-asyncio. Listed now so `pip install -r` produces
-# a working suite instead of one that fails at import.
-pytest>=8.0
-pytest-mock>=3.14
-pytest-asyncio>=1.0
-# Batch 109. NOT optional: pytest.ini's addopts carries `-n auto`, so
-# without this `pytest` fails at argument parsing rather than merely
-# running serially. That is deliberate -- a suite that silently takes
-# eight times longer on a machine missing a package is worse than one
-# that says which package.
-#
-# `>=` like its three siblings above rather than an exact pin. D22's
-# argument for pinning is about packages whose behaviour CI's RESULT
-# depends on; this one decides how the run is scheduled, and the three
-# ordered sites that care are pinned by `--dist loadscope` in pytest.ini
-# -- loadfile until batch 110 switched it, and this comment said loadfile
-# for eighteen batches after that
-# rather than by a version. Brings `execnet` (MIT), which is its only
-# transitive.
-pytest-xdist>=3.6
-
+# Test dependencies live in requirements-test.txt, NOT here (S18-07,
+# batch 136). pyproject.toml reads THIS file for `[project].dependencies`
+# via `dynamic`, so anything below this line is a hard requirement of the
+# published package and of every end user's venv. Install the suite's own
+# packages with `pip install -r requirements-test.txt`.

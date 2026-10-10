@@ -19913,3 +19913,88 @@ Two gated digits moved, and the suite named both: `AGENTS.md`'s
 gate's own message points at) and the tree's per-file count (440 -> 443).
 
 Counts 6333 -> 6336.
+
+## Batch 136 -- a research harness that installed a test runner (2026-10-10)
+
+The first of the two owner rulings from the review marathon's triage. S18-07
+was filed `OWNER-DECISION` because it is a packaging policy rather than a
+defect in anything; the owner ruled **move them to a test extra**.
+
+**What was shipping.** `pyproject.toml` declares
+`dynamic = ["dependencies"]` pointing at `requirements.txt`, whose last four
+entries were the test block -- so pytest, pytest-mock, pytest-asyncio,
+pytest-xdist and execnet were HARD REQUIREMENTS of the distribution.
+`pip install venastine-research-harness` resolved a test runner and its
+scheduler, and `bin/venastine.mjs` did the same by a different route,
+installing them into every end user's venv. Somebody who installed a
+research harness got a test framework.
+
+Expanded with setuptools itself, before and after, no install performed:
+
+| | before | after |
+|---|---|---|
+| `[project].dependencies` | 22 | **18** |
+| test packages among them | pytest, pytest-mock, pytest-asyncio, pytest-xdist | **none** |
+| `defusedxml` shipped | yes | yes |
+| extras | documents, pdf | documents, pdf, **test** |
+
+**`defusedxml` is the reason this needed care rather than a delete.** It is a
+PRODUCTION dependency -- `tools/builtin/arxiv.py` imports it at module load
+-- and it had been sitting *under the "Test dependencies" heading* since
+batch 116, with a comment warning that "a later tidy of that block would drop
+it from the shipped set and break `arxiv_search` at import."
+
+That warning was right about the risk and **wrong about the mechanism**: it
+reasoned about a shipped set distinct from the file, and there was none, which
+is why the test block shipped in the first place. The distinction is real now,
+defusedxml is unambiguously on the shipped side of it, and the comment says
+so. It survived the tidy it predicted because it explained itself -- which is
+the comment earning its place rather than the claim it got wrong.
+
+**Two copies, deliberately, with a gate over them.** setuptools'
+`optional-dependencies` is all-or-nothing: making `test` read a file would
+force `documents` and `pdf` into files of their own, which is churn to two
+working groups in order to avoid typing four names. So the names are in
+`requirements-test.txt` and in pyproject's `test` extra, and
+`test_the_test_extra_matches_requirements_test` compares the REQUIREMENT
+STRINGS rather than the names -- a floor raised in one file and not the other
+fails there rather than at whichever install happens to resolve differently.
+#144's rule is not that a duplicate is always wrong; it is that a
+hand-maintained one is only as good as the gate over it.
+
+`test_no_test_package_is_a_runtime_dependency` is the other half, and the one
+that catches the REGRESSION rather than the drift: adding pytest back to
+requirements.txt by habit puts it in `[project].dependencies` again, and
+nothing else in this suite would notice. It also asserts defusedxml is still
+there, because that is the mistake this batch was one `git rm` away from.
+
+**The part the finding did not mention: five CI install sites.** Every
+workflow that runs pytest got it by accident, because it was a runtime
+dependency -- `tests.yml` twice, `compat.yml` twice and `publish.yml` once,
+all `pip install -r requirements.txt`. Each now installs the test file too,
+and the script that did it checked the PAIRING both ways afterwards: every
+workflow that runs pytest installs the extra, and none that does not. Had
+that been missed, the fix would have been a green local suite and five red
+jobs.
+
+**The npm channel needed nothing**, which is the `files` allowlist doing its
+job: it names `requirements.txt` and not the new file, so the test packages
+cannot reach a tarball even by accident. That is the third copy of "keep
+local things out of a distribution" working as intended (S18-08 is about
+those copies disagreeing, and this is not one of the disagreements).
+
+Three documented install commands moved, and they are not all the same
+command: `README.md`'s *From a clone* stays `requirements.txt` alone, because
+that section is about RUNNING the harness. `AGENTS.md` and
+`docs/CONTRIBUTING.md` both gain the test file, because both are followed by
+`pytest` -- and `pytest.ini` carries `-n auto`, so without it the suite fails
+at argument parsing rather than running serially, which is the trade batch
+109 chose on purpose.
+
+Mutation pass 5/5 killed with the equivalence control green: a test package
+back in the shipped set, the extra losing a package, a floor raised in one
+file only, defusedxml tidied away, and the file emptied. G1 reorders the
+extra and stays green, so the comparison is order-insensitive by test rather
+than by luck.
+
+Counts 6336 -> 6338.

@@ -1261,6 +1261,96 @@ def test_the_npm_package_and_pyproject_state_the_same_version():
         f"says {versions[0]!r}. They describe one release -- bump both.")
 
 
+def test_the_test_extra_matches_requirements_test():
+    """S18-07, batch 136. The suite's own packages in two files, pinned to
+    each other so they cannot drift.
+
+    They used to be at the bottom of requirements.txt, which
+    `dynamic = ["dependencies"]` reads, so pytest, pytest-mock,
+    pytest-asyncio, pytest-xdist and execnet were HARD REQUIREMENTS of the
+    distribution: `pip install venastine-research-harness` resolved a test
+    runner, and bin/venastine.mjs installed the same set into every end
+    user's venv.
+
+    TWO COPIES IS THE DELIBERATE TRADE, because setuptools'
+    `optional-dependencies` is all-or-nothing -- making `test` read a file
+    would force `documents` and `pdf` into files of their own. #144's rule is
+    not that a duplicate is always wrong, it is that a hand-maintained one is
+    only as good as the gate over it. This is the gate.
+
+    It compares the REQUIREMENT STRINGS, not just the names, so a floor
+    raised in one file and not the other fails here rather than at whichever
+    install happens to resolve differently.
+    """
+    def requirements(text):
+        found = []
+        for line in text.splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                found.append(line)
+        return sorted(found)
+
+    with open(os.path.join(ROOT, "requirements-test.txt"),
+              encoding="utf-8") as f:
+        from_file = requirements(f.read())
+
+    with open(os.path.join(ROOT, "pyproject.toml"), encoding="utf-8") as f:
+        pyproject = f.read()
+    block = re.search(r"^test = \[(.*?)\]", pyproject, re.MULTILINE | re.DOTALL)
+    assert block, (
+        "pyproject.toml has no `test = [...]` extra. If the group was renamed, "
+        "repoint this test -- do not delete it: the names it guards are what "
+        "stopped shipping to end users in batch 136.")
+    from_pyproject = sorted(re.findall(r'"([^"]+)"', block.group(1)))
+
+    # Vacuity guard. An empty file or an empty extra would make the
+    # comparison below pass while the suite's packages were declared nowhere.
+    assert len(from_file) >= 4, (
+        f"requirements-test.txt names only {from_file}; the suite needs at "
+        f"least pytest, pytest-mock, pytest-asyncio and pytest-xdist")
+
+    assert from_file == from_pyproject, (
+        f"requirements-test.txt and pyproject.toml's `test` extra disagree.\n"
+        f"  only in requirements-test.txt: "
+        f"{sorted(set(from_file) - set(from_pyproject))}\n"
+        f"  only in the pyproject extra:   "
+        f"{sorted(set(from_pyproject) - set(from_file))}\n"
+        f"They are the same four packages said twice -- change both.")
+
+
+def test_no_test_package_is_a_runtime_dependency():
+    """The other half of S18-07, and the one that would catch the regression
+    rather than the drift.
+
+    The gate above compares two files that both describe the TEST set; this
+    one asserts the test set is not in the SHIPPED set. Adding
+    `pytest` back to requirements.txt -- or adding a sixth test package there
+    by habit -- puts it in `[project].dependencies` again and into every end
+    user's venv, and nothing else in this suite would notice.
+    """
+    with open(os.path.join(ROOT, "requirements.txt"), encoding="utf-8") as f:
+        shipped = [line.strip() for line in f
+                   if line.strip() and not line.strip().startswith("#")]
+
+    # Not a blanket "pytest" substring match: `defusedxml` lives in the
+    # shipped set deliberately and a future comment could mention pytest.
+    offenders = [line for line in shipped
+                 if re.match(r"^(pytest|execnet|pluggy|iniconfig)\b", line)]
+    assert not offenders, (
+        f"{offenders} are in requirements.txt, which pyproject.toml reads for "
+        f"`[project].dependencies` -- so they are hard requirements of the "
+        f"published package and of every venv bin/venastine.mjs builds. Test "
+        f"packages belong in requirements-test.txt (S18-07, batch 136).")
+
+    # And the shipped set must still carry the one that LOOKS like a test
+    # dependency and is not: arxiv.py imports defusedxml at module load.
+    assert any(line.startswith("defusedxml") for line in shipped), (
+        "defusedxml left requirements.txt. It is a PRODUCTION dependency -- "
+        "tools/builtin/arxiv.py imports it at module load -- and it sat under "
+        "a 'Test dependencies' heading for twenty batches, which is exactly "
+        "how it would get tidied away by mistake (TECHNICAL_DEBT 18).")
+
+
 def test_every_npm_allowlist_entry_exists():
     """A `files` entry naming nothing ships nothing, and says nothing.
 

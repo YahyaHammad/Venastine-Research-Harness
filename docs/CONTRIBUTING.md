@@ -31,10 +31,18 @@ No CLA to sign, and **no CI check** — CI runs the test suite and nothing else,
 1. **Fork and branch** from `main`.
 2. **Setup (Python 3.11+):**
    ```bash
-   pip install -r requirements.txt
+   pip install -r requirements.txt       # runs the harness
+   pip install -r requirements-test.txt  # and runs the suite (S18-07)
    cp providers.json.example providers.json  # stays empty for tests
    python -m pytest -q   # runs all tests, fully offline, uses no API keys
    ```
+   * **Two files since batch 136.** The suite's packages used to be in
+     `requirements.txt`, which `pyproject.toml` reads for its dependency
+     list — so `pip install venastine-research-harness` resolved pytest and
+     its scheduler, and the npm launcher installed them into every end
+     user's venv. `pytest.ini` carries `-n auto`, so without
+     `requirements-test.txt` the suite fails at argument parsing rather
+     than running serially, which is the intended trade.
    * `providers.json` is gitignored — the suite fakes SDKs via `conftest.py`, but needs the file to exist.
    * Optional extras: `pip install -e ".[documents]"` (markitdown) or `pip install -e ".[pdf]"`.
 3. **Make your change** — keep it focused. Read `AGENTS.md` then `ARCHITECTURE.md` plus other relevant markdown project docs before touching any code.
