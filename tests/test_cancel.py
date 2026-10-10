@@ -633,3 +633,98 @@ def test_the_injection_actually_hands_a_handler_the_token(mocker):
     assert seen["cancel"] is token, (
         "dispatch did not hand the handler the run's token -- a spawned "
         "child would never see a stop")
+
+
+# ---------------------------------------------------------------------------
+# ---- The two entry points one `common` dict is spread into ----------------
+# ---------------------------------------------------------------------------
+
+def _subagent_tool_source():
+    """The module's text. `tests/` sits one level under the repo root."""
+    import os
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "agents", "subagent_tool.py"),
+              encoding="utf-8") as handle:
+        return handle.read()
+
+
+def _subagent_common_keys():
+    """The keyword names `agents/subagent_tool.py`'s `common = dict(...)`
+    carries, read by AST rather than listed here.
+
+    Listing them would make this test pass for the next argument added,
+    which is the whole failure it exists to catch.
+    """
+    import ast
+
+    tree = ast.parse(_subagent_tool_source())
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == "common"
+                and isinstance(node.value, ast.Call)):
+            return {kw.arg for kw in node.value.keywords if kw.arg}
+    return set()
+
+
+def _spread_sites():
+    """How many `**common` spreads the module has, so a refactor that
+    renames the dict or drops a call site cannot leave this test quietly
+    measuring nothing."""
+    return _subagent_tool_source().count("**common")
+
+
+def test_every_common_key_is_a_parameter_of_BOTH_entry_points():
+    """§61 CN7 added `cancel` to the one `common` dict that
+    `agents/subagent_tool.py` builds for a child's first turn AND every
+    wake turn after it. `run_agent_conversation` accepted it;
+    `wake_conversation` did not -- so every subagent wake turn raised
+    `TypeError: ... unexpected keyword argument 'cancel'`, 100% of the
+    time, and the child's already-completed first answer (a full agent
+    run, paid for in model calls) was discarded while the parent was told
+    the tool had failed.
+
+    THE GUARD IS A RELATION, not an assertion about either signature.
+    Pinning a list of arguments on either side would go stale in exactly
+    the way the defect did; what has to hold is that the dict and the two
+    functions it is spread into agree. `subagent_tool`'s own comment says
+    why the dict is shared -- *"A wake IS that run continuing ... so the
+    two calls take one dict rather than two argument lists that could
+    drift apart"* -- and this is the assertion that makes that true
+    instead of merely intended.
+
+    It is also why the existing coverage could not see it: both
+    `tests/test_session_subagent.py` and `tests/test_session_cli.py`
+    replace the entry point with `def fake_wake(**kwargs)` under
+    `mocker.patch.object(...)` with no `autospec`, so the double accepts
+    every argument and the mismatch is invisible from the caller's side.
+    `tests/test_harness_rows.py` does drive the real `wake_conversation`
+    -- with an argument list it chooses itself, which did not include
+    `cancel`. Nothing compared the two lists.
+    """
+    keys = _subagent_common_keys()
+
+    # Vacuity guards, both directions: an AST walk that found nothing, or
+    # a module that no longer spreads the dict twice, would make every
+    # assertion below pass for free.
+    assert len(keys) >= 8, (
+        f"the AST walk over agents/subagent_tool.py found only {sorted(keys)} "
+        f"in `common`. Either the dict was renamed or it is no longer built "
+        f"with dict(...) -- either way this test is checking nothing and "
+        f"needs repointing, not deleting.")
+    assert _spread_sites() == 2, (
+        f"expected two `**common` spreads (the first turn and the wake), "
+        f"found {_spread_sites()}. If a third call site appeared, add it to "
+        f"this test; if one disappeared, the drift this guards is back.")
+
+    for entry in ("run_agent_conversation", "wake_conversation"):
+        params = inspect.signature(getattr(RunAgentLoop, entry)).parameters
+        missing = sorted(k for k in keys if k not in params)
+        assert not missing, (
+            f"agents/subagent_tool.py spreads `common` into "
+            f"RunAgentLoop.{entry}, which has no parameter for {missing}. "
+            f"That is a TypeError on every call, before anything else "
+            f"happens -- §61 CN7 shipped exactly this for `cancel` and "
+            f"`wake_conversation`.")

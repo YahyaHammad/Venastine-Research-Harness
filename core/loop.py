@@ -2168,6 +2168,7 @@ class RunAgentLoop:
         granted_tools: Optional[set] = None,
         authorization=None,
         activity=None,
+        cancel=None,
     ) -> ModelResponse:
         """A turn started by the HARNESS in an existing thread: a background
         session's result, delivered as a harness-written user row
@@ -2177,8 +2178,15 @@ class RunAgentLoop:
 
         `run_agent_conversation`'s arguments, less what only a NEW thread
         needs (kind, lineage) and plus the row: a wake runs with the same
-        channel, grant, authorization and activity as the run whose session
-        it reports, because it IS that run continuing. `authorization` is
+        channel, grant, authorization, activity and CANCEL as the run whose
+        session it reports, because it IS that run continuing. `cancel` was
+        the one member of that list the signature omitted, and because
+        `agents/subagent_tool.py` builds ONE `common` dict for the child's
+        first turn and every wake after it -- deliberately, so the two
+        cannot drift -- §61's CN7 adding `cancel` to that dict meant every
+        subagent wake turn raised `TypeError` before anything else
+        happened, 100% of the time, discarding a full agent run that had
+        already been paid for in model calls (batch 133). `authorization` is
         what the CLI's chat loop carries -- without it a wake turn would
         run with no way to ask a human, so every gated call in it would be
         denied for a reason that is about the harness rather than the
@@ -2213,6 +2221,7 @@ class RunAgentLoop:
             max_steps, _resolve_spend_cap(max_total_tokens),
             temperature=temperature, effort=effort,
             response_channel=response_channel, activity=activity,
+            cancel=cancel,
             **auth_kwargs,
         ))
         response.thread_id = memory.thread_id

@@ -19641,4 +19641,82 @@ the quiet direction, which is why it is worth a test: a key missing from the
 fake is a key the reduction strips in tests and keeps in production.
 
 Counts 6327 -> 6330 in the default run, 6329 -> 6332 including `integration`.
+
+## Batch 133 -- the wake turn that could not be called (2026-10-10)
+
+The fourth of the review marathon's six `BLOCKS-MERGE` fixes, and the
+cheapest: one parameter and one argument.
+
+**The defect.** `agents/subagent_tool.py` builds ONE `common` dict for a
+child's first turn and for every wake turn after it, deliberately -- its own
+comment says why: *"A wake IS that run continuing ... so the two calls take
+one dict rather than two argument lists that could drift apart."* ROADMAP_v3
+section 61's CN7 added `cancel` to that dict. `run_agent_conversation`
+accepts `cancel`; `wake_conversation` did not. So `_wake` raised before
+anything else happened:
+
+    TypeError: RunAgentLoop.wake_conversation() got an unexpected keyword
+    argument 'cancel'
+
+`cancel` is in `common` unconditionally -- `cancel=cancel`, where the value
+is `None` on any path that did not opt in -- so this was not conditional on a
+token existing. **Every subagent wake turn raised, 100% of the time.** The
+trigger is SS9's shipped behaviour: a spawned subagent starts a background
+shell session (which SS17 permits precisely because the child is a wake
+CONSUMER), `_sleep_for_sessions` gets a batch, `_wake` is called. What the
+parent then saw: the `except BaseException` killed the child's sessions and
+re-raised, `dispatch` contained it as
+`{"error": "spawn_subagent failed: ... unexpected keyword argument 'cancel'"}`,
+and the child's already-completed first answer -- a full agent run, paid for
+in model calls -- was discarded. A harness `TypeError` reported to the model
+as a tool failure.
+
+Driven through the real `wake_conversation` with the real keys `_wake`
+spreads: all ten were accepted except `cancel`. The control is what makes it
+a signature fault rather than a probe fault -- with `cancel` dropped the same
+call reached the real body and died on the probe's empty database
+(`no such table: conversationthread`). After the fix it reaches that same
+point WITH `cancel` present, which is the shape of the fix being right.
+
+**`wake_conversation`'s own docstring stated the contract it could not meet**
+-- *"a wake runs with the same channel, grant, authorization and activity as
+the run whose session it reports, because it IS that run continuing"* --
+and `cancel` was the one member of that list the signature omitted. It is now
+in both the signature and the sentence. `_run` is a `*args, **kwargs` frame
+over `_run_steps`, which already takes `cancel`, so forwarding needed nothing
+else.
+
+**This also closes half of S10-05**, which is worth saying because that
+finding predicted the opposite. It argued that "nothing can stop a wake turn"
+would survive the `TypeError` fix -- true only if the fix had removed `cancel`
+from the CALLER rather than adding it to the callee. Adding it means a wake
+turn is now cancellable, so what remains of S10-05 is `continue_conversation`,
+which still takes no `cancel` and is not this batch.
+
+**The guard is a RELATION, not an assertion about either signature**, for the
+reason the existing coverage shows: both `tests/test_session_subagent.py` and
+`tests/test_session_cli.py` replace the entry point with
+`def fake_wake(**kwargs)` under `mocker.patch.object(...)` with **no
+`autospec`**, so the double accepts every argument and the mismatch is
+invisible from the caller's side. `tests/test_harness_rows.py` does drive the
+real `wake_conversation` -- with an argument list it chooses itself, which did
+not include `cancel`. Nothing compared the two lists, which is
+`ARCHITECTURE.md` section 11's *"a test that PATCHES the wiring cannot see the
+wiring break"* with its own stated remedy unmet.
+
+So `test_every_common_key_is_a_parameter_of_BOTH_entry_points` reads
+`common`'s keys out of the source by AST -- listing them would make the test
+pass for the next argument added, which is the whole failure it exists to
+catch -- and asserts each is a parameter of both entry points the dict is
+spread into. Two vacuity guards in both directions: an AST walk that found
+fewer than eight keys, or a module that no longer spreads the dict exactly
+twice, fails the test rather than passing it for free.
+
+Mutation pass 2/2 killed with the equivalence control green. A1 restores the
+defect (drop `cancel` from the signature); A2 is the same drift from the other
+side -- a new key in `common` that only one entry point takes, which is
+literally what CN7 did. G1 moves `cancel` earlier in the signature and stays
+green, which is what makes it a relation rather than a list.
+
+Counts 6330 -> 6331.
 
