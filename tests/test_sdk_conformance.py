@@ -126,6 +126,138 @@ def test_every_genai_keyword_is_a_field_on_the_pinned_class():
     assert not problems, "; ".join(problems)
 
 
+def test_every_advertised_SCHEMA_constructs_against_the_REAL_pinned_types():
+    """The assertion the GOOGLE branch never had, and the reason it could
+    ship broken: no model call on GOOGLE could be built AT ALL.
+
+    `_tools_for_provider` handed each tool's `input_schema` dict straight
+    to `FunctionDeclaration(parameters=...)`. On the pinned
+    `google-genai==1.0.0` that field is a `types.Schema` whose
+    `model_config` is `extra="forbid"`, and this repository's own
+    `probability_stats` renders its `Optional[dict[str, float]]` as
+    `{"anyOf": [{"additionalProperties": ..., "type": "object"},
+    {"type": "null"}]}`. `additionalProperties` is not a field, so
+    construction raised -- and because the translation is one list
+    comprehension over every schema, the refusal of one entry took all 15
+    with it. `python main.py --provider GOOGLE` raised on its first turn
+    and a research run recorded `status='failed'` inside pass 1.
+
+    THE KEYWORD TEST ABOVE CANNOT SEE THIS. It compares the keyword NAMES
+    `core/client.py` passes against the pinned classes' fields, which is a
+    different question from whether the VALUES validate; and the rest of
+    the Google coverage runs against the conftest's fake `genai`, whose
+    declaration type accepts anything. So this drives the real registry
+    through the real translation against the real pinned types, which is
+    the only arrangement in which the defect is visible.
+    """
+    with real_package("google"):
+        from tools.registry import registry
+
+        import core.client as client
+
+        schemas = registry.schemas(None)
+        # Vacuity guard, same shape as the one above: an empty or tiny
+        # advertised set would make every assertion below pass for free.
+        assert len(schemas) >= 10, (
+            f"registry.schemas(None) advertised only {len(schemas)} tools; "
+            f"this test is quantifying over almost nothing and needs "
+            f"repointing, not deleting")
+
+        # The whole set at once -- which is how production calls it, and
+        # therefore the only way to catch one entry taking the rest down.
+        tools = client._tools_for_provider("GOOGLE", schemas)
+        assert tools and len(tools[0].function_declarations) == len(schemas)
+
+        # And per tool, so a failure names the entry rather than the batch.
+        for schema in schemas:
+            try:
+                client._tools_for_provider("GOOGLE", [schema])
+            except Exception as exc:  # pragma: no cover - the point is it does not
+                raise AssertionError(
+                    "%s does not translate for GOOGLE against the pinned "
+                    "types: %s" % (schema["name"], exc)) from exc
+
+
+def test_the_google_reduction_keeps_the_shape_it_is_allowed_to_keep():
+    """The reduction has to be narrow, or it would "fix" GOOGLE by sending
+    an empty schema and nothing would notice.
+
+    Three claims: an ordinary field is untouched, `Optional[X]` becomes X
+    plus `nullable` rather than disappearing, and the key that cannot be
+    carried is the only thing lost. `additionalProperties` is a real loss
+    -- the pinned `Schema` cannot express "a dict whose values are
+    numbers" at all -- so it is recorded here rather than papered over.
+    """
+    with real_package("google"):
+        from google.genai import types as genai_types
+
+        import core.client as client
+        from tools.builtin.probability_stats import ProbabilityStatsParams
+
+        accepted = client._google_schema_keys(genai_types)
+        assert "anyOf" in accepted and "any_of" in accepted, (
+            "the accepted-key set is read off the SDK and must carry both "
+            "the field names and their camelCase aliases, since JSON Schema "
+            "spells it anyOf and the model declares any_of")
+        assert "additionalProperties" not in accepted
+
+        raw = ProbabilityStatsParams.model_json_schema()
+        reduced = client._reduce_for_google(raw, accepted)
+
+        # Optional[dict[str, float]] -> object + nullable, description kept.
+        params = reduced["properties"]["distribution_params"]
+        assert params["type"] == "object"
+        assert params["nullable"] is True
+        assert "anyOf" not in params
+        assert "additionalProperties" not in params
+        assert params["description"].startswith("Parameters for the chosen")
+
+        # An ordinary field is passed through unchanged, so the reduction is
+        # not simply stripping everything it does not recognise.
+        before = raw["properties"]["evaluate"]
+        assert reduced["properties"]["evaluate"] == before
+
+        # And the null member is GONE rather than carried: the pinned SDK
+        # coerces {"type": "null"} with `UserWarning: null is not a valid
+        # Type` and continues, so leaving it in would put a type that does
+        # not exist on the wire.
+        assert genai_types.Schema(**params).nullable is True
+
+
+def test_the_FAKE_schema_carries_the_same_keys_as_the_REAL_one():
+    """The fake `types.Schema` in the root `conftest.py` exists so that
+    `_google_schema_keys` has a field set to read during the offline suite.
+    A fake whose key set drifts from the real one stops describing
+    anything -- and it fails in the quiet direction: a key missing from the
+    fake is a key the reduction strips in tests and keeps in production, so
+    `tests/test_client_translation.py` would be asserting about schemas
+    that are not the ones sent.
+
+    This is the project's own rule applied to the double it depends on:
+    anything a test patches, some other test has to assert for real.
+    """
+    def keyset(schema_cls):
+        keys = set(schema_cls.model_fields)
+        for field in schema_cls.model_fields.values():
+            alias = getattr(field, "alias", None)
+            if alias:
+                keys.add(alias)
+        return keys
+
+    from google.genai import types as fake_types
+    fake = keyset(fake_types.Schema)
+
+    with real_package("google"):
+        from google.genai import types as real_types
+        real = keyset(real_types.Schema)
+
+    assert fake == real, (
+        "the fake types.Schema's key set has drifted from the pinned "
+        "google-genai. Missing from the fake: %s. Extra in the fake: %s. "
+        "Update _FakeSchema._NAMES in the root conftest.py."
+        % (sorted(real - fake), sorted(fake - real)))
+
+
 def test_the_thinking_budget_guard_still_describes_the_pin():
     """`requirements.txt` pins google-genai==1.0.0 with a note saying
     ThinkingConfig has no `thinking_budget`, and `core/client.py` branches on

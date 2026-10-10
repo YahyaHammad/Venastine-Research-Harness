@@ -294,6 +294,52 @@ def _build_fake_google_module():
             self.include_thoughts = include_thoughts
             self.thinking_budget = thinking_budget
 
+    class _FakeSchemaField:
+        """Just the `.alias` that `_google_schema_keys` reads."""
+
+        def __init__(self, alias=None):
+            self.alias = alias
+
+    class _FakeSchema:
+        """`types.Schema`, faithful in the ONE respect production depends on:
+        the set of keys it can carry.
+
+        `core/client.py`'s `_google_schema_keys` reads `model_fields` (and
+        each field's camelCase `alias`) to decide which JSON Schema keys the
+        pinned SDK can accept, because the real `Schema` is `extra="forbid"`
+        and a key it has no field for is a `ValidationError` rather than
+        something ignored (batch 132). A fake with no `Schema` at all made
+        that an `AttributeError`, and a fake with an EMPTY field set would be
+        worse -- the reduction would strip every key and the tests here would
+        pass against schemas that are not what production sends.
+
+        These are the 22 fields of `google-genai==1.0.0`. The alias is the
+        camelCase spelling, which is how JSON Schema writes them and is the
+        half that makes `anyOf` recognisable at all. This fake is NOT
+        `extra="forbid"` and does not validate -- it cannot, and that is what
+        `tests/test_sdk_conformance.py` drives the REAL package for.
+        """
+
+        _NAMES = (
+            "any_of", "default", "description", "enum", "example", "format",
+            "items", "max_items", "max_length", "max_properties", "maximum",
+            "min_items", "min_length", "min_properties", "minimum",
+            "nullable", "pattern", "properties", "property_ordering",
+            "required", "title", "type",
+        )
+
+        model_fields = {
+            name: _FakeSchemaField(
+                alias=name.split("_")[0] + "".join(
+                    part.title() for part in name.split("_")[1:]))
+            for name in _NAMES
+        }
+
+        def __init__(self, **kw):
+            for key, value in kw.items():
+                setattr(self, key, value)
+
+    types_mod.Schema = _FakeSchema
     types_mod.ThinkingConfig = _FakeThinkingConfig
     types_mod.FunctionDeclaration = _FakeFunctionDeclaration
     types_mod.Tool = _FakeTool
