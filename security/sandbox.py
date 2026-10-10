@@ -1082,8 +1082,14 @@ def _ssh_env() -> dict:
     with no reason attached -- and it would have been diagnosed as an
     unreachable host. Bisected over twelve candidate variables (USERNAME,
     APPDATA, LOCALAPPDATA, SYSTEMDRIVE, PATHEXT and the rest), this is the
-    only one that changes the answer; it resolves `%PROGRAMDATA%\\ssh`,
-    which the client reads even under `-F none`.
+    only one that changes the answer FOR THIS ROUTE; it resolves
+    `%PROGRAMDATA%\\ssh`, which the client reads even under `-F none`.
+
+    PATHEXT is named in that bisection and is now in `_SAFE_ENV_KEYS`
+    anyway, which does not weaken the conclusion above: it was added for the
+    FALLBACK shell, where its absence made `powershell` not wait for an
+    external program, and it still changes nothing about `ssh`. Two routes,
+    two measurements, one variable that happens to appear in both.
     """
     env = _scrubbed_env()
     for name in ("PROGRAMDATA", "ProgramData"):
@@ -2085,7 +2091,28 @@ def containment_for(
 _SAFE_ENV_KEYS = frozenset({
     "PATH", "HOME", "USERPROFILE", "SYSTEMROOT", "TEMP", "TMP",
     "LANG", "LC_ALL", "TERM", "SHELL", "COMSPEC", "WINDIR",
+    "PATHEXT",
 })
+# WHY `PATHEXT`, and why this was found by running rather than by reading:
+# without it, `powershell -c "& 'prog' args"` STARTS the external program and
+# returns immediately instead of waiting for it. Measured on the fallback
+# route against a program that appends a line a second for five seconds and
+# exits non-zero: 0.37s, `return_code=0`, empty stdout, and ZERO lines
+# written by the time `run_sandboxed` returned -- with the work still running
+# six seconds later. With `PATHEXT` restored and nothing else changed: 5.26s,
+# the real exit code, the real output, all five lines done. So the model was
+# being told every build, install and test suite on this route had succeeded
+# and produced nothing, while it was only just starting; and because the
+# shell was gone before it, `SANDBOX_TIMEOUT_SECONDS` bounded nothing and a
+# session's `kill()` short-circuited on an already-exited shell.
+#
+# PATHEXT names extensions, not paths, so it leaks nothing this allowlist is
+# protecting -- and it is needed by the SHELL this harness chose, not by the
+# command. The other 64 names `_scrubbed_env()` drops were each restored one
+# at a time against the same program and none of them changes the answer, so
+# this is the one addition the measurement supports. PowerShell BUILTINS
+# (`Start-Sleep`, `Write-Output`) run in-process and are unaffected, which is
+# why a probe written with those alone sees nothing wrong.
 
 
 def _scrubbed_env() -> dict:

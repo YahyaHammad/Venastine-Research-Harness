@@ -13,6 +13,7 @@ import platform
 import random
 import shlex
 import subprocess
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -514,6 +515,28 @@ class TestScrubbedEnv:
         assert "PATH" in env
         assert "HOME" in env
 
+    def test_the_fallback_shell_is_given_pathext(self, monkeypatch):
+        """Without PATHEXT, `powershell -c "& 'prog' args"` STARTS an
+        external program and returns immediately instead of waiting: the
+        model was told every build and test suite on this route exited 0
+        with no output, 0.37s after launch, while the work was only
+        starting -- and the wall clock, the route's one bound on Windows,
+        was gone before it.
+
+        Asserted on the env the REAL `_run_subprocess_fallback` passes
+        rather than on the frozenset, so dropping the name is what goes
+        red and not merely renaming it. Platform-neutral on purpose: the
+        allowlist is shared by every route, so the guard holds on the
+        Linux runner too, where the value is simply absent from the
+        environment unless a test puts it there."""
+        monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT")
+        with patch("security.sandbox.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0, stdout="", stderr="")
+            _run_subprocess_fallback("whoami", "/tmp/ws", "bash")
+        passed_env = mock_run.call_args.kwargs["env"]
+        assert passed_env.get("PATHEXT") == ".COM;.EXE;.BAT"
+
 
 # ===========================================================================
 # ---- Backend internals ----------------------------------------------------
@@ -598,6 +621,46 @@ class TestBackendInternals:
             result = _run_subprocess_fallback("ls", "/tmp/ws", "bash")
         assert result["return_code"] == -1
         assert "not found" in result["stderr"].lower()
+
+    @pytest.mark.integration
+    @pytest.mark.skipif(platform.system() != "Windows",
+                        reason="bash always waits; the defect was powershell's")
+    def test_a_real_program_is_reported_with_its_own_exit_code(self, tmp_path):
+        """The behavioural half of the PATHEXT fix, and the assertion the
+        route never had: every other fallback test above patches
+        `subprocess.run`, so none of them can observe that the shell did
+        not wait for what it launched.
+
+        `integration` because it spawns a real external process, which
+        pytest.ini's default run excludes ("strictly offline: no process,
+        no socket"). Run it with `pytest -m integration`.
+
+        Pre-fix this returned 0.37s / rc=0 / empty stdout with zero lines
+        written; the marker file is what makes "did not wait"
+        distinguishable from "ran and said nothing"."""
+        marker = tmp_path / "progress.txt"
+        script = (
+            "import time,sys;"
+            "f=open(r'%s','w');"
+            "f.write('done');f.flush();f.close();"
+            "time.sleep(2);"
+            "print('PROGRAM_RAN');"
+            "sys.exit(7)" % str(marker)
+        )
+        command = "& '%s' -c \"%s\"" % (sys.executable, script.replace('"', '`"'))
+        # "powershell" by name, NOT detect_shell(): under the test config
+        # `config.SHELL_BINARY` is '/bin/bash', which on Windows is a
+        # WinError 2 before any of this is exercised. powershell is the
+        # shell whose waiting behaviour PATHEXT decides and it ships with
+        # the platform this test is gated to, so naming it keeps the guard
+        # measuring the thing it is named after.
+        result = _run_subprocess_fallback(command, str(tmp_path), "powershell")
+        detail = "rc=%r stdout=%r stderr=%r marker=%r" % (
+            result.get("return_code"), result.get("stdout"),
+            result.get("stderr"), marker.exists())
+        assert marker.exists(), "returned before the program ran: " + detail
+        assert "PROGRAM_RAN" in (result["stdout"] or ""), detail
+        assert result["return_code"] != 0, detail
 
 
 # ===========================================================================

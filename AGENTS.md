@@ -48,11 +48,11 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 6316 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
+pytest                                            # 6317 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
-pytest -m integration                             # opt-in; spawns a real stdio MCP server (§17 AC8)
+pytest -m integration                             # opt-in, 2 tests; a real stdio MCP server (§17 AC8) and the fallback shell (batch 130)
 
 # PARALLEL BY DEFAULT since batch 109 -- pytest.ini's addopts carries
 #   `-n auto --dist loadscope`, and nothing below needs typing normally.

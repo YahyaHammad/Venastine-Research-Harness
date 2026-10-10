@@ -19295,3 +19295,108 @@ whether 19 scopes' worth of findings earns a public index is a decision worth
 taking once the triage index exists and the count is known.
 
 Counts 6316 -> 6316.
+
+## Batch 130 -- the fallback shell that did not wait (2026-10-10)
+
+The first of the review marathon's six `BLOCKS-MERGE` fixes (`review/TRIAGE.md`
+section 1), and the one whose fix is a single name in a frozenset.
+
+**S02-01.** `_SAFE_ENV_KEYS` did not contain `PATHEXT`. Without `PATHEXT` in its
+environment, `powershell -c "& 'prog' args"` STARTS an external program and
+returns immediately instead of waiting for it, so every command the insecure
+host fallback ran was reported to the model as having succeeded with no output
+while the work was only just starting.
+
+Measured through the real `_run_subprocess_fallback` against a program that
+appends a line a second for five seconds and exits non-zero:
+
+| | as shipped | with `PATHEXT`, nothing else changed |
+|---|---|---|
+| elapsed | **0.37s** | 5.26s |
+| return code | **0** | the program's own |
+| stdout | **empty** | `PROGRAM_RAN` |
+| lines written by the time it returned | **0 of 5** | 5 of 5 |
+| lines six seconds later | 5 -- still running after the harness moved on | 5 |
+
+Three consequences followed from the one cause. The result was unrelated to what
+the command did, and `_annotate` added `ran_on: "host"` to it, so the model was
+told the command ran and produced nothing. `SANDBOX_TIMEOUT_SECONDS` bounded
+nothing on this route, because the shell was gone before the clock -- and
+`_unix_resource_limits()` returns `None` on Windows, so with the clock gone there
+was no bound of any kind on work running with no filesystem or network
+isolation. And a host-fallback session's `kill()` short-circuited on
+`self._proc.poll() is not None`, so `taskkill /T /F` was never sent.
+
+**The bisection was re-run rather than inherited**, because the fix writes it
+into a comment and the register's own rule is that an entry is evidence, not
+instruction. All 65 names `_scrubbed_env()` drops on this box were restored one
+at a time against the same external program: exactly one changes the answer.
+Baseline 0.18s with empty output; `PATHEXT` 3.17s with the program's output.
+`PATHEXT` names extensions, not paths, so it leaks nothing the allowlist is
+protecting, and it is needed by the SHELL this harness chose rather than by the
+command -- which is why the fix is that one name and not a wider allowlist.
+
+**What a probe written the obvious way does not see.** PowerShell builtins
+(`Start-Sleep`, `Write-Output`) run in-process and never consult `PATHEXT`, so a
+first probe using those measured 4.50s and the correct exit code and reported
+the route healthy. The defect needs an EXTERNAL executable, which is what every
+build, install and test suite on this route is. That is recorded here because
+the obvious probe is the one a later reader will write first.
+
+**One claim elsewhere was made false by this change and moved with it.**
+`_ssh_env`'s `PROGRAMDATA` rationale bisects twelve candidate variables and names
+`PATHEXT` among the ones that changed nothing -- true, for `ssh`. With `PATHEXT`
+now in the shared base set, the sentence read as though the name were still
+outside it, so it says `FOR THIS ROUTE` and carries a clause naming the other
+measurement. Two routes, two bisections, one variable that appears in both.
+Without that clause this batch would have created `ARCHITECTURE.md` section 11's
+shape 9 -- a claim made false by a change somewhere else -- inside the file it
+was repairing, which is the shape the marathon exists to find.
+
+**The guard is two tests, because the route had neither.** Every existing
+fallback test patches `subprocess.run`, so none of them can observe that the
+shell did not wait for what it launched -- which is why a route that executed
+nothing to completion was green. `test_the_fallback_shell_is_given_pathext` is
+offline and runs by default: it drives the real `_run_subprocess_fallback` and
+asserts on the `env=` kwarg actually handed to `subprocess.run`, so the WIRING is
+what it measures, not the frozenset in isolation. It is platform-neutral because
+the allowlist is shared by every route.
+`test_a_real_program_is_reported_with_its_own_exit_code` is the behavioural half
+and is marked `integration`, since it spawns a real external process and
+`pytest.ini`'s default run is "strictly offline: no process, no socket"; it is
+Windows-gated because `bash` always waits and the defect was `powershell`'s.
+
+**Two things found while writing that test, neither of them this finding.**
+`detect_shell()` returns `/bin/bash` under the test configuration, which on
+Windows is a `WinError 2` before anything under test is reached -- so the test
+names `powershell` directly rather than asking the detector, and the reason is in
+a comment beside it. And PowerShell's `-Command` collapses a non-zero child exit
+to 1, so the test asserts the exit code is non-zero rather than asserting the
+program's own 7; "reported with that exit code" is not a promise this route can
+keep, and that is worth someone's attention separately rather than being asserted
+as though it worked.
+
+Mutation pass, 3/3 killed with the equivalence control green: dropping `PATHEXT`
+from the allowlist, misspelling it there (which keeps the set's size and loses
+the behaviour, so the guard is shown to check the name), and stopping the
+fallback passing the scrubbed env at all. The negative control for the
+`integration` half is the pre-fix signature exactly -- `rc=0 stdout=''
+marker=False`.
+
+**Four gated digits and three prose claims moved with the two tests**, and the
+prose half is the part worth recording: adding a second `integration` test made
+`pytest.ini`, `README.md` and `AGENTS.md` wrong, because all three said there
+was exactly ONE and named the MCP server as what it does. That is the same shape
+9 this batch had just finished repairing in `_ssh_env`, arriving from the
+opposite direction -- not a claim this change invalidated somewhere else, but a
+claim about the suite's own shape that only a count makes false. The gated
+digits were caught by the suite (`test_the_documented_count_is_the_real_one`,
+6316 -> 6317 in `README.md`, `AGENTS.md` and `ARCHITECTURE.md`, and
+`test_the_tree_states_a_correct_count_for_every_collected_test_file`,
+`test_shell.py` 299 -> 300). **The three prose claims were caught by nobody**,
+and were found by grepping for the sentence this batch was about to falsify.
+`ARCHITECTURE.md`'s `test_mcp_integration.py # 1 test` line is about that file
+and stays true.
+
+Counts 6316 -> 6317 in the default run, 6318 -> 6319 including `integration`.
+
