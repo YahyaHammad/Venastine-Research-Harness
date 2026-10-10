@@ -2179,6 +2179,39 @@ first KEPT row is an `assistant` row rather than a `user` row -- so a
 pre-batch-120 checkpoint, which is always turn-aligned, re-adds nothing and
 renders exactly as it did.
 
+### The scenario this entry measures was the one the fix did not admit (batch 134)
+
+Corrected rather than rewritten, because the entry is evidence and getting it
+wrong twice in the same place is the thing worth recording. The case tabled
+above -- *"`starts` is `[0, 1]`, the only legal boundary folds turn 0's 253
+tokens, and every later evaluation answers `no-progress`"* -- is a thread with
+TWO user rows, and batch 120 gated its fix behind `cutoff < 1`.
+`completed_turns()` is `len(turn_start_ids) - 1`, so it is at least 1 for any
+thread with a second user row: on the very shape this entry describes, the
+sub-turn path was unreachable and the boundary was the useless turn-aligned
+one. The 97.2% tabled here was never reached by a two-turn thread.
+
+What batch 120 did fix is the narrower claim `AGENTS.md` states -- *"a thread
+whose only turn is the one still running then has no legal fold at all"* --
+and the two were allowed to disagree for fourteen batches. Measured in 134,
+one 40-step turn: alone it folds 90.0% through the sub-turn path; behind a
+single short exchange the identical steps fold **0.0%**, and then answer
+`no-progress` forever at `logger.debug` with `kind=None`, so no notice is
+appended and nothing appears on screen. A sweep of every legal
+`keep_recent_tokens` x `keep_recent_turns` pair reached a sub-turn boundary 0
+times in 30 accepted settings.
+
+It also reinstated the trap item 39 names and says it avoided -- *"A
+successful compaction that cannot be repeated"* -- on the DEFAULT
+configuration with no settings edit at all.
+
+Batch 134's gate is "no turn-aligned fold WORTH A MODEL CALL" rather than "no
+turn-aligned fold": the turn-aligned boundary is kept when it frees at least
+`keep_recent_tokens`, which is the tail the fold exists to make room behind,
+and otherwise the sub-turn path runs exactly as it does for a single-turn
+thread. That branch is untouched, so everything this entry closed stays
+closed.
+
 ## 41. `arxiv_search` output is unbounded, and one result was 29k tokens (closed, batch 126)
 
 Found while measuring item 39's per-step growth. `max_read_chars` (50,000

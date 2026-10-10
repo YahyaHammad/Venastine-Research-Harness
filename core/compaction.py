@@ -704,20 +704,85 @@ def compactable_span(memory, current_turn_start: Optional[int] = None,
             "turn and keep_recent_tokens still hold.",
             memory.thread_id, settings["keep_recent_turns"], len(starts))
 
-    if cutoff < 1:
-        # NO TURN-ALIGNED FOLD EXISTS. Batch 120 tries one inside the turn
-        # before giving up -- see _sub_turn_span for what that costs and
-        # why M4 holds. Last, and only here: a turn-aligned boundary is
-        # always preferable, since it needs no row re-added and no
-        # amendment to M5 at all.
+    # THE TURN-ALIGNED FOLD HAS TO BE WORTH A MODEL CALL, not merely legal.
+    # Batch 134, and this is the gate `cutoff < 1` used to be.
+    #
+    # `completed_turns()` is `len(turn_start_ids) - 1`, so it is at least 1
+    # for any thread with two user rows, and the token floor's loop assigns
+    # `token_cutoff = index` BEFORE testing -- so it stops at
+    # `len(starts) - 1` as soon as the last turn alone exceeds
+    # keep_recent_tokens. Between them, `cutoff` was >= 1 on every thread
+    # with a second user row, and the sub-turn path behind `cutoff < 1` was
+    # unreachable there. The boundary was then the best TURN-ALIGNED one,
+    # which on a thread whose current turn is almost all of it is the end of
+    # the first turn.
+    #
+    # MEASURED on one 40-step turn, with and without one short exchange in
+    # front of it:
+    #
+    #   40 steps, one user row        SUB-TURN at row 73   folds 90.0%
+    #   one exchange, then the same    turn-aligned row 2   folds  0.0%
+    #   two exchanges, then the same   turn-aligned row 4   folds  0.1%
+    #   five exchanges, then the same  turn-aligned row 6   folds  0.1%
+    #
+    # And it was a DEAD END rather than a slow start, because the useless
+    # fold satisfies `advances()` permanently: every later evaluation
+    # answered `no-progress`, at `logger.debug`, with `kind=None` so
+    # `_maybe_compact` appended no notice -- nothing on screen while the
+    # thread ran toward the provider's limit, where `headroom_for`'s
+    # docstring says the loop retries the identical oversized prompt three
+    # times and the turn dies. A sweep of every legal
+    # keep_recent_tokens x keep_recent_turns pair reached a sub-turn
+    # boundary 0 times in 30 accepted settings.
+    #
+    # This is the trap item 39 names and says it avoided -- "a successful
+    # compaction that cannot be repeated" -- arriving on the DEFAULT
+    # configuration with no settings edit at all, and item 40's own measured
+    # scenario (two turns, 97.2% available) is the case the shipped gate
+    # excluded.
+    #
+    # THE FLOOR IS keep_recent_tokens, which is the thing the fold exists to
+    # make room behind: a boundary that frees less than the tail it must
+    # keep has not answered the size pressure it was called for. Below it,
+    # fall through to the sub-turn path exactly as `cutoff < 1` does -- and
+    # that branch is kept untouched, so the single-turn case batch 120 fixed
+    # is unchanged. `_sub_turn_span` itself needs nothing: with
+    # `current_turn_start >= 1` it already resolves `opener = starts[index]`
+    # to the current turn's user row and scans forward from there.
+    worth_it = True
+    if cutoff >= 1:
+        freed = sum(len(rows[i]["content"])
+                    for i in range(starts[cutoff])) // CHARS_PER_TOKEN
+        worth_it = freed >= settings["keep_recent_tokens"]
+        if not worth_it:
+            logger.info(
+                "Compaction on thread %s: the turn-aligned boundary would "
+                "free %d proxy tokens against a keep_recent_tokens of %d, "
+                "which is not worth a model call, so the boundary is inside "
+                "the current turn instead.",
+                memory.thread_id, freed, settings["keep_recent_tokens"])
+
+    if cutoff < 1 or not worth_it:
+        # NO TURN-ALIGNED FOLD WORTH MAKING. Batch 120 tries one inside the
+        # turn before giving up -- see _sub_turn_span for what that costs
+        # and why M4 holds. Last, and only here: a turn-aligned boundary is
+        # always preferable WHEN IT FREES ENOUGH, since it needs no row
+        # re-added and no amendment to M5 at all.
         inside = _sub_turn_span(rows, starts, settings, current_turn_start)
         if inside is not None:
-            logger.info(
-                "Compaction on thread %s: no turn-aligned fold exists (%d "
-                "turns, all held), so the boundary is inside the current "
-                "turn. Its request and the recent steps stay verbatim.",
-                memory.thread_id, len(starts))
-        return inside
+            if cutoff < 1:
+                logger.info(
+                    "Compaction on thread %s: no turn-aligned fold exists "
+                    "(%d turns, all held), so the boundary is inside the "
+                    "current turn. Its request and the recent steps stay "
+                    "verbatim.",
+                    memory.thread_id, len(starts))
+            return inside
+        # A sub-turn fold is not available either (fewer than two steps in
+        # the current turn). A small turn-aligned fold still beats nothing,
+        # so fall back to it rather than refusing to compact at all.
+        if cutoff < 1:
+            return None
     # Fold everything strictly before turn `cutoff`, so the watermark is
     # the row just before that turn's first row. cutoff >= 1 guarantees
     # there is one.

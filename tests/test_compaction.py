@@ -1489,6 +1489,96 @@ class TestAFoldInsideOneTurnWhenNothingElseIsLegal:
     every placement test below walks both sides for unanswered calls.
     """
 
+    def test_a_long_turn_BEHIND_a_completed_one_still_folds_inside(
+            self, fake_storage):
+        """The gap this class's own vacuity note did not cover: every case
+        below it passes `current_turn_start=0`, so none of them has a
+        completed turn in front of the long one.
+
+        `completed_turns()` is `len(turn_start_ids) - 1`, so it is at least
+        1 for any thread with two user rows -- which put the sub-turn path
+        behind `cutoff < 1` out of reach on exactly the shape that is MORE
+        common than the single-turn thread batch 120 fixed. Measured before
+        the fix: one 40-step turn alone folded 90.0%, and the identical 40
+        steps behind one short exchange folded 0.0%, turn-aligned, and then
+        answered `no-progress` forever with no notice and nothing on screen.
+
+        NOT `OVERRIDES`: its `keep_recent_tokens` is 1, and the gate's floor
+        IS keep_recent_tokens, so a nine-token fold genuinely clears a floor
+        of one. The shipped default is 4000, against which the leading
+        exchange is nothing -- so the floor has to be meaningful relative to
+        the thread for this shape to be the one the defect was about.
+        """
+        overrides = dict(OVERRIDES, keep_recent_tokens=200)
+        memory = ConversationMemory()
+        memory.add_user_message("a one-line question")
+        memory.add_assistant_message(_Resp("a one-line answer"))
+        _stepped_turn(memory, steps=12)
+
+        rows = fake_storage._messages_by_thread[memory.thread_id]
+        starts = [i for i, row in enumerate(rows) if row["role"] == "user"]
+        assert len(starts) == 2, "the fixture is not the two-turn shape"
+
+        watermark = compaction.compactable_span(
+            memory, current_turn_start=1, overrides=overrides)
+        assert watermark is not None
+
+        ids = [row["id"] for row in rows]
+        cut = ids.index(watermark) + 1
+        assert cut not in starts, (
+            "the boundary is a turn start, so the fold is the 0.0% one "
+            "again -- a completed turn in front of the long one has put "
+            "the sub-turn path out of reach")
+
+        total = sum(len(row["content"]) for row in rows)
+        folded = sum(len(rows[i]["content"]) for i in range(cut))
+        assert folded > total // 2, (
+            f"the boundary freed {folded} of {total} characters, which is "
+            f"not worth a model call -- the point of the gate is that a "
+            f"legal fold and a useful one are different things")
+
+    def test_a_turn_aligned_fold_that_clears_the_floor_is_still_preferred(
+            self, fake_storage):
+        """The other side of the same gate, and the reason it is a FLOOR
+        rather than a comparison.
+
+        `test_a_turn_aligned_fold_is_preferred_when_one_exists` below pins
+        that sub-turn folding must not fire while a turn-aligned boundary
+        is available. That stays true -- but it would also stay true if the
+        gate simply took whichever candidate folded more, which is a
+        different rule with a different failure mode. This asserts the
+        boundary is a turn start when the turn-aligned fold clears
+        keep_recent_tokens, so "prefer turn-aligned" is what is tested and
+        not "prefer bigger".
+
+        Same floor as the case above, so the two differ only in the shape of
+        the thread and not in the setting being measured.
+        """
+        overrides = dict(OVERRIDES, keep_recent_tokens=200)
+        memory = ConversationMemory()
+        # Two substantial completed turns, then a short current one: the
+        # turn-aligned boundary clears the 200-token floor comfortably,
+        # while a sub-turn fold of three tiny steps would free almost
+        # nothing -- so "prefer bigger" and "prefer turn-aligned" give the
+        # same answer here only if the gate is the floor.
+        for index in range(2):
+            memory.add_user_message(f"question {index} " + "x" * 2000)
+            memory.add_assistant_message(_Resp(f"answer {index} " + "x" * 2000))
+        _stepped_turn(memory, steps=3, body="y" * 10)
+
+        rows = fake_storage._messages_by_thread[memory.thread_id]
+        starts = [i for i, row in enumerate(rows) if row["role"] == "user"]
+
+        watermark = compaction.compactable_span(
+            memory, current_turn_start=2, overrides=overrides)
+
+        ids = [row["id"] for row in rows]
+        cut = ids.index(watermark) + 1
+        assert cut in starts, (
+            "a turn-aligned boundary that clears keep_recent_tokens was "
+            "passed over for a sub-turn one, which inverts the last-resort "
+            "rule batch 120 established")
+
     def test_a_single_turn_thread_can_now_be_folded(self, fake_storage):
         memory = ConversationMemory()
         _stepped_turn(memory, steps=6)

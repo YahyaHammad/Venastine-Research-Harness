@@ -19719,4 +19719,124 @@ literally what CN7 did. G1 moves `cancel` earlier in the signature and stays
 green, which is what makes it a relation rather than a list.
 
 Counts 6330 -> 6331.
-
+
+## Batch 134 -- the fold that was legal and useless (2026-10-10)
+
+The fifth of the review marathon's six `BLOCKS-MERGE` fixes.
+
+**The defect.** `compactable_span` consulted the sub-turn fold only inside
+`if cutoff < 1`, and `cutoff` is `min(token_cutoff, current_turn_start)`.
+`current_turn_start` is `memory.completed_turns()`, which is
+`len(turn_start_ids) - 1`, so it is at least 1 for any thread with two user
+rows; and the token floor's loop assigns `token_cutoff = index` BEFORE
+testing, so it stops at `len(starts) - 1` as soon as the last turn alone
+exceeds `keep_recent_tokens`. Between them, on any thread with a second user
+row the sub-turn path was unreachable and the boundary was the best
+TURN-ALIGNED one -- which, when the current turn is almost the whole thread,
+is the end of the first turn.
+
+Measured on one 40-step turn, with and without short completed turns in front
+of it, through the real storage writers and the real `compactable_span`:
+
+| thread | turns | boundary | folds |
+|---|---|---|---|
+| 40 steps, one user row | 1 | SUB-TURN at row 73 | 36,722 of 40,802 (**90.0%**) |
+| one short exchange, then the same 40 | 2 | turn-aligned at row 2 | 18 of 40,820 (**0.0%**) |
+| two short exchanges, then the same 40 | 3 | turn-aligned at row 4 | 36 of 40,838 (0.1%) |
+| five short exchanges, then the same 40 | 6 | turn-aligned at row 6 | 54 of 40,892 (0.1%) |
+
+The control is the first row: delete the leading exchange and nothing else,
+and the identical 40 steps fold 90.0% through the sub-turn path. So the 0.0%
+rows are the gate, not the probe failing to reach the code.
+
+**And it was a dead end rather than a slow start**, because the useless fold
+satisfies `advances()` permanently: every later evaluation answered
+`no-progress`, logged at `logger.debug`, with `kind=None` so `_maybe_compact`
+returns before appending a notice. **No notice, no WARNING, nothing on
+screen** while the thread runs toward the provider's limit, where
+`headroom_for`'s own docstring says the loop retries the identical oversized
+prompt three times and the turn dies. There was no way out from inside the
+app: a sweep of every legal `keep_recent_tokens` x `keep_recent_turns` pair
+reached a sub-turn boundary 0 times in 30 accepted settings, `/compact`
+reaches the same code with `current_turn_start=None` and still computes
+`cutoff = 1`, switching model recomputes the identical number (the function
+takes none), and a restart re-reads the same archive.
+
+**The shape is ordinary.** A long tool-heavy turn preceded by at least one
+completed exchange is strictly more common than the single-turn thread batch
+120 did fix, and it reinstated the trap item 39 names and says it avoided --
+*"A successful compaction that cannot be repeated"* -- on the DEFAULT
+configuration with no settings edit at all.
+
+**The fix: the gate is "no turn-aligned fold WORTH A MODEL CALL" rather than
+"no turn-aligned fold".** The turn-aligned boundary is kept when it frees at
+least `keep_recent_tokens` -- the tail the fold exists to make room behind, so
+a boundary freeing less than that has not answered the size pressure it was
+called for -- and otherwise falls through to `_sub_turn_span`. The
+`cutoff < 1` branch is untouched, so the single-turn case batch 120 fixed is
+unchanged, and `_sub_turn_span` itself needed nothing: with
+`current_turn_start >= 1` it already resolves `opener = starts[index]` to the
+current turn's user row and scans forward. After the fix all four rows above
+fold 90.0%.
+
+**The floor rather than a comparison, and the tests say which.** "Take
+whichever candidate folds more" would also unstick the thread, and it is a
+different rule with a different failure mode -- it would invert batch 120's
+last-resort ordering, under which a turn-aligned boundary is preferable
+because it needs no row re-added and no amendment to M5 at all. So the new
+cases come in a pair: a two-turn thread must fold INSIDE the turn, and a
+turn-aligned fold that clears the floor must still be preferred even though a
+sub-turn fold exists. Mutation A4 (the floor made infinite, so no
+turn-aligned fold is ever kept) is what the second one catches and the first
+one would not.
+
+**A test of mine was wrong for an instructive reason.** The first version used
+the file's shared `OVERRIDES`, whose `keep_recent_tokens` is **1** -- and the
+gate's floor IS keep_recent_tokens, so a nine-token fold genuinely clears a
+floor of one and the turn-aligned boundary was correctly kept. The shipped
+default is 4000, against which the leading exchange is nothing. Both new
+cases now set a floor meaningful relative to the thread and say why, because
+a test whose setting makes the defect unreachable is the same vacuity the
+class it sits in already warns about.
+
+**`TECHNICAL_DEBT` 40 is corrected rather than rewritten.** The case it tables
+-- *"`starts` is `[0, 1]`, the only legal boundary folds turn 0's 253
+tokens"* -- is a thread with TWO user rows, so it is describing a fix for a
+case the shipped gate did not admit, and the 97.2% it tables was never
+reached by a two-turn thread. What batch 120 actually fixed is the narrower
+claim `AGENTS.md` states, and the two were allowed to disagree for fourteen
+batches. That is the second time in three batches the register has been found
+wrong about its own defect, which is the register's own stated rule working.
+
+Mutation pass 5/5 killed with the equivalence control green, and the subject
+deliberately includes batch 120's counter-case so a mutation that satisfies
+one case by breaking the other cannot score as a kill.
+
+**Three full-suite runs to close this batch, and the two red ones were not
+this batch.** Run 1 failed
+`test_question_tool.py::TestTheTuiModal::test_the_discuss_button_defers` in
+10:55 of wall time against a normal 1:30; run 2 failed
+`test_agent_navigation.py::...::test_a_code_block_in_the_viewer_matches_the_live_pane`
+in 1:37; run 3 was green in 1:39 with nothing changed between them. Both
+failures pass in isolation -- 84 and then 134 tests green -- and both are
+Textual PILOT tests going through `pilot.pause()` / `settle()`.
+
+`tests/conftest.py`'s `settle` docstring already measures the mechanism: one
+pause costs 21ms with nothing burning CPU in-process and 1021ms with one busy
+sibling thread, a **46x swing**, and misreading that budget *"COST TWO CI
+FAILURES (batch 116)"*. Two different pilot assertions failing on consecutive
+runs, each green alone, is that sensitivity under load rather than a
+regression -- a compaction-gate change has no route to a modal button or a
+code-block width.
+
+The leading alternative hypothesis was checked and DISPROVED rather than
+argued away: this batch adds a `logger.info` to `compactable_span`, which
+`_maybe_compact` calls after every step while a thread is over the trigger
+(item S11-09's subject), and `tui/app.py` attaches a handler to the ROOT
+logger -- so a new INFO line could in principle have landed in the transcript
+and broken width assertions. It cannot: `TranscriptLogHandler` is constructed
+`level=logging.WARNING`, with "INFO in a chat transcript is noise" as its
+stated reason. Recorded because the next reader will hit the same two tests
+and deserves the measurement rather than the guess.
+
+Counts 6331 -> 6333.
