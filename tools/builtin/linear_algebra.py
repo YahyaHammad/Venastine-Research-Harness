@@ -13,7 +13,9 @@ from typing import Literal, Optional
 import sympy
 from pydantic import BaseModel, Field
 
-from tools.builtin._math_common import MathParseError, safe_parse, serialize
+from tools.builtin._math_common import (
+    MathParseError, _split_warnings, safe_parse, serialize,
+)
 
 _OPERATIONS = Literal[
     "add", "subtract", "multiply", "transpose", "determinant",
@@ -33,6 +35,15 @@ class LinearAlgebraParams(BaseModel):
     vector_a: Optional[list[str]] = Field(None, description="First vector -- needed for dot_product/cross_product/norm")
     vector_b: Optional[list[str]] = Field(None, description="Second vector -- needed for dot_product/cross_product")
     scalar: Optional[str] = Field(None, description="Scalar value, for scalar multiplication of matrix_a")
+    symbols: Optional[list[str]] = Field(
+        None,
+        description=(
+            "Multi-character symbol names used in the entries, e.g. "
+            "['mass', 'velocity']. Declare them or they are read as products "
+            "of single letters: 'mass' becomes a*m*s**2. Single letters and "
+            "names containing an underscore are safe without this."
+        ),
+    )
 
 
 TOOL_SCHEMA = {
@@ -49,16 +60,30 @@ TOOL_SCHEMA = {
 }
 
 
-def _to_matrix(rows: list[list[str]]) -> sympy.Matrix:
-    return sympy.Matrix([[safe_parse(cell) for cell in row] for row in rows])
+def _to_matrix(rows: list[list[str]], symbols=None, rewritten=None) -> sympy.Matrix:
+    return sympy.Matrix([[safe_parse(cell, symbols=symbols, rewritten=rewritten)
+                          for cell in row] for row in rows])
 
 
-def _to_vector(values: list[str]) -> sympy.Matrix:
-    return sympy.Matrix([safe_parse(v) for v in values])
+def _to_vector(values: list[str], symbols=None, rewritten=None) -> sympy.Matrix:
+    return sympy.Matrix([safe_parse(v, symbols=symbols, rewritten=rewritten)
+                         for v in values])
 
 
 def run(params: dict) -> dict:
     parsed = LinearAlgebraParams(**params)
+    # EVERY parsed field gets `symbols` and shares one `rewritten` set: this
+    # tool had no way to reach `symbols=` at all, so a multi-character entry
+    # was silently rewritten into a product of single letters and the answer
+    # named a different quantity (batch 131).
+    rewritten: set = set()
+    syms = parsed.symbols or None
+
+    def to_matrix(rows):
+        return _to_matrix(rows, syms, rewritten)
+
+    def to_vector(values):
+        return _to_vector(values, syms, rewritten)
 
     try:
         op = parsed.operation
@@ -66,80 +91,81 @@ def run(params: dict) -> dict:
         if op == "add":
             if parsed.matrix_a is None or parsed.matrix_b is None:
                 return {"error": "add requires 'matrix_a' and 'matrix_b' (each a list of rows)."}
-            result = _to_matrix(parsed.matrix_a) + _to_matrix(parsed.matrix_b)
+            result = to_matrix(parsed.matrix_a) + to_matrix(parsed.matrix_b)
         elif op == "subtract":
             if parsed.matrix_a is None or parsed.matrix_b is None:
                 return {"error": "subtract requires 'matrix_a' and 'matrix_b' (each a list of rows)."}
-            result = _to_matrix(parsed.matrix_a) - _to_matrix(parsed.matrix_b)
+            result = to_matrix(parsed.matrix_a) - to_matrix(parsed.matrix_b)
         elif op == "multiply":
             if parsed.matrix_a is None:
                 return {"error": "multiply requires 'matrix_a'."}
-            a = _to_matrix(parsed.matrix_a)
+            a = to_matrix(parsed.matrix_a)
             if parsed.scalar is not None:
-                result = safe_parse(parsed.scalar) * a
+                result = safe_parse(parsed.scalar, symbols=syms,
+                                    rewritten=rewritten) * a
             else:
                 if parsed.matrix_b is None:
                     return {"error": "multiply requires 'matrix_b' or 'scalar'."}
-                result = a * _to_matrix(parsed.matrix_b)
+                result = a * to_matrix(parsed.matrix_b)
         elif op == "transpose":
             if parsed.matrix_a is None:
                 return {"error": "transpose requires 'matrix_a'."}
-            result = _to_matrix(parsed.matrix_a).T
+            result = to_matrix(parsed.matrix_a).T
         elif op == "determinant":
             if parsed.matrix_a is None:
                 return {"error": "determinant requires 'matrix_a'."}
-            m = _to_matrix(parsed.matrix_a)
+            m = to_matrix(parsed.matrix_a)
             if m.rows != m.cols:
                 return {"error": f"determinant requires a square matrix (got {m.rows}x{m.cols})."}
             result = m.det()
         elif op == "inverse":
             if parsed.matrix_a is None:
                 return {"error": "inverse requires 'matrix_a'."}
-            m = _to_matrix(parsed.matrix_a)
+            m = to_matrix(parsed.matrix_a)
             if m.rows != m.cols:
                 return {"error": f"inverse requires a square matrix (got {m.rows}x{m.cols})."}
             result = m.inv()
         elif op == "eigenvalues":
             if parsed.matrix_a is None:
                 return {"error": "eigenvalues requires 'matrix_a'."}
-            m = _to_matrix(parsed.matrix_a)
+            m = to_matrix(parsed.matrix_a)
             if m.rows != m.cols:
                 return {"error": f"eigenvalues requires a square matrix (got {m.rows}x{m.cols})."}
             result = m.eigenvals()
         elif op == "eigenvectors":
             if parsed.matrix_a is None:
                 return {"error": "eigenvectors requires 'matrix_a'."}
-            m = _to_matrix(parsed.matrix_a)
+            m = to_matrix(parsed.matrix_a)
             if m.rows != m.cols:
                 return {"error": f"eigenvectors requires a square matrix (got {m.rows}x{m.cols})."}
             result = m.eigenvects()
         elif op == "rank":
             if parsed.matrix_a is None:
                 return {"error": "rank requires 'matrix_a'."}
-            result = _to_matrix(parsed.matrix_a).rank()
+            result = to_matrix(parsed.matrix_a).rank()
         elif op == "solve_linear_system":
             if parsed.matrix_a is None or parsed.matrix_b is None:
                 return {"error": "solve_linear_system requires 'matrix_a' and 'matrix_b' (b as column vector/matrix with same rows as A, e.g. [[7],[5]])."}
-            a = _to_matrix(parsed.matrix_a)
-            b = _to_matrix(parsed.matrix_b)
+            a = to_matrix(parsed.matrix_a)
+            b = to_matrix(parsed.matrix_b)
             if a.rows != b.rows:
                 return {"error": f"solve_linear_system: 'matrix_b' has {b.rows} rows but 'matrix_a' has {a.rows} — b must be a column vector/matrix with the same number of rows as A (e.g. [[7],[5]] for a 2-row system)."}
             result = a.solve(b)
         elif op == "dot_product":
             if parsed.vector_a is None or parsed.vector_b is None:
                 return {"error": "dot_product requires 'vector_a' and 'vector_b'."}
-            result = _to_vector(parsed.vector_a).dot(_to_vector(parsed.vector_b))
+            result = to_vector(parsed.vector_a).dot(to_vector(parsed.vector_b))
         elif op == "cross_product":
             if parsed.vector_a is None or parsed.vector_b is None:
                 return {"error": "cross_product requires 'vector_a' and 'vector_b'."}
-            va, vb = _to_vector(parsed.vector_a), _to_vector(parsed.vector_b)
+            va, vb = to_vector(parsed.vector_a), to_vector(parsed.vector_b)
             if len(va) != 3 or len(vb) != 3:
                 return {"error": "cross_product requires 3-dimensional vectors"}
             result = va.cross(vb)
         elif op == "norm":
             if parsed.vector_a is None:
                 return {"error": "norm requires 'vector_a'."}
-            result = _to_vector(parsed.vector_a).norm()
+            result = to_vector(parsed.vector_a).norm()
         else:
             return {"error": f"Unknown operation: {op}"}
 
@@ -152,4 +178,7 @@ def run(params: dict) -> dict:
             return {"error": "Computation failed: determinant/inverse/eigen requires a square matrix — the supplied matrix is not square."}
         return {"error": f"Computation failed: {e}"}
 
-    return {"result": serialize(result), "operation": op}
+    out: dict = {"result": serialize(result), "operation": op}
+    if rewritten:
+        out["warnings"] = _split_warnings(rewritten)
+    return out

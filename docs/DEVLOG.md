@@ -19399,4 +19399,118 @@ and were found by grepping for the sentence this batch was about to falsify.
 and stays true.
 
 Counts 6316 -> 6317 in the default run, 6318 -> 6319 including `integration`.
+
+## Batch 131 -- the name that was answered as a different question (2026-10-10)
+
+The review marathon's only severity S1, and the second of its six
+`BLOCKS-MERGE` fixes.
+
+**The defect.** `_TRANSFORMATIONS` carries `split_symbols`, so a
+multi-character name that is not in `local_dict` is rewritten into a PRODUCT
+of single-letter Symbols before anything is computed. `symbols=` is the only
+thing that keeps a name whole, and three of the four parsing tools could not
+reach it. Driven through the real `linear_algebra.run`, `determinant` of
+`[[name,0],[0,name]]`, where the correct answer is `name**2` in every row:
+
+| entry | returned | |
+|---|---|---|
+| `mass` | `a**2*m**2*s**4` | wrong, no warning |
+| `rate` | `a**2*e**2*r**2*t**2` | wrong, no warning |
+| `Rate` | `R**2*a**2*e**2*t**2` | wrong, no warning |
+| `xy` | `x**2*y**2` | wrong, no warning |
+| `mass_1`, `alpha`, `theta`, `T` | correct | an underscore, a Greek name, one character |
+| `beta`, `N` | an error dict | the name is a SymPy function |
+
+Five of eleven plausible entries came back as a successful `{"result": ...}`
+naming a quantity nobody asked about. `a**2*m**2*s**4` is a well-formed
+symbolic expression, so a reader skimming a report has no reason to question
+it -- which is the register's own wording for severity S1, "silently produces
+a wrong answer a user would act on". The same mechanism through the siblings:
+`norm(['force','0'])` answered `Abs(c*e*f*o*r)`, and
+`integrate('force*distance', variable='distance')` answered
+`c*distance**2*e*f*o*r/2` -- the clearest statement of the shape, because the
+ONE name the schema let a caller protect survived and the other one in the
+same expression was shredded.
+
+**Why it is severity S1 and not a wrong answer among many.**
+`_math_common.py` states the exposure itself: all six math tools are
+`permission=True, approval=False`, advertised and callable with no prompt in
+plain chat AND in all ten research passes. A research pass writes its claims
+into a durable `PipelineRunRecord`, so this is not a lost turn, it is a
+persisted claim.
+
+**The split stays.** It is what makes the tools accept informal algebra
+(`2xy` meaning `2*x*y`) and
+`test_a_multi_letter_unknown_name_is_split_not_refused` pins it deliberately.
+What was wrong was not the behaviour but that **the remedy that test's own
+docstring names was unreachable** -- *"callers who need the name kept whole
+pass it via `symbols=`, which is what that parameter is for."* Two tools had
+no parameter through which a caller could, and the test asserted the
+behaviour without asking whether the remedy it cited could be applied. That
+is the fourth vacuity shape turned inside out: not an assertion that cannot
+discriminate, but a *remedy recorded as though it had been available*. That
+docstring now says so, and points at the reachability guard.
+
+**The fix is three parts and does not touch `_TRANSFORMATIONS`.**
+
+1. `safe_parse` grows an optional `rewritten` set. When one is passed it
+   collects the names that were split anyway, decided by `_rewritten_names`
+   comparing what was WRITTEN against the result's `free_symbols` rather
+   than by reimplementing SymPy's `_token_splittable` -- whatever that
+   predicate does with a given spelling, a name is reported exactly when it
+   did not survive as itself.
+2. `symbols=` is threaded through every parsed field. `linear_algebra` and
+   `geometry` gain a `symbols` schema field and pass it from every call
+   site; `symbolic_math` now passes `variable` PLUS the caller's list on all
+   SIX of its parses, where it previously passed it on two.
+3. An undeclared split goes into a `warnings` list, which is
+   `probability_stats`'s existing convention for "keep forgiving but
+   explain". `_split_warnings` is ONE copy in `_math_common` rather than
+   four spellings in four tools, because four lists once answered "what
+   counts as a project file" and no two agreed (#96).
+
+**Three exclusions, each load-bearing, and the mutation pass is what proved
+it.** A one-character name cannot be split; a name in `_ALLOWED_NAMES` is a
+SymPy binding the caller may well have meant (`E` IS Euler's number, so
+`E**2` is correctly `exp(2)` -- the finding put the constant bindings
+explicitly out of scope, and `symbols=["E"]` is how a caller overrides one);
+and a declared name is already protected. The regex also ignores a name
+preceded by a word character or a dot, so the `e5` inside `1e5` is not read
+as a name the caller wrote.
+
+**The pass found a vacuous test of my own, which is the point of running
+it.** Row A3 -- deleting the declared-name exclusion -- came back EQUIVALENT
+on the first run. The test written for it asked `linear_algebra`, where
+`safe_parse` runs once per CELL and a declared name therefore always
+survives its own parse, so the clause it meant to defend was never
+exercised. Rewritten against `symbolic_math.evaluate('mass*0')`, where the
+name cancels inside a single parse, with the undeclared half beside it as the
+control that proves the expression can still warn at all. 7/7 killed after
+that, with the equivalence control green.
+
+**Two stale claims moved with this batch rather than being left staler.**
+`tools/registry.py`'s argument for isolating compute tools at dispatch cited
+"the 123 tests in test_math_tools.py"; the real figure was 131 before this
+batch and 141 after it. The count is deleted rather than corrected, because
+the argument never needed a number -- the sentence is about a tool that
+isolated itself being uncallable by a plain test, which is true at any count.
+And the gated digits moved as usual: 6317 -> 6327, and the tree's entry for
+`test_math_tools.py` 131 -> 141.
+
+**A namespace collision worth recording, because five more batches will meet
+it.** The marathon numbers its findings `S01`-`S19` by scope, and
+`test_every_decision_id_cited_in_production_code_resolves` reads a bare
+`S06` in a production comment as a decision id that resolves nowhere --
+`_CITATION`'s lookahead permits a following hyphen, so `S06-01` matches as
+`S06`. Worse, `S11`, `S12` and `S16` are ALREADY claimed by the record's
+"Rev. 1 open question" namespace, so three of the six scopes in this fix pass
+would collide with a real id rather than with nothing. `REVIEW_MARATHON.md`
+warns about exactly this for the severity names and not for the scope ids.
+Rather than widen a shared gate's qualifier grammar and `AGENTS.md`'s
+namespace table on one batch's behalf, the production comments cite the BATCH
+-- which is this project's existing idiom everywhere else -- and the finding
+ids stay in this document, `tests/BREAKING_CHANGES.md` and the triage index,
+none of which the gate scans.
+
+Counts 6317 -> 6327 in the default run, 6319 -> 6329 including `integration`.
 

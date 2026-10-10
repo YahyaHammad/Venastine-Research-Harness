@@ -812,8 +812,12 @@ class ToolRegistry:
             # The branch is HERE, inside the containment try and at the
             # one place a handler is ever invoked, rather than inside the
             # six tools. A tool that isolated itself could not be called
-            # plainly by a test, and the 123 tests in test_math_tools.py
+            # plainly by a test, and every test in test_math_tools.py
             # would then be measuring the transport instead of the maths.
+            # (The count that used to stand here said 123 and was 131 by
+            # the time anyone checked, and 141 after batch 131 -- the
+            # ARGUMENT never needed the number, which is why it is gone
+            # rather than corrected.)
             #
             # `injected` is not passed: nothing in _INJECTABLE_PARAMS
             # survives a process boundary, and assert_budget_declared

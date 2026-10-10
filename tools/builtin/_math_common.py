@@ -60,6 +60,7 @@ allowlist excludes every module, so nothing depends on it.
 from __future__ import annotations
 
 import ast
+import re
 import types
 from typing import Any, Optional
 
@@ -329,14 +330,89 @@ def _reject_escaped_value(value: Any, _depth: int = 0) -> None:
             _reject_escaped_value(item, _depth + 1)
 
 
-def safe_parse(expr_str: str, symbols: Optional[list[str]] = None):
+# A name token, ignoring one preceded by a word character or a dot, so the
+# `e5` inside `1e5` is not read as a name the caller wrote.
+_NAME_TOKEN = re.compile(r"(?<![\w.])[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _rewritten_names(expr_str: str, result: Any, local_dict: dict) -> set:
+    """The multi-character names the caller wrote that did NOT survive the
+    parse as themselves.
+
+    `_TRANSFORMATIONS` carries `split_symbols`, so a multi-character name
+    that is not in `local_dict` is rewritten into a PRODUCT of single-letter
+    Symbols before anything is computed: `mass` becomes `a*m*s**2`, and
+    `determinant([[mass,0],[0,mass]])` then answers `a**2*m**2*s**4` as a
+    successful result naming a quantity nobody asked about (batch 131).
+
+    Decided by comparing what was written against what came back rather than
+    by reimplementing SymPy's `_token_splittable`: whatever that predicate
+    does with a given spelling, a name is reported here exactly when it is
+    not among the result's free symbols. Three exclusions, each for its own
+    reason:
+
+      * a ONE-character name cannot be split, so it is never interesting;
+      * a name in `_ALLOWED_NAMES` is a SymPy binding the caller may well
+        have meant -- `E` is Euler's number and `sin` is a function, and
+        deciding that those were mistakes is not this function's business
+        (the `symbols=` route is how a caller overrides one);
+      * a DECLARED name is in `local_dict` and therefore already protected,
+        which is the whole point of declaring it.
+    """
+    try:
+        survived = {str(s) for s in result.free_symbols}
+    except AttributeError:
+        # A plain bool/int/str result has no free symbols; nothing survived,
+        # which is the right answer for a name that should have.
+        survived = set()
+    found = set()
+    for token in _NAME_TOKEN.findall(expr_str):
+        if len(token) < 2 or token in _ALLOWED_NAMES or token in local_dict:
+            continue
+        if token not in survived:
+            found.add(token)
+    return found
+
+
+def _split_warnings(rewritten: set) -> list[str]:
+    """One sentence per split name, for a tool's `warnings` list.
+
+    ONE copy, shared by every tool that reports this: four lists once
+    answered "what counts as a project file" and no two agreed (#96), and
+    four spellings of this sentence would be the same defect. The text names
+    the remedy because the model is the only caller there is, and nothing in
+    any schema told it the rule until this batch.
+    """
+    return [
+        "'%s' was read as a product of single letters, not as one symbol. "
+        "Pass symbols=['%s'] to keep it whole." % (name, name)
+        for name in sorted(rewritten)
+    ]
+
+
+def safe_parse(expr_str: str, symbols: Optional[list[str]] = None,
+               rewritten: Optional[set] = None):
     """
     Parses a math expression string into a SymPy object without exposing
-    Python builtins. `symbols` is optional -- SymPy's standard
-    transformations already auto-convert undefined names into Symbols,
-    but passing them explicitly keeps variable identity consistent across
-    multiple calls (e.g. the same 'x' in an expression and a separate
-    bound for a definite integral).
+    Python builtins.
+
+    `symbols` IS THE ONLY WAY TO KEEP A MULTI-CHARACTER NAME WHOLE, and
+    that is the load-bearing half of this parameter rather than the
+    convenience it used to be documented as. `_TRANSFORMATIONS` carries
+    `split_symbols`, so a name absent from `local_dict` is rewritten into a
+    product of single letters before anything is computed -- `mass` parses
+    as `a*m*s**2`. Declaring it binds the name to a Symbol first, so it
+    survives. (It also keeps variable identity consistent across calls, e.g.
+    the same 'x' in an expression and a separate bound for a definite
+    integral, which is what this docstring said when `symbols=` was
+    reachable from only two of the four parsing tools.)
+
+    `rewritten`, when a set is passed, collects the names that were split
+    anyway -- a caller that cannot know in advance what the model will send
+    reports those rather than returning a confident answer about a
+    different expression. See `_rewritten_names`. The tools put them in a
+    `warnings` list, which is `probability_stats`'s existing convention for
+    "keep forgiving but explain".
     """
     local_dict = {name: sympy.Symbol(name) for name in (symbols or [])}
     try:
@@ -348,6 +424,8 @@ def safe_parse(expr_str: str, symbols: Optional[list[str]] = None):
         _validate_ast(code, local_dict)
         result = eval_expr(code, local_dict, _SAFE_GLOBALS)
         _reject_escaped_value(result)
+        if rewritten is not None:
+            rewritten.update(_rewritten_names(expr_str, result, local_dict))
         return result
     except MathParseError:
         # A refusal from _validate_ast already says which name or node was

@@ -367,6 +367,17 @@ def test_a_multi_letter_unknown_name_is_split_not_refused():
     here is that a multi-letter name is not REFUSED; callers who need the
     name kept whole pass it via `symbols=`, which is what that parameter
     is for.
+
+    THAT LAST SENTENCE WAS NOT TRUE OF THE TOOLS UNTIL BATCH 130's
+    successor (S06-01). `safe_parse` has always taken `symbols=`, but
+    `linear_algebra` and `geometry` had no parameter through which a caller
+    could reach it and `symbolic_math` passed it on two of its six parses --
+    so this test asserted the behaviour and cited a remedy that could not
+    be applied, which is the vacuity shape turned inside out: not an
+    assertion that cannot discriminate, but a remedy recorded as though it
+    had been available. See
+    `TestASplitSymbolNameIsReportedRatherThanAnswered` at the end of this
+    file for the reachability guard.
     """
     from sympy import Symbol
 
@@ -944,3 +955,147 @@ class TestAResultTooLargeToPrintIsTheToolsOwnError:
         result = discrete_math.run({"operation": "factorial", "n": 20})
         assert result == {"result": "2432902008176640000",
                           "operation": "factorial"}
+
+
+# ===========================================================================
+# ---- S06-01: a split name is reported, and the remedy is reachable --------
+# ===========================================================================
+
+class TestASplitSymbolNameIsReportedRatherThanAnswered:
+    """`_TRANSFORMATIONS` carries `split_symbols`, so a multi-character name
+    absent from `local_dict` becomes a PRODUCT of single letters before
+    anything is computed: `determinant([[mass,0],[0,mass]])` answered
+    `a**2*m**2*s**4` as a successful `{"result": ...}`, with no marker
+    distinguishing it from a correct answer (S06-01, severity S1).
+
+    The split itself is deliberate and stays -- it is what makes the tools
+    accept informal algebra, and
+    `test_a_multi_letter_unknown_name_is_split_not_refused` above pins it.
+    What changed is that the remedy that test's docstring names is now
+    REACHABLE from every parsing tool, and that an undeclared split is said
+    out loud instead of being returned as though nothing happened.
+    """
+
+    def test_an_undeclared_name_is_answered_with_a_warning_naming_it(self):
+        out = linear_algebra.run({"operation": "determinant",
+                                  "matrix_a": [["mass", "0"], ["0", "mass"]]})
+        # The answer still comes back -- forgiving, per the split's own
+        # rationale -- but it no longer comes back silent.
+        assert out["result"] == "a**2*m**2*s**4"
+        assert len(out["warnings"]) == 1
+        assert "mass" in out["warnings"][0]
+        assert "symbols=['mass']" in out["warnings"][0]
+
+    def test_a_declared_name_survives_and_warns_about_nothing(self):
+        out = linear_algebra.run({"operation": "determinant",
+                                  "matrix_a": [["mass", "0"], ["0", "mass"]],
+                                  "symbols": ["mass"]})
+        assert out["result"] == "mass**2"
+        assert "warnings" not in out
+
+    def test_the_other_two_parsing_tools_reach_the_same_remedy(self):
+        """`geometry` and `symbolic_math` are the two the finding is about:
+        neither could pass `symbols=` at all, and `symbolic_math` protected
+        only the ONE name in `variable` while shredding any other name in
+        the same expression."""
+        bare = geometry.run({"operation": "distance",
+                             "points": [["mass", "0"], ["0", "0"]]})
+        assert bare["warnings"] and "mass" in bare["warnings"][0]
+        fixed = geometry.run({"operation": "distance",
+                              "points": [["mass", "0"], ["0", "0"]],
+                              "symbols": ["mass"]})
+        assert fixed["result"] == "sqrt(mass**2)"
+        assert "warnings" not in fixed
+
+        # The clearest statement of the shape: the one name the schema let
+        # you protect survived and the other one was shredded.
+        bare = symbolic_math.run({"operation": "integrate",
+                                  "expression": "force*distance",
+                                  "variable": "distance"})
+        assert bare["result"] == "c*distance**2*e*f*o*r/2"
+        assert bare["warnings"] and "force" in bare["warnings"][0]
+        fixed = symbolic_math.run({"operation": "integrate",
+                                   "expression": "force*distance",
+                                   "variable": "distance",
+                                   "symbols": ["force"]})
+        assert fixed["result"] == "distance**2*force/2"
+        assert "warnings" not in fixed
+
+    @pytest.mark.parametrize("entry,expected", [
+        ("T", "T**2"),               # one character cannot be split
+        ("mass_1", "mass_1**2"),     # an underscore suppresses the split
+        ("alpha", "alpha**2"),       # a Greek-letter name does too
+        ("E", "exp(2)"),             # a SymPy binding the caller may have meant
+    ])
+    def test_a_name_that_was_not_split_stays_silent(self, entry, expected):
+        """The warning has to be specific or it is noise on every call.
+
+        `E` is in the list deliberately: it is Euler's number rather than a
+        free symbol, so `E**2` IS `exp(2)` and deciding that the caller
+        meant a symbol is not this layer's business -- `symbols=["E"]` is
+        how a caller overrides it. The finding put the constant bindings
+        explicitly out of scope.
+        """
+        out = linear_algebra.run({"operation": "determinant",
+                                  "matrix_a": [[entry, "0"], ["0", entry]]})
+        assert out["result"] == expected
+        assert "warnings" not in out
+
+    def test_a_name_that_cancels_out_of_the_result_is_judged_on_what_it_was(self):
+        """The detector asks "is this name among the result's free symbols",
+        which is the wrong question on its own for a name that CANCELS.
+
+        `mass*0` evaluates to 0, whose free symbols are empty, so a
+        declared `mass` and a single-letter `y` both look identical to a
+        split name unless the declaration and the length are checked first.
+        Those two exclusions exist for this case and nothing else, so
+        without this test they could be deleted silently -- and the first
+        version of this test could not see it, because it asked
+        `linear_algebra` where `safe_parse` runs once per CELL and a
+        declared name therefore always survives its own parse. The mutation
+        pass caught that; the undeclared half below is the control that
+        proves this expression can still produce a warning at all.
+        """
+        declared = symbolic_math.run({"operation": "evaluate",
+                                      "expression": "mass*0",
+                                      "symbols": ["mass"]})
+        assert declared["result"] == "0"
+        assert "warnings" not in declared
+
+        undeclared = symbolic_math.run({"operation": "evaluate",
+                                        "expression": "mass*0"})
+        assert undeclared["warnings"] and "mass" in undeclared["warnings"][0]
+
+        single = symbolic_math.run({"operation": "evaluate",
+                                    "expression": "y*0"})
+        assert "warnings" not in single
+
+    def test_a_function_call_and_a_float_literal_are_not_names(self):
+        """Two false positives the detector has to not have: `sin` is an
+        allowlisted binding, and the `e5` inside `1e5` is not a name the
+        caller wrote at all."""
+        assert "warnings" not in symbolic_math.run(
+            {"operation": "differentiate", "expression": "sin(x)"})
+        assert "warnings" not in symbolic_math.run(
+            {"operation": "evaluate", "expression": "1e5"})
+
+    def test_every_parsing_tool_can_declare_a_symbol(self):
+        """The structural guard, and the one that would have caught this
+        class rather than this instance.
+
+        The defect was not that names split -- it was that the remedy the
+        pinned test NAMES was unreachable from two of the four tools, and
+        the test asserted the behaviour without asking whether the remedy
+        it cited could be applied. A tool that grows a parsed field and no
+        way to declare its symbols reintroduces exactly that, so this
+        asserts the capability rather than any one answer.
+        """
+        for module, field in ((linear_algebra, "symbols"),
+                              (geometry, "symbols"),
+                              (symbolic_math, "symbols"),
+                              (logic, "variables")):
+            params = module.TOOL_SCHEMA["input_schema"]["properties"]
+            assert field in params, (
+                "%s advertises no way to declare a multi-character symbol, "
+                "so split_symbols can rewrite a model-supplied name with no "
+                "remedy the model can reach" % module.TOOL_SCHEMA["name"])
