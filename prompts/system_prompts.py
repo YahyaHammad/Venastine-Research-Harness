@@ -161,10 +161,18 @@ def agent_catalog_text(targets=None) -> str:
     be spawned with the spawn_subagent tool" -- and spawn_subagent
     passes exactly one thing: params["task"], as the first message of
     a FRESH thread. An agent whose body opens "Read the thread so far"
-    cannot be fed that way. Spawning it does not fail; it produces a
-    confident review of the task description, and the parent has no
-    way to tell. Degraded rather than broken is exactly what makes it
-    worth suppressing.
+    cannot be fed that way. It produces a confident review of the task
+    description, and the parent has no way to tell. Degraded rather
+    than broken is exactly what makes it worth suppressing.
+
+    THIS PARAGRAPH SAID "spawning it does not fail" UNTIL A16
+    (ROADMAP_v3 §62), which is no longer true: `refusal_reason` now
+    refuses a spawn of anything whose `spawnable` is not True, so the
+    filter here and that refusal give the same answer instead of the
+    catalog merely hiding what the tool would still do. The suppression
+    argument above is unchanged -- it is why the field exists -- but
+    the failure mode it describes is now the one A16 prevents rather
+    than the one it tolerated.
 
     THE TUI'S /agent IS UNAFFECTED -- it lists manager.names(), not
     this. A non-spawnable agent is still selectable by a human, who

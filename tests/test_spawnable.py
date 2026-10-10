@@ -245,7 +245,13 @@ class TestTheCatalogListsOnlyWhatCanBeSpawned:
         """/agent lists manager.names(), not this catalog. A human
         selecting grill-me supplies the thread it needs BY BEING IN ONE,
         which is the whole distinction A3 encodes -- the agent is not
-        broken, the delegation route is."""
+        broken, the delegation route is.
+
+        This half survived A16 untouched, and it is what makes A16 a
+        narrowing of the SPAWN route rather than a removal of the agent:
+        `agents/tui_commands.py` goes through `manager.get` and
+        `manager.names()`, neither of which consults `refusal_reason`.
+        """
         from agents.manager import manager
 
         _harness(roots, "internal", ["spawnable: false"])
@@ -253,6 +259,125 @@ class TestTheCatalogListsOnlyWhatCanBeSpawned:
 
         assert "internal" in manager.names()
         assert manager.get("internal") is not None
+
+
+# ===========================================================================
+# ---- A16: spawnable is a REFUSAL, not only an advertisement ---------------
+# ===========================================================================
+
+class TestSpawnableRefusesAndDoesNotOnlyHide:
+    """A16 (ROADMAP_v3 section 62), reversing A3/A4's "advertisement only".
+
+    `refusal_reason` never read `spawnable`, so `spawn_subagent` would spawn
+    any agent the loader had discovered, by name -- including one A3's
+    asymmetry had deliberately left off the catalog. The measured
+    consequence of "a stranger's silence reads as false" was that such an
+    agent became INVISIBLE rather than unreachable: absent from the prompt a
+    user might read, and callable by any text that named it.
+
+    WHAT WOULD MAKE THIS CLASS VACUOUS: asserting only that a declared agent
+    spawns. The whole content is in the undeclared and false cases, and in
+    the catalog and the refusal now agreeing -- so every case below checks
+    both answers rather than one.
+    """
+
+    def _refusal(self, name):
+        from agents.subagent_tool import refusal_reason
+
+        return refusal_reason({"agent_name": name, "task": "do a thing"})
+
+    def _in_catalog(self, name):
+        return "- %s:" % name in system_prompts.with_catalogs("BASE")
+
+    def test_a_declared_spawnable_agent_still_spawns(self, roots):
+        """The control. Without it every assertion below passes for a
+        refusal that refuses everything."""
+        _harness(roots, "delegate", ["spawnable: true"])
+        config_loader.initialize(str(roots["project"]))
+
+        assert self._refusal("delegate") is None
+        assert self._in_catalog("delegate")
+
+    def test_spawnable_false_is_refused_rather_than_merely_hidden(self, roots):
+        _harness(roots, "internal", ["spawnable: false"])
+        config_loader.initialize(str(roots["project"]))
+
+        assert not self._in_catalog("internal"), "the catalog half of A3 moved"
+        refusal = self._refusal("internal")
+        assert refusal is not None, (
+            "a non-spawnable agent still spawns by name, so the catalog says "
+            "absent and the refusal says yes -- which is the state A16 "
+            "reversed")
+        assert "spawnable" in refusal
+
+    @pytest.mark.parametrize("tier", ["user", "project"])
+    def test_an_undeclared_agent_is_refused_at_the_stranger_tiers(
+            self, roots, tier):
+        """A3's reading of silence is UNCHANGED -- undeclared still reads as
+        false. What changed is the consequence: it used to mean invisible
+        and callable, which ranked the adversarial author above the careless
+        one. Now it means absent and refused, the same answer twice."""
+        {"user": _user, "project": _project}[tier](roots, "mine")
+        config_loader.initialize(str(roots["project"]))
+
+        assert not self._in_catalog("mine")
+        assert self._refusal("mine") is not None
+
+    def test_an_unknown_name_still_reports_that_it_is_UNKNOWN(self, roots):
+        """The order is load-bearing and the docstring says so: the checks
+        above the new one are a live contract, and an unknown name must
+        report that it is unknown rather than that it is not permitted."""
+        _harness(roots, "delegate", ["spawnable: true"])
+        config_loader.initialize(str(roots["project"]))
+
+        refusal = self._refusal("nope")
+        assert refusal is not None
+        assert "Unknown agent" in refusal
+        assert "spawnable" not in refusal, (
+            "an unknown name was told it is not spawnable, which is a "
+            "different and more confusing claim than that it does not exist")
+
+    def test_the_unknown_message_no_longer_claims_the_CATALOG_decides(
+            self, roots):
+        """Shape 9 inside the function that owns the contract, and a wording
+        fix that was due whichever way A16 had gone.
+
+        `manager.get` reads the ROSTER; `agent_catalog_text()` is the
+        catalog. The message said "is not in the available agents catalog"
+        while testing the roster, so it described a test that was not being
+        run.
+        """
+        _harness(roots, "delegate", ["spawnable: true"])
+        config_loader.initialize(str(roots["project"]))
+
+        assert "catalog" not in self._refusal("nope")
+
+    def test_every_shipped_spawn_target_is_itself_spawnable(
+            self, real_harness_tier):
+        """The roster-wide consequence, swept rather than asserted of one
+        agent by name -- which is how A13 broke (batch 51 added `build` and
+        a comment claimed a superset the whitelist never gained).
+
+        Under A16 a `spawn_targets` entry naming a non-spawnable agent is a
+        route that can never fire: the parent is told it may spawn it and
+        the refusal says no. `plan` declares four targets and all four are
+        spawnable today, so this passes -- it exists to fail the next time
+        someone adds a target without checking.
+        """
+        from agents.manager import manager
+
+        config_loader.initialize(str(real_harness_tier))
+        broken = []
+        for name in manager.names():
+            agent = manager.get(name)
+            for target in (getattr(agent, "spawn_targets", None) or ()):
+                goal = manager.get(target)
+                if goal is None or getattr(goal, "spawnable", None) is not True:
+                    broken.append("%s -> %s" % (name, target))
+        assert not broken, (
+            "these spawn_targets name agents that A16 refuses, so the "
+            "parent is told it may spawn something the refusal will "
+            "block: %s" % broken)
 
 
 class TestWhatTheDefaultInstallActuallyAdvertises:

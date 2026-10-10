@@ -119,9 +119,43 @@ def refusal_reason(params: dict, context=None):
                 "'task'.")
     from agents.manager import manager
 
-    if manager.get(name) is None:
-        return (f"Unknown agent: {name!r} is not "
-                f"in the available agents catalog.")
+    agent = manager.get(name)
+    if agent is None:
+        # "the roster", not "the catalog", and the distinction is the one
+        # A16 turns on: `manager.get` reads the ROSTER (every agent the
+        # loader discovered) while `agent_catalog_text()` is the CATALOG
+        # (the spawnable subset). This message claimed the catalog was the
+        # membership test for as long as it was not -- so for an agent that
+        # was in the roster and off the catalog, the catalog's answer was
+        # "absent" and this function's was "spawn it", and the one string a
+        # model ever sees about membership described a test that was not
+        # being run. Defect shape 9 inside the function that owns the
+        # contract. The wording was wrong whichever way A16 had gone.
+        return (f"Unknown agent: {name!r} is not one of this harness's "
+                f"agents.")
+    # A16 (ROADMAP_v3 §62), which REVERSES §32 A3/A4's "advertisement
+    # only". Before this, `refusal_reason` never read `spawnable`, so
+    # `spawn_subagent` would spawn any agent the loader had discovered, by
+    # name -- including one that A3's asymmetry had deliberately left OFF
+    # the catalog. A3 argued that a stranger's silence must get the safe
+    # answer, and the measured consequence of "reads as false" was that the
+    # agent became INVISIBLE rather than unreachable: a project-tier agent
+    # omitting the field was absent from the prompt a user might read and
+    # callable by any text that named it. For the careless author the
+    # default was safe; for the adversarial one it was the quieter option,
+    # which is the opposite ranking from the one A3 argues.
+    #
+    # BEFORE spawn_targets and after the unknown-agent check: an unknown
+    # name must still report that it is unknown rather than that it is not
+    # permitted, and this is a property of the agent being spawned where
+    # spawn_targets is a property of the parent.
+    #
+    # `is not True` rather than `not`, because `None` means undeclared at
+    # the user and project tiers and A3's reading of silence is unchanged --
+    # only its consequence is.
+    if getattr(agent, "spawnable", None) is not True:
+        return (f"{name!r} is not a spawnable agent. It can be used by hand "
+                f"with /agent, which is unaffected.")
     # LAST, because the checks above are the live contract this
     # docstring describes and an unknown name must still report that it
     # is unknown rather than that it is not permitted.

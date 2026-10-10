@@ -901,13 +901,44 @@ class TestAnAnsweredCallActuallyRuns:
         the live one and this only reads what it was called with.
         """
         config_loader.initialize(str(real_harness_tier))
+        # A SPAWNABLE FIXTURE, because A16 (batch 137) closed the only
+        # route this test used to have. `manager.candidate_approvals` is
+        # EMPTY for all six spawnable shipped agents on a stock install --
+        # each narrows `allowed_tools` and the gated tools a sign-off would
+        # offer are globally denied -- while `grill-me`, which this test
+        # used, declares no `allowed_tools` at all and so inherited
+        # everything. It is `spawnable: false`.
+        #
+        # So the shipped spawn sign-off was reachable only by spawning a
+        # NON-SPAWNABLE agent, which is the defect A16 closes. The feature
+        # is still reachable -- an operator who enables tools, or a
+        # user/project agent that declares no narrowing and opts in -- and
+        # this fixture is shaped like that. Without it the assertion below
+        # compares an empty set to an empty set, which is the vacuity
+        # test_review.py makes the same move to avoid.
+        roster = dict(config_loader.get_agents())
+        roster["signoff-fixture"] = config_loader.AgentDef(
+            name="signoff-fixture", description="a spawnable fixture",
+            model=None, provider=None, allowed_tools=None,
+            approval_overrides={}, use_project_context=False,
+            use_memory=False, max_steps=None, body="Body.",
+            tier="harness", path="<fixture>", spawnable=True)
+        # BOTH lookups, because they are separate functions: the catalog
+        # reads `get_agents()` and `manager.get` reads `get_agent(name)`,
+        # so patching only the plural one leaves refusal_reason looking at
+        # the real roster and refusing the fixture.
+        mocker.patch.object(config_loader, "get_agents", lambda: roster)
+        mocker.patch.object(config_loader, "get_agent",
+                            lambda name: roster.get(name))
         spy = mocker.patch.object(registry, "dispatch",
                                   wraps=registry.dispatch)
 
         _drive_real(
             mocker,
-            [("spawn_subagent", {"agent_name": "grill-me", "task": "a"}),
-             ("spawn_subagent", {"agent_name": "grill-me", "task": "b"})],
+            [("spawn_subagent",
+              {"agent_name": "signoff-fixture", "task": "a"}),
+             ("spawn_subagent",
+              {"agent_name": "signoff-fixture", "task": "b"})],
             [{"write_project_doc"}], spawn=True)
 
         passed = [c.kwargs.get("signoff") for c in spy.call_args_list]

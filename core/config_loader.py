@@ -249,12 +249,29 @@ class AgentDef:
     # spawnable does not fail, it under-performs, and the parent has
     # no way to tell (which is #69's actual complaint).
     #
-    # Consulted by prompts.system_prompts.agent_catalog_text only.
-    # It is NOT a permission: C6 still caps a child's tools, and the
-    # depth limit still applies. This decides what the model is TOLD
-    # exists, which is D24's rule ("advertising an uncallable tool is
-    # not harmless: the model keeps choosing it") applied to the
-    # catalog's entries rather than to the tool itself.
+    # IT IS A PERMISSION SINCE A16 (ROADMAP_v3 section 62), and this
+    # comment said the opposite for as long as it was true. Consulted by
+    # prompts.system_prompts.agent_catalog_text AND by
+    # agents.subagent_tool.refusal_reason, which refuses a spawn of
+    # anything whose value is not True.
+    #
+    # WHY IT CHANGED. "Advertisement only" meant `spawn_subagent` would
+    # spawn any agent the loader had discovered, by name -- including one
+    # the asymmetry above had deliberately left off the catalog. So the
+    # measured consequence of a stranger's silence was INVISIBLE rather
+    # than unreachable: a project-tier agent omitting the field was absent
+    # from the prompt a user might read and callable by any text that named
+    # it. For the careless author the default was safe; for the adversarial
+    # one it was the quieter option, which inverts the ranking the SAFE
+    # answer above is reaching for. Its own sibling `spawn_targets` had
+    # already chosen refusal for the same class of problem.
+    #
+    # C6 still caps a child's tools and the depth limit still applies;
+    # those were never what this field was about. D24's rule
+    # ("advertising an uncallable tool is not harmless: the model keeps
+    # choosing it") still applies to the catalog's entries -- and now its
+    # mirror applies too: a catalog that hides a REACHABLE agent is the
+    # same defect read the other way.
     spawnable: Optional[bool] = None
     # WHICH agents this one may spawn. `spawnable` above is the other
     # half of the same question -- that one is about being spawned, this

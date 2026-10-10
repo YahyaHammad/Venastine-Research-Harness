@@ -19998,3 +19998,154 @@ extra and stays green, so the comparison is order-insensitive by test rather
 than by luck.
 
 Counts 6336 -> 6338.
+
+## Batch 137 -- the field that hid an agent instead of refusing it (2026-10-10)
+
+The second of the two owner rulings from the review marathon's triage, and the
+only one in this fix pass that **reverses a locked decision**. S13-07 was
+filed `DECISION`/`OWNER-DECISION` rather than as a defect precisely because
+the behaviour matched the record: §32's A3/A4 made `spawnable` an
+advertisement and the code implemented that faithfully. `CLAUDE.md`'s rule is
+that a single reviewer's reading is not the authority to reverse one, so it
+went to the owner, who ruled **make it a refusal**. Recorded as **A16** in
+`docs/ROADMAP_v3.md` §62.
+
+**What the field actually bought.** `refusal_reason` checks depth, params,
+`manager.get(name) is None`, then `spawn_targets` -- and never read
+`spawnable`. So `spawn_subagent` would spawn any agent the loader had
+discovered, by name. Measured across all three tiers with a real roster:
+
+| agent | tier | `spawnable` | in the catalog | `refusal_reason` |
+|---|---|---|---|---|
+| `delegate` | harness | `true` | yes | None -- spawns |
+| `internal` | harness | `false` | **no** | **None -- spawns** |
+| `quiet` | project | undeclared | **no** | **None -- spawns** |
+| `mine` | user | undeclared | **no** | **None -- spawns** |
+
+So the two halves disagreed about membership and only one of them was ever
+shown to a model. **A3's asymmetry bought concealment, not refusal**: its
+stated reason is that "a stranger's silence must get the safe answer", and the
+measured consequence of reading as false was that the agent was left off the
+catalog -- invisible in the prompt a user might read, and callable by any text
+that named it, including the project's own root `AGENTS.md` under
+`use_project_context`, a skill body, or an injection in a fetched page. For
+the careless author the default was safe; for the adversarial one it was the
+quieter option, which is the opposite ranking from the one A3 is reaching for.
+
+**A3's reading of silence is unchanged.** Undeclared still reads as `false` at
+the user and project tiers. Only its consequence changed: absent AND refused,
+rather than absent and callable.
+
+**Nothing pinned the old behaviour, which is the clearest statement of the
+gap.** All 91 tests across `test_spawnable.py`, `test_spawn_preflight.py` and
+`test_agents.py` passed unchanged after the reversal. The record said
+advertisement-only, the code did advertisement-only, and no test asserted that
+a non-spawnable agent could in fact be spawned -- so the behaviour the record
+describes had never been observed by the suite.
+
+**The wording fix was due whichever way the ruling went.** The refusal read
+*"Unknown agent: … is not in the available agents catalog"*, and `manager.get`
+reads the ROSTER while `agent_catalog_text()` is the catalog. For `internal`,
+`quiet` and `mine` the catalog's answer was "absent" and this function's was
+"spawn it", so the one string a model ever sees about membership described a
+test that was not being run -- shape 9 inside the function that owns the
+contract. It now says "is not one of this harness's agents", and a test
+asserts the word "catalog" is gone.
+
+**What A16 deliberately leaves alone**, each checked rather than assumed:
+`/agent` still reaches every agent, because `agents/tui_commands.py` goes
+through `manager.get` and `manager.names()` and consults neither the catalog
+nor the refusal -- `test_a_non_spawnable_agent_is_still_reachable_by_hand` is
+unchanged. The harness's own direct runs are untouched for the same reason:
+`compactor`, `initializer` and `pipeline-reviewer` are all `spawnable: false`,
+all invoked by the code that needs them, and `refusal_reason` is wired only as
+the `spawn_subagent` tool's `refusal_check`.
+
+**And the shipped roster needed no edits, which was the risk worth checking
+first.** Eleven agents ship, six `spawnable: true`. Under A16 a
+`spawn_targets` entry naming a non-spawnable agent would be a route that can
+never fire -- the parent told it may spawn something the refusal blocks. The
+only declaration in the tree is `plan`'s four (`explore`, `review`, `writer`,
+`test`) and all four are spawnable, so nothing broke;
+`test_every_shipped_spawn_target_is_itself_spawnable` sweeps the whole roster
+rather than asserting it of `plan` by name, which is how A13 broke in the
+first place.
+
+**Four documents carried the old claim and all four moved**: the loader's
+`spawnable:` comment said "It is NOT a permission" in as many words;
+`AGENTS.md`'s Agents bullet said "what the model is TOLD exists and nothing
+else"; and `prompts/system_prompts.py`'s `agent_catalog_text` docstring said
+"**Spawning it does not fail**", which A16 makes false -- the same shape-9
+sweep that this batch's own finding is about, caught by grepping for the
+sentence the change was about to invalidate rather than by a gate.
+
+**Three gated claims moved too, and the third is a trap worth recording.**
+`AGENTS.md`'s family range said A1-A15 and the record now defines A16;
+`ROADMAP_v3.md`'s index needed a row for §62. The third belonged to **batch
+136**: adding `requirements-test.txt` raised what `read_project_doc` reaches
+on a clean checkout from 61 files to 62, and **the gate counts TRACKED files,
+so a pre-commit suite run could not catch it** -- batch 136's suite was green
+and its committed state was red. Read before bumping, because the gate asks
+for that explicitly and the paragraph is about a security bound: the new file
+holds four package names and comments, no credentials, and is the same class
+as `requirements.txt`, which was already readable. The bound going up by one
+is benign; the ordering lesson is not.
+
+**THE FULL SUITE FOUND THREE TESTS THE NARROWED RUN DID NOT, and what they
+turned out to be is the most interesting part of this batch.**
+`test_spawnable.py`, `test_spawn_preflight.py` and `test_agents.py` were all
+green; `test_grants.py`, `test_review.py` and `test_thread_legibility.py` were
+not. All three drove `subagent_tool.run` with **`grill-me`**, which is
+`spawnable: false` -- so A16 refused the spawn and each test lost the thing it
+was measuring. Not flakes, and not a fault in A16: the tests were reaching the
+spawn path through an agent that A16 says cannot be spawned.
+
+Each was retargeted rather than weakened, and two of the three taught
+something:
+
+**`test_review`'s assertion was already vacuous.** It claims that "a parent
+that excluded `spawn_subagent` must not have the catalog re-invite its child
+to spawn one", and asserted `"spawn_subagent" not in captured["system_prompt"]`
+-- while spawning `grill-me`, which **declares no `spawn_subagent` at all**.
+The name was absent whether or not the parent's restriction did anything. It
+now spawns `general`, the only spawnable branch and the one that declares the
+tool three times, with an explicit assertion that the agent under test DOES
+declare it -- so the suppression the test is named for is observable for the
+first time.
+
+**The spawn sign-off was reachable on the shipped roster only through the
+defect.** `manager.candidate_approvals` is EMPTY for all six spawnable shipped
+agents on a stock install: each narrows `allowed_tools`, and the gated tools a
+sign-off would offer are globally denied. `grill-me` declares no
+`allowed_tools` at all, so it inherited everything and was the one agent with
+a non-empty candidate set -- and it is `spawnable: false`. So before A16, the
+only way a spawn sign-off fired against the shipped roster was by spawning a
+non-spawnable agent. Two intermediate attempts to retarget the test failed for
+two different reasons that make the point: `explore` produced
+`[set(), set()]`, because the signoff is INTERSECTED with the child's
+whitelist and A15 omits `write_project_doc` by design; ticking `shell` instead
+produced *"Sign-off answer named ['shell'], which was not offered"*, because
+`shell` is globally denied and so never a candidate. The test now registers a
+spawnable fixture that declares no narrowing, which is the shape an operator
+with tools enabled or a project agent that opts in actually has -- the same
+move `test_review.py` already makes, for the same reason: otherwise the
+assertion compares an empty set to an empty set.
+
+**Worth filing rather than fixing here:** that the spawn sign-off has no
+reachable configuration on a *stock* install is a property of the shipped
+roster's whitelists, not of A16, and it was true before this batch. It belongs
+in the register as its own item rather than inside a decision reversal.
+
+**And a patching trap, recorded because it cost two runs.** `manager.get`
+calls `config_loader.get_agent(name)` while the catalog reads
+`config_loader.get_agents()` -- two separate functions. Patching only the
+plural one, which is what `test_review.py` does and needs, leaves
+`refusal_reason` looking at the real roster, so a fixture agent is refused and
+the failure looks identical to A16 working. Both lookups have to move
+together.
+
+Mutation pass 4/4 killed with the equivalence control green: the clause
+removed (the pre-A16 behaviour restored), the comparison inverted, undeclared
+no longer refused, and the unknown-agent message claiming the catalog again.
+
+Counts 6338 -> 6345.

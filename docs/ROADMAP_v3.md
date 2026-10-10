@@ -42,6 +42,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§58. Who the agent is when you ask it** — **(NOT BUILT: requested batch 122, specified, not designed)** (the chat system prompt is "You are a helpful assistant.", so the model knows nothing about the harness it is running in)
 - **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
+- **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
 - **§61. Stopping a turn that is already running** — **(BUILT in batch 124)** (a turn going the wrong way is watched to its end or the harness is killed: nothing anywhere stops one, and both keys that look like they would end the process instead) (there is no way to drive this harness except by sitting in front of it, and the open standard that would change that has no concept of the approval gate this project is built around)
 
 ---
@@ -1692,3 +1693,67 @@ for abandonment and the wrong one for a cancellation, which has a status of its 
   `check_action` to grey rather than reflow, and `None` would keep the key slot and shadow
   `close_thread_view`. One of the two had to give, and a wrong label on a live key is worse than no
   label.
+
+
+## §62. The field that hid an agent instead of refusing it
+
+**Built in batch 137**, from the review marathon's S13-07 -- a finding filed
+`OWNER-DECISION` rather than as a defect, because the behaviour matched the
+record exactly. §32's A3/A4 made `spawnable` an *advertisement*, and the code
+implemented that faithfully. The owner ruled to reverse it.
+
+### What the code did before this
+
+- **`refusal_reason` never read the field.** It checks depth, then params,
+  then `manager.get(name) is None`, then `spawn_targets` -- so
+  `spawn_subagent` would spawn any agent the loader had discovered, by name.
+  Measured across all three tiers with a real roster: `internal`
+  (`spawnable: false`), `quiet` (project tier, field omitted) and `mine`
+  (user tier, field omitted) were each absent from the catalog and each
+  spawned.
+- **So the two halves disagreed about membership**, and only one of them was
+  ever shown to a model. For those three agents `agent_catalog_text()`
+  answered "absent" and `refusal_reason` answered "spawn it".
+- **The refusal's own message named the wrong test.** *"Unknown agent: … is
+  not in the available agents catalog"* -- `manager.get` reads the ROSTER;
+  `agent_catalog_text()` is the catalog. The one string a model ever sees
+  about membership described a test that was not being run. That is
+  `ARCHITECTURE.md` §11's shape 9 inside the function that owns the
+  contract, and it was wrong whichever way this decision went.
+- **Nothing pinned the old behaviour.** All 91 tests across
+  `test_spawnable.py`, `test_spawn_preflight.py` and `test_agents.py` passed
+  unchanged after the reversal, which is the clearest statement of the gap:
+  the record said advertisement-only, the code did advertisement-only, and
+  no test asserted that a non-spawnable agent could in fact be spawned.
+
+### Design Decisions Record — §62 (A16)
+
+| id | decision |
+|---|---|
+| **A16** | **`spawnable` is a REFUSAL, not only an advertisement**, reversing §32 A3/A4's "it decides what the model is TOLD exists and nothing else". `refusal_reason` refuses a spawn of any agent whose `spawnable` is not `True`, after the unknown-agent check and before `spawn_targets`. **A3's reading of silence is unchanged** -- undeclared at the user and project tiers still reads as `false` -- what changes is the consequence. A3 argues that "a stranger's silence must get the safe answer", and the measured consequence of reading as false was that the agent became INVISIBLE rather than unreachable: a project-tier agent omitting the field was off the prompt a user might read and callable by any text that named it, including the project's own root `AGENTS.md` under `use_project_context`, a skill body, or an injection in a fetched page. For the careless author the default was safe; for the adversarial one it was the quieter option, which is the opposite ranking from the one A3 is reaching for. **The sibling had already chosen this answer**: `spawn_targets` is a refusal, and the loader's own comment says so -- *"It is a REFUSAL, unlike `spawnable`'s advertisement."* Both fields describe a spawn that should not happen; one refused it and one hid it. And D24's rule ("advertising an uncallable tool is not harmless: the model keeps choosing it") has a mirror this design did not apply: a catalog that hides a REACHABLE agent is the same defect read the other way |
+
+### What A16 deliberately does not change
+
+- **`/agent` is untouched.** `agents/tui_commands.py` goes through
+  `manager.get` and `manager.names()`, neither of which consults
+  `refusal_reason`, so a human can still select `grill-me` or `plan` by
+  hand -- which is the distinction A3 encodes and the half worth keeping.
+  `test_a_non_spawnable_agent_is_still_reachable_by_hand` pins it and is
+  unchanged by this batch.
+- **The harness's own direct runs are untouched**, for the same reason:
+  `compactor`, `initializer` and `pipeline-reviewer` are invoked by the code
+  that needs them rather than through the `spawn_subagent` tool, and
+  `refusal_reason` is wired only as that tool's `refusal_check`
+  (`tools/registry.py`). All three are `spawnable: false` and all three
+  still run.
+- **`max_steps` still REPLACES rather than narrows**, and C6 still
+  intersects a child's tools with its parent's. A16 is about which agents
+  the spawn route admits, not about what one does once admitted.
+- **The shipped roster needed no edits**, which was checked rather than
+  assumed: eleven agents ship, six are `spawnable: true`, and the only
+  `spawn_targets` declaration in the tree is `plan`'s four
+  (`explore`, `review`, `writer`, `test`) -- all four spawnable. A
+  `spawn_targets` entry naming a non-spawnable agent would now be a route
+  that can never fire, so `test_every_shipped_spawn_target_is_itself_spawnable`
+  sweeps the whole roster for that rather than asserting it of `plan` by
+  name, which is how A13 broke.

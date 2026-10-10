@@ -131,7 +131,10 @@ def _invoke_subagent(mocker, project):
     from core import config_loader
     config_loader.initialize(str(project))
     try:
-        subagent_tool.run({"agent_name": "grill-me", "task": "do it"})
+        # `explore`, not `grill-me`: A16 refuses a spawn of a
+        # non-spawnable agent, and this is about the thread KIND a
+        # subagent run creates.
+        subagent_tool.run({"agent_name": "explore", "task": "do it"})
     finally:
         config_loader.reset()
 

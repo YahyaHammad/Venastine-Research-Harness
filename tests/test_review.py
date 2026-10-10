@@ -1932,12 +1932,23 @@ class TestCatalogsFollowTheContext:
 
         mocker.patch.object(RunAgentLoop, "run_agent_conversation",
                             side_effect=_conv)
-        agent = config_loader.get_agent("grill-me")
+        # `general` rather than `grill-me`, for TWO reasons. A16 refuses a
+        # spawn of a non-spawnable agent, and `grill-me` is one -- but the
+        # sharper reason is that `grill-me` never declared
+        # `spawn_subagent` at all, so the assertion below could not
+        # discriminate: the name was absent from the child's prompt
+        # whether or not the parent's restriction did anything. `general`
+        # declares it and is the only spawnable branch, so the
+        # suppression this test is named for is now observable.
+        agent = config_loader.get_agent("general")
         assert agent is not None
-        # A parent restricted to read + web_search: whatever grill-me
+        assert "spawn_subagent" in (agent.allowed_tools or ()), (
+            "the agent this test spawns must DECLARE spawn_subagent, or "
+            "the assertion below passes for an agent that never had it")
+        # A parent restricted to read + web_search: whatever `general`
         # declares, the child cannot spawn.
         parent = ToolContext(allowed_tools={"read", "web_search"})
-        subagent_tool.run({"agent_name": "grill-me", "task": "t"},
+        subagent_tool.run({"agent_name": "general", "task": "t"},
                           parent_context=parent)
 
         assert "spawn_subagent" not in captured["system_prompt"]
