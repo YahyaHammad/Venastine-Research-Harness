@@ -2772,8 +2772,42 @@ class VenastineApp(App):
             # time the answer changes: a history never empties.
             self.refresh_bindings()
         if text.startswith("/"):
-            if not commands.dispatch(self, text):
-                name = text[1:].split(" ")[0]
+            name = text[1:].split(" ")[0]
+            # CONTAINED HERE, not inside CommandRegistry.dispatch, and the
+            # split is the same one that keeps policy out of
+            # tools/registry.py: the registry is MECHANISM, and what a
+            # broken command does to the shell is the shell's decision.
+            #
+            # Without this, a handler's exception reached Textual's
+            # `_handle_exception` and exited the whole application --
+            # transcript, thread view and session with it -- because the
+            # handler runs on the UI thread inside a message handler.
+            # Reachable by one mistyped line in a file a PROJECT ships:
+            # a non-string element in `additional_tools` parses clean
+            # (only `isinstance(tools, list)` is checked) and crashes
+            # `/skill` with an AttributeError (batch 135).
+            #
+            # `AGENTS.md` states the rule one layer down -- "A raising tool
+            # must not kill the run. `dispatch()` wraps the handler call and
+            # turns any exception into `{"error": ...}`, logged at ERROR with
+            # the traceback so a real bug stays findable" -- and
+            # tui/commands.py's own docstring claims kinship with that
+            # module ("the same mechanism-vs-policy split tools/registry.py
+            # already uses for tools") while inheriting none of its
+            # containment. This is the layer above having the same property.
+            #
+            # `logger.exception`, so the traceback reaches logs/app.log
+            # through the redacting formatter and a real bug stays findable.
+            try:
+                handled = commands.dispatch(self, text)
+            except Exception:  # noqa: BLE001 -- see the comment above
+                logger.exception("The /%s command handler raised.", name)
+                self._transcript.write_error(
+                    f"/{name} failed. The error is in logs/app.log; the "
+                    f"session is intact."
+                )
+                return
+            if not handled:
                 self._transcript.write_error(
                     f"Unknown command /{name}. Try /help."
                 )

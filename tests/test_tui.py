@@ -8592,3 +8592,122 @@ class TestPreMountNoticesReachTheTranscript:
         assert not [line for line in written if "[mcp]" in line
                     or "[warning]" in line], written
         assert "" not in written, "an empty notice list wrote a blank line"
+
+
+# ===========================================================================
+# ---- AC3's sibling: a raising COMMAND must not kill the app ---------------
+# ===========================================================================
+
+class TestARaisingCommandDoesNotKillTheApp:
+    """AC3 one layer up.
+
+    This file's own statement of AC3 is *"a tool call that raises must not
+    kill the app"*, and `dispatch()` gives the tool layer that property --
+    `AGENTS.md`: "A raising tool must not kill the run. `dispatch()` wraps
+    the handler call and turns any exception into `{"error": ...}`". The
+    layer ABOVE had none of it: `CommandRegistry.dispatch` ended in a bare
+    `command.handler(app, args)` and its one production caller had no `try`,
+    on the UI thread inside a message handler -- so any handler exception
+    reached Textual's `_handle_exception` and exited the whole application,
+    taking the transcript, the thread view and the session with it.
+
+    Reachable by one mistyped line in a file a PROJECT ships, which is why
+    it blocked the merge rather than waiting: a non-string element in
+    `additional_tools` parses clean, because only `isinstance(tools, list)`
+    is checked, and then crashes `/skill` with an `AttributeError`.
+
+    THE REGISTRY IS LEFT AS IT WAS FOUND. `_commands` and `_aliases` are
+    module-global on the one shared `registry`, and under `--dist loadscope`
+    every test in this file runs in the same process -- so a probe command
+    left behind would be offered by `/help` and by the suggestion panel in
+    every later test, and `test_a_bare_slash_offers_everything_help_lists`
+    would start disagreeing with itself for a reason nothing names.
+    """
+
+    @pytest.fixture
+    def raising_command(self):
+        """Register `/probeboom`, whose handler raises S08's AttributeError,
+        and take it back out again whatever the test does."""
+        from tui.commands import SlashCommand
+
+        def _handler(app, args):
+            # Exactly what a non-string `additional_tools` element produces.
+            return [{"not": "a string"}][0].strip()
+
+        commands.register(SlashCommand(
+            "probeboom", "raises, for the containment test", _handler))
+        try:
+            yield "probeboom"
+        finally:
+            commands._commands.pop("probeboom", None)
+
+    @pytest.mark.asyncio
+    async def test_the_app_survives_and_the_transcript_says_so(
+            self, raising_command):
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        errors = []
+        async with app.run_test() as pilot:
+            app._transcript.write_error = lambda text: errors.append(str(text))
+            app.query_one("#prompt").value = "/probeboom"
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert app.is_running, (
+                "the app exited: a command handler's exception reached "
+                "Textual's _handle_exception, which takes the whole "
+                "application down")
+
+        assert errors, "the raise was swallowed with nothing said on screen"
+        assert "probeboom" in errors[0], errors
+        assert "logs/app.log" in errors[0], (
+            "the line should point at where the traceback went, since the "
+            "handler logs it at ERROR through the redacting formatter")
+
+    @pytest.mark.asyncio
+    async def test_a_working_command_is_unaffected(self, raising_command):
+        """The control. Containment that also swallowed the RETURN value
+        would make every command report failure, and the assertion above
+        cannot tell the difference -- `/help` writing to the transcript is
+        what proves `dispatch` still ran and still reported handling it."""
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        errors = []
+        async with app.run_test() as pilot:
+            app._transcript.write_error = lambda text: errors.append(str(text))
+            app.query_one("#prompt").value = "/help"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.is_running
+
+        assert not errors, (
+            "a command that works reported an error, so the containment is "
+            "catching more than it should: %r" % errors)
+
+    def test_a_raising_completer_offers_no_rows_instead_of_crashing(self):
+        """`matching()` is the same exposure on a hotter path -- it calls
+        `command.complete(rest)` once per KEYSTROKE, also on the UI thread.
+
+        Contained inside `matching()` rather than at its call site, unlike
+        `dispatch`: "offer nothing" is this function's own vocabulary and
+        there is no policy for the shell to decide, where what a broken
+        COMMAND does to the session is the shell's call.
+        """
+        from tui.commands import CommandRegistry, SlashCommand
+
+        def _completer(rest):
+            return [{"not": "a string"}][0].strip()
+
+        local = CommandRegistry()
+        local.register(SlashCommand(
+            "probecomplete", "raises in its completer",
+            lambda app, args: None, complete=_completer))
+
+        assert local.matching("/probecomplete x") == []
+        # The control: the same registry still completes a command whose
+        # completer works, so the empty list above is the containment and
+        # not `matching()` having stopped working.
+        local.register(SlashCommand(
+            "probefine", "completes fine", lambda app, args: None,
+            complete=lambda rest: [SlashCommand(
+                "probefine ok", "a row", lambda app, args: None)]))
+        assert [row.name for row in local.matching("/probefine x")] == [
+            "probefine ok"]

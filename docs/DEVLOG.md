@@ -19840,3 +19840,76 @@ stated reason. Recorded because the next reader will hit the same two tests
 and deserves the measurement rather than the guess.
 
 Counts 6331 -> 6333.
+
+## Batch 135 -- a raising command took the whole shell with it (2026-10-10)
+
+The last of the review marathon's six `BLOCKS-MERGE` fixes. With this the
+merge gate is clear.
+
+**The defect.** `CommandRegistry.dispatch` ended in a bare
+`command.handler(app, args.strip())`, and its one production caller was
+`if not commands.dispatch(self, text):` inside `on_prompt_input_submitted`
+with no `try`. That handler runs on the UI thread inside a message handler,
+so any exception it raised reached Textual's `_handle_exception` and exited
+the whole application -- the transcript, the thread view and the session with
+it. Driven through a real mounted `VenastineApp` and the real registry, with
+nothing monkeypatched between the keystroke and the handler: the control
+command returned normally and the app stayed up; the subject raised and
+`app.is_running` was False.
+
+**This is defect shape 3 exactly** -- *"Containment is a property of a layer,
+not of a function [...] When you find one layer that has containment, ask
+what the layer above does with the same class of failure."* The layer below
+has it, and `AGENTS.md` states the rule: *"A raising tool must not kill the
+run. `dispatch()` wraps the handler call and turns any exception into
+`{"error": ...}`, logged at ERROR with the traceback so a real bug stays
+findable."* `tui/commands.py`'s own docstring claims kinship with that module
+-- *"the same mechanism-vs-policy split tools/registry.py already uses for
+tools"* -- and inherited none of its containment.
+
+**Why it blocked the merge rather than waiting.** It is reachable by one
+mistyped line in a file a PROJECT ships: a non-string element in
+`additional_tools` parses clean, because only `isinstance(tools, list)` is
+checked, and then crashes `/skill` with an `AttributeError`. The loss is the
+user's whole shell, and the fix is a `try` at a single call site. S14's brief
+in the marathon document already named this route -- *"a parsing defect in
+S08 lands in this scope as a TUI crash"*.
+
+**The two halves got DIFFERENT treatment, deliberately.** `dispatch` is
+contained at its call site in `tui/app.py`, not inside the registry: the
+registry is MECHANISM, and the decision about what a broken command does to
+the session is the shell's, which is the same split that keeps policy out of
+`tools/registry.py`. `matching()`'s `command.complete(rest)` -- the same
+exposure one layer over and on a hotter path, once per KEYSTROKE, also on the
+UI thread -- is contained INSIDE `matching()`, because there "offer nothing"
+is the function's own vocabulary (it already returns `[]` on four other
+lines) and there is no policy for the shell to decide. Both log at ERROR with
+`logger.exception`, so the traceback reaches `logs/app.log` through the
+redacting formatter and a real bug stays findable, which is the half of
+`dispatch()`'s contract that matters as much as the containment.
+
+**The control the finding did not ask for, and the mutation row that needs
+it.** Containment that also swallowed `dispatch`'s RETURN value would make
+every command report failure, and an assertion that the app survived cannot
+tell the difference. So `/help` is driven through the same path and must
+write nothing to the error channel. That is mutation A4 -- "the containment
+is too wide: every command reports failure" -- which the survival test alone
+scores EQUIVALENT on.
+
+**The registry is left as it was found.** `_commands` and `_aliases` are
+module-global on the one shared `registry`, and under `--dist loadscope`
+every test in `test_tui.py` runs in the same process, so a probe command left
+behind would be offered by `/help` and by the suggestion panel in every later
+test -- and `test_a_bare_slash_offers_everything_help_lists` would start
+disagreeing with itself for a reason nothing names. The fixture pops it in a
+`finally`.
+
+Mutation pass 4/4 killed with the equivalence control green: each call site
+losing its containment, containment that says nothing on screen, and
+containment that is too wide.
+
+Two gated digits moved, and the suite named both: `AGENTS.md`'s
+`test_tui.py` class count (64 -> 65, in the FLOOR-BOUND paragraph, which the
+gate's own message points at) and the tree's per-file count (440 -> 443).
+
+Counts 6333 -> 6336.

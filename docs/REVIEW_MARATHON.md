@@ -1,7 +1,8 @@
 # REVIEW_MARATHON.md — the pre-merge stability and security review
 
-**Status: open.** See § *Run log* at the bottom for which scopes have been reviewed and which have
-not.
+**Status: all 19 scopes reported; the `BLOCKS-MERGE` set is fixed (batches
+130-135).** See § *Run log* at the bottom for the per-scope outcome, and
+`review/TRIAGE.md` for the merged index the remaining fixes come from.
 
 ## Why this document exists
 
@@ -915,22 +916,35 @@ it, and the tree stays frozen against it while the marathon is open.
 
 | Scope | Reviewer | Date | Report | Findings (s1/s2/s3/s4) |
 |---|---|---|---|---|
-| S01 shell gate | — | — | — | — |
-| S02 sandbox & posture | — | — | — | — |
-| S03 permissions & registry | — | — | — | — |
-| S04 file & doc tools | — | — | — | — |
-| S05 network & content policy | — | — | — | — |
-| S06 math & compute | — | — | — | — |
-| S07 secrets & logging | — | — | — | — |
-| S08 config, schema, trust | — | — | — | — |
-| S09 persistence & memory | — | — | — | — |
-| S10 loop, client, cancel | — | — | — | — |
-| S11 compaction & sessions | — | — | — | — |
-| S12 research pipeline | — | — | — | — |
-| S13 agents, skills, MCP | — | — | — | — |
-| S14 TUI lifecycle | — | — | — | — |
-| S15 TUI rendering | — | — | — | — |
-| S16 headless shell | — | — | — | — |
-| S17 scaffolding & prompts | — | — | — | — |
-| S18 build, CI, supply chain | — | — | — | — |
-| S19 test infrastructure | — | — | — | — |
+| S01 shell gate | agent | 2026-10-08 | `review/S01-shell-gate.md` | 0/0/2/1 |
+| S02 sandbox & posture | agent | 2026-10-08 | `review/S02-sandbox.md` | 0/2/5/3 |
+| S03 permissions & registry | agent | 2026-10-08 | `review/S03-permissions-registry.md` | 0/1/0/1 |
+| S04 file & doc tools | agent | 2026-10-08 | `review/S04-file-doc-tools.md` | 0/1/3/2 |
+| S05 network & content policy | agent | 2026-10-08 | `review/S05-network-content.md` | 0/0/3/1 |
+| S06 math & compute | agent | 2026-10-08 | `review/S06-math-compute.md` | 1/3/4/5 |
+| S07 secrets & logging | agent | 2026-10-08 | `review/S07-secrets-logging.md` | 0/2/3/5 |
+| S08 config, schema, trust | agent | 2026-10-09 | `review/S08-config-trust.md` | 0/0/3/2 |
+| S09 persistence & memory | agent | 2026-10-09 | `review/S09-persistence.md` | 0/0/2/2 |
+| S10 loop, client, cancel | agent | 2026-10-09 | `review/S10-loop-client.md` | 0/4/3/0 |
+| S11 compaction & sessions | agent | 2026-10-09 | `review/S11-compaction-sessions.md` | 0/2/4/3 |
+| S12 research pipeline | agent | 2026-10-09 | `review/S12-research-pipeline.md` | 0/1/2/0 |
+| S13 agents, skills, MCP | agent | 2026-10-09 | `review/S13-agents-skills-mcp.md` | 0/1/6/1 |
+| S14 TUI lifecycle | agent | 2026-10-10 | `review/S14-tui-lifecycle.md` | 0/3/3/4 |
+| S15 TUI rendering | agent | 2026-10-09 | `review/S15-tui-rendering.md` | 0/1/0/1 |
+| S16 headless shell | agent | 2026-10-09 | `review/S16-headless-shell.md` | 0/0/2/2 |
+| S17 scaffolding & prompts | agent | 2026-10-10 | `review/S17-scaffolding-prompts.md` | 0/0/3/3 |
+| S18 build, CI, supply chain | agent | 2026-10-10 | `review/S18-build-ci-supply-chain.md` | 0/1/6/4 |
+| S19 test infrastructure | agent | 2026-10-10 | `review/S19-test-infrastructure.md` | 0/0/5/8 |
+
+**All 19 scopes reported.** 142 findings, 130 severity-tagged: 1 severity `S1`, 22 `S2`, 59 `S3`, 48 `S4`. The *Reviewer* column says `agent` because the report format carries no reviewer field -- the column is not unfilled, there was nothing to fill it from.
+
+The triage index is `review/TRIAGE.md` (gitignored, for the reasons in § *Where the reports go*). **The `BLOCKS-MERGE` set is clear as of batch 135**, fixed one surface per commit in batches 130-135, each with a `docs/DEVLOG.md` entry, a `tests/BREAKING_CHANGES.md` row per guard, a negative control, a mutation pass and a green full suite. So the merge can happen, with the rest carried in the register -- which is the decision this document exists to inform.
+
+| batch | finding | surface | mutation |
+|---|---|---|---|
+| 130 | S02-01 | `security/sandbox.py` | 3/3 |
+| 131 | S06-01 (the severity `S1`) | the four parsing math tools | 7/7 |
+| 132 | S10-01 | `core/client.py` | 7/7 |
+| 133 | S10-02 | `core/loop.py` | 2/2 |
+| 134 | S11-01 | `core/compaction.py` | 5/5 |
+| 135 | S14-02 | `tui/app.py`, `tui/commands.py` | 4/4 |

@@ -13,9 +13,12 @@ A handler takes (app, argument_string) and returns None. It runs on the UI
 thread, so anything slow belongs in a worker.
 """
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -162,7 +165,28 @@ class CommandRegistry:
             command = self.get(head[1:].lower())
             if command is None or command.complete is None:
                 return []
-            return command.complete(rest)
+            # CONTAINED HERE, unlike dispatch(), and the asymmetry is the
+            # point rather than an inconsistency. `matching()` runs per
+            # KEYSTROKE on the UI thread, and the right answer to a
+            # completer that raises is "offer nothing" -- which is this
+            # function's own vocabulary, already returned on four other
+            # lines. There is no policy for the shell to decide, so there
+            # is nothing to hand upward.
+            #
+            # dispatch() is the other way round: what a broken COMMAND does
+            # to the session is the shell's call, so it is caught at the
+            # call site in tui/app.py instead (batch 135). Uncontained,
+            # this was the same exposure one layer over and on a hotter
+            # path: an exception here reaches Textual's `_handle_exception`
+            # and exits the application mid-keystroke, while the user is
+            # still typing the command.
+            try:
+                return command.complete(rest)
+            except Exception:  # noqa: BLE001 -- see the comment above
+                logger.exception(
+                    "The /%s completer raised; offering no rows.",
+                    command.name)
+                return []
         prefix = token[1:].lower()
         matches = [c for c in self.all() if c.name.startswith(prefix)]
         if not prefix:
