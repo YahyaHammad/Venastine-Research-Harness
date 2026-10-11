@@ -963,3 +963,131 @@ class TestRedactionKillSwitch:
         rebind_posture(monkeypatch)
         digest = param_digest({"url": GEM_SOURCE})
         assert "tok3n" in digest
+
+
+# ===========================================================================
+# ---- S07-01 / S07-05: the case list, and the one order --------------------
+# ===========================================================================
+
+# DEFERRED, not added to the import block at the top, and the reason is
+# measured. `.gitleaksignore` pins five intentional fake fixtures in this file
+# by LINE NUMBER, and six more names up there pushed all five down by six --
+# re-firing the secret scan and inviting five re-blessings for a change that
+# never needed to touch anything above them. The suite already defers an
+# import into the one gate that needs it where the cost of a module-level one
+# is real (batch 144).
+def _every_matcher():
+    """Every regex that redacts, vendor patterns and shapes alike."""
+    from safety.policy_enforcement import (
+        _ASSIGNMENT_RE,
+        _SECRET_PATTERNS,
+        _URL_USERINFO_RE,
+        _XML_PASSWORD_RE,
+    )
+
+    return (list(_SECRET_PATTERNS)
+            + [_URL_USERINFO_RE, _XML_PASSWORD_RE, _ASSIGNMENT_RE])
+
+
+def _cases():
+    """The shared case list, deferred for `_every_matcher`'s reason."""
+    from tests.conftest import REDACTION_CASES
+
+    return REDACTION_CASES
+
+
+class TestTheRedactionCaseListIsDerivedNotRestated:
+    """`tests/conftest.REDACTION_CASES` is read by this file and by
+    `test_logging_setup.py`, and this is the check that keeps it honest.
+
+    BOTH DIRECTIONS, because each catches a different drift. A pattern
+    with no case is a pattern nothing drives -- which is how S07-01
+    survived, the log sink having only an `sk-ant-` case. A case no
+    pattern matches is a case that asserts nothing and would go green if
+    the thing it names were deleted.
+    """
+
+    def test_every_pattern_and_every_shape_has_a_case(self):
+        orphans = []
+        for pattern in _every_matcher():
+            if not any(pattern.search(text)
+                       for _label, text, _needle in _cases()):
+                orphans.append(pattern.pattern)
+
+        assert not orphans, (
+            f"these redaction patterns have no case in "
+            f"tests/conftest.REDACTION_CASES: {orphans}. Add one, with a "
+            f"needle, or the parity tests in test_logging_setup.py stop "
+            f"covering the pattern the moment it is added here")
+
+    def test_every_case_is_matched_by_something(self):
+        idle = [label for label, text, _needle in _cases()
+                if not any(p.search(text) for p in _every_matcher())]
+
+        assert not idle, (
+            f"these cases match no pattern, so every assertion about them "
+            f"is vacuous: {idle}. This is the check that caught a Google "
+            f"API key case written 33 characters long against a pattern "
+            f"that wants 35 (batch 144)")
+
+    def test_the_needle_is_really_in_the_text(self):
+        """The third way a row can be inert: a needle that is not a
+        substring of the text it is supposed to be found in. Then
+        `needle not in redacted` passes before anything redacts."""
+        wrong = [label for label, text, needle in _cases()
+                 if needle not in text]
+        assert not wrong, f"the needle is absent from the text: {wrong}"
+
+
+class TestOneOrderForBothCompositions:
+    """S07-05. Two sites composed the same two passes in opposite orders,
+    one of them argued and the other not, and nothing could say which was
+    right."""
+
+    def test_a_stored_value_containing_a_vendor_token_is_redacted_whole(
+            self, monkeypatch):
+        """`redact_live_values` matches by exact substring, so the pattern
+        pass must not run first: rewriting the middle of the stored value
+        destroys the needle and leaves the ends standing."""
+        from safety.policy_enforcement import (
+            redact_diagnostic_text,
+            redact_output_text,
+        )
+        from security import secrets as harness_secrets
+
+        # BUILT, not written out: a contiguous `ghp_` + 36 is what gitleaks'
+        # `github-pat` rule matches, and a fabricated fixture is not worth a
+        # line-pinned entry in `.gitleaksignore` that every later edit above
+        # it re-fires. The value at runtime is the one the test needs.
+        stored = "PREFIX-ghp_" + "a1b2c3d4" * 4 + "a1b2" + "-SUFFIX"
+        monkeypatch.setattr(
+            harness_secrets, "redact_live_values",
+            lambda text: text.replace(stored, "[REDACTED]"))
+
+        for name, out in (("redact_diagnostic_text",
+                           redact_diagnostic_text(f"header {stored} sent")),
+                          ("redact_output_text",
+                           redact_output_text(f"header {stored} sent"))):
+            assert "PREFIX" not in out, f"{name} ran the patterns first"
+            assert "SUFFIX" not in out, f"{name} ran the patterns first"
+
+    def test_the_switch_does_not_govern_the_diagnostic_path(self, monkeypatch):
+        """`redaction_enabled()` governs what the MODEL is shown. The log
+        has always redacted regardless -- that clause is in the switch's
+        own docstring -- and the vocabulary is now the same one."""
+        import config
+        from safety.policy_enforcement import (
+            redact_diagnostic_text,
+            redact_output_text,
+        )
+
+        monkeypatch.setattr(config, "REDACT_TOOL_OUTPUTS", False)
+        monkeypatch.setenv("VENASTINE_REDACT_OFF", "1")
+        rebind_posture(monkeypatch)
+
+        text = 'systemProp.gradle.password = "s3cr3t-in-an-assignment"'
+        assert "s3cr3t-in-an-assignment" in redact_output_text(text), (
+            "the switch no longer reaches tool output, which is the one "
+            "thing it is for")
+        assert "s3cr3t-in-an-assignment" not in redact_diagnostic_text(text), (
+            "the switch reached the harness's own diagnostics")

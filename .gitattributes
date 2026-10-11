@@ -7,6 +7,11 @@
 providers.json export-ignore
 .env export-ignore
 secrets.json export-ignore
+# S07-02 (batch 144), for .gitignore's reason one channel over: a failed
+# rename inside `write_json_atomic` left a complete copy of a credential
+# store beside it, and `providers.json export-ignore` does not match
+# `providers.json.a1b2c3d4.tmp`.
+*.tmp export-ignore
 # S18-01 (batch 140), for .gitignore's reason one channel over.
 .venastine/mcp.json export-ignore
 .venastine/settings.json export-ignore

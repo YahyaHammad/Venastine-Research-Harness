@@ -65,15 +65,16 @@ def write_json_atomic(path: str, payload, *, mode: Optional[int] = None,
     afterwards would be both a no-op and a lie, and setting it on the
     destination beforehand is worse -- replace overwrites that too.
 
-    THREE CALLERS PASS ONE SINCE BATCH 108, and two of them now pass it for
-    the reason the trust store explicitly does NOT: `credentials.py` and
+    EVERY CALLER HOLDING A CREDENTIAL PASSES ONE, and two of them pass it
+    for the reason the trust store explicitly does NOT: `credentials.py` and
     `security/secrets.py` hold secrets, and 0600-at-creation is the property
-    their own comments argue for at length. That sentence used to read "only
-    the trust store passes one today, and its docstring says why it is for
-    consistency with credentials.py rather than because the file holds a
-    secret" -- true while the two secret stores each kept a private
-    truncate-then-write, which is the pattern this module was extracted to
-    delete.
+    their own comments argue for at length. `mcp_client/config.py` is the
+    fourth, for the `Authorization` header batch 140 named in
+    `.venastine/mcp.json`. This used to say "THREE CALLERS PASS ONE" and was written
+    when three did -- a count in prose with nothing able to notice the
+    fourth, which is the shape batch 143 closed twice on another surface and
+    answered the same way: the argument never needed the number, so it is
+    gone rather than corrected (batch 144).
 
     `trailing_newline` is off by default so every existing store writes
     the same bytes it always did. The four here are machine state nobody
@@ -91,7 +92,19 @@ def write_json_atomic(path: str, payload, *, mode: Optional[int] = None,
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)
-    tmp = f"{path}.tmp"
+
+    # A UNIQUE NAME, not a fixed `<path>.tmp` sibling (batch 144).
+    # `config_edit.write` reached this conclusion for `config.yaml` and
+    # wrote down why -- "two writers raced on the one name, and a failed
+    # `os.replace` left the leftover in the install tree forever" -- and
+    # this helper, extracted so these mechanics would have exactly ONE
+    # copy, had neither half of the answer. One question, two answers, and
+    # nothing that could tell you they disagreed.
+    #
+    # Two instances in one directory is a supported configuration:
+    # `docs/PRIVACY.md` says "everything is relative to the directory you
+    # run in".
+    tmp = "%s.%s.tmp" % (path, os.urandom(4).hex())
 
     def _dump(handle) -> None:
         json.dump(payload, handle, indent=indent, sort_keys=sort_keys)
@@ -99,32 +112,56 @@ def write_json_atomic(path: str, payload, *, mode: Optional[int] = None,
             handle.write("\n")
 
     # THE TEMP FILE IS SWEPT ON FAILURE (batch 108). Without this a write
-    # that dies inside `_dump` leaves `<path>.tmp` behind for good: the
+    # that dies inside `_dump` leaves its temp file behind for good: the
     # destination is correctly untouched, which is the whole point, but the
     # debris is not. It is worst for the two stores that joined this helper
     # in the same batch -- a half-written SEALED ENVELOPE sitting next to
     # the secrets file, and a partial provider file next to the real one.
+    #
+    # AND THE RENAME IS INSIDE IT (batch 144). `os.replace` used to
+    # be the statement after this handler, so the sweep covered the failure
+    # the comment above names and not the one next to it -- which is the
+    # repository's own prompt for defect shape 6: "what actually raises
+    # this, and what raises the thing next to it?"
+    #
+    # The rename's failure is not hypothetical and not symmetrical across
+    # platforms. On Windows a plain `open()` takes no FILE_SHARE_DELETE, so
+    # any other process merely READING the destination makes `os.replace`
+    # fail -- an editor, a sync client, a backup, a virus scanner, or a
+    # second instance in the same directory. Driven, with a happy-path
+    # control: `PermissionError WinError 5`, destination correctly intact,
+    # and `providers.json.tmp` left holding EVERY stored provider key in
+    # cleartext, because `save_credentials` reads the whole file, mutates
+    # one entry and writes all of it back. The POSIX arm is clean -- rename
+    # there ignores open handles and the destination's mode -- and the
+    # process-death window between the write and the rename is on both.
     #
     # Hygiene, never error policy: the original exception is re-raised
     # unchanged, because "errors belong to the caller" above is the rule
     # and a cleanup that swallowed one would be the opposite of it. The
     # unlink is itself guarded, so a failure to tidy up cannot replace the
     # failure worth reporting.
+    #
+    # ONE `os.open` rather than two branches, and `0o666` is not a new
+    # policy: it is the mode `open(path, "w")` passes, so the umask
+    # subtracts from it exactly as before. Measured on WSL at `umask 022`,
+    # both forms give 0o644 -- while `os.open` with NO mode argument gives
+    # 0o755, which is why the argument is explicit rather than omitted.
+    # `O_EXCL` on a unique name is what makes the sweep below safe: the
+    # file this unlinks is always one this call created, never another
+    # writer's.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    fd = os.open(tmp, flags, 0o666 if mode is None else mode)
     try:
-        if mode is None:
-            with open(tmp, "w", encoding="utf-8") as f:
-                _dump(f)
-        else:
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                _dump(f)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            _dump(f)
+        os.replace(tmp, path)
     except BaseException:
         try:
             os.unlink(tmp)
         except OSError:
             pass
         raise
-    os.replace(tmp, path)
 
 
 def read_versioned(path: str, version: int, fallback_note: str = "") -> dict:

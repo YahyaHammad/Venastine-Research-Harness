@@ -177,6 +177,22 @@
       ]
     },
     {
+      "label": "atomic-write debris",
+      "match": "suffix",
+      "value": [
+        ".tmp"
+      ],
+      "channels": [
+        "git",
+        "archive",
+        "npm"
+      ],
+      "samples": [
+        "providers.json.a1b2c3d4.tmp",
+        "secrets.json.a1b2c3d4.tmp"
+      ]
+    },
+    {
       "label": "the unsafe-mode branch marker",
       "match": "exact",
       "value": [

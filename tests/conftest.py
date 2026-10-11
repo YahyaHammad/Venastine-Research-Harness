@@ -1820,3 +1820,79 @@ def rebind_posture(monkeypatch):
     """
     from security import posture
     monkeypatch.setattr(posture, "_posture", posture._from_config())
+
+
+# ---- The redaction case list (S07-01, S07-09) ----------------------------
+#
+# EVERY PATTERN AND EVERY SHAPE, in one place, read by
+# `test_logging_setup.py` and `test_policy_enforcement.py`. Two readers and
+# a check rather than a hope: `test_every_pattern_and_every_shape_has_a_case`
+# holds this list against `safety/policy_enforcement`'s own regexes in both
+# directions, so a pattern added there without a case here goes red, and a
+# case here that nothing matches goes red too.
+#
+# It exists because of what a SINGLE case could not discriminate.
+# `test_logging_setup.py` had three secret tests and one value between them,
+# `sk-ant-...`, which `redact_secrets` matches on its own -- so every
+# assertion in that file passed against a formatter applying the vendor
+# tokens alone, which is exactly what it was doing while three credential
+# SHAPES reached `logs/app.log` in cleartext (S07-01). The first of the
+# protocol's four vacuity shapes: input that cannot discriminate.
+#
+# The last three rows are the discriminating ones, and
+# `test_the_three_shapes_are_what_discriminates` asserts that they are --
+# that `redact_secrets` alone leaves them standing -- so this list cannot
+# quietly lose its teeth by having the shapes dropped from it.
+#
+# Each row is (label, the text a sink is handed, the substring whose
+# survival IS the leak). The needle differs from the text for the shapes
+# because their whole point is to preserve the surrounding structure: a
+# redacted `<password>` element still has its tags.
+REDACTION_CASES = [
+    ("openai key",
+     "401 from https://api.example/v1?key=sk-a1b2c3d4a1b2c3d4a1b2c3",
+     "sk-a1b2c3d4a1b2c3d4a1b2c3"),
+    ("anthropic key",
+     "401 from https://api.example/v1?key="
+     "sk-ant-a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2",
+     "sk-ant-a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2"),
+    # BUILT, not written out, and this is the one row that needs saying.
+    # A contiguous `ghp_` + 36 characters is what gitleaks' `github-pat`
+    # rule matches, and a fabricated fixture is not worth a line-pinned
+    # `.gitleaksignore` entry that every later edit above it re-fires --
+    # which is exactly what six names added to one import block did to the
+    # five already in that file (batch 144). The value is identical at
+    # runtime, which is all the derivation gate and the sinks ever see.
+    ("github pat",
+     "clone failed for ghp_" + "a1b2c3d4" * 4 + "a1b2",
+     "ghp_" + "a1b2c3d4" * 4 + "a1b2"),
+    ("aws access key id",
+     "signing with AKIAA1B2C3D4A1B2C3D4 failed",
+     "AKIAA1B2C3D4A1B2C3D4"),
+    ("google api key",
+     "maps lookup with AIzaa1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4abc failed",
+     "AIzaa1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4abc"),
+    ("slack token",
+     "post to #general failed: xoxb-1234567890-abcdefghij",
+     "xoxb-1234567890-abcdefghij"),
+    ("pem private key header",
+     "could not parse -----BEGIN RSA PRIVATE KEY----- from the identity file",
+     "-----BEGIN RSA PRIVATE KEY-----"),
+    # --- The three shapes (#167), which is where the two vocabularies
+    # --- differed. A vendor prefix is not involved in any of them.
+    ("url userinfo",
+     "fetch_url failed for https://bob:s3cr3t-in-a-url@gems.example/v1",
+     "s3cr3t-in-a-url"),
+    ("xml password element",
+     "<server><password>s3cr3t-in-an-element</password></server>",
+     "s3cr3t-in-an-element"),
+    ("quoted password assignment",
+     'systemProp.gradle.password = "s3cr3t-in-an-assignment"',
+     "s3cr3t-in-an-assignment"),
+]
+
+#: The rows whose needle has no vendor prefix, so `redact_secrets` cannot
+#: see them. Named rather than sliced by index, because an index is a
+#: second fact about the order of the list above.
+SHAPE_CASE_LABELS = frozenset({
+    "url userinfo", "xml password element", "quoted password assignment"})

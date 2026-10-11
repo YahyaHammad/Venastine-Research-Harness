@@ -83,8 +83,8 @@ from project_init.tui_commands import register_init_commands
 from prompts import system_prompts
 from safety.policy_enforcement import (
     check_output_policy,
+    redact_diagnostic_text,
     redact_output_text,
-    redact_secrets,
 )
 from security import posture
 from skills.manager import manager as skills
@@ -250,8 +250,18 @@ class TranscriptLogHandler(logging.Handler):
             # an exception reached the screen with its key intact. The same
             # rule as the file (owner decision), so the two places the
             # harness's own diagnostics go cannot disagree about a secret.
+            #
+            # AND THEY NO LONGER DO (batch 144). That last sentence
+            # was false for forty-six days in two separate ways: this line
+            # applied `redact_secrets` alone, which is the seven vendor
+            # tokens, so a quoted password assignment reached the screen --
+            # and it applied no value redaction at all, so the harness's
+            # OWN stored value, the one thing SS61 calls unconditional,
+            # was drawn here verbatim while app.log redacted it. One name
+            # now, and `redact_diagnostic_text` is where the order and the
+            # vocabulary are decided for all five sinks.
             self._app.post_message(LogRecordMessage(
-                redact_secrets(text),
+                redact_diagnostic_text(text),
                 "error" if record.levelno >= logging.ERROR else "warning",
             ))
         except Exception:  # noqa: BLE001 -- see the docstring
@@ -3587,7 +3597,12 @@ class VenastineApp(App):
             failed = isinstance(result, dict) and "error" in result
             if failed:
                 tool_name = self._tool_names.get(call_id) if call_id else None
-                error_text = redact_secrets(str(result["error"]))
+                # The shared diagnostic composition (batch 144), not
+                # `redact_secrets`: a tool's error string is the most
+                # likely place in the harness for a credential shape with
+                # no vendor prefix to appear, because it is usually the
+                # upstream request that failed.
+                error_text = redact_diagnostic_text(str(result["error"]))
                 if tool_name:
                     transcript.write_role("tool_error", f"  ✗ {tool_name}  {error_text}")
                 else:

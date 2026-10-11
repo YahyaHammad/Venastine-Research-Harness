@@ -12,6 +12,16 @@ logs/
 # something else is still covered.
 *.db-wal
 *.db-shm
+# S07-02 (batch 144). `json_store.write_json_atomic` writes `<store>.<hex>
+# .tmp` beside its destination and renames it into place, and until this
+# batch the rename sat outside the handler that sweeps -- so a failed
+# rename, which on Windows needs nothing more than another process READING
+# the destination, left a complete copy of the file behind. For
+# `providers.json` that is every stored provider key in cleartext, at a
+# name no line below covered. Broad like `*.log` and `*.db` above, and for
+# the same reason: this covers all nine of that helper's call sites rather
+# than the two that hold credentials.
+*.tmp
 providers.json
 # ROADMAP_v3 §49 slice 5a. The harness-held secret store's DEFAULT name, in
 # case anyone points AGENT_SECRETS_FILE at a checkout. It lives in

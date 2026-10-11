@@ -55,7 +55,7 @@ from core.client import (
 )
 from core.events import LoopEvent
 from core.memory import ConversationMemory
-from safety.policy_enforcement import redact_secrets
+from safety.policy_enforcement import redact_diagnostic_text
 
 # §27 (T1). The loop is where a thread's kind is DECIDED -- it knows which
 # of its three entry points is running -- and storage.create_thread is
@@ -1378,8 +1378,15 @@ class RunAgentLoop:
             return (yield from RunAgentLoop._run_steps(memory, *args, **kwargs))
         except Exception as error:
             try:
+                # THE DURABLE SINK, so the vocabulary matters most
+                # here (batch 144). `API_URL` is user-supplied
+                # through `save_credentials(api_url=...)`, an httpx error
+                # names the URL it failed on, and this row lands in
+                # `MessageLog.error` in app.db -- which `docs/PRIVACY.md`
+                # says is deleted by wiping the database, not one thread.
+                # `redact_secrets` alone would keep a URL's userinfo.
                 memory.mark_turn_failed(
-                    redact_secrets(provider_errors.describe(error)))
+                    redact_diagnostic_text(provider_errors.describe(error)))
             except Exception:  # noqa: BLE001 -- see the docstring
                 logger.warning(
                     "Could not record this run's failure on its thread.",

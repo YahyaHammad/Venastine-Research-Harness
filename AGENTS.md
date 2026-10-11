@@ -55,7 +55,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 6531 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
+pytest                                            # 6581 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -258,7 +258,7 @@ Three stop conditions, all in `_run()`: no tool calls (`complete`), `max_steps` 
 
 **A retraction is bounded by a MARK, not by the open span** (batch 113). `Transcript._retract_mark` is armed by the first delta of a span and cleared by `flush_stream`; `retract_to_mark(note)` truncates `_entries` back to it, clears both pending buffers, replays and writes the note. A second retraction keeps the first line for free, because `write_system` flushes — which clears the mark — and the next delta re-arms it after the note. Not the open span, because `_write_thinking_chunk` closes an open ANSWER before it draws — one attempt with interleaved reasoning is three entries with only the last open. Not taken at the flush either, though that was tried: every `write_*` opens with `flush_stream()`, so a line written mid-span moved the mark PAST the attempt's own text and the retraction then deleted the foreign line and kept the half-answer. `Transcript` is the only surface in this repository that draws model text — the research orchestrator translates a character COUNT and the CLI shell (`main.py`, never a `cli.py` -- there has never been one) ignores `retract` entirely, which `core/events.py` states is still correct about failures — so it is the only consumer of this event.
 
-**`_run` is a thin frame; the loop is `_run_steps`** (batch 91). On an `Exception` escaping it, the frame stores `redact_secrets(describe(e))` on the thread's newest user row (`MessageLog.error`, via `mark_turn_failed`) and re-raises unchanged — `core/events.py` still has no error variant. Not on `GeneratorExit`: an abandoned generator (#42) is not a failed run. **A column, not an `error` ROLE, is the decision:** provider translation and the compactor's `_as_text` read a user row's `content` alone, so the failure reaches `replay_entries` (an `error` entry right after its user entry) and nothing that sends or summarizes the conversation — a role would have been M8's mistake. `test_grants.py` walks `core.loop`'s AST for exactly one function named `_run` with no `authorized_call` in it; the frame satisfies both, so do not "simplify" it back into the body without re-reading that test.
+**`_run` is a thin frame; the loop is `_run_steps`** (batch 91). On an `Exception` escaping it, the frame stores `redact_diagnostic_text(describe(e))` on the thread's newest user row (`redact_secrets` until batch 144, which is the vendor tokens alone -- and `API_URL` is user-supplied, so an httpx error names a URL that may carry userinfo, into the sink `docs/PRIVACY.md` says is deleted by wiping the database rather than one thread) (`MessageLog.error`, via `mark_turn_failed`) and re-raises unchanged — `core/events.py` still has no error variant. Not on `GeneratorExit`: an abandoned generator (#42) is not a failed run. **A column, not an `error` ROLE, is the decision:** provider translation and the compactor's `_as_text` read a user row's `content` alone, so the failure reaches `replay_entries` (an `error` entry right after its user entry) and nothing that sends or summarizes the conversation — a role would have been M8's mistake. `test_grants.py` walks `core.loop`'s AST for exactly one function named `_run` with no `authorized_call` in it; the frame satisfies both, so do not "simplify" it back into the body without re-reading that test.
 
 **"Headless" means unable to ask, not "not a TUI."** `_run()` hides approval-gated tools when there is neither a `permission_channel` nor an `approval_provider` (§25 broadened this from the channel alone). A research pass in attended mode can ask, so its gated tools are advertised.
 
@@ -338,7 +338,7 @@ the person running the suite had ever typed `/theme`.
 
 **Logging and Textual cannot share the terminal.** `main.py` calls `configure_logging(stderr=False)` immediately before `run_tui()` — not at the top of `main()`, because pre-mount messages (db creation, the trust prompt, MCP connections) genuinely want stderr. `TranscriptLogHandler` routes WARNING+ into the transcript so dropping stderr does not just make warnings invisible; it is attached in `on_mount` and **removed in `on_unmount`**, or it keeps a dead app alive and stacks one handler per instance across the test suite. Anything written to stderr while Textual is up paints over the rendered screen and disappears on the next repaint.
 
-**The routed line carries the exception's reason and is redacted** (batch 91). `emit` appends `describe(exc)` when a record has `exc_info` — `logger.exception("Tool %s raised; ...")` otherwise showed a failure with no cause — and passes the whole line through `redact_secrets`, the log file's rule. Before this the handler redacted nothing: the file had been redacted at its formatter since #132 while the screen got `record.getMessage()` raw.
+**The routed line carries the exception's reason and is redacted** (batch 91). `emit` appends `describe(exc)` when a record has `exc_info` — `logger.exception("Tool %s raised; ...")` otherwise showed a failure with no cause — and passes the whole line through `redact_diagnostic_text`, the log file's rule. Before this the handler redacted nothing: the file had been redacted at its formatter since #132 while the screen got `record.getMessage()` raw. **And "the log file's rule" was two rules until batch 144** (S07-01): this line called `redact_secrets` with no value redaction at all, so the harness's OWN stored value -- the one thing SS61 calls unconditional -- was drawn on screen verbatim while app.log redacted it. All five diagnostic sinks now call one function.
 
 **The transcript renders progressively, and it computes its own line boundaries** (§38, O7).
 `Transcript.stream_delta` used to do nothing but `self._pending += delta`, so a plain answer
@@ -2132,9 +2132,18 @@ Slice 5a (batch 103) -- the harness-held secret store (SS56-SS64):
   argv and no log. **A refused AUTHENTICATION does NOT lock**: that would cost the master passphrase
   over a typo. It quarantines that host's credentials instead (SS63).
 * **Value redaction is UNCONDITIONAL** (SS61), above `redaction_enabled()` in `redact_output_text`
-  and again in `logging_setup`'s formatter. `redact_tool_outputs` governs guesses about other
-  people's credentials; this is the harness leaking its own, and no switch asks for that. The values
-  never leave `security/secrets.py` -- the redactor calls IT rather than asking for a list.
+  and first inside `redact_diagnostic_text`, which is the one composition all five diagnostic sinks
+  call since batch 144 -- the log formatter, the TUI's log handler and its tool-error line,
+  `mark_turn_failed`, and the orchestrator's pipeline event. `redact_tool_outputs` governs guesses
+  about other people's credentials; this is the harness leaking its own, and no switch asks for that.
+  The values never leave `security/secrets.py` -- the redactor calls IT rather than asking for a list.
+* **The order is live values, then vendor tokens, then shapes, in that order and one place**
+  (S07-05, batch 144). `redact_live_values` matches by exact substring, so a pattern pass that has
+  already rewritten part of a stored value leaves the remainder standing: measured, a stored value
+  containing a `ghp_` token came back as `PREFIX-[REDACTED]-SUFFIX` from the log's old order and
+  `[REDACTED]` from the other. Two sites composed the same two passes in opposite orders and nothing
+  could say which was right. Same rule as `fetch_url` redacting before it cuts, with a substitution
+  as the destroyer instead of a slice.
 * **A new §23 AC1 request kind needs a branch in BOTH shells** (SS59), and the parity test in `test_cli.py`
   enforces it. The TUI got this project's first masked modal; the CLI got `readline_masked` on the
   ONE stdin reader -- `getpass` is refused because it reads stdin itself, which is the second reader
@@ -2768,7 +2777,7 @@ is gone outright, not kept as a fallback. `doc_path()` is one join now.
   `read` with no gate. But the set is not small: the tool takes a PATH, resolves
   anywhere under the project, and admits `.md`/`.markdown`/`.rst`/`.txt` plus ten
   named build files, which on a clean checkout of this repository is **62 files
-  and under 4 MB at depths 0-3**, including every agent and skill body under
+  and under 5 MB at depths 0-3**, including every agent and skill body under
   `agents/builtin/` and `skills/builtin/` and the whole of `docs/`. The 61st is
   `docs/REVIEW_MARATHON.md` (batch 129), and the per-scope review reports it
   governs are deliberately NOT tracked, so they do not move this figure at
@@ -2782,7 +2791,15 @@ is gone outright, not kept as a fallback. `doc_path()` is one join now.
   figures are read back out of this sentence by
   `test_the_documented_doc_read_bound_is_not_understated`, which fails only in
   the understating direction, because that is the direction the next sentence
-  says costs something. ARCHITECTURE.md used to say the most a prompt-injected pass
+  says costs something. **The ceiling was 4 MB until batch 144**, when the
+  real figure reached 4.01 MB and this record was again almost all of it --
+  that batch's own DEVLOG entry is what crossed the line. Raised to 5 MB,
+  which is roughly thirty more batches at the measured rate (3.58 MB at batch
+  128, 4.01 MB at batch 144, so about 27 KB a batch), because the ceiling is
+  a ceiling on purpose: an equality would go red on the next commit and be
+  retyped without being read, and a round number going red is the moment
+  noticing is the correct outcome. The FILE COUNT is pinned exactly instead,
+  and it did not move. ARCHITECTURE.md used to say the most a prompt-injected pass
   gains is the README (audit #97); understating a security bound is the one
   direction that costs something.
 - **The hub is the map of the documents it links** (I9, as relocated by WS8). All

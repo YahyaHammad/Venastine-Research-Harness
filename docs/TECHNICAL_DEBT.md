@@ -2698,6 +2698,17 @@ model-facing third-party text in this project is bounded at the producer:
 MCP is the one producer that is not, and it is the one whose payload is
 written by a third party nobody here reviewed.
 
+**CORRECTION (batch 144).** "Every other model-facing text is bounded at the
+producer" was false when it was written: the six math tools were a second
+unbounded producer, and S06-02 measured a 14-symbol truth table returning
+3,440,679 characters -- 49x `compaction_min_headroom_tokens` -- from 27
+characters of input. Batch 143 bounded them at `config.MAX_READ_CHARS`, so
+the sentence is true again now. It is corrected here rather than only in the
+DEVLOG because this entry is what a later reader consults to decide whether
+the SHAPE question below has a precedent, and "MCP is the only one" was the
+argument for treating it as unprecedented. The precedent now exists and it
+chose REFUSE over truncate, at a config value rather than a new constant.
+
 **Measured, as part of item 46.** `check_output_policy` costs
 `a*leaves + b*bytes`, and both terms are unbounded here: 200,000 short
 leaves cost **351ms** and 2,832 leaves of 10,000 chars cost **290ms**, so an

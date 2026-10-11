@@ -208,7 +208,8 @@ def test_the_trust_store_write_is_still_atomic(tmp_path, monkeypatch):
     workspace_trust._save_trust_store({"/a": "1"})
 
     assert store.exists()
-    assert not (tmp_path / "trusted_projects.json.tmp").exists()
+    assert _debris(tmp_path, store) == [], (
+        "a temp file was left beside the store")
 
 
 # ---------------------------------------------------------------------------
@@ -476,7 +477,8 @@ def test_an_interrupted_write_leaves_no_temp_file(_in_tmp, monkeypatch):
     with pytest.raises(TypeError):
         credentials.save_credentials("anthropic", "sk-ant-the-second-key")
 
-    assert not (_in_tmp / "providers.json.tmp").exists()
+    assert _debris(_in_tmp, _in_tmp / "providers.json") == [], (
+        "a temp file was left beside the store")
 
 
 def test_the_bare_relative_default_still_writes(_in_tmp):
@@ -494,3 +496,126 @@ def test_the_bare_relative_default_still_writes(_in_tmp):
     assert (_in_tmp / "providers.json").exists()
     assert (credentials.load_provider_data()["openai"]["API_KEY"]
             == "sk-a-key-for-the-bare-path")
+
+
+# ---------------------------------------------------------------------------
+# ---- S07-02: the rename is inside the handler too -------------------------
+# ---------------------------------------------------------------------------
+#
+# The two assertions above used to read `not (dir / "providers.json.tmp")
+# .exists()`, and batch 144 gave `write_json_atomic` a UNIQUE temp name --
+# which would have left both of them passing whatever was on disk. They ask
+# the directory now, which is also what they always meant.
+
+
+def _debris(directory, destination) -> list:
+    """Every file in `directory` that is not the destination itself.
+
+    The assertion the fix needs, rather than one fixed name: the temp file
+    is `<path>.<hex>.tmp` now, because a fixed sibling raced between two
+    writers -- the defect `config_edit.py:510` measured for `config.yaml`
+    and answered, in the file one directory over from the shared helper
+    that had neither half of the answer.
+    """
+    return sorted(p.name for p in directory.iterdir()
+                  if p.name != os.path.basename(str(destination)))
+
+
+def _failing_replace(monkeypatch):
+    """`os.replace` raising where it really raises.
+
+    On Windows a plain `open()` takes no FILE_SHARE_DELETE, so any other
+    process merely READING the destination makes the rename fail -- an
+    editor, a sync client, a backup, a virus scanner, or a second harness
+    instance in the same directory, which `docs/PRIVACY.md` makes a
+    supported configuration. Patched rather than staged, because the real
+    trigger is a second process and the thing under test is what the
+    handler covers.
+    """
+    import json_store
+
+    def _boom(src, dst):
+        raise PermissionError(5, "another process has the file open")
+
+    monkeypatch.setattr(json_store.os, "replace", _boom)
+
+
+def test_a_failed_rename_leaves_no_provider_debris(_in_tmp, monkeypatch):
+    """S07-02, the reachable half and the one that matters most.
+
+    `providers.json.tmp` held EVERY stored provider key in cleartext --
+    `save_credentials` reads the whole file, mutates one entry and writes
+    all of it back -- at a name `.gitignore` and `.gitattributes` did not
+    cover, so `git add -A` staged it and `git archive` shipped it. The
+    destination is correctly untouched either way; the debris was not.
+    """
+    credentials.save_credentials("openai", "sk-the-first-key")
+    before = (_in_tmp / "providers.json").read_bytes()
+    _failing_replace(monkeypatch)
+
+    with pytest.raises(PermissionError):
+        credentials.save_credentials("anthropic", "sk-ant-the-second-key")
+
+    assert (_in_tmp / "providers.json").read_bytes() == before, (
+        "the destination was damaged, which is the half that always worked")
+    assert _debris(_in_tmp, _in_tmp / "providers.json") == [], (
+        "the temp file survived a failed rename, holding every stored key")
+
+
+def test_two_writers_do_not_share_one_temp_name(_in_tmp, monkeypatch):
+    """The other half of the unique name, and `config_edit`'s own reason
+    for it: "two writers raced on the one name".
+
+    Driven by capturing what the helper opens rather than by racing two
+    processes -- the property is that two calls never choose the same
+    path, which a race can only sample.
+    """
+    import json_store
+
+    seen = []
+    real_open = json_store.os.open
+
+    def _record(path, *args, **kwargs):
+        seen.append(path)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(json_store.os, "open", _record)
+
+    credentials.save_credentials("openai", "sk-the-first-key")
+    credentials.save_credentials("anthropic", "sk-ant-the-second-key")
+
+    assert len(seen) == 2, f"expected two writes, saw {seen}"
+    assert seen[0] != seen[1], (
+        f"both writes opened {seen[0]}; a fixed temp name is what left a "
+        f"leftover in the install tree forever when one of them failed")
+    for path in seen:
+        assert path.endswith(".tmp"), path
+        assert "providers.json" in os.path.basename(path), (
+            f"{path} does not name the store it belongs to, so a human "
+            f"finding it cannot tell what it is")
+
+
+def test_the_sweep_never_deletes_a_file_this_call_did_not_create(
+        _in_tmp, monkeypatch):
+    """`O_EXCL` on a unique name is what makes the sweep safe, and this is
+    the claim `json_store.py` makes in a comment.
+
+    The sweep unlinks the temp file on any failure. If the open could ever
+    SUCCEED on a path another writer created, that unlink would delete
+    someone else's work-in-progress. Forced here by pinning the random
+    suffix, which is the only way to collide on purpose -- `os.urandom(4)`
+    is otherwise 4 billion names.
+    """
+    import json_store
+
+    monkeypatch.setattr(json_store.os, "urandom",
+                        lambda n: bytes([0xa1, 0xb2, 0xc3, 0xd4]))
+    squatter = _in_tmp / "providers.json.a1b2c3d4.tmp"
+    squatter.write_text("another writer got here first", encoding="utf-8")
+
+    with pytest.raises(FileExistsError):
+        credentials.save_credentials("openai", "sk-the-first-key")
+
+    assert squatter.exists(), "the sweep deleted another writer's temp file"
+    assert squatter.read_text(encoding="utf-8") == (
+        "another writer got here first")

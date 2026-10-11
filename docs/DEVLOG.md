@@ -21143,3 +21143,295 @@ the two failures were re-sourced to inputs that reach them cheaply
 about that specific call. 15.4s now.
 
 Counts 6411 -> 6531.
+
+## Batch 144 -- one string, two vocabularies, five sinks (2026-10-11)
+
+The secrets, credentials and logging surface, all seven FIX-NOW findings:
+S07-01, S07-02, S07-03, S07-04, S07-05, S07-06 and S07-09. One owner
+ruling, and two riders that were not in the report.
+
+**S07-01, and three of the seven are one defect.** `_redact_credential_shapes`
+is the only thing in this project that matches a credential with NO vendor
+prefix -- a URL's userinfo, a `<password>` element, a quoted `password =`
+assignment -- and it had exactly one caller, `redact_output_text`. Every
+sink the harness's own diagnostics go to called `redact_secrets` instead,
+which is the seven vendor-token patterns and nothing else. So one string
+took two different vocabularies depending on which sink it reached. Driven
+through the real `configure_logging` with nothing monkeypatched, on issue
+\#167's own seven cases:
+
+    case                   app.log      transcript   tool output
+    anthropic key          redacted     redacted     redacted
+    openai key             redacted     redacted     redacted
+    github pat             redacted     redacted     redacted
+    aws access key id      redacted     redacted     redacted
+    gradle password        LEAKED       LEAKED       redacted
+    maven server password  LEAKED       LEAKED       redacted
+    gem source url         LEAKED       LEAKED       redacted
+
+The four vendor rows are the control: they prove the formatter was attached
+and firing, so the three LEAKED rows were the vocabulary and not a probe
+that had stopped working. It needed no contrivance to reach --
+`fetch_url` logs the URL it failed on BY DESIGN, in a comment that names
+this redaction as the sink-side guard for a URL carrying userinfo -- and
+`core/loop.py` puts the same description in `MessageLog.error`, which
+persists in `app.db`, where `docs/PRIVACY.md` says the deletion granularity
+is the whole database.
+
+It has a date. `0617eb1` (#132) wired the formatter to `redact_secrets`, at
+which point `redact_secrets` WAS the entire output vocabulary and four
+separate claims in the tree were true. `4f25d1d` (#167) added the shapes to
+`redact_output_text` alone, five days later. Defect shape 9, and the gap
+between two closed issues neither of which is wrong about what it fixed.
+
+`redact_diagnostic_text` is the composition now, with five callers, and
+`redact_output_text` is that same composition under its switch rather than
+its own copy of the three passes. Two of the four false claims become TRUE
+and needed no edit, which is the test of whether the fix is the right
+shape: `fetch_url`'s comment, and `tui/app.py`'s "the two places the
+harness's own diagnostics go cannot disagree about a secret".
+
+**S07-05 was the second half of the same line, and it is why the order is
+now decided in one place.** `logging_setup` composed
+`redact_live_values(redact_secrets(...))` and `redact_output_text` composed
+them the other way round. `redact_live_values` matches a stored value by
+exact substring, so a pattern pass that has already rewritten part of one
+leaves the remainder standing. Measured with a stored value that properly
+contains a `ghp_` token: `PREFIX-[REDACTED]-SUFFIX` from the log's order,
+`[REDACTED]` from the other. One of the two orders was argued in a comment
+and the other was not, and nothing could tell you which was right -- the
+same rule as `fetch_url` redacting before it cuts, with a substitution as
+the destroyer instead of a slice.
+
+**THE FIRST RIDER: `tui/app.py` was a vocabulary worse than the log, and the
+report says so in an answer rather than a finding.** Both its sinks applied
+the vendor patterns with NO value redaction at all, so the harness's OWN
+stored value -- the one pass SS61 calls unconditional -- was drawn on screen
+verbatim while `app.log` redacted it. Two new pilot tests, because this
+file's premise is that "a handler called by hand proves the function works,
+not that the app wires it up".
+
+**THE SECOND RIDER: S07-09's vacuity shape has a second instance the finding
+does not name.** `test_tui.py`'s `test_a_routed_line_is_redacted_like_the_log_file`
+uses `"sk-ant-api03-" + "b" * 32`, so it too passed against a handler
+applying the vendor patterns alone -- and its docstring says "Both routes a
+secret can take are covered", which was true about the two ROUTES and said
+nothing about the vocabulary either route used. Named rather than rewritten,
+with the discriminating case added beside it.
+
+**S07-09 is why the other six survived forty-six days with three tests
+pointed at the sink.** All three used one module-level value, an
+`sk-ant-` key matched by `_SECRET_PATTERNS[1]` -- so no assertion in the
+file could tell the two vocabularies apart. The first of the protocol's four
+vacuity shapes: input that cannot discriminate. The case list is in
+`tests/conftest.py` now, read by `test_logging_setup.py` and
+`test_policy_enforcement.py`, with the relation checked in BOTH directions:
+a pattern with no case is a pattern nothing drives, and a case no pattern
+matches is a case whose every assertion is vacuous. That second direction
+earned itself immediately -- it caught a Google API key case written 33
+characters long against a pattern that wants 35.
+
+And `test_the_three_shapes_are_what_discriminates` asserts that
+`redact_secrets` ALONE still leaves the three shape rows standing, so the
+list cannot quietly lose its teeth.
+
+**What stops a sixth sink** is a source-level relation in
+`test_docs_consistency.py`: no production module outside
+`safety/policy_enforcement.py` may call `redact_secrets` directly. Fixing
+five sinks was a one-line change each; the five existing as five was the
+defect. `redact_secrets` stays public -- `docs/ARCHITECTURE.md` lists it and
+both compositions are built from it -- the rule is only that a caller
+outside the module is by definition a sink choosing a vocabulary.
+
+**S07-02: the sweep covered the write and not the rename.** `os.replace` was
+the statement AFTER the handler that sweeps, so a failed rename, or a
+process death between the two statements, left `<path>.tmp` holding exactly
+what was about to be written. For `providers.json` that is EVERY stored
+provider key in cleartext, because `save_credentials` reads the whole file,
+mutates one entry and writes all of it back. Driven on Windows with a
+happy-path control: `PermissionError WinError 5`, destination correctly
+intact, 324 bytes of debris holding both keys. The trigger needs no unusual
+state -- a plain `open()` there takes no `FILE_SHARE_DELETE`, so any other
+process merely READING the destination makes the rename fail, which an
+editor, a sync client, a backup, a scanner or a second instance in the same
+directory all do. The POSIX arm is clean and the report says so.
+
+`config_edit.write` had already measured both halves of this for the one
+file in this project that is not JSON, and answered both -- a unique name
+from `tempfile.mkstemp` and an `except BaseException` that encloses the
+replace -- in the file one directory over from the shared helper that was
+extracted so these mechanics would have exactly ONE copy. One question, two
+answers, and nothing that could tell you they disagreed.
+
+**Not `mkstemp`, and the reason is measured.** `mkstemp` creates at 0600
+unconditionally, and `os.replace` carries the source's mode to the
+destination -- verified: a 0644 destination comes out 0600 after a replace
+from a 0600 temp. So adopting it would have silently tightened the four
+callers that pass no mode, and made the docstring's "`mode` sets permissions
+on the TEMP FILE" mean something it does not say. The name is
+`<path>.<hex>.tmp` with `os.urandom(4)`, and the two branches collapsed into
+one `os.open` with `0o666 if mode is None else mode`: that is the mode
+`open(path, "w")` itself passes, so the umask subtracts from it exactly as
+before. Measured on WSL at `umask 022`, both forms give 0o644 -- while
+`os.open` with NO mode argument gives 0o755, which is why the argument is
+explicit rather than omitted.
+
+`O_EXCL` on a unique name is what makes the sweep safe: the file it unlinks
+is always one this call created, never another writer's. Pinned by forcing a
+collision through `os.urandom`, which is the only way to collide on purpose.
+
+**The belt and braces landed here although the report routes it to S18**,
+which closed at batch 142 -- because batch 140 made `package.json`'s
+`neverDistribute` the one list all three exclusion channels read, so this is
+ONE entry and the two patterns its own gates then demand, rather than three
+hand-edited files that could disagree. `*.tmp` rather than
+`providers.json.*.tmp`: the same breadth `*.log` and `*.db` already have, it
+covers all nine of the helper's call sites rather than the two holding
+credentials, and no tracked file in the tree ends in `.tmp`. Checked, and
+the trap in this particular widening is checked too --
+`providers.json.example` and `.env.example` stay tracked.
+
+One observation worth recording rather than fixing: an entry DELETED from
+`neverDistribute` is caught by nothing. The gates check that a claimed
+channel covers the entry's samples, and `>= 10` is the only check on the
+list's size, so removing one of thirteen is silent. Batch 140's design
+question, not this batch's finding.
+
+**S07-03: `logs/app.log` was created with no mode**, so it took the process
+umask -- measured 0o644 on WSL at `umask 022`, against `providers.json` and
+`secrets.json` at 0o600, both of which this project argues for at length.
+The project has already filed this exact shape at this exact severity for
+the file one directory over: issue #19, "providers.json is written with no
+explicit mode, so plaintext API keys land 0644", whose argument survives
+verbatim in `credentials.py`.
+
+`_open` is where the mode goes, because ROTATION creates files too:
+`doRollover` renames `app.log` to `app.log.1` and then calls `_open` for a
+fresh one, so a mode applied once at construction would be right for one
+file in four. A rename carries the mode, so the three backups inherit 0600
+from the file they used to be, and the test asserts both halves.
+
+**An existing loose file is deliberately left alone**, which is the one place
+this differs from `credentials.py`'s sibling --
+`test_rewriting_an_existing_file_repairs_a_loose_mode` pins that the
+provider store repairs a 0644 file on its next write. The log's path is not
+the harness's to decide: `configure_logging` records that "the user can
+still point AGENT_LOG_FILE anywhere they want", so a file there may be
+group-readable on purpose. It ages out through rotation instead. Pinned as a
+decision, with a control (A11) proving the test notices if someone adds the
+chmod.
+
+**S07-04, and the owner ruled it.** `MIN_SECRET_LENGTH = 4` admitted values
+that defeat the reason the constant's own docstring gives: measured,
+`'    '`, `'\t\t\t\t'`, `'true'`, `'null'`, `'name'` and `'aaaa'` are all
+accepted, and a stored `'    '` turns every four-space indent in every file
+the model reads into `[REDACTED]` while a stored `'true'` does it to every
+JSON boolean -- unconditionally, with no switch by SS61's design, and
+invisibly, because SS59 masks the input.
+
+Also measured, and it corrects how the fork was framed: nothing
+re-validates a stored value on unlock, so raising the floor refuses new
+puts only and strands nothing already in the file. The cost of raising it is
+not stored data; it is a legitimate 4-7 character secret, and a short sudo
+password is exactly the kind of value this store holds.
+
+Ruled: refuse what is empty or nothing but whitespace, keep the floor at 4,
+and correct the docstring rather than defend it. No length closes the class
+-- at 4 a stored `'pass'` destroys every Python `pass` statement, at 8
+`'password'` destroys every build file -- because length is a proxy for how
+often a value occurs in ordinary text and a poor one: a four-character
+RANDOM password occurs in nothing. `test_a_four_character_word_is_still_accepted`
+pins the ruling so it is not quietly "fixed" later, and A17 is the control
+that proves it notices.
+
+Refused rather than stripped-and-stored: a password with a trailing space is
+still that password, and silently altering a value the user cannot see would
+be worse than refusing it. `test_a_value_may_still_contain_other_whitespace`
+is the negative control and it already existed.
+
+**S07-06: `recovery_hint` blamed a cause that had been fixed.** It said the
+usual cause was "a write that was interrupted before batch 108 made them
+atomic", which tells someone already confused that their build is old --
+while the live cause sat one function away. `create` deliberately does not
+go through `_write`, for the reason its own docstring gives, so it is a
+single non-atomic write and a crash inside it leaves exactly this state:
+`exists()` true, `unlock` raising `StoreUnreadable`, `create` refusing to
+overwrite. It names both now. No code change: `O_EXCL` should not become
+`os.replace`, which overwrites without complaint and is the TOCTOU `create`
+closed.
+
+**Two drifted claims in files this batch was already editing.**
+`logging_setup`'s import comment said `safety/policy_enforcement.py` is "a
+leaf (stdlib imports only, nothing from this project)", which stopped being
+true when value redaction landed -- it imports `security.posture` and
+`security.secrets`, and the sentence is now about the direction rather than
+a leaf, which is what actually makes the edge acyclic. And
+`write_json_atomic`'s docstring said "THREE CALLERS PASS ONE SINCE BATCH
+108" when four do; the fourth is `mcp_client/config.py`, for the
+`Authorization` header batch 140 named in `.venastine/mcp.json`. Stated
+without the digit now, which is the answer batch 143 reached for the same
+shape: the argument never needed the number.
+
+**The carried rider from batch 143.** TECHNICAL_DEBT 48 said "MCP is the one
+producer that is not [bounded at the producer]", which S06-02 made false and
+only the DEVLOG recorded. Corrected in the entry itself, because that entry
+is what a later reader consults to decide whether the bound's SHAPE has a
+precedent -- and "MCP is the only one" was the argument for treating it as
+unprecedented. The precedent exists now and it chose REFUSE over truncate,
+at a config value rather than a new constant.
+
+**Controls 20/20 with the equivalence control green**, every file restored
+from bytes held in memory and verified by sha256. Two of the twenty are
+POSIX-only -- the mode tests skip on Windows, where `os.stat`'s bits carry
+only the read-only flag -- so the harness reports them as skipped here and
+scores them under WSL rather than counting a platform skip as a survivor.
+
+Two existing assertions had to move, and one of them would have gone
+silently vacuous. `test_credentials.py` asserted `not (dir /
+"providers.json.tmp").exists()` in two places; a unique temp name leaves a
+list-membership test for a name that no longer occurs passing whatever is on
+disk. They ask the directory now, which is also what they always meant. The
+same thing happened to `_handler_types()`: the new handler subclass broke
+`"RotatingFileHandler" in types` loudly in one test and would have gutted
+`"RotatingFileHandler" not in handler_types` -- the assertion that the
+OSError fallback attaches no file handler at all -- quietly in another. Both
+are `isinstance` now, which is also the question they meant to ask, and the
+stream half excludes `FileHandler` because `RotatingFileHandler` is itself a
+`StreamHandler` subclass, which is why this file compared names in the first
+place.
+
+The formatter costs more per record and it is measured: 6.7 us -> 9.4 us on
+Linux, +40%, for three more regex passes over a line that already takes
+seven. Invisible at INFO, under a millisecond per thousand records at DEBUG.
+
+**The secret scan cost a cycle for a reason worth writing down.** The CI form
+is `gitleaks detect --source . --no-git -c .github/gitleaks.toml`, and it
+went from five findings to ten. Four were my own fabricated `ghp_` fixtures
+written as contiguous literals. The other FIVE were already-blessed
+fingerprints that moved: `.gitleaksignore` pins them by LINE NUMBER in
+`tests/test_policy_enforcement.py`, and six names added to that file's import
+block pushed every one of them down by six. The file's own comment says
+re-firing is deliberate -- "so a real secret pasted beside a fake one cannot
+hide behind this file" -- so the tripwire did its job; what it caught was a
+change that never needed to touch anything above those fixtures. Both halves
+were avoided rather than blessed: the new imports moved INSIDE the tests that
+use them, which is an idiom this suite already has, and the fixtures are built
+by concatenation (`"ghp_" + "a1b2c3d4" * 4 + "a1b2"`) so no line holds a
+40-character token. Not evasion -- there is no secret, and that file already
+records that "the count of fake literals in the tree is not the count of
+findings" because whether one fires depends on the rule's shape. The scan is
+back to its five pre-existing blessings and `.gitleaksignore` is untouched.
+
+Also a near-miss worth the line: the first `bandit -b` run of the batch
+reported 9,165 new findings, which is not a regression but a missing `-s
+B101,B105,B106`. The baseline is produced with those three skipped, so a
+comparison without them reports every `assert` in the suite as new. The
+figure is implausible enough to be obvious; a subtler mismatch would not be,
+and the CI invocation is the one to copy rather than reconstruct.
+
+Full suite green. ruff clean. Both bandit checks clean, the second against a
+path-rewritten throwaway baseline per TECHNICAL_DEBT 22. pip-audit clean on
+both dependency files. Affected tests re-run with AGENT_WORKSPACE unset, and
+under WSL, where the three mode tests Windows skips actually execute.
+
+Counts 6531 -> 6581.

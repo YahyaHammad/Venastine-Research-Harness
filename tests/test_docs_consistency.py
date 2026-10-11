@@ -2690,3 +2690,45 @@ def test_architecture_states_the_real_truth_table_ceiling():
         "row measured is past `max_read_chars` -- the input bound and the "
         "output bound no longer agree about where the edge is"
         % (logic._MAX_TRUTH_TABLE_SYMBOLS, logic._MAX_TRUTH_TABLE_SYMBOLS))
+
+
+# ---------------------------------------------------------------------------
+# ---- S07-01: no sink composes its own redaction ---------------------------
+# ---------------------------------------------------------------------------
+
+def test_no_production_module_composes_its_own_secret_redaction():
+    """The relation, and the only form of this that cannot go vacuous.
+
+    S07-01 was not one wrong line. It was five sinks each holding part of
+    a rule: `logging_setup`'s formatter and `tui/app.py`'s log handler
+    composed `redact_secrets` with `redact_live_values` -- in opposite
+    orders -- while `tui/app.py`'s tool-error line, `core/loop.py`'s
+    `mark_turn_failed` and the orchestrator's pipeline event called
+    `redact_secrets` alone. Fixing the five was a one-line change each;
+    what stops a SIXTH is this.
+
+    `redact_secrets` is public and stays public -- `docs/ARCHITECTURE.md`
+    lists it, and it is the vendor-token pass that both compositions are
+    built from. The rule is only that nothing outside its own module
+    calls it directly, because every caller outside is by definition a
+    sink choosing a vocabulary.
+    """
+    offenders = {}
+    for path in _production_python():
+        rel = os.path.relpath(path, ROOT).replace("\\", "/")
+        if rel == "safety/policy_enforcement.py":
+            continue
+        with open(path, encoding="utf-8") as f:
+            for number, line in enumerate(f, 1):
+                if line.lstrip().startswith("#"):
+                    continue
+                if "redact_secrets(" in line:
+                    offenders.setdefault(rel, []).append(number)
+
+    assert not offenders, (
+        f"these call `redact_secrets` directly: {offenders}. That is the "
+        f"vendor-token pass alone -- seven patterns, no credential SHAPES "
+        f"and no value redaction -- so the sink would take a smaller "
+        f"vocabulary than tool output, which is S07-01 exactly. Call "
+        f"`redact_diagnostic_text` instead; it is the composition all five "
+        f"existing sinks share, and it decides the order too (S07-05).")

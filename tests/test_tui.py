@@ -1397,7 +1397,17 @@ class TestLoggingMustNotScribbleOnTheScreen:
         and this handler posted the raw message beside it -- so a warning
         interpolating a URL or an exception reached the screen with its key
         intact. Both routes a secret can take are covered: the message's own
-        arguments, and the exception text the handler now appends."""
+        arguments, and the exception text the handler now appends.
+
+        THE VENDOR-TOKEN HALF, and batch 144 is why that is worth saying.
+        `sk-ant-...` is matched by `redact_secrets` alone, so this test
+        passed against a handler applying the seven vendor patterns and
+        nothing else -- which is exactly what it was applying while three
+        credential SHAPES, and the harness's own stored value, reached the
+        screen. "Both routes a secret can take" was true about the two
+        ROUTES and said nothing about the vocabulary either route used. The
+        test below is the discriminating case.
+        """
         import logging
 
         key = "sk-ant-api03-" + "b" * 32
@@ -1419,6 +1429,72 @@ class TestLoggingMustNotScribbleOnTheScreen:
 
         assert not any(key in text for _role, text in written)
 
+
+    @pytest.mark.asyncio
+    async def test_a_credential_with_no_vendor_prefix_is_redacted_too(self):
+        """The case the test above could not see (batch 144).
+
+        `_redact_credential_shapes` is the only thing in this project that
+        matches a credential with no vendor prefix, and it had exactly one
+        caller -- `redact_output_text`, the tool-output path. This handler
+        called `redact_secrets`, so the same string was redacted on its way
+        to the model and drawn on screen in cleartext on its way to the
+        user. Measured through the real `configure_logging`: four of issue
+        #167's seven cases redacted here, three not.
+
+        `fetch_url` logs the URL it failed on BY DESIGN -- its own comment
+        names this redaction as the sink-side guard for a URL carrying
+        userinfo -- so this needs no contrivance to reach.
+        """
+        import logging
+
+        written = []
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app._transcript.write_role = \
+                lambda role, text: written.append((role, text))
+            logging.getLogger("tools.builtin.fetch_url").warning(
+                "fetch_url failed for %s",
+                "https://bob:s3cr3t-in-a-url@gems.example/v1")
+            assert await settle(
+                pilot, lambda: any("gems.example" in t for _r, t in written))
+
+        assert not any("s3cr3t-in-a-url" in text for _role, text in written), (
+            f"the password in the URL's userinfo reached the screen: "
+            f"{written}")
+        assert any("[REDACTED]" in text for _role, text in written)
+
+    @pytest.mark.asyncio
+    async def test_a_live_stored_value_is_redacted_on_screen(self, monkeypatch):
+        """The SS61 half, which this sink had NO value redaction for at all.
+
+        `redact_live_values` is the one pass the decision record calls
+        unconditional, and `tui/app.py` applied it nowhere: the harness's
+        own stored value -- a value this process put into a subprocess and
+        got back out -- was drawn on screen verbatim while `app.log`
+        redacted it. One vocabulary worse than the log, which is how the
+        report put it.
+        """
+        import logging
+
+        from security import secrets as harness_secrets
+
+        monkeypatch.setattr(
+            harness_secrets, "redact_live_values",
+            lambda text: text.replace("hunter2-value", "[REDACTED]"))
+
+        written = []
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app._transcript.write_role = \
+                lambda role, text: written.append((role, text))
+            logging.getLogger("security.sandbox").warning(
+                "sudo on %s failed with %s", "build-host", "hunter2-value")
+            assert await settle(
+                pilot, lambda: any("build-host" in t for _r, t in written))
+
+        assert not any("hunter2-value" in text for _role, text in written), (
+            f"the harness's own stored value reached the screen: {written}")
 
     @pytest.mark.asyncio
     async def test_the_handler_is_detached_when_the_app_unmounts(self):

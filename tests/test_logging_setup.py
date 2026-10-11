@@ -13,10 +13,15 @@ unreadable at once.
 """
 
 import logging
+import os
+from logging.handlers import RotatingFileHandler
 
 import pytest
 
 from logging_setup import configure_logging
+from safety.policy_enforcement import redact_output_text, redact_secrets
+from security import secrets as harness_secrets
+from tests.conftest import REDACTION_CASES, SHAPE_CASE_LABELS
 
 
 @pytest.fixture
@@ -37,6 +42,40 @@ def _handler_types() -> list[str]:
     return [type(h).__name__ for h in logging.getLogger().handlers]
 
 
+def _file_handlers() -> list:
+    """Asked by TYPE rather than by name, and batch 144 is why.
+
+    `configure_logging` attaches `_OwnerOnlyRotatingFileHandler` now
+    (S07-03), and the two assertions that used to read
+    `"RotatingFileHandler" in _handler_types()` did not survive that in
+    the same way. One FAILED, loudly, which is fine. The other was
+    `"RotatingFileHandler" not in handler_types` -- the assertion that
+    the OSError fallback attached no file handler at all -- and a list
+    membership test for a name the subclass does not have passes whether
+    the handler is there or not. It would have gone quietly vacuous.
+
+    So both are now about the type. `isinstance` is also the honest
+    question: what those tests mean is "is a rotating file handler
+    attached", not "is this class called that".
+    """
+    return [h for h in logging.getLogger().handlers
+            if isinstance(h, RotatingFileHandler)]
+
+
+def _stream_handlers() -> list:
+    """The console half, and NOT the file half.
+
+    `RotatingFileHandler` is itself a `StreamHandler` subclass, which is
+    why this file compared type names in the first place -- a bare
+    `isinstance(h, StreamHandler)` is true for the log file too. Excluding
+    `FileHandler` is what makes the question "is anything writing to the
+    console".
+    """
+    return [h for h in logging.getLogger().handlers
+            if isinstance(h, logging.StreamHandler)
+            and not isinstance(h, logging.FileHandler)]
+
+
 def test_stderr_false_attaches_no_stream_handler(_clean_root, tmp_path):
     """The TUI's requirement. The file handler must still be there --
     dropping stderr is about WHERE messages go, not about keeping fewer
@@ -44,9 +83,9 @@ def test_stderr_false_attaches_no_stream_handler(_clean_root, tmp_path):
     configure_logging(log_file=str(tmp_path / "app.log"), stderr=False)
 
     types = _handler_types()
-    assert "StreamHandler" not in types, (
+    assert not _stream_handlers(), (
         f"stderr=False still attached a stream handler: {types}")
-    assert "RotatingFileHandler" in types, (
+    assert _file_handlers(), (
         f"the file handler is what keeps the messages: {types}")
 
 
@@ -192,3 +231,226 @@ def test_a_raising_tool_dispatched_for_real_leaves_no_secret_in_the_log(
     assert SECRET not in str(result)           # the half that already worked
     assert "Traceback" in _read_log(path)      # the traceback did land...
     assert SECRET not in _read_log(path)       # ...and this is the half that did not
+
+
+# ---------------------------------------------------------------------------
+# ---- S07-01 / S07-09: one vocabulary, every sink ---------------------------
+# ---------------------------------------------------------------------------
+
+
+def _log_once(path, text: str) -> str:
+    """One line through the real formatter, read back off disk."""
+    configure_logging(log_file=str(path), stderr=False)
+    logging.getLogger("t").error("%s", text)
+    return _read_log(path)
+
+
+class TestEverySinkHasTheSameVocabulary:
+    """The parity this file could not previously express.
+
+    `redact_secrets` is the seven vendor patterns. `_redact_credential_shapes`
+    is the only thing in the project that matches a credential with no vendor
+    prefix, and it had ONE caller -- so the harness's own diagnostics took a
+    strictly smaller vocabulary than tool output, for forty-six days, with
+    three tests in this file pointed at the sink and none of them able to
+    notice (S07-01, S07-09).
+
+    The assertion is parity rather than "the log redacts a password",
+    because parity is the thing that actually failed.
+    """
+
+    @pytest.mark.parametrize("label,text,needle",
+                             REDACTION_CASES,
+                             ids=[c[0] for c in REDACTION_CASES])
+    def test_every_case_is_redacted_in_the_log_file(
+            self, _clean_root, tmp_path, label, text, needle):
+        """Through the real `configure_logging`, asserted against the FILE.
+
+        Not against a caplog record: caplog attaches its own handler with
+        its own formatter, so it would report the record this formatter
+        never touched -- the trap `:123-126` already names.
+        """
+        contents = _log_once(tmp_path / "app.log", text)
+
+        assert needle not in contents, (
+            f"{label}: the credential reached logs/app.log")
+        assert "[REDACTED]" in contents
+
+    @pytest.mark.parametrize("label,text,needle",
+                             REDACTION_CASES,
+                             ids=[c[0] for c in REDACTION_CASES])
+    def test_every_case_is_redacted_for_the_model_too(
+            self, label, text, needle):
+        """The other side of the parity, from the same list.
+
+        This is what makes the class a parity test rather than two
+        unrelated coverage tests: one list, and both sinks asked the same
+        question about it. If a pattern is added for tool output alone,
+        the test above goes red; if one is added for the log alone, this
+        one does.
+        """
+        assert needle not in redact_output_text(text), (
+            f"{label}: the credential reached the model")
+
+    @pytest.mark.parametrize(
+        "label,text,needle",
+        [c for c in REDACTION_CASES if c[0] in SHAPE_CASE_LABELS],
+        ids=[c[0] for c in REDACTION_CASES if c[0] in SHAPE_CASE_LABELS])
+    def test_the_three_shapes_are_what_discriminates(
+            self, label, text, needle):
+        """THE GUARD ON THE CASE LIST, and the reason this class is not
+        just more of what was already here.
+
+        `redact_secrets` ALONE must leave these standing. That is what
+        makes the list above able to tell the two vocabularies apart --
+        and what the old single `SECRET` value could not do, being an
+        `sk-ant-` key that `redact_secrets` matches by itself. If someone
+        later adds a vendor pattern that happens to cover these strings,
+        or drops the shape rows from the list, this goes red and says so
+        rather than leaving the parity tests passing vacuously.
+        """
+        assert needle in redact_secrets(text), (
+            f"{label} is no longer a discriminating case: `redact_secrets` "
+            f"alone now redacts it, so the parity tests above would pass "
+            f"against a sink that applies the vendor patterns only -- which "
+            f"is precisely the defect they exist to catch")
+
+    def test_a_live_stored_value_is_redacted_in_the_log_file(
+            self, _clean_root, tmp_path, monkeypatch):
+        """The SS61 half, which this file had no test for at all.
+
+        `tests/test_secrets.py` covers it from the other side; the
+        formatter is here, so the pin belongs here too. A stub store is
+        enough -- the subject is the composition, not the envelope.
+        """
+        monkeypatch.setattr(harness_secrets, "redact_live_values",
+                            lambda text: text.replace("hunter2-value",
+                                                      "[REDACTED]"))
+
+        contents = _log_once(tmp_path / "app.log",
+                             "ssh to host failed with hunter2-value")
+
+        assert "hunter2-value" not in contents
+        assert "[REDACTED]" in contents
+
+    def test_a_stored_value_containing_a_vendor_token_survives_whole(
+            self, _clean_root, tmp_path, monkeypatch):
+        """S07-05, at the sink that had the wrong order.
+
+        `redact_live_values` matches by exact substring, so running the
+        pattern pass FIRST rewrites the middle of the stored value and
+        leaves the needle no longer present -- the ends then survive.
+        Measured before the fix: `PREFIX-[REDACTED]-SUFFIX`.
+        """
+        # Built rather than written out, for the reason `conftest`'s own
+        # github row gives: a contiguous token is a line-pinned
+        # `.gitleaksignore` entry nobody needs.
+        stored = "PREFIX-ghp_" + "a1b2c3d4" * 4 + "a1b2" + "-SUFFIX"
+
+        def _values(text):
+            return text.replace(stored, "[REDACTED]")
+
+        monkeypatch.setattr(harness_secrets, "redact_live_values", _values)
+
+        contents = _log_once(tmp_path / "app.log",
+                             f"sent header {stored} to the runner")
+
+        assert "PREFIX" not in contents, (
+            "the head of the stored value survived, which means the pattern "
+            "pass ran before the value pass and destroyed the needle")
+        assert "SUFFIX" not in contents
+
+
+# ---------------------------------------------------------------------------
+# ---- S07-03: the log file is the owner's ----------------------------------
+# ---------------------------------------------------------------------------
+
+_POSIX_ONLY = pytest.mark.skipif(
+    os.name != "posix",
+    reason="POSIX mode bits do not apply on this platform (os.open's mode "
+           "only controls the read-only flag on Windows, which is why the "
+           "four mode tests in test_credentials.py skip here too)")
+
+
+def _mode(path) -> int:
+    return os.stat(path).st_mode & 0o777
+
+
+class TestTheLogFileIsOwnerOnly:
+    """`RotatingFileHandler` takes no mode, so `logs/app.log` was created
+    under the process umask -- measured 0o644 at `umask 022`, against
+    `providers.json` and `secrets.json` at 0o600 (S07-03).
+
+    The project filed this exact shape for the file one directory over as
+    issue #19, `[S2][security] providers.json is written with no explicit
+    mode, so plaintext API keys land 0644`, and `credentials.py` still
+    carries the argument verbatim.
+    """
+
+    @_POSIX_ONLY
+    def test_a_new_log_is_created_owner_only(self, _clean_root, tmp_path):
+        old = os.umask(0o022)
+        try:
+            path = tmp_path / "logs" / "app.log"
+            configure_logging(log_file=str(path), stderr=False)
+            logging.getLogger("t").error("one line")
+            for handler in logging.getLogger().handlers:
+                handler.flush()
+        finally:
+            os.umask(old)
+
+        assert _mode(path) == 0o600, (
+            f"logs/app.log is 0o{_mode(path):o}; what it holds is "
+            f"provider/HTTP traces and, until S07-01, a third party's "
+            f"cleartext password")
+
+    @_POSIX_ONLY
+    def test_a_rotated_backup_is_owner_only_too(self, _clean_root, tmp_path):
+        """ROTATION CREATES FILES, which is why the mode is in `_open` and
+        not applied once at construction. `doRollover` renames `app.log`
+        to `app.log.1` -- a rename carries the mode -- and then calls
+        `_open` for a fresh one, so both halves have to be right.
+        """
+        old = os.umask(0o022)
+        try:
+            path = tmp_path / "app.log"
+            configure_logging(log_file=str(path), stderr=False,
+                              max_bytes=512, backup_count=2)
+            for i in range(60):
+                logging.getLogger("t").error("a line long enough to roll %d", i)
+            for handler in logging.getLogger().handlers:
+                handler.flush()
+        finally:
+            os.umask(old)
+
+        rotated = tmp_path / "app.log.1"
+        assert rotated.exists(), "nothing rotated, so this proves nothing"
+        assert _mode(rotated) == 0o600, (
+            f"the rotated backup is 0o{_mode(rotated):o}")
+        assert _mode(path) == 0o600, (
+            f"the file opened after the roll is 0o{_mode(path):o}")
+
+    @_POSIX_ONLY
+    def test_an_existing_log_keeps_the_mode_it_had(self, _clean_root,
+                                                   tmp_path):
+        """THE DELIBERATE DIFFERENCE from `credentials.py`'s sibling, which
+        REPAIRS a loose mode on its next write
+        (`test_rewriting_an_existing_file_repairs_a_loose_mode`).
+
+        The log's path is not the harness's to decide: `configure_logging`
+        records that "the user can still point AGENT_LOG_FILE anywhere
+        they want", so a file there may be group-readable on purpose, and
+        tightening it silently would be this module overruling them. The
+        old file ages out through rotation instead.
+
+        This is a pinned decision, not a gap. Changing it means changing
+        the docstring in `_OwnerOnlyRotatingFileHandler` that argues it.
+        """
+        path = tmp_path / "app.log"
+        path.write_text("an earlier run\n", encoding="utf-8")
+        os.chmod(path, 0o644)
+
+        configure_logging(log_file=str(path), stderr=False)
+        logging.getLogger("t").error("a later run")
+
+        assert _mode(path) == 0o644

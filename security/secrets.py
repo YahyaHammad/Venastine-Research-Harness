@@ -134,10 +134,28 @@ MIN_SCRYPT_N = 1 << 14
 #: invert the layering `protected_paths` sets out.
 REDACTED = "[REDACTED]"
 
-#: The floor `put` enforces. Not a password-strength opinion -- it is what
-#: makes SS61's value redaction survivable: a one-character secret would
-#: substitute over every occurrence of that character in every tool result,
-#: and the output would be destroyed rather than merely redacted.
+#: The floor `put` enforces. Not a password-strength opinion -- it is about
+#: SS61's value redaction, which substitutes a stored value over every
+#: occurrence of it in every tool result and every log line: a
+#: one-character secret would destroy the output rather than merely redact
+#: it.
+#:
+#: WHAT IT DOES NOT DO, and this sentence used to claim otherwise (batch
+#: 144). It does not make that redaction survivable in general. At 4
+#: the floor admits `'true'`, `'null'`, `'name'` and `'aaaa'`, and a stored
+#: `'true'` turns every JSON boolean in every tool result into `[REDACTED]`
+#: -- measured. Raising it closes no class either: at 4 a stored `'pass'`
+#: destroys every Python `pass` statement and at 8 `'password'` destroys
+#: every build file, because length is a proxy for how often a value occurs
+#: in ordinary text and a poor one. A four-character RANDOM password occurs
+#: in nothing.
+#:
+#: So the floor stays 4 (the owner's ruling, batch 144) and `put` closes
+#: the cases that have no legitimate reading at all -- a value that is
+#: empty or nothing but whitespace -- rather than a bigger number being
+#: chosen to look like a guarantee. Those are the ones with the worst
+#: blast radius anyway: four spaces replaces every four-space indent in
+#: every file the model is shown.
 MIN_SECRET_LENGTH = 4
 
 
@@ -306,14 +324,31 @@ def recovery_hint() -> str:
     what makes saying the path out loud necessary rather than merely
     helpful: without it the next step is undiscoverable, in a directory
     the shell gate and the file tools both refuse to touch.
+
+    IT NAMES TWO CAUSES, and the second one is the live one (batch 144).
+    This said the usual cause was "a write that was interrupted
+    before batch 108 made them atomic" -- which tells someone already
+    confused that their build is old or their file predates a fix, when
+    the write that produced it may have happened on this build thirty
+    seconds ago. `create` is deliberately NOT routed through `_write`, for
+    the reason its own docstring gives, so it is a single non-atomic write
+    and a crash inside it leaves exactly this state: `exists()` true,
+    `unlock` refusing structurally, `create` refusing to overwrite.
+    Driven, and the message quoted above is what the probe got back.
+
+    That is a sentence, not a defect in `create`: the remedy here was
+    always correct, and `O_EXCL` should not become `os.replace`, which
+    overwrites without complaint and is the TOCTOU `create` closed.
     """
     return (
         "This file is not a secrets store this build can open, and that is "
-        "not a wrong passphrase -- the envelope itself is unreadable. The "
-        "usual cause is a write that was interrupted before batch 108 made "
-        "them atomic. Nothing here will delete it for you: if you have no "
-        "backup of it, remove %s by hand and run the command again to start "
-        "a new store." % store_path()
+        "not a wrong passphrase -- the envelope itself is unreadable. Two "
+        "causes are known: a write interrupted before batch 108 made the "
+        "rewrites atomic, or an interrupted first creation, which is a "
+        "single non-atomic write by design and is still one on this build. "
+        "Nothing here will delete it for you: if you have no backup of it, "
+        "remove %s by hand and run the command again to start a new store."
+        % store_path()
     )
 
 
@@ -662,6 +697,28 @@ def put(name: str, value: str) -> None:
     """
     if not name or not name.strip():
         raise SecretsError("a secret needs a name")
+    if not value.strip():
+        # THE SAME CHECK THE NAME GETS ONE LINE UP (batch 144).
+        # Refused rather than stripped-and-stored: a password with a
+        # trailing space is still that password, and silently altering a
+        # value the user cannot see -- SS59 masks this input in both the
+        # TUI modal and the CLI -- would be worse than refusing it.
+        # `test_a_value_may_still_contain_other_whitespace` pins that
+        # INTERNAL whitespace stays permitted, which is why this is
+        # `strip()` and not a character class.
+        #
+        # Refusing at the door is where the constraint can still be
+        # explained to whoever is typing, which is the argument the
+        # newline check below already makes. The symptom otherwise is
+        # undiagnosable from the other end: `[REDACTED]` starts appearing
+        # in unrelated places, in every sink at once, with nothing
+        # connecting it to a stored secret.
+        raise SecretsError(
+            "a secret cannot be empty or only whitespace: a stored value is "
+            "substituted over every occurrence of it in every tool result "
+            "and every log line, unconditionally, so four spaces would "
+            "replace every four-space indent the model is shown with "
+            "[REDACTED]")
     if len(value) < MIN_SECRET_LENGTH:
         raise SecretsError(
             "a secret must be at least %d characters: shorter values are "

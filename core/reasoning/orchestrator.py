@@ -88,7 +88,7 @@ from core.reasoning.pipeline_storage import create_pipeline_run, update_pipeline
 from core.reasoning.scholar import ScholarLookup
 from core.reasoning.source_corpus import SourceCorpus
 from core.reasoning.source_scoring import make_scorer, score_grounding_sources
-from safety.policy_enforcement import redact_secrets
+from safety.policy_enforcement import redact_diagnostic_text
 from tools.registry import registry
 
 logger = logging.getLogger(__name__)
@@ -163,7 +163,7 @@ class _Progress:
 _ACTIVITY_CHARS = 2000
 
 # §26's _param_digest, and its two truncation constants, MOVED to
-# safety/policy_enforcement.py in §27 -- beside redact_secrets, because
+# safety/policy_enforcement.py in §27 -- beside the redactors, because
 # §27's replay renderer is its second caller and the redact-before-truncate
 # ordering must not exist twice. Imported under its own name rather than
 # aliased back to the old private one: an alias would leave two spellings
@@ -298,7 +298,8 @@ def _translate(pass_id: str, stream, corpus=None):
                 # boundary -- "nothing leaves this function unredacted" --
                 # beats depending on a guarantee made two layers away that
                 # a later refactor could quietly drop.
-                text=redact_secrets(str(result.get("error"))) if failed else None)
+                text=(redact_diagnostic_text(str(result.get("error")))
+                      if failed else None))
 
 
 def _check_not_truncated(pass_id: str, response, trace: list[str] | None):

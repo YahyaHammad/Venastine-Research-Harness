@@ -907,3 +907,147 @@ class TestAStoreThisBuildCannotOpen:
         # It must not claim the passphrase was wrong, which is the one
         # thing a reader of this message has already ruled out.
         assert "not a wrong passphrase" in hint
+
+
+# ---------------------------------------------------------------------------
+# ---- S07-04: the floor, as the owner ruled it -----------------------------
+# ---------------------------------------------------------------------------
+
+class TestTheFloorRefusesWhatWouldDestroyTheOutput:
+    """`MIN_SECRET_LENGTH = 4` admitted values that defeat the reason the
+    constant's own docstring gives for existing.
+
+    SS61 substitutes a stored value over every occurrence of it in every
+    tool result and every log line, unconditionally and with no switch,
+    and SS59 masks the input so the user cannot see what they typed.
+    Measured at HEAD: four spaces turned every four-space indent in every
+    file the model reads into `[REDACTED]`.
+    """
+
+    @pytest.mark.parametrize("value,what", [
+        ("    ", "four spaces"),
+        ("\t\t\t\t", "four tabs"),
+        ("  \t ", "a mixture"),
+        ("", "empty"),
+        ("        ", "eight spaces, so not the length rule refusing"),
+    ])
+    def test_a_whitespace_only_value_is_refused(self, store, value, what):
+        with pytest.raises(secrets.SecretsError) as excinfo:
+            secrets.put("ssh.h.login", value)
+
+        assert "whitespace" in str(excinfo.value).lower(), (
+            f"{what} was refused for the wrong reason: {excinfo.value}")
+
+    def test_the_refusal_explains_what_it_would_have_done(self, store):
+        """The symptom is undiagnosable from the other end -- `[REDACTED]`
+        starts appearing in unrelated places, in every sink at once, with
+        nothing connecting it to a stored secret. So the refusal is where
+        the constraint gets explained, which is the argument the newline
+        check one block down already makes."""
+        with pytest.raises(secrets.SecretsError) as excinfo:
+            secrets.put("ssh.h.login", "    ")
+
+        message = str(excinfo.value)
+        assert "indent" in message, message
+        assert "[REDACTED]" in message, message
+
+    def test_an_ordinary_passphrase_with_whitespace_is_still_accepted(
+            self, store):
+        """THE NEGATIVE CONTROL, and it is a test that already existed:
+        `test_a_value_may_still_contain_other_whitespace` pins
+        `"correct horse\tbattery staple"`. The fix must refuse a value
+        that is NOTHING but whitespace without touching one that contains
+        some, which is why it is `strip()` and not a character class."""
+        secrets.put("ssh.h.login", "correct horse\tbattery staple")
+
+        assert secrets.get("ssh.h.login").reveal() == (
+            b"correct horse\tbattery staple")
+
+    def test_a_four_character_word_is_still_accepted(self, store):
+        """THE RULING, pinned so it is not quietly "fixed" later.
+
+        `'true'` is storable, and a stored `'true'` turns every JSON
+        boolean in every tool result into `[REDACTED]` -- measured. The
+        owner's decision (batch 144) was to refuse the cases with no
+        legitimate reading and to stop claiming the floor makes SS61
+        survivable in general, because no length does: at 4 a stored
+        `'pass'` destroys every Python `pass` statement, and at 8
+        `'password'` destroys every build file. Length is a proxy for how
+        often a value occurs in ordinary text and a poor one -- a
+        four-character RANDOM password occurs in nothing.
+
+        If this test is ever deleted in favour of refusing more, the
+        constant's docstring is where the reasoning lives and the cost is
+        a legitimate short secret, such as a sudo password.
+        """
+        secrets.put("ssh.h.login", "true")
+
+        assert secrets.get("ssh.h.login").reveal() == b"true"
+        assert secrets.MIN_SECRET_LENGTH == 4
+
+    def test_a_value_below_the_floor_is_still_refused_by_length(self, store):
+        """The floor itself is untouched, and this is what says so."""
+        with pytest.raises(secrets.SecretsError) as excinfo:
+            secrets.put("ssh.h.login", "abc")
+
+        assert "at least 4" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# ---- S07-02 / S07-06: the envelope's debris, and the hint's second cause --
+# ---------------------------------------------------------------------------
+
+class TestTheStoreSurvivesAFailedRename:
+
+    def test_no_envelope_debris_is_left_by_a_failed_rename(
+            self, store, monkeypatch):
+        """`test_no_temp_file_is_left_beside_the_store` above covers the
+        `_dump` branch. This is the statement that was OUTSIDE the handler
+        that sweeps: a failed `os.replace`, or a process death between the
+        two statements, left a sealed envelope beside the real one.
+
+        An offline guessing target rather than a plaintext one -- which is
+        exactly the risk `.gitignore:17-22` names as its reason for
+        listing `secrets.json` at all, at a name it did not list.
+        """
+        import json_store
+
+        def _boom(src, dst):
+            raise PermissionError(5, "another process has the file open")
+
+        monkeypatch.setattr(json_store.os, "replace", _boom)
+        before = store.read_bytes()
+
+        with pytest.raises(PermissionError):
+            secrets.put("ssh.h.login", VALUE)
+
+        assert store.read_bytes() == before
+        assert [p.name for p in store.parent.iterdir()] == [store.name], (
+            "a sealed envelope was left beside the store")
+
+
+def test_the_recovery_hint_names_both_causes(tmp_path, monkeypatch):
+    """S07-06. The hint blamed "a write that was interrupted before batch
+    108 made them atomic" -- a cause that was FIXED -- while the live one
+    sat one function away: `create` deliberately does not go through
+    `_write`, for the reason its own docstring gives, so it is a single
+    non-atomic write and a crash inside it leaves exactly this state.
+
+    Driven in the report: `exists()` true, `unlock` raising
+    `StoreUnreadable`, `create` refusing to overwrite, and this sentence
+    telling the user their build is old.
+    """
+    monkeypatch.setenv("AGENT_SECRETS_FILE", str(tmp_path / "secrets.json"))
+
+    hint = secrets.recovery_hint()
+
+    assert "108" in hint, (
+        "the first cause is gone; it is still a real one for a file "
+        "written by an older build")
+    assert "creation" in hint, (
+        f"the hint does not name an interrupted create, which is the cause "
+        f"that is still live on this build: {hint}")
+    assert str(tmp_path / "secrets.json") in hint, (
+        "the hint stopped naming the path, which is what makes the next "
+        "step discoverable")
+    assert "delete it for you" in hint
