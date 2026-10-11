@@ -474,10 +474,17 @@ every test file.
   match at the project root only.
 - `max_read_chars` and what a truncated read reports about having been truncated.
 - `write_project_doc` derives its path from the document's *name*, never from a path parameter (I1).
-- The residual `project_docs.py`'s own docstring names and files against the redactor rather than
+- ~~The residual `project_docs.py`'s own docstring names and files against the redactor rather than
   fixing locally: a plaintext `<password>` element, a Gradle `password "…"` and a `user:token@host`
-  URL are **not** redacted out of a tool result, and those are the credential shapes that occur in
-  exactly the five build manifests it reads. Verify it is still true, and that it is still filed.
+  URL are **not** redacted out of a tool result~~ — **ANSWERED, and the answer was that the claim was
+  false** (S04-05, fixed batch 146). All three shapes are redacted: #167 closed on 2026-08-23 and
+  `safety/policy_enforcement.py` has carried `_URL_USERINFO_RE`, `_XML_PASSWORD_RE` and
+  `_ASSIGNMENT_RE` ever since. The docstring was never updated, so a security residual read as OPEN
+  for seven weeks and propagated here as a scope brief and into S04's launch prompt as a question —
+  which is what spent a probe re-measuring a leak that did not exist. The instruction that found it
+  ("verify it is still true, and that it is still filed") is left standing because it is the
+  instruction that worked. `docs/TECHNICAL_DEBT.md` 91 carries what is NOT built: nothing keeps an
+  issue number cited in a docstring honest, the way the decision-id gate keeps a decision id honest.
 
 **Tests** `test_file_ops` · `test_project_path_guard` · `test_pin_tool` · `test_remember_tool` ·
 `test_todo` · `test_question_tool` · `test_load_skill`

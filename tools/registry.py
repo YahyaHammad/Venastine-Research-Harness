@@ -915,9 +915,9 @@ registry.register(ToolSpec("geometry", geometry.TOOL_SCHEMA, geometry.run, grant
 # pre-approval, so no human is asked a question the tool would refuse
 # anyway. The handlers re-test -- the refusal_check is the
 # prompt-suppression half, not the enforcement.
-registry.register(ToolSpec("read", file_ops.READ_TOOL_SCHEMA, file_ops.read_run, approval_check=file_ops._file_approval_check, refusal_check=file_ops._protected_refusal, grant_policy=GRANT_NEVER, budget=BUDGET_IO))
-registry.register(ToolSpec("write", file_ops.WRITE_TOOL_SCHEMA, file_ops.write_run, approval_check=file_ops._file_approval_check, refusal_check=file_ops._protected_refusal, grant_policy=GRANT_NEVER, budget=BUDGET_IO))
-registry.register(ToolSpec("edit", file_ops.EDIT_TOOL_SCHEMA, file_ops.edit_run, approval_check=file_ops._file_approval_check, refusal_check=file_ops._protected_refusal, grant_policy=GRANT_NEVER, budget=BUDGET_IO))
+registry.register(ToolSpec("read", file_ops.READ_TOOL_SCHEMA, file_ops.read_run, approval_check=file_ops._file_approval_check, refusal_check=file_ops._refusal_for("read"), grant_policy=GRANT_NEVER, budget=BUDGET_IO))
+registry.register(ToolSpec("write", file_ops.WRITE_TOOL_SCHEMA, file_ops.write_run, approval_check=file_ops._file_approval_check, refusal_check=file_ops._refusal_for("write"), grant_policy=GRANT_NEVER, budget=BUDGET_IO))
+registry.register(ToolSpec("edit", file_ops.EDIT_TOOL_SCHEMA, file_ops.edit_run, approval_check=file_ops._file_approval_check, refusal_check=file_ops._refusal_for("edit"), grant_policy=GRANT_NEVER, budget=BUDGET_IO))
 # §28: approval_notice carries the capability profile into the prompt.
 # The command text is already in the params; what it does not show is
 # WHERE it runs, and "cat /etc/shadow" does not look like a host read.

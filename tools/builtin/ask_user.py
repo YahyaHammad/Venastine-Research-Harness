@@ -100,8 +100,10 @@ TOOL_SCHEMA = {
 
 def run(params: dict, response_channel=None) -> dict:
     # params.get throughout, never params[]: no provider validates tool
-    # inputs against the schema, and a bare KeyError escapes the loop's
-    # ToolCallDenied handler and takes down the whole turn. pin.py's rule.
+    # inputs against the schema. tools/base.py carries the one copy of why, under
+    # "WHAT A CALLABLE REGISTERED BELOW MAY RAISE": a handler's exception IS
+    # contained, so what this buys is an error dict the model can READ rather
+    # than the generic wrapper dispatch() would return (batch 146).
     question = params.get("question")
     if not question or not isinstance(question, str):
         return {"error": "ask_user requires a 'question' string."}

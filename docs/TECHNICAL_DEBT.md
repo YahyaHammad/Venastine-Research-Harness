@@ -4730,6 +4730,187 @@ is WARNING+ and routes into the transcript, so that is the inline marker
 arriving by a route nobody chose, with a `[warning]` prefix on an ordinary
 coloured answer.
 
+## 90. A hardlink is a second name for a file, and the one hard deny cannot see it (open, found and filed batch 146)
+
+`file_ops._protected_path_error` resolves a path before testing it for a
+protected segment, which is what catches a symlink and a junction into
+`.venastine/` -- both measured, both refused. A HARDLINK is not a link to
+anything: `os.path.realpath` returns the path it was given, `os.path.islink`
+is False, and the segment test sees an ordinary name inside the workspace.
+
+Measured in batch 146, and no report names it -- it was found by asking the
+S17 report's question (a document name that is a link) of the S04 report's
+file. A `write` through a hardlinked name put `{"mcpServers": ...}` into a
+protected `settings.json` whose direct spelling is refused, and that is the
+file whose own rationale says it "names commands the harness spawns at
+startup".
+
+**The WRITE half is closed** and not by the deny: `json_store.write_text_atomic`
+replaces the name rather than writing through it, so the link breaks and the
+other name keeps its bytes. `write`, `edit` and `write_project_doc` all go
+through it, and `tests/test_file_ops.py::TestAHardlinkCannotReachTheProtectedFile`
+asserts on the protected file's bytes rather than on the answer the tool
+returned, because the refusal still says None and that is the honest state.
+
+**The READ half is open.** A `read` through a hardlink into `.venastine/`
+serves the file, and `edit`'s read half sees it too (though `edit` returns no
+content, so what leaks there is a match count). Reached only by someone who
+has enabled `read` in `config.py` AND has a pre-existing hardlink -- git does
+not store hardlinks, and a hardlink across a container's bind mount fails --
+so this is the lowest-reachability item in the surface and the highest
+consequence per unit of it.
+
+**What would close it:** the same decision S02 owns for a link it cannot
+resolve, which the S04 report names and declines in the same breath -- "a
+guard that cannot resolve a path should refuse it", across `file_ops`,
+`protected_paths` and `security/sandbox._within` together. The two mechanisms
+available are both bad on their own: enumerating a file's other names is
+per-platform (`FindFirstFileNameW` on Windows, a tree walk on POSIX), and
+refusing every file with `st_nlink > 1` denies ordinary ones. Worth noting
+that the ro-mount already covers the sandboxed-shell route, so the file tools
+are the whole of this.
+
+**Not:** adding `st_nlink` to the refusal. It would refuse a legitimate layout
+to protect against one the write path already handles, and it would read as
+the deny working when the deny is what cannot see this.
+
+## 91. A closed issue cited in a docstring has nothing keeping it honest (open, found and filed batch 146)
+
+`tools/builtin/project_docs.py`'s module docstring stated a credential
+residual in the present tense -- a plaintext `<password>` element, a Gradle
+`password "..."` and a `user:token@host` URL are "NOT" redacted out of a
+`read_project_doc` result -- and closed with "Filed against the redactor
+rather than fixed here."
+
+It was filed, as #167, and #167 closed on 2026-08-23.
+`safety/policy_enforcement.py` has carried `_URL_USERINFO_RE`,
+`_XML_PASSWORD_RE` and `_ASSIGNMENT_RE` ever since, and all three shapes are
+redacted today -- driven on all four file types in batch 146, with a
+credential-free document passing through byte-identical as the control.
+
+The paragraph was wrong for seven weeks, and the cost was not hypothetical:
+the claim propagated into `docs/REVIEW_MARATHON.md` as a scope brief and into
+a review scope's launch prompt as a question to go and verify, so a reviewer
+spent a probe re-measuring a leak that did not exist. A security residual that
+reads as OPEN is the most expensive kind of stale comment.
+
+`tests/test_docs_consistency.py` already gates two kinds of citation from
+production code: a decision id must resolve in the record, and a test name
+must exist. An ISSUE NUMBER is gated by nothing, and there are many of them --
+every `#NNN` in a comment is an assertion about a GitHub issue's state that no
+test has ever read.
+
+**What would close it:** the same shape as the decision-id gate, which is
+`gh issue view` rather than a local file -- so it is a NETWORK check, which
+this suite does not do, or a cached manifest, which is a second source of
+truth about an issue's state. The narrower and probably right version: gate
+only the citations that make a CLAIM about state ("filed as", "closed by",
+"open in"), which is a grep for a handful of phrasings rather than for every
+`#NNN`, and fail when the issue named is closed while the sentence says it is
+open. That needs the manifest either way.
+
+**Not:** removing issue numbers from comments. They are the most useful kind
+of citation in the tree -- the question is only what keeps them true.
+
+## 92. An atomic doc write can fail where a truncating one succeeded (open, filed batch 146)
+
+`write_project_doc`, `write` and `edit` write through
+`json_store.write_text_atomic` since batch 146, which is what stops a
+hardlinked name being written through (item 90). The rename it ends with has a
+failure mode the truncating write did not, and `json_store` already documents
+it from the credential stores' side: on Windows a plain `open()` takes no
+`FILE_SHARE_DELETE`, so any other process merely READING the destination makes
+`os.replace` fail with `PermissionError WinError 5` -- an editor, a sync
+client, a backup, a virus scanner.
+
+So `/init` writing `AGENTS.md` while the user has it open in an editor can now
+return "Could not write ..." where it previously overwrote the file. The
+destination is correctly untouched and the temp file is swept, which is the
+right failure; it is simply a failure that did not happen before, on the one
+write path reachable with no config edit, at the moment a user is most likely
+to have the document open -- they were just shown a diff of it.
+
+**What would close it:** nothing, on the current trade. The alternatives are
+worse: writing through the name again re-opens item 90's write half, and a
+retry loop around `os.replace` turns a deterministic refusal into a timeout.
+What is worth doing is making the MESSAGE say what to do, since
+`PermissionError` on a rename reads as a permissions problem and the actual
+remedy is "close the file" -- which needs the errno distinguished, and WinError
+5 arrives as `PermissionError` for several unrelated reasons.
+
+**Not:** a Windows-only branch that falls back to a truncating write. That is
+item 90 reintroduced on the platform where a case-insensitive filesystem makes
+the rest of this surface hardest to reason about.
+
+## 93. An environment override that is SET BUT EMPTY is honoured as a value (open, found and filed batch 146)
+
+`config_schema.py` merges the environment over the YAML with
+`override = os.environ.get(variable)` and `if override is not None`, so an
+empty string is a value. For `AGENT_WORKSPACE` that means
+`workspace_dir = ""`, and `os.path.realpath("")` is the LAUNCH DIRECTORY.
+
+Measured:
+
+```
+AGENT_WORKSPACE = ''
+config.WORKSPACE_DIR            = ''
+file_ops.WORKSPACE_ROOT         = C:\Projects\Venastine Research Harness
+_is_within_workspace(config.py) = True
+_file_approval_check('write', config.py) = False      <-- auto-approved
+```
+
+...against the properly-unset behaviour, which is the control:
+
+```
+AGENT_WORKSPACE = None
+config.WORKSPACE_DIR            = ./workspace
+_is_within_workspace(config.py) = False
+_file_approval_check('write', config.py) = True       <-- asks
+```
+
+**Two guarantees go at once**, because `WORKSPACE_DIR_EXPLICIT` reads the
+variable's PRESENCE and never its value (batch 111, item 28, deliberately):
+an empty value is present, so the workspace is ALSO taken as the project
+path. So a launch with `AGENT_WORKSPACE=""` from a user's home directory
+makes the home directory the agent's auto-approved workspace and the project
+whose documents `read_project_doc` and `write_project_doc` are scoped to.
+
+**How it was found, which is the part worth keeping**: the per-batch
+verification step re-runs the affected tests with `AGENT_WORKSPACE` unset,
+because this shell has it set and CI does not. Written as
+`AGENT_WORKSPACE= python -m pytest ...`, which sets it to empty rather than
+unsetting it -- and `test_posture.py`'s
+`test_writing_config_py_still_needs_a_human` and its `config.yaml` sibling
+both went red. Those two tests are the whole answer to "is moving the
+posture into a data file a weakening?", in their own docstring's words, and
+an empty variable is enough to answer yes. `env -u AGENT_WORKSPACE` is the
+correct invocation and the suite is green under it.
+
+**What limits it today.** `protected_paths.check_workspace` refuses a
+workspace that IS the install tree, and that refusal fires for this case
+when the launch directory happens to be the install tree -- measured. For
+any other launch directory it returns None, so there is nothing between an
+empty variable and a home-directory workspace. `write` and `edit` are also
+globally denied, which leaves the live consequences as the sandbox's
+read-write mount plus auto-approval of non-inert commands inside it -- which
+is exactly the reasoning `check_workspace`'s own message gives for refusing
+the install tree -- and the project scope of the two `project_doc` tools.
+
+**What would close it:** a decision rather than a line, which is why this is
+filed and not fixed. `if override is not None` is deliberate for SOME keys:
+an empty string is a meaningful value for a prefix or a suffix, and the
+merge is generic over `ENV_OVERRIDES`. The candidates are a per-key rule
+("these are paths, and an empty path is not a value"), a blanket
+`if override` (which silently stops honouring an empty value everywhere,
+including keys where it might be wanted), or validating `workspace_dir`
+after the merge rather than at the merge. The third is probably right and is
+the only one that keeps the generic merge generic -- `check_workspace`
+already exists as the place a bad workspace is refused, and "empty" is a bad
+workspace in exactly its sense.
+
+**Not:** treating this as a posture bug. The posture is frozen and correct;
+what moved is which directory the posture is ABOUT, one layer below it.
+
 ## Review-marathon arrivals at open issues with no register entry
 
 Two `KNOWN` findings landed on GitHub issues that are not mirrored here. Both

@@ -21808,3 +21808,353 @@ Counts 6581 -> 6739. `test_tui.py` 445 -> 468 and 65 -> 71 classes,
 The decision-id gate caught finding ids in production comments for the
 THIRD batch running (item 86's trap), 12 sites across `tui/app.py` and
 `tui/widgets.py`, all reworded to cite the batch.
+
+## Batch 146 -- the write that did not land where the consent said (2026-10-12)
+
+The file-and-document-tools surface, all seven FIX-NOW findings:
+**S03-01 = S04-01** and **S04-02** (the two S2s), **S04-03**, **S04-04**,
+**S17-01**, **S04-05** and **S04-06**. Three owner rulings, recorded as
+`docs/ROADMAP_v3.md` §63's A17-A19. **Two of the seven reports' suggested
+fixes were measurably half of one**, and one defect belongs to no report at
+all.
+
+**The theme of the surface, stated once: every one of these is a layer that
+had the right idea and one missing step.** The read path resolved before
+deciding and the write path did not. The segment list had three consumers
+and two comparisons. The refusal check was total in every module but this
+one. The count was computed before the cut that invalidated it. None of
+these is a wrong design; each is a design with a step missing where nothing
+could see the gap.
+
+### The two suggested fixes that measuring changed
+
+**S04-02 said `newline=""` on the three writes, and that "alone leaves the
+read side still normalising, so `edit` would then preserve whatever the file
+already had, which is the behaviour the uniqueness contract implies."** That
+sentence is the only thing in the report I did not believe, so I drove four
+variants over LF, CRLF and MIXED files with the live `edit_run` as the
+control:
+
+```
+---- a CRLF file, one-line span ----
+   LIVE  replaced 1   CRLF=4 LF=0  30 bytes   endings kept: True
+   V1    replaced 1   CRLF=0 LF=4  26 bytes   endings kept: False   <-- the report's shape
+   V2    replaced 1   CRLF=4 LF=0  30 bytes   endings kept: True
+   V3    replaced 1   CRLF=4 LF=0  30 bytes   endings kept: True
+---- a CRLF file, MULTI-line span ----
+   V1    replaced 1                16 bytes   b'alpha\nB\nC\ndelta\n'
+   V2    old_text not found in file.          b'alpha\r\nbravo\r\n...'
+   V3    replaced 1                20 bytes   b'alpha\r\nB\r\nC\r\ndelta\r\n'
+---- a MIXED file, one-line span ----
+   LIVE  endings kept: False      V1  endings kept: False
+   V2    endings kept: True       V3  endings kept: True
+```
+
+**The report's shape turns a case that is CORRECT today into a broken one.**
+`edit` read with universal newlines, so `content` was LF in memory whatever
+the file held; writing that back with `newline=""` converts a CRLF file to
+LF -- the same defect pointing the other way. The read had to move too.
+
+And then the strict version (V2) refuses a multi-line span of a CRLF file,
+which is correct about the bytes and unactionable: `read_run` does
+`f.read().splitlines()` and joins with `"\n"`, so EVERY file reaches the
+model as LF whatever it holds. A model cannot see a CRLF file's endings
+through any tool here, so a span it spells from what it was shown can never
+match by bytes, and the refusal it gets names text it has no way to produce.
+That measurement is what makes V3 -- retry an LF-spelled `old_text`
+translated, moving `new_text` with it -- the only actionable answer rather
+than the lenient one. The owner ruled it, and the schema's "exact,
+uniquely-matching span" becomes exact-modulo-line-endings, which is in A19
+rather than left in the code.
+
+**S17-01 said "resolve `destination` with the same `_resolve_in_project`
+`read_run` already does", and its own probe demonstrated the harm through a
+HARDLINK** -- because this machine cannot create symlinks, which the report
+says. So the question nobody had asked was whether the fix stops the
+demonstration that motivated it:
+
+```
+   the hardlinked destination : DEVLOG.md
+   os.path.realpath(dest)     : <the in-project path itself>
+   islink                     : False
+   st_nlink                   : 2
+   _resolve_in_project says   : True
+   -> so the suggested shape ADMITS this write.
+```
+
+It does not. A hardlink is not a link to anything -- it IS the file, under a
+second name -- so no resolution can see it. `os.replace` can:
+
+```
+   outside before : 'SECRET ORIGINAL\n'   st_nlink 2
+   outside AFTER  : 'SECRET ORIGINAL\n'
+   in-project now : '# replaced\n'
+   st_nlink now   : 1
+```
+
+The owner ruled the atomic replace, which is the house pattern already:
+`json_store` exists because four JSON stores each had a copy of the dance
+and the copies had drifted -- one of them, holding a record of CONSENT,
+wrote with a bare `open(path, "w")` and said nothing. So the file tools'
+text write became that module's FIFTH consumer, over one new private
+`_replace_through_temp`, rather than a sixth copy. The containment is still
+required and still does the other half: a junction AT a doc name resolves
+OUTSIDE and `_resolve_in_project` returns None, which is measured and is
+what A17's second sentence is about.
+
+### The defect no report names
+
+Asking S17's question of S04's file found this, the same way batch 145's C1
+finding was found by asking S15's question of S16's module:
+
+```
+   the direct spelling, for the control:
+     write_run  : "Refused: the path resolves into '.venastine/' ..."
+     file now   : '{"original": true}'
+   the hardlinked spelling:
+     islink            : False
+     realpath tail     : \notes.md
+     protected_segment : None
+     refusal_check says: None
+     write_run  : 'Wrote 24 characters to notes.md'
+     PROTECTED FILE NOW: '{"mcpServers": {"x": 1}}'
+```
+
+**A hardlinked name reaches the bytes of the one hard deny** -- the file
+`protected_paths`' own rationale calls the one that "names commands the
+harness spawns at startup". The write half closes with the same replace;
+the READ half does not close at all, and is register item 90 rather than a
+pretend fix, because nothing available here distinguishes a hardlink from a
+file. The tests assert on the PROTECTED FILE'S BYTES rather than on the
+tool's answer, because the refusal still says None and that is the honest
+state.
+
+Reachability, stated so the item can be prioritised: it needs `read` or
+`write` enabled in `config.py` AND a pre-existing hardlink. git does not
+store hardlinks and a hardlink across a container bind mount fails, so this
+is the lowest-reachability finding in the surface and the highest
+consequence per unit of it.
+
+### The rest of the seven
+
+**S03-01 = S04-01, the merged pair.** `{"path": null}` is a well-formed
+object, so `params.get("path", "")` returns None -- the key IS there -- and
+`os.path.join(WORKSPACE_ROOT, None)` raised a `TypeError` out of a gate that
+runs ABOVE `dispatch()`'s containment. `core/loop.py` calls both gates with
+no `try` and the `try` around dispatch catches only `ToolCallDenied`: a lost
+turn alone, a durable `status='failed'` in a research pass, one call's error
+result in a parallel batch.
+
+Fixed at the producer with one closure per tool, so the refusal validates
+against that tool's own model as well as answering the path -- which
+`shell_sessions._start_refusal` has done for four tools all along, and whose
+renderer moved to `tools/base.py` rather than being copied. **The renderer
+matters more than it looks**: `err['loc']` and `err['msg']` only, never
+`str(e)`, because the refusal path returns its reason as the result directly
+and is the one result path that does not pass `check_output_policy`. The
+obvious one-liner would have been a secret sink the output scanner never
+sees, which is S03-02's finding arriving in the fix for S03-01.
+
+**And the ordering was wrong in my first draft, which two existing tests
+caught.** Validating the whole model first made `write` with a protected
+path and no `content` answer "content: Field required" and never mention the
+deny -- the same mistake §32 A7 exists to prevent, one layer over: supplying
+the content would only earn the refusal next turn. The order is the path's
+TYPE, then the deny, then everything else.
+
+Then swept, because the relation the merged finding asks for is only worth
+writing if it holds for the other 29 tools: **1,572 gate calls over 30
+tools, every declared property x six wrong-typed values.** Nothing raises
+for a wrong-typed VALUE anywhere. What did raise was `params` that is not a
+dict at all, in seven gate/tool pairs -- the three file tools, the three
+shell tools, and spawn's refusal. Unreachable from a model (`core/client.py`
+converts non-object arguments to a parse error and says why in those words),
+so it is a layer-above guarantee rather than a property of the gates -- and
+the relation would have had to carry seven exemptions. A guard with
+exemptions rots, so three lines closed it.
+
+**S04-03.** `lines_returned` came from the selection and the character cut
+discarded most of it afterwards. 500 reported, 313 delivered, and the clamp
+branch's own message says *"Use offset=500 to read further"* -- an
+instruction that skips 187 lines and 29,920 characters no call the model can
+construct will ever return. The cut is at a LINE boundary now, because
+`offset` and `count` are in lines, and both branches name ONE resume point:
+
+```
+   before:  lines_returned 500, in content 312, message names offset=500
+            page 1 ended at 'L0312', page 2 starts at 'L0500'
+   after:   lines_returned 312, in content 312, message names offset=312
+            page 1 ended at 'L0311', page 2 starts at 'L0312'
+```
+
+The guard that should have caught it could not: `test_read_char_truncation_with_message`
+writes `"A" * 50`, a SINGLE line, so `lines_returned` is 1 and no count can
+be wrong whatever the cut does -- the first vacuity shape, in the test named
+for the behaviour. The new tests use many WIDE lines.
+
+One case the report does not mention: a single line longer than the whole
+ceiling accumulates ZERO lines, so a minified file would return empty
+content and the model would have nowhere to go. That line is delivered CUT
+and the message says the rest of it is not reachable by offset -- the one
+place this tool loses data by design, stated rather than left to be found.
+
+**S04-04.** The one hard deny was an exact-case membership test whose
+docstring claimed `realpath` handled the Windows case upstream. True only
+for a path that already EXISTS, which is not the state a `write` is in:
+`.VENASTINE/mcp.json` resolved to itself, carried no known segment, was
+auto-approved, and created the protected directory under the spelling the
+guard did not know -- after which realpath canonicalised to the ON-DISK name
+and BOTH spellings were admitted in that project permanently. The ordered
+pair is what makes it persistent rather than momentary, so the test drives
+the ordered pair.
+
+One fold, in `protected_paths.folded_segments`, read by all three consumers
+-- including `shell.py`'s RAW-TOKEN branch, which `protected_segment` does
+not reach. The S04 report routes that file to another scope and says it is
+"not reviewing" it; leaving it would have shipped the fold half-applied,
+with the inconsistency inside the thing being fixed, and the shell consumer
+only ever ADDS a prompt so widening it costs one prompt. **The report's cost
+sentence for the fold is wrong and A18 says so**: "a false refusal here
+costs one prompt" is true of the shell and false of the file tools, where
+this list is the DENY -- a directory genuinely named `.VENASTINE` on a
+case-sensitive filesystem is now unreachable, with no prompt and no
+override. That is the trade the owner ruled on, with the cost stated
+correctly.
+
+**S04-05, the cheapest fix and the most expensive defect.** The module
+docstring states a credential residual in the present tense; it was filed as
+#167 and #167 closed on 2026-08-23, and all three shapes are redacted today
+(driven on all four file types, with a credential-free document passing
+through byte-identical as the control). The claim had propagated into
+`docs/REVIEW_MARATHON.md` as this scope's brief and into S04's launch prompt
+as a question, so a reviewer spent a probe re-measuring a leak that did not
+exist. Both copies corrected. **A security residual that reads as OPEN is
+the most expensive kind of stale comment**, and register item 91 carries what
+is not built: the decision-id gate keeps a decision id honest and nothing
+keeps a cited issue number honest.
+
+**S04-06.** Six modules justified `params.get` over `params[]` with the same
+mechanism, cross-citing each other as the authority -- "pin.py's rule",
+"Same reasoning as load_skill's", "remember.py's note" -- and the mechanism
+is false: `dispatch()` contains a handler's exception "on purpose".
+
+Two corrections to the report's own count, both from reading the live tree.
+It is SIX sites carrying the claim, not seven; the seventh location it names
+(`pin.py:79`) carries a different claim entirely, about
+`isinstance(True, int)`. And the six are not all wrong: **load_skill's is in
+the PAST tense** -- "raised", "aborted" -- an account of the failure that
+bought the practice, and every clause of it is true, including the two
+clauses no sibling has, about the batched calls and the missing
+`tool_result`. It keeps its text. The five present-tense copies point at
+`tools/base.py` now.
+
+What NONE of the six said is the half that was live in their own surface: a
+GATE's raise is not contained, and the two gates in this very directory were
+not total. That half is in the one copy, which is what makes the copy worth
+gating -- `test_no_production_module_restates_why_a_handler_validates`, plus
+a guard on the guard, because "nobody restated it" is also true of an empty
+tree. The one-copy relation is batch 144's shape, one surface over.
+
+### What the mutation pass found
+
+24/25 on the first pass. The survivor was **a test of mine that could not
+discriminate**: control D3 reverted `shell.py`'s RAW-TOKEN branch to an
+exact-case compare and the new test went on passing, because
+`cat .VENASTINE/settings.json` is answered by the RESOLVED branch below it
+-- with no such directory on disk, `realpath` returns the path unchanged and
+the folded segment is still in it.
+
+The input that discriminates is a traversal that CANCELS the segment:
+
+```
+  .venastine/settings.json      raw-component=True  resolved-seg='.venastine'
+  .VENASTINE/../notes.txt       raw-component=True  resolved-seg=None
+```
+
+`.VENASTINE/../notes.txt` resolves to `<ws>/notes.txt`, which carries
+nothing to find, so only the raw branch can answer -- and the lowercase form
+has been caught that way for as long as the check has existed, measured
+rather than assumed. The test asserts that the resolved branch finds
+nothing, rather than leaving the isolation in a docstring, so the day
+`realpath` stops cancelling the traversal this goes red instead of quietly
+becoming a third copy of the case above it. **Second pass: 25/25** with the
+equivalence control green.
+
+The pass also found the gap BEFORE it ran: planning it is what showed that
+nothing covered the shell fold at all, which is why that test exists.
+
+### One test-double that had stopped describing anything
+
+Five consent tests in `test_project_init.py` went green on the atomic write,
+and `_fail_write_of` is why: it hooks `builtins.open` and matches the
+document's basename, and the bytes now go through `os.open` into
+`<name>.<hex>.tmp`. The failure they inject stopped happening.
+
+Its docstring's argument for that level is right and worth keeping -- "so
+the whole chain runs ... Patching higher up would test the handler against a
+failure shape the handler was already written for" -- so the hook moved down
+rather than up, and covers both opens and the temp name. A helper that fires
+only at the one call the implementation happens to make today has an expiry
+date nobody can see.
+
+### Four register items rather than fixes
+
+**90**, the hardlink READ half, with both available mechanisms named and
+rejected (enumerating a file's other names is per-platform; refusing every
+`st_nlink > 1` denies ordinary files) and the note that the ro-mount already
+covers the sandboxed-shell route, so the file tools are the whole of it.
+
+**91**, nothing keeps a cited issue number honest, with the narrower version
+that is probably right: gate only the citations that make a CLAIM about
+state, which is a grep for a handful of phrasings rather than for every
+`#NNN`.
+
+**92**, an atomic doc write can now fail where a truncating one succeeded.
+`json_store` already documents the mechanism from the credential stores'
+side -- on Windows a plain `open()` takes no `FILE_SHARE_DELETE`, so any
+process merely READING the destination fails the rename with
+`PermissionError WinError 5`. So `/init` writing `AGENTS.md` while the user
+has it open in an editor can now refuse, at the moment they are most likely
+to have it open, since they were just shown a diff of it. Nothing closes
+this on the current trade; what is worth doing is making the message say
+"close the file", which needs the errno distinguished.
+
+**93**, and this one was found BY the verification step rather than by the
+fix pass. The per-batch convention re-runs the affected tests with
+`AGENT_WORKSPACE` unset, because this shell has it set and CI does not --
+and written as `AGENT_WORKSPACE= python -m pytest`, which sets it to EMPTY
+rather than unsetting it, two posture tests went red. They were right to:
+`config_schema.py` merges the environment with `if override is not None`, so
+an empty string is a value, `os.path.realpath("")` is the launch directory,
+and `WORKSPACE_DIR_EXPLICIT` reads the variable's PRESENCE -- so an empty
+`AGENT_WORKSPACE` makes the launch directory both the auto-approved
+workspace and the project path.
+
+```
+AGENT_WORKSPACE = ''      _file_approval_check('write', config.py) = False
+AGENT_WORKSPACE = None    _file_approval_check('write', config.py) = True
+```
+
+`test_writing_config_py_still_needs_a_human` and its `config.yaml` sibling
+are, in their own docstring's words, "the whole answer to 'is moving the
+posture into a data file a weakening?'" -- and an empty variable answers
+yes. `protected_paths.check_workspace` refuses the install tree and returns
+None for a home directory, both measured, so there is nothing between an
+empty variable and a home-directory workspace. Filed rather than fixed
+because `if override is not None` is deliberate and generic over every
+environment override; validating `workspace_dir` after the merge, where
+`check_workspace` already lives, is probably the right shape and is a
+decision for the config surface rather than this one. `env -u
+AGENT_WORKSPACE` is the correct invocation; the suite is green under it
+(1,121 passed).
+
+### Verification
+
+Full suite **6791** -- 6,742 passed and 49 skipped, which is 6,739 + 52, and
+52 is the sum of the five per-file INCREASES the tree now records
+(test_file_ops 59->83, test_shell 328->333, test_docs_consistency 55->57,
+test_project_init 165->180, test_tool_arguments 21->27). `ruff check .` clean. Both bandit checks, pip-audit
+and gitleaks by hand, since six workflows are not on `main` (register item
+88). Affected tests re-run with `AGENT_WORKSPACE` unset, and under WSL for
+the symlink arm of `TestTheWriteResolvesBeforeItWrites`, which takes the
+junction path on Windows.

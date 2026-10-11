@@ -88,7 +88,10 @@ from security.capability import (
     CommandProfile,
     auto_approved,
 )
-from security.protected_paths import PROTECTED_SEGMENTS, protected_segment
+from security.protected_paths import (
+    PROTECTED_SEGMENTS_FOLDED,
+    protected_segment,
+)
 from security.sandbox import (
     BACKEND_CONTAINER,
     BACKEND_SSH,
@@ -398,7 +401,11 @@ def _command_touches_protected(command: str) -> str | None:
             candidates.append(token.split("=", 1)[1])
         for candidate in candidates:
             for part in re.split(r"[\\/]", candidate):
-                if part in PROTECTED_SEGMENTS:
+                # Folded, like the resolved branch below it (batch 146).
+                # This is the branch for a token realpath cannot help with,
+                # so an exact-case compare here was the half of the fold
+                # that `protected_segment` could not reach.
+                if part.casefold() in PROTECTED_SEGMENTS_FOLDED:
                     return part
             try:
                 resolved = os.path.realpath(
@@ -513,6 +520,15 @@ def _shell_approval_check(tool_name: str, params: dict) -> bool:
     if mode == capability.NEVER:
         return False
 
+    # TOTAL from here down (batch 146). Below the mode branches on
+    # purpose: `never` is a documented opt-out of ALL approval and answers
+    # without reading the params at all, so a guard above it would have
+    # changed what that opt-out means. From here the function reads six
+    # fields, and `params` is whatever the model emitted -- which for this
+    # shape means "not an object". ASK, like every other answer this
+    # function cannot settle.
+    if not isinstance(params, dict):
+        return True
     command = params.get("command", "")
     backend = declared_backend(params)
     profile, containment = _profile_and_containment(

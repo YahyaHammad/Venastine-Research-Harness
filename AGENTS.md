@@ -55,7 +55,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 6739 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
+pytest                                            # 6791 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -179,7 +179,7 @@ made the move free: no import changed, and `tests/test_docs_consistency.py` is t
 opens any of these files (its `DOCS` constant is where the path now comes from).
 
 - **docs/ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49–§52, §55 and §61 built; §53, §54 and §56–§60 recorded from the owner's requests in batches 122 and 123, specified and not yet designed) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A16 from §32 (A16 in ROADMAP_v3 §62), W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 SS1–SS72 from §49, NW1–NW5 from §50, PG1–PG9 from §51, RB1–RB7 from §52, IO1–IO7 from §53, AT1–AT8 from §54, TR1–TR15 from §55, JV1–JV10 from §56, SM1–SM4 from §57, PR1–PR5 from §58 UI1–UI4 from §59, UH1–UH12 from §60 and CN1–CN12 from §61). Section and D-numbers are stable and cross-referenced everywhere.
+- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49–§52, §55, §61, §62 and §63 built; §53, §54 and §56–§60 recorded from the owner's requests in batches 122 and 123, specified and not yet designed) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A19 from §32 (A16 in ROADMAP_v3 §62, A17–A19 in §63), W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 SS1–SS72 from §49, NW1–NW5 from §50, PG1–PG9 from §51, RB1–RB7 from §52, IO1–IO7 from §53, AT1–AT8 from §54, TR1–TR15 from §55, JV1–JV10 from §56, SM1–SM4 from §57, PR1–PR5 from §58 UI1–UI4 from §59, UH1–UH12 from §60 and CN1–CN12 from §61). Section and D-numbers are stable and cross-referenced everywhere.
 
 **Six namespaces use the same `LETTER+NUMBER` shape, and only the first is the
 record.** An id that resolves to two places is a cross-reference that fails
@@ -2810,6 +2810,12 @@ is gone outright, not kept as a fallback. `doc_path()` is one join now.
   a fixed allowlist and has **no path parameter at all**, so the destination is
   derived and it cannot be aimed elsewhere. Flipping the globals would hand every
   agent and all ten research passes standing file access to serve one command.
+  **"Cannot be aimed elsewhere" needed the write path to RESOLVE, which it did not
+  until batch 146**: a document name that is a link aimed it elsewhere, and the read
+  path in the same module had resolved before deciding since the day it was written.
+  A hardlink is not caught by resolving anything -- it is a second name for the file,
+  not a link to it -- so the write also replaces the name instead of writing through
+  it (`json_store.write_text_atomic`).
 - **The readable set is documentation, not "text files", and that is
   load-bearing.** A registered tool with permission `True` is advertised to EVERY
   run — the initializer's `allowed_tools` narrows *that agent*, not plain chat or

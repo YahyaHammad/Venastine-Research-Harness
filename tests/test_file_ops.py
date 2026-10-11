@@ -432,6 +432,18 @@ class TestEditRejectsAnOversizedFileBeforeOpeningIt:
 # ---- Protected segments: `.venastine/` is the one hard deny ---------------
 # ===========================================================================
 
+#: What each file tool needs BESIDES `path`. A control that means "this
+#: path is not refused" has to hand over a call that is otherwise complete,
+#: or it is really asserting that an incomplete one is acceptable -- which
+#: is what both controls below were doing before batch 146, invisibly,
+#: because the refusal did not look at the arguments yet.
+_REST_OF_THE_CALL = {
+    "read": {},
+    "write": {"content": "x"},
+    "edit": {"old_text": "a", "new_text": "b"},
+}
+
+
 class TestProtectedSegmentDenial:
     """PROTECTED_SEGMENTS (security/protected_paths.py): read/write/edit
     refuse any path resolving into `.venastine/`, wherever it sits and
@@ -492,9 +504,20 @@ class TestProtectedSegmentDenial:
         assert "error" in result and ".venastine" in result["error"]
 
     def test_the_refusal_check_answers_pre_approval(self, workspace):
-        assert ".venastine" in file_ops._protected_refusal(
-            {"path": ".venastine/settings.json"}, None)
-        assert file_ops._protected_refusal({"path": "notes.txt"}, None) is None
+        # ONE CLOSURE PER TOOL since batch 146, so the refusal can validate
+        # the arguments against that tool's own model as well as answer the
+        # path. All three share the protected answer, which is what the
+        # loop below reads.
+        for tool in ("read", "write", "edit"):
+            refusal = file_ops._refusal_for(tool)
+            assert refusal(
+                {"path": "notes.txt", **_REST_OF_THE_CALL[tool]}, None) is None
+            # The deny, with NOTHING but the path -- which for `write` and
+            # `edit` is an incomplete call, and is the point: the segment is
+            # answered before the arguments are, so supplying what is
+            # missing could not have changed the outcome.
+            assert ".venastine" in refusal(
+                {"path": ".venastine/settings.json"}, None)
 
     def test_the_approval_layer_is_unchanged_the_deny_is_not_its_job(
             self, workspace):
@@ -529,4 +552,425 @@ class TestProtectedSegmentDenial:
                 tool, {"path": ".venastine/settings.json"})
             assert reason is not None and ".venastine" in reason
             assert registry.refusal_reason(
-                tool, {"path": "notes.txt"}) is None
+                tool, {"path": "notes.txt",
+                       **_REST_OF_THE_CALL[tool]}) is None
+
+
+# ===========================================================================
+# ---- The bytes ------------------------------------------------------------
+# ===========================================================================
+
+def _put_bytes(workspace, rel_path, data: bytes) -> str:
+    """BYTES, because `_write` above opens in text mode and would translate
+    the very thing these tests are about."""
+    full = os.path.join(workspace, rel_path)
+    os.makedirs(os.path.dirname(full), exist_ok=True)
+    with open(full, "wb") as f:
+        f.write(data)
+    return full
+
+
+def _raw(path: str) -> bytes:
+    with open(path, "rb") as f:
+        return f.read()
+
+
+_LF = b"alpha\nbravo\ncharlie\ndelta\n"
+_CRLF = b"alpha\r\nbravo\r\ncharlie\r\ndelta\r\n"
+_MIXED = b"alpha\r\nbravo\ncharlie\r\ndelta\n"
+
+
+class TestTheBytesWrittenAreTheBytesSupplied:
+    """Batch 146. All three write paths opened with mode "w" and no
+    `newline=`, so Python translated every "\\n" to os.linesep.
+
+    What that cost, measured rather than reasoned: on Windows `write` could
+    not reproduce bytes it had just been handed, so a model could not use it
+    to restore a file it had just read; and `edit` replacing one span of an
+    LF file rewrote every line ending in the file -- 2,910 of them in this
+    repository's own AGENTS.md -- which buries the real change in review and
+    makes the diff the user approved not the bytes that land.
+
+    THE REPORT'S SUGGESTED FIX WAS HALF OF ONE. It said `newline=""` on the
+    three writes alone would leave `edit` "preserving whatever the file
+    already had"; driven, it does the opposite, because `edit` read with
+    universal newlines and so held LF in memory whatever the file had.
+    Writing that back converted a CRLF file to LF -- the same defect
+    pointing the other way, and it broke a case that was correct before. So
+    the read moved too, and the match runs against the file's real bytes.
+    """
+
+    def test_write_lands_the_bytes_it_was_given(self, workspace):
+        for content in ("one\ntwo\nthree\n", "crlf\r\nin\r\ncontent\r\n",
+                        "mixed\r\nendings\nhere\n"):
+            result = file_ops.write_run({"path": "w.txt", "content": content})
+            assert "result" in result, result
+            assert _raw(os.path.join(workspace, "w.txt")) == content.encode(
+                "utf-8"), (
+                f"the model supplied {content!r} and the file holds "
+                f"{_raw(os.path.join(workspace, 'w.txt'))!r}")
+
+    @pytest.mark.parametrize("data,label", [
+        (_LF, "an LF file"), (_CRLF, "a CRLF file"), (_MIXED, "a mixed file"),
+    ])
+    def test_edit_moves_only_the_span_it_was_asked_to_move(self, workspace,
+                                                           data, label):
+        """A MIXED file is in here because this repository has one --
+        docs/DEVLOG.md -- and because it is the case that distinguishes
+        "writes what it was handed" from "writes the file's dominant
+        ending". Only the first survives it.
+        """
+        path = _put_bytes(workspace, "f.txt", data)
+        result = file_ops.edit_run(
+            {"path": "f.txt", "old_text": "bravo", "new_text": "BRAVO"})
+        assert "result" in result, result
+
+        after = _raw(path)
+        assert after == data.replace(b"bravo", b"BRAVO"), (
+            f"{label}: the edit changed bytes outside the span. "
+            f"before={data!r} after={after!r}")
+
+    def test_a_multi_line_span_still_matches_a_crlf_file(self, workspace):
+        """The reason the strict version of this fix is unactionable.
+
+        `read` hands the model its lines joined with "\\n" whatever the file
+        held -- `f.read().splitlines()` then `"\\n".join(...)` -- so a span
+        the model spells from what it was SHOWN is LF-spelled even for a
+        CRLF file. A matcher that only compared bytes would refuse every
+        multi-line edit of one, with a message naming text the model has no
+        way to produce. So an LF-spelled span is retried translated, and
+        the replacement carries the file's endings with it.
+        """
+        path = _put_bytes(workspace, "f.txt", _CRLF)
+        result = file_ops.edit_run({"path": "f.txt",
+                                    "old_text": "bravo\ncharlie",
+                                    "new_text": "B\nC"})
+        assert "result" in result, result
+        assert _raw(path) == b"alpha\r\nB\r\nC\r\ndelta\r\n", _raw(path)
+
+    def test_a_span_that_is_really_absent_is_still_refused(self, workspace):
+        """The control on the retry. A fallback match that widened into
+        "near enough" would satisfy the test above and silently edit the
+        wrong span; this is the input it has to keep refusing.
+        """
+        path = _put_bytes(workspace, "f.txt", _CRLF)
+        result = file_ops.edit_run({"path": "f.txt",
+                                    "old_text": "bravo\nNOPE",
+                                    "new_text": "x"})
+        assert result.get("error") == "old_text not found in file."
+        assert _raw(path) == _CRLF
+
+    def test_the_uniqueness_contract_counts_the_real_bytes(self, workspace):
+        """Two CRLF-separated copies of an LF-spelled span are two matches,
+        not one -- the count is taken after the translation, so the
+        contract is about the file rather than about a normalised view of
+        it.
+        """
+        path = _put_bytes(workspace, "f.txt",
+                          b"a\r\nb\r\nx\r\na\r\nb\r\n")
+        result = file_ops.edit_run(
+            {"path": "f.txt", "old_text": "a\nb", "new_text": "Q"})
+        assert "appears 2 times" in result.get("error", ""), result
+        assert _raw(path) == b"a\r\nb\r\nx\r\na\r\nb\r\n"
+
+    def test_a_write_replaces_the_name_rather_than_following_it(
+            self, workspace):
+        """What the atomic write buys, with no protected path in sight: a
+        hardlinked name is not written THROUGH. `os.path.realpath` cannot
+        see a hardlink -- it is not a link to anything -- so no resolution
+        test can answer this one, and replacing the name is what does.
+        """
+        outside = os.path.join(os.path.dirname(workspace), "outside.txt")
+        _put_bytes(os.path.dirname(workspace), "outside.txt", b"ORIGINAL\n")
+        try:
+            os.link(outside, os.path.join(workspace, "inside.txt"))
+        except OSError:                                   # pragma: no cover
+            pytest.skip("hardlinks unavailable here")
+
+        result = file_ops.write_run({"path": "inside.txt",
+                                     "content": "REPLACED\n"})
+        assert "result" in result, result
+        assert _raw(outside) == b"ORIGINAL\n", (
+            "the write followed the link and landed on the other name")
+        assert _raw(os.path.join(workspace, "inside.txt")) == b"REPLACED\n"
+
+
+# ===========================================================================
+# ---- The count ------------------------------------------------------------
+# ===========================================================================
+
+class TestTheCountIsWhatWasReturned:
+    """Batch 146. `lines_returned` was computed from the SELECTION and the
+    character cut threw most of it away afterwards.
+
+    Measured on 800 lines of 160 characters: 500 reported, 313 delivered.
+    The model's only continuation cue is `lines_returned` plus `offset`, so
+    it asks for `offset=500` -- and the clamp branch's own message told it
+    to, in words: "Use offset=500 to read further." 187 lines and 29,920
+    characters were then delivered by no call it could construct.
+
+    The guard that should have caught it could not: the existing char-cut
+    test writes a SINGLE line, so `lines_returned` is 1 and no count can be
+    wrong whatever the cut does. Input that cannot discriminate, in the
+    test named for the behaviour -- which is why these use many WIDE lines.
+    """
+
+    def _wide(self, workspace, lines=800, width=160):
+        body = "\n".join("L%04d " % i + "x" * (width - 6)
+                          for i in range(lines))
+        _put_bytes(workspace, "wide.txt", body.encode("utf-8"))
+        return body.split("\n")
+
+    def test_the_number_reported_is_the_number_delivered(self, workspace):
+        self._wide(workspace)
+        result = file_ops.read_run({"path": "wide.txt"})
+
+        assert result["truncated"] is True
+        assert result["lines_returned"] == result["content"].count("\n") + 1, (
+            f"reported {result['lines_returned']} and delivered "
+            f"{result['content'].count(chr(10)) + 1}")
+        assert len(result["content"]) <= config.MAX_READ_CHARS
+
+    def test_following_the_message_delivers_the_very_next_line(self,
+                                                               workspace):
+        """The property the number is FOR. Not "the offset is consistent
+        with the count" -- that is arithmetic either way -- but that the
+        next call hands back the line after the last one delivered, with no
+        gap. Before this batch page one ended at L0312 and page two began
+        at L0500.
+        """
+        lines = self._wide(workspace)
+        first = file_ops.read_run({"path": "wide.txt"})
+        resume = first["offset"] + first["lines_returned"]
+        assert f"offset={resume}" in first["message"], first["message"]
+
+        second = file_ops.read_run({"path": "wide.txt", "offset": resume})
+        last_delivered = first["content"].rsplit("\n", 1)[-1]
+        first_of_page_two = second["content"].split("\n", 1)[0]
+        assert last_delivered == lines[resume - 1]
+        assert first_of_page_two == lines[resume], (
+            f"page one ended at {last_delivered[:6]!r} and page two starts "
+            f"at {first_of_page_two[:6]!r}")
+
+    def test_the_two_branches_name_one_resume_point(self, workspace):
+        """Both ceilings at once. The clamp message used to carry its own
+        offset -- `offset + effective_count` -- and the char cut invalidated
+        it, so the message that fired said one thing and the number beside
+        it said another.
+        """
+        self._wide(workspace)
+        result = file_ops.read_run({"path": "wide.txt", "count": 10000})
+        assert "maximum" in result["message"]
+        assert "10000" in result["message"]
+        offsets = [part for part in result["message"].split()
+                   if part.startswith("offset=")]
+        assert len(offsets) == 1, result["message"]
+        assert offsets[0].rstrip(".") == (
+            "offset=%d" % result["lines_returned"])
+
+    def test_a_line_longer_than_the_whole_ceiling_is_still_delivered(
+            self, workspace, monkeypatch):
+        """Minified JavaScript, a one-line JSON document, a packed asset.
+        Keeping whole lines only would hand back NOTHING here and the model
+        would have nowhere to go -- so the line is cut, and the message
+        says that resuming skips the rest of it rather than leaving the
+        model to discover the hole.
+        """
+        monkeypatch.setattr(config, "MAX_READ_CHARS", 100)
+        _put_bytes(workspace, "min.js", b"{" + b"a" * 400 + b"}")
+        result = file_ops.read_run({"path": "min.js"})
+
+        assert result["lines_returned"] == 1
+        assert len(result["content"]) == 100
+        assert result["truncated"] is True
+        assert "offset=1" in result["message"], result["message"]
+        assert "not reachable" in result["message"], result["message"]
+
+    def test_the_count_is_right_when_nothing_is_cut(self, workspace,
+                                                    monkeypatch):
+        """The control, and it is the one that locates the defect: the
+        number was never wrong EXCEPT in the case where it is the number
+        the model needs. Raise the ceiling and the old code agreed with
+        the new one.
+        """
+        monkeypatch.setattr(config, "MAX_READ_CHARS", 10_000_000)
+        self._wide(workspace)
+        result = file_ops.read_run({"path": "wide.txt"})
+        assert result["lines_returned"] == config.MAX_READ_LINES
+        assert result["lines_returned"] == result["content"].count("\n") + 1
+        assert result["truncated"] is False
+        assert result["message"] is None if "message" in result else True
+
+
+# ===========================================================================
+# ---- The case of the one hard deny ----------------------------------------
+# ===========================================================================
+
+class TestTheProtectedSegmentIsCaseFolded:
+    """Batch 146. `PROTECTED_SEGMENTS` was an exact-case membership test,
+    and its docstring claimed the Windows case was handled upstream:
+    "a link pointing at `.venastine/settings.json` arrives here as the real
+    thing, and on Windows so does a case-spelled one."
+
+    That holds only where the path ALREADY EXISTS for `realpath` to
+    canonicalise, which is not the state a `write` is in. With no
+    `.venastine/` yet, `.VENASTINE/mcp.json` resolved to itself, carried no
+    known segment, was auto-approved, and created the protected directory
+    under the spelling the guard did not know. After that `realpath`
+    canonicalised every later path to the ON-DISK name, so both spellings
+    were admitted in that project from then on -- and the file
+    `config_loader` opens at startup was one of them.
+    """
+
+    SPELLINGS = (".venastine", ".VENASTINE", ".VeNaStInE", ".Venastine")
+
+    @pytest.mark.parametrize("spelling", SPELLINGS)
+    def test_every_spelling_is_refused_by_every_layer(self, workspace,
+                                                      spelling):
+        from tools.registry import registry
+
+        path = spelling + "/settings.json"
+        for tool in ("read", "write", "edit"):
+            reason = registry.refusal_reason(
+                tool, {"path": path, **_REST_OF_THE_CALL[tool]})
+            assert reason is not None and "resolves into" in reason, (
+                f"{tool} admitted {path!r}")
+
+        assert "error" in file_ops.read_run({"path": path})
+        assert "error" in file_ops.write_run({"path": path, "content": "x"})
+        assert "error" in file_ops.edit_run(
+            {"path": path, "old_text": "a", "new_text": "b"})
+
+    def test_the_spellings_are_four_distinct_strings(self):
+        """The guard on the parametrisation above: a list that collapsed to
+        one spelling would pass four times and prove one thing. Item 6's
+        shape, from the other direction.
+        """
+        assert len(set(self.SPELLINGS)) == 4
+        assert len({s.casefold() for s in self.SPELLINGS}) == 1
+
+    def test_the_bypass_cannot_be_made_permanent(self, workspace):
+        """THE ORDERED PAIR, which is what made this persistent rather than
+        momentary. One write under a spelling the guard did not know created
+        the directory; from then on `realpath` canonicalised to that
+        spelling and the frozenset missed BOTH cases in that project, for
+        good. So the second half of this test is the half that mattered.
+        """
+        first = file_ops.write_run(
+            {"path": ".VENASTINE/mcp.json", "content": "{}"})
+        assert "error" in first and "resolves into" in first["error"]
+        assert not os.path.exists(os.path.join(workspace, ".VENASTINE")), (
+            "a refused write created the protected directory on its way to "
+            "being refused")
+
+        # And with the directory present under the canonical spelling, both
+        # cases are still refused -- the arrangement that always worked,
+        # kept as the control.
+        os.makedirs(os.path.join(workspace, ".venastine"))
+        _put_bytes(workspace, ".venastine/settings.json", b"{}")
+        for spelling in (".venastine", ".VENASTINE"):
+            assert "error" in file_ops.read_run(
+                {"path": spelling + "/settings.json"})
+
+    def test_the_refusal_names_the_spelling_the_caller_used(self, workspace):
+        """The segment comes from the PATH, not from the list, so the
+        message tells the model what IT wrote. A refusal naming
+        `.venastine/` for a call that said `.VENASTINE/` reads as a
+        different file.
+        """
+        result = file_ops.read_run({"path": ".VENASTINE/settings.json"})
+        assert ".VENASTINE" in result["error"], result["error"]
+
+
+class TestAHardlinkCannotReachTheProtectedFile:
+    """Batch 146, and no report names this one -- it was found by asking
+    S17's question of S04's file.
+
+    `_protected_path_error` resolves before testing the segment, which is
+    what catches a symlink and a junction into `.venastine/`. A HARDLINK is
+    not a link to anything: `realpath` returns the path it was given,
+    `islink` is False, and the segment test sees an ordinary name in the
+    workspace. So a `write` through a hardlinked name reached the protected
+    file's bytes, and the measurement was an mcpServers object landing in a
+    `settings.json` whose direct spelling is refused -- which is the file
+    that "names commands the harness spawns at startup".
+
+    THE REFUSAL STILL CANNOT SEE IT, and that is deliberate rather than
+    unfinished: nothing available here can tell a hardlink from a file, so
+    the deny is not what closes this. The atomic write is. That makes the
+    assertion below about the protected file's BYTES rather than about the
+    answer the tool returned.
+    """
+
+    def _hardlink(self, workspace, name, target):
+        try:
+            os.link(target, os.path.join(workspace, name))
+        except OSError:                                   # pragma: no cover
+            pytest.skip("hardlinks unavailable here")
+
+    def test_a_write_through_a_hardlinked_name_spares_the_protected_file(
+            self, workspace):
+        protected = _put_bytes(
+            workspace, ".venastine/settings.json".replace("/", os.sep),
+            b'{"original": true}')
+        self._hardlink(workspace, "notes.md", protected)
+
+        result = file_ops.write_run(
+            {"path": "notes.md", "content": '{"mcpServers": {"x": 1}}'})
+
+        assert "result" in result, result
+        assert _raw(protected) == b'{"original": true}', (
+            "the write reached the protected file through the hardlink")
+        assert _raw(os.path.join(workspace, "notes.md")) == (
+            b'{"mcpServers": {"x": 1}}')
+
+    def test_an_edit_through_one_spares_it_too(self, workspace):
+        protected = _put_bytes(
+            workspace, ".venastine/settings.json".replace("/", os.sep),
+            b'{"original": true}')
+        self._hardlink(workspace, "notes.md", protected)
+
+        result = file_ops.edit_run({"path": "notes.md",
+                                    "old_text": "original",
+                                    "new_text": "replaced"})
+
+        assert "result" in result, result
+        assert _raw(protected) == b'{"original": true}'
+
+    def test_the_direct_spelling_is_still_refused(self, workspace):
+        """The control, and the reason this is a gap rather than a policy:
+        the same bytes under their own name are denied outright, so the
+        hardlink was a second name for a file the tool must not write.
+        """
+        protected = _put_bytes(
+            workspace, ".venastine/settings.json".replace("/", os.sep),
+            b'{"original": true}')
+        result = file_ops.write_run(
+            {"path": ".venastine/settings.json", "content": "x"})
+        assert "error" in result and "resolves into" in result["error"]
+        assert _raw(protected) == b'{"original": true}'
+
+    def test_the_read_half_is_the_residual_this_does_not_close(self,
+                                                               workspace):
+        """STATED RATHER THAN LEFT TO BE FOUND, and pinned so the next
+        reader does not have to re-measure it.
+
+        A `read` through a hardlink into `.venastine/` still serves the
+        file. Closing it would mean either enumerating a file's other names
+        -- per-platform -- or refusing every multiply-linked file, which
+        denies ordinary ones. It is in docs/TECHNICAL_DEBT.md with the
+        sandbox's own answer for a link it cannot resolve. If a later batch
+        closes it, this test is where it goes red, which is the point of
+        writing it down this way round.
+        """
+        protected = _put_bytes(
+            workspace, ".venastine/settings.json".replace("/", os.sep),
+            b'{"secret": "value"}')
+        self._hardlink(workspace, "notes.md", protected)
+
+        result = file_ops.read_run({"path": "notes.md"})
+        assert result.get("content") == '{"secret": "value"}', (
+            "the read half is closed now -- update the register item and "
+            "this docstring, which is a better outcome than this test "
+            "going red for a reason nobody can place")
+

@@ -112,6 +112,12 @@ def refusal_reason(params: dict, context=None):
     if parent.subagent_depth >= config.SUBAGENT_MAX_DEPTH:
         return (f"Maximum subagent nesting depth "
                 f"({config.SUBAGENT_MAX_DEPTH}) reached")
+    # Depth first, which is the order the docstring above pins; then
+    # whether there are arguments to read at all (batch 146). A refusal
+    # rather than a raise, because this runs above dispatch()'s
+    # containment -- tools/base.py carries the one copy of what that costs.
+    if not isinstance(params, dict):
+        return "spawn_subagent requires an object of arguments."
     name = params.get("agent_name")
     task = params.get("task")
     if not name or not task:

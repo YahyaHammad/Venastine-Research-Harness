@@ -100,8 +100,10 @@ def _pinned_share(memory) -> tuple:
 
 def run(params: dict, memory=None) -> dict:
     # params.get, not params[]: no provider validates tool inputs against
-    # the schema, and a bare KeyError escapes the loop's ToolCallDenied
-    # handler and aborts the whole turn. Same reasoning as load_skill's.
+    # the schema. tools/base.py carries the one copy of why, under
+    # "WHAT A CALLABLE REGISTERED BELOW MAY RAISE": a handler's exception IS
+    # contained, so what this buys is an error dict the model can READ rather
+    # than the generic wrapper dispatch() would return (batch 146).
     last_n = _validated_turns(params)
     if isinstance(last_n, str):
         return {"error": f"pin {last_n}"}

@@ -44,13 +44,13 @@ from pydantic import (
     Field,
     StrictBool,
     StrictInt,
-    ValidationError,
 )
 
 import config
 from core import shell_sessions as core_sessions
 from security import capability, posture
 from security.sandbox import SandboxUnavailable
+from tools.base import invalid_params
 from tools.builtin import shell
 
 BACKGROUND = "shell_background"
@@ -316,18 +316,14 @@ KILL_TOOL_SCHEMA = _schema(
 # ---------------------------------------------------------------------------
 
 
-def _invalid(name: str, model, params) -> Optional[str]:
-    """Why these params would not validate, in one line, or None."""
-    if not isinstance(params, dict):
-        return f"Invalid arguments for {name}: expected an object."
-    try:
-        model(**params)
-    except ValidationError as e:
-        problems = "; ".join(
-            f"{'.'.join(str(part) for part in err['loc']) or 'arguments'}: "
-            f"{err['msg']}" for err in e.errors())
-        return f"Invalid arguments for {name}: {problems}."
-    return None
+#: Why these params would not validate, in one line, or None.
+#:
+#: MOVED TO tools/base.py IN BATCH 146, where the refusal_check contract it
+#: serves is defined, because file_ops' gates now need it too -- they were
+#: the one pair in the tree that was not total over a JSON object, and this
+#: is the renderer that made the sibling's refusals readable. The name stays
+#: so the six call sites below read as they always did.
+_invalid = invalid_params
 
 
 def _start_refusal(name: str, model):

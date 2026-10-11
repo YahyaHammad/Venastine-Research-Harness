@@ -2732,3 +2732,103 @@ def test_no_production_module_composes_its_own_secret_redaction():
         f"vocabulary than tool output, which is S07-01 exactly. Call "
         f"`redact_diagnostic_text` instead; it is the composition all five "
         f"existing sinks share, and it decides the order too (S07-05).")
+
+
+# ---------------------------------------------------------------------------
+# ---- Batch 146: what a registered callable may raise, stated once ---------
+# ---------------------------------------------------------------------------
+
+#: The spellings the six copies used, in the PRESENT tense. load_skill's
+#: copy survives because it is an account of what happened -- "raised",
+#: "aborted" -- and every clause of it is true; these say a raise ends a
+#: turn today, and dispatch() has contained a handler's exception since
+#: well before any of them was written.
+_THE_FALSE_CLAIM = (
+    "aborts the whole turn",
+    "takes down the whole turn",
+    "escapes the loop's ToolCallDenied",
+)
+
+#: Where the reason lives. Matched on the heading rather than on a sentence
+#: so that rewording the paragraph does not quietly empty this relation.
+_THE_ONE_COPY = "WHAT A CALLABLE REGISTERED BELOW MAY RAISE"
+
+
+def test_no_production_module_restates_why_a_handler_validates():
+    """The relation, and the reason it is a relation rather than six fixes.
+
+    Six modules in tools/builtin/ justified `params.get` over `params[]`
+    with the same mechanism and cited each other as the authority --
+    "pin.py's rule", "Same reasoning as load_skill's", "remember.py's
+    note". The practice is right; the mechanism was false, and had been
+    since `dispatch()` started containing a handler's exception "on
+    purpose". Seven cross-citing copies of one claim is seven chances to
+    disagree with the code and one shared reason to believe it.
+
+    What none of the six said is the half that was live in their own
+    surface: a GATE's raise is not contained, and file_ops' two gates were
+    not total. That is in the one copy now, which is what makes this worth
+    gating -- the paragraph a seventh copy would be competing with is the
+    one that carries the part that matters.
+    """
+    offenders = {}
+    for path in _production_python():
+        rel = os.path.relpath(path, ROOT).replace("\\", "/")
+        if rel == "tools/base.py":
+            continue
+        for number, line in _prose_lines(path):
+            for claim in _THE_FALSE_CLAIM:
+                if claim in line:
+                    offenders.setdefault(rel, []).append(
+                        f"{number}: {claim}")
+
+    assert not offenders, (
+        f"these say a raise out of a tool ends the turn, in the present "
+        f"tense: {offenders}. `dispatch()` contains a handler's exception "
+        f"-- what validating params actually buys is an error dict the "
+        f"model can read instead of a generic wrapper. The one copy of "
+        f"this, including the half about GATES that none of the six "
+        f"carried, is tools/base.py's "
+        f"\"{_THE_ONE_COPY}\" block; cite it rather than restating it.")
+
+
+def test_the_one_copy_is_where_the_relation_says_it_is():
+    """The guard on the guard, and it closes the loosening the test above
+    invites: deleting the paragraph in tools/base.py would make every
+    citation of it dangle and the relation would go on passing, because
+    passing means "nobody restated it" and an empty tree restates nothing.
+
+    So: the block exists, exactly once, in the file whose fields declare
+    the two callables it is about -- and it says both halves, because a
+    version that kept only the containment half would be the comment the
+    six modules had.
+    """
+    base = os.path.join(ROOT, "tools", "base.py")
+    with open(base, encoding="utf-8") as f:
+        body = f.read()
+
+    assert body.count(_THE_ONE_COPY) == 1, (
+        f"tools/base.py mentions {_THE_ONE_COPY!r} "
+        f"{body.count(_THE_ONE_COPY)} times; the relation above exempts "
+        f"this file on the strength of there being one copy here")
+    for half in ("A HANDLER'S exception is contained",
+                 "A GATE'S exception is NOT contained"):
+        assert half in body, (
+            f"tools/base.py no longer states {half!r}. The six copies this "
+            f"replaced all had the first half and none had the second, "
+            f"which is the whole reason the paragraph exists.")
+
+    # And the citations are real, so the exemption is paying for something.
+    citing = []
+    for path in _production_python():
+        rel = os.path.relpath(path, ROOT).replace("\\", "/")
+        if rel == "tools/base.py":
+            continue
+        with open(path, encoding="utf-8") as f:
+            if _THE_ONE_COPY in f.read():
+                citing.append(rel)
+    assert len(citing) >= 4, (
+        f"only {citing} cite the one copy, and six modules were corrected "
+        f"to point at it -- a relation nobody references is a relation "
+        f"about nothing")
+

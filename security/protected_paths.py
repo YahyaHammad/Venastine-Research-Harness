@@ -342,6 +342,12 @@ def readonly_mounts(workspace_real: str) -> list[str]:
 # project_docs.py unions this set into its own wider denylist rather than
 # re-spelling the segment.
 #
+# AND ONE COMPARISON, since batch 146 -- `folded_segments` below, because
+# the fact is not the spelling on its own but the spelling together with
+# how a filesystem will match it. Two of the three consumers had their own
+# comparison and only one of them folded case, which is not a thing either
+# file said; it was a thing you could only find by writing `.VENASTINE/`.
+#
 # KNOWN LIMITS, in the house style. The file tools DENY; the shell only
 # ever ASKS, because a token check that learned shell syntax would be a
 # parser whose bugs auto-approve (G2), and an approval prompt leaves the
@@ -361,16 +367,60 @@ def readonly_mounts(workspace_real: str) -> list[str]:
 PROTECTED_SEGMENTS = frozenset({".venastine"})
 
 
+def folded_segments(names) -> frozenset:
+    """`names` prepared for the comparison a filesystem will actually make.
+
+    THE ONE SPELLING OF THE FOLD (batch 146). Both consumers that compare a
+    path's segments against a denylist call this -- `protected_segment`
+    below and `project_docs._is_readable_doc` -- because the alternative is
+    what was there before: two comparisons, one of them case-sensitive, and
+    nothing in either file able to say they disagreed.
+
+    `casefold` rather than `lower`, which is the comparison Python offers
+    for "are these the same name to a human"; for ASCII segment names they
+    are identical and the difference costs nothing.
+    """
+    return frozenset(name.casefold() for name in names)
+
+
+#: PUBLIC, because `shell.py`'s raw-token branch compares against it too
+#: and a second `folded_segments(PROTECTED_SEGMENTS)` at that module's top
+#: would be one derived value computed twice.
+PROTECTED_SEGMENTS_FOLDED = folded_segments(PROTECTED_SEGMENTS)
+
+
 def protected_segment(resolved_path: str) -> str | None:
     """The protected segment *resolved_path* carries, or None.
 
     Callers pass a realpath'd path (file_ops' ``resolve_path``, the
     sandbox's ``_within``), so `..` travel and symlinks are already
-    collapsed: a link pointing at `.venastine/settings.json` arrives
-    here as the real thing, and on Windows so does a case-spelled one.
-    Split on both separators because a raw shell token may carry either.
+    collapsed: a link pointing at `.venastine/settings.json` arrives here
+    as the real thing. Split on both separators because a raw shell token
+    may carry either.
+
+    CASE-FOLDED ON EVERY PLATFORM, and the word "realpath" above is exactly
+    why it has to be (batch 146). This used to say that on Windows a
+    case-spelled path "arrives here as the real thing" too, and that is
+    true only where the path ALREADY EXISTS for realpath to canonicalise --
+    which is not the state a `write` is in. With no `.venastine/` yet,
+    `.VENASTINE/mcp.json` resolved to itself, carried no known segment, was
+    auto-approved, and created the protected directory under the spelling
+    the guard did not know. After that realpath canonicalised every later
+    path to the ON-DISK name, so BOTH spellings were admitted in that
+    project from then on, and the file `config_loader` opens at startup was
+    one of them. Measured, including the control: a project whose directory
+    was created lowercase refuses both.
+
+    Folding unconditionally rather than per platform is the fail-closed
+    direction and costs what it costs: on a case-SENSITIVE filesystem a
+    directory genuinely named `.VENASTINE` is now denied to the file tools
+    with no prompt and no override, because for them this list is the hard
+    deny rather than a reason to ask. The shell consumer only ever ASKS, so
+    there the same fold costs one prompt.
     """
     for part in re.split(r"[\\/]", resolved_path):
-        if part in PROTECTED_SEGMENTS:
+        if part.casefold() in PROTECTED_SEGMENTS_FOLDED:
+            # The spelling from the PATH, not from the list, so the refusal
+            # names what the caller actually wrote.
             return part
     return None

@@ -23,6 +23,7 @@ and has to say so, or it fills the picker with threads nobody will resume.
 """
 
 import os
+import subprocess  # nosec B404 - the link helper below shells out to `mklink`, a cmd builtin with no executable of its own
 from types import SimpleNamespace
 
 import pytest
@@ -119,24 +120,46 @@ def _hand_back_reversed(monkeypatch, project):
 def _fail_write_of(monkeypatch, filename):
     """Make one write fail the way a real one does (#95).
 
-    Patched at `open` rather than at `write_run` or `dispatch`, so the
+    Patched at the OPEN rather than at `write_run` or `dispatch`, so the
     whole chain runs: OSError -> write_run's error dict -> _write's
     InitError. Patching higher up would test the handler against a failure
     shape the handler was already written for.
+
+    BOTH OPENS, since batch 146. `write_project_doc` writes through
+    `json_store.write_text_atomic` now -- for the hardlink, which a
+    resolved path cannot see -- so the bytes go through `os.open` into
+    `<name>.<hex>.tmp` and are renamed onto the document, and a hook on
+    `builtins.open` alone stopped firing. Five tests here went green
+    because the failure they inject no longer happened, which is the
+    reason this covers the temp name and keeps the old arm: a helper that
+    fires only at the one call the implementation happens to make today
+    has an expiry date nobody can see.
     """
     import builtins
 
     real_open = builtins.open
+    real_os_open = os.open
+
+    def _is_the_target(path) -> bool:
+        if not isinstance(path, (str, os.PathLike)):
+            return False
+        base = os.path.basename(os.fspath(path))
+        return base == filename or (base.startswith(filename + ".")
+                                    and base.endswith(".tmp"))
 
     def _open(path, *args, **kwargs):
         mode = args[0] if args else kwargs.get("mode", "r")
-        if (isinstance(path, (str, os.PathLike))
-                and os.path.basename(os.fspath(path)) == filename
-                and "w" in mode):
+        if _is_the_target(path) and "w" in mode:
             raise OSError(28, "No space left on device")
         return real_open(path, *args, **kwargs)
 
+    def _os_open(path, flags, *args, **kwargs):
+        if _is_the_target(path) and flags & (os.O_WRONLY | os.O_RDWR):
+            raise OSError(28, "No space left on device")
+        return real_os_open(path, flags, *args, **kwargs)
+
     monkeypatch.setattr(builtins, "open", _open)
+    monkeypatch.setattr(os, "open", _os_open)
 
 
 def _generate(**overrides):
@@ -384,6 +407,247 @@ class TestWhereItWrites:
         assert doc_path(_project_root(), "AGENTS.md").startswith(
             os.path.realpath(str(project)))
 
+
+class TestTheWriteResolvesBeforeItWrites:
+    """Batch 146. The write path had no realpath containment while the read
+    path in the same module did.
+
+    The module's invariant, quoted from its own docstring: the destination
+    is derived from a NAME, "so it cannot be aimed elsewhere", and
+    ARCHITECTURE.md calls that "structural rather than validated". A
+    document name that is a LINK aims it elsewhere. Concrete trigger: a
+    cloned project carrying `ARCHITECTURE.md -> ~/.bashrc`, which git
+    stores natively, a user running /init, and one consent naming the
+    in-project path.
+
+    TWO MECHANISMS, because they need two different fixes and only one of
+    them is a resolution problem:
+
+      a link POINTING OUT is caught by resolving the destination, which is
+      what `read_run` has always done;
+
+      a HARDLINK is not caught by any resolution -- `realpath` returns the
+      path it was given and `islink` is False -- and is caught by writing
+      through a temp file and replacing the name, which is the house
+      pattern `json_store` already documents as "replaces rather than
+      follows".
+    """
+
+    def _link_out(self, project, name, target):
+        """A doc name that points outside the project, by whichever
+        mechanism this machine allows. The symlink arm runs under WSL and
+        on POSIX CI; the junction arm runs here.
+        """
+        destination = os.path.join(str(project), name)
+        try:
+            os.symlink(target, destination)
+            return "symlink"
+        except (OSError, NotImplementedError, AttributeError):
+            pass
+        if os.path.isdir(target) and os.name == "nt":
+            # ARGV, not a shell string: `os.system` with a format string is
+            # the shape bandit flags B605 HIGH on, and it was right to --
+            # these are tmp_path names here, but a test helper is the last
+            # place worth arguing that from. The absolute COMSPEC keeps it
+            # off B607 as well, and `mklink` is a cmd BUILTIN so it needs
+            # the interpreter rather than an executable of its own.
+            comspec = os.environ.get("COMSPEC")
+            if comspec and os.path.isabs(comspec):
+                done = subprocess.run(  # nosec B603 - fixed argv through an absolute COMSPEC, with tmp_path names
+                    [comspec, "/c", "mklink", "/J", destination, target],
+                    capture_output=True, check=False)
+                if done.returncode == 0:
+                    return "junction"
+        pytest.skip("no link mechanism available for this user")
+
+    def test_a_name_that_leaves_the_project_is_not_one_of_its_documents(
+            self, project, tmp_path):
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "kept.txt").write_text("ORIGINAL\n", encoding="utf-8")
+        kind = self._link_out(project, "FINDINGS.md", str(outside))
+
+        result = project_docs.write_run(
+            {"name": "FINDINGS.md", "content": "# landed\n"})
+
+        assert "error" in result, f"({kind}) {result}"
+        assert "outside the project" in result["error"]
+        assert (outside / "kept.txt").read_text(encoding="utf-8") == (
+            "ORIGINAL\n")
+
+    def test_the_consent_says_it_will_refuse_rather_than_naming_a_path(
+            self, project, tmp_path):
+        """The approval is where this defect became visible: the notice
+        rendered the unresolved join, so the consent named a file the bytes
+        would not land on. It now says the write will not happen, which is
+        the only honest thing to put in front of a person for a call that
+        cannot succeed.
+        """
+        outside = tmp_path / "outside2"
+        outside.mkdir()
+        self._link_out(project, "SOURCES.md", str(outside))
+
+        notice = project_docs.approval_notice(
+            {"name": "SOURCES.md", "content": "x"}, None)
+        assert "REFUSE" in notice, notice
+        assert "resolves outside the project" in notice, notice
+
+    def test_the_notice_is_unchanged_for_an_ordinary_document(self, project):
+        """The control. `_project_root()` is already a realpath, so for a
+        name that is not a link the resolved path IS the join and the
+        prompt reads exactly as it did -- which is what keeps this fix from
+        being a change to every approval anyone sees.
+        """
+        notice = project_docs.approval_notice(
+            {"name": "AGENTS.md", "content": "12345"}, None)
+        assert notice == (
+            "Create %s (5 characters)." % project_docs.doc_path(
+                os.path.realpath(str(project)), "AGENTS.md"))
+
+        project_docs.write_run({"name": "AGENTS.md", "content": "hello"})
+        again = project_docs.approval_notice(
+            {"name": "AGENTS.md", "content": "12345"}, None)
+        assert again.startswith("Overwrite "), again
+
+    def test_a_hardlinked_document_name_is_replaced_not_followed(
+            self, project, tmp_path):
+        """The half no resolution can answer, and the measurement that
+        settled the fix: the report's suggested shape -- resolve the
+        destination -- ADMITS this write, because `_resolve_in_project`
+        says the hardlink is inside the project, which it is. The other
+        name is a second name for the same bytes, and replacing rather
+        than truncating is what spares it.
+        """
+        outside = tmp_path / "outside3.md"
+        outside.write_text("ORIGINAL\n", encoding="utf-8")
+        destination = os.path.join(str(project), "METHODOLOGY.md")
+        try:
+            os.link(str(outside), destination)
+        except OSError:                                   # pragma: no cover
+            pytest.skip("hardlinks unavailable here")
+
+        # The containment test cannot see it -- stated as an assertion so
+        # that nobody reads the pass below as the resolution working.
+        assert project_docs._resolve_in_project(
+            os.path.realpath(str(project)), "METHODOLOGY.md") is not None
+
+        result = project_docs.write_run(
+            {"name": "METHODOLOGY.md", "content": "# landed\n"})
+
+        assert "result" in result, result
+        assert outside.read_text(encoding="utf-8") == "ORIGINAL\n", (
+            "the write followed the hardlink out of the project")
+        with open(destination, "rb") as fh:
+            assert fh.read() == b"# landed\n"
+
+
+class TestTheDocumentGetsTheBytesItWasGiven:
+    """Batch 146. `write_project_doc` opened with mode "w" and no
+    `newline=`, so on Windows every "\\n" became "\\r\\n".
+
+    Why this is the severity it is: the diff the user approves is built
+    from text read with universal newlines and compared against the model's
+    "\\n" body, so it shows the one line that changed -- and then the write
+    moved every line ending in the file. Measured on a six-line LF
+    document: one line changed, five of six lines' bytes changed. This
+    repository's own AGENTS.md is 2,988 LF lines.
+    """
+
+    def test_an_lf_document_stays_an_lf_document(self, project):
+        body = "# Title\n\nOne line.\nAnother line.\n"
+        result = project_docs.write_run({"name": "AGENTS.md",
+                                         "content": body})
+        assert "result" in result, result
+        with open(os.path.join(str(project), "AGENTS.md"), "rb") as fh:
+            raw = fh.read()
+        assert raw == body.encode("utf-8"), raw
+        assert b"\r\n" not in raw
+
+    def test_a_crlf_body_is_written_as_crlf(self, project):
+        """The other direction, which is what makes the first assertion
+        about TRANSLATION rather than about a platform: the tool writes
+        what it was handed either way.
+        """
+        body = "# Title\r\n\r\nWindows body.\r\n"
+        project_docs.write_run({"name": "AGENTS.md", "content": body})
+        with open(os.path.join(str(project), "AGENTS.md"), "rb") as fh:
+            assert fh.read() == body.encode("utf-8")
+
+    def test_the_approved_diff_is_the_bytes_that_land(self, project):
+        """The property, rather than the mechanism. Rewrite one line of a
+        multi-line LF document and assert that exactly one line's bytes
+        differ -- which is what the person who approved a one-line diff
+        was promised.
+        """
+        before = "alpha\nbravo\ncharlie\ndelta\n"
+        path = os.path.join(str(project), "ARCHITECTURE.md")
+        with open(path, "wb") as fh:
+            fh.write(before.encode("utf-8"))
+
+        after = before.replace("charlie", "CHARLIE")
+        project_docs.write_run({"name": "ARCHITECTURE.md", "content": after})
+
+        with open(path, "rb") as fh:
+            landed = fh.read()
+        changed = [i for i, (a, b) in enumerate(
+            zip(before.encode().split(b"\n"), landed.split(b"\n")))
+            if a != b]
+        assert changed == [2], (
+            f"lines whose bytes changed: {changed} -- the approval was "
+            f"shown one")
+
+
+class TestTheReadDenylistFoldsCaseToo:
+    """Batch 146. `_DENIED_SEGMENTS` unions `PROTECTED_SEGMENTS` in -- "so
+    the one fact cannot drift between its three consumers" -- and then
+    compared it with no case folding, which is the only thing left for two
+    consumers of one fact to disagree about.
+
+    `read_project_doc` is enabled by DEFAULT, so this is the half of the
+    fold that needs no config edit to reach: in a project whose directory
+    was created under a non-canonical case, `.VENASTINE/agents/foo.md` was
+    a readable `.md`.
+    """
+
+    @pytest.mark.parametrize("path", [
+        ".VENASTINE/notes.md",
+        ".VeNaStInE/agents/worker.md",
+        ".GIT/COMMIT_EDITMSG.txt",
+        "NODE_MODULES/pkg/README.md",
+        "__PYCACHE__/notes.md",
+    ])
+    def test_a_case_spelled_denied_segment_is_still_denied(self, project,
+                                                           path):
+        result = project_docs.read_run({"path": path})
+        assert "error" in result, result
+        assert "not a readable project document" in result["error"]
+
+    def test_the_canonical_spellings_are_denied_as_they_always_were(
+            self, project):
+        """The control: the fold widened the comparison and did not replace
+        it.
+        """
+        for path in (".venastine/notes.md", ".git/x.txt",
+                     "node_modules/pkg/README.md"):
+            assert "error" in project_docs.read_run({"path": path})
+
+    def test_an_ordinary_document_is_still_readable(self, project):
+        """And the control that matters most: folding case must not have
+        turned the denylist into a denylist of everything.
+        """
+        result = project_docs.read_run({"path": "README.md"})
+        assert "content" in result, result
+
+    def test_the_public_test_agrees_with_the_private_one(self, project):
+        """`is_readable_doc` is what /init's manifest prints, and the
+        module's own docstring says the point of exporting it is that the
+        listing and the tool cannot disagree. A fold applied in one and not
+        the other would re-open that seam.
+        """
+        root = os.path.realpath(str(project))
+        for path in (".VENASTINE/notes.md", "NODE_MODULES/pkg/README.md"):
+            assert project_docs.is_readable_doc(root, path) is False
+        assert project_docs.is_readable_doc(root, "README.md") is True
 
 class TestTheDocumentSets:
 

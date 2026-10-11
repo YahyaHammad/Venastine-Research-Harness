@@ -2,6 +2,8 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Optional
 
+from pydantic import ValidationError
+
 # ROADMAP_v2 §25 (R13). How far approving a tool BY NAME goes -- the
 # question asked before any call exists, by the §18 subagent sign-off and
 # by the §25 pipeline grant.
@@ -67,6 +69,76 @@ BUDGET_HUMAN = "human"
 BUDGETS = frozenset({BUDGET_COMPUTE, BUDGET_IO, BUDGET_HUMAN})
 
 
+# ===========================================================================
+# WHAT A CALLABLE REGISTERED BELOW MAY RAISE -- stated ONCE, here, because it
+# was stated six times elsewhere and all six copies were wrong (batch 146).
+#
+# NO PROVIDER VALIDATES TOOL INPUTS AGAINST THE SCHEMA. `params` is whatever
+# the model emitted: a key may be missing, misspelled, or present with a
+# value of the wrong type. `{"path": null}` is a well-formed JSON object, so
+# the arguments layer passes it and `params.get("path", "")` returns None
+# rather than the default -- the key IS there.
+#
+# A HANDLER'S exception is contained. tools/registry.py wraps the handler
+# call "on purpose", under a comment naming the failure that bought it ("a
+# raising tool used to take the whole run down with it"), and returns
+# `{"error": "<tool> failed: ..."}`. So a bare KeyError in a `run()` has not
+# ended a turn since that landed, and six comments in tools/builtin/ saying
+# it "escapes the loop's ToolCallDenied handler and aborts the whole turn"
+# were describing a tree that no longer existed. The practice they defend is
+# still right, for a reason that survives the containment: an error dict the
+# model can READ beats a generic wrapper it cannot act on, which is what the
+# unknown-name branch in load_skill already does two lines from its comment.
+#
+# A GATE'S exception is NOT contained, and that is the half nobody wrote
+# down. `approval_check` and `refusal_check` run ABOVE the handler boundary;
+# core/loop.py calls `approval_needed` and `refusal_reason` with no `try`,
+# and the `try` around `dispatch()` catches only ToolCallDenied. Sequentially
+# the exception leaves `_run` and ends the turn; in a research pass it
+# propagates into the pipeline handler that records a durable
+# `status='failed'`; in a PARALLEL batch the identical input becomes one
+# call's error result. So the same malformed argument kills a turn alone and
+# is recoverable beside siblings.
+#
+# THEREFORE: a gate must be TOTAL over any JSON object. shell.py has said so
+# at its own gate for a long time -- "Total, like everything else the gate
+# calls: `params['command']` is whatever the model emitted" -- and batch 146
+# found file_ops' two gates were the one exception in the tree, reaching
+# `os.path.join(WORKSPACE_ROOT, None)` before any prompt and any handler.
+#
+# AND A REFUSAL MUST NOT ECHO A VALUE. The refusal path returns its reason
+# as the result directly, which is the one result path that does NOT pass
+# through the output redactor -- so a refusal that interpolated the model's
+# input would be a sink the scanner never sees. `invalid_params` below
+# renders the field and the problem and never the value, which is the shape
+# shell_sessions chose first.
+# ===========================================================================
+
+def invalid_params(tool_name: str, model, params) -> Optional[str]:
+    """Why `params` would not validate against `model`, in one line, or None.
+
+    For a `refusal_check`, which is what makes a mistyped argument a refusal
+    the model can correct instead of an exception above the containment. The
+    handler's own `model(**params)` stays where it is: this is the
+    pre-approval answer, and base.py's rule for the segment guards applies
+    here too -- the check above is not the enforcement.
+
+    `err['loc']` and `err['msg']` only. `str(e)` would carry `input_value`,
+    and the block above says why that matters: this string becomes the tool
+    result without passing the redactor.
+    """
+    if not isinstance(params, dict):
+        return f"Invalid arguments for {tool_name}: expected an object."
+    try:
+        model(**params)
+    except ValidationError as e:
+        problems = "; ".join(
+            f"{'.'.join(str(part) for part in err['loc']) or 'arguments'}: "
+            f"{err['msg']}" for err in e.errors())
+        return f"Invalid arguments for {tool_name}: {problems}."
+    return None
+
+
 @dataclass
 class ToolSpec:
     name: str  # Tool name
@@ -83,6 +155,10 @@ class ToolSpec:
     # invisible to config/context-level approval settings entirely, which
     # would have silently voided agent approval_overrides for read/write/
     # edit/shell -- the four tools where per-agent tightening matters most.
+    #
+    # TOTAL over any JSON object -- see "WHAT A CALLABLE REGISTERED BELOW MAY
+    # RAISE" at the top of this file. A predicate that cannot answer should
+    # answer True: ASKING is the fail-closed direction for this one.
     approval_check: Optional[Callable[[str, dict], bool]] = None
     # Optional "is this tool meaningful right now?" predicate, consulted by
     # registry.schemas() when deciding what to advertise to the model.
@@ -135,6 +211,11 @@ class ToolSpec:
     #
     # A property of the tool rather than a name hard-coded into the
     # loop, for exactly the reason grant_scope and request_kind are.
+    #
+    # TOTAL over any JSON object, like approval_check above it -- see "WHAT A
+    # CALLABLE REGISTERED BELOW MAY RAISE" at the top of this file, which is
+    # the one copy of why, and `invalid_params` beside it, which is the one
+    # copy of how.
     refusal_check: Optional[Callable[[dict, object], Optional[str]]] = None
     # Optional extra text shown in the approval prompt, above the params.
     # Signature: (params, context) -> str. Lets a tool explain what

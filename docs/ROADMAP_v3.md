@@ -43,6 +43,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
+- **§63. The write that did not land where the consent said** — **(BUILT in batch 146)** (a document NAME that is a link wrote outside the project under a consent naming the inside path, every write path translated line endings so the bytes that landed were not the bytes approved, and the one hard deny compared a path segment with exact case)
 - **§61. Stopping a turn that is already running** — **(BUILT in batch 124)** (a turn going the wrong way is watched to its end or the harness is killed: nothing anywhere stops one, and both keys that look like they would end the process instead) (there is no way to drive this harness except by sitting in front of it, and the open standard that would change that has no concept of the approval gate this project is built around)
 
 ---
@@ -1758,3 +1759,109 @@ implemented that faithfully. The owner ruled to reverse it.
   that can never fire, so `test_every_shipped_spawn_target_is_itself_spawnable`
   sweeps the whole roster for that rather than asserting it of `plan` by
   name, which is how A13 broke.
+
+## §63. The write that did not land where the consent said
+
+**Built in batch 146**, from the review marathon's file-and-document-tools
+surface: seven `FIX-NOW` findings across `tools/builtin/file_ops.py`,
+`tools/builtin/project_docs.py` and `security/protected_paths.py`, plus one
+defect no report names.
+
+Three of the answers are DECISIONS rather than fixes, and the owner ruled all
+three. Two of them were ruled against the reports' own suggested shapes,
+because measuring the suggestion first is what showed the suggestion was
+half of one.
+
+### What the code did before this
+
+- **A document name that was a link wrote outside the project.**
+  `project_docs.write_run` joined the allowlisted name onto the project root
+  and opened it -- no `realpath`, no `islink` -- while `read_run` in the same
+  module resolved before deciding and had always done so. `approval_notice`
+  rendered the unresolved join, so the consent named the inside path and the
+  bytes went to the link target. git stores symlinks natively, so
+  `ARCHITECTURE.md -> ~/.bashrc` in a cloned project needs no privilege to
+  arrive.
+- **The suggested fix for that admits the mechanism the report's own probe
+  used.** The report drove the harm through a HARDLINK, because this machine
+  cannot create symlinks, and then proposed resolving the destination.
+  Measured: `os.path.realpath` returns a hardlinked path unchanged,
+  `os.path.islink` is False, and `_resolve_in_project` answers "inside the
+  project" -- correctly, because it is. A hardlink is not a link to
+  anything; it is the file.
+- **And the same hole reached the one hard deny**, which no report names. A
+  `write` through a hardlinked name put an `mcpServers` object into a
+  protected `settings.json` whose direct spelling is refused -- the file
+  whose own rationale says it "names commands the harness spawns at
+  startup". Found by asking S17's question of S04's file.
+- **All three write paths translated line endings.** Mode `"w"` with no
+  `newline=`, so every `"\n"` became `os.linesep`: `write` could not
+  reproduce bytes it had just read, and `edit` replacing one span of an LF
+  file rewrote every line ending in it. Measured on a six-line document, one
+  line changed and five of six lines' bytes changed -- under an approval that
+  had been shown a diff of the one.
+- **The suggested fix for THAT breaks a case that was correct.** It said
+  `newline=""` on the three writes alone would leave `edit` "preserving
+  whatever the file already had". Driven across LF, CRLF and mixed files, it
+  does the opposite: `edit` read with universal newlines, so `content` was LF
+  in memory whatever the file held, and writing that back converted a CRLF
+  file to LF. The same defect pointing the other way.
+- **The one hard deny compared a segment with exact case,** and its docstring
+  claimed the Windows case was handled upstream by `realpath`. True only for
+  a path that already EXISTS. With no `.venastine/` yet, `.VENASTINE/mcp.json`
+  resolved to itself, carried no known segment, was auto-approved, and
+  created the protected directory under the spelling the guard did not know
+  -- after which `realpath` canonicalised to the ON-DISK name and BOTH
+  spellings were admitted in that project permanently.
+- **`read`'s `lines_returned` counted the lines it CHOSE.** The character cut
+  ran afterwards: 500 reported, 313 delivered, and the clamp branch's own
+  message said "Use offset=500 to read further" -- 187 lines and 29,920
+  characters reachable by no call the model could construct.
+- **Both file_ops gates were the one pair in the tree not total over a JSON
+  object.** They run ABOVE `dispatch()`'s containment, and
+  `os.path.join(WORKSPACE_ROOT, None)` on a well-formed `{"path": null}`
+  raised out of the registry: a lost turn alone, a durable `status='failed'`
+  in a research pass, one call's error result in a parallel batch. Swept
+  afterwards: 1,572 gate calls over 30 tools, and after the fix nothing
+  raises for a wrong-typed value anywhere.
+- **Six modules justified `params.get` with a mechanism that was false,**
+  citing each other as the authority, and none of them mentioned the layer
+  where a raise does still end the turn -- which was the layer in their own
+  surface.
+
+### Design Decisions Record — §63 (A17-A19)
+
+| id | decision |
+|---|---|
+| **A17** | **A write REPLACES a name rather than writing through it**, via `json_store.write_text_atomic` -- so `os.replace` is load-bearing for a security property and not only for durability. Chosen over the report's containment-only shape, which admits a hardlink, and over refusing a destination with `st_nlink > 1`, which keeps the link and refuses a layout that may be deliberate. This is the house pattern already: `json_store` exists because four stores had four copies of the dance, and `mcp_client`'s -- holding a record of CONSENT -- wrote with a bare `open(path, "w")`, so the file tools' text write became the FIFTH consumer of one private helper rather than a sixth copy. What it costs is stated where the function lives and filed as register item 92: on Windows a destination another process merely has OPEN fails the rename, so a `/init` write of a document the user has in an editor can now fail where it previously overwrote. A write that fails loudly beats one that half-succeeds, and the alternative is item 90's write half reopened. **Resolution is still required and still does the other half** -- a symlink or junction pointing OUT is refused before any of this, in the sense the unknown-name branch means, and the approval notice renders the resolved path so a consent cannot name a file the bytes will not reach |
+| **A18** | **A protected path segment is compared CASE-FOLDED on every platform**, in the one place the segment is spelled (`protected_paths.folded_segments`), read by all three consumers -- `file_ops`' deny, `project_docs`' wider denylist, and `shell`'s prompt, including its RAW-TOKEN branch, which `protected_segment` does not reach and which is the branch for a token `realpath` cannot help with. Unconditional rather than per-platform because it is the fail-closed direction and a case-insensitive mount on Linux is a real configuration, and because a platform test is a second thing the three consumers each have to get right -- which is the drift the "ONE LIST, THREE CONSUMERS" discipline in that file exists to prevent. **The cost is stated correctly rather than as the report states it:** for the file tools this list is the hard DENY, so a false positive costs a refusal with no prompt and no override, not "one prompt" -- a directory genuinely named `.VENASTINE` on a case-sensitive filesystem is now unreachable to `read`, `write` and `edit`. For the shell consumer, which only ever ASKS, the same fold does cost one prompt |
+| **A19** | **`edit` matches the file's real bytes, and retries an LF-spelled span translated.** Reading and writing with `newline=""` makes the uniqueness contract a statement about the bytes on disk, which is what the contract implies and what keeps a mixed-ending file (this repository has one) byte-identical outside the replaced span. The retry is there because the STRICT version is unactionable, which was measured rather than argued: `read_run` does `f.read().splitlines()` and then joins with `"\n"`, so every file reaches the model as LF whatever it holds, and a model cannot see a CRLF file's endings through any tool here. A matcher that compared bytes only would refuse every multi-line edit of such a file, naming text the model has no way to produce. So an `old_text` containing `"\n"` that finds no match is retried with its endings translated, and `new_text` moves with it. **The schema's contract sentence changes with the fix**: "an exact, uniquely-matching span" becomes exact-modulo-line-endings, and the count is taken after the translation, so two CRLF-separated copies of an LF-spelled span are two matches and the edit is refused |
+
+### What §63 deliberately does not change
+
+- **`MAX_READ_LINES` and `MAX_READ_CHARS` are untouched.** The cut moved to a
+  LINE boundary, because `offset` and `count` are in lines and a
+  character-aligned cut makes the last line partial and the resume point
+  lossy. The ceilings themselves are governed by
+  `test_every_documented_ceiling_matches_the_live_config` and are fine.
+- **One case still loses data, and says so.** A single line longer than the
+  whole ceiling is delivered CUT, because keeping whole lines only would
+  return nothing and leave the model nowhere to go. The message says the rest
+  of that line is not reachable by offset -- the honest answer for a tool
+  whose paging unit is a line, and preferable to a byte-offset parameter on a
+  globally-denied tool.
+- **The READ half of the hardlink is open**, as register item 90. Nothing
+  available here distinguishes a hardlink from a file, so the deny cannot see
+  it; the atomic write is what closes the write half, and the tests assert on
+  the protected file's BYTES rather than on the tool's answer for exactly
+  that reason.
+- **`PROTECTED_SEGMENTS`' membership is unchanged**, and so is the rule that
+  the file tools DENY while the shell ASKS. A18 is about the comparison, not
+  about the list or about either consumer's policy.
+- **No containment was added inside `registry.refusal_reason` or
+  `registry.approval_needed`.** The S04 report declines that and names the
+  reason on both sides: a swallowed refusal fails OPEN where a swallowed
+  notice fails closed. The gates were made total instead, which is what
+  `shell.py`'s own gate has said for a long time -- "total, like everything
+  else the gate calls" -- and `tools/base.py` now carries the one copy of
+  why, including the half about gates that none of the six copies had.

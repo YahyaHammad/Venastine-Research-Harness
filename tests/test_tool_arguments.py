@@ -29,6 +29,7 @@ OpenAI-compatible branch's alone. That is the branch a local model
 server takes, which is where a truncated tool call is likeliest.
 """
 
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -443,3 +444,213 @@ def test_the_parse_error_never_reaches_storage(fake_storage):
     assert persisted, "the malformed call is still persisted as a tool_use"
     for tc in persisted:
         assert set(tc) == {"id", "name", "input"}
+
+
+# ===========================================================================
+# ---- The gates' totality --------------------------------------------------
+# ===========================================================================
+
+#: Every wrong-typed value a well-formed JSON object can carry. `True` is in
+#: here on purpose: `isinstance(True, int)` is True in Python, so a bool
+#: passes an int check, and pin.py already met that one from the other side.
+_WRONG_VALUES = (None, 123, ["x"], {"k": 1}, True, 1.5)
+
+#: And valid JSON that is not an object at all. `core/client.py` converts
+#: this to a parse error before dispatch ever sees it, so the gates are
+#: protected by a layer ABOVE rather than by anything they do -- which is
+#: the kind of claim this relation exists to stop resting on.
+_NOT_AN_OBJECT = (None, 123, "a string", ["x"])
+
+
+def _statically_registered():
+    """Every tool whose name exists before a connection does.
+
+    `mcp__*` tools are named at connect time, and are exempt here for the
+    reason base.py exempts them from the grant-policy and budget asserts.
+    """
+    from tools.registry import registry
+    return sorted(n for n in registry._tools if not n.startswith("mcp__"))
+
+
+def _declared_properties(tool):
+    from tools.registry import registry
+    schema = (registry._tools[tool].schema or {}).get("input_schema") or {}
+    return sorted(schema.get("properties") or {})
+
+
+class TestTheGatesAreTotalOverWhateverTheModelEmitted:
+    """Batch 146, and the merged finding S03/S04 raised from both ends.
+
+    `approval_needed` and `refusal_reason` run ABOVE dispatch()'s handler
+    containment, and `core/loop.py` calls both with no `try` -- the `try`
+    around dispatch catches only ToolCallDenied. So an exception out of
+    either leaves `_run` and ends the turn sequentially, and in a research
+    pass propagates into the handler that records a durable
+    `status='failed'`; in a parallel batch the identical input becomes one
+    call's error result instead. The same malformed argument killed a turn
+    alone and was recoverable beside siblings.
+
+    `file_ops` was the one module in the tree whose two gates were not
+    total: `os.path.join(WORKSPACE_ROOT, None)` on a `{"path": null}`,
+    which is a well-formed object, so nothing above it had anything to
+    object to.
+
+    THE ASSERTION IS ON THE ANSWER, not merely on the absence of a raise.
+    A predicate that returned None rather than a bool would satisfy "did
+    not raise" and read as "no approval needed" -- a silent auto-approve is
+    the failure this layer cannot afford, so the type of the answer is part
+    of the contract.
+    """
+
+    def test_a_wrong_typed_value_in_any_declared_property_is_answered(self):
+        from tools.registry import registry
+
+        broken, checked = {}, 0
+        for tool in _statically_registered():
+            for prop in _declared_properties(tool):
+                for bad in _WRONG_VALUES:
+                    params = {prop: bad}
+                    checked += 2          # one call to each gate
+                    try:
+                        answer = registry.approval_needed(tool, params)
+                        assert isinstance(answer, bool), (
+                            f"{tool}.approval_needed returned "
+                            f"{answer!r}, and a non-bool here reads as "
+                            f"'no approval needed'")
+                        reason = registry.refusal_reason(tool, params)
+                        assert reason is None or isinstance(reason, str)
+                    except AssertionError:
+                        raise
+                    except Exception as exc:
+                        broken[f"{tool}({prop}={bad!r})"] = (
+                            f"{type(exc).__name__}: {exc}")
+
+        assert not broken, (
+            f"these gates raised instead of answering, above the layer that "
+            f"contains a handler's exception: "
+            f"{dict(sorted(broken.items())[:8])}")
+        # The sweep ran. Without this the relation passes trivially the day
+        # `_statically_registered` or `_declared_properties` stops finding
+        # anything -- item 6's shape, and batch 145 met it for real.
+        assert checked > 1000, (
+            f"only {checked} gate calls were made, so this relation is not "
+            f"sweeping what it claims to")
+
+    def test_params_that_are_not_an_object_are_answered(self):
+        """The shape no report names, found by sweeping for the one they do.
+
+        Seven gate/tool pairs raised on it before batch 146: the three file
+        tools' and the three shell tools' approval checks, and
+        spawn_subagent's refusal. Unreachable from a model, because
+        `core/client.py` turns non-object arguments into a parse error and
+        says so in those words -- "dispatch() would be handed something
+        that is not params". Closed anyway, because the alternative was
+        this relation carrying seven exemptions, and a guard with
+        exemptions is a guard that rots.
+        """
+        from tools.registry import registry
+
+        broken = {}
+        for tool in _statically_registered():
+            for bad in _NOT_AN_OBJECT:
+                try:
+                    assert isinstance(registry.approval_needed(tool, bad),
+                                      bool)
+                    reason = registry.refusal_reason(tool, bad)
+                    assert reason is None or isinstance(reason, str)
+                except AssertionError:
+                    raise
+                except Exception as exc:
+                    broken[f"{tool}({bad!r})"] = f"{type(exc).__name__}: {exc}"
+
+        assert not broken, (
+            f"these gates raised on params that are not an object: "
+            f"{dict(sorted(broken.items())[:8])}")
+
+    def test_the_relation_knows_which_tools_it_is_relating(self):
+        """The guard on the guard, in both directions.
+
+        A registry that came back empty, or a property scan that stopped
+        matching the schema shape, would make both tests above pass over
+        nothing at all. So: a floor on the roster, the four tools this
+        batch is about by name, and a property scan that really finds
+        their parameters.
+        """
+        tools = _statically_registered()
+        assert len(tools) >= 25, (
+            f"only {len(tools)} statically registered tools were found, so "
+            f"the sweep above is sweeping a roster it cannot see: {tools}")
+        for expected in ("read", "write", "edit", "write_project_doc",
+                         "shell", "spawn_subagent"):
+            assert expected in tools, (
+                f"{expected} is not in the swept roster: {tools}")
+        assert _declared_properties("read") == ["count", "offset", "path"]
+        assert "content" in _declared_properties("write")
+
+    def test_a_non_string_path_is_a_readable_refusal_not_an_exception(self):
+        """The finding itself, at the one gate that answers it.
+
+        Not merely "a dict came back": the message has to name the FIELD and
+        the problem, because the whole argument for making this a refusal
+        rather than letting the handler's own validation produce a generic
+        `"<tool> failed: ..."` wrapper is that the model can act on it.
+        """
+        from tools.registry import registry
+
+        for tool in ("read", "write", "edit"):
+            reason = registry.refusal_reason(tool, {"path": None})
+            assert reason is not None
+            assert tool in reason and "path" in reason, reason
+            assert "valid string" in reason, reason
+
+    def test_the_refusal_does_not_echo_the_value_it_rejected(self):
+        """The refusal path returns its reason as the result DIRECTLY, which
+        is the one result path that does not pass through
+        `check_output_policy`. So a refusal that interpolated the model's
+        input would be a sink the output scanner never sees -- which is why
+        `invalid_params` renders `loc` and `msg` and never `input_value`,
+        and why `str(e)` would have been the wrong one line of code.
+        """
+        from tools.registry import registry
+
+        secret = "sk-ant-api03-" + "b" * 32
+        reason = registry.refusal_reason("read", {"path": [secret]})
+        assert reason is not None
+        assert secret not in reason, reason
+        assert "b" * 32 not in reason, reason
+
+    def test_dispatch_contains_it_too_for_the_three_file_tools(self, tmp_path,
+                                                               monkeypatch):
+        """The merged finding's own words: drive `dispatch` and assert that
+        nothing but an error dict escapes. Only the file tools are
+        dispatched here -- the roster includes tools that spawn a child,
+        run a command and block on a person, and sweeping dispatch over
+        those would be testing something else entirely.
+        """
+        import config
+        from tools.builtin import file_ops
+        from tools.registry import registry
+
+        monkeypatch.setattr(file_ops, "WORKSPACE_ROOT",
+                            os.path.realpath(str(tmp_path)))
+        monkeypatch.setattr(
+            config, "ToolPermissions",
+            lambda: type("P", (), {"read": True, "write": True,
+                                   "edit": True})())
+        monkeypatch.setattr(
+            config, "ToolApprovals",
+            lambda: type("A", (), {"read": False, "write": False,
+                                   "edit": False})())
+
+        for tool in ("read", "write", "edit"):
+            for bad in _WRONG_VALUES:
+                result = registry.dispatch(tool, {"path": bad})
+                assert isinstance(result, dict), result
+                assert "error" in result, result
+
+        # THE CONTROL: the same dispatch still answers a real call, so the
+        # rows above are not passing because everything is refused.
+        (tmp_path / "notes.txt").write_text("hello\n", encoding="utf-8")
+        ok = registry.dispatch("read", {"path": "notes.txt"})
+        assert ok.get("content") == "hello"
+

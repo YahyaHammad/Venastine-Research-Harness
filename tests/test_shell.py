@@ -2584,6 +2584,67 @@ class TestProtectedSegmentsAlwaysAsk:
         assert _asks("cat notes.txt") is False
         assert _asks("ls -la") is False
 
+    @pytest.mark.parametrize("spelling", [
+        ".VENASTINE", ".VeNaStInE", ".Venastine"])
+    def test_a_case_spelled_reference_is_caught_too(self, _tiered, spelling):
+        """Batch 146. The segment list is compared case-folded now, and
+        this classifier has TWO branches that read it: the raw token, and
+        the realpath of the token. Only the second was reached through
+        `protected_segment`, so folding there left the raw branch
+        case-sensitive -- and the raw branch is the one for a token that
+        does not resolve to anything, which is where a spelling the
+        filesystem would accept is hardest to see.
+
+        An approval here rather than a deny, which is what makes widening
+        it safe: this classifier only ever ADDS a prompt.
+
+        THE THIRD CASE IS THE ONE THAT DISCRIMINATES, and the mutation
+        pass is why it is here: the first two are answered by the resolved
+        branch as well, because with no such directory on disk `realpath`
+        returns the path unchanged and the segment is still in it. A
+        traversal that CANCELS the segment resolves to a path carrying
+        nothing to find, so only the raw-token branch can answer -- which
+        is the branch the fold had to reach.
+        """
+        assert _asks("cat %s/settings.json" % spelling) is True
+        assert _asks("grep --path=%s/mcp.json x" % spelling) is True
+        assert _asks("cat %s/../notes.txt" % spelling) is True
+
+    def test_only_the_raw_branch_can_answer_a_cancelled_traversal(self,
+                                                                  _tiered):
+        """The proof that the case above is the discriminating one, stated
+        as an assertion rather than left in a docstring.
+
+        If `realpath` ever stopped cancelling the traversal, the test above
+        would quietly become a third copy of the first two and the raw
+        branch would be uncovered again. So this reads the resolved branch's
+        own answer for that token and requires it to be None.
+        """
+        from security.protected_paths import protected_segment
+
+        for spelling in (".venastine", ".VENASTINE"):
+            token = "%s/../notes.txt" % spelling
+            resolved = os.path.realpath(
+                os.path.join(config.WORKSPACE_DIR, token))
+            assert protected_segment(resolved) is None, (
+                f"the resolved branch finds a segment in {resolved!r}, so "
+                f"the test above no longer isolates the raw-token branch")
+            assert _asks("cat " + token) is True
+
+    def test_the_folded_set_is_what_both_branches_read(self):
+        """The relation, not a third spelling of the list. `shell.py`
+        imports the folded set rather than computing its own, because one
+        derived value computed twice in two modules is how the two
+        comparisons came to differ in the first place.
+        """
+        from security import protected_paths
+        from tools.builtin import shell as shell_module
+
+        assert (shell_module.PROTECTED_SEGMENTS_FOLDED
+                is protected_paths.PROTECTED_SEGMENTS_FOLDED)
+        assert protected_paths.PROTECTED_SEGMENTS_FOLDED == {
+            s.casefold() for s in protected_paths.PROTECTED_SEGMENTS}
+
     def test_the_routing_is_unchanged_it_still_classifies_inert(self, _tiered):
         """EP6: approval and execution are one decision written twice --
         but this control is approval-side ONLY. When approved, the
