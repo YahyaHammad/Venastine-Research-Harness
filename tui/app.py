@@ -1368,6 +1368,29 @@ class VenastineApp(App):
             theme, self._settings_theme)
 
     def on_unmount(self) -> None:
+        # BATCH 145. The release used to live only in `exit()`,
+        # which is every DELIBERATE route out and not the involuntary one:
+        # textual's `_handle_exception` goes to `_fatal_error()` ->
+        # `_close_messages_no_wait()` and never calls `App.exit()`. So an
+        # unhandled UI error tore the app down with a worker still parked
+        # in `channel.get(timeout=ATTENDED_APPROVAL_TIMEOUT_S)` -- 600s as
+        # shipped, on a NON-daemon executor thread that holds `App.run()`,
+        # which presents as a hang rather than an error.
+        #
+        # Measured, against a real App subclass mirroring this exit funnel:
+        # a deliberate quit reached exit() and this handler; an unhandled
+        # exception reached ONLY this handler. So this is the funnel both
+        # paths share, which is the property `exit()` was chosen for and
+        # does not have.
+        #
+        # `exit()` keeps its own copy of these two lines. The release
+        # reads-and-clears, so it is idempotent, and setting the flag
+        # twice costs nothing -- while removing it from `exit()` would
+        # make the window between a quit and the unmount a window with no
+        # flag set, which is precisely what the seven `ask_*_blocking`
+        # guards are for.
+        self._shutting_down = True
+        self._release_permission_channel()
         handler = getattr(self, "_log_handler", None)
         if handler is not None:
             logging.getLogger().removeHandler(handler)
@@ -3024,6 +3047,38 @@ class VenastineApp(App):
         while True:
             if not sessions.live_for(thread_id) and not sessions.pending(thread_id):
                 return
+            # BATCH 145. The SAME rule as `sessions.closing`
+            # below, one step earlier in the same teardown: the flag means
+            # main.py's `finally` is about to do the killing, and the row
+            # saying what became of these sessions is written by the quit
+            # path rather than by a turn. Two teardown signals, one answer.
+            #
+            # Without it the quit gesture answered itself with a hang.
+            # `closing` is set only by `SessionManager.close()`, reached
+            # from `main.py`'s `finally` -- which runs AFTER `run_tui()`
+            # returns, and `run_tui()` is `App.run()`, which does not
+            # return while this worker is alive. So the only thing that
+            # would have stopped this loop ran after the thing it was
+            # waiting on. Measured: with one live session and the flag up,
+            # the worker was still spinning after 111 `wait_for_wake`
+            # calls; the same run via `closing` returned after 13.
+            #
+            # ABOVE the cancel branch, deliberately. A quit sets both this
+            # flag and the cancel token (batch 145), and the cancel branch
+            # posts "their results will arrive with your next message" --
+            # true for escape, false for a quit, where there is no next
+            # message. Whichever is tested first decides what the user is
+            # told, so the order is the message.
+            if self._shutting_down:
+                return
+            if sessions.closing:
+                # The harness is on its way out and `_close_sessions` is
+                # killing these. `wait_for_wake` returns None instantly
+                # once that flag is up, so without this the loop spins at
+                # full speed through teardown -- and there is nothing left
+                # to wake, since the row saying what became of them is
+                # written by the quit path rather than by a turn.
+                return
             # ROADMAP_v3 §61 (CN2), this shell's drain. A turn that was
             # stopped must not be followed by a wake turn answering the
             # sessions it started -- that is the same turn continuing
@@ -3035,20 +3090,17 @@ class VenastineApp(App):
             # stops the sessions, and neither quietly does the other's
             # job. SS19 then delivers what they produced with the user's
             # next message.
+            #
+            # BELOW the two teardown tests since batch 145, and the
+            # comment above them says why: a quit sets the cancel token
+            # too, and this branch's message promises a next message that
+            # a quit will never have.
             if self._cancel is not None and self._cancel.cancelled:
                 self.post_message(SessionNote(
                     "system",
                     "— stopped; background sessions are still running "
                     "and their results will arrive with your next "
                     "message —"))
-                return
-            if sessions.closing:
-                # The harness is on its way out and `_close_sessions` is
-                # killing these. `wait_for_wake` returns None instantly
-                # once that flag is up, so without this the loop spins at
-                # full speed through teardown -- and there is nothing left
-                # to wake, since the row saying what became of them is
-                # written by the quit path rather than by a turn.
                 return
             batch = sessions.wait_for_wake(thread_id, timeout=1.0)
             if batch is None:
@@ -4069,9 +4121,22 @@ class VenastineApp(App):
         # rather than on the quit binding alone.
         if self._busy:
             # #105, D4. Say what quitting does to a run rather than
-            # leaving it mysterious: the worker stops forwarding at its
-            # next event (#105's fix), so this is a bounded goodbye, and
-            # the line tells the user what became of the run.
+            # leaving it mysterious: this is a bounded goodbye, and the
+            # line tells the user what became of the work.
+            #
+            # BATCH 145 REWORDED IT, because it was true of one
+            # of the two things `_busy` covers. `_research_is_running`'s
+            # docstring says `_busy` is a chat turn, a research run or
+            # `/compact` alike; only the research path read the flag
+            # (`_forwarding` breaks at the next event, #105), and
+            # `_consume` was deliberately untouched -- recorded as such in
+            # BREAKING_CHANGES. So on a chat turn this sentence asserted
+            # an abandonment that did not happen while the worker went on
+            # draining the generator, which is up to `max_steps` further
+            # model calls and every tool call inside them, dispatched
+            # against an app that has gone. A user told the work is
+            # abandoned had been told the opposite of what was being done
+            # with their API budget.
             #
             # Best-effort (#104's rule), though the case it was written
             # for is gone: `_transcript` is held from on_mount, so
@@ -4081,11 +4146,38 @@ class VenastineApp(App):
             # the goodbye.
             try:
                 self._transcript.write_system(
-                    "[quitting — the active work is abandoned at its next "
-                    "event; its checkpoints are kept.]")
+                    "[quitting — the active work stops at its next "
+                    "boundary; anything already running finishes, and "
+                    "what it did is kept.]")
             except NoMatches:
                 pass
         self._shutting_down = True
+        # BATCH 145. AFTER the flag, so a worker that can see the
+        # cancellation can already see the flag -- `_wait_for_sessions`
+        # tests the two in that order and the message it posts depends on
+        # which it finds.
+        #
+        # THE TOKEN, not a break in `_consume`'s drain, and the difference
+        # is measured. Breaking out of the drain stops it at whatever event
+        # is next, and one of those events is `tool_call_start`: D20 has
+        # already persisted the assistant turn carrying the `tool_use` and
+        # nothing has written the matching `tool_result`, so the thread is
+        # left holding M4's broken pairing -- "an HTTP 400 on Anthropic, a
+        # hard wire error" on the next resume. Driven on the real
+        # generator, three ways: abandoning on `tool_result` orphaned
+        # nothing (that is what #42 fixed), abandoning on `tool_call_start`
+        # orphaned one, and the cancel token orphaned nothing and ended the
+        # turn `cancelled`.
+        #
+        # It orphans nothing because SS61 already answered this: the token
+        # is tested BETWEEN tool groups, and `_finish_cancelled` writes a
+        # row for every call it will not run -- "#42's lesson from the
+        # other side", in that function's own words. Reusing it is also
+        # what makes the line above true for both halves of `_busy`
+        # instead of one, and what stops a quit spending money.
+        token = self._cancel
+        if token is not None:
+            token.cancel("quitting")
         self._release_permission_channel()
         return super().exit(*args, **kwargs)
 
@@ -4251,33 +4343,70 @@ class VenastineApp(App):
         declining default, which is why nothing here fabricates an answer.
         """
         channel: queue.Queue = queue.Queue()
-        self._permission_channel = channel
-        # Batch 61. The turn clock stops while a human is being waited
-        # on -- this is their time, not the harness's, and counting it
-        # would make a 30-second decision read as a slow model and
-        # collapse the throughput figure to nothing. The tick reads the
-        # screen stack for the general case; this call is what makes
-        # the pause exact when `tui.animations: false` leaves no tick
-        # to notice the transition. set_blocked is idempotent, so the
-        # two routes are one piece of state.
-        #
-        # DIRECT, never call_from_thread: this runs on a worker, and
-        # a quitting app has no message pump left to marshal into --
-        # measured, that parks the worker forever and breaks the
-        # shutdown release this method exists to keep working
-        # (test_quitting_during_an_attended_research_prompt_releases_
-        # the_worker). The meter touches no widget, so there is
-        # nothing to marshal.
-        self._meter.set_blocked(True, monotonic())
-        self.call_from_thread(
-            self.push_screen, screen, lambda answer: channel.put(answer))
-        if logger.isEnabledFor(logging.DEBUG):
-            # Batch 78. Which question went on screen -- screen type only,
-            # never the params it shows or the answer it returns. Paired
-            # with the answered/timed-out lines below, this orders the
-            # modal against the loop events above.
-            logger.debug("modal pushed: %s", type(screen).__name__)
+        # BATCH 145. EVERYTHING the `finally` undoes is now
+        # inside the `try`, and the three statements below were outside
+        # it. `call_from_thread` raises -- `RuntimeError("App is not
+        # running")` when textual's `_loop` is None, which teardown sets,
+        # and again from its same-thread guard -- and when it did, the
+        # `finally` was never entered: `_permission_channel` stayed set,
+        # so the field stopped meaning "there is an ask outstanding", and
+        # `set_blocked(False)` was never called, so the TURN CLOCK STAYED
+        # PAUSED for the rest of the session. The clock is the visible
+        # half: `tui/meters.py` explains that the two pauses must not
+        # overlap, and every later turn's time and `~tok/s` are wrong once
+        # the resume is lost -- TECHNICAL_DEBT 9's misreading arriving by a
+        # new route, in the batch 61 machinery written to stop it.
+        # Measured on the real method: with the marshal raising, the field
+        # read LEFT SET and the clock STILL PAUSED; with the fix, cleared
+        # and resumed.
         try:
+            self._permission_channel = channel
+            # BATCH 145. The `_shutting_down` guard is tested by
+            # each of the seven CALLERS, and this method -- the one place
+            # they all share -- did not test it again after publishing.
+            # The release is read-and-clear, so a release that runs while
+            # the field is still None puts nothing anywhere, and an ask
+            # publishing a moment later parks on a queue with no writer
+            # left. The caller-side guards close the SEQUENTIAL re-arm,
+            # which is what TECHNICAL_DEBT 5's r1-1 hang was; they leave
+            # the window where the re-arm is CONCURRENT with the release.
+            #
+            # Re-tested HERE, which is after the publication and before
+            # the marshal: a flag set before this point means the release
+            # has either already happened or is about to find the channel,
+            # and either way there is nothing to ask. Declining with None
+            # is what the timeout path returns and what `interaction.decode`
+            # turns into the kind's declining default, so this adds no new
+            # answer. Driven with the window widened on purpose: the
+            # subject returned None only when the 2 s timeout expired,
+            # where the control returned False in 0.60 s.
+            if self._shutting_down:
+                return None
+            # Batch 61. The turn clock stops while a human is being waited
+            # on -- this is their time, not the harness's, and counting it
+            # would make a 30-second decision read as a slow model and
+            # collapse the throughput figure to nothing. The tick reads the
+            # screen stack for the general case; this call is what makes
+            # the pause exact when `tui.animations: false` leaves no tick
+            # to notice the transition. set_blocked is idempotent, so the
+            # two routes are one piece of state.
+            #
+            # DIRECT, never call_from_thread: this runs on a worker, and
+            # a quitting app has no message pump left to marshal into --
+            # measured, that parks the worker forever and breaks the
+            # shutdown release this method exists to keep working
+            # (test_quitting_during_an_attended_research_prompt_releases_
+            # the_worker). The meter touches no widget, so there is
+            # nothing to marshal.
+            self._meter.set_blocked(True, monotonic())
+            self.call_from_thread(
+                self.push_screen, screen, lambda answer: channel.put(answer))
+            if logger.isEnabledFor(logging.DEBUG):
+                # Batch 78. Which question went on screen -- screen type
+                # only, never the params it shows or the answer it
+                # returns. Paired with the answered/timed-out lines below,
+                # this orders the modal against the loop events above.
+                logger.debug("modal pushed: %s", type(screen).__name__)
             answer = channel.get(timeout=config.ATTENDED_APPROVAL_TIMEOUT_S)
         except queue.Empty:
             # NARRATION IS BEST-EFFORT; THE ANSWER IS NOT. This method's
@@ -4507,6 +4636,34 @@ class VenastineApp(App):
 
     def on_turn_finished(self, message: TurnFinished) -> None:
         self._busy = False
+        # BATCH 145. The transcript removes terminal control
+        # sequences from everything it draws, and this is where that gets
+        # said. ONE record per turn, read-and-clear, rather than one per
+        # span or one per sequence.
+        #
+        # HERE rather than in the widget, and that is not a preference:
+        # `tui/widgets.py` does no logging deliberately -- `Transcript`'s
+        # own contract is that "write* does no logging, so a handler
+        # feeding a widget that logs cannot loop here", and
+        # `on_log_record_message` routes records straight back into
+        # `write_role`. A Transcript that logged while writing would make
+        # that sentence false, which is the shape batch 144 spent a whole
+        # surface removing. The widget counts; this layer, which knows
+        # whose text it was, is the one that speaks.
+        #
+        # INFO, so it reaches `logs/app.log` at the default level and goes
+        # through batch 144's redacting formatter like every other record,
+        # and NOT the transcript: `TranscriptLogHandler` is WARNING+, and a
+        # model that merely emitted a colour code is not a warning. The
+        # text itself says nothing -- the stripped sequence leaves no mark
+        # on screen, which is `core/ansi.py`'s locked answer for the pty
+        # and the same answer here, so that `_entries`, the screen, `/copy`
+        # and the replay stay byte-identical to one another.
+        stripped = self._transcript.take_stripped_count()
+        if stripped:
+            logger.info(
+                "Removed %d terminal control sequence(s) from this turn's "
+                "rendered text.", stripped)
         self._permission_channel = None
         # ROADMAP_v3 §61 (CN9). Same lifetime as the channel above: with
         # no turn to stop, escape goes back to meaning only what it

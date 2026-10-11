@@ -21435,3 +21435,376 @@ both dependency files. Affected tests re-run with AGENT_WORKSPACE unset, and
 under WSL, where the three mode tests Windows skips actually execute.
 
 Counts 6531 -> 6581.
+
+## Batch 145 -- the funnel every deliberate exit shares (2026-10-11)
+
+The `tui/` lifecycle and rendering surface, all six FIX-NOW findings:
+S14-01, S14-05, S15-01 (the three S2s), S14-03, S14-04 and S14-06. Three
+owner rulings, one correction to a report's suggested fix, and one defect
+found under a finding that belongs to a different scope's module.
+
+**Four of the six are one sentence.** The teardown work was installed on
+the funnel every DELIBERATE route out shares, and the involuntary routes
+do not share it.
+
+**S14-01.** `_shutting_down = True` and `_release_permission_channel()`
+occur exactly once each in `tui/app.py`, on consecutive lines inside
+`exit()`. `exit()` is not on the crash path: textual's `_handle_exception`
+reaches `_fatal_error()` -> `_close_messages_no_wait()`, which puts a
+`CloseMessages` on the queue and never calls `App.exit()`. So an unhandled
+exception on the UI thread tore the app down with a worker still parked in
+`channel.get(timeout=ATTENDED_APPROVAL_TIMEOUT_S)` -- 600 s as shipped --
+on a NON-daemon executor thread, and `App.run()` does not return while one
+is alive. A traceback, and then a shell that will not close.
+
+The release moved to `on_unmount`, which the report's probe measured
+running on both paths. **What that probe did not measure is WHEN**, and the
+fix rests on it: `App._shutdown` reads `await self._close_all()`, then
+`await self._close_messages()`, then `_dispatch_message(Unmount())`.
+Unmount is THIRD. If either of the first two waited for the thread workers,
+a release at Unmount would be one the worker could never see -- it waits
+for the release, the shutdown waits for it, and the park's 600 s timeout is
+what breaks the tie. Driven on the installed textual with a real thread
+worker parked on a real queue: the worker is released by the unmount and
+`App.run()` returns in 0.21 s against a 3 s park, in the order
+`parked -> exit() -> unmount -> released`. So it is early enough, and the
+test that says so is a DEPENDENCY pin in `TestShiftEnterIsStillNotTheKey`'s
+shape -- a pin bump that reorders `_shutdown` fails there rather than
+turning the fix back into the hang it replaced.
+
+`exit()` keeps its own copy of both lines. Removing them would leave the
+window between a quit and the unmount with no flag set, which is what the
+seven `ask_*_blocking` guards read; the release reads-and-clears, so the
+second call finds nothing and puts nothing, and a test pins that the two
+funnels together still produce exactly one `False`.
+
+**S14-05.** `_wait_for_sessions` holds the worker after the turn's
+generator is drained, and its loop had three exits: nothing live and
+nothing pending, the cancel token, and `sessions.closing`. None of them was
+the shutdown flag -- and `closing` is set only by `SessionManager.close()`,
+reached from `main.py`'s `finally`, which runs AFTER `run_tui()` returns.
+`run_tui()` is `App.run()`, which does not return while this worker is
+alive. **So the only thing that would have stopped the loop ran after the
+thing it was waiting on.** The second ctrl+c offers "Quit and stop what is
+running?", the user confirms, and the process then waits for the session it
+just offered to kill. `quit_with_sessions`' own docstring states the rule
+this breaks -- "a gesture that answers insistence with another dialog is
+the hang it was meant to avoid" -- and it now answered insistence with a
+hang directly.
+
+Re-measured on the live tree before the fix, with one live session: the
+worker was still spinning after 111 `wait_for_wake` calls where the
+`closing` control returned after 13. After: 13.
+
+**The flag is tested ABOVE the cancel branch, and that ordering is the
+message.** A quit sets both (S14-06 below), and the cancel branch posts
+"background sessions are still running and their results will arrive with
+your next message" -- which is true for escape, CN2's deliberate split, and
+false for a quit, where there is no next message. Whichever test runs first
+decides what the user is told.
+
+**S14-04.** Two pieces of state were installed before the `try` whose
+`finally` undoes them, with `call_from_thread` in between -- and that
+raises: `RuntimeError("App is not running")` when textual's `_loop` is
+None, which teardown sets, and again from its same-thread guard. When it
+did, the `finally` was never entered. Measured on the real method with the
+marshal raising: `_permission_channel` LEFT SET and the turn clock STILL
+PAUSED.
+
+The clock is the half a user would read. `_meter.set_blocked(True)` stops
+the turn clock, `tui/meters.py` explains that the two pauses must not
+overlap, and with the resume lost it stays stopped for the rest of the
+session -- so the turn time and the `~tok/s` figure are wrong from then on
+for **every later turn**. That is TECHNICAL_DEBT 9's misreading arriving by
+a new route, in the batch 61 machinery written to stop it. Three statements
+moved inside the `try`; nothing between them needed to be outside it.
+
+**S14-03.** The `_shutting_down` guard is tested by each of the seven
+callers and not by `_blocking_modal`, the one place all seven reach. The
+release is read-and-clear, so a release that runs while
+`_permission_channel` is still `None` puts nothing anywhere, and the ask
+publishing a moment later parks on a queue with no writer left. The
+caller-side guards close the SEQUENTIAL re-arm, which is what
+TECHNICAL_DEBT 5's r1-1 hang was; they leave the window where the re-arm is
+CONCURRENT with the release.
+
+Re-tested after the publication and before the marshal. **The placement is
+the whole fix, and a return value cannot show it** -- a guard put BEFORE
+the publication declines identically and leaves the race exactly where it
+was. So the test's seam is the field: a recording `_permission_channel`
+setter, and the assertion is that the queue was published and the method
+still declined. The report's own suggestion was a property whose setter
+blocks on an event, to widen the race; this is the same seam without
+needing the race to happen.
+
+**S14-06, and the report's suggested fix is the wrong one.** `exit()`
+wrote, on any exit while `_busy`:
+
+```
+[quitting -- the active work is abandoned at its next event; its checkpoints are kept.]
+```
+
+`_busy` covers a chat turn, a research run and `/compact` alike --
+`_research_is_running`'s docstring says so in those words. Only the
+research path honoured the flag: `_forwarding` breaks at the next event,
+closes the generator and records `abandoned` (\#105). `_consume` has no
+such test, and `tests/BREAKING_CHANGES.md` records the omission as
+deliberate. So on a chat turn the line asserted an abandonment that did not
+happen while the worker went on draining -- up to `max_steps` further model
+calls and every tool call inside them, dispatched against an app that has
+gone, each `post_message` silently dropped. A user told the work is
+abandoned had been told the opposite of what was being done with their API
+budget.
+
+The report suggests giving `_consume` the same shutdown test `_forwarding`
+has, and names the risk itself: "breaking out of the drain is what leaves a
+`tool_use` with no matching `tool_result`". **Measured, that risk is real
+and #42 does not cover it.** #42 moved `add_tool_result` BEFORE the
+`tool_result` event, so abandoning there is safe -- but the drain's other
+yield is `tool_call_start`, and at that point D20 has already persisted the
+assistant turn carrying the `tool_use` (50 lines earlier, `core/loop.py`
+:1740 against :1792) and the dispatch that would write the matching result
+is still ahead. Driven on the real generator, three runs:
+
+```
+    abandoned on       tool_use rows   tool_result rows   orphans
+    tool_result        ['t1']          ['t1']             0   <- what #42 fixed
+    tool_call_start    ['t1']          []                 1   <- the report's shape
+    cancel token       ['t1']          ['t1']             0   <- stop_reason cancelled
+```
+
+An orphan is M4's pairing broken: "a `tool_result` with no preceding
+`tool_use` is an HTTP 400 on Anthropic -- a hard wire error", from the
+other side, and an unresumable thread.
+
+So the fix is the cancel token SS61 already built, which the owner ruled
+for. `is_cancelled(cancel)` is tested BETWEEN tool groups and
+`_finish_cancelled` writes a row for every call it will not run -- "#42's
+lesson from the other side", in that function's own words. A quit asks it;
+the turn stops cooperatively at its next boundary, every row it owes is
+written, the thread stays resumable, and the line becomes true for both
+halves of `_busy` instead of one. It also stops a quit spending money,
+which is the half a user would notice. **No new mechanism**, which is the
+test of whether a fix is the right shape: the machinery for stopping a turn
+safely existed, and the quit was simply not using it.
+
+The flag is set BEFORE the cancel, so a worker that can see the stop can
+already see the teardown -- which is what S14-05's ordering depends on.
+And the line was reworded, because it was written for the path that has the
+behaviour: it claims a BOUNDARY now, which is what a cooperative stop does.
+The existing `test_quitting_while_busy_says_what_happens_to_the_work`
+asserts only that "quitting" appears, so it did not and could not see this.
+
+**S15-01.** Every transcript ingress stored and drew model- and
+third-party-controlled text byte-for-byte. `core/ansi.py` exists and was
+called in exactly one place -- the pty session stream -- and nothing in
+`tui/` was it. Neither layer below removes the byte: Rich keeps it through
+`export_text()` (probed on the pinned install) and textual's `Content`
+strips only codepoints 7, 8, 11, 12 and 13, read off the installed source,
+so ESC and the whole C1 range survived both the `RichLog` path and the
+`as_content(Text(...))` one. Reproduced on seven ingress paths before the
+fix, each keeping its ESC, with a plain-ASCII control proving the probe
+read content at all.
+
+**THREE chokepoints, because measurement says three.** `_emit` is the
+single write path for complete strings, and the two delta entry points are
+not on it: `_write_stream_chunk` and `_write_thinking_chunk` append to
+`_entries` themselves, so stripping in `_emit` alone would have left every
+streamed answer raw.
+
+**THREE stripper objects, and each count is measured.** The delta streams
+need one held ACROSS calls, because the provider's chunk boundaries fall
+wherever it put them -- the same argument `core/ansi.py` makes about a
+pipe, where 128 KB arrived in 74 chunks. A fresh stripper per delta is
+wrong two ways and both were driven: dropping its carry turns
+`hi ESC [` + `2Jthere` into `hi 2Jthere`, leaving the sequence BODY as
+visible text, and flushing its carry per call emits the ESC outright. And
+the answer and reasoning spans need SEPARATE ones, for the reason the
+widget already gives about `_thinking_pending` -- the two interleave. With
+one shared: a CSI left open by the answer terminated on the reasoning
+chunk's first character, because `t` is 0x74 and lands inside the CSI
+final-byte range 0x40-0x7E, and the reasoning text lost its `t`.
+
+**The strip also corrects arithmetic that was wrong.** `display_len` and
+`cell_len` are unchanged; what changed is that they are no longer handed
+escape bytes to count. Measured: `display_len` read 10 for text whose
+visible width is 6, so an escape counted as cells was a row that wrapped
+early. The fix is one thing seen from two sides, not two fixes.
+
+**The C1 range, which the report does not name and which belongs to another
+scope's module.** `core/ansi.py` keyed on ESC alone, so every one of the
+seven 8-bit sequence introducers passed through untouched while the ESC
+spelling of each was removed:
+
+```
+    CSI  U+009B   survived      ESC [  stripped
+    OSC  U+009D   survived      ESC ]  stripped
+    DCS  U+0090   survived      ESC P  stripped
+    APC  U+009F   survived      ESC _  stripped
+    ... and ST U+009C, SOS U+0098, PM U+009E
+```
+
+Same control, two encodings, one covered -- and U+009B is `\xc2\x9b` on
+the wire, which a terminal in UTF-8 mode decodes back into the introducer.
+**So the pty path was exposed too**, not just the TUI: `PtyStream.feed` is
+what every byte of an interactive session goes through, and it kept
+`ls: \x9b2J`.
+
+The owner ruled to extend `core/ansi.py` rather than add a second pass in
+`tui/`, and the module's own docstring is the argument -- "a second
+stripper anywhere else would be the two-copies-of-one-decision shape §46
+(EP6) and #157 are about" -- which batch 144 had just spent a whole surface
+undoing for the secret redactors. The whole C1 range goes, not only the
+introducers, and that is the symmetry rather than a widening: `ESC D` and
+`ESC E` already went through the two-character fallback, and U+0084 and
+U+0085 are those same two controls. The cost is stated rather than
+discovered later: text decoded as latin-1 where it was written as cp1252
+carries C1 characters where its curly quotes belong, and those are now
+deleted rather than drawn as something odd -- which is a choice between
+losing a character and handing it to the terminal as a control.
+
+**The one thing the two consumers genuinely disagree about is a flag.** An
+unterminated carry is TEXT for the pty -- a program's output cut off
+mid-sequence is still the output the agent asked for, and holding it
+forever would lose it -- and must NOT be for a transcript, where the text
+is handed to a terminal and `ESC [` with no final byte consumes whatever is
+drawn next. `release_unterminated` names both contracts where they are
+decided, the pty's answer stays the default, and the flag governs BOTH
+releases -- `flush` and the `_MAX_CARRY` overflow -- because they are one
+event by two routes and covering one would have left the other as the way
+out.
+
+**Silent, and said once.** The third ruling. `core/ansi.py`'s locked answer
+for the pty is that a sequence is REMOVED and never interpreted, and a
+visible marker would be a second answer to that -- in the one place a model
+could type the marker itself, which is the spoof `[REDACTED]` already
+accepts. So `_entries`, the screen, `/copy` and the replay stay
+byte-identical to one another, and a test compares them against the same
+text with no sequence in it at all. The record lives in `tui/app.py`'s
+`on_turn_finished`, one INFO line per turn off a read-and-clear count --
+and it is there rather than in the widget because `Transcript`'s own
+contract is that "write* does no logging, so a handler feeding a widget
+that logs cannot loop here", while `on_log_record_message` routes records
+straight back into `write_role`. A Transcript that logged while writing
+would have made that sentence false: defect shape 9, authored in the file
+being fixed. The widget counts; the layer that knows whose text it was
+speaks.
+
+**The purity rule moved rather than being quietly broken.**
+`tui/widgets.py` said "nothing here imports core/". It imports
+`core/ansi.py` now, and the rule says what was ever load-bearing: nothing
+here reaches into harness state or does I/O. `core/ansi.py` imports
+`__future__` and nothing else, holds no state, touches no widget and does
+no I/O -- it is the same KIND of module as `tui/markdown.py` one directory
+over, and it lives in `core/` because the pty reader needs it too.
+
+**THE RIDER FROM BATCH 144, closed.** S07-09's shape had a second instance
+in `test_tui.py`: one `sk-ant-` value between three tests pointed at the
+routed-log sink, so nothing in the file could tell two vocabularies apart.
+Batch 144 added one test per missing vocabulary, which is a pilot and still
+a restated literal -- a case added to `REDACTION_CASES` for the log file
+and for tool output did not reach this sink. It reads the shared list now,
+in one pilot session for the whole of it.
+
+**TWO MISTAKES OF MINE IN THIS BATCH, both worth writing down.**
+
+The first: every `\` line continuation in the generated test code was
+eaten. The patch script's block is a non-raw triple-quoted string, so a
+single backslash at the end of a line is a STRING line continuation --
+Python removed the backslash AND the newline when it read the generator,
+and what reached the test file was two source lines joined. **It still
+parsed**, which is why nothing complained; it was found because the next
+edit's anchor matched 0 times. The standing note says heredocs mangle
+backslashes, and this is the same class one layer in: generated code gets
+parentheses, never a backslash.
+
+The second: the first cut of the session-wait tests drove the real loop on
+a daemon thread with a stub whose `wait_for_wake` returned instantly, so
+the loop busy-spun and the threads outlived their tests. Three of them
+starved the pytest process -- no output for five minutes, which read as a
+deadlock and sent me measuring the `on_unmount` ordering to find out
+whether the fix itself was impossible. (It was not, and the measurement
+became the dependency pin above, so the cost was not wasted.) The loop is
+a loop: it is driven on the calling thread now, with the event in the STUB,
+which also makes every assertion an exact `wait_for_wake` count instead of
+a sleep that has to be long enough.
+
+**THE MUTATION PASS FOUND FIVE GAPS IN MY OWN TESTS AND ONE IN BATCH
+144'S.** It scored 20/27 on the first run, and the survivors were worth
+more than the kills.
+
+The big one: **`_emit` was masking the delta strip.** Deleting the strip
+from `stream_delta` and from `thinking_delta` killed nothing -- 79 tests
+selected, 79 passed. Both spans end through `_close_answer` /
+`end_thinking`, and when no commit boundary has been crossed those route
+the residual through `_emit`, which strips. So every ingress test written
+for the two delta paths was really a second test of `_emit`, and the path
+that appends to `_entries` on its own -- `_write_stream_chunk`,
+`_write_thinking_chunk` -- had no test at all. **That is S15-01's own shape
+arriving in the tests written to close it**: input that cannot discriminate.
+Two committing ingress rows now sit beside the existing ones (a delta
+ending in a newline commits), with a control that asserts they really do
+commit, so the masking cannot come back silently.
+
+The C1 sweep read `feed()` alone, so a mutation that routed a bare C1 into
+the CARRY rather than removing it passed -- the character is absent from
+that return either way. Strengthened to `feed() + flush()`, it immediately
+went red for the five string openers, and **the failure was correct**:
+`chr(0x9d) + "Zb"` opens an OSC and never closes it, so the carry holds it
+and `flush` hands it back as text. That is the pty's stated contract for an
+unterminated sequence and the ESC spelling has done it since batch 100, so
+the cases gained their terminator and the behaviour the sweep stumbled into
+gained a test of its own rather than a case shaped to pass.
+
+`release_unterminated=False` turned out to have exactly one observable on
+the transcript path, and it is not `flush`: `_close_answer` discards what
+`flush` returns, so the flag is belt and braces there. The difference is at
+the `_MAX_CARRY` overflow, which for the pty releases the held bytes into
+the output as text. That is what the test drives now.
+
+And nothing tested `tui/app.py`'s half of the logging ruling at all. The
+widget's read-and-clear count was pinned; the one INFO line per turn was
+not, so a control that stopped reading the count survived. Three tests now:
+the record, the control that a clean turn says nothing, and the one that
+proves the count does not carry into the next turn.
+
+**The gap in batch 144's own guard is the better find.**
+`test_the_three_shapes_are_what_discriminates` is parametrised over the
+rows whose labels are in `SHAPE_CASE_LABELS`, so dropping those rows from
+`REDACTION_CASES` left it with nothing to run: it reported **`1 skipped`**
+and the parity tests went on passing -- which is the exact vacuity the
+guard exists to prevent. Item 6's own follow-up names this class in these
+words: *"one class of vacuity a revert check cannot catch is a test that
+SKIPS ... Worth generalising: where a test can decline to run, prove it
+runs."* Two lines of proof added beside it, covering a dropped row and a
+renamed label alike.
+
+**Two of the seven were faults in the controls, not the tests**, and that
+is worth separating: C4 moved only the queue publication out of the `try`,
+which the `finally` clears unconditionally, so it reintroduced nothing and
+survived correctly -- the defect was the METER and the MARSHAL being
+outside. D1 pointed at `test_tui.py` when the guard on the case list lives
+in `test_logging_setup.py`. A survivor is a question, not a verdict.
+
+Second pass: 28/28 with the equivalence control green.
+
+**Three register items rather than fixes.** Item 87, `.gitleaksignore`
+pinning its blessings by line number, which batch 144 paid for and this one
+paid again -- the fix is a sweep over the suite's fixtures, not a config
+change, since the pinned gitleaks has no content-addressed ignore. Item 88,
+the six workflows that are not on `main`, so a branch's lint, secret and
+dependency checks are typed out of the YAML by hand -- which is how batch
+144's first `bandit -b` run reported 9,165 new findings over a missing
+`-s B101,B105,B106`. The fix is a script that READS the invocations out of
+the workflow files, and that is a build-surface change (S18, clear since
+batch 142) wanting its own batch and its own test: that it fails when the
+script and the YAML disagree. Item 89, that nothing acts on the stripped-
+sequence count, with the middle option neither ruling covered -- a
+once-per-session line rather than a per-line marker.
+
+Counts 6581 -> 6739. `test_tui.py` 445 -> 468 and 65 -> 71 classes,
+`test_live_output.py` 154 -> 260, `test_interactive_sessions.py` 111 -> 139,
+`test_logging_setup.py` 35 -> 36.
+The decision-id gate caught finding ids in production comments for the
+THIRD batch running (item 86's trap), 12 sites across `tui/app.py` and
+`tui/widgets.py`, all reworded to cite the batch.

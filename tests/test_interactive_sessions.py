@@ -359,6 +359,205 @@ class TestTheStripperCarriesAcrossReads:
         assert ansi.AnsiStripper().feed("plain text") == "plain text"
 
 
+#: Each sequence shape in BOTH spellings, as
+#: (label, ESC form, 8-bit form). The two must strip identically: they are
+#: the same control, and a terminal in UTF-8 mode decodes `\xc2\x9b` back
+#: into the CSI introducer that `ESC [` also writes.
+SPELLINGS = [
+    ("csi", "\x1b[2J", "\x9b2J"),
+    ("csi with parameters", "\x1b[10;1H", "\x9b10;1H"),
+    ("osc closed with st", "\x1b]0;title\x1b\\", "\x9d0;title\x9c"),
+    ("osc closed with bel", "\x1b]0;title\x07", "\x9d0;title\x07"),
+    ("dcs", "\x1bPq\x1b\\", "\x90q\x9c"),
+    ("apc", "\x1b_x\x1b\\", "\x9f" + "x\x9c"),
+    ("pm", "\x1b^x\x1b\\", "\x9e" + "x\x9c"),
+    ("index", "\x1bD", "\x84"),
+    ("next line", "\x1bE", "\x85"),
+]
+
+
+class TestBothSpellingsOfAControlAreRemoved:
+    """Batch 145. Until it, `_sequence_end` keyed on ESC alone, so every
+    8-bit introducer passed through -- while the ESC form of the same
+    control was removed. That was not a judgement about the 8-bit forms;
+    they were never considered.
+
+    This module's own reason applies unchanged: the stripper exists because
+    a control must not reach a terminal, and `PtyStream.feed` is what every
+    byte of an interactive session goes through.
+    """
+
+    @pytest.mark.parametrize("label,esc_form,c1_form",
+                             SPELLINGS,
+                             ids=[s[0] for s in SPELLINGS])
+    def test_the_two_spellings_strip_identically(self, label, esc_form,
+                                                 c1_form):
+        """The RELATION, which is what a new sequence shape inherits.
+        Asserting on each output separately would be two lists to keep in
+        step -- the shape EP6 names, and the shape this gap had.
+        """
+        esc_out = ansi.AnsiStripper().feed("x" + esc_form + "y")
+        c1_out = ansi.AnsiStripper().feed("x" + c1_form + "y")
+        assert esc_out == c1_out == "xy", (
+            f"{label}: ESC form -> {esc_out!r}, 8-bit form -> {c1_out!r}")
+
+    @pytest.mark.parametrize("label,esc_form,c1_form",
+                             SPELLINGS,
+                             ids=[s[0] for s in SPELLINGS])
+    def test_each_spelling_is_actually_different_text(self, label, esc_form,
+                                                      c1_form):
+        """The control for the relation above. Two identical inputs would
+        satisfy it while testing one spelling twice, and a case whose
+        8-bit form still carried an ESC would be measuring the branch it
+        was written to leave.
+        """
+        assert esc_form != c1_form
+        assert "\x1b" in esc_form and "\x1b" not in c1_form
+
+    def test_the_whole_c1_range_goes_not_only_the_introducers(self):
+        """The symmetry argument, stated as a sweep.
+
+        `ESC D` and `ESC E` were already removed by the two-character
+        fallback, and U+0084 and U+0085 are those same two controls. So
+        every C1 goes -- the introducers because they open a sequence, the
+        rest because they are single-character controls a terminal acts on.
+        """
+        kept = []
+        for code in range(0x80, 0xA0):
+            # WELL-FORMED for every introducer, which cost a cycle to get
+            # right: `chr(0x9d) + "Zb"` opens an OSC and never closes it,
+            # so the carry holds it and `flush` hands it back as text --
+            # correctly, and the ESC spelling does the same (see
+            # `test_an_unterminated_sequence_is_text_after_all` and the
+            # test below). `Z` is a CSI final byte and `\x9c` is ST, so
+            # this one string terminates every shape: a CSI ends at `Z`, a
+            # string sequence ends at the ST, and a single-character
+            # control is simply removed.
+            #
+            # And feed PLUS flush, which the mutation pass is the reason
+            # for: a change that routed a bare C1 into the CARRY rather
+            # than removing it passed against `feed` alone, because the
+            # character is absent from that return either way.
+            stripper = ansi.AnsiStripper()
+            probe = "a" + chr(code) + "Z" + "\x9c" + "b"
+            produced = stripper.feed(probe) + stripper.flush()
+            if chr(code) in produced:
+                kept.append(hex(code))
+            assert "a" in produced and "b" in produced, (
+                f"U+{code:04X} took the surrounding text with it: "
+                f"{produced!r}")
+        assert kept == [], f"these C1 controls still reach the terminal: {kept}"
+
+    def test_an_unterminated_8_bit_string_sequence_is_text_after_all(self):
+        """The behaviour the sweep above stumbled into, pinned rather than
+        designed around.
+
+        An 8-bit OSC that never reaches its terminator is held in the carry
+        and released by `flush`, introducer and all -- which is the pty's
+        contract for an unterminated sequence, stated where `_MAX_CARRY` is
+        defined, and exactly what the ESC spelling already does. The two
+        spellings agree here too, which is the point: this is the same rule
+        reaching the same answer, not a hole in the new branch.
+
+        A transcript gets the other contract, and `tui/widgets.py` passes
+        `release_unterminated=False` for it.
+        """
+        for opener in ("\x9d", "\x90", "\x9f"):
+            stripper = ansi.AnsiStripper()
+            assert stripper.feed("a" + opener + "title") == "a"
+            assert stripper.flush() == opener + "title"
+
+            held = ansi.AnsiStripper(release_unterminated=False)
+            assert held.feed("a" + opener + "title") == "a"
+            assert held.flush() == ""
+
+    def test_a_c1_introducer_split_across_two_reads(self):
+        """One character where the ESC form is two, so the split cannot
+        fall inside the introducer -- but it can fall inside the BODY, and
+        the carry has to hold it exactly as it does for the ESC form.
+        """
+        raw = "hi \x9b10;1H there"
+        for cut in range(len(raw) + 1):
+            stripper = ansi.AnsiStripper()
+            got = stripper.feed(raw[:cut]) + stripper.feed(raw[cut:])
+            assert got + stripper.flush() == "hi  there", f"cut at {cut}"
+
+    def test_an_osc_opened_with_esc_and_closed_with_the_8_bit_st(self):
+        """A sender may mix the spellings freely, and this mixture was the
+        one that left the ESC consumed and the terminator standing.
+        """
+        assert ansi.AnsiStripper().feed(
+            "a\x1b]8;;http://x.test\x9cb") == "ab"
+
+    def test_a_printable_above_the_c1_range_is_left_alone(self):
+        """The boundary. U+00A0 and up is text -- accented letters, the
+        pound sign, a non-breaking space -- and a strip that reached one
+        character further would eat the ordinary output of half the world's
+        locales.
+        """
+        sample = "caf\u00e9 \u00a3100 \u00a0 \u00ff \u0100"
+        assert ansi.AnsiStripper().feed(sample) == sample
+
+
+class TestTheUnterminatedCarryHasTwoContracts:
+    """Batch 145 made the release a flag, because the two consumers of this
+    module genuinely disagree about it.
+
+    The pty's answer is unchanged and is the default, which is what keeps
+    SS27 where it was. `tui/widgets.py` passes False: the text there is
+    handed to a terminal, and `ESC [` with no final byte consumes whatever
+    is drawn after it.
+    """
+
+    def test_the_pty_still_gets_its_carry_back_as_text(self):
+        """The default, pinned where the flag was introduced so a change of
+        default is a failure here rather than a silent change to every
+        interactive session."""
+        stripper = ansi.AnsiStripper()
+        assert stripper.feed("a\x1b[3") == "a"
+        assert stripper.flush() == "\x1b[3"
+
+    def test_a_transcript_does_not(self):
+        stripper = ansi.AnsiStripper(release_unterminated=False)
+        assert stripper.feed("a\x1b[3") == "a"
+        assert stripper.flush() == ""
+
+    def test_the_runaway_release_follows_the_same_flag(self):
+        """BOTH releases, because they are one event by two routes --
+        covering `flush` and leaving `_MAX_CARRY` would make the overflow
+        the way out.
+        """
+        held = ansi.AnsiStripper(release_unterminated=False)
+        out = held.feed("\x1b]" + "x" * (ansi._MAX_CARRY + 10))
+        assert out == "", "the overflow released a sequence as text"
+
+        released = ansi.AnsiStripper()
+        out = released.feed("\x1b]" + "x" * (ansi._MAX_CARRY + 10))
+        assert len(out) > ansi._MAX_CARRY, \
+            "the pty's overflow release stopped happening"
+
+    def test_the_overflow_still_recovers_either_way(self):
+        """The control: a dropped carry must not leave the stripper stuck,
+        or one unterminated sequence would eat the rest of the session.
+        """
+        for release in (True, False):
+            stripper = ansi.AnsiStripper(release_unterminated=release)
+            stripper.feed("\x1b]" + "x" * (ansi._MAX_CARRY + 10))
+            assert stripper.feed("done") == "done", release
+
+    def test_the_count_says_how_much_was_removed(self):
+        """The counter exists so a caller can say something was removed
+        without rescanning to find out -- `tui/app.py` logs it once a turn.
+        Nothing on the pty path reads it.
+        """
+        stripper = ansi.AnsiStripper()
+        assert stripper.sequences_removed == 0
+        stripper.feed("a\x1b[2Jb\x9b31mc")
+        assert stripper.sequences_removed == 2
+        stripper.feed("plain")
+        assert stripper.sequences_removed == 2
+
+
 class TestThePromptIsMachineryNotOutput:
     """SS34. The token is a thing this process minted; the agent asked for
     a command's result and that is not part of it."""

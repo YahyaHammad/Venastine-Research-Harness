@@ -1431,6 +1431,47 @@ class TestLoggingMustNotScribbleOnTheScreen:
 
 
     @pytest.mark.asyncio
+    async def test_every_shared_redaction_case_is_redacted_here_too(self):
+        """BATCH 145. The three tests around this one are pilots: one case
+        per vocabulary, with the literal written out here.
+
+        That is how this sink came to be a vocabulary behind the log file
+        in the first place -- S07-09's finding is that one `sk-ant-` value
+        between three tests cannot discriminate, and a restated literal is
+        the same defect one step later: a case added to `REDACTION_CASES`
+        for the log file and for tool output does not arrive here. So the
+        list is READ, and every row in it has to survive the trip.
+
+        One pilot session for the whole list rather than one per row. The
+        app is not what varies; the case is, and this file is already the
+        suite's slowest.
+        """
+        import logging
+
+        from tests.conftest import REDACTION_CASES
+
+        written = []
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app._transcript.write_role = (
+                lambda role, text: written.append((role, text)))
+            for label, source, _needle in REDACTION_CASES:
+                logging.getLogger("tools.builtin.fetch_url").warning(
+                    "fetch_url failed for %s", source)
+            assert await settle(
+                pilot, lambda: len(written) >= len(REDACTION_CASES))
+
+        drawn = " ".join(text for _role, text in written)
+        leaked = [label for label, _source, needle in REDACTION_CASES
+                  if needle in drawn]
+        assert not leaked, (
+            "these shared cases reached the screen in cleartext while the "
+            "log file redacted them: %r" % (leaked,))
+        assert drawn.count("[REDACTED]") >= len(REDACTION_CASES), (
+            "fewer marks than cases, so at least one case was dropped "
+            "rather than redacted")
+
+    @pytest.mark.asyncio
     async def test_a_credential_with_no_vendor_prefix_is_redacted_too(self):
         """The case the test above could not see (batch 144).
 
@@ -8787,3 +8828,663 @@ class TestARaisingCommandDoesNotKillTheApp:
                 "probefine ok", "a row", lambda app, args: None)]))
         assert [row.name for row in local.matching("/probefine x")] == [
             "probefine ok"]
+
+# ---------------------------------------------------------------------------
+# ---- Batch 145: the lifecycle findings (S14-01, S14-03..S14-06) -----------
+# ---------------------------------------------------------------------------
+#
+# Four of these are one sentence: the teardown work was installed on the
+# funnel every DELIBERATE route out shares, and the involuntary routes do
+# not share it. `exit()` is not on the crash path -- textual's
+# `_handle_exception` reaches `_fatal_error()` -> `_close_messages_no_wait()`
+# and never calls `App.exit()` -- and `_wait_for_sessions` read the one
+# teardown flag that is set after the thing it was waiting on.
+
+
+class _ChannelWatchingApp(VenastineApp):
+    """Records every write to `_permission_channel`.
+
+    The S14-03 guard has to sit AFTER the publication, and a test cannot
+    tell that from the return value alone: a guard placed BEFORE the
+    publication declines identically and leaves the race it was meant to
+    close. So the seam is the field itself -- if the queue was published
+    and the method still declined, the guard covers the publication.
+    """
+
+    @property
+    def _permission_channel(self):
+        return self._channel_value
+
+    @_permission_channel.setter
+    def _permission_channel(self, value):
+        self._channel_writes.append(value)
+        self._channel_value = value
+
+
+def _bare_modal_app(call_from_thread, cls=VenastineApp):
+    """A VenastineApp with only what `_blocking_modal` touches.
+
+    The `__new__` pattern tui/app.py's own comment says three test files
+    already use. A mounted app cannot be driven here: the subject is what
+    happens when the marshal into the UI thread FAILS, and a running app is
+    precisely the state in which it does not.
+    """
+    from tui import meters
+
+    app = cls.__new__(cls)
+    app._channel_writes = []
+    app._channel_value = None
+    app._permission_channel = None
+    app._meter = meters.TurnMeter()
+    app.call_from_thread = call_from_thread
+    return app
+
+
+class _StillSpinning(Exception):
+    """Raised BY the session stub to say the wait loop never returned.
+
+    The loop is driven on the calling thread, so "it did not stop" has to be
+    something the stub does rather than something a test waits for. A thread
+    and a sleep were the first cut and both are worse: the real
+    `wait_for_wake` blocks for up to a second and a stub that returns
+    instantly makes this loop spin at full speed, so those tests left
+    spinning threads behind and starved the process measuring them.
+    """
+
+
+class _StubSessions:
+    """`shell_sessions.sessions` for `_wait_for_sessions`, holding one
+    session that never finishes.
+
+    `on_wait` is called with the wait count, so a test can set the thing it
+    is measuring at an exact point in the loop rather than racing it.
+    """
+
+    def __init__(self, live=1, on_wait=None, give_up_after=20):
+        self.closing = False
+        self._live = live
+        self._on_wait = on_wait
+        self._give_up_after = give_up_after
+        self.waits = 0
+
+    def live_for(self, owner):
+        return self._live
+
+    def pending(self, owner):
+        return 0
+
+    def suspended(self, owner):
+        return False
+
+    def wait_for_wake(self, owner, timeout=None):
+        self.waits += 1
+        if self._on_wait is not None:
+            self._on_wait(self.waits)
+        if self.waits >= self._give_up_after:
+            raise _StillSpinning(
+                "the loop made %d wait_for_wake calls and never returned"
+                % self.waits)
+        return None
+
+
+class TestACrashIsADismissalPathToo:
+    """S14-01. ARCHITECTURE 4.16: "Every dismissal path must produce a
+    boolean." Review f10 covered quitting; a crash is a dismissal too, and
+    it was the uncovered one.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_teardown_releases_the_blocked_worker(
+            self, _mocked_loop, monkeypatch):
+        """The worker parks in `channel.get(timeout=600)` on a NON-daemon
+        executor thread, which holds `App.run()`; so a teardown that
+        released nothing presented as a hang rather than an error.
+
+        The assertion is on the PUT, for `_RecordingQueue`'s reason: the
+        pump is gone by then, so nothing downstream of the release reports
+        anything either way. And it is made AFTER the context exits,
+        because `on_unmount` is part of leaving it.
+        """
+        _mocked_loop.patch("core.loop.registry.approval_needed",
+                           return_value=True)
+        _mocked_loop.patch("core.loop.registry.dispatch")
+        monkeypatch.setattr("tui.app.queue.Queue", _RecordingQueue)
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app.query_one("#prompt").value = "do a thing"
+            await pilot.press("enter")
+            assert await settle(
+                pilot, lambda: isinstance(app.screen, PermissionScreen))
+            channel = app._permission_channel
+            assert channel is not None and channel.puts == []
+            app._shutting_down = False     # as a crash leaves it
+
+        assert channel.puts == [False], (
+            "the app was torn down with the worker still parked on the "
+            "permission channel")
+
+    @pytest.mark.asyncio
+    async def test_the_release_is_reachable_without_exit(self, _mocked_loop,
+                                                         monkeypatch):
+        """The half that distinguishes the fix from what shipped.
+
+        `exit()` has always released. What it does not do is run on the
+        crash path: textual's `_handle_exception` goes to `_fatal_error()`
+        -> `_close_messages_no_wait()` and never calls `App.exit()`.
+        Measured, against a real App subclass mirroring this exit funnel: a
+        deliberate quit reached exit() and the unmount; an unhandled
+        exception reached ONLY the unmount.
+
+        So this drives `on_unmount` directly with a worker parked, which is
+        the crash path's shape with textual's own teardown left out of it.
+        """
+        app = _bare_modal_app(lambda *a, **k: None)
+        channel = _RecordingQueue()
+        app._permission_channel = channel
+        app._log_handler = None
+        app._session_sink = object()
+
+        app.on_unmount()
+
+        assert channel.puts == [False], (
+            "on_unmount released nothing, so the only release is on a "
+            "funnel the crash path does not reach")
+        assert app._shutting_down, (
+            "the flag was not set either, so the seven ask_*_blocking "
+            "guards stay open through teardown")
+
+    @pytest.mark.asyncio
+    async def test_unmount_is_dispatched_before_the_worker_is_waited_for(
+            self):
+        """The DEPENDENCY fact the fix rests on, pinned because nothing
+        else in the tree would notice it changing.
+
+        `App._shutdown` reads `await self._close_all()`, then
+        `await self._close_messages()`, then `_dispatch_message(Unmount())`
+        -- Unmount is THIRD. If either of the first two waited for the
+        thread workers, a release at Unmount would be a release the worker
+        could never see: it waits for the release, the shutdown waits for
+        it, and the park's 600s timeout is what breaks the tie. Measured on
+        the installed textual, the worker is released by the unmount and
+        `App.run()` returns in 0.21s against a 3s park -- so Unmount is
+        early enough.
+
+        `TestShiftEnterIsStillNotTheKey` is the shape: pin the dependency
+        fact a decision rests on, not the feature.
+        """
+        import queue as queue_module
+        import threading
+
+        from textual.app import App
+
+        order = []
+
+        class _Probe(App):
+            def on_mount(self):
+                self.run_worker(self._park, thread=True)
+
+            def _park(self):
+                order.append("parked")
+                parked.set()
+                try:
+                    order.append("released %r" % (channel.get(timeout=5.0),))
+                except queue_module.Empty:
+                    order.append("TIMED OUT")
+                finished.set()
+
+            def on_unmount(self):
+                order.append("unmount")
+                channel.put(False)
+
+        channel = queue_module.Queue()
+        parked = threading.Event()
+        finished = threading.Event()
+        probe = _Probe()
+
+        async with probe.run_test() as pilot:
+            await pilot.pause()
+            assert parked.wait(5.0), "the probe's worker never parked"
+            probe.exit()
+
+        # WAITED FOR, not assumed: leaving the context can return before
+        # the released worker is scheduled again, and an `order` that is
+        # merely incomplete would satisfy both assertions below for the
+        # wrong reason.
+        assert finished.wait(5.0), "the probe's worker never came back"
+        assert "TIMED OUT" not in order, (
+            "textual now waits for the thread workers before dispatching "
+            "Unmount, so releasing there cannot work: " + repr(order))
+        assert order.index("unmount") < order.index("released False"), order
+
+    @pytest.mark.asyncio
+    async def test_a_deliberate_quit_still_releases_exactly_once(
+            self, _mocked_loop, monkeypatch):
+        """Both funnels now release, and `exit()` keeps its own copy of the
+        two lines -- removing it would leave the window between a quit and
+        the unmount with no flag set, which is what the seven
+        `ask_*_blocking` guards read.
+
+        So the release runs twice on a deliberate quit, and this pins that
+        the second one is free: `_release_permission_channel`
+        reads-and-clears, so it finds nothing and puts nothing. A second
+        `False` would be an answer to the NEXT ask if the field were reused.
+        """
+        _mocked_loop.patch("core.loop.registry.approval_needed",
+                           return_value=True)
+        _mocked_loop.patch("core.loop.registry.dispatch")
+        monkeypatch.setattr("tui.app.queue.Queue", _RecordingQueue)
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app.query_one("#prompt").value = "do a thing"
+            await pilot.press("enter")
+            assert await settle(
+                pilot, lambda: isinstance(app.screen, PermissionScreen))
+            channel = app._permission_channel
+            app.exit()
+            await pilot.pause()
+
+        assert channel.puts == [False], (
+            "the release is not idempotent across the two funnels: %r"
+            % (channel.puts,))
+
+
+class TestTheModalRetestsTheShutdownFlagItself:
+    """S14-03. The guard was in each of the seven callers and not in the
+    one place they share, so it closed the sequential re-arm and left the
+    concurrent one.
+    """
+
+    def test_a_shutting_down_app_declines_without_marshalling(self):
+        """The ask must not push a modal onto an app that is going away,
+        and must not park on a queue whose writer has already gone.
+
+        `None` is the timeout path's own return value, which
+        `interaction.decode` turns into the kind's declining default -- so
+        this adds no new answer to the contract.
+        """
+        marshalled = []
+        app = _bare_modal_app(lambda *a, **k: marshalled.append(a),
+                              cls=_ChannelWatchingApp)
+        app._shutting_down = True
+
+        assert app._blocking_modal(object(), on_timeout=lambda s: None) is None
+        assert marshalled == [], (
+            "a modal was pushed onto an app that is shutting down")
+
+    def test_the_queue_was_published_before_the_guard_declined(self):
+        """The half a return value cannot show.
+
+        A guard placed BEFORE the publication declines identically and
+        leaves the race intact: the release reads a `None` field, puts
+        nothing, and the ask publishes a moment later onto a queue with no
+        writer left. Covering the publication is the whole point, so the
+        test asserts the field was written before the decline.
+        """
+        app = _bare_modal_app(lambda *a, **k: None, cls=_ChannelWatchingApp)
+        app._shutting_down = True
+
+        app._blocking_modal(object(), on_timeout=lambda s: None)
+
+        published = [w for w in app._channel_writes if w is not None]
+        assert published, (
+            "the guard declined BEFORE publishing the queue, so a release "
+            "racing the publication still parks the worker")
+        assert app._channel_writes[-1] is None, (
+            "the finally did not clear the field")
+
+    def test_an_app_that_is_not_shutting_down_still_asks(self):
+        """The control. Without it the two tests above would pass against a
+        `_blocking_modal` that declined unconditionally.
+        """
+        marshalled = []
+
+        def working(push, screen, callback):
+            marshalled.append(screen)
+            callback(True)
+
+        app = _bare_modal_app(working, cls=_ChannelWatchingApp)
+
+        assert app._blocking_modal(object(), on_timeout=lambda s: None) is True
+        assert len(marshalled) == 1
+
+
+class TestTheModalLeavesNothingBehindWhenTheMarshalFails:
+    """S14-04. Two pieces of state were installed before the `try` whose
+    `finally` undoes them, with a call that raises in between.
+    """
+
+    def test_a_raising_marshal_clears_the_channel_and_resumes_the_clock(self):
+        """`call_from_thread` raises `RuntimeError("App is not running")`
+        when textual's `_loop` is None, which teardown sets.
+
+        The clock is the half a user would read: `set_blocked(True)` stops
+        the turn clock, and with the resume lost it stays stopped for the
+        rest of the session -- so every later turn's time and `~tok/s` are
+        wrong. TECHNICAL_DEBT 9's misreading, in the batch 61 machinery
+        written to stop it.
+        """
+        def dead(push, screen, callback):
+            raise RuntimeError("App is not running")
+
+        app = _bare_modal_app(dead)
+
+        with pytest.raises(RuntimeError, match="App is not running"):
+            app._blocking_modal(object(), on_timeout=lambda s: None)
+
+        assert app._permission_channel is None, (
+            "the field stayed set, so it no longer means 'there is an ask "
+            "outstanding' and a later release puts False on an orphan queue")
+        assert app._meter._blocked_at is None, (
+            "the turn clock is still paused, so every later turn's duration "
+            "and ~tok/s are wrong")
+
+    def test_the_exception_still_propagates(self):
+        """Pinned because the fix must not become a swallow. The contract
+        of this method is to return the dismissal value raw; a marshal that
+        failed is not a dismissal, and the frame above is what reports it.
+        """
+        def dead(push, screen, callback):
+            raise RuntimeError("App is not running")
+
+        with pytest.raises(RuntimeError):
+            _bare_modal_app(dead)._blocking_modal(
+                object(), on_timeout=lambda s: None)
+
+    def test_a_working_marshal_clears_both_as_it_always_did(self):
+        """The control: the `finally` was already correct on the path that
+        reaches it, and moving three statements inside the `try` must not
+        change that.
+        """
+        def working(push, screen, callback):
+            callback(True)
+
+        app = _bare_modal_app(working)
+
+        assert app._blocking_modal(object(), on_timeout=lambda s: None) is True
+        assert app._permission_channel is None
+        assert app._meter._blocked_at is None
+
+
+class TestTheSessionWaitEndsOnAQuit:
+    """S14-05. `_wait_for_sessions` had three exits and none of them was
+    the shutdown flag, so the quit gesture answered insistence with a hang.
+    """
+
+    def _app(self, **attrs):
+        app = VenastineApp.__new__(VenastineApp)
+        app._cancel = None
+        app.posted = []
+        app.post_message = lambda message: app.posted.append(message)
+        for name, value in attrs.items():
+            setattr(app, name, value)
+        return app
+
+    def _drive(self, app, sessions, monkeypatch):
+        """Run the real `_wait_for_sessions` on THIS thread.
+
+        It returns or the stub raises `_StillSpinning`; there is no third
+        outcome, which is what makes every assertion below exact.
+        """
+        from core import shell_sessions
+
+        monkeypatch.setattr(shell_sessions, "sessions", sessions)
+        app._wait_for_sessions("t1", object())
+
+    def test_the_wait_ends_when_the_app_is_shutting_down(self, monkeypatch):
+        """`closing` is set only by `SessionManager.close()`, reached from
+        main.py's `finally` -- which runs after `run_tui()` returns, and
+        `run_tui()` is `App.run()`, which does not return while this worker
+        is alive. The only thing that would have stopped this loop ran
+        after the thing it was waiting on.
+
+        The flag goes up on the third wait, so the loop is already running
+        when it changes: a flag set before the first iteration would pass
+        against a loop that reads it once and never again.
+        """
+        app = self._app()
+        sessions = _StubSessions(
+            live=1,
+            on_wait=lambda n: setattr(app, "_shutting_down", n >= 3))
+
+        self._drive(app, sessions, monkeypatch)
+
+        assert sessions.waits == 3, (
+            "the loop did not stop on the first wait after the flag went up "
+            "(%d waits)" % sessions.waits)
+
+    def test_nothing_in_particular_does_not_end_the_wait(self, monkeypatch):
+        """The control. Without it the test above would pass against a loop
+        that returns immediately for any reason at all -- and the stub is
+        what reports "still going", so this pins that the loop really does
+        keep waiting while a session is live.
+        """
+        app = self._app()
+
+        with pytest.raises(_StillSpinning):
+            self._drive(app, _StubSessions(live=1), monkeypatch)
+
+    def test_the_wait_still_ends_on_closing(self, monkeypatch):
+        """The branch that already worked, pinned beside the new one so the
+        two teardown signals stay one rule rather than one rule and a
+        duplicate of it.
+        """
+        app = self._app()
+        sessions = _StubSessions(live=1)
+        sessions._on_wait = lambda n: setattr(sessions, "closing", n >= 3)
+
+        self._drive(app, sessions, monkeypatch)
+
+        assert sessions.waits == 3
+
+    def test_a_quit_does_not_promise_a_next_message(self, monkeypatch):
+        """The ORDER of the two tests, which is the user-visible half.
+
+        A quit sets the shutdown flag AND the cancel token (S14-06), and
+        the cancel branch posts "their results will arrive with your next
+        message" -- true for escape, false for a quit, where there is no
+        next message. Whichever test comes first decides what the user is
+        told, so the order is the message.
+        """
+        from core.cancel import CancelToken
+
+        app = self._app(_shutting_down=True)
+        app._cancel = CancelToken()
+        app._cancel.cancel("quitting")
+
+        self._drive(app, _StubSessions(live=1), monkeypatch)
+
+        assert app.posted == [], (
+            "a quit was narrated as a stop that holds results for a next "
+            "message: %r" % ([getattr(m, "text", m) for m in app.posted],))
+
+    def test_escape_still_says_the_results_are_held(self, monkeypatch):
+        """The control for the order: with the cancel token set and the app
+        NOT shutting down, the note is still posted. CN2 is unchanged --
+        escape stops the conversation and leaves the sessions running.
+        """
+        from core.cancel import CancelToken
+
+        app = self._app()
+        app._cancel = CancelToken()
+        app._cancel.cancel("stopped from the keyboard")
+
+        self._drive(app, _StubSessions(live=1), monkeypatch)
+
+        assert len(app.posted) == 1, (
+            "escape stopped narrating the held results")
+        assert "next" in app.posted[0].text
+
+
+class TestAQuitStopsTheTurnItSaysItStops:
+    """S14-06. `_busy` covers a chat turn, a research run and `/compact`
+    alike; only the research path read the flag, so on a chat turn the
+    quitting line asserted an abandonment that did not happen.
+    """
+
+    @pytest.mark.asyncio
+    async def test_quitting_cancels_the_running_turn(self, _mocked_loop):
+        """The token, not a break in the drain, and the difference is
+        measured: abandoning the generator on a `tool_call_start` event
+        leaves D20's persisted `tool_use` with no `tool_result` -- M4's
+        pairing broken and an unresumable thread. The token is tested
+        between tool groups and `_finish_cancelled` writes a row for every
+        call it will not run.
+        """
+        from core.cancel import CancelToken
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._busy = True
+            app._cancel = CancelToken()
+            assert not app._cancel.cancelled
+
+            app.exit()
+            await pilot.pause()
+
+            assert app._cancel.cancelled, (
+                "the quit announced that the work stops and left the turn "
+                "draining against an app that has gone")
+            assert app._cancel.reason == "quitting"
+
+    @pytest.mark.asyncio
+    async def test_the_flag_is_set_before_the_cancel(self, _mocked_loop):
+        """The ordering `_wait_for_sessions` depends on: a worker that can
+        see the cancellation can already see the flag, so it takes the
+        teardown exit rather than the one that promises a next message.
+        """
+        from core.cancel import CancelToken
+
+        seen = []
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+
+        class _Watching(CancelToken):
+            def cancel(self, reason="x"):
+                seen.append(app._shutting_down)
+                return super().cancel(reason)
+
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._busy = True
+            app._cancel = _Watching()
+            app.exit()
+            await pilot.pause()
+
+        assert seen == [True], (
+            "the turn was cancelled before the shutdown flag was set, so a "
+            "worker can see the stop without seeing the teardown")
+
+    @pytest.mark.asyncio
+    async def test_an_idle_quit_cancels_nothing(self, _mocked_loop):
+        """The control. `_cancel` is None between turns (CN9 gives it the
+        channel's lifetime), and a quit must not invent a token to cancel.
+        """
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert app._cancel is None
+            app.exit()
+            await pilot.pause()
+        assert app._cancel is None
+
+    @pytest.mark.asyncio
+    async def test_the_line_claims_a_boundary_rather_than_an_abandonment(
+            self, _mocked_loop):
+        """The wording moved with the behaviour. It said the work "is
+        abandoned at its next event", which was true of `_forwarding` and
+        of nothing else -- `_consume` is recorded in BREAKING_CHANGES as
+        deliberately untouched. What happens now is a cooperative stop: a
+        tool call already running finishes (CN6), and every row the turn
+        owes is written.
+        """
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app._busy = True
+            app.exit()
+            await pilot.pause()
+            said = app._transcript.as_text()
+
+        assert "quitting" in said
+        assert "stops at its next boundary" in said, said
+        assert "abandoned" not in said, (
+            "the line still claims an abandonment the chat path does not do")
+
+class TestTheStrippedSequencesAreRecordedOnce:
+    """Batch 145's third ruling, the app's half.
+
+    The widget counts and this layer speaks, because `Transcript.write*`
+    doing no logging is what stops `on_log_record_message` closing a loop.
+    The widget's count is pinned in `test_live_output.py`; what is pinned
+    here is that anything reads it -- which the mutation pass found nothing
+    did.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_turn_that_stripped_something_says_so_once(self, caplog):
+        """INFO, so it reaches `logs/app.log` at the default level and goes
+        through batch 144's redacting formatter -- and NOT the transcript,
+        since `TranscriptLogHandler` is WARNING+ and a model that emitted a
+        colour code is not a warning.
+        """
+        import logging
+
+        from tui.app import TurnFinished
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._transcript.write_answer("a \x1b[2J b \x1b[31m c")
+            with caplog.at_level(logging.INFO, logger="tui.app"):
+                app.on_turn_finished(TurnFinished(None))
+
+        records = [r for r in caplog.records
+                   if "control sequence" in r.getMessage()]
+        assert len(records) == 1, (
+            "the turn stripped two sequences and the log says %r"
+            % ([r.getMessage() for r in records],))
+        assert records[0].levelno == logging.INFO
+        assert "2" in records[0].getMessage(), records[0].getMessage()
+
+    @pytest.mark.asyncio
+    async def test_a_clean_turn_says_nothing(self, caplog):
+        """The control. A line per turn whether or not anything was
+        stripped is a line nobody can read anything from.
+        """
+        import logging
+
+        from tui.app import TurnFinished
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._transcript.write_answer("nothing unusual here")
+            with caplog.at_level(logging.INFO, logger="tui.app"):
+                app.on_turn_finished(TurnFinished(None))
+
+        assert not [r for r in caplog.records
+                    if "control sequence" in r.getMessage()]
+
+    @pytest.mark.asyncio
+    async def test_the_count_does_not_carry_into_the_next_turn(self, caplog):
+        """Read-and-clear, which is what makes it a count PER TURN rather
+        than a total that only grows -- so a second turn with nothing in it
+        reports nothing.
+        """
+        import logging
+
+        from tui.app import TurnFinished
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._transcript.write_answer("a \x1b[2J b")
+            app.on_turn_finished(TurnFinished(None))
+            with caplog.at_level(logging.INFO, logger="tui.app"):
+                app.on_turn_finished(TurnFinished(None))
+
+        assert not [r for r in caplog.records
+                    if "control sequence" in r.getMessage()]
+

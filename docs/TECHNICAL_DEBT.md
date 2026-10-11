@@ -80,6 +80,21 @@ pumps racing for one stdin (f3).
 
 - **Fixed:** `_shutting_down` flag consulted by both blocking ask paths;
   one `_StdinReader` per process shared by both builders.
+- **Fixed, batch 145 (S14-01, S14-03, S14-04):** the flag closed the
+  SEQUENTIAL re-arm, which is what r1-1 was, and left two things beside it.
+  The re-arm that is CONCURRENT with the release had no guard at all —
+  `_release_permission_channel` reads-and-clears, so a release landing
+  while `_permission_channel` is still `None` puts nothing anywhere and the
+  ask publishing a moment later parks on a queue with no writer; the shared
+  `_blocking_modal` now re-tests the flag after publishing, which puts the
+  check in the one place all seven asks reach. And the release itself lived
+  only in `exit()`, which is every DELIBERATE route out and not the
+  involuntary one, so a crash left a worker parked for the full 600 s on a
+  non-daemon thread holding `App.run()`; `on_unmount` releases too, and the
+  ordering that makes it work — textual dispatches `Unmount` before it
+  waits for the thread workers — is pinned rather than assumed. Also the
+  marshal: `call_from_thread` sat outside the `try` whose `finally` clears
+  the field and resumes the turn clock, so a raise left both.
 - **Remaining (by design):** unanswered asks still wait out the 600 s
   attended timeout in the normal (non-shutdown) path — R9's degrade-and-
   continue trade.
@@ -103,6 +118,19 @@ very order it existed to check (r3-2).
   file would sit there looking like coverage — so the guard has a direct
   test of its own rather than a revert-and-see-red. Worth generalising:
   where a test can decline to run, prove it runs.
+- **Second instance, batch 145, and this one was found rather than
+  foreseen.** A PARAMETRISATION can empty, which skips without anything in
+  the test looking conditional.
+  `test_logging_setup.py::test_the_three_shapes_are_what_discriminates` is
+  batch 144's guard on `REDACTION_CASES`, parametrised over the rows whose
+  labels are in `SHAPE_CASE_LABELS` — so a mutation that dropped those rows
+  reported `1 skipped` and the parity tests it protects went on passing,
+  which is precisely the vacuity it exists to prevent. Caught by a mutation
+  control, not by reading. `test_the_three_shapes_are_all_still_in_the_list`
+  is the proof-that-it-runs beside it, and it covers a renamed label as well
+  as a dropped row. **Worth a sweep**: every `@pytest.mark.parametrize` whose
+  argument list is a COMPREHENSION over another list can do this, and the
+  suite has more than one.
 
 ## 7. Documentation drift
 
@@ -4602,6 +4630,105 @@ lines and closes the observed failure; the first is closer to the gate's name.
 test-name gate has no business reading JavaScript -- a `.mjs` file naming a
 pytest test is not a thing that happens. Give the citation gate its own
 domain.
+
+## 87. `.gitleaksignore` pins its blessings by LINE NUMBER (open, found and filed batch 144, measured again batch 145)
+
+The secret scan's allowlist is a list of fingerprints, and a fingerprint is
+`<path>:<rule>:<line>`. So a blessing is attached to a line number, not to the
+text it blesses, and **any edit that moves a blessed line re-fires the scan**.
+
+Measured in batch 144, which is what filed this: six names added to
+`tests/test_policy_enforcement.py`'s import block pushed five already-blessed
+fake fixtures down by six lines, and `gitleaks detect --source . --no-git -c
+.github/gitleaks.toml` went from five findings to ten. The change had no
+business touching anything above those fixtures.
+
+**This is not a bug in the ignore file, and the re-firing is deliberate** — the
+file's own comment says it is, "so a real secret pasted beside a fake one
+cannot hide behind this file". The cost is that it is paid by every future
+batch that edits above a fixture, and the two ways of paying it are both bad:
+re-number five blessings (which is the thing the comment is guarding against
+becoming routine), or restructure the edit to avoid the lines. Batch 144 did
+the second — the imports moved inside the tests that use them, and the
+fixtures are built by concatenation so no line holds a whole token — and
+batch 145 paid it again in a smaller way.
+
+**What would close it:** the pinned gitleaks version has no content-addressed
+ignore, so the fix is not a config change. The candidates are (a) move every
+fabricated credential in the suite behind a builder that no rule matches, so
+there is nothing to bless and `.gitleaksignore` can be emptied; (b) generate
+the ignore file from a scan as a build step, which trades the surprise for a
+generated artefact nobody reads; or (c) keep paying it and write down that it
+is a known cost of editing those three files. (a) is the only one that
+removes the class, and it is a sweep over the suite's fixtures rather than a
+fix — hence the register.
+
+**Not:** adding fingerprints as they fire. "Adding a fingerprint for a REAL
+credential is never the fix; rotation is", and a routine of re-blessing is
+how a real one gets blessed by accident.
+
+## 88. Six workflows are not on `main`, so a branch's CI is reconstructed by hand (open, filed batch 145)
+
+`navigable-agents` carries six workflow files that `main` does not, so GitHub
+runs none of them for this branch and every batch's lint, secret and
+dependency checks are run locally from invocations typed out of the workflow
+YAML. That has cost a cycle at least twice, most recently in batch 144: the
+first `bandit -b` run of the batch reported **9,165 new findings**, which was
+not a regression but a missing `-s B101,B105,B106` — the baseline is produced
+with those three skipped, so a comparison without them reports every `assert`
+in the suite as new. The figure was implausible enough to be obvious. A
+subtler mismatch would not be.
+
+The four that have to agree with CI exactly:
+
+```
+ruff check .
+bandit $files -s B101,B105,B106 -b .github/bandit-baseline.json -q
+gitleaks detect --source . --no-git -c .github/gitleaks.toml -v
+pip-audit -r requirements.txt -r requirements-test.txt
+```
+
+**What would close it:** one script in `scripts/` that reads the invocations
+out of the workflow files rather than restating them, so the local run cannot
+drift from the YAML by a flag. It is small, and it is deliberately NOT part of
+batch 145: the build/CI surface (S18) closed at batch 142, and a script that
+runs CI locally is a build-surface change that wants its own batch and its own
+tests — including the one that matters, that the script fails when the YAML
+and the script disagree.
+
+**Not:** merging the workflows to `main` to make CI run. That is the owner's
+call and the branch is not merged yet; the point of this entry is the local
+reproduction, which is needed either way for the batches before the merge.
+
+## 89. The transcript's ANSI strip is silent, and nothing reads the count it keeps (open, filed batch 145)
+
+S15-01's fix removes every terminal control sequence at every transcript
+ingress, and the owner's ruling was that the text says nothing and the log
+says it once. Both halves shipped: `Transcript.take_stripped_count()` is
+read-and-clear and `tui/app.py` logs one INFO line per turn.
+
+What is NOT built is anything that acts on it. A model emitting a CSI is
+anomalous — the transcript's grammar has no use for one, and the plausible
+sources are a tool result carrying a program's raw output, a fetched page, or
+an attempt at drawing something the user did not ask for. One INFO line in
+`logs/app.log` is an audit trail for someone already reading the file, which
+is "nobody, mid-run" in `TranscriptLogHandler`'s own words about exactly this
+problem.
+
+**What would close it:** a decision about whether a stripped sequence is worth
+the user's attention, which is a UX question and not a defect. The options
+were measured and named in batch 145 — a visible inline marker was considered
+and declined, because it enters `_entries` (so `/copy` and the replay carry
+it), changes `display_len`, and a model can type the marker itself, which is
+the spoof `[REDACTED]` already accepts. The middle option that was NOT
+explored: a once-per-session system line the first time a turn strips
+anything, which costs no per-line grammar and is not spoofable by typing,
+since the count comes from the stripper rather than from the text.
+
+**Not:** raising the record to WARNING to make it visible. `TranscriptLogHandler`
+is WARNING+ and routes into the transcript, so that is the inline marker
+arriving by a route nobody chose, with a `[warning]` prefix on an ordinary
+coloured answer.
 
 ## Review-marathon arrivals at open issues with no register entry
 

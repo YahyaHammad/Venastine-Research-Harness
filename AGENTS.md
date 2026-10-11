@@ -55,7 +55,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 6581 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
+pytest                                            # 6739 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -74,7 +74,7 @@ Test dependencies (`pytest`, `pytest-mock`, `pytest-asyncio`, and `pytest-xdist`
 
 **And a file is no longer one unit, which is the trap loadscope adds.** A file holding both module-level tests and a class is TWO groups, so a non-function-scoped fixture in it is set up twice on any worker that takes both — found by measuring, not by reading, when a `-n logical` run put `test_storage_e2e.py`'s two groups on one worker and the second `real_storage` raised `Table 'conversationthread' is already defined`. Five `-n auto` runs had been green, so it is a scheduling lottery. `test_storage_e2e.py` holds the suite's ONLY two non-function-scoped fixtures -- `real_storage` and the `_schema_cache_is_put_back` it requests (batch 110) -- and that grep is how to check: `grep -rn 'scope="module"' tests/` returns those two and nothing else. **This sentence said ONE until batch 128**, which is the register's own defect in the document that warns about it: a count written when it was true, beside a rule that did not need it. The rule is what matters, and it is unchanged -- one FILE still has the problem, so that file declares no test class, pinned by `test_this_file_declares_no_test_class`. **If you add a module- or session-scoped fixture, its file must hold no test class.**
 
-**The suite was FLOOR-BOUND and is not any more, and batch 114 is why.** The slowest single GROUP sets the wall time whatever the worker count, and under loadscope that was `tests/test_tui.py`'s 183 module-level tests — one group, because a test outside a class is grouped by MODULE — at 292 node ids and about a fifth of the suite's measured time. They were cut into 41 classes along the section banners the file already had (TECHNICAL_DEBT 30) and are **65** now, which is the rule working rather than drifting. That number is read back out of this sentence by `test_agents_md_states_the_real_test_tui_class_count` (batch 128), so a batch that adds a class here also edits this digit. Measured properly: three runs a side, ALTERNATED on one box so drift cancels instead of landing on whichever side ran second — **2:17.9 / 2:07.9 / 2:28.6 before against 1:10.7 / 1:40.6 / 1:26.3 after, a mean of 138.1s against 85.9s, 1.61×**, and the two ranges do not overlap, which is the part that makes it a result rather than a pair of averages. Against a serial run that read 8:41 the same evening, 6.1× where it was 3.8×.
+**The suite was FLOOR-BOUND and is not any more, and batch 114 is why.** The slowest single GROUP sets the wall time whatever the worker count, and under loadscope that was `tests/test_tui.py`'s 183 module-level tests — one group, because a test outside a class is grouped by MODULE — at 292 node ids and about a fifth of the suite's measured time. They were cut into 41 classes along the section banners the file already had (TECHNICAL_DEBT 30) and are **71** now, which is the rule working rather than drifting. That number is read back out of this sentence by `test_agents_md_states_the_real_test_tui_class_count` (batch 128), so a batch that adds a class here also edits this digit. Measured properly: three runs a side, ALTERNATED on one box so drift cancels instead of landing on whichever side ran second — **2:17.9 / 2:07.9 / 2:28.6 before against 1:10.7 / 1:40.6 / 1:26.3 after, a mean of 138.1s against 85.9s, 1.61×**, and the two ranges do not overlap, which is the part that makes it a result rather than a pair of averages. Against a serial run that read 8:41 the same evening, 6.1× where it was 3.8×.
 
 **What is left as the floor is one PARAMETRISED function**, and it cannot be split by any class boundary: loadscope groups every node id of a parametrised test together, and `test_every_modal_keeps_its_decision_on_screen` is 3 sizes × 19 cases = **57** of them, pinned against the collected node ids by `test_agents_md_states_the_real_modal_parametrisation` (batch 128) because `_DECISION_CASES` is computed and cannot be counted by reading. Splitting it further was measured and declined — `-n auto` is 11 workers here and the serial suite is ~520s, so the ideal worker share is ~47s and that group already sits under it. Below a bound that has stopped binding there is nothing to win.
 
@@ -256,6 +256,27 @@ Three stop conditions, all in `_run()`: no tool calls (`complete`), `max_steps` 
 
 **A model call is retried, and since batch 113 the screen is no longer the boundary** (batch 91, amended by batch 113 / TECHNICAL_DEBT 25). The attempt loop in `_run_steps` re-sends one step's call when `core/provider_errors.is_transient` says the failure can pass: a connection error, a 408/409/429/5xx, or an error event inside a stream that opened with 200 — which both the openai and anthropic SDKs raise unretried, and which is how OpenRouter reports an overloaded upstream. Up to `model_call_max_retries` more attempts, `model_call_retry_base_delay_s` doubling with jitter; the SDKs' own pre-stream retries stay on inside each attempt. **One rule for every caller**: batch 91 split them, retrying a *drained* run whatever it had streamed and refusing a *drawn* one after its first delta, because a RichLog row could not be taken back. Batch 112 made one retractable, so the loop now yields `LoopEvent(retract=...)` before the backoff wait — only when the attempt had drawn something — and the shell deletes its own rows. **`drained` is gone**; do not reintroduce a two-speed retry, which `test_one_rule_for_every_caller` guards by reading the source. The loop sits below the wrappers that write the user row, so a retry never writes it twice, and above the accounting, so only the attempt that succeeded is billed or persisted (D20).
 
+**A quit STOPS the turn it says it stops** (batch 145, S14-06). `exit()` printed
+"the active work is abandoned at its next event" on any exit while `_busy`, and
+`_busy` covers a chat turn, a research run and `/compact` alike — but only the
+research path read the flag (`_forwarding` breaks at the next event, #105) and
+`_consume` is recorded in `tests/BREAKING_CHANGES.md` as deliberately untouched. So
+on a chat turn the sentence asserted an abandonment that did not happen while the
+worker went on draining the generator: up to `max_steps` further model calls and
+every tool call inside them, against an app that has gone. **The fix is SS61's
+cancel token, not a break in the drain**, and the difference is measured: a break
+lands on whatever event is next, and one of those is `tool_call_start`, where D20
+has already persisted the assistant turn carrying the `tool_use` and nothing has
+written the matching `tool_result` — M4's pairing broken and an unresumable thread.
+Driven on the real generator three ways, abandoning on `tool_result` orphaned
+nothing (that is what #42 fixed), abandoning on `tool_call_start` orphaned one, and
+the token orphaned nothing and ended the turn `cancelled`. The token is tested
+BETWEEN tool groups and `_finish_cancelled` writes a row for every call it will not
+run, which is "#42's lesson from the other side" in that function's own words. The
+flag is set BEFORE the cancel, so a worker that can see the stop can already see the
+teardown — `_wait_for_sessions` reads them in that order and the message it posts
+depends on which it finds.
+
 **A retraction is bounded by a MARK, not by the open span** (batch 113). `Transcript._retract_mark` is armed by the first delta of a span and cleared by `flush_stream`; `retract_to_mark(note)` truncates `_entries` back to it, clears both pending buffers, replays and writes the note. A second retraction keeps the first line for free, because `write_system` flushes — which clears the mark — and the next delta re-arms it after the note. Not the open span, because `_write_thinking_chunk` closes an open ANSWER before it draws — one attempt with interleaved reasoning is three entries with only the last open. Not taken at the flush either, though that was tried: every `write_*` opens with `flush_stream()`, so a line written mid-span moved the mark PAST the attempt's own text and the retraction then deleted the foreign line and kept the half-answer. `Transcript` is the only surface in this repository that draws model text — the research orchestrator translates a character COUNT and the CLI shell (`main.py`, never a `cli.py` -- there has never been one) ignores `retract` entirely, which `core/events.py` states is still correct about failures — so it is the only consumer of this event.
 
 **`_run` is a thin frame; the loop is `_run_steps`** (batch 91). On an `Exception` escaping it, the frame stores `redact_diagnostic_text(describe(e))` on the thread's newest user row (`redact_secrets` until batch 144, which is the vendor tokens alone -- and `API_URL` is user-supplied, so an httpx error names a URL that may carry userinfo, into the sink `docs/PRIVACY.md` says is deleted by wiping the database rather than one thread) (`MessageLog.error`, via `mark_turn_failed`) and re-raises unchanged — `core/events.py` still has no error variant. Not on `GeneratorExit`: an abandoned generator (#42) is not a failed run. **A column, not an `error` ROLE, is the decision:** provider translation and the compactor's `_as_text` read a user row's `content` alone, so the failure reaches `replay_entries` (an `error` entry right after its user entry) and nothing that sends or summarizes the conversation — a role would have been M8's mistake. `test_grants.py` walks `core.loop`'s AST for exactly one function named `_run` with no `authorized_call` in it; the frame satisfies both, so do not "simplify" it back into the body without re-reading that test.
@@ -336,7 +357,7 @@ not optional hygiene: the mount path READS the store, so without it
 `test_theme_preference_from_settings_is_applied_at_mount` passes or fails depending on whether
 the person running the suite had ever typed `/theme`.
 
-**Logging and Textual cannot share the terminal.** `main.py` calls `configure_logging(stderr=False)` immediately before `run_tui()` — not at the top of `main()`, because pre-mount messages (db creation, the trust prompt, MCP connections) genuinely want stderr. `TranscriptLogHandler` routes WARNING+ into the transcript so dropping stderr does not just make warnings invisible; it is attached in `on_mount` and **removed in `on_unmount`**, or it keeps a dead app alive and stacks one handler per instance across the test suite. Anything written to stderr while Textual is up paints over the rendered screen and disappears on the next repaint.
+**Logging and Textual cannot share the terminal.** `main.py` calls `configure_logging(stderr=False)` immediately before `run_tui()` — not at the top of `main()`, because pre-mount messages (db creation, the trust prompt, MCP connections) genuinely want stderr. `TranscriptLogHandler` routes WARNING+ into the transcript so dropping stderr does not just make warnings invisible; it is attached in `on_mount` and **removed in `on_unmount`**, or it keeps a dead app alive and stacks one handler per instance across the test suite. **`on_unmount` is also where the permission channel is released and `_shutting_down` is set** (batch 145, S14-01): `exit()` is every DELIBERATE route out and not the involuntary one — textual's `_handle_exception` reaches `_fatal_error()` -> `_close_messages_no_wait()` and never calls `App.exit()` — so a crash tore the app down with a worker parked on `channel.get(timeout=600)`, on a non-daemon executor thread that holds `App.run()`. `exit()` keeps its own copy of both lines, because removing them would leave the window between a quit and the unmount with no flag set, and the release reads-and-clears so the second call is free. The ordering this rests on is pinned rather than assumed: `App._shutdown` dispatches `Unmount` THIRD, after `_close_all()` and `_close_messages()`, and measured on the installed textual neither waits for the thread workers — so the release at unmount is early enough for the parked worker to see it. Anything written to stderr while Textual is up paints over the rendered screen and disappears on the next repaint.
 
 **The routed line carries the exception's reason and is redacted** (batch 91). `emit` appends `describe(exc)` when a record has `exc_info` — `logger.exception("Tool %s raised; ...")` otherwise showed a failure with no cause — and passes the whole line through `redact_diagnostic_text`, the log file's rule. Before this the handler redacted nothing: the file had been redacted at its formatter since #132 while the screen got `record.getMessage()` raw. **And "the log file's rule" was two rules until batch 144** (S07-01): this line called `redact_secrets` with no value redaction at all, so the harness's OWN stored value -- the one thing SS61 calls unconditional -- was drawn on screen verbatim while app.log redacted it. All five diagnostic sinks now call one function.
 
@@ -2512,6 +2533,26 @@ run rather than by reading the code.
 - **`Transcript._entries` serves the replay and `/copy`.** `RichLog` stores rendered
   segments, so `/theme` needs `rerender()`. Every write path must go through `_emit()`,
   or a line reaches the screen and neither the replay nor the copy.
+- **Nothing the transcript draws keeps a terminal control sequence** (batch 145,
+  S15-01). Every ingress stored and drew model- and third-party text byte-for-byte:
+  `core/ansi.py` existed and was called in exactly one place, the pty stream, and
+  nothing in `tui/` was it. Neither layer below removes the byte — Rich keeps it
+  through `export_text()`, and textual's `Content` strips only codepoints 7, 8, 11,
+  12 and 13, so ESC and the whole C1 range survived both the `RichLog` path and the
+  `as_content(Text(...))` one. **THREE chokepoints, not one**, because `_emit` is the
+  single write path for complete strings and the two delta entry points are not on
+  it: `_write_stream_chunk` and `_write_thinking_chunk` append to `_entries`
+  themselves. **THREE stripper objects**, and each count is measured: the delta
+  streams need one held ACROSS calls (a fresh one per delta turns `hi ESC [` +
+  `2Jthere` into `hi 2Jthere`, and one that flushes per delta emits the ESC
+  outright), and the answer and reasoning streams need separate ones because they
+  interleave — with one shared, a CSI left open by the answer terminated on the
+  reasoning chunk's first character and ate it. The strip also CORRECTS the wrap:
+  `display_len` read 10 for text six cells wide, so an escape counted as cells was a
+  row that broke early. Nothing is drawn in its place and the widget logs nothing —
+  `tui/app.py` reads a count at `on_turn_finished` and records one INFO line per
+  turn, because `Transcript.write*` doing no logging is what stops
+  `on_log_record_message` closing a loop.
 - **`/copy last` is READ from that log, never tracked beside it** (batch 48).
   `_last_response` was the second buffer, updated from whichever flush site kept
   `flush_stream()`'s return — and the one that mattered did not. `on_loop_event_message`

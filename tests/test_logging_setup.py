@@ -292,6 +292,30 @@ class TestEverySinkHasTheSameVocabulary:
         assert needle not in redact_output_text(text), (
             f"{label}: the credential reached the model")
 
+    def test_the_three_shapes_are_all_still_in_the_list(self):
+        """THE GUARD ON THE GUARD, and batch 145's mutation pass is why.
+
+        The test below is parametrised over the rows whose labels are in
+        `SHAPE_CASE_LABELS`, so dropping those rows from `REDACTION_CASES`
+        leaves it with NOTHING to run: it reported `1 skipped` and the
+        parity tests above went on passing, which is the exact vacuity the
+        guard exists to prevent. `docs/TECHNICAL_DEBT.md` item 6 names this
+        class -- "where a test can decline to run, prove it runs" -- and
+        this is that proof.
+
+        It covers the other direction too: a label renamed in one of the
+        two places and not the other silently empties the same
+        parametrisation.
+        """
+        present = {c[0] for c in REDACTION_CASES} & SHAPE_CASE_LABELS
+        assert present == set(SHAPE_CASE_LABELS), (
+            f"these shape labels are named in SHAPE_CASE_LABELS and absent "
+            f"from REDACTION_CASES, so the test below has no cases and "
+            f"SKIPS rather than guarding anything: "
+            f"{sorted(set(SHAPE_CASE_LABELS) - present)}")
+        assert len(present) == 3, (
+            f"the three shapes are three: {sorted(present)}")
+
     @pytest.mark.parametrize(
         "label,text,needle",
         [c for c in REDACTION_CASES if c[0] in SHAPE_CASE_LABELS],

@@ -1,8 +1,21 @@
 """
 tui/widgets.py
 
-ROADMAP_v2 §16 widgets. Presentation only -- nothing here imports core/
-or reaches into harness state; tui/app.py feeds them.
+ROADMAP_v2 §16 widgets. Presentation only -- nothing here reaches into
+harness state or does I/O; tui/app.py feeds them.
+
+THE RULE SAID "nothing here imports core/" UNTIL BATCH 145, and the one
+import it now has is the reason the wording moved rather than the rule.
+`core/ansi.py` is a pure text transform -- it imports `__future__` and
+nothing else, holds no harness state, touches no widget and does no I/O,
+which its own docstring says in those words. It lives in `core/` because
+the pty reader needs it too, not because it is harness machinery; it is
+the same KIND of module as `tui/markdown.py`, one directory over. A second
+copy here is what the rule would actually have bought, and that is the
+two-copies-of-one-decision shape (EP6, #157) that `core/ansi.py`'s own
+docstring refuses -- and batch 144 had just spent a whole surface undoing
+it for the secret redactors. The part of the rule that matters is intact:
+nothing here reads config, storage, a session or a tool.
 """
 
 import webbrowser
@@ -21,6 +34,7 @@ from textual.message import Message
 from textual.reactive import reactive
 from textual.widgets import ContentSwitcher, RichLog, Static, TextArea
 
+from core.ansi import AnsiStripper
 from prompts.system_prompts import pass_label
 from tui import diffs, markdown, ravens, themes
 from tui.commands import registry as commands
@@ -2189,6 +2203,77 @@ class Transcript(RichLog):
         # `retract_to_mark` truncates back to. None means nothing is
         # retractable. See that method for why a mark and not a span.
         self._retract_mark: int | None = None
+        # Batch 145. Three, and each one is measured -- see
+        # `_strip` for the vocabulary and `_new_strippers` for why the
+        # count is three rather than one.
+        self._new_strippers()
+
+    def _new_strippers(self) -> None:
+        """One stripper per independent ingress stream (batch 145).
+
+        THREE, not one, and not one per call:
+
+        `_entry` takes complete strings -- every `write_*` path -- so it is
+        fed and flushed within the call and carries nothing between two
+        unrelated entries.
+
+        `_answer` and `_thinking` are held ACROSS deltas, because a
+        sequence split over two of them is ordinary rather than a corner:
+        the model's chunk boundaries fall wherever the provider put them,
+        which is the same argument `core/ansi.py` makes about a pipe. A
+        fresh stripper per delta was measured both ways and both are wrong
+        -- dropping the carry turns `hi ESC [` + `2Jthere` into
+        `hi 2Jthere`, and flushing it per call emits the ESC itself.
+
+        They are SEPARATE from each other for the reason `_thinking_pending`
+        is separate from `_pending` one screen up: the two spans interleave,
+        and a shared stripper carries one span's unterminated sequence into
+        the other. Measured -- an open CSI from the answer ate the `t` of
+        the next reasoning chunk, because 0x74 is inside the CSI final-byte
+        range, so the sequence terminated on the reasoning text's first
+        character.
+
+        `release_unterminated=False` on all three. The pty's default is to
+        release a carry that never completed as text; here the text is
+        handed to a terminal, where `ESC [` with no final byte consumes
+        whatever is drawn next, so an unterminated sequence is dropped.
+        `core/ansi.py` argues both contracts where the flag is defined.
+        """
+        self._entry_ansi = AnsiStripper(release_unterminated=False)
+        self._answer_ansi = AnsiStripper(release_unterminated=False)
+        self._thinking_ansi = AnsiStripper(release_unterminated=False)
+
+    def _strip(self, stripper, text: str) -> str:
+        """The ONE redaction of terminal control sequences this widget does.
+
+        A function rather than three call sites spelling it out, for the
+        reason batch 144 spent a surface on: five sinks each composing
+        their own version of one transform is how two of them end up with
+        different vocabularies, and nothing can tell you which.
+
+        Returns the text with every escape sequence removed, in BOTH
+        encodings (`ESC [` and U+009B alike, batch 145's addition to
+        `core/ansi.py`). What it does NOT do is announce anything: this
+        widget does no logging, deliberately -- `on_log_record_message`
+        feeds routed records straight back into `write_role`, and a
+        Transcript that logged while writing would close that loop. The
+        count is kept instead and `tui/app.py` reads it, which is the
+        layer that knows whose text this was.
+        """
+        return stripper.feed(text)
+
+    def take_stripped_count(self) -> int:
+        """How many control sequences have been removed since the last ask.
+
+        READ-AND-CLEAR, so the caller gets a count per turn rather than a
+        total that only grows -- `tui/app.py` asks once when a turn ends.
+        """
+        total = 0
+        for stripper in (self._entry_ansi, self._answer_ansi,
+                         self._thinking_ansi):
+            total += stripper.sequences_removed
+            stripper.sequences_removed = 0
+        return total
 
     def write(self, content, *args, width=None, **kwargs):
         """Write at the width this pane will be SHOWN at (§47).
@@ -2317,6 +2402,15 @@ class Transcript(RichLog):
         opens -- and a second dict keyed by the same index would have
         been a third lifetime to keep in step with the other two.
         """
+        # Batch 145. BEFORE the entry is recorded, so `_entries`,
+        # the screen, `/copy` and the replay all hold the same bytes --
+        # which is the obligation this method's own docstring states, now
+        # also about what the text IS and not only about where it goes.
+        # Fed and flushed within the call: this is a complete string, so a
+        # sequence left open at the end of it was never split, and the
+        # flush discards it rather than releasing it as text.
+        text = self._strip(self._entry_ansi, text)
+        self._entry_ansi.flush()
         if record:
             self._entries.append((role, text))
             if links:
@@ -2956,7 +3050,12 @@ class Transcript(RichLog):
 
     def stream_delta(self, delta: str) -> None:
         self._arm_retraction()
-        self._pending += delta
+        # Batch 145. AT INGRESS, before `_pending` holds it: the
+        # commit rules below measure this buffer in rendered cells, and an
+        # escape sequence counted as cells is a row that wraps early.
+        # Measured: `display_len` read 10 for text whose visible width is
+        # 6, so stripping here also corrects arithmetic that was wrong.
+        self._pending += self._strip(self._answer_ansi, delta)
         self._commit_ready()
 
     def _arm_retraction(self) -> None:
@@ -3083,6 +3182,14 @@ class Transcript(RichLog):
         emits that remainder as a second, standalone thinking entry and
         then drops it.
         """
+        # Batch 145. The span is over, so a sequence still open was never
+        # going to be completed by a later delta. Discarded rather than
+        # released (`release_unterminated=False`), and discarded HERE
+        # rather than left in place, because a carry that outlived its span
+        # would prepend itself to the next one's first delta and eat a
+        # character of it -- which is the measurement in `_new_strippers`,
+        # arriving between two spans instead of between two streams.
+        self._answer_ansi.flush()
         if not self._pending and not self._stream_open:
             return ""
         residual, self._pending = self._pending, ""
@@ -3145,7 +3252,10 @@ class Transcript(RichLog):
 
     def thinking_delta(self, delta: str) -> None:
         self._arm_retraction()
-        self._thinking_pending += delta
+        # Batch 145, and `stream_delta`'s comment. Its own
+        # stripper, because the two spans interleave -- see
+        # `_new_strippers` for what a shared one was measured to do.
+        self._thinking_pending += self._strip(self._thinking_ansi, delta)
         self._commit_thinking_ready()
 
     def _commit_thinking_ready(self) -> None:
@@ -3185,6 +3295,11 @@ class Transcript(RichLog):
     def end_thinking(self) -> str:
         """Close the thinking span, if one is open. Idempotent: every
         non-thinking event calls it, and most of them find nothing."""
+        # Batch 145, for `_close_answer`'s reason. Before the early
+        # return, so an idempotent call that finds no span still clears a
+        # carry -- `flush` on an empty stripper costs nothing, which is
+        # what lets this sit in front of the cheap exit.
+        self._thinking_ansi.flush()
         if not self._thinking_open and not self._thinking_pending:
             return ""
         residual, self._thinking_pending = self._thinking_pending, ""
@@ -3234,6 +3349,11 @@ class Transcript(RichLog):
         # mark left pointing into an emptied log would have the next
         # retraction truncate to an index that no longer means anything.
         self._retract_mark = None
+        # Batch 145, on the same list and for the same reason twice over: a
+        # carry left behind would put the previous thread's unterminated
+        # sequence in front of this one's first delta, and a count left
+        # behind would be reported against a thread that did not produce it.
+        self._new_strippers()
         # Batch 65, and the same sentence as the line above it: a click
         # target left behind would belong to a thread that is no longer
         # on screen, and index N would then arm the NEXT thread's Nth

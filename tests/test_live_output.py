@@ -2801,3 +2801,441 @@ class TestAResizeRelaysTheTranscript:
             await pilot.pause()
 
             assert view.scroll_y >= view.max_scroll_y - 1
+
+# ===========================================================================
+# ---- Batch 145 (S15-01): no terminal control sequence survives ingress ----
+# ===========================================================================
+#
+# Every transcript ingress stored and drew model- and third-party text
+# byte-for-byte. `core/ansi.py` existed and was called in exactly one place
+# -- the pty stream -- and nothing in `tui/` was it, so a CSI in a streamed
+# answer, a tool line, a replayed thread or an MCP reply was handed to the
+# terminal. Rich does not remove it (measured on the pinned install:
+# `Console(record=True)` + `export_text()` keeps the ESC) and textual's
+# `Content` strips only codepoints 7, 8, 11, 12 and 13, so ESC and the whole
+# C1 range survived both draw paths.
+#
+# ESC = 27. The 8-bit forms matter just as much and are measured separately:
+# U+009B is the same CSI introducer as `ESC [`, and nothing covered it until
+# batch 145 widened `core/ansi.py`.
+
+ESC = "\x1b"
+
+#: The four shapes a control sequence arrives in, as (label, text, needle).
+#: The needle is what must NOT survive; the label names the shape.
+CONTROL_CASES = [
+    ("csi erase display", "hello " + ESC + "[2J world", ESC + "[2J"),
+    ("csi cursor move", "row " + ESC + "[10;1H here", ESC + "[10;1H"),
+    ("osc with st", "link " + ESC + "]8;;http://evil.test" + ESC + "\\x",
+     ESC + "]8;;"),
+    ("osc with bel", "title " + ESC + "]0;pwned\x07 done", ESC + "]0;"),
+    ("8-bit csi", "hi \x9b2J there", "\x9b"),
+    ("8-bit osc", "hi \x9d8;;http://evil.test\x9c there", "\x9d"),
+    ("bare c1 control", "line \x85 next", "\x85"),
+]
+
+#: Every way text enters a Transcript, as (label, callable taking the
+#: transcript and the text). A path missing from here is a path nothing
+#: below drives, which is the half of the relation that catches a NEW sink.
+INGRESS_PATHS = [
+    ("write_answer", lambda t, s: t.write_answer(s)),
+    ("write_user", lambda t, s: t.write_user(s)),
+    ("write_system", lambda t, s: t.write_system(s)),
+    ("write_error", lambda t, s: t.write_error(s)),
+    ("write_role tool", lambda t, s: t.write_role("tool", s)),
+    ("write_role wake", lambda t, s: t.write_role("wake", s)),
+    ("stream_delta", lambda t, s: (t.stream_delta(s), t.flush_stream())),
+    ("thinking_delta", lambda t, s: (t.thinking_delta(s), t.end_thinking())),
+    # THE SAME TWO ENTRY POINTS, past a commit boundary, and the mutation
+    # pass is why they are here. A delta that crosses no boundary leaves
+    # its residual to `_close_answer` / `end_thinking`, which route it
+    # through `_emit` -- so deleting the strip from `stream_delta` and from
+    # `thinking_delta` killed nothing, and every row above was really a
+    # second test of `_emit`. A trailing newline commits, and a committed
+    # chunk reaches `_entries` through `_write_stream_chunk` /
+    # `_write_thinking_chunk`, which `_emit` never sees.
+    ("stream_delta committed",
+     lambda t, s: (t.stream_delta(s + "\n"), t.flush_stream())),
+    ("thinking_delta committed",
+     lambda t, s: (t.thinking_delta(s + "\n"), t.end_thinking())),
+]
+
+
+class TestNoIngressKeepsAControlSequence:
+    """S15-01. The entries AND the drawn rows, for every path and shape."""
+
+    @pytest.mark.parametrize("path_label,enter",
+                             INGRESS_PATHS,
+                             ids=[p[0] for p in INGRESS_PATHS])
+    @pytest.mark.parametrize("case_label,source,needle",
+                             CONTROL_CASES,
+                             ids=[c[0] for c in CONTROL_CASES])
+    def test_neither_the_entry_nor_the_row_keeps_it(
+            self, case_label, source, needle, path_label, enter):
+        transcript, written = _recording_transcript()
+        enter(transcript, source)
+
+        entries = " ".join(t for _role, t in transcript._entries)
+        rows = " ".join(written)
+        assert needle not in entries, (
+            f"{path_label} stored {case_label} verbatim, so /copy and the "
+            f"replay hand it back and a /theme redraw sends it again")
+        assert needle not in rows, (
+            f"{path_label} drew {case_label} verbatim, so the terminal got it")
+        assert ESC not in entries and ESC not in rows
+
+    @pytest.mark.parametrize("path_label,enter",
+                             INGRESS_PATHS,
+                             ids=[p[0] for p in INGRESS_PATHS])
+    def test_the_surrounding_text_still_arrives(self, path_label, enter):
+        """THE CONTROL, and the reason it is per-path rather than once: a
+        strip that ate the line would pass every assertion above. Each
+        ingress has to keep its words.
+        """
+        transcript, written = _recording_transcript()
+        enter(transcript, "hello " + ESC + "[2J world")
+
+        entries = " ".join(t for _role, t in transcript._entries)
+        assert "hello" in entries and "world" in entries, (
+            f"{path_label} lost the text along with the sequence: {entries!r}")
+
+    @pytest.mark.parametrize("enter,role", [
+        (lambda t, s: t.stream_delta(s + "\n"), "assistant"),
+        (lambda t, s: t.thinking_delta(s + "\n"), "thinking"),
+    ], ids=["stream_delta", "thinking_delta"])
+    def test_the_committed_rows_really_bypass_emit(self, enter, role):
+        """THE CONTROL for the two rows above, and the reason they exist.
+
+        If a trailing newline did not actually commit, those two cases
+        would fall back to the residual path and be a third and fourth
+        test of `_emit` -- which is exactly the masking they were added to
+        remove. So this asserts the span is OPEN with text already
+        recorded, which is only true once `_write_stream_chunk` or
+        `_write_thinking_chunk` has run.
+        """
+        transcript, _written = _recording_transcript()
+        enter(transcript, "hello " + ESC + "[2J world")
+
+        assert transcript._entries, "nothing was recorded at all"
+        assert transcript._entries[-1][0] == role
+        open_flag = (transcript._stream_open if role == "assistant"
+                     else transcript._thinking_open)
+        assert open_flag, (
+            "the chunk did not commit, so this case routes through _emit "
+            "and cannot see the ingress strip")
+        assert ESC not in transcript._entries[-1][1]
+
+    def test_plain_text_is_untouched_by_the_strip(self):
+        """The other control. Pipes, hashes, backslashes and marks are what
+        this transcript's grammar is made of, and a stripper that touched
+        any of them would break the rendering it was added to protect.
+        """
+        sample = "| a # b *c* `d` \\e [f](g) 2*3*4 __init__"
+        transcript, _written = _recording_transcript()
+        transcript.write_answer(sample)
+        assert transcript._entries[-1][1] == sample
+
+    def test_every_case_is_one_some_matcher_actually_removes(self):
+        """The second direction of the relation (batch 144's shape).
+
+        A case nothing removes is a case whose assertions above are vacuous
+        -- they would pass on a needle that could never have been there.
+        Checked against the real stripper rather than against a list of
+        patterns, because the stripper is a scanner and has no pattern list
+        to compare with.
+        """
+        from core.ansi import AnsiStripper
+
+        idle = [label for label, source, _needle in CONTROL_CASES
+                if AnsiStripper(release_unterminated=False).feed(source)
+                == source]
+        assert not idle, (
+            f"these cases are not changed by the stripper at all, so the "
+            f"tests above assert nothing about them: {idle}")
+
+    def test_every_case_needle_is_in_its_own_text(self):
+        """And the half that caught a mistake in batch 144: a needle absent
+        from its own source is a `not in` that was never going to fail.
+        """
+        wrong = [label for label, source, needle in CONTROL_CASES
+                 if needle not in source]
+        assert not wrong, f"needle missing from its own case text: {wrong}"
+
+    def test_every_ingress_path_is_covered(self):
+        """The first direction: a `write_*` method this list does not name
+        is a sink nothing above drives.
+
+        Read off the class rather than restated, so a NEW ingress added to
+        `Transcript` fails here instead of quietly shipping unstripped --
+        which is exactly how five sinks for one redaction happened in
+        batch 144.
+        """
+        covered = {"write_answer", "write_user", "write_system",
+                   "write_error", "write_role", "stream_delta",
+                   "thinking_delta"}
+        actual = {name for name in dir(Transcript)
+                  if name.startswith("write_") or name.endswith("_delta")}
+        assert actual == covered, (
+            f"Transcript's ingress set changed; the parametrisation above "
+            f"does not cover {actual - covered} and names "
+            f"{covered - actual} which is gone")
+
+
+class TestASequenceSplitAcrossDeltasIsStillRemoved:
+    """The case a per-delta stripper cannot see.
+
+    The provider's chunk boundaries fall wherever it put them, so a sequence
+    arriving in two deltas is ordinary rather than a corner -- the same
+    argument `core/ansi.py` makes about a pipe, where 128 KB arrived in 74
+    chunks.
+    """
+
+    @pytest.mark.parametrize("cut", range(1, 7))
+    def test_an_answer_cut_at_every_offset_inside_the_sequence(self, cut):
+        """Swept over every cut point rather than one chosen to pass, which
+        is this file's own idiom for the chunking claims above.
+        """
+        source = "hi " + ESC + "[2Jthere"
+        transcript, written = _recording_transcript()
+        transcript.stream_delta(source[:3 + cut])
+        transcript.stream_delta(source[3 + cut:])
+        transcript.flush_stream()
+
+        entries = " ".join(t for _role, t in transcript._entries)
+        assert ESC not in entries, f"cut at {cut} let the ESC through"
+        assert "2J" not in entries, (
+            f"cut at {cut} dropped the ESC and left the sequence BODY as "
+            f"visible text: {entries!r}")
+        assert "hi" in entries and "there" in entries
+
+    def test_a_reasoning_span_is_cut_the_same_way(self):
+        transcript, _written = _recording_transcript()
+        transcript.thinking_delta("think " + ESC + "[")
+        transcript.thinking_delta("2Jmore")
+        transcript.end_thinking()
+
+        entries = " ".join(t for _role, t in transcript._entries)
+        assert ESC not in entries and "2J" not in entries
+        assert "think" in entries and "more" in entries
+
+    def test_the_two_spans_do_not_share_a_stripper(self):
+        """Measured, and the reason there are three stripper objects: with
+        one shared, a CSI left open by the answer terminated on the FIRST
+        CHARACTER of the next reasoning chunk, because `t` is 0x74 and
+        lands inside the CSI final-byte range 0x40-0x7E. The reasoning text
+        lost its `t`.
+
+        `_thinking_pending` is separate from `_pending` for this same
+        reason, which the widget's own comment states: the two spans
+        interleave.
+        """
+        transcript, _written = _recording_transcript()
+        transcript.stream_delta("answer " + ESC + "[")
+        transcript.thinking_delta("thinking text")
+        transcript.end_thinking()
+        transcript.flush_stream()
+
+        thinking = [t for role, t in transcript._entries if role == "thinking"]
+        assert thinking and thinking[-1].strip() == "thinking text", (
+            f"the answer span's open sequence ate into the reasoning span: "
+            f"{thinking}")
+
+    def test_an_unterminated_sequence_never_becomes_text(self):
+        """`release_unterminated=False`, which is the one thing the two
+        consumers of `core/ansi.py` disagree about.
+
+        For the pty a carry that never completed is text -- a program's
+        output cut off mid-sequence is still output. Here the text is handed
+        to a terminal, and `ESC [` with no final byte consumes whatever is
+        drawn next, so flushing it back would be the leak. Measured: a
+        stripper per delta that flushes each call emitted the ESC outright.
+        """
+        transcript, written = _recording_transcript()
+        transcript.stream_delta("done" + ESC + "[")
+        transcript.flush_stream()
+
+        everything = " ".join(t for _role, t in transcript._entries) \
+            + " ".join(written)
+        assert ESC not in everything, (
+            "the span ended with a sequence still open and it was released "
+            "as text")
+        assert "done" in everything
+
+    def test_a_runaway_sequence_is_dropped_rather_than_released(self):
+        """`release_unterminated=False`'s only observable on this path.
+
+        `_close_answer` discards what `flush` returns, so the flag is belt
+        and braces at the end of a span -- the mutation pass proved it, by
+        flipping the answer stripper back to the pty's default and killing
+        nothing. The difference is at the `_MAX_CARRY` overflow, which for
+        the pty RELEASES the held bytes into the output as text (its own
+        comment explains why: a stream that opens a sequence and never
+        closes it would otherwise hold text forever). Releasing here would
+        hand the terminal the ESC that started it.
+        """
+        from core.ansi import _MAX_CARRY
+
+        transcript, written = _recording_transcript()
+        transcript.stream_delta("x" + ESC + "]" + "q" * (_MAX_CARRY + 10))
+        transcript.flush_stream()
+
+        everything = (" ".join(t for _role, t in transcript._entries)
+                      + " ".join(written))
+        assert ESC not in everything, (
+            "the runaway carry was released as text, so the ESC that "
+            "opened it reached the screen")
+
+    def test_a_carry_does_not_outlive_its_span(self):
+        """Two spans in a row: the first ends with a sequence open, and the
+        second must not have it prepended to its first delta -- which is the
+        shared-stripper measurement arriving between two spans instead of
+        between two streams.
+        """
+        transcript, _written = _recording_transcript()
+        transcript.stream_delta("first" + ESC + "[")
+        transcript.flush_stream()
+        transcript.stream_delta("telling")
+        transcript.flush_stream()
+
+        entries = [t for role, t in transcript._entries if role == "assistant"]
+        assert any("telling" in t for t in entries), (
+            f"the previous span's carry ate the start of the next one: "
+            f"{entries}")
+
+    def test_a_reset_drops_the_carry_too(self):
+        """`reset()`'s own list: a thread being left must not leave state
+        that the next thread's first chunk lands behind.
+        """
+        transcript, _written = _recording_transcript()
+        transcript.stream_delta("left" + ESC + "[")
+        transcript.reset()
+        transcript.stream_delta("talking")
+        transcript.flush_stream()
+
+        entries = [t for role, t in transcript._entries]
+        assert any("talking" in t for _role, t in transcript._entries), entries
+
+
+class TestTheStripIsCountedAndNotAnnounced:
+    """Batch 145's third ruling: the text says nothing, the log says it
+    once. `core/ansi.py`'s locked answer for the pty is that a sequence is
+    REMOVED and never interpreted, and leaving a mark on screen would be a
+    second answer to that in the one place a model could type the mark
+    itself.
+    """
+
+    def test_the_count_is_what_was_removed(self):
+        transcript, _written = _recording_transcript()
+        transcript.write_answer("a " + ESC + "[2J b " + ESC + "[31m c")
+        assert transcript.take_stripped_count() == 2
+
+    def test_the_count_is_read_and_cleared(self):
+        """So `tui/app.py` gets a count per TURN rather than a total that
+        only grows."""
+        transcript, _written = _recording_transcript()
+        transcript.write_answer("x " + ESC + "[2J")
+        assert transcript.take_stripped_count() == 1
+        assert transcript.take_stripped_count() == 0
+
+    def test_plain_text_counts_nothing(self):
+        """The control: a count that fired on ordinary text would put a
+        line in the log for every turn and mean nothing."""
+        transcript, _written = _recording_transcript()
+        transcript.write_answer("nothing here | # * ` \\ [x](y)")
+        assert transcript.take_stripped_count() == 0
+
+    def test_the_count_spans_the_three_strippers(self):
+        """One number for the turn, whichever path the text took."""
+        transcript, _written = _recording_transcript()
+        transcript.write_role("tool", "a" + ESC + "[2J")
+        transcript.stream_delta("b" + ESC + "[2J")
+        transcript.thinking_delta("c" + ESC + "[2J")
+        transcript.end_thinking()
+        transcript.flush_stream()
+        assert transcript.take_stripped_count() == 3
+
+    def test_nothing_is_drawn_in_place_of_the_sequence(self):
+        """The ruling's other half. The row is the row it would have been
+        with no sequence in the text at all, so `_entries`, the screen,
+        `/copy` and the replay stay byte-identical to one another.
+        """
+        with_seq, drawn_with = _recording_transcript()
+        with_seq.write_answer("before " + ESC + "[2J after")
+        without, drawn_without = _recording_transcript()
+        without.write_answer("before  after")
+
+        assert with_seq._entries == without._entries
+        assert drawn_with == drawn_without
+
+    def test_the_widget_still_does_no_logging(self):
+        """The invariant the ruling had to be placed around.
+
+        `Transcript`'s contract is that "write* does no logging, so a
+        handler feeding a widget that logs cannot loop here", and
+        `on_log_record_message` routes records straight back into
+        `write_role`. A Transcript that logged while writing would make
+        that sentence false -- defect shape 9, authored in the file being
+        fixed -- so the widget counts and `tui/app.py` speaks.
+        """
+        import logging
+
+        records = []
+
+        class _Catch(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        handler = _Catch()
+        root = logging.getLogger()
+        root.addHandler(handler)
+        previous = root.level
+        root.setLevel(logging.DEBUG)
+        try:
+            transcript, _written = _recording_transcript()
+            transcript.write_answer("x " + ESC + "[2J")
+            transcript.stream_delta("y " + ESC + "[2J")
+            transcript.flush_stream()
+        finally:
+            root.removeHandler(handler)
+            root.setLevel(previous)
+
+        from_widgets = [r for r in records
+                        if r.name.startswith("tui.widgets")]
+        assert from_widgets == [], (
+            f"tui/widgets.py logged while writing, which closes the loop "
+            f"on_log_record_message opens: {[r.getMessage() for r in from_widgets]}")
+
+
+class TestTheStripCorrectsTheWrapArithmetic:
+    """Not a second fix -- the same one, measured on the other side.
+
+    `display_len` and `cell_len` are unchanged; what changed is that they
+    are no longer handed escape bytes to count. An ESC counted as cells is
+    a row that wraps early, which is why this belongs with the commit rules
+    above rather than beside them.
+    """
+
+    def test_a_sequence_no_longer_counts_toward_the_width(self):
+        from tui import markdown
+
+        raw = "hi " + ESC + "[31mred"
+        assert markdown.display_len(raw) == 10
+        assert markdown.display_len("hi red") == 6
+
+    def test_a_streamed_row_wraps_where_its_visible_text_does(self):
+        """The property that follows: the buffer the commit rules measure
+        holds no escapes, so a streamed answer and the same text written
+        whole break at the same place -- which is this file's existing
+        row-equality claim, now also true of text with a sequence in it.
+        """
+        streamed, drawn_streamed = _recording_transcript()
+        for piece in ("one two ", ESC + "[31m", "three four five"):
+            streamed.stream_delta(piece)
+        streamed.flush_stream()
+
+        written, drawn_written = _recording_transcript()
+        written.write_answer("one two three four five")
+
+        assert [t for _r, t in streamed._entries] \
+            == [t for _r, t in written._entries]
+
