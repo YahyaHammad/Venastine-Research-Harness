@@ -12,6 +12,7 @@ import os
 import platform
 import random
 import shlex
+import signal
 import subprocess
 import sys
 from unittest.mock import MagicMock, patch
@@ -530,17 +531,68 @@ class TestScrubbedEnv:
         Linux runner too, where the value is simply absent from the
         environment unless a test puts it there."""
         monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT")
-        with patch("security.sandbox.subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                returncode=0, stdout="", stderr="")
+        # `Popen`, not `run`, since batch 142 -- see `_FallbackProc`.
+        with patch("security.sandbox.subprocess.Popen") as mock_popen:
+            mock_popen.return_value = _FallbackProc()
             _run_subprocess_fallback("whoami", "/tmp/ws", "bash")  # nosec B108 - fixture path string, as above
-        passed_env = mock_run.call_args.kwargs["env"]
+        passed_env = mock_popen.call_args.kwargs["env"]
         assert passed_env.get("PATHEXT") == ".COM;.EXE;.BAT"
 
 
 # ===========================================================================
 # ---- Backend internals ----------------------------------------------------
 # ===========================================================================
+
+class _FallbackProc:
+    """What `_run_subprocess_fallback` drives since batch 142.
+
+    `subprocess.run` cannot be the call any more: on a timeout it
+    kills the child and then waits for EOF on the pipes, and an
+    orphaned grandchild still holds the write end -- measured at
+    30.21s against a 5s bound, and unbounded in principle. So the
+    route owns a `Popen` and this stands in for it.
+
+    *timeouts* is how many `communicate` calls raise before one
+    answers: 1 is the ordinary timeout (the wall clock fires, the
+    drain succeeds), 2 is the Windows shape above (the drain cannot
+    finish either, and the call must still return)."""
+
+    pid = 4242
+
+    def __init__(self, *, timeouts=0, out="", err="", rc=0,
+                 survives_kill=False):
+        self._timeouts = timeouts
+        self._out, self._err = out, err
+        self.returncode = rc
+        self._survives_kill = survives_kill
+        self.waits = []
+        #: Every `timeout=` this was handed, in order. The drain's
+        #: bound is an ARGUMENT, and a test asserting only the
+        #: returned dict cannot see it go away -- which is the
+        #: Windows half of S02-03 (30.21s against a 5s bound).
+        self.timeouts_seen = []
+        self.terminated = False
+        self.killed = False
+
+    def communicate(self, timeout=None):
+        self.timeouts_seen.append(timeout)
+        if self._timeouts > 0:
+            self._timeouts -= 1
+            raise subprocess.TimeoutExpired("bash", timeout)
+        return self._out, self._err
+
+    def wait(self, timeout=None):
+        self.waits.append(timeout)
+        if self._survives_kill:
+            raise subprocess.TimeoutExpired("bash", timeout)
+        return self.returncode
+
+    def terminate(self):
+        self.terminated = True
+
+    def kill(self):
+        self.killed = True
+
 
 class TestBackendInternals:
 
@@ -609,15 +661,19 @@ class TestBackendInternals:
         assert len(kill_calls) == 1
 
     def test_run_subprocess_fallback_timeout(self):
-        with patch("security.sandbox.subprocess.run") as mock_run:
-            mock_run.side_effect = subprocess.TimeoutExpired(cmd="bash", timeout=60)
+        # `subprocess.run` as well as `Popen`, because a timeout now
+        # RECLAIMS -- and on Windows that is a real `taskkill /PID
+        # 4242` against whatever holds that pid on this machine.
+        with patch("security.sandbox.subprocess.Popen") as mock_popen, \
+             patch("security.sandbox.subprocess.run"):
+            mock_popen.return_value = _FallbackProc(timeouts=1)
             result = _run_subprocess_fallback("sleep 999", "/tmp/ws", "bash")  # nosec B108 - fixture path string, as above
         assert result["return_code"] == -1
         assert "timed out" in result["stderr"]
 
     def test_run_subprocess_fallback_shell_not_found(self):
-        with patch("security.sandbox.subprocess.run") as mock_run:
-            mock_run.side_effect = FileNotFoundError("no bash")
+        with patch("security.sandbox.subprocess.Popen") as mock_popen:
+            mock_popen.side_effect = FileNotFoundError("no bash")
             result = _run_subprocess_fallback("ls", "/tmp/ws", "bash")  # nosec B108 - fixture path string, as above
         assert result["return_code"] == -1
         assert "not found" in result["stderr"].lower()
@@ -2684,6 +2740,304 @@ class TestTheInertTierDoesNotClaimWritesItCannotSee:
         the tier called it."""
         assert _escapes_workspace("uniq in.txt /etc/passwd", "/workspace") is True
         assert _escapes_workspace("uniq in.txt out.txt", "/workspace") is False
+
+
+# ===========================================================================
+# ---- S02-03 (batch 142): a reported timeout has to have stopped the work --
+# ===========================================================================
+
+class TestTheTimedOutFallbackStopsTheWork:
+    """H7, quoted in this module's own `SessionProcess` docstring: "an IO
+    bound that reports a timeout must have stopped the work, and a kill
+    that can hang stops nothing". The one-shot host fallback reported a
+    timeout and stopped the shell only.
+
+    Measured before the fix. POSIX: the call returned on time, 3.00s
+    against a 3s bound, and `pgrep -a sleep` listed FOUR survivors --
+    with the control in the same run showing `start_new_session=True`
+    alone changes nothing, because nothing signalled the group. Windows:
+    30.21s against a 5s bound, 76 lines of work completed, because
+    `subprocess.run` drains pipes the orphan still holds.
+
+    The comparison that made it a defect rather than a platform limit is
+    the other three one-shot routes: `_run_docker` kills the container,
+    `_run_wsl_process` relies on a measured fact, and `_run_ssh_process`
+    SAYS in the result the model reads that the remote command may still
+    be running. This route neither reclaimed the work nor disclosed that
+    it had not -- and it is the one with no isolation, so what it left
+    behind was running with the user's own authority."""
+
+    @staticmethod
+    def _run(monkeypatch, proc, system, taskkill=None):
+        """Drive the route with the platform answered.
+
+        `subprocess.run` is ALWAYS replaced, and that is not
+        tidiness: the double's pid is 4242, so a Windows
+        reclamation here would send a real `taskkill /T /F /PID
+        4242` at whatever process on the machine running the
+        suite happens to hold that pid."""
+        monkeypatch.setattr(sandbox.platform, "system",
+                            lambda: system)
+        # The rlimits too, because answering the platform reaches
+        # `_unix_resource_limits`, which then does `import resource` --
+        # absent on Windows, where this file mostly runs. They are
+        # S02-06's subject, not this class's, and the real POSIX
+        # behaviour is what the suite under WSL exercises.
+        monkeypatch.setattr(sandbox, "_unix_resource_limits",
+                            lambda *a, **kw: None)
+        monkeypatch.setattr(sandbox.subprocess, "Popen",
+                            lambda *a, **kw: proc)
+        calls = [] if taskkill is None else taskkill
+        monkeypatch.setattr(sandbox.subprocess, "run",
+                            lambda args, **kw: calls.append(
+                                list(args)))
+        return _run_subprocess_fallback(
+            "sleep 999", "/tmp/ws", "bash")  # nosec B108 - fixture path string, as above
+
+    def test_the_group_is_signalled_and_not_only_the_shell(
+            self, monkeypatch):
+        """The defect itself: TERM to the GROUP, which is what reaches a
+        shell's children (SS15)."""
+        sent = []
+        monkeypatch.setattr(sandbox.os, "getpgid", lambda pid: pid,
+                            raising=False)
+        monkeypatch.setattr(sandbox.os, "killpg",
+                            lambda pgid, sig: sent.append((pgid, sig)),
+                            raising=False)
+        proc = _FallbackProc(timeouts=1)
+        result = self._run(monkeypatch, proc, "Linux")
+        assert sent == [(4242, signal.SIGTERM)]
+        assert result["return_code"] == -1
+
+    def test_a_survivor_is_forced_and_then_disclosed(self, monkeypatch):
+        """TERM, grace, KILL -- and when it outlives even that, the
+        stderr says so rather than asserting a stop that did not
+        happen. `_run_ssh_process`'s honesty is the precedent, and this
+        route needs it more: it has no isolation."""
+        sent = []
+        monkeypatch.setattr(sandbox.os, "getpgid", lambda pid: pid,
+                            raising=False)
+        monkeypatch.setattr(sandbox.os, "killpg",
+                            lambda pgid, sig: sent.append((pgid, sig)),
+                            raising=False)
+        proc = _FallbackProc(timeouts=1, survives_kill=True)
+        result = self._run(monkeypatch, proc, "Linux")
+        assert sent == [(4242, signal.SIGTERM), (4242, sandbox._SIGKILL)]
+        assert "may still be running" in result["stderr"]
+
+    def test_a_reclaimed_timeout_says_the_work_was_stopped(
+            self, monkeypatch):
+        """The control for the sentence above: when the reclamation DID
+        work, the message must not hedge."""
+        monkeypatch.setattr(sandbox.os, "getpgid", lambda pid: pid,
+                            raising=False)
+        monkeypatch.setattr(sandbox.os, "killpg", lambda pgid, sig: None,
+                            raising=False)
+        result = self._run(monkeypatch, _FallbackProc(timeouts=1), "Linux")
+        assert "process group were killed" in result["stderr"]
+        assert "may still be running" not in result["stderr"]
+
+    def test_on_windows_the_tree_is_killed_by_pid(self, monkeypatch):
+        """There are no process groups to signal here, so `taskkill /T`
+        is the tree walk -- the same call the session path makes."""
+        calls = []
+        self._run(monkeypatch, _FallbackProc(timeouts=1), "Windows",
+                  taskkill=calls)
+        assert calls == [["taskkill", "/T", "/F", "/PID", "4242"]]
+
+    def test_the_drain_is_bounded_so_an_orphan_cannot_hold_the_call(
+            self, monkeypatch):
+        """THE WINDOWS HALF. The second `communicate` is the hand-over of
+        whatever was already written, and it waits for EOF -- which an
+        orphan holding the write end never sends. Two timeouts here, so
+        the drain fails too, and the call must still come back with the
+        bound it promised."""
+        proc = _FallbackProc(timeouts=2)
+        result = self._run(monkeypatch, proc, "Windows")
+        assert result["return_code"] == -1
+        assert "timed out" in result["stderr"]
+        # THE BOUND ITSELF. Two calls: the wall clock, then the
+        # drain -- and the drain's has to be a number. `None`
+        # there is the defect, because EOF never comes while an
+        # orphan holds the write end.
+        assert len(proc.timeouts_seen) == 2, proc.timeouts_seen
+        assert proc.timeouts_seen[0] == config.SANDBOX_TIMEOUT_SECONDS
+        assert proc.timeouts_seen[1] == sandbox._DRAIN_AFTER_KILL_S
+
+    def test_the_child_leads_its_own_group_on_posix_only(self):
+        """`start_new_session` is necessary for the killpg above and is
+        NOT `_isolation_kwargs()`: a session is stopped from elsewhere
+        through `kill()`, while a one-shot is waited on in the function
+        itself, so taking it out of the console's group on WINDOWS would
+        only stop Ctrl+C reaching it while `taskkill /T` already
+        reclaims the tree."""
+        for system, expected in (("Linux", True), ("Windows", False)):
+            with patch("security.sandbox.platform.system",
+                       return_value=system), \
+                 patch("security.sandbox._unix_resource_limits",
+                       return_value=None), \
+                 patch("security.sandbox.subprocess.Popen") as popen:
+                popen.return_value = _FallbackProc()
+                _run_subprocess_fallback("ls", "/tmp/ws", "bash")  # nosec B108 - fixture path string, as above
+            kwargs = popen.call_args.kwargs
+            assert kwargs.get("start_new_session", False) is expected
+            assert "creationflags" not in kwargs
+
+    def test_an_interrupt_reclaims_before_it_unwinds(self, monkeypatch):
+        """The cost of the group change, paid rather than ignored: the
+        child no longer shares the console's group, so a Ctrl+C the
+        terminal delivered did not reach it. Without this the fix would
+        trade a timeout orphan for an interrupt orphan."""
+        sent = []
+        monkeypatch.setattr(sandbox.os, "getpgid", lambda pid: pid,
+                            raising=False)
+        monkeypatch.setattr(sandbox.os, "killpg",
+                            lambda pgid, sig: sent.append(sig),
+                            raising=False)
+
+        class _Interrupted(_FallbackProc):
+            def communicate(self, timeout=None):
+                raise KeyboardInterrupt
+
+        with pytest.raises(KeyboardInterrupt):
+            self._run(monkeypatch, _Interrupted(), "Linux")
+        assert sent == [signal.SIGTERM]
+
+    def test_the_child_is_given_no_console(self, monkeypatch):
+        """`subprocess.run(capture_output=True)` left stdin INHERITED.
+        SS70 measured the identical omission on the WSL one-shot -- a
+        command there read a string written to the harness's own stdin,
+        a second reader of the console beside the CLI's one (N1). Every
+        other route already passed DEVNULL."""
+        with patch("security.sandbox.subprocess.Popen") as popen:
+            popen.return_value = _FallbackProc()
+            _run_subprocess_fallback("ls", "/tmp/ws", "bash")  # nosec B108 - fixture path string, as above
+        assert popen.call_args.kwargs["stdin"] == subprocess.DEVNULL
+
+    def test_a_normal_run_still_reports_its_own_output_and_code(self):
+        """The equivalence half: none of the above may change what a
+        command that finishes reports."""
+        with patch("security.sandbox.subprocess.Popen") as popen:
+            popen.return_value = _FallbackProc(out="hi\n", err="warn",
+                                               rc=3)
+            result = _run_subprocess_fallback("echo hi", "/tmp/ws", "bash")  # nosec B108 - fixture path string, as above
+        assert result == {"stdout": "hi\n", "stderr": "warn",
+                          "return_code": 3}
+
+
+class TestTheDangerousFlagSpellingFamily:
+    """S01-01 (batch 142): the residual of the defect above.
+
+    Batch 117 made the table true for the spellings it ENUMERATED. The
+    parsers accept a small language: GNU `date` and `tree` both use
+    `getopt_long`, where a short option with a required argument takes
+    it attached (`-sSTRING` is POSIX getopt behaviour) and an
+    unambiguous long-option prefix resolves. So three spellings were
+    guarded and the rest of the family auto-approved -- a profile of
+    `tier=INERT, writes=False, measured=True`, and under `tiered` that
+    is covered by `auto_approved`.
+
+    Traced token by token in the report; reproduced here as the table,
+    because the thing that was wrong was a list of points standing in
+    for a shape."""
+
+    @pytest.mark.parametrize("command", [
+        "date -s 2024-01-01",      # exact, guarded since 117
+        "date --set=2024-01-01",   # `=` head, guarded since 117
+        "date -s2024-01-01",       # attached short argument
+        "date --s 2024-01-01",     # long option abbreviated
+        "date --se=2024-01-01",    # both at once
+        "tree -o out.txt",         # exact, guarded since 117
+        "tree -oout.txt",          # attached short argument
+        "tree -ao out.txt",        # a bundle of short options
+    ])
+    def test_every_spelling_the_parser_accepts_is_not_inert(
+            self, command):
+        assert _is_inert(command) is False
+
+    @pytest.mark.parametrize("command", [
+        "date", "date -u", "tree", "tree notes", "tree -L 2",
+    ])
+    def test_the_reading_forms_are_still_inert(self, command):
+        """THE CONTROL, and the reason the rule is not "any flag on a
+        tabled tool": these are the ordinary uses, and a guard that
+        prompts for them is a tier change dressed up as a fix."""
+        assert _is_inert(command) is True
+
+    def test_a_bare_end_of_options_marker_is_not_a_flag(self):
+        """`--` is a prefix of every long option, so a prefix rule that
+        forgot it would refuse every command carrying one."""
+        assert _is_inert("date --") is True
+
+    def test_the_long_prefix_rule_errs_toward_asking(self):
+        """`--s` resolves to `--set` for `date` and this does not try to
+        decide whether a prefix is unambiguous -- that needs the tool's
+        whole option list, which is the parsing G2 keeps out of the
+        classifier. A false positive costs a PROMPT; a false negative
+        costs the prompt the tier requires."""
+        dangerous = frozenset({"-s", "--set"})
+        assert sandbox._names_dangerous_flag("--se", dangerous) is True
+        assert sandbox._names_dangerous_flag("--set", dangerous) is True
+        # NOT the other direction: `--setting` is not an
+        # abbreviation of `--set`, and getopt rejects it rather than
+        # resolving it. Erring toward asking is not erring in every
+        # direction -- a rule that matched this would refuse any
+        # long flag beginning with a dangerous one's letters.
+        assert sandbox._names_dangerous_flag("--setting", dangerous) is False
+        assert sandbox._names_dangerous_flag("--x", dangerous) is False
+
+    def test_a_value_carrying_a_dangerous_letter_is_read_as_a_value(self):
+        """Rule 3's limit, written down: a token with a non-letter in it
+        is a flag plus its argument, so only the FIRST letter is read as
+        a flag. `tree -P*.txt` is not a write.
+
+        Its sibling `tree -Pfoo` IS refused, because a purely alphabetic
+        token is a bundle as far as this can tell. That asymmetry is the
+        accepted cost and it costs a prompt."""
+        dangerous = frozenset({"-o"})
+        assert sandbox._names_dangerous_flag("-P*.txt", dangerous) is False
+        assert sandbox._names_dangerous_flag("-Pfoo", dangerous) is True
+
+    def test_the_table_is_still_consulted_by_command(self):
+        """The flags are per-tool. `tree`'s `-o` must not make `cat -o`
+        non-inert, or the table has become a global denylist."""
+        assert _is_inert("cat -oout.txt") is True
+
+    def test_an_attached_path_does_not_hide_from_the_escape_check(self):
+        """THE HALF THE REPORT GOT WRONG, and this test is how it was
+        found. S01-01 argues severity S3 rather than S2 on the grounds
+        that "`_escapes_workspace` reads every token as a path
+        regardless of this table, so an out-of-workspace write still
+        lands at HOST_READ and always asks". Measured in batch 142:
+
+            tree -o /etc/passwd        escapes=True
+            tree -o/etc/passwd         escapes=False
+            tree --output=/etc/passwd  escapes=True
+
+        True for the spelling the report traced and false for the
+        attached one, because a token that does not start with `/`
+        reads as RELATIVE and lands under the root. So for that
+        spelling neither half saw it.
+
+        It is not only about writes: `grep -f FILE` and `file -f FILE`
+        are inert commands whose short option takes a file, so this
+        was an auto-approved READ of a host file -- and `file -f`
+        echoes every unopenable line, which is the content."""
+        for command in ("tree -o/etc/passwd", "grep -f/etc/passwd x",
+                        "file -f/etc/shadow", "cat -A/etc/passwd"):
+            assert _escapes_workspace(command, "/workspace") is True, \
+                command
+
+    def test_a_flag_that_carries_no_path_still_passes(self):
+        """The control, and the reason the clause is sound: the tail of
+        `-la` is `a` and the tail of `-n5` is `5`. Both are relative
+        and land inside the workspace -- which is how this function has
+        always passed flags, without recognising one. A rule that
+        refused them would prompt for `ls -la`."""
+        for command in ("ls -la", "head -n5 notes.txt", "date --",
+                        "grep -i pattern notes.txt"):
+            assert _escapes_workspace(command, "/workspace") is False, \
+                command
 
 
 class TestTheNetworkListIsNotSpelledTwice:

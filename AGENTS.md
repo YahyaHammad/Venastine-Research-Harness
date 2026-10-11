@@ -55,7 +55,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 6359 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
+pytest                                            # 6411 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -2323,9 +2323,14 @@ And the four from §28 itself:
   `override_for_tests` from anything that ships.
 - **No module may read the posture at IMPORT time** (UN2). `apply_cli()` runs inside
   `main()`, after every import, so a module-level `posture.current()` binds it before
-  the command line exists and every launch dies in the ordering guard. `shell.py`'s
-  import-time mode validation reads `config` directly for that reason. Pinned by a
-  source scan in `test_posture.py`.
+  the command line exists. `shell.py`'s import-time mode validation reads `config`
+  directly for that reason. **Pinned by the source scan in `test_posture.py`, and by
+  nothing else** -- this bullet used to say "every launch dies in the ordering
+  guard", and S02-09 measured that it does not: `main.py` calls `apply_cli()` with no
+  overrides, so the guard has no change to detect and cannot fire on a shipped
+  launch. It goes live the day the first posture flag exists. The scan covers import
+  time only, so a posture read placed inside `main()` ABOVE the `apply_cli()` call is
+  caught by neither -- keep that call first among readers.
 - **`unsafe_reasons()` is the ONLY description of the posture** (UN3). Banner, launch
   WARNING and TUI badge all read it. A fourth surface that re-derives the question is
   the bug.

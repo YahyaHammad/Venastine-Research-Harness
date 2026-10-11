@@ -78,7 +78,7 @@ from __future__ import annotations
 import collections
 import json
 import os
-import subprocess
+import subprocess  # nosec B404 - this script's whole job is to run bandit and read its report
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -102,8 +102,12 @@ def grouped(results) -> dict:
 
 
 def python_files() -> list:
-    out = subprocess.run(["git", "ls-files", "*.py"], cwd=ROOT,
-                         capture_output=True, text=True, check=True).stdout
+    # The same `git ls-files '*.py'` the workflow uses, and the same
+    # reason: bandit does not respect .gitignore, so a bare `-r .`
+    # scans output/ and __pycache__ as well.
+    out = subprocess.run(  # nosec B603 B607 - fixed argv built here; no input of any kind reaches it, and `git` resolves on PATH exactly as the workflow step's own `git ls-files` does
+        ["git", "ls-files", "*.py"], cwd=ROOT,
+        capture_output=True, text=True, check=True).stdout
     return [line for line in out.splitlines() if line.strip()]
 
 
@@ -122,7 +126,7 @@ def main() -> int:
               file=sys.stderr)
         return 2
 
-    proc = subprocess.run(
+    proc = subprocess.run(  # nosec B603 - `sys.executable -m bandit` over the file list `git ls-files` just printed; the only variable part is a set of tracked paths from git
         [sys.executable, "-m", "bandit", *files, "-s", SKIPS, "-f", "json",
          "-q"],
         cwd=ROOT, capture_output=True, text=True)

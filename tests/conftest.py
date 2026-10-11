@@ -690,6 +690,22 @@ def isolate_sandbox_probes():
     general reason ("otherwise the first test's answer would be the only
     one any of them measured") with nothing applying it generally.
 
+    AND TWO QUARANTINES SINCE BATCH 142 (S02-10). Slices 5a and 5b added
+    `_ssh_auth_rejected` and `_sudo_rejected`, with the same process
+    lifetime and the same reach into behaviour, and this fixture did not
+    know about them -- the resets were an autouse fixture inside
+    `test_sudo.py` and two opt-in fixtures in `test_ssh_backend.py`, whose
+    docstring reasons in FILE scope about state that is global to the
+    process. `ssh_available()` reads `_ssh_auth_rejected` before it looks
+    at the posture or the probe, so one left behind defeats the fixed
+    answer installed below, and `--dist loadscope` puts many files in one
+    worker. Latent at the time it was found -- tripping the SSH one needs
+    a stored credential, which only that file arranges, and it clears on
+    teardown -- which is exactly why the enumeration test in
+    `test_probe_isolation.py` comes with this: the list is maintained by
+    hand against a module that keeps gaining state, and nobody edited the
+    fixture, which is why nothing surfaced it.
+
     SO THE SUITE'S RESULT DEPENDED ON A DAEMON. Measured in batch 106
     across four full WSL runs: which tests fail there is decided by
     COLLECTION ORDER, because collection order decides which test runs the
@@ -719,19 +735,21 @@ def isolate_sandbox_probes():
 
     THE `_reset_*` HELPERS RUN FIRST rather than the globals being assigned
     directly, because two of them own more than a memo: `_reset_wsl_probe`
-    also clears `_wsl_workspace`'s lru_cache, whose entries name the distro
-    that resolved them, and `_reset_ssh_probe` also unlinks the known_hosts
-    file the probe wrote.
+    also clears `_wsl_workspace_memo`'s lru_cache, whose entries name the
+    distro that resolved them, and `_reset_ssh_probe` also unlinks the
+    known_hosts file the probe wrote.
 
     SETUP ONLY, where `clear_network_tool_caches` above does both ends, and
     the asymmetry is forced rather than casual. `monkeypatch` is created by
     an earlier autouse fixture in this file, so it is undone AFTER this one
     tears down -- and `test_wsl_backend.py`'s `wsl_on` replaces
-    `_wsl_workspace` with a plain lambda, which `_reset_wsl_probe` would
-    then call `cache_clear()` on. Softening that call to a `getattr` to
-    suit a fixture is exactly what `ARCHITECTURE.md` warns against, and a
-    teardown buys nothing here anyway: the next test's setup installs the
-    answer before it can read one.
+    `_wsl_workspace` with a plain lambda. That one stopped mattering in
+    batch 142, when the cache moved to `_wsl_workspace_memo` so a FAILED
+    translation could not enter it, but the asymmetry stands on the
+    general argument: softening a reset to a `getattr` to suit a fixture
+    is exactly what `ARCHITECTURE.md` warns against, and a teardown buys
+    nothing here anyway, since the next test's setup installs the answer
+    before it can read one.
     """
     from security import sandbox
 
@@ -739,6 +757,10 @@ def isolate_sandbox_probes():
         sandbox._reset_runtime_probe()
         sandbox._reset_wsl_probe()
         sandbox._reset_ssh_probe()
+        # The two quarantines, through their own helpers for the
+        # reason the three above go through theirs.
+        sandbox._reset_ssh_auth_quarantine()
+        sandbox._reset_sudo_quarantine()
         defaults = _sandbox_probe_defaults()
         sandbox._runtime_probe = defaults.runtime
         sandbox._wsl_probe = defaults.wsl

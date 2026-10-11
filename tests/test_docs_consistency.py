@@ -2155,9 +2155,18 @@ DOCUMENTED_CEILINGS = [
     ("README.md", "sandbox_timeout_seconds",
      "`docker.io/library/python:3.13-slim`; {} s,"),
     ("README.md", "sandbox_memory_mb", "wall clock, {} MB of memory"),
-    ("README.md", "sandbox_memory_mb", "s, {} MB, 30 CPU-s"),
+    ("README.md", "sandbox_memory_mb", "s, {} MB, 1 CPU core"),
     ("README.md", "sandbox_max_pids", "{} processes, 120 seconds"),
-    ("README.md", "sandbox_cpu_seconds", "MB, {} CPU-s, 200 pids"),
+    ("README.md", "sandbox_cpu_seconds",
+     "`sandbox_cpu_seconds` ({} CPU-s) is a budget"),
+    # S02-08 (batch 142). The prose three pages up states this
+    # number too, and nothing matched it: `grep -c "30 CPU-seconds"` -> 1
+    # and `grep -c "30 CPU-s,"` -> 1, two separate claims with one gate.
+    # Changing the value in config.yaml turned the table row red and
+    # left the sentence saying 30 for ever, which is the failure this
+    # gate's own docstring names.
+    ("README.md", "sandbox_cpu_seconds",
+     "{} CPU-seconds and the same memory ceiling"),
     ("README.md", "max_read_chars", "truncated at {:,} characters"),
     ("README.md", "default_context_window", "| {}k fallback |"),
     ("CONFIG_ARCHITECTURE.md", "tool_compute_timeout_s",

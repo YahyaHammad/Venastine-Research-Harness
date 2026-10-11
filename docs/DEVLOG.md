@@ -20739,3 +20739,180 @@ than fixed: closing it needs a JS comment extractor, the Python half works by
 of.
 
 Counts 6354 -> 6359.
+
+## Batch 142 -- the four bounds on the fallback, and none of them held (2026-10-11)
+
+The `security/sandbox.py` + `security/posture.py` surface, all nine
+`FIX-NOW` findings: S02-02, S02-03, S02-04, S02-06, S02-07, S02-08, S02-09,
+S02-10 and S01-01. Plus the owner's ruling on the nine dead bandit baseline
+rows, and one red the branch was already carrying.
+
+**The finding under the findings, and it is the one the report could not
+see.** S01-01's severity argument says the profile lies but the boundary
+holds -- *"`_escapes_workspace` reads every token as a path regardless of
+this table, so an out-of-workspace write still lands at HOST_READ and
+always asks"*. The control written for the fix measured it:
+
+```
+tree -o /etc/passwd        escapes=True    <- the spelling the report traced
+tree -o/etc/passwd         escapes=False
+tree --output=/etc/passwd  escapes=True    <- the `=` clause catches it
+grep -f/etc/passwd x       escapes=False   inert=True
+file -f/etc/shadow         escapes=False   inert=True
+```
+
+True for the spacing the report traced and false for the attached one,
+because a token that does not start with `/` reads as RELATIVE and lands
+under the root. So for that spelling **neither half saw it** -- and it is
+not only about writes: `grep -f FILE` and `file -f FILE` are inert
+commands whose short option takes a file, so that was an auto-approved
+READ of a host file, with `file -f` echoing every unopenable line, which
+is the content. Fixed here rather than filed, because the DEVLOG entry for
+S01-01 would otherwise repeat a claim this batch measured false. The fix
+is the `=` clause's own concession one spelling over, and that docstring
+had already made the argument: *"`--file=/etc/x` is inside the workspace
+read whole ... while the path it actually names is not."*
+
+**S01-01 proper: the spelling family, not a list of spellings.** Batch 117
+made the flag table true for the spellings it enumerated; the parsers
+accept a small language. `date -s2024-01-01`, `date --s 2024-01-01`,
+`date --se=2024-01-01`, `tree -oout.txt` and `tree -ao out.txt` all
+profiled `tier=INERT, writes=False, measured=True` and ran with no prompt,
+while the space-separated spelling asked. `_names_dangerous_flag` now
+reads four shapes -- the whole token, the `=` head, an abbreviated long
+option, and an attached or bundled short one -- and the direction is
+deliberate: a false positive costs a PROMPT, so `tree -Pfoo` is refused
+and that is the accepted cost of not parsing (G2). The controls are the
+ordinary uses: `tree -L 2`, `tree -P *.txt`, `date -u`, `date --` all
+stay inert.
+
+**S02-02: a session got the argv whose anti-hang property is a listener,
+with no listener.** `_ssh_auth_options` takes `BatchMode=yes` off as soon
+as anything is stored, because BatchMode suppresses askpass too, and its
+docstring records the measurement -- 20s hung without forced askpass, 0.8s
+with. `start_sandboxed` passed a bare `_ssh_env()`: four askpass variables
+on the one-shot path, none on the session path, same store, same host.
+
+**S02-04 is the same mechanism's other half**, and the pair is why both
+went into one helper. `secrets.guarded` and `askpass.serving` are BLOCKS
+and a session is not -- `start_sandboxed` returns while the process it
+started keeps running. Both one-shot routes wrap their window; both
+session routes wrapped nothing, on the route that holds a sudo plaintext
+LONGEST. `_popen_session_with_credentials` owns both, hands the live
+window to the `SessionProcess`, and `release_credentials` closes it on the
+kill or on the first `poll`/`wait` that sees the process gone.
+
+The failure path is the part worth writing down: the window is hand-held
+rather than `with`-held, so the cleanup goes through `serving.__exit__`
+and not `_cleanup` -- the exception is what locks the store (SS60), and
+that trigger had to survive the change of scope.
+
+**And the tests found a gap in the fix.** `kill()` returns early when the
+process has already gone, and that exit skipped the release -- a session
+that ended by itself and was then reaped kept its listener. The release is
+now in one `finally` round the whole method, which is the shape `kill`
+already used for the process.
+
+**S02-03: a reported timeout that stopped the shell and nothing below it.**
+H7 is quoted in this module's own `SessionProcess` docstring. Measured on
+POSIX: the call returned on time, 3.00s against a 3s bound, and
+`pgrep -a sleep` listed four survivors -- with the control in the same run
+showing `start_new_session=True` ALONE changes nothing, because nothing
+signalled the group. On Windows: 30.21s against a 5s bound, because
+`subprocess.run` drains pipes an orphaned grandchild still holds.
+
+So the route owns a `Popen` now, and `_reclaim_tree` /`_terminate_tree` /
+`_force_tree` are the session path's own answer SHARED rather than copied
+-- EP6's rule applied to a sibling pair. Three riders, each measured
+rather than assumed:
+
+- **`_leads_its_own_group` is asked before every `killpg`.** `os.killpg`
+  takes a group id, and a child started without `start_new_session` sits
+  in THIS process's group. The property holds at both launch sites today,
+  so this is a guard that keeps it true rather than a fix -- a change at
+  either one can no longer turn a kill of the work into a kill of the
+  harness.
+- **The drain is bounded** (`_DRAIN_AFTER_KILL_S`), which is what makes
+  the wall clock true on Windows.
+- **Ctrl+C reclaims before it unwinds.** The group change costs the
+  keystroke's delivery to the child, so `except BaseException` pays it;
+  without that the fix would trade a timeout orphan for an interrupt one.
+  And `stdin` is DEVNULL now rather than inherited -- SS70 measured the
+  identical omission on the WSL one-shot, where a command read a string
+  written to the harness's own stdin (N1).
+
+**S02-07: the WSL translation cache memoised its FAILURE.** One `wslpath`
+that exited non-zero cached `""` for the life of the process, and the
+refusal the model then read named a cause that was not what happened. Now
+`_wsl_workspace_memo` RAISES and `_wsl_workspace` returns `""` -- because
+`lru_cache` stores a return value and never an exception, which makes
+"only a success is remembered" a property of the cache rather than a rule
+the body has to keep. Driven: `''` then `/mnt/c/ws` then `/mnt/c/ws`, two
+`wsl.exe` invocations, and the success still cached.
+
+**S02-06 and S02-08, which are one sentence and its gate.** README stated
+the fallback's rlimits with no platform qualifier, and
+`_unix_resource_limits()` returns None on Windows -- so on the platform
+this harness is developed on, that route enforced NEITHER number. With
+S02-01 and S02-03 both open it had three bounds and none of them held.
+Measured while fixing it: `--cpus 1` is the container's only CPU control,
+a RATE, and `config.SANDBOX_CPU_SECONDS` is read in exactly one place, so
+the table row's "30 CPU-s -- under Docker, or Podman" attributed the
+budget to the two routes that do not enforce it. Both corrected, and the
+prose spelling is now gated -- it was stated twice and only the table was
+checked, which is the failure the gate's own docstring names.
+
+**S02-09: a guard that cannot fire on any shipped launch.** `apply_cli()`
+raises on a posture CHANGE after a read; `main.py` calls it with no
+arguments, so `supplied` is `{}` and the predicate is never true. Three
+places described it as live protection. The report's option 1, because
+option 2 is a feature: all three now say what is dormant and that the
+source scan is what enforces UN2 today, and the gate is a test that reads
+`main.py` and fails the day a production call gains an override -- naming
+the three places to correct, so the documents move with the feature rather
+than after it.
+
+**S02-10: the fixture's list was three of five.** Slices 5a and 5b added
+`_ssh_auth_rejected` and `_sudo_rejected`, and `ssh_available()` reads the
+first BEFORE the posture and the probe. Both are reset now, and the
+durable half is the enumeration: `_module_state()` reads the names off the
+SOURCE -- every name a function declares `global`, plus every lowercase
+module-level dict/set/list -- so the next addition fails instead of
+joining the cohort. My first version guessed from the loaded module's
+value types and answered `__builtins__`, three functions and a name that
+does not exist, which is the same defect as the fixture it guards.
+
+**THE OWNER'S RULING, and A12 is the measurement.** Nine baseline rows
+could no longer match anything (`sandbox.py` B603 7->0, B607 3->1), which
+was the count check's blind spot: it took EIGHT new subprocess findings in
+that file to fire. Removed -- not regenerated, which is TECHNICAL_DEBT 22;
+every kept object was carried across byte for byte, so the diff is
+`0 insertions, 220 deletions`. One `# nosec` removed now turns the check
+red where batch 141 measured the same mutation green at 1, 4 and 7.
+
+**And the branch was carrying a red.** Running the check the baseline edit
+required reported four new findings in `scripts/bandit-count-check.py` --
+the file batch 141 created, reporting "both bandit checks clean". A new
+file's findings are new by definition; the local run that claim rested on
+cannot have included the file it had just written. Annotated per site, as
+the ruling for batch 141's 21 decided for this class. The path rewrite
+cost one cycle of its own: replacing every separator makes all 127 entries
+miss, because bandit on Windows emits `.\x/y.py` -- the leading `./` only.
+
+**Controls 12/12 with the equivalence control green.** Two vacuity defects
+of my own, both caught while planning the pass and both fixed before it:
+the drain test asserted the returned dict while the double raised on a
+call count, so removing the bound left it green -- it asserts the ARGUMENT
+now; and the quarantine test asserted two globals were empty in a test
+that never dirtied them, which is true whether or not the fixture resets
+anything, so it became the ordered pair this file already uses one class
+over. Separately, three of my tests let a real `taskkill /T /F /PID 4242`
+run against whatever holds that pid on the machine running the suite.
+
+**The citation gate caught fifteen of mine**, which is item 86 doing its
+job on a `.py` file: `S02-07` reads as the decision id `S02`. Production
+code cites the batch, per batch 141's convention; the finding ids stay in
+this entry, in BREAKING_CHANGES and in the register, none of which
+`_production_python()` scans.
+
+Counts 6359 -> 6411.

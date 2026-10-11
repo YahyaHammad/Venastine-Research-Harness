@@ -455,7 +455,7 @@ def _reset_wsl_probe() -> None:
     global _wsl_probe
     with _wsl_lock:
         _wsl_probe = None
-    _wsl_workspace.cache_clear()
+    _wsl_workspace_memo.cache_clear()
 
 
 def wsl_enabled() -> bool:
@@ -506,7 +506,67 @@ def wsl_unavailable_reason() -> str:
             if reason else "")
 
 
+class _WslPathUnavailable(Exception):
+    """`wslpath` did not answer.
+
+    Private, and raised for one mechanical reason rather than to be
+    handled: it is what keeps a FAILURE out of
+    `_wsl_workspace_memo`'s cache. See that function (batch 142,
+    batch 142).
+    """
+
+
 @functools.lru_cache(maxsize=8)
+def _wsl_workspace_memo(workspace_dir: str) -> str:
+    """The live `wslpath` translation, memoised -- SUCCESSES ONLY.
+
+    THE FAILURE IS NOT CACHED, and that is why this is a separate
+    function instead of a branch. `functools.lru_cache` stores a
+    RETURN VALUE and never an exception, so raising makes "only a
+    success is remembered" a property of the cache rather than a rule
+    the body has to keep. Returning "" from inside the cached
+    function instead cached the REFUSAL for the life of the process.
+
+    Measured (batch 142) with `wslpath` set to fail once and
+    then succeed: calls 2 and 3 answered '' from the cache after a
+    single `wsl.exe` invocation, so the backend stayed down until the
+    user restarted -- and the refusal the model read named a cause
+    (a UNC path, an unmounted drive) that was not what happened.
+
+    CACHED AT ALL, because otherwise every WSL command pays a second
+    `wsl.exe` round trip for an answer that cannot change: a
+    workspace is bound once per process, and the mount that makes it
+    visible is a property of the machine. A `wslpath` that exited
+    non-zero or missed its 10s deadline is NOT a property of the
+    machine -- the two likeliest causes are the distro's service
+    still starting (the state `_probe_wsl`'s own reason text
+    anticipates) and a loaded machine missing a deadline, and both
+    change by themselves. That is the whole difference in lifetime:
+    the round trip worth saving is the one on the happy path, which
+    is the one that repeats.
+
+    The key is *workspace_dir* alone while the answer also depends on
+    `wsl_distro()`. Left as a note rather than a key change: the
+    distro cannot change inside one process, and `_reset_wsl_probe`
+    clears this cache and the distro memo together.
+    """
+    try:
+        result = subprocess.run(  # nosec B603 - wslpath translation; the distro name came from WSL itself and the path from config
+            [WSL, "-d", wsl_distro(), "-e", "wslpath", "-a", "-u",
+             workspace_dir],
+            capture_output=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise _WslPathUnavailable(
+            "wslpath did not run: %s" % type(exc).__name__) from None
+    if result.returncode != 0:
+        raise _WslPathUnavailable(
+            "wslpath exited %d" % result.returncode)
+    translated = result.stdout.decode("utf-8", "replace").strip()
+    if not translated:
+        raise _WslPathUnavailable("wslpath printed nothing")
+    return translated
+
+
 def _wsl_workspace(workspace_dir: str) -> str:
     """*workspace_dir* as the distro sees it, or "" when it cannot see it.
 
@@ -521,22 +581,18 @@ def _wsl_workspace(workspace_dir: str) -> str:
     code, and the POSIX path is what `--cd` is given -- measured working,
     `--cd /tmp` runs in /tmp. An empty answer means the route refuses.
 
-    Cached, because otherwise every WSL command pays a second `wsl.exe`
-    round trip for an answer that cannot change: a workspace is bound once
-    per process, and the mount that makes it visible is a property of the
-    machine. `_reset_wsl_probe` clears it, so a test that moves the
-    workspace is not answered from the last one's translation.
+    The caching, and why a failure is not cached, are in
+    `_wsl_workspace_memo`. This wrapper is the "" half of the
+    contract above: every caller refuses on an empty string, and
+    none of them should have to know that the absence arrives as an
+    exception so that the cache cannot keep it.
     """
     try:
-        result = subprocess.run(  # nosec B603 - wslpath translation; the distro name came from WSL itself and the path from config
-            [WSL, "-d", wsl_distro(), "-e", "wslpath", "-a", "-u",
-             workspace_dir],
-            capture_output=True, timeout=10)
-    except (OSError, subprocess.TimeoutExpired):
+        return _wsl_workspace_memo(workspace_dir)
+    except _WslPathUnavailable as exc:
+        logger.debug("wslpath could not translate %r: %s",
+                     workspace_dir, exc)
         return ""
-    if result.returncode != 0:
-        return ""
-    return result.stdout.decode("utf-8", "replace").strip()
 
 
 def _wsl_argv(
@@ -1581,6 +1637,64 @@ _DANGEROUS_FLAGS: dict[str, frozenset[str]] = {
 # look populated while doing nothing.
 
 
+def _names_dangerous_flag(token: str, dangerous: frozenset) -> bool:
+    """True when *token* is one of *dangerous*, in any spelling the
+    tabled tool's own parser accepts (batch 142).
+
+    Batch 117 made the table true for the spellings it enumerated.
+    The residual was that the PARSER accepts a small language and the
+    table listed three points in it. GNU `date` and `tree` both parse
+    with `getopt_long`, where a short option with a required argument
+    takes it ATTACHED and an unambiguous long-option prefix resolves,
+    so these all reached `tier=INERT, writes=False` and ran with no
+    prompt while the space-separated spelling asked:
+
+        date -s2024-01-01    tree -oout.txt
+        date --s 2024-01-01  date --se=2024-01-01
+
+    THE DIRECTION IS DELIBERATE. A false positive costs a PROMPT and
+    a false negative costs the prompt the tier requires, so this errs
+    toward asking -- which is also why it stays this side of parsing.
+    It reads a token's shape; it does not learn what a flag MEANS,
+    and G2 is why (teaching the classifier which positions are
+    outputs is what got `uniq` removed rather than tabled).
+
+    Four rules, in the order a parser would apply them:
+
+      1. the whole token, and its head before the first `=` (117).
+      2. a long option ABBREVIATED: `--s` and `--se` are prefixes of
+         `--set` and resolve to it. Any prefix counts, not only an
+         unambiguous one -- deciding ambiguity needs the tool's whole
+         option list, which is the parsing this must not do.
+      3. a short option with its argument ATTACHED: `-oFILE`, where
+         the token's first letter is the flag and the rest is the
+         value. Recognised by the token carrying a non-letter.
+      4. a BUNDLE of short options, `-ao`: purely alphabetic after
+         the dash, so any dangerous letter in it is a flag rather
+         than part of a value. `tree -Pfoo` is flagged by this rule
+         and that is the accepted cost of rule 3's limit: a prompt.
+    """
+    head = token.split("=", 1)[0]
+    if token in dangerous or head in dangerous:
+        return True
+    if head.startswith("--"):
+        # Rule 2. `len(head) > 2` keeps a bare `--` (the end-of-options
+        # marker) from matching every long flag in the set.
+        return len(head) > 2 and any(
+            flag.startswith(head)
+            for flag in dangerous if flag.startswith("--"))
+    if not head.startswith("-") or len(head) < 2:
+        return False
+    shorts = {flag[1] for flag in dangerous
+              if len(flag) == 2 and not flag.startswith("--")}
+    if not shorts:
+        return False
+    letters = head[1:]
+    if letters.isalpha():
+        return bool(shorts.intersection(letters))  # rule 4
+    return letters[0] in shorts                     # rule 3
+
+
 def _is_inert(command: str) -> bool:
     """True if the command is a read-only inspection command with no
     shell metacharacters, no quoting, no escaping, no path-qualified
@@ -1615,15 +1729,15 @@ def _is_inert(command: str) -> bool:
     # Check for dangerous flags on specific commands
     dangerous = _DANGEROUS_FLAGS.get(first_word)
     if dangerous:
-        # THE FLAG HEAD AS WELL AS THE WHOLE TOKEN (batch 117). An exact
-        # match misses the `=` spelling: `sort --output=/tmp/x` is one
-        # token, equal to neither "-o" nor "--output", and would have
-        # passed as INERT. Splitting on the first `=` is the same
-        # concession `_escapes_workspace` already makes to flag syntax and
-        # stops well short of parsing -- it reads a token's head, it does
-        # not learn what a flag MEANS.
+        # THE SPELLING FAMILY, NOT A LIST OF SPELLINGS. Batch 117 added
+        # the `=` head because `sort --output=/tmp/x` is one token equal
+        # to neither "-o" nor "--output"; batch 142 added the
+        # other two shapes the same parsers accept, an attached short
+        # argument and an abbreviated long option. The rules and the
+        # reason the direction errs toward asking are in
+        # `_names_dangerous_flag`.
         for token in stripped.split():
-            if token in dangerous or token.split("=", 1)[0] in dangerous:
+            if _names_dangerous_flag(token, dangerous):
                 return False
     return True
 
@@ -1815,12 +1929,32 @@ def _escapes_workspace(command: str, workspace_dir: str) -> bool:
     with it. Refusing to parse is only sound while nothing downstream
     parses either.
 
-    The `=` clause is the one place a token needs splitting: `--file=/etc/x`
-    is inside the workspace read whole (there is no such file, but the
-    join stays under the root) while the path it actually names is not.
-    Splitting on the first `=` and checking the tail costs nothing and
-    closes it. Everything else -- absolute paths, `..` escapes, drive
-    letters, UNC paths -- is caught by reading the token as it stands.
+    TWO PLACES A TOKEN NEEDS SPLITTING, and they are the same place
+    twice -- a path carried inside a flag token rather than beside it.
+
+      `--file=/etc/x` is inside the workspace read whole (there is no
+      such file, but the join stays under the root) while the path it
+      actually names is not. Splitting on the first `=` closes it.
+
+      `-f/etc/x` is the identical shape in the spelling `getopt` calls
+      an attached argument, and it was open until batch 142. MEASURED
+      (batch 142): `tree -o /etc/passwd` escaped and `tree -o/etc/passwd`
+      did not, because a token that does not START with `/` reads as
+      relative and lands under the root. `grep -f FILE` and
+      `file -f FILE` are INERT commands whose short option takes a
+      file, so that was an auto-approved read of a host file -- and
+      `file -f` echoes each unopenable line back, which is the
+      content. So anything after a leading `-x` is checked too.
+
+    THIS IS STILL NOT PARSING. Neither clause asks what a flag MEANS
+    or which one takes an argument; both read a token's shape and hand
+    the tail to the same `_within`. A token like `-la` or `-n5` offers
+    `a` and `5`, which are relative and land inside the workspace --
+    passing for the reason the whole function passes flags, not because
+    anything recognised them.
+
+    Everything else -- absolute paths, `..` escapes, drive letters, UNC
+    paths -- is caught by reading the token as it stands.
 
     False positives are the designed error direction: `grep /etc/passwd
     notes.txt` searches for a STRING that looks like a path, and it will
@@ -1830,7 +1964,11 @@ def _escapes_workspace(command: str, workspace_dir: str) -> bool:
     for token in command.split()[1:]:
         if not _within(workspace_dir, token):
             return True
-        if "=" in token and not _within(workspace_dir, token.split("=", 1)[1]):
+        if "=" in token and not _within(workspace_dir,
+                                        token.split("=", 1)[1]):
+            return True
+        if (token.startswith("-") and len(token) > 2
+                and not _within(workspace_dir, token[2:])):
             return True
     return False
 
@@ -2888,23 +3026,41 @@ def _run_subprocess_fallback(
     """
     preexec = _unix_resource_limits()
 
+    # ITS OWN PROCESS GROUP ON POSIX, so the timeout path below can
+    # signal the GROUP. Without it the shell was killed and its
+    # children ran on (batch 142, four survivors measured), and the flag
+    # on its own is not the fix -- `_terminate_tree` is.
+    #
+    # NOT `_isolation_kwargs()`, which is the SESSION's answer and also
+    # carries CREATE_NEW_PROCESS_GROUP on Windows. A session is stopped
+    # through `kill()` from elsewhere; a one-shot is waited on right
+    # here, so taking it out of the console's group on Windows would
+    # only stop Ctrl+C reaching it, while `taskkill /T` already
+    # reclaims the tree by pid. What Ctrl+C costs on POSIX is paid
+    # below, where an interrupt reclaims before it unwinds.
+    group_kwargs = ({} if platform.system() == "Windows"
+                    else {"start_new_session": True})
     try:
-        result = subprocess.run(
+        proc = subprocess.Popen(
             [shell_binary, "-c", command],
             cwd=workspace_dir,
             env=_scrubbed_env(),
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            # DEVNULL rather than INHERITED, which is what
+            # `subprocess.run(capture_output=True)` left until batch
+            # 142. SS70 measured the identical omission on the WSL
+            # one-shot: a command there read a string written to the
+            # HARNESS's own stdin, a second reader of the console
+            # beside the CLI's one (N1). Every other route already
+            # passes DEVNULL, and a command that waits on stdin now
+            # ends instead of burning the whole wall clock.
+            stdin=subprocess.DEVNULL,
             text=True,
-            timeout=config.SANDBOX_TIMEOUT_SECONDS,
             preexec_fn=preexec,
             shell=False,  # nosec B603 - EXECUTION ROUTE: carries the model's command by design. List form and no shell, so there is nothing to inject into; the bound is upstream -- mode gate G3, the INERT allowlist, the dangerous-flag check and the approval prompt -- not this call (the insecure host fallback)
+            **group_kwargs,
         )
-    except subprocess.TimeoutExpired:
-        return {
-            "stdout": "",
-            "stderr": f"Command timed out after {config.SANDBOX_TIMEOUT_SECONDS}s",
-            "return_code": -1,
-        }
     except FileNotFoundError as e:
         return {
             "stdout": "",
@@ -2920,10 +3076,44 @@ def _run_subprocess_fallback(
             "return_code": -1,
         }
 
+    try:
+        stdout, stderr = proc.communicate(
+            timeout=config.SANDBOX_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        # H7: the message below asserts the work stopped, so it has to
+        # have stopped. `_reclaim_tree` is the session path's own
+        # answer, shared rather than copied.
+        reclaimed = _reclaim_tree(proc)
+        stdout, stderr = _drain_after_kill(proc)
+        note = (
+            "Command timed out after "
+            f"{config.SANDBOX_TIMEOUT_SECONDS}s. The shell and its "
+            "process group were killed."
+            if reclaimed else
+            "Command timed out after "
+            f"{config.SANDBOX_TIMEOUT_SECONDS}s, and it OUTLIVED a "
+            "forced kill: some of its processes may still be running "
+            "with your own authority, since this route has no "
+            "isolation.")
+        return {
+            "stdout": (stdout or "")[:config.MAX_READ_CHARS],
+            "stderr": ((stderr or "") + ("\n" if stderr else "")
+                       + note)[:config.MAX_READ_CHARS],
+            "return_code": -1,
+        }
+    except BaseException:
+        # Ctrl+C included, and it is the reason this is BaseException:
+        # on POSIX the child now leads its own group, so the keystroke
+        # the terminal delivered did NOT reach it. Reclaiming before
+        # the unwind is what keeps the group change from trading a
+        # timeout orphan for an interrupt orphan.
+        _reclaim_tree(proc)
+        raise
+
     return {
-        "stdout": result.stdout[:config.MAX_READ_CHARS],
-        "stderr": result.stderr[:config.MAX_READ_CHARS],
-        "return_code": result.returncode,
+        "stdout": (stdout or "")[:config.MAX_READ_CHARS],
+        "stderr": (stderr or "")[:config.MAX_READ_CHARS],
+        "return_code": proc.returncode,
     }
 
 
@@ -3147,6 +3337,125 @@ _KILL_GRACE_S = 5
 _SIGKILL = getattr(signal, "SIGKILL", 9)
 _CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP",
                                     0x00000200)
+#: How long a reclaimed process gets to hand over what it had already
+#: written. Short, and bounded on purpose: an ORPHAN holding the write
+#: end of the pipe means EOF never comes, which is the 30.21s-for-a-5s
+#: bound half of the timeout defect batch 142 fixed.
+_DRAIN_AFTER_KILL_S = 2.0
+
+
+def _leads_its_own_group(pid: int) -> bool:
+    """True when *pid* is its own process group leader.
+
+    ASKED BEFORE EVERY `killpg`, and the reason is the failure mode
+    rather than tidiness. `os.killpg` takes a process GROUP id, and a
+    child started WITHOUT `start_new_session` sits in THIS process's
+    group -- so passing its pid as a group id means either no such
+    group (ESRCH, which the caller handles) or, if an unrelated group
+    happens to carry that id, somebody else's processes.
+
+    The property holds for both callers today: `_isolation_kwargs`
+    sets the flag for a session and `_run_subprocess_fallback` sets it
+    for a one-shot. So this is a guard that KEEPS it true rather than
+    a fix for a live defect -- a change at either launch site can no
+    longer turn a kill of the work into a kill of the harness.
+    """
+    try:
+        return os.getpgid(pid) == pid
+    except (OSError, AttributeError):
+        # AttributeError is Windows, where there are no process groups
+        # in this sense and `taskkill /T` is the tree walk instead.
+        return False
+
+
+def _signal_tree(proc, sig) -> None:
+    """Send *sig* to *proc*'s whole group, or to *proc* if it does not
+    lead one."""
+    if _leads_its_own_group(proc.pid):
+        try:
+            os.killpg(proc.pid, sig)
+            return
+        except OSError:
+            pass
+    proc.kill()
+
+
+def _terminate_tree(proc) -> None:
+    """The polite stop, for the work and not only its shell.
+
+    A shell's children are what actually do the work (SS15), so a
+    terminate that reaches only the shell reports a stop it did not
+    make -- which H7 forbids: an IO bound that reports a timeout must
+    have STOPPED the work. Measured (batch 142) on the one-shot route
+    before this existed: `pgrep -a sleep` listed four survivors after
+    a reported timeout, and the control in the same run showed
+    `start_new_session=True` ALONE changes nothing, because nothing
+    signalled the group.
+    """
+    if platform.system() == "Windows":
+        try:
+            subprocess.run(  # nosec B603 - `taskkill` against this process's own child, by pid
+                ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                capture_output=True, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            proc.kill()
+        return
+    _signal_tree(proc, signal.SIGTERM)
+
+
+def _force_tree(proc) -> None:
+    """The forced stop. On Windows `taskkill /T /F` was already the
+    forced one, so this is the single-process fallback for the case
+    where it could not run."""
+    if platform.system() == "Windows":
+        proc.kill()
+        return
+    _signal_tree(proc, _SIGKILL)
+
+
+def _reclaim_tree(proc, *, grace_s: float = _KILL_GRACE_S) -> bool:
+    """Stop *proc* and the work below it: polite, a grace period, then
+    forced. True when it is gone.
+
+    ONE DECISION IN ONE PLACE, which is EP6's rule applied to a
+    sibling pair rather than to a gate: `SessionProcess.kill` and
+    `_run_subprocess_fallback`'s timeout are both "stop this host
+    process and its children", and they were two different answers --
+    the session's correct, the one-shot's a terminate of the shell
+    alone under a message asserting the opposite.
+    """
+    _terminate_tree(proc)
+    try:
+        proc.wait(timeout=grace_s)
+        return True
+    except subprocess.TimeoutExpired:
+        pass
+    _force_tree(proc)
+    try:
+        proc.wait(timeout=grace_s)
+        return True
+    except subprocess.TimeoutExpired:
+        logger.warning("Process %s outlived a forced kill", proc.pid)
+        return False
+
+
+def _drain_after_kill(proc) -> tuple:
+    """Whatever *proc* had already written, bounded.
+
+    `communicate()` after a kill is how CPython hands over the
+    buffered output, and it waits for EOF on the pipes. An ORPHANED
+    GRANDCHILD STILL HOLDS THE WRITE END, so on Windows that wait is
+    what turned a 5s bound into a 30.21s return -- measured, and in
+    principle unbounded. The second bound is what makes the first one
+    true."""
+    try:
+        return proc.communicate(timeout=_DRAIN_AFTER_KILL_S)
+    except subprocess.TimeoutExpired:
+        return "", ""
+    except (OSError, ValueError):
+        # ValueError: the pipes are closed already, which is what a
+        # second drain on a reaped process looks like.
+        return "", ""
 
 
 def _route(profile: CommandProfile, docker_available: bool,
@@ -3229,6 +3538,77 @@ def _popen_session(args: list[str], *, cwd: Optional[str] = None,
     )
 
 
+def _popen_session_with_credentials(
+        args: list[str], *, env: dict, sudo_secret=None,
+        guard_reason: str = "", askpass_answers=None):
+    """`_popen_session` plus the credential windows a SESSION needs.
+
+    Returns `(proc, window)`, where *window* is the live
+    `askpass.serving` context the session now OWNS, or None.
+
+    THE SCOPE MISMATCH IS THE WHOLE PROBLEM, and it is why this
+    exists instead of two more `with` statements in `start_sandboxed`.
+    `askpass.serving` and `secrets.guarded` are BLOCKS; a session is
+    not. `start_sandboxed` returns while the process it started keeps
+    running, so a block around the start closes the window before the
+    connection needs it and a block around the session cannot be
+    written at all. Both one-shot routes got this right and both
+    session routes got it wrong, which is EP6 one layer down: the
+    environment a mode DEPENDS ON was composed at two call sites and
+    only one of them knew.
+
+    THE ASKPASS HALF. `_ssh_auth_options` takes `BatchMode=yes`
+    OFF as soon as anything is stored for the host, because BatchMode
+    suppresses askpass too -- and its docstring records that the
+    anti-hang property moves to `SSH_ASKPASS_REQUIRE=force`, measured
+    as 20s hung versus 0.8s. `start_sandboxed` passed a bare
+    `_ssh_env()`, so a background session on a password-authenticated
+    host got the argv whose anti-hang property is a listener, with no
+    listener. Measured: four askpass variables on the one-shot path
+    and none on the session path, same store, same host.
+
+    THE GUARD HALF. SS60 locks the store on anything that is
+    not "still working normally", and an exception escaping a secret
+    consumer is one of its triggers. The one-shot routes say so
+    themselves (`_run_wsl`) or get it from `serving` (`_run_ssh`); the
+    session route did neither, on the route that holds the plaintext
+    LONGEST. The span wrapped here is the one where the plaintext is
+    in THIS process's hands -- from the start to the end of
+    `_feed_sudo_password` -- which is as narrow as it can be while
+    still being a block.
+
+    WHO CLOSES THE LISTENER. The session does, through
+    `SessionProcess.release_credentials`, on its kill and on the first
+    `poll`/`wait` that sees the process gone. Two backstops behind
+    that: `_Listener` has its own `DEADLINE_S` (120s), so a session
+    nobody ever reaps still stops serving, and `MAX_SERVES` caps the
+    prompts one window may answer.
+    """
+    window = None
+    if askpass_answers:
+        window = askpass.serving(askpass_answers)
+        live = window.__enter__()
+        env = dict(env)
+        env.update(live.env)
+    try:
+        with secrets.guarded(guard_reason) if sudo_secret is not None \
+                else contextlib.nullcontext():
+            proc = _popen_session(
+                args, env=env,
+                stdin=(subprocess.PIPE if sudo_secret is not None
+                       else subprocess.DEVNULL))
+            if sudo_secret is not None:
+                _feed_sudo_password(proc, sudo_secret)
+    except BaseException as exc:
+        # `__exit__` rather than `_cleanup`, because the exception is
+        # what locks the store (SS60) and that trigger must survive
+        # the window being hand-held rather than `with`-held.
+        if window is not None:
+            window.__exit__(type(exc), exc, exc.__traceback__)
+        raise
+    return proc, window
+
+
 class SessionProcess:
     """A sandboxed command running in the background.
 
@@ -3241,11 +3621,16 @@ class SessionProcess:
 
     ran_on = ""
 
-    def __init__(self, proc, *, tier: str) -> None:
+    def __init__(self, proc, *, tier: str, credentials=None) -> None:
         self._proc = proc
         self.tier = tier
         self._kill_lock = threading.Lock()
         self._kill_started = False
+        # The live `askpass.serving` window this session owns, or None.
+        # A session outlives the call that started it, so the listener
+        # it authenticated against cannot be scoped to that call
+        # (batch 142). See `_popen_session_with_credentials`.
+        self._credentials = credentials
 
     @property
     def stdout(self):
@@ -3266,34 +3651,64 @@ class SessionProcess:
         return self._proc.returncode
 
     def poll(self) -> Optional[int]:
-        return self._proc.poll()
+        code = self._proc.poll()
+        if code is not None:
+            self.release_credentials()
+        return code
 
     def wait(self, timeout: Optional[float] = None) -> Optional[int]:
         """The exit code, or None if the process is still running when
         *timeout* runs out."""
         try:
-            return self._proc.wait(timeout=timeout)
+            code = self._proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             return None
+        self.release_credentials()
+        return code
 
     def kill(self) -> None:
-        with self._kill_lock:
-            if self._kill_started or self._proc.poll() is not None:
+        # ONE `finally` ROUND THE WHOLE METHOD, not round the last
+        # wait. `kill` has four exits -- already killed, already
+        # exited, stopped politely, forced -- and the credential
+        # release belongs to all of them. Found by the tests in
+        # batch 142: a session that had already ended kept its
+        # listener, because that path returns before any of the
+        # stopping happens.
+        try:
+            with self._kill_lock:
+                if (self._kill_started
+                        or self._proc.poll() is not None):
+                    self._kill_started = True
+                    return
                 self._kill_started = True
+            self._terminate()
+            try:
+                self._proc.wait(timeout=_KILL_GRACE_S)
                 return
-            self._kill_started = True
-        self._terminate()
-        try:
-            self._proc.wait(timeout=_KILL_GRACE_S)
-            return
-        except subprocess.TimeoutExpired:
-            pass
-        self._force()
-        try:
-            self._proc.wait(timeout=_KILL_GRACE_S)
-        except subprocess.TimeoutExpired:
-            logger.warning("Session process %s outlived a forced kill",
-                           self._proc.pid)
+            except subprocess.TimeoutExpired:
+                pass
+            self._force()
+            try:
+                self._proc.wait(timeout=_KILL_GRACE_S)
+            except subprocess.TimeoutExpired:
+                logger.warning(
+                    "Session process %s outlived a forced kill",
+                    self._proc.pid)
+        finally:
+            self.release_credentials()
+
+    def release_credentials(self) -> None:
+        """Close the credential machinery this session owns. Idempotent.
+
+        Called from `kill`, and from the first `poll` or `wait` that
+        sees the process gone, so a session that ENDED BY ITSELF does
+        not leave a listener up until its own deadline. Idempotent
+        because all three can happen, in any order, from more than one
+        thread."""
+        with self._kill_lock:
+            window, self._credentials = self._credentials, None
+        if window is not None:
+            window.__exit__(None, None, None)
 
     def _terminate(self) -> None:
         self._proc.terminate()
@@ -3330,28 +3745,15 @@ class HostSessionProcess(SessionProcess):
 
     ran_on = "host"
 
+    # Both halves live at module level since batch 142, because the
+    # one-shot fallback needs the same reclamation and had its own
+    # weaker answer (batch 142).
+
     def _terminate(self) -> None:
-        if platform.system() == "Windows":
-            try:
-                subprocess.run(  # nosec B603 - `taskkill` against this process's own child, by pid
-                    ["taskkill", "/T", "/F", "/PID", str(self._proc.pid)],
-                    capture_output=True, timeout=10)
-            except (OSError, subprocess.TimeoutExpired):
-                self._proc.kill()
-            return
-        self._signal_group(signal.SIGTERM)
+        _terminate_tree(self._proc)
 
     def _force(self) -> None:
-        if platform.system() == "Windows":
-            self._proc.kill()
-            return
-        self._signal_group(_SIGKILL)
-
-    def _signal_group(self, sig) -> None:
-        try:
-            os.killpg(self._proc.pid, sig)
-        except (OSError, AttributeError):
-            self._proc.kill()
+        _force_tree(self._proc)
 
 
 class WslSessionProcess(SessionProcess):
@@ -3447,12 +3849,9 @@ def start_sandboxed(
                 session_timeout_s=int(timeout_s) + SESSION_TIMEOUT_MARGIN_S,
                 as_root=needs_root)
             try:
-                proc = _popen_session(
-                    args, env=_scrubbed_env(),
-                    stdin=(subprocess.PIPE if sudo_secret is not None
-                           else subprocess.DEVNULL))
-                if sudo_secret is not None:
-                    _feed_sudo_password(proc, sudo_secret)
+                proc, _ = _popen_session_with_credentials(
+                    args, env=_scrubbed_env(), sudo_secret=sudo_secret,
+                    guard_reason="a root command on WSL")
             except FileNotFoundError:
                 raise SandboxUnavailable(
                     "wsl.exe was not found, so the WSL backend cannot run "
@@ -3464,17 +3863,16 @@ def start_sandboxed(
                 session_timeout_s=int(timeout_s) + SESSION_TIMEOUT_MARGIN_S,
                 as_root=needs_root)
             try:
-                proc = _popen_session(
-                    args, env=_ssh_env(),
-                    stdin=(subprocess.PIPE if sudo_secret is not None
-                           else subprocess.DEVNULL))
-                if sudo_secret is not None:
-                    _feed_sudo_password(proc, sudo_secret)
+                proc, window = _popen_session_with_credentials(
+                    args, env=_ssh_env(), sudo_secret=sudo_secret,
+                    guard_reason="a root command over SSH",
+                    askpass_answers=_ssh_stored_secrets())
             except FileNotFoundError:
                 raise SandboxUnavailable(
                     f"{_ssh_binary()!r} was not found, so the SSH backend "
                     f"cannot run anything.") from None
-            return SshSessionProcess(proc, tier=profile.tier)
+            return SshSessionProcess(proc, tier=profile.tier,
+                                     credentials=window)
         if route == ROUTE_CONTAINER:
             runtime = known_runtime()
             _log_image_identity(runtime)

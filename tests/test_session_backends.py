@@ -305,8 +305,18 @@ class TestKilling:
             self, monkeypatch):
         """TERM to the whole group first; KILL only if it outlives the
         grace period -- a group, because a shell's children are what
-        actually do the work."""
+        actually do the work.
+
+        `getpgid` is answered as well as `killpg` since batch 142:
+        `_signal_tree` asks whether the pid LEADS its own group before
+        signalling that group, because a child started without
+        `start_new_session` sits in this process's group and passing
+        its pid as a group id is then a question about somebody else.
+        Both are absent on Windows, which is where this runs, so the
+        double has to supply the platform as well as the call."""
         sent = []
+        monkeypatch.setattr(sandbox.os, "getpgid", lambda pid: pid,
+                            raising=False)
         monkeypatch.setattr(sandbox.os, "killpg",
                             lambda pgid, sig: sent.append((pgid, sig)),
                             raising=False)

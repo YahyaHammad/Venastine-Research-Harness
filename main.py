@@ -2507,12 +2507,18 @@ def main(argv=None) -> int:
     # behind -- the same argument audit #101 makes one line down.
     # §40 (UN2). ABOVE check_workspace, and that ordering is not
     # cosmetic: the posture is what a later batch lets decide whether the
-    # workspace guard runs at all, and `apply_cli` RAISES if anything has
-    # already read the posture -- so a reader creeping above this line is
-    # a loud startup failure rather than a run that quietly used the
-    # config-only value. Below parse_args because the command line feeds
-    # it; below configure_logging so the warnings below have somewhere to
-    # go.
+    # workspace guard runs at all. Below parse_args because the command
+    # line feeds it; below configure_logging so the warnings below have
+    # somewhere to go.
+    #
+    # THE ORDERING IS NOT ENFORCED AT RUN TIME TODAY (batch 142),
+    # and the sentence that used to be here said it was. `apply_cli` does
+    # raise on a posture CHANGE after a read -- but this call passes no
+    # overrides, so there is no change to detect and a reader creeping
+    # above this line produces nothing at all. What catches it is the
+    # source scan in `test_posture.py`, which covers IMPORT time; a read
+    # placed inside `main()` above this line is covered by neither. Keep
+    # this call here, and keep it FIRST among posture readers.
     posture.apply_cli()
     _announce_posture()
 

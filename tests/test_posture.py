@@ -46,6 +46,10 @@ PRODUCTION_FILES = ("main.py", "config.py", "logging_setup.py", "database.py",
                     "storage.py", "credentials.py")
 
 
+#: The repository root, for the two tests that read a source file.
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
 def _production_sources():
     """(relative path, source text) for everything that runs in a session."""
     for name in PRODUCTION_FILES:
@@ -219,6 +223,67 @@ class TestApplyCliOrdering:
 # ---- Nothing a session can reach may change it ----------------------------
 # ===========================================================================
 
+
+class TestTheOrderingGuardIsDormantAndSaysSo:
+    """S02-09 (batch 142). The guard cannot fire on a shipped launch.
+
+    `apply_cli()` raises when folding in the command line would CHANGE
+    the posture after a read. `main.py` calls it with no arguments --
+    the only production call -- so `supplied` is {}, `candidate` equals
+    `_posture`, and the second half of the predicate is never true.
+    Three documents described it as a live protection, and a reader
+    creeping above that call produced nothing at all.
+
+    There is no live harm, and that is the same fact as the finding:
+    with nothing folded in, a premature reader reads the right value
+    anyway. The cost is a reviewer trap, which is what these tests are
+    against -- `CLAUDE.md` says these decisions "have already been
+    broken once by someone who reasoned from the code alone".
+    """
+
+    def test_no_production_call_supplies_an_override(self):
+        """THE GATE. The day a posture flag exists, this goes red -- and
+        the failure names the three places that describe the guard, so
+        the documents move with the feature rather than after it."""
+        tree = ast.parse(
+            open(os.path.join(_ROOT, "main.py"),
+                    encoding="utf-8").read())
+        calls = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if (isinstance(func, ast.Attribute)
+                    and func.attr == "apply_cli"):
+                calls.append(len(node.args) + len(node.keywords))
+        assert calls, (
+            "no `apply_cli` call found in main.py -- either the call moved, "
+            "and UN2's ordering has to be re-established wherever it went, "
+            "or this test is now measuring nothing.")
+        assert all(count == 0 for count in calls), (
+            "main.py now passes %r argument(s) to `apply_cli`, so the ordering guard CAN fire and is no longer dormant. Three places say it is: `security/posture.py`'s module docstring, the comment above the call in `main.py`, and AGENTS.md's UN2 bullet. Update all three -- this is the drift shape S02-09 was." % calls)
+
+    def test_the_shipped_call_shape_does_not_raise_after_a_read(self):
+        """The measurement, kept as a test: exactly what `main.py` does,
+        in the order a late reader would make it happen."""
+        posture.current()
+        assert posture.apply_cli() == posture.current()
+
+    def test_the_control_is_that_an_override_still_raises(self):
+        """So the guard is dormant, not broken -- which is why it is kept
+        rather than removed."""
+        posture.current()
+        with pytest.raises(RuntimeError, match="already been read"):
+            posture.apply_cli(shell_approval_mode="never")
+
+    def test_the_flag_the_docs_write_about_does_not_exist_yet(self):
+        """`--unsafe` is named in `posture.py` and in this file as though
+        it existed. It does not, and that is the reason the guard has
+        never fired -- recorded here so the next reader does not go
+        looking for a flag to pass."""
+        argv_text = open(
+            os.path.join(_ROOT, "main.py"), encoding="utf-8").read()
+        assert "--unsafe" not in argv_text
 
 class TestNothingReachableChangesIt:
     """The security claim, taken one surface at a time. Each of these is a

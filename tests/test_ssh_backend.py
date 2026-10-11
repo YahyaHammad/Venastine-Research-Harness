@@ -18,6 +18,7 @@ command unasked, and the reason this one cannot is that "in the
 workspace" is a question about a filesystem this process cannot resolve.
 """
 
+import contextlib
 import os
 import shlex
 from unittest.mock import MagicMock, patch
@@ -1284,6 +1285,272 @@ class TestTheRunPathServesTheSecrets:
         seen = self._capture(monkeypatch)
         sandbox._run_ssh("echo hi", "/local/ws")
         assert not os.path.exists(seen["env"]["SSH_ASKPASS"])
+
+
+# ===========================================================================
+
+class _FakeSessionProc:
+    """What `SessionProcess` actually calls, which is not what
+    `_FakeProc` above offers: a one-shot is driven through
+    `communicate`, a session through `poll`, `wait`, `terminate` and
+    `kill`."""
+
+    returncode = 0
+    pid = 4242
+    stdout = None
+    stdin = None
+
+    def __init__(self, alive=True) -> None:
+        self._alive = alive
+
+    def poll(self):
+        return None if self._alive else self.returncode
+
+    def wait(self, timeout=None):
+        self._alive = False
+        return self.returncode
+
+    def terminate(self):
+        self._alive = False
+
+    def kill(self):
+        self._alive = False
+
+
+class TestTheSessionGetsTheSameWindowAsTheOneShot:
+    """S02-02 and S02-04, batch 142.
+
+    EP6 one layer down. `_ssh_auth_options` is the ONE place the auth
+    mode is decided and it takes `BatchMode=yes` off as soon as anything
+    is stored -- because BatchMode suppresses askpass too, so the
+    anti-hang property moves to the listener. But the ENVIRONMENT that
+    mode depends on was composed at two call sites, and only `_run_ssh`
+    knew: a background session on the same host got the argv whose
+    anti-hang property is a listener, with no listener, and waited for a
+    password it had no way to answer.
+
+    So the tests below are mostly ONE RELATION rather than two
+    assertions. `TestTheRunPathServesTheSecrets` above pins the one-shot
+    environment; what was missing is anything holding the session
+    against it for the same store.
+    """
+
+    #: What `askpass.serving` contributes. Named here rather than read
+    #: off `Serving.env`, so dropping a variable from the module is what
+    #: goes red instead of being adopted as the new expectation.
+    ASKPASS_KEYS = frozenset({
+        "SSH_ASKPASS", "SSH_ASKPASS_REQUIRE",
+        "VEN_ASKPASS_PORT", "VEN_ASKPASS_TOKEN",
+    })
+
+    @staticmethod
+    def _session(monkeypatch, tmp_path, alive=True, **kwargs):
+        """Start a background session, capturing what `_popen_session`
+        was about to hand the operating system."""
+        seen = {}
+
+        def _popen(args, **popen_kwargs):
+            seen["env"] = dict(popen_kwargs.get("env") or {})
+            seen["args"] = list(args)
+            return _FakeSessionProc(alive=alive)
+
+        monkeypatch.setattr(sandbox, "_popen_session", _popen)
+        session = sandbox.start_sandboxed(
+            "sleep 60", str(tmp_path), profile=_profile(),
+            docker_available=True, timeout_s=60, backend=BACKEND_SSH,
+            **kwargs)
+        return seen, session
+
+    @staticmethod
+    def _one_shot(monkeypatch):
+        """The control path, which has been right since slice 5a."""
+        seen = {}
+
+        def _popen(args, **popen_kwargs):
+            seen["env"] = dict(popen_kwargs.get("env") or {})
+            return _FakeProc()
+
+        monkeypatch.setattr(sandbox.subprocess, "Popen", _popen)
+        sandbox._run_ssh("echo hi", "/local/ws")
+        return seen
+
+    def test_the_session_environment_carries_the_askpass_window(
+            self, ssh_on, ssh_secrets, monkeypatch, tmp_path):
+        """The defect, directly: four variables on the one-shot path and
+        none on the session path, same store and same host."""
+        seen, session = self._session(monkeypatch, tmp_path)
+        try:
+            assert self.ASKPASS_KEYS.issubset(seen["env"])
+            assert seen["env"]["SSH_ASKPASS_REQUIRE"] == "force"
+        finally:
+            session.release_credentials()
+
+    def test_the_session_and_the_one_shot_agree_for_the_same_store(
+            self, ssh_on, ssh_secrets, monkeypatch, tmp_path):
+        """THE RELATION, and the reason it is a relation rather than two
+        copies of a list: what must hold is that the two paths compose
+        the SAME window, so a variable added to one and not the other is
+        a failure here no matter which one it was."""
+        session_seen, session = self._session(monkeypatch, tmp_path)
+        session.release_credentials()
+        one_shot_seen = self._one_shot(monkeypatch)
+
+        def askpass_keys(env):
+            return {k for k in env if "ASKPASS" in k}
+
+        assert askpass_keys(session_seen["env"]) == \
+            askpass_keys(one_shot_seen["env"])
+        # And the values that are not per-connection must match too: the
+        # port and the token differ by construction, the requirement
+        # does not.
+        assert session_seen["env"]["SSH_ASKPASS_REQUIRE"] == \
+            one_shot_seen["env"]["SSH_ASKPASS_REQUIRE"]
+
+    def test_the_session_argv_and_the_window_come_from_one_decision(
+            self, ssh_on, ssh_secrets, monkeypatch, tmp_path):
+        """The two halves that must not drift: if the argv says
+        `BatchMode=no` -- which is what a stored credential buys -- then
+        the environment has to carry the listener that replaces it. This
+        is the pair `_ssh_auth_options` documents and nothing held."""
+        seen, session = self._session(monkeypatch, tmp_path)
+        try:
+            assert "BatchMode=no" in seen["args"]
+            assert "VEN_ASKPASS_TOKEN" in seen["env"]
+        finally:
+            session.release_credentials()
+
+    def test_no_secret_value_reaches_the_argv_or_the_environment(
+            self, ssh_on, ssh_secrets, monkeypatch, tmp_path):
+        seen, session = self._session(monkeypatch, tmp_path)
+        try:
+            joined = "".join(seen["env"].values()) + " ".join(seen["args"])
+            assert "the-login-password" not in joined
+            assert "the-key-passphrase" not in joined
+            assert "a master passphrase" not in joined
+        finally:
+            session.release_credentials()
+
+    def test_with_nothing_stored_the_session_opens_no_listener(
+            self, ssh_on, no_store, monkeypatch, tmp_path):
+        """The control, and the half that keeps slice 4 intact: with
+        nothing stored the argv is `BatchMode=yes` and no socket is
+        opened at all."""
+        seen, session = self._session(monkeypatch, tmp_path)
+        try:
+            assert not self.ASKPASS_KEYS.intersection(seen["env"])
+            assert "BatchMode=yes" in seen["args"]
+        finally:
+            session.release_credentials()
+
+    def test_the_listener_is_closed_when_the_session_is_killed(
+            self, ssh_on, ssh_secrets, monkeypatch, tmp_path):
+        """A session OUTLIVES the call that started it, so the window
+        cannot be a block -- and a window nobody closes is a listener
+        holding a password until its own deadline."""
+        seen, session = self._session(monkeypatch, tmp_path)
+        helper = seen["env"]["SSH_ASKPASS"]
+        assert os.path.exists(helper)
+        session.kill()
+        assert not os.path.exists(helper)
+
+    def test_the_listener_is_closed_when_the_session_ends_by_itself(
+            self, ssh_on, ssh_secrets, monkeypatch, tmp_path):
+        """Not every session is killed. The first `poll` that sees the
+        process gone releases it, so the ordinary end of a short command
+        is not the path that leaks."""
+        seen, session = self._session(monkeypatch, tmp_path,
+                                      alive=False)
+        helper = seen["env"]["SSH_ASKPASS"]
+        assert os.path.exists(helper)
+        assert session.poll() == 0   # _FakeSessionProc.returncode
+        assert not os.path.exists(helper)
+
+    def test_releasing_twice_is_not_an_error(
+            self, ssh_on, ssh_secrets, monkeypatch, tmp_path):
+        """`kill`, `poll` and `wait` can all reach it, from more than
+        one thread."""
+        _, session = self._session(monkeypatch, tmp_path)
+        session.release_credentials()
+        session.release_credentials()
+        session.kill()
+
+    def test_killing_a_session_that_already_ended_still_releases(
+            self, ssh_on, ssh_secrets, monkeypatch, tmp_path):
+        """`kill` returns early when the process has already gone,
+        and that exit skipped the release until batch 142 put the
+        release in a `finally` round the whole method. A session
+        that ends by itself and is then reaped is the ORDINARY
+        shape, not the corner."""
+        seen, session = self._session(monkeypatch, tmp_path,
+                                      alive=False)
+        helper = seen["env"]["SSH_ASKPASS"]
+        assert os.path.exists(helper)
+        session.kill()
+        assert not os.path.exists(helper)
+
+    def test_a_root_session_holds_the_plaintext_inside_a_guard(
+            self, ssh_on, ssh_secrets, monkeypatch, tmp_path):
+        """S02-04. SS60 locks the store on anything that is not "still
+        working normally", and an exception escaping a secret consumer
+        is one of its triggers. Both one-shot routes wrap the window;
+        the session route wrapped nothing, on the route that holds the
+        plaintext LONGEST -- `start_sandboxed` returns while the
+        password is still being written.
+
+        Asserted as an ORDER rather than as a call count, because what
+        was wrong was not that `guarded` was missing from the file but
+        that the span was outside it."""
+        order = []
+
+        @contextlib.contextmanager
+        def _guarded(reason):
+            order.append("enter:%s" % reason)
+            try:
+                yield
+            finally:
+                order.append("exit")
+
+        def _popen(args, **kwargs):
+            order.append("popen")
+            return _FakeSessionProc()
+
+        monkeypatch.setattr(sandbox.secrets, "guarded", _guarded)
+        monkeypatch.setattr(sandbox, "_popen_session", _popen)
+        # The sudo GATE is test_sudo.py's subject; what is under test
+        # here is only where the plaintext is held relative to the
+        # guard, so the gate is answered and the secret is a sentinel.
+        monkeypatch.setattr(sandbox, "sudo_refusal", lambda backend: "")
+        monkeypatch.setattr(sandbox, "_sudo_secret",
+                            lambda backend: "sentinel-secret")
+        monkeypatch.setattr(sandbox, "_feed_sudo_password",
+                            lambda proc, secret: order.append("feed"))
+        session = sandbox.start_sandboxed(
+            "whoami", str(tmp_path), profile=_profile(),
+            docker_available=True, timeout_s=60, backend=BACKEND_SSH,
+            needs_root=True)
+        session.release_credentials()
+        assert order == ["enter:a root command over SSH", "popen",
+                         "feed", "exit"]
+
+    def test_a_failure_inside_the_window_still_closes_it(
+            self, ssh_on, ssh_secrets, monkeypatch, tmp_path):
+        """The listener is hand-held rather than `with`-held, so the
+        failure path is the one that has to be written down. `serving`'s
+        `__exit__` is what locks the store (SS60), which is why the
+        cleanup goes through it rather than through `_cleanup`."""
+        helpers = []
+
+        def _popen(args, **kwargs):
+            helpers.append(kwargs["env"]["SSH_ASKPASS"])
+            raise OSError("no route to host")
+
+        monkeypatch.setattr(sandbox, "_popen_session", _popen)
+        with pytest.raises(SandboxUnavailable):
+            sandbox.start_sandboxed(
+                "sleep 60", str(tmp_path), profile=_profile(),
+                docker_available=True, timeout_s=60,
+                backend=BACKEND_SSH)
+        assert helpers and not os.path.exists(helpers[0])
 
 
 # ===========================================================================

@@ -52,9 +52,28 @@ ORDERING IS SELF-ENFORCING (UN2)
 --------------------------------
 `current()` marks the posture bound. `apply_cli()` raises if folding in
 the command line would now CHANGE it. So a wrong call order in `main.py`
-is a LOUD startup failure rather than a silently stale posture -- which
-matters because the failure mode of getting it wrong is a run that
+would be a LOUD startup failure rather than a silently stale posture --
+which matters because the failure mode of getting it wrong is a run that
 believes it is safer than it is, and that is invisible.
+
+AND THAT GUARD IS DORMANT ON EVERY SHIPPED LAUNCH (batch 142).
+`main.py` calls `apply_cli()` with NO ARGUMENTS -- it is the only
+production call -- so `supplied` is always empty, `candidate` always
+equals `_posture`, and `candidate != _posture` is never true. Measured:
+`current()` then `apply_cli()` does not raise, while the control
+`apply_cli(shell_approval_mode="never")` does. There is no live harm and
+that is the same fact as the finding -- with nothing folded in, a
+premature reader reads the right value anyway -- but a reader creeping
+above that line today produces nothing at all.
+
+WHAT ENFORCES UN2 TODAY is
+`test_posture.py::test_no_module_reads_the_posture_at_import`, a source
+scan, which is what AGENTS.md names as the pin. The scan covers IMPORT
+time only, not a reader placed inside `main()` above the `apply_cli()`
+call. The guard below becomes live the day the first posture flag
+exists (`--unsafe` is written about in this module and in
+`test_posture.py` as though it did), and `TestApplyCliOrdering` keeps it
+working for that day -- which is why it is kept rather than removed.
 
 The predicate is "a change after a read", not "a read", and the
 difference is not a softening. The guard exists to catch *something acted
@@ -348,6 +367,12 @@ def apply_cli(**overrides: Any) -> Posture:
     # the read alone would also make `main()` un-callable twice in one
     # interpreter, which the suite does constantly -- and a guard that
     # forces the tests to work around it stops being read as a guard.
+    #
+    # DORMANT UNTIL THE FIRST POSTURE FLAG EXISTS (batch 142). No shipped
+    # launch passes an override, so `supplied` is {} and this cannot
+    # fire. The predicate is NOT the thing to revisit -- raising on the
+    # read alone was tried and was wrong twice, and the paragraph above
+    # is why. See the module docstring for what enforces UN2 meanwhile.
     if _read and candidate != _posture:
         raise RuntimeError(
             "security.posture.apply_cli() would CHANGE the posture after it "
