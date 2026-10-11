@@ -20916,3 +20916,230 @@ this entry, in BREAKING_CHANGES and in the register, none of which
 `_production_python()` scans.
 
 Counts 6359 -> 6411.
+
+## Batch 143 -- the tools that could not say how big their answer was (2026-10-11)
+
+The six math tools, all ten `FIX-NOW` findings on the surface: S06-02,
+S06-03, S06-04, S06-05, S06-06, S06-07, S06-08, S06-09, S06-10 and S06-11.
+Plus the owner's two rulings, and one finding under the findings that makes
+the report's own remedy for S06-08 false as written.
+
+**S06-10 was already closed, by the batch that created the problem it
+describes.** The comment at `tools/registry.py:815` said *"the 123 tests in
+test_math_tools.py"* against 131 collected. It now reads *"(The count that
+used to stand here said 123 and was 131 by the time anyone checked, and 141
+after batch 131 -- the ARGUMENT never needed the number, which is why it is
+gone rather than corrected.)"* So the fix landed in batch 131 and the
+finding was written against `96de26e`. Counted as done rather than
+re-litigated; measured, not assumed.
+
+**THE FINDING UNDER THE FINDINGS, and this time it invalidates a suggested
+shape.** S06-08's remedy is a pydantic `pattern` on `symbolic_math.variable`,
+*"which turns the case into a schema error the model can read"*. Measured:
+it does not. All six tools build `Model(**params)` on the line **above**
+their `try`, so a field constraint that fires leaves `run()` as a bare
+`ValidationError`. Driven through the real transport against the three
+constraints that already existed:
+
+```
+operation="nope"   -> {"error": "symbolic_math did not return a usable
+                       result (exit 1). ... line 263, in __init__ ...
+                       pydantic_core._pydantic_core.ValidationError: 1
+                       validation error for SymbolicMathParams ..."}
+precision=100      -> the same shape (le=50)
+order=0            -> the same shape (ge=1)
+```
+
+plus the same traceback at WARNING, which the TUI's `TranscriptLogHandler`
+draws on screen. That is `test_a_crashed_child_is_NOT_reported_as_a_limit`'s
+branch for a harness **bug**, and it is H6's defect one line higher in the
+same function. So adding a pattern without containing the failure would have
+traded a wrong answer for a traceback. `parse_params` is the fix, in all six
+-- fix at the producer and grep every call site, not just the one the finding
+names. It also explains a thing nobody had noticed: every tool's
+`else: return {"error": "Unknown operation: ..."}` arm is unreachable,
+because the `Literal` refuses first, so the readable message those six arms
+were written to give has never once been given. Now it is.
+
+**S06-02, and the owner ruled the shape.** No math tool bounded its own
+output. The only ceiling was `tools/isolation.MAX_CHILD_OUTPUT_BYTES`, a
+4 MB **transport** limit, against a premise `config.yaml` states plainly --
+*"max_read_chars (50,000 chars = 12,500 proxy tokens, the largest a single
+bounded read can return)"*:
+
+```
+columns  rows     chars        proxy tokens   secs
+  8        256     33,575          8,393      0.01   <- last one allowed
+  9        512     73,511         18,377      0.03
+ 14     16,384  3,440,679        860,169      1.36   <- reached the model
+ 15     32,768  7,323,687      1,830,921      3.03
+
+series exp(x) order=1000      1,185,090        296,272      9.92
+```
+
+Ruled: refuse at both levels. `logic` refuses on the COLUMN COUNT before
+`2**n` rows exist -- H5's trade, and not a reversal of H4, because a
+free-symbol count is derived from the expression and is not a parameter
+anyone can cap. The other five get one cap in `_math_common.serialize` at
+`config.MAX_READ_CHARS`, so the compaction arithmetic keeps one premise
+instead of acquiring a second. The two bounds agree about where the edge is
+without being told to: 8 columns is 33,575 characters, the last table under
+the cap.
+
+Measured blast radius before the number was chosen rather than after: the
+whole legitimacy battery is untouched (`series order=200` is 35,088,
+`expand((x+y+z)**40)` is 27,340, every matrix, geometry, factorial and
+stats case is under 3,000), and exactly two things are refused --
+`series order=1000` and a 9-column table.
+
+**S06-03 is H6, stated generally and implemented in one of four places.**
+`serialize` was called in the `return` statement, outside every `try`, in
+`symbolic_math`, `linear_algebra` and `geometry`; `discrete_math`
+serialises by hand and caught it. So a correct answer carrying an integer
+above CPython's 4,300-digit `int -> str` cap came back as `exit 1` with 400
+characters of traceback naming the install path under
+`C:\Users\<username>\AppData\Roaming`. The guard went into what the three
+of them share. The tail handler is `discrete_math`'s own shape rather than
+one `try` round the whole body -- which is what lets geometry's evaluate
+block stay where it is.
+
+**S06-04 is a complexity class, not a ceiling.** `permutations` was
+`factorial(n) / factorial(n - r)`, so its cost was in `n` while the
+operation's cost is in `r` -- and `combinations`, four lines down the same
+chain, was already O(r):
+
+```
+permutations n=100000  r=1    0.14s
+permutations n=1000000 r=1   15.27s of a 20s budget
+permutations n=3000000 r=1   killed at the wall clock, 48.07s uncontained
+combinations n=3000000 r=1    0.0002s -> 3000000
+```
+
+At r=1 the two return the same number, and the model was told *"the inputs
+given are too large for this operation"* about one multiplication. `sympy.ff`
+now, checked to agree with the form it replaced at the edges too:
+`ff(5,7)` is 0 because the old form divided by `factorial(-2)` = `zoo`, and
+`ff(10,-1)` is `1/11`. H4 stands and its rationale is narrowed in the
+record: *"cost is joint"* was true of `combinations` and false of this line.
+
+**S06-05: a near-miss on a type check.** The string-literal refusal tested
+`isinstance(node.value, str)`, so `factor(b"1+1")` returned `b'1+1'`,
+`b"abc"` returned `b'abc'` and `roots(b"x**2-1")` returned `{}` -- "no roots"
+for x^2-1. The output backstop let bytes through at every depth too, and
+`serialize` rendered `b'1+1'` as the string `"b'1+1'"`. Not an execution
+route on the pinned versions, and that was measured rather than assumed: the
+suite's own witness-import probe, extended from `str` to `bytes` payloads
+across all 213 allowlisted callables under WSL, found 117 of 213 evaluate a
+`str` and **0 of 213** evaluate a `bytes` -- and the 117 reproduces
+AGENTS.md's documented figure exactly, which is what makes the 0 a
+measurement. Fixed anyway, because the design is an allowlist precisely so
+that it does not depend on that holding for the next SymPy, and `bytes` is
+the one non-`str` type a future evaluator would land on: `eval()` and
+`compile()` accept it where they reject everything else.
+
+**S06-06: a field whose real effect was the opposite of its description.**
+`variables` was *"Explicit variable names/order -- mainly useful for
+truth_table"*, and `truth_table` was the one operation that never received
+it -- its column list was `sorted(expr.free_symbols, key=str)` regardless.
+Both halves of the description were inert while the field was silently
+load-bearing for something it did not mention: it is the `symbols=` that
+stops a multi-character variable being split into single letters.
+
+The fix is a function rather than one expression, and the reason is
+measured. Handed a list that does not cover every free symbol, SymPy's
+`truth_table` leaves the rest **unsubstituted** and returns the symbol
+itself as the output -- `truth_table(a & b, [a])` gives `([1], b)`, and
+`bool(Symbol('b'))` is then drawn as `true`. So "use the declared names"
+alone would have replaced an ignored parameter with a wrong table.
+Declared names first, in the order given, then every undeclared free
+symbol.
+
+**And `logic` is the fourth parsing tool batch 131 did not reach.** It could
+already get at `symbols=` through `variables`, so it was left out of the
+`rewritten` plumbing -- but the FUNCTIONAL spellings parse to something
+Boolean, pass the domain check, and answer about a product of single letters
+in silence:
+
+```
+Not(rain)           -> Not          Boolean=True    rewritten=['rain']
+Xor(rain, b)        -> Xor          Boolean=True    rewritten=['rain']
+Eq(rain, 5)         -> Equality     Boolean=True    rewritten=['rain']
+Implies(rain, b)    -> Implies      Boolean=True    rewritten=['rain']
+rain                -> Mul          Boolean=False   rewritten=['rain']
+rain & b            -> parse error (Mul & Symbol)
+```
+
+so `truth_table` on `Not(rain)` drew 16 rows over a, i, n, r as a success.
+Only the infix spellings fail loudly, and they fail naming SymPy's operand
+types. `logic` reports the split now -- and `_split_warnings` gained the
+field name, because its one shared sentence said `symbols=[...]`, which is
+right for three tools and wrong for the one whose field is `variables`.
+
+**S06-07: a tool whose stated value is that it is mechanical.** `safe_parse`
+admits the whole 230-name allowlist, so `logic`'s `expression` need not be
+Boolean and no operation looked. SymPy's `truth_table` substitutes 0/1 and
+coerces through `bool()`:
+
+```
+truth_table "x - 1"  ->  a confident NOT table
+truth_table "x + y"  ->  the truth table of OR
+satisfiable "x + y"  ->  true
+tautology   "x + y"  ->  false
+```
+
+The second has a plausible caller: in GF(2) and in coding theory `x + y`
+IS XOR, and the tool answers OR. The check is **one** `isinstance` against
+`boolalg.Boolean`, not the four-way union the report suggested, and that
+was measured: `Symbol`, `BooleanTrue`, `BooleanFalse` and every
+`Relational` already subclass it, so `a`, `true`, `Eq(x, 5)`, `x > 0` and
+`1 = 1` pass while `Add`, `Mul`, `Pow`, `Integer` and `Matrix` do not. One
+name is also closed over whatever Boolean type a future SymPy adds.
+`a & 1` and `a | 0` never reach it -- SymPy's own `&` raises on an Integer
+operand, so an arithmetic constant inside a formula was already refused
+loudly.
+
+**S06-09 fails closed.** The recursion guard was `if _depth > 6: return`,
+so the one check written for an escape nobody anticipated had an
+anticipated depth: `[[[os]]]` refused, `[[[[[[[[os]]]]]]]]` accepted
+uninspected. Filed `suspected` with no reachable consequence, and fixed
+anyway because the comment justifying the `return` ("containers are shallow
+here") was an assertion about today's return shapes inside the one function
+whose stated job is not to rely on them.
+
+**S06-11, and the second ruling.** `ARCHITECTURE.md` said 231 allowlisted
+names where `len(_ALLOWED_NAMES)` is 230 and the AGENTS.md gate reads 230
+back -- the sibling copy a recorded correction missed. Fixed, and the bare
+`118` denominator beside it (119 on this interpreter) now carries the same
+tilde and the same reason AGENTS.md's sympy figure does. Adjacent to it,
+measured while sizing the output cap: `CONFIG_ARCHITECTURE.md` calls
+`series order=1000` the slowest legitimate call *"at 3.44s, so this is
+roughly 6x headroom"*. Here it is 9.92-10.19s warm and 11.14s through the
+transport -- roughly **2x**. Ruled: correct the arithmetic, keep 20s, which
+is what batch 83 did to that same paragraph. It is stated as a ratio now,
+because a timing taken on another machine and another sympy is not a number
+to restate bare. And its output was never measured when it was chosen; that
+call is refused on size from this batch anyway.
+
+**The one number this batch created is gated on the day it was created.**
+`_MAX_TRUTH_TABLE_SYMBOLS` is stated in `logic.py` and in ARCHITECTURE's
+prose, which is the review marathon's shape 1 -- and this surface carries
+two instances of it already (S06-10's four ungated copies of a test count,
+S06-11's 231 against a gated 230). Creating a third while closing two is
+not a trade worth making, so
+`test_architecture_states_the_real_truth_table_ceiling` reads both, derives
+the row count rather than restating it, and also asserts the two bounds
+still agree about where the edge is.
+
+**Controls 21/21 with the equivalence control green**, every file restored
+from bytes held in memory and verified by sha256. The harness itself cost
+one cycle: `_math_common.py` is CRLF in the worktree and the other five
+tools are LF, so a shared anchor matched 0 times on the first run; the
+anchors are translated per file now. And the first version of these tests
+cost 92 seconds for 257 of them -- 58s of it one `series order=4000` -- so
+the two failures were re-sourced to inputs that reach them cheaply
+(`simplify factorial(3000)` is 0.00s for the printer cap,
+`expand((x+y+z)**60)` is 0.88s for the character cap), with
+`series order=1000` kept in exactly one test because the claim there is
+about that specific call. 15.4s now.
+
+Counts 6411 -> 6531.

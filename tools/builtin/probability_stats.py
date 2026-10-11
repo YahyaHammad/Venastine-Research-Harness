@@ -20,6 +20,8 @@ import sympy
 import sympy.stats as sstats
 from pydantic import BaseModel, Field
 
+from tools.builtin._math_common import MathParseError, parse_params
+
 _OPERATIONS = Literal["describe", "distribution_stats", "distribution_pdf", "distribution_cdf"]
 _DISTRIBUTIONS = Literal["normal", "binomial", "poisson", "uniform", "exponential"]
 
@@ -154,7 +156,10 @@ def _cdf_at(dist, x):
 
 
 def run(params: dict) -> dict:
-    parsed = ProbabilityStatsParams(**params)
+    try:
+        parsed = parse_params(ProbabilityStatsParams, params)
+    except MathParseError as e:
+        return {"error": str(e)}
 
     try:
         if parsed.operation == "describe":

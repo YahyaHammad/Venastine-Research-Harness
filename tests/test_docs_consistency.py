@@ -2645,3 +2645,48 @@ def test_agents_md_states_the_real_sympy_allowlist_sizes():
     # The claim the two numbers are FOR: an allowlist, not a denylist.
     assert stated_names < stated_exposed, (
         "the allowlist cannot admit more names than SymPy exposes")
+
+
+def test_architecture_states_the_real_truth_table_ceiling():
+    """The one number batch 143 added, gated on the day it was added.
+
+    `logic._MAX_TRUTH_TABLE_SYMBOLS` is what refuses a truth table before
+    `2**n` rows exist, and ARCHITECTURE's tool contracts state it in prose
+    -- so it is a value derived in two places, which is the shape S06-10
+    and S06-11 on this same surface are both instances of. The bug is never
+    that two copies drift; it is that nothing can tell you they have.
+
+    The ROW COUNT is derived here rather than stated in the document, so
+    the prose carries one number and this test does the arithmetic. 8
+    columns is 256 rows and 33,575 characters measured -- the last table
+    under `config.MAX_READ_CHARS`, which is where the figure came from.
+    """
+    from tools.builtin import logic
+
+    with open(os.path.join(ROOT, "docs", "ARCHITECTURE.md"),
+              encoding="utf-8") as handle:
+        architecture = handle.read()
+
+    stated = re.findall(r"truth table above \*\*(\d+) columns\*\* is refused",
+                        architecture)
+    assert len(stated) == 1, (
+        "docs/ARCHITECTURE.md should state the truth-table ceiling exactly "
+        "once in the shape 'a truth table above **N columns** is refused'; "
+        "found %d: %s. Editing that sentence means editing this pattern "
+        "too, which is the point." % (len(stated), stated[:4]))
+
+    assert int(stated[0]) == logic._MAX_TRUTH_TABLE_SYMBOLS, (
+        "docs/ARCHITECTURE.md says a truth table above %s columns is "
+        "refused; `logic._MAX_TRUTH_TABLE_SYMBOLS` is %d, so the document "
+        "and the code disagree about what the tool does."
+        % (stated[0], logic._MAX_TRUTH_TABLE_SYMBOLS))
+
+    # The claim the number is FOR: the largest table it admits has to fit
+    # inside the ceiling the other five tools get, or the two bounds are
+    # answering different questions.
+    import config
+    assert 2 ** logic._MAX_TRUTH_TABLE_SYMBOLS * 140 < config.MAX_READ_CHARS * 2, (
+        "a %d-column table is 2**%d rows, which at the ~131 characters per "
+        "row measured is past `max_read_chars` -- the input bound and the "
+        "output bound no longer agree about where the edge is"
+        % (logic._MAX_TRUTH_TABLE_SYMBOLS, logic._MAX_TRUTH_TABLE_SYMBOLS))

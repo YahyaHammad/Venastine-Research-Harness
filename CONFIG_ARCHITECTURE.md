@@ -1114,10 +1114,21 @@ nothing bounding them from the inside. dispatch runs them in a
 killable subprocess under this budget (tools/isolation.py).
 
 20s is chosen against measurement, not taste. The slowest LEGITIMATE
-call found is `symbolic_math series order=1000` at 3.44s, so this is
-roughly 6x headroom; the runaways it exists for do not return at all.
-Ten passes each burning a full budget is 200s rather than forever,
-which is the trade being made.
+call found is `symbolic_math series order=1000`, so the headroom is the
+ratio between that call and this number; the runaways it exists for do
+not return at all. Ten passes each burning a full budget is 200s rather
+than forever, which is the trade being made.
+
+*(Re-measured in batch 143, and the value is again unchanged. That call
+is 9.92-10.19s warm on Windows / Python 3.13.13 / sympy 1.13.3 and
+11.14s through the real transport -- roughly 2x headroom, not the 6x this
+paragraph claimed from a 3.44s reading. The ratio is the thing that
+moved: a timing taken on another machine or another sympy is not a
+number to restate bare, which is why it is now named as a ratio and
+measured where it is quoted. The call itself is refused on SIZE from
+batch 143 anyway -- 1,185,090 characters against
+`config.MAX_READ_CHARS` -- so it is no longer the worst case this budget
+has to cover, and its output was never measured when it was chosen.)*
 
 *(Corrected in batch 83. This paragraph was carried over saying 15s,
 roughly 4x and 150s -- all three consistent with a 15 the value has not

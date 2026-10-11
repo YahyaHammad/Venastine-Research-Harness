@@ -12,6 +12,8 @@ from typing import Literal, Optional
 import sympy
 from pydantic import BaseModel, Field
 
+from tools.builtin._math_common import MathParseError, parse_params
+
 _OPERATIONS = Literal[
     "gcd", "lcm", "is_prime", "prime_factors", "next_prime",
     "factorial", "permutations", "combinations",
@@ -42,7 +44,10 @@ TOOL_SCHEMA = {
 
 
 def run(params: dict) -> dict:
-    parsed = DiscreteMathParams(**params)
+    try:
+        parsed = parse_params(DiscreteMathParams, params)
+    except MathParseError as e:
+        return {"error": str(e)}
 
     try:
         op = parsed.operation
@@ -72,11 +77,37 @@ def run(params: dict) -> dict:
                 return {"error": "factorial requires 'n' (integer)."}
             result = sympy.factorial(parsed.n)
         elif op == "permutations":
-            # nPr = n! / (n-r)! -- computed directly rather than relying
-            # on a less-common sympy function name.
+            # nPr AS THE FALLING FACTORIAL, which is O(r). It used to be
+            # `factorial(n) / factorial(n - r)`, so its cost was in `n`
+            # while the operation's cost is in `r` -- and `combinations`,
+            # four lines below in this same chain, was already O(r) via
+            # `binomial`. Measured, with `combinations` on identical
+            # inputs as the control in every row:
+            #
+            #     permutations n=100000   r=1    0.14s
+            #     permutations n=1000000  r=1   15.27s of a 20s budget
+            #     permutations n=3000000  r=1   killed at the wall clock,
+            #                                   48.07s uncontained
+            #     combinations n=3000000  r=1    0.0002s -> 3000000
+            #
+            # At r=1 the two operations return the same number, and the
+            # model was told "the inputs given are too large for this
+            # operation" about one multiplication. `ff` agrees with the
+            # factorial form everywhere both are defined, checked
+            # including the edges: ff(5,7)=0 (the old form divided by
+            # factorial(-2)=zoo) and ff(10,-1)=1/11.
+            #
+            # This is H5's trade -- paying a full budget to learn the
+            # answer is the wrong answer -- and it does NOT contradict H4,
+            # which refuses a per-parameter CEILING. The fix is an
+            # algorithm. H4's rationale ("cost is joint, so no
+            # per-parameter ceiling expresses it") was true of
+            # `combinations` and false of this line as it stood; the
+            # comment that stood here preferred a common sympy name to the
+            # right complexity class.
             if parsed.n is None or parsed.r is None:
                 return {"error": "permutations requires 'n' and 'r' (integers)."}
-            result = sympy.factorial(parsed.n) / sympy.factorial(parsed.n - parsed.r)
+            result = sympy.ff(parsed.n, parsed.r)
         elif op == "combinations":
             if parsed.n is None or parsed.r is None:
                 return {"error": "combinations requires 'n' and 'r' (integers)."}

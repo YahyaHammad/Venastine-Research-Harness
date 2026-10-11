@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from tools.builtin._math_common import (
     MathParseError,
     _split_warnings,
+    parse_params,
     safe_parse,
     serialize,
 )
@@ -74,7 +75,10 @@ def _to_vector(values: list[str], symbols=None, rewritten=None) -> sympy.Matrix:
 
 
 def run(params: dict) -> dict:
-    parsed = LinearAlgebraParams(**params)
+    try:
+        parsed = parse_params(LinearAlgebraParams, params)
+    except MathParseError as e:
+        return {"error": str(e)}
     # EVERY parsed field gets `symbols` and shares one `rewritten` set: this
     # tool had no way to reach `symbols=` at all, so a multi-character entry
     # was silently rewritten into a product of single letters and the answer
@@ -181,7 +185,14 @@ def run(params: dict) -> dict:
             return {"error": "Computation failed: determinant/inverse/eigen requires a square matrix — the supplied matrix is not square."}
         return {"error": f"Computation failed: {e}"}
 
-    out: dict = {"result": serialize(result), "operation": op}
+    # H6, one batch late (batch 143). `determinant([["factorial(3000)","0"],["0","1"]])` is a
+    # correct answer this call could not print, and the ValueError left
+    # `run()` for dispatch's containment -- the branch reserved for a real
+    # bug. See `_math_common.serialize`.
+    try:
+        out: dict = {"result": serialize(result, what=op), "operation": op}
+    except MathParseError as e:
+        return {"error": str(e)}
     if rewritten:
         out["warnings"] = _split_warnings(rewritten)
     return out

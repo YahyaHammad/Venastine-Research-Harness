@@ -60,11 +60,13 @@ allowlist excludes every module, so nothing depends on it.
 from __future__ import annotations
 
 import ast
+import json
 import re
 import types
 from typing import Any, Optional
 
 import sympy
+from pydantic import ValidationError
 from sympy.parsing.sympy_parser import (
     convert_equals_signs,
     eval_expr,
@@ -72,6 +74,8 @@ from sympy.parsing.sympy_parser import (
     standard_transformations,
     stringify_expr,
 )
+
+import config
 
 # SymPy's own public namespace (sin, cos, sqrt, pi, Symbol, Matrix, oo, ...)
 # with __builtins__ explicitly neutered. Built once at import time.
@@ -86,7 +90,29 @@ _SAFE_GLOBALS["__builtins__"] = {}
 
 
 class MathParseError(ValueError):
-    """Raised when an expression string can't be safely parsed."""
+    """Raised when an expression string can't be safely parsed.
+
+    ALSO THE BASE OF THE TWO BELOW, neither of which is a parse failure.
+    They are in this family for one mechanical reason: every tool already
+    has exactly one `except MathParseError as e: return {"error": str(e)}`
+    arm, so a subclass is caught by a handler that is already there and
+    already tested. Two new `except` arms across six tools would be twelve
+    places to add and twelve chances to miss one, which is the shape #96
+    and EP6 are both about (batch 143).
+    """
+
+
+class MathResultTooLarge(MathParseError):
+    """A result that was computed CORRECTLY and cannot be returned.
+
+    Two causes, one message family, because the model's remedy is the same
+    for both: CPython caps `int -> str` at 4,300 digits, and a math result
+    is bounded at `config.MAX_READ_CHARS`. See `serialize`.
+    """
+
+
+class MathParamsError(MathParseError):
+    """The tool's own params did not validate. See `parse_params`."""
 
 
 # What a math EXPRESSION may name. Grouped by category rather than listed
@@ -261,6 +287,21 @@ def _validate_ast(code: str, local_dict: dict) -> None:
     # other string keeps the property closed rather than filtered. This
     # also removes `"%s" % pi` and every other string-valued construct
     # without needing a rule per construct.
+    #
+    # A `bytes` LITERAL IS REFUSED IN THE SAME BREATH, and that is the one
+    # non-`str` type it has to be: `eval()` and `compile()` both accept
+    # bytes where they reject every other non-string object, so a future
+    # SymPy callable that sympifies what it is handed would land there.
+    # The rule here used to name `str` alone, and `factor(b"1+1")`,
+    # `b"abc"` and `roots(b"x**2-1")` were all accepted -- measured, with
+    # the `str` spelling of each refused as the control. No expression
+    # needs one: `stringify_expr` never emits a bytes argument, so the
+    # licensing pass below deliberately licenses `str` only, which refuses
+    # even `Symbol(b"x")` (batch 143).
+    #
+    # Naming one of the two string types is the same category of mistake
+    # as the dunder tripwire above: a near-miss on a type check rather
+    # than on a payload.
     licensed = set()
     for node in ast.walk(tree):
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
@@ -270,7 +311,8 @@ def _validate_ast(code: str, local_dict: dict) -> None:
                     licensed.add(id(arg))
 
     for node in ast.walk(tree):
-        if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+        if (isinstance(node, ast.Constant)
+                and isinstance(node.value, (str, bytes))
                 and id(node) not in licensed):
             raise MathParseError(
                 "string literals are not allowed in a math expression")
@@ -297,7 +339,22 @@ def _reject_escaped_value(value: Any, _depth: int = 0) -> None:
     of `Basic`, which is what separates them from `type` or `os`.
     """
     if _depth > 6:
-        return                      # deep enough; containers are shallow here
+        # FAILS CLOSED. This used to `return`, which gave the one check
+        # written for an escape nobody anticipated an anticipated DEPTH:
+        # `[[[os]]]` was refused and `[[[[[[[[os]]]]]]]]` was accepted
+        # uninspected -- measured, with the depth-3 case as the control
+        # proving the function was live. The comment that stood here
+        # ("containers are shallow here") was an assertion about today's
+        # return shapes inside the one function whose stated job is the
+        # opposite of relying on them.
+        #
+        # The cap's job is to bound the WALK, which it still does. The
+        # deepest legitimate return shape in the battery is `eigenvects()`
+        # at 4, and `test_the_backstop_allows_every_legitimate_return_shape`
+        # is what goes red if that stops being true (batch 143).
+        raise MathParseError(
+            "expression evaluated to a value nested more than 6 deep, "
+            "which is not a mathematical value")
 
     if isinstance(value, types.ModuleType):
         raise MathParseError(
@@ -320,6 +377,16 @@ def _reject_escaped_value(value: Any, _depth: int = 0) -> None:
         raise MathParseError(
             "expression evaluated to a function or method, which is "
             "never a mathematical value")
+
+    # Raw bytes are not a mathematical value either, and they are listed
+    # here for the same reason the AST rule names them: `b'1+1'`,
+    # `[b'x']` and `{"k": b'x'}` all walked past this function, because
+    # bytes is not a module, a type, a function, or one of the four
+    # containers below (batch 143).
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        raise MathParseError(
+            "expression evaluated to raw bytes, which is never a "
+            "mathematical value")
 
     if isinstance(value, dict):
         for k, v in value.items():
@@ -374,20 +441,77 @@ def _rewritten_names(expr_str: str, result: Any, local_dict: dict) -> set:
     return found
 
 
-def _split_warnings(rewritten: set) -> list[str]:
+def _split_warnings(rewritten: set, field: str = "symbols") -> list[str]:
     """One sentence per split name, for a tool's `warnings` list.
 
     ONE copy, shared by every tool that reports this: four lists once
     answered "what counts as a project file" and no two agreed (#96), and
     four spellings of this sentence would be the same defect. The text names
     the remedy because the model is the only caller there is, and nothing in
-    any schema told it the rule until this batch.
+    any schema told it the rule until batch 131.
+
+    `field` EXISTS BECAUSE THE REMEDY IS NOT THE SAME WORD EVERYWHERE
+    (batch 143). Three tools call the declaring parameter `symbols`;
+    `logic` calls it `variables`. One sentence with the field named by its
+    caller is one copy; a sentence that hardcodes `symbols=` is one copy
+    that is wrong for a quarter of its callers, which is worse than four.
     """
     return [
         "'%s' was read as a product of single letters, not as one symbol. "
-        "Pass symbols=['%s'] to keep it whole." % (name, name)
+        "Pass %s=['%s'] to keep it whole." % (name, field, name)
         for name in sorted(rewritten)
     ]
+
+
+def parse_params(model, params: dict):
+    """Validate one tool's params, or refuse in a sentence the model can act on.
+
+    EVERY math tool built `Model(**params)` on the line ABOVE its `try`, so
+    a field constraint that fired left `run()` as a bare
+    `pydantic.ValidationError`. Measured through the real transport, with
+    `operation="nope"` -- the most ordinary mistake a caller can make:
+
+        {"error": "symbolic_math did not return a usable result (exit 1).
+         ... line 263, in __init__ ... pydantic_core._pydantic_core.
+         ValidationError: 1 validation error for SymbolicMathParams ..."}
+
+    plus the same traceback at WARNING, which the TUI's
+    `TranscriptLogHandler` draws on screen. That is the branch
+    `test_a_crashed_child_is_NOT_reported_as_a_limit` reserves for a
+    harness BUG, and it is H6's defect one line higher up the same
+    function: a routine, input-shaped outcome taking the path that means
+    "this tool is broken". Three of the three constraints that already
+    existed -- `precision` (le=50), `order` (ge=1) and the `operation`
+    `Literal` itself -- reached it.
+
+    It is also why each tool's `else: return {"error": "Unknown
+    operation"}` arm has never run: the `Literal` refuses first, so the
+    readable message that arm was written to give was unreachable. This is
+    where it gets given.
+
+    Not a pydantic `ValidationError` passed through verbatim: that names
+    a file, a line and a pydantic.dev URL, none of which a model can act
+    on (batch 143).
+    """
+    try:
+        return model(**params)
+    except ValidationError as exc:
+        raise MathParamsError(_params_message(exc)) from None
+
+
+def _params_message(exc: ValidationError) -> str:
+    """One sentence per rejected field, in the model's own vocabulary.
+
+    `err["msg"]` is pydantic's own wording, which for a `Literal` lists the
+    operations verbatim -- exactly what the caller needs and the one thing
+    the generic transport error cannot say.
+    """
+    parts = []
+    for err in exc.errors():
+        field = ".".join(str(p) for p in err.get("loc", ())) or "parameters"
+        parts.append("'%s' %s" % (field, err.get("msg", "is not valid")))
+    return ("The parameters were not accepted: %s. Correct the parameter "
+            "and call again." % "; ".join(parts))
 
 
 def safe_parse(expr_str: str, symbols: Optional[list[str]] = None,
@@ -438,18 +562,92 @@ def safe_parse(expr_str: str, symbols: Optional[list[str]] = None,
         raise MathParseError(f"Could not parse expression '{expr_str}': {e}") from e
 
 
-def serialize(value: Any) -> Any:
+def serialize(value: Any, what: str = "") -> Any:
     """
     Generic SymPy-object -> JSON-safe converter, used across all six math
-    tools. Matrices become nested lists of strings, dicts/lists recurse,
-    everything else falls back to str().
+    tools -- AND THE ONE PLACE A MATH RESULT IS BOUNDED (batch 143).
+
+    Two raises, both `MathResultTooLarge`, both caught by the one
+    `except MathParseError` arm every caller already has.
+
+    H6, AT THE PRODUCER (batch 143). `str()` of an Integer above CPython's 4,300-digit cap
+    raises `ValueError`, and this function was called in the `return`
+    statement -- OUTSIDE every `try` -- in `symbolic_math`,
+    `linear_algebra` and `geometry`. So `series order=4000` and
+    `determinant([["factorial(3000)","0"],["0","1"]])` left `run()` as a
+    bare `ValueError`, were reported as `exit 1` ("did not return a usable
+    result"), and handed the model 400 characters of traceback naming
+    `C:\\Users\\<username>\\AppData\\Roaming\\...`. `discrete_math`
+    caught it and the other three did not; the guard belongs here because
+    this is what the three of them share. ROADMAP_v2 H6: *"A result the
+    tool cannot serialise is the tool's own error."*
+
+    THE CEILING (batch 143). No math tool bounded its own output. Measured,
+    the only ceiling was `tools/isolation.MAX_CHILD_OUTPUT_BYTES` at 4 MB
+    -- a TRANSPORT limit, 62x the premise the compaction arithmetic is
+    sized from (`config.yaml`: *"max_read_chars (50,000 chars = 12,500
+    proxy tokens, the largest a single bounded read can return)"*):
+
+        truth_table, 14 free symbols, 27 chars in   786,441 proxy tokens
+        series order=1000 -- the documented worst case  296,272
+        TECHNICAL_DEBT 41, the arxiv result already fixed  31,733
+
+    and `core/compaction.py` says what the headroom is for: nothing in
+    this harness recovers from a prompt that overflows the window. A
+    result 49x `compaction_min_headroom_tokens` cannot be contained by it.
+
+    `config.MAX_READ_CHARS` rather than a new constant, because that is
+    the number the arithmetic already names, and it is read at CALL time
+    so a config change needs no reimport. Measured blast radius at 50,000:
+    nothing in the legitimacy battery is refused -- `series order=200` is
+    35,088 characters, `expand((x+y+z)**40)` is 27,340, every matrix,
+    geometry and factorial case is under 3,000 -- and the two things that
+    are refused are `series order=1000` and a truth table of 9+ symbols.
+    `logic` carries its own bound because it does not come through here
+    and because 2**n rows are predictable from the input, which is the H5
+    move; see `_MAX_TRUTH_TABLE_SYMBOLS` there.
+
+    REFUSE rather than truncate, per the owner's ruling: half a truth
+    table is a wrong answer presented as an answer, and `discrete_math`'s
+    H6 message and `isolation._child_main`'s own refusal are the wording
+    family this joins rather than a second convention.
     """
+    label = ("The %s result" % what) if what else "The result"
+    try:
+        rendered = _rendered(value)
+    except ValueError as e:
+        # The ONLY ValueError `_rendered` can raise: it does isinstance
+        # checks, container recursion and `str()`, and `str()` of a large
+        # Integer is the documented cap.
+        raise MathResultTooLarge(
+            "%s was computed but is too large to return (%s). Ask for the "
+            "same operation with smaller inputs." % (label, e)) from None
+
+    # The JSON length rather than the character count of the pieces: this
+    # is what the child actually writes, escaping included, so the number
+    # in the message is the number that would have been sent.
+    size = len(json.dumps(rendered))
+    ceiling = int(config.MAX_READ_CHARS)
+    if size > ceiling:
+        raise MathResultTooLarge(
+            "%s was computed but is too large to return (%d characters, "
+            "against a ceiling of %d). Ask for the same operation with "
+            "smaller inputs -- fewer series terms, a lower order, a "
+            "smaller matrix." % (label, size, ceiling))
+    return rendered
+
+
+def _rendered(value: Any) -> Any:
+    """`serialize` without the bounds. Separate so the size is measured
+    ONCE, on the finished structure, rather than on each recursion -- a
+    cap applied per level would pass a 4 MB matrix of one-character
+    cells."""
     if isinstance(value, sympy.Matrix):
         return [[str(cell) for cell in row] for row in value.tolist()]
     if isinstance(value, dict):
-        return {str(k): serialize(v) for k, v in value.items()}
+        return {str(k): _rendered(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
-        return [serialize(v) for v in value]
+        return [_rendered(v) for v in value]
     if isinstance(value, bool):
         return value
     return str(value)

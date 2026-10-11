@@ -16,6 +16,7 @@ from sympy.geometry import Circle, Line, Point, Polygon, Triangle
 from tools.builtin._math_common import (
     MathParseError,
     _split_warnings,
+    parse_params,
     safe_parse,
     serialize,
 )
@@ -67,7 +68,10 @@ def _to_point(coords: list[str], symbols=None, rewritten=None) -> Point:
 
 
 def run(params: dict) -> dict:
-    parsed = GeometryParams(**params)
+    try:
+        parsed = parse_params(GeometryParams, params)
+    except MathParseError as e:
+        return {"error": str(e)}
     # One `rewritten` set across every coordinate and the radius: this tool
     # could not reach `symbols=` at all, so a multi-character coordinate was
     # rewritten into a product of single letters (batch 131).
@@ -168,7 +172,13 @@ def run(params: dict) -> dict:
         except Exception:
             pass
 
-    out: dict = {"result": serialize(result), "operation": op}
+    # H6, one batch late (batch 143). The evaluate block above stays where it is: a tail
+    # handler contains the one call that can fail without restructuring the
+    # function around it, which is `discrete_math`'s shape.
+    try:
+        out: dict = {"result": serialize(result, what=op), "operation": op}
+    except MathParseError as e:
+        return {"error": str(e)}
     if rewritten:
         out["warnings"] = _split_warnings(rewritten)
     return out
