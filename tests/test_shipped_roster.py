@@ -31,6 +31,8 @@ it silently subtracts the tool the author meant to include. Same for a
 skill's `additional_tools`, one file over, where the consequence is an
 activation note that misses exactly the tools that will fail mid-turn.
 """
+import dataclasses
+
 import pytest
 
 import prompts.system_prompts as system_prompts
@@ -581,3 +583,98 @@ class TestTheCatalogTheDefaultInstallNowCarries:
 
         assert config_loader.get_skill("software/code-review") is None
         assert config_loader.get_skill("code-review") is not None
+
+
+# ===========================================================================
+# ---- TECHNICAL_DEBT 83: the sign-off nothing on the roster can reach ------
+# ===========================================================================
+
+class TestTheSpawnSignoffIsUnreachableOnTheShippedRoster:
+    """`docs/TECHNICAL_DEBT.md` 83, found in batch 137 and filed in 138.
+
+    The two classes above already assert `candidate_approvals(child) == []`
+    for `explore`, `review`, `build` and `test`, and argue it as a design
+    property per agent: "the one yes that starts the spawn creates no
+    standing authority." That argument is sound and is not what this class
+    is about.
+
+    What nothing pinned is the GLOBAL claim. It holds for all SIX spawnable
+    agents, which means §18's spawn sign-off has no reachable configuration
+    on a stock install -- a consent mechanism the shipped roster cannot
+    reach. `writer` and `general` were the two nobody had measured, and
+    `writer` is the striking one: the agent whose name most suggests it
+    would hold `write_project_doc` declares no writing tool at all.
+
+    Before A16 (batch 137) the shipped sign-off fired only when a
+    NON-SPAWNABLE agent was spawned -- `grill-me`, which declares
+    `allowed_tools: None` and so inherited `write_project_doc` from global
+    policy. A16 closed that route, which is how the gap was noticed.
+
+    This class does not change behaviour. It pins the claim so that the day
+    a whitelist widens, the sweep goes red and item 83 is what the reader
+    comes back to -- it offers three answers and they are not equivalent.
+    """
+
+    def test_no_spawnable_shipped_agent_offers_a_signoff(self, roster):
+        """The sweep, over the roster rather than over a typed list.
+
+        A hand-written list of agent names is how this check would stop
+        covering the seventh agent, which is the shape item 79 files
+        against a doc gate.
+        """
+        spawnable = sorted(name for name, agent in roster.items()
+                           if agent.spawnable is True)
+
+        assert len(spawnable) >= 5, (
+            f"only {len(spawnable)} spawnable agents discovered, so this "
+            f"sweep cannot discriminate -- did the roster or the fixture "
+            f"move?")
+
+        offered = {name: manager.candidate_approvals(
+            manager.child_context(roster[name], ToolContext()))
+            for name in spawnable}
+        reachable = {name: tools for name, tools in offered.items() if tools}
+
+        assert not reachable, (
+            f"{reachable} -- a spawnable agent now offers a spawn sign-off. "
+            f"That is not a regression: it makes §18's sign-off reachable on "
+            f"a stock install for the first time. Read TECHNICAL_DEBT 83, "
+            f"which records why it was not and names the three ways to "
+            f"resolve it, then update or close the entry.")
+
+    def test_the_signoff_vocabulary_on_a_stock_install_is_one_tool(self):
+        """WHY the sweep above comes out empty, which the sweep alone does
+        not say.
+
+        `write_project_doc` is the only gated-and-grantable tool a stock
+        install has, and global policy ALLOWS it -- so the reason no agent
+        offers it is that no agent declares it, not that it is denied.
+        (The triage note for item 83 got this backwards, which is why the
+        mechanism is pinned here rather than described in prose.) The other
+        candidates never reach the list: `write`/`edit` are globally denied,
+        and `shell` plus the file tools carry a per-call `approval_check`,
+        which §25 R2 filters out of every grant path by name.
+        """
+        assert sorted(manager.candidate_approvals(ToolContext())) == [
+            "write_project_doc"]
+        assert is_tool_allowed("write_project_doc", ToolContext())
+
+    def test_a_spawnable_agent_declaring_it_would_offer_one(self, roster):
+        """The control that keeps the sweep from being vacuous.
+
+        If `candidate_approvals` ever answered `[]` unconditionally -- a
+        broken filter, a renamed declaration -- the sweep above would stay
+        green while measuring nothing. This drives the same helper through
+        a synthetic spawnable definition that declares the one grantable
+        tool, so the helper is shown able to come out the other way.
+        """
+        probe = dataclasses.replace(
+            roster["review"], name="signoff-probe",
+            allowed_tools=["read_project_doc", "write_project_doc"])
+
+        child = manager.child_context(probe, ToolContext())
+
+        assert manager.candidate_approvals(child) == ["write_project_doc"], (
+            "a spawnable agent declaring write_project_doc must offer it; "
+            "otherwise the sweep above is asserting about a helper that "
+            "cannot answer non-empty, and proves nothing")

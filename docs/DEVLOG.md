@@ -20149,3 +20149,181 @@ removed (the pre-A16 behaviour restored), the comparison inverted, undeclared
 no longer refused, and the unknown-agent message claiming the catalog again.
 
 Counts 6338 -> 6345.
+
+## Batch 138 -- the findings that only existed in a gitignored folder (2026-10-11)
+
+The review marathon's bookkeeping tranche, and the reason it went first rather
+than after the code work: **35 of the 142 findings existed in exactly one place
+on disk, and that place is untracked.** `review/` is gitignored by the
+marathon's own design -- an itemised list of open exploitable defects must not
+be reachable by `read_project_doc`, which is registered `permission=True` --
+so one `git clean -xdf` and five days of measurement are gone. Every other
+item in `docs/TECHNICAL_DEBT.md` has a durable document behind it. These had
+none.
+
+So the entries carry their own evidence. Where a report measured something, the
+measurement is reproduced in the register rather than cited, and each entry is
+written to be actionable without the report. That is why the file grew from
+2,566 lines to 4,389 and why that is the right size: it is the only copy.
+
+**What landed.** `docs/TECHNICAL_DEBT.md` items **49-84**, from 142 findings:
+
+- **34 new items (49-82)** from the 35 findings dispositioned `DEFER`. The
+  arithmetic is off by one on purpose -- S13-01 carried `DEFER` and `KNOWN`
+  both, and its half folded into item 48 rather than opening an entry.
+- **Item 83**, which no reviewer filed: the spawn sign-off has no reachable
+  configuration on the shipped roster. Batch 137 found it and deliberately did
+  not file it, because the disposition was the owner's.
+- **Item 84**, which this batch's own mutation pass found. See below; it is the
+  argument for running a mutation pass on a batch that changes no production
+  code.
+- **Eight KNOWN fold-backs** into items 11, 14, 17, 19, 43, 44, 45 and 48, each
+  carrying what its report added rather than a pointer.
+- **One *Accepted risks* entry** (S19-12), with the reviewer's argument for not
+  fixing it, which is the whole value of that disposition.
+- **Two issue-only arrivals** (#12, #8) in a short section of their own,
+  because neither has a register entry to fold into and this session does not
+  touch GitHub.
+
+**The fold-backs are where the marathon's design paid off.** Twelve findings
+arrived at an already-recorded defect, and the instruction was to report
+`KNOWN` plus whatever the entry gets wrong. Two of them had something:
+
+- **Item 48 named the wrong half of its own defect.** The entry said
+  `structured_content` -- which is an OPTIONAL field on
+  `mcp.types.CallToolResult` that a server need never send. The unbounded path
+  every MCP result takes is `out["content"]`, the `"\n".join(...)` of every
+  text block at `mcp_client/client.py:194-197`. Measured through the real
+  `_normalize` and the real `check_output_policy`: 1 MB costs 11 ms, 8 MB
+  93 ms, 32 MB 369 ms, linear with no knee because there is nothing to knee
+  against. The entry already argued for a total-size bound and then named one
+  term in its `Where`, which invites a fix that closes the optional field and
+  leaves the universal one open.
+- **Issue #9 names the wrong file.** It says the four `with_*` appenders are
+  in `prompts/system_prompts.py`. All four are in `core/loop.py`, lines 98,
+  109, 146 and 168 -- and `prompts/system_prompts.py` is the one function all
+  four carry a docstring warning them *not* to move into. Half the issue was
+  also discharged by §49 without anyone updating it.
+
+Nineteen reviewers rediscovering item 48 would have been nineteen findings of
+no value. Two arrived, one with a measurement and a correction. That is the
+mechanism working as specified.
+
+**Item 83's triage note was wrong about its own mechanism, which is why the
+batch measured it rather than transcribing it.** The note said the gated tools
+a sign-off would offer "are globally denied". Driven against the real roster
+with `HOME` redirected:
+
+```
+SPAWNABLE: 6 -> ['build', 'explore', 'general', 'review', 'test', 'writer']
+candidate_approvals: [] for all six
+WIDE-OPEN CONTEXT candidate_approvals: ['write_project_doc']
+  write_project_doc is_tool_allowed(bare ToolContext) = True
+synthetic spawnable agent declaring write_project_doc -> ['write_project_doc']
+```
+
+`write_project_doc` is the only gated-and-grantable tool a stock install has,
+global policy **allows** it, and what excludes it is that none of the six
+whitelists names it. `write`/`edit` are denied and `shell` plus the file tools
+are filtered by §25 R2 as per-call, so neither of those is the operative
+reason. Half the property was already pinned and argued as intended --
+`test_shipped_roster.py` asserts the empty set for `explore`, `review`, `build`
+and `test` -- and what nothing pinned is the *global* claim, which is the
+difference between a narrow sign-off and an unreachable one. `writer` and
+`general` were the two nobody had measured, and `writer` is the striking case:
+the agent whose name most suggests it would hold `write_project_doc` declares
+no writing tool at all.
+
+`TestTheSpawnSignoffIsUnreachableOnTheShippedRoster` pins the global claim
+without changing behaviour, and says in its failure message that going red
+means the sign-off became reachable -- read item 83, do not revert the
+declaration.
+
+**Item 84, and the honest version of a conclusion I got wrong first.** Mutation
+A1 dropped `candidate_approvals`' `grantable()` filter and survived the whole
+of `test_shipped_roster.py` -- all 34 tests. My first reading was that §25 R2's
+filter is dead code. Measured across the five other files that touch the
+helper, it is not:
+
+```
+test_grants.py -k never_offers_a_param_gated  A1 -> SURVIVES (1 passed)
+test_grants.py (all 56)                       A1 -> SURVIVES (56 passed)
+test_research_authorization.py -k offers_a_subset  A1 -> KILLS (1 failed)
+```
+
+The filter is pinned. Just not by the test that says it pins it.
+`test_the_signoff_never_offers_a_param_gated_tool` asserts an empty
+intersection with `{shell, write, edit, read}`, all four globally denied, so
+`registry._advertised` drops them before `grantable()` is ever consulted; its
+docstring calls `wide.allowed_tools = None` "the widest case the filter ever
+sees", and that removes the agent narrowing rather than the global denial. The
+configuration the filter is for is a non-grantable tool global policy
+**allows**, and the shipped config has none -- so the test cannot fail from the
+removal of the property it names. The one that kills A1 does so incidentally,
+from another file, because it registers its own tools.
+
+Filed rather than fixed: this is a bookkeeping batch, and the fix is three
+lines using the `gated_pair` fixture already in that file.
+
+**A1 is therefore outside the new guard's domain and not a survivor of it.**
+Scoring it as one would be scoring the stock roster for not containing a
+configuration it is defined by. Mutation pass **3/3** on the mutations in
+scope, with the equivalence control green: the `GRANT_NEVER` test inverted
+(A2), `return []` unconditionally (A3, the vacuity mutation -- killed by the
+synthetic control, which the sweep alone would have passed), and the child's
+narrowing ignored (A4). G reordered the two predicates and wrapped the
+generator in `list()`, same answer, green.
+
+**Negative control** for the sweep: `agents/builtin/writer.md` gained
+`write_project_doc`, the sweep went red, the file was restored from bytes held
+in memory and verified by sha256 -- `f7923f28975a6777` before and after, never
+`git checkout`. The vocabulary and control tests correctly stayed green under
+that mutation, since neither is about which agents declare what.
+
+Three gated digits moved: the suite total in `README.md`, `AGENTS.md` and
+`docs/ARCHITECTURE.md`, and `test_shipped_roster.py`'s per-file count in
+ARCHITECTURE's tree, 31 -> 34.
+
+`docs/REVIEW_MARATHON.md`'s rules-of-engagement line listing the register's
+open items is now stale by construction -- it told nineteen reviewers to check
+items 11, 14, 17, 18, 19, 21, 43, 44, 45 and 48 before reporting `KNOWN`, and
+this batch added thirty-six more. It gains a sentence saying so rather than
+being edited to look current, because what it recorded is what the reviewers
+were actually told.
+
+**And the full suite failed once, which is where item 85 came from.**
+`test_tui.py::TestTheQuitGesture::test_quitting_by_gesture_releases_a_blocked_worker`
+went red in a 635-second run -- against the 86 seconds `README.md` documents --
+and passed in every other configuration tried: alone (10 passed), under `-n0`,
+three times under a narrowed `-n auto`, and once with the whole of
+`tests/test_tui.py` under `-n auto --dist loadscope` (443 passed). **Not
+reproduced.**
+
+The attribution is not "flaky, re-ran it". The test presses `ctrl+c` twice,
+waits with two raw `pilot.pause()` calls, and then asserts `channel.puts ==
+[False]` -- state a WORKER thread produces, because the gesture has to reach
+`exit()` and `_release_permission_channel()`. `AGENTS.md` says `pause`/`pump`
+is for negative assertions only, and `tests/conftest.py:249-250` carries the
+measurement that makes it matter: `pilot.pause()` costs 21ms idle and 1021ms
+with one busy sibling thread, a **46x swing**, because its exit condition is a
+process-wide CPU heuristic. A 7x-slower run is that condition.
+
+Measured across the file: **six** tests wait on a raw `pause()` and then assert
+positively about state only another thread can produce, and two of them are the
+same `channel.puts == [False]` pair reached by two different keys -- so which
+one a run fails is which one got scheduled against a busy sibling. A first pass
+counted 119 of 319 tests asserting positively after a `pause()`, and that
+number is wrong to act on: nearly all of them assert synchronous state like
+`app.theme == "ember"`, which no second thread is involved in producing. The
+cross-thread subset is the risk and it is six. Item 85 names them; the fix is
+the predicate the assertion already states.
+
+**This batch did not cause it and could have perturbed it.** Nothing here
+touches `tui/`. But `--dist loadscope` distributes by class, so adding a class
+to `tests/test_shipped_roster.py` changes which groups land on which worker --
+the "scheduling lottery" `pytest.ini:36` and `AGENTS.md:68` both name, and
+which item 80 files one layer out. Changing the cohort is not causing the
+defect, and saying so precisely is the difference between an attribution and an
+excuse.
+
+Counts 6345 -> 6348.

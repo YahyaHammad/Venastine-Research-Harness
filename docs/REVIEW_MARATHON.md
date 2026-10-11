@@ -243,6 +243,14 @@ identifier and stop:
 **`docs/TECHNICAL_DEBT.md`, open items: 11, 14, 17, 18, 19, 21, 43, 44, 45, 48** (plus its
 *Accepted risks* section).
 
+> **That list is what the nineteen reviewers were told, and batch 138 made it stale on
+> purpose rather than wrong.** The triage filed the marathon's own `DEFER` set as register
+> items **49-84**, so the register now runs to 84 and a reader checking `KNOWN` against this
+> paragraph would miss thirty-six entries. It is kept as written because it is the only
+> account of the instruction the reports were produced under -- the register itself is the
+> current list, and `docs/TECHNICAL_DEBT.md`'s batch-138 block names which entries came
+> from here.
+
 **And four audit findings are still OPEN as GitHub issues** — which the first version of this
 document did not say, so nineteen reviewers would each have rediscovered them:
 
@@ -940,6 +948,8 @@ it, and the tree stays frozen against it while the marathon is open.
 
 The triage index is `review/TRIAGE.md` (gitignored, for the reasons in § *Where the reports go*). **The `BLOCKS-MERGE` set is clear as of batch 135**, fixed one surface per commit in batches 130-135, each with a `docs/DEVLOG.md` entry, a `tests/BREAKING_CHANGES.md` row per guard, a negative control, a mutation pass and a green full suite. So the merge can happen, with the rest carried in the register -- which is the decision this document exists to inform.
 
+Both `OWNER-DECISION` findings were then ruled and fixed (136, 137), and batch 138 moved everything this document still owed into the register: the 35 `DEFER` findings as items 49-82, the `ACCEPTED` one into *Accepted risks*, and the 12 `KNOWN` ones folded back into the entries they arrived at. **That tranche went before the remaining fix work for one reason: `review/` is untracked, so until it landed, 35 measured findings existed in exactly one place that `git clean` would remove.** What is left is the 86 distinct `FIX-NOW` findings, grouped by the surfaces in `review/TRIAGE.md` § 3.
+
 | batch | finding | surface | mutation |
 |---|---|---|---|
 | 130 | S02-01 | `security/sandbox.py` | 3/3 |
@@ -948,3 +958,6 @@ The triage index is `review/TRIAGE.md` (gitignored, for the reasons in § *Where
 | 133 | S10-02 | `core/loop.py` | 2/2 |
 | 134 | S11-01 | `core/compaction.py` | 5/5 |
 | 135 | S14-02 | `tui/app.py`, `tui/commands.py` | 4/4 |
+| 136 | S18-07 (owner ruling) | `requirements*.txt`, `pyproject.toml`, 5 CI jobs | 5/5 |
+| 137 | S13-07 (owner ruling, **A16**) | `agents/subagent_tool.py` + 4 documents | 4/4 |
+| 138 | the `DEFER`/`KNOWN`/`ACCEPTED` tranche | `docs/TECHNICAL_DEBT.md` 49-85 | 3/3 |

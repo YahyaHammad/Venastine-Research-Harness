@@ -400,6 +400,24 @@ the next caller that wants sampling variation, and it will consult this set.
 next time a live API key is available for either provider, check both and
 either extend the set or record that it was checked and is right.
 
+**Rechecked in the review marathon (batch 138), and both halves still hold.**
+(a) Nothing in the harness passes a `temperature`: `git grep "temperature="`
+over tracked production code returns only `temperature=None`,
+`temperature=temperature` forwarding, and the WARNING's own format string at
+`core/client.py:608`. `_sampling_kwargs` is the backstop AGENTS.md says it is
+and the threading through `core/loop.py` is intact. (b)
+`config.yaml:118-124`'s `models_rejecting_sampling_params` is still six
+Anthropic names and nothing else -- `claude-fable-5`, `claude-mythos-5`,
+`claude-opus-4-7`, `claude-opus-4-8`, `claude-opus-5`, `claude-sonnet-5` -- so
+§16's guard has most likely still never fired for the OpenAI model AGENTS.md's
+own example command names.
+
+Nothing to add beyond the re-verification, which is not the default outcome:
+this file's rule is that an entry is evidence rather than instruction, and
+batches 126 and 127 each found one wrong about its own defect. This one is
+accurate. Neither half can be settled offline, so it stays open for the reason
+it was filed.
+
 ---
 
 ## 12. `effective_compaction()` reports no provenance (closed, batch 111)
@@ -597,6 +615,14 @@ across the commit boundary).
 list-context state machine in `split_blocks`, which is the same machinery the indent rule
 declined to add.
 
+**Rechecked in the review marathon (batch 138).** Still true as written, read
+rather than re-driven: `tui/markdown.py:157` (`verbatim`), `:278`
+(`_is_fence_line`) and `:297` (`split_blocks`) are unchanged, and the fence
+split still runs before any line rule, per the §26 and §38 pins. No new
+measurement, and the entry's own revisit trigger -- a code sample swallowing
+the rest of an answer -- was not observed on any path the marathon exercised.
+So this stays owner-deferred rather than becoming a fixing agent's item.
+
 ## 15. Nothing re-renders on resize, so a pre-wrapped construct freezes (closed with item 23, batch 112)
 
 `Transcript` pre-wraps three things rather than letting Rich soft-wrap them, because each needs
@@ -678,6 +704,15 @@ cap, a palette role, and a hold).
 **Revisit if** models in use start quoting heavily, or if the thinking span's own furniture
 changes enough that the collision goes away.
 
+**Rechecked in the review marathon (batch 138).** Read and agreed, with one
+thing to add: the collision rationale still holds on the current tree. The
+thinking span's furniture is unchanged (`THINKING_BAR` at
+`tui/widgets.py:68`), so the reason a quote bar would read as the model's own
+reasoning is still live, and the deliberate absence still sits alongside
+horizontal rules, heading levels and setext headings per `ARCHITECTURE.md`
+4.16. Owner-deferred by decision, not by cost, and that is still the right
+label.
+
 ## Accepted risks noted in the review, deliberately not "fixed"
 
 - **The container `sudo` refusal's REASON depends on a user-settable tag**
@@ -717,6 +752,46 @@ changes enough that the collision goes away.
   reading as the recurring lesson rather than a one-off: a per-case opt-out
   added to a shared assembly point usually means the condition belongs
   inside it.
+- **Three doc gates walk the filesystem where two ask git, and the
+  split is deliberate** (recorded batch 138, from the review marathon's
+  S19-12, severity `S4`, `stability`). `tests/test_docs_consistency.py:632-647`
+  defines `_SKIP_DIRS` without `review/` or `.qwen/`, and gitignore has nothing
+  to do with it -- so `test_no_source_file_carries_double_encoded_text`,
+  `test_the_url_blocklist_is_defined_exactly_once` and the two citation gates
+  via `_production_python()` all read untracked content, while
+  `test_the_documented_doc_read_bound_is_not_understated` asks `git ls-files`.
+  Measured during the marathon: `review/` held 20 markdown files, roughly
+  700 KB of reviewer prose, every one of them read by the mojibake gate on
+  every run of the suite.
+
+  **The reviewer argues this should NOT be fixed, and the argument is the
+  entry.** The filesystem is the right domain for three of the four questions,
+  for a reason stronger than convenience:
+  `test_the_url_blocklist_is_defined_exactly_once` exists because
+  `tools/builtin/.ipynb_checkpoints/web_search-checkpoint.py` carried an
+  **empty** `BLOCKED_DOMAINS` beside the real one and "a reader auditing
+  #48/#53/#54 had no way to tell from the grep which was live". A grep does not
+  care whether a file is tracked; neither does a code-search tool, nor an agent
+  reading this repository. A gate that asked git would have reported clean on
+  the exact artifact it was written for -- the same trap "`.gitignore` does not
+  untrack" records at `docs/ARCHITECTURE.md:2012`. The same holds for mojibake:
+  a file that renders wrong renders wrong whether or not it is staged. And the
+  cost was already paid down -- `docs/REVIEW_MARATHON.md` measured this before
+  the marathon opened and converted it into two rules of engagement (probes
+  live outside the repository, reports are plain UTF-8), each written "with the
+  measurement beside it, because the next reader's instinct will be that
+  gitignore covers it." Nineteen reviewers were told.
+
+  What is worth adding, and goes in the file rather than in the protocol:
+  `_SKIP_DIRS`' definition should say the set is deliberately *not* gitignore
+  and that the three walkers answer a filesystem question on purpose, pointing
+  at `_readable_docs_on_a_clean_checkout` as the one that asks git and why. Two
+  of the four checks already carry that reasoning; the shared helper does not,
+  which is why each new reader re-derives it. Adding `review` and `.qwen` to
+  `_SKIP_DIRS` costs nothing today but removes the property that a `.py`
+  dropped anywhere in the worktree is scanned as production code, which is a
+  cheap tripwire worth keeping -- and that is the owner's call, which is why
+  this is accepted with an argument rather than recommended.
 
 ## ROADMAP_v2's index skipped four sections (closed 2026-09-10)
 
@@ -816,6 +891,38 @@ explicitly that this item moves with it rather than the family quietly
 gaining a member. ROADMAP_v3 §54 (AT7) is the other claimant: an `@` file
 mention is thread state and must not reach `pass_prompt()` either, which
 makes §19's K6 trap five instances deep.
+
+**Rechecked in the review marathon (batch 138), which found two errors in the
+issue that carries the other half of this family (#9).** The defect itself is
+real and unchanged -- `with_goal(prompt, memory)`, `with_todos(prompt,
+memory)`, `with_memories(prompt, agent=None)` and `with_refs(prompt, memory)`
+still take three different signatures, and `with_memories` is still the only
+one behind `if system_prompt is None` (`core/loop.py:2144-2152`), which is the
+load-bearing asymmetry. But:
+
+1. **The file in issue #9 is wrong.** It says "there are now four prompt-tier
+   appenders in `prompts/system_prompts.py`". All four are in
+   **`core/loop.py`** -- lines 98, 109, 146 and 168. `git grep "^def with_"`
+   over tracked production code returns those four plus `with_skill_catalog`
+   and `with_catalogs`, which are the two that genuinely live in
+   `prompts/system_prompts.py`. A reader following the issue to that file
+   finds the one function all four of these carry a docstring warning them
+   *not* to move into.
+2. **Half of it has been answered since.** The complaint about "four parallel
+   assembly points" was discharged by ROADMAP_v3 §49:
+   `RunAgentLoop._conversation_prompt` (`core/loop.py:2118-2152`) is now the
+   single assembly point for all four, shared by a user's turn and a wake turn
+   precisely so "a wake turn cannot run under a prompt missing the goal, the
+   references or the checklist a user's turn has." What remains open is only
+   the signature and conditionality divergence -- which is what the issue's
+   title and this entry say, so the title is still accurate while the body
+   over-states the scope.
+
+The K6 hazard the family is really about is intact and defended in place: each
+of the four carries a `MUST NOT move inside prompts.system_prompts.with_catalogs()`
+docstring naming its own instance, and `memories/manager.py:24`,
+`skills/manager.py:119` and `project_init/manifest.py:20` repeat it from the
+other side.
 
 ## 20. Restart-required config editor (closed, batch 84)
 
@@ -2395,6 +2502,16 @@ least likely to be diagnosed as this. If it is ever fixed, the fix is
 measurement is batch 121's: inject keys with `WriteConsoleInputW` and
 count what the app's `on_key` sees.
 
+**Rechecked in the review marathon (batch 138), as a seam rather than an
+owned finding.** This is the THIRD stdin reader on one terminal, beside
+`main.py`'s `_StdinReader` and Textual's own console reader -- which is the
+frame that makes it worth keeping open even though it is "probably benign".
+The assessment above was deliberately not re-measured: the entry itself
+prescribes the measurement, and no Python module can fix a Node reader, so a
+reviewer of the harness's own shells can name this and nothing more. Item 49
+is the fourth instance of the same one-reader-at-a-time property (§29 N1), on
+the sandbox's one-shot executors.
+
 ## 44. `ask()`'s drain can only drop what the pump already took (open)
 
 `ask()` drops stale input before each gated prompt, because "a line typed
@@ -2413,6 +2530,16 @@ The honest fix is an OS-level flush -- `termios.tcflush(fd, TCIFLUSH)` and
 non-racy rather than best-effort. That is a change to a locked §29 safety
 property and wants its own batch, with the measurement being a line typed
 before the prompt is printed rather than after.
+
+**Rechecked in the review marathon (batch 138).** Still true exactly as
+written, re-read at `main.py:706-710`: the drain drops only what the pump
+thread has already taken from the terminal, so a line sitting in the
+terminal's own buffer when `_start()` fires can answer the next gated
+question. Batch 121 (inline `readline`, `_release_terminal`) is still out of
+scope for this entry by its own statement, and the honest-fix direction above
+is untouched. Nothing to add -- and item 49 now cites this entry for the half
+it explains: a one-shot child reading the terminal directly is consuming input
+the drain was never able to reach.
 
 ## 45. A view policy module in `core/` that only one shell reads (open)
 
@@ -2443,6 +2570,28 @@ convention and believing it: `ViewEntry` is a shell-independent shape, the
 policy is in one place and is correct, and exactly one shell asks for it.
 A second shell can be added without moving anything, which is the whole
 value the placement was bought for.
+
+**Rechecked in the review marathon (batch 138) by two scopes independently**,
+which is itself the signal: the compaction/sessions reviewer and the headless
+shell reviewer arrived here from opposite ends. Confirmed still true --
+`grep -n "session_view\|call_view" main.py` returns nothing, so there is still
+no CLI route to a session view, live or rebuilt. Two things to add:
+
+- The sentence above about `core/call_view.py` sitting beside it "on the same
+  terms, with the same gap" is now load-bearing in the other direction. §55
+  TR9 made `session_view.output_lines` **public** specifically so
+  `core/call_view.py` could share it rather than re-implement the
+  one-entry-per-line rule. So the two modules have a real shared dependency,
+  which makes the convention slightly more than an argument even with one
+  shell: a second reader of the policy exists, it is just not a second shell.
+  `core/call_view.py:30-37`'s own docstring records the same gap from its side
+  ("ONLY THE TUI PAINTS THEM TODAY").
+- `core/session_view.stored_entries` is reached only from `tui/app.py:2206`
+  and `live_entries` only from `:2318`, both keyed by the model's call id --
+  which `core/replay.py` already puts on the tool line for either shell. So
+  the CLI side needs no new data, only a surface. That narrows "designing what
+  a CLI session view IS" to the question of the command, which is what this
+  entry says the real cost is.
 
 ## 46. `check_output_policy`'s walk bounds depth and not breadth (closed, batch 127 -- breadth is the wrong axis)
 
@@ -2564,3 +2713,1812 @@ arbitrary JSON from an arbitrary server. Batch 126's own argument applies:
 truncating a structured document is PG5's splice, and refusing one outright
 is a tool the user configured becoming unusable. The measurement to take
 first is what real MCP servers actually return, which nobody here has.
+
+**AMENDED by the review marathon (batch 138): this entry names the wrong half
+of its own defect.** Two scopes arrived here, and one of them measured it.
+
+The `Where` above names exactly one site -- `structured_content` into
+`out["result"]`. That is the OPTIONAL half: `structured_content` is an optional
+field on `mcp.types.CallToolResult` (typed `Any`, verified against the
+installed `mcp==2.0.0`) and a server need never send it. The half this entry
+does not name is `out["content"]` -- the `"\n".join(...)` of every text block
+at `mcp_client/client.py:194-197` -- and that is the path **every** MCP tool
+result takes, including every result from every server that has never heard of
+structured content.
+
+Driven through the real `_normalize` and then the real `check_output_policy`
+the dispatch path runs:
+
+| text block in | `out["content"]` chars | `check_output_policy` |
+|---|---|---|
+| 1 MB | 1,048,576 | 11 ms |
+| 8 MB | 8,388,608 | 93 ms |
+| 32 MB | 33,554,432 | 369 ms |
+
+Linear in bytes with no knee, because there is nothing to knee against. The
+cost model above is `a*leaves + b*bytes`; the text path is the pure-`bytes`
+term, and 32 MB of it is roughly 8M tokens of context behind a 369 ms
+redaction pass on the dispatch thread. Control, from the producers this entry
+names as having done it right: `fetch_url.MAX_CONTENT_BYTES` is 65,536, so the
+unbounded path is 512x that at 32 MB and has no ceiling at all. The other
+claim here -- "`mcp_client/` contains no size constant at all" -- was verified
+exactly by enumerating every upper-case name containing `MAX`, `BYTES`,
+`CHARS`, `LIMIT` or `SIZE` in all three modules: none in `client`, `config` or
+`registration`.
+
+**So the disposition stands and the prescription needs two words.** The bound
+must be on the **total** normalized result, taken in `_normalize` before
+either key is filled -- not on `structured_content`. This entry already argues
+for that ("a total-size bound is the one instrument that closes both terms,
+since leaves cannot exceed bytes") and then names only one term in its
+`Where`, which invites a fix that bounds the optional field and leaves the
+universal one open. A test asserts that a 10 MB text block and a 10 MB
+structured payload come back the same bounded size, and that the truncation
+says so in the result.
+
+Severity is `S2` on the measuring scope's reading rather than `S3`: behaviour
+is wrong today on the path a normal run reaches the moment any MCP server is
+configured -- no unusual configuration, only a verbose tool. Still not `S1`,
+because nothing is exploitable past resource exhaustion and the model is
+handed too much rather than something false. Unchanged: choosing the number,
+or the truncate-versus-refuse question, is what this entry is deferred for,
+and §31 H7 and §51 PG8 giving two different answers is the stated reason.
+# The review marathon's deferred findings (items 49-85, batch 138)
+
+`docs/REVIEW_MARATHON.md` scoped a pre-merge review of `navigable-agents` into
+19 independent read-only scopes. 142 findings; the six `BLOCKS-MERGE` ones were
+fixed in batches 130-135 and the two owner decisions in 136-137.
+
+Thirty-five findings were dispositioned `DEFER`, and they become **34** items
+here, 49-82: one of the thirty-five carried `DEFER` and `KNOWN` both, and its
+half folded into item 48 above rather than opening a new entry. The last two
+were not reported by anyone -- **item 83** came out of batch 137's fix pass and
+**item 84** out of batch 138's own mutation pass -- which is the argument for
+running one on a bookkeeping batch at all. **Item 85** came out of that batch's
+full-suite run, from declining to re-run a flake until it went green.
+
+**Each entry below has to stand on its own, and that is deliberate.** The
+reports live in `review/`, which is gitignored -- so unlike every other item in
+this file, there is no durable document behind these to go back to. A `git clean
+-xdf` removes the only other copy. Where an entry says something was *measured*,
+the measurement is reproduced here rather than cited.
+
+Three things carried over from the reports' own conventions, because they change
+how an entry should be read:
+
+- **`suspected` means no failure path was constructed**, and the reporter said
+  so rather than dressing a reading up as a measurement. Items 57, 61, 69, 76
+  and 80 are labelled that way. They are recorded because the property the
+  design claims is not the property that holds, not because something is known
+  to break.
+- **The *Not* line is load-bearing.** Where a report explicitly refused to
+  propose something, that refusal is kept -- it exists to stop the next reader
+  re-proposing a change the first one already considered and rejected.
+- **An entry is evidence, not instruction** (this file's own rule, learned
+  twice in batches 126 and 127). Item 83 is a third instance: the triage note
+  that recorded it was wrong about its own mechanism, and the correction is in
+  the entry.
+
+## 49. Three one-shot executors inherit the harness's console stdin (open, deferred batch 138)
+
+**S01-02, severity S3, `stability`.** `security/sandbox.py:2124-2146`
+(`_run_inert`), `:2532-2547` (`_run_docker` one-shot), `:2851-2874`
+(`_run_subprocess_fallback`) spawn with no `stdin=`. Three sibling routes point
+the other way, all read from the same file: the WSL one-shot uses `DEVNULL` or a
+one-line `PIPE` for root (`:2622-2645`, the SS70 fix), the SSH one-shot the same
+(`:2752-2766`), and every session `DEVNULL` by default (`:3176-3202`).
+
+The failure path needs Docker down, which is when these three routes serve. On
+the shipped `tiered` default, `shell("cat")` -- a bare read with no file
+argument, a plausible model mistake -- classifies INERT, is auto-approved with no
+prompt, takes `ROUTE_INERT_HOST`, and execs with the terminal as its stdin. It
+then sits until `SANDBOX_TIMEOUT_SECONDS` consuming whatever the user types: on
+the CLI, type-ahead meant for the next prompt, only partly mitigated by `ask()`'s
+drain (item 44, which drops what the pump already holds and not what a live child
+is consuming); under the TUI, a second reader beside Textual's input thread,
+which is the keystroke-loss class batch 121 measured for the trust prompt. §29's
+N1 is "one reader at a time", and it is violated on three executors.
+
+RECORDED RATHER THAN FIXED, and already twice: `docs/ROADMAP_v3.md`'s SS70 row
+and `AGENTS.md` both say "the container, inert and host-fallback one-shots have
+the same gap and are recorded, not changed". This entry is the register half of
+that deferral, with the reachability traced.
+
+**Shape:** `stdin=subprocess.DEVNULL` on the three spawns, matching the three
+routes that have it; a test asserting a bare `cat` with Docker down returns
+without consuming a staged stdin line. Needs a `tests/BREAKING_CHANGES.md` row,
+because a command that legitimately reads the terminal today gets EOF after the
+change -- which is the shipped-behaviour change the SS70 deferral was protecting.
+
+**Not:** the WSL/SSH/session paths (already correct); a timeout or a prompt (the
+command was already approved, so the defect is the descriptor and not the
+decision).
+
+## 50. `run_isolated` buffers the child's whole output before bounding it (open, deferred batch 138)
+
+**S01-03, severity S4, `performance`.** `tools/isolation.py:257-284` runs the
+child with `capture_output=True` and no streaming cap; `:192-195` and `:220-226`
+length-check stdout and excerpt stderr only once both pipes are in memory.
+
+The child-side bound is real and is the one #55 required: `_child_main`
+(`:287-310`) refuses to emit a result payload over `MAX_CHILD_OUTPUT_BYTES`
+(4 MB). But the transport is not the payload. A compute child that prints
+voluminously -- progress spam, a giant traceback, a warning flood, all ordinary
+misbehaviour for a path whose purpose is containing misbehaving calls -- is held
+in full in the parent up to the wall clock. `RLIMIT_AS` caps the child on POSIX,
+not the parent's buffers; on Windows the wall clock is the only bound anywhere,
+which is H3 as stated.
+
+Filed for the comment rather than the cost: the module's docstring claims the
+size is "bounded on the CHILD side, where the size is known before anything is
+written", which is true of the result dict and not of the two pipes carrying it,
+and a reader of that sentence concludes there is nothing left to bound. No math
+tool emits unbounded text today and the timeout bounds the accumulation, which
+is why this is S4.
+
+**Shape:** cap the transport rather than the payload rule -- stream
+`communicate` through a bounded accumulator (stop reading past N bytes, kill,
+report truncation), or cap stderr independently since only its tail is ever
+read. `tools/isolation.py` only.
+
+**Not:** lowering `MAX_CHILD_OUTPUT_BYTES` (the result bound is correct);
+thread-based collection (the module's process decision, H2, stands).
+
+## 51. A session's refused credential is never quarantined (open, deferred batch 138)
+
+**S02-05, severity S3, `security`.** `security/sandbox.py:1047`
+(`_note_ssh_auth_failure`) and `:1419` (`_note_sudo_auth_failure`) are called
+only from `_run_ssh_process` (`:2782-2783`) and `_run_wsl_process` (`:2648`).
+Both read the subprocess's `stderr` -- and a session has none to read, because
+`_popen_session` sets `stderr=subprocess.STDOUT` (`:3199`) so the stream belongs
+to the session manager, for the stated reason that "a monitor has to see lines in
+the order the program wrote them". So `_ssh_auth_rejected` and `_sudo_rejected`
+can only ever be set by a one-shot command.
+
+The quarantine exists for a measured harm, stated at `sandbox.py:985-993`: "one
+refused call makes TWO authentication attempts (the keyboard-interactive method
+and the password method each get their own prompt budget), so a harness that
+retried on every command would walk a real account into a lockout at four
+attempts a call." `_note_sudo_auth_failure` names `pam_faillock` for the same
+reason. A model starting background sessions against a host whose stored password
+is wrong is exactly "a harness that retried on every command", and the protection
+does not reach it. S3 rather than S2 because the one-shot path still quarantines,
+so the first ordinary `shell` call to that host closes the door for the rest of
+the run; the gap is open only while every call is a session.
+
+Deferred because it is structural rather than an omission. The stderr a session
+would be judged on belongs to another layer, so the fix needs a decision about
+who inspects a session's first bytes and when -- and that layer is
+`core/shell_sessions.py`.
+
+**Shape:** settle first whether the sandbox should be *told* about a failed
+authentication by whoever reads the stream rather than reading it itself. A
+callback the session manager invokes on the session's first lines keeps the
+quarantine in one place; a second copy of the matching in
+`core/shell_sessions.py` does not.
+
+**Not:** changing the matching strings or the quarantine's one-way lifetime.
+
+## 52. Sixteen of twenty-two credential shapes survive `redact_output_text` (open, deferred batch 138)
+
+**S05-03, severity S3, `security`.** `safety/policy_enforcement.py:208-223`
+(`_SECRET_PATTERNS`), `:287-306` (the three credential shapes), `:382-398` (the
+composition). Driven through the real `redact_output_text`, with `ghp_`,
+`xoxb-`, `sk-`, URL-userinfo and `<password>` shapes all caught as the control
+that the probe detects redaction when it happens:
+
+- **Survives:** `github_pat_` (the current fine-grained format), `gho_`/`ghs_`
+  (OAuth and server flows), `sk-proj-` (current OpenAI project keys), `sk_live_`
+  (Stripe), `npm_` tokens, `Authorization: Basic`, `Bearer`/JWT, an AWS secret
+  key in an assignment, and the `api_secret`/`token` keywords.
+- **Partly:** a PEM block is caught by its header line only. The base64 body --
+  the key material -- survives verbatim.
+
+The module's contract is "known secret patterns" as defence-in-depth over every
+tool result; the set covers the 2024 vendor formats and misses their current
+siblings plus two structural cases. Reachable whenever third-party text (a
+fetched page, a search snippet, an MCP result) carries one.
+
+Deferred because breadth is a product decision with documented exclusions on
+both sides, not a regex edit: the `password|passwd`-only keyword set and the
+quoted-only assignments are deliberate (`policy_enforcement.py:262-268` --
+`token`/`secret`/`key` appear in ordinary prose, unquoted values out of scope),
+and every addition buys false positives in a research tool that reads security
+literature.
+
+**Shape:** grouped additions, each with a dated source -- (a) vendor prefixes
+`github_pat_`, `gho_`/`ghs_`/`ghu_`, `sk-proj-`, `sk_live_`/`rk_live_`, `npm_`;
+(b) structural: the PEM body under a caught header, `Authorization:` schemes,
+the JWT compact shape. Each wants this file's test idiom -- a whole-string case
+plus a split-across-cut case.
+
+**Not:** keyword widening past `password`/`passwd`, and unquoted values. The
+comment at `:262-268` already refuses both; it is cited here so the next reader
+does not re-propose them. No change to `_SECRET_PATTERNS`, which stay the input
+side's whole vocabulary by decision.
+
+## 53. `resolve=False` checks dotted IP literals and no other numeric form (open, deferred batch 138)
+
+**S05-04, severity S4, `coherence`.** `tools/builtin/web_search.py:114-123`
+carries the comment "An IP LITERAL is still checked"; `resolve=False`'s semantics
+are at `safety/policy_enforcement.py:144-150`. Driven through the real
+`is_url_permitted` with `resolve=False`, which is what the filter `_normalize`
+uses: `http://127.0.0.1/` and `http://169.254.169.254/` are refused, while
+`http://2130706433/` (decimal for 127.0.0.1), `http://0x7f.0.0.1/` and
+`http://0x7F000001/` are **allowed** -- `ipaddress.ip_address` parses none of
+them, so the "name is taken on trust" branch takes them. All five are refused
+with `resolve=True`, which is the path `fetch_url` always takes.
+
+No SSRF follows: the only socket-opener in the scope resolves, so the cost is
+one wasted tool call and one confusing refusal. The defect is the overclaim, in
+the file that decides what the model is shown.
+
+**Shape:** either teach the `resolve=False` path a literals-only resolution
+(numeric forms resolve locally, so the latency reason for `resolve=False` does
+not apply to them), or narrow the comment to "a dotted-decimal or bracketed IPv6
+literal is still checked". Test: the three non-dotted spellings through
+`_normalize`'s real filter, asserting dropped.
+
+**Not:** any change to `fetch_url`, which is correct; DNS at filter time for
+names, where the documented latency tradeoff stands; any change to
+`is_url_permitted`'s `resolve=True` path.
+
+## 54. `probability_stats._build_distribution` is dead and is a second answer (open, deferred batch 138)
+
+**S06-12, severity S4, `coherence`.** `tools/builtin/probability_stats.py:62-73`
+against `:76-107`. `_build_distribution` has no caller: the one call site
+(`:187`) is to `_build_distribution_with_warnings`. The two functions build the
+same five distributions from the same dict with the same defaults, and the live
+one also collects the warning strings.
+
+This is shape 1 in its plainest form -- a value derived in two places, where the
+bug is not that they drift but that nothing can tell you they have. They agree
+today. A sixth distribution, or a changed default, added to the live function
+alone would leave the dead one wrong with nothing red, and the next reader cannot
+tell which is authoritative without grepping for callers.
+
+**Shape:** delete `_build_distribution`. If a no-warnings entry point is wanted
+it is `_build_distribution_with_warnings(...)[0]`.
+
+**Not:** changing the defaults, the warning strings, or
+`_build_distribution_with_warnings`' signature.
+
+## 55. `**`-unpacking is admitted by the math node allowlist (open, deferred batch 138)
+
+**S06-13, severity S4, `security`, harm `suspected`.**
+`tools/builtin/_math_common.py:185` has `ast.keyword` in `_ALLOWED_NODES` for
+ordinary keyword arguments, and `f(**mapping)` is also `ast.keyword` (with
+`arg=None`). So the `**` form passes `_validate_ast` and
+`safe_parse('sin(**Dict())')` reaches evaluation, where it fails with "sin takes
+exactly 1 argument (0 given)" -- a refusal from SymPy rather than from the guard,
+which is the distinction
+`test_safe_parse_refuses_the_injection_payload_class` exists to make.
+
+The module's closure argument enumerates what is absent, and `AGENTS.md` repeats
+it: "`JoinedStr`, `Lambda`, the comprehensions, `NamedExpr`, `Starred` and
+`Dict`/`Set` are all absent too, by being unlisted rather than by being
+recognised." `Starred` is the `*args` form. The `**kwargs` form is spelled with
+`keyword`, which is listed -- so one of the two unpacking constructs is closed by
+the node list and the other only by the unavailability of a string-keyed mapping.
+
+**`suspected`, and the reason is the interesting part.** `**` needs a mapping
+with `str` keys. `ast.Dict` is absent, string literals are refused, and
+`sympy.Dict` -- the one allowlisted name with `keys()` -- sympifies its keys into
+`Symbol`s, which `**` rejects with "keywords must be strings". The construct is
+admitted and inert. It is filed because the property that makes it inert is not
+the property the design claims.
+
+**Shape:** in `_validate_ast`'s existing `ast.Name` loop, refuse an
+`ast.keyword` whose `arg is None`. One clause, and it makes the comment's
+enumeration true. Dropping `ast.keyword` outright is smaller still -- measured,
+keyword arguments do not survive `auto_symbol` anyway
+(`safe_parse('Symbol("a", positive=True)')` fails at evaluation) -- but that is a
+decision about future expression support, which is why this is deferred.
+
+**Not:** adding `ast.Dict` or `ast.Starred`; touching
+`_STRING_ARG_CONSTRUCTORS`.
+
+## 56. Nothing imports `env_secrets`, so `.env` is read by nothing (open, deferred batch 138)
+
+**S07-07, severity S4, `coherence`.** No production module imports
+`env_secrets`, so `get_env_secret` has no caller and the import-time
+`load_dotenv` at `env_secrets.py:57` never runs. `git grep -l env_secrets`
+returns the module, one test file and a dozen-odd documents -- this entry is now
+one of them -- and **no production module.** Re-measured in batch 138: the only
+`import env_secrets` anywhere is inside two string literals in
+`tests/test_credentials.py`, which are subprocess snippets. `git grep -n "GITHUB_API_TOKEN\|NVD_API_KEY"` finds the two
+names only in `.env.example` and in unrelated MCP test fixtures.
+
+One of the four documents is right and three read as though the mechanism is
+live. `docs/ARCHITECTURE.md:522` is the honest one: "a GitHub token for **a
+future** GitHub tool, an NVD/NIST key for **a future** CVE-lookup tool" -- a
+module shipped ahead of its consumers, recorded as such, which is not a defect.
+`AGENTS.md:82` states it in the present tense, and so does `docs/PRIVACY.md:21`,
+which lists `.env` under *What is stored locally* as holding tool API keys.
+`.env.example` goes further and tells the user what will happen:
+"`env_secrets.get_env_secret()` will raise a clear error at the point of use if a
+tool needs a key you never set". No tool needs one, so nothing raises and nothing
+reads.
+
+Shape 2 in its mildest form -- wired, documented, never executed end to end --
+and the mildness is why it is S4. The user-visible cost is that someone who
+follows `.env.example` puts a GitHub token on disk believing the harness will use
+it, and `docs/PRIVACY.md`'s deletion section does not mention `.env` either, so
+nothing tells them to remove it.
+
+**Shape:** the choice is the owner's and either answer is cheap. Either the three
+present-tense claims gain `ARCHITECTURE.md`'s "for a future tool" clause -- three
+sentences, module untouched -- or `.env` is wired to something, which is a feature
+and not this marathon's business. Item 57 is a reason to prefer the first until
+the second is actually wanted.
+
+**Not:** deleting the module. It is referenced by `package.json`'s `files`, by a
+bandit baseline entry and by two pinned tests in `tests/test_credentials.py`
+whose own `tests/BREAKING_CHANGES.md:2826` row explains what reverting them
+re-breaks; and the `usecwd=True` fix it carries is correct and worth keeping.
+
+## 57. `env_secrets` turns an untrusted `.env` into process environment at import (open, deferred batch 138)
+
+**S07-08, severity S3, `security`, harm `suspected`.** `env_secrets.py:55-57`:
+
+```python
+ENV_FILE = os.environ.get("AGENT_ENV_FILE")
+
+load_dotenv(ENV_FILE or find_dotenv(usecwd=True))
+```
+
+`load_dotenv` writes every name it finds into `os.environ` for the whole
+process, and `find_dotenv(usecwd=True)` walks *up* from the working directory, so
+a `.env` above it is in scope too. A `.env` is an ordinary file in a repository
+and inside no trust boundary: `core/workspace_trust.py` gates `.venastine/` and
+`AGENTS.md`, and nothing gates `.env`.
+
+Several security-relevant knobs are read from `os.environ`, and most at *call*
+time, which is after any import: `AGENT_SECRETS_FILE` (`security/secrets.py:281`
+-- where the encrypted store lives), `AGENT_LOG_FILE` (`logging_setup.py:170`),
+`AGENT_LOG_LEVEL` (`logging_setup.py:98`), `VENASTINE_REDACT_OFF`
+(`security/posture.py:274`) and `AGENT_PROVIDERS_FILE` (`credentials.py:17`, at
+import).
+
+`VENASTINE_REDACT_OFF` is the one that makes this worth recording.
+`AGENTS.md:1464` states the decision: it disables pattern substitution and is
+"deliberately **not a settings.json key** (G7's reason)." The point of keeping it
+out of `settings.json` is that a cloned repository must not be able to turn
+redaction off. A cloned repository can ship a `.env`.
+
+**`suspected` is the honest label: no live failure path exists.** Nothing imports
+`env_secrets`, so `load_dotenv` never executes and none of the above happens
+today. The finding is that the first module to import it -- which `.env.example`
+and `AGENTS.md:82` both invite, and which is the whole point of the module
+existing -- silently converts an untrusted file into process environment, and
+nothing in the module, the decision record or the trust layer would surface it.
+Item 56 is why it is still open.
+
+**Shape:** whichever module first needs a tool key calls a function rather than
+importing a side effect -- `load_dotenv(..., override=False)` inside
+`get_env_secret`, or an explicit `load_tool_secrets()` the entry point calls at a
+known moment. Then there is a place for the half that matters: a `.env` may
+populate tool keys and must not be able to set `AGENT_*` or `VENASTINE_*` names.
+`dotenv_values()` returns the mapping without touching `os.environ`, which makes
+that filter a two-line comprehension rather than a policy.
+
+**Not:** claiming any of this happens today. Whether `.env` should join D17's
+content hash is a separate question for the trust layer and for the owner.
+
+## 58. One env-var misconfiguration warns and the other raises (open, deferred batch 138)
+
+**S07-10, severity S4, `ux`.** `logging_setup.py:93-107` (`_resolve_level`)
+against `:190-199` (the `OSError` fallback), reached from `main.py:2495`. An
+unwritable `AGENT_LOG_FILE` prints a warning and continues, with the stated
+reason that "logging to a file is non-essential". An unparseable
+`AGENT_LOG_LEVEL` does not:
+
+```
+$ AGENT_LOG_LEVEL=verbose python -c "from logging_setup import configure_logging; configure_logging()"
+raises at startup: ValueError invalid literal for int() with base 10: 'verbose'
+```
+
+`main.py:2495` calls `configure_logging()` with no handler around it, and its own
+comment explains that the call sits there because "nothing above logs anything"
+-- so the traceback is the whole user experience, and the one subsystem that
+would have reported the problem legibly is the one that failed to start. Shape 6:
+a handler present for the unreachable failure and absent for the reachable one,
+forty lines apart in one function, where the reachable one is a typo in a
+documented knob. `verbose`, `trace` and `warn` are all plausible things to type;
+`warn` happens to work, because `logging.WARN` exists.
+
+The counter-argument is in the code and is why this is deferred rather than
+fixed. `:100-103`: "fall back to parsing as an int ('20'). Anything else raises
+`ValueError`, which is the right failure mode for a misconfigured env var." The
+raise is deliberate, and **the owner may reasonably mark this ACCEPTED on the
+strength of that comment.** Not a `DECISION` finding, because a comment is not a
+locked decision in `AGENTS.md` or a ROADMAP id.
+
+**Shape:** if it is to change, keep the raise and make it legible -- catch the
+`ValueError` in `_resolve_level`, print the same style of warning the `OSError`
+branch prints (naming the variable, the value and the accepted forms), and fall
+back to the `INFO` default. The two branches then agree about what a bad
+environment variable costs.
+
+**Not:** having `configure_logging` validate anything else.
+
+## 59. The config schema checks shape where fitness also matters, unevenly (open, deferred batch 138)
+
+**S08-04, severity S4, `coherence`.** `config_schema.py:392` (`ssh_port: int`,
+un-ranged), `:355`/`:361` (`db_path`, `workspace_dir`: bare `str`, no emptiness
+check), `core/config_loader.py:74` (`max_token_budget: (int, type(None))`, no
+sign check). `PositiveInt` is `strict=True` and refuses `max_read_chars=True`;
+the three fields above accept anything their lax type allows. Driven against the
+real `config_schema.validate`:
+
+```
+ssh_port=True: ACCEPTED       ssh_port=-1: ACCEPTED
+ssh_port=99999: ACCEPTED      db_path empty: ACCEPTED
+workspace_dir empty: ACCEPTED
+_type_ok(-5, int) = True      _type_ok(0, int) = True
+```
+
+Downstream, `max_token_budget: 0` resolves through `spend_cap()`
+(`config_loader.py:1247`, no validation) into `_run()`, whose check is
+`total_tokens_used >= max_total_tokens` (`core/loop.py:1742-1743`) -- true after
+the first billable call, so every turn dies with `token_budget_exceeded` having
+spent one model call, reporting a budget problem for a configuration typo.
+`ssh_port: True` coerces to port 1 and fails at the SSH call rather than at
+startup.
+
+Separately and in the same entry because it is two lines: the trust-rationale
+comments at `core/config_loader.py:1390-1393` and `main.py:2172` still say a
+project's settings "multiply pipeline cost via `ensemble_n`". `ensemble_n` is
+vestigial and warned-ignored (`core/reasoning/orchestrator.py:1015-1028`), the
+only roster key (`ensemble_models`) is rejected by name, and the live multiplier
+is `ensemble_mode` over the `config.yaml` roster. Shape 9; item 21 does not cover
+it, which was checked by reading that entry.
+
+**Shape:** `ssh_port: PositiveInt` or an explicit port range; `min_length=1` on
+`db_path`/`workspace_dir`; reject `max_token_budget <= 0` at load in
+`_validate_settings` (it is a settings key, not a schema key), with the
+compaction-relationship errors as the wording model; reword the two rationale
+comments to `ensemble_mode`. One test per check, each demonstrated red against
+the ACCEPTED lines above.
+
+**Not:** the `ensemble_models`/`critic_model`/`embedder_model` looseness, which
+is deliberate and documented at `config_schema.py:271-283` and validated
+downstream with a better error; `default_effort`, which is already cross-checked;
+`tui.effort`, which downstream per-model validation owns.
+
+## 60. The loader reads `.md` files the trust hash refuses to (open, deferred batch 138)
+
+**S08-05, severity S4, `stability`, harm `suspected`.**
+`core/config_loader.py:363-364` is `open(path)` plus `f.read()` with no
+regular-file guard. `core/workspace_trust.py:114-126` -- on the same files --
+skips non-regular files with `<non-regular file>`, reads in chunks, and states
+the FIFO rationale in its own comment.
+
+Every `initialize()` and every trust-prompt listing (`_catalog_entries` ->
+`_parse_md_file`) opens and fully reads each discovered `.md`. On POSIX, a cloned
+project containing `.venastine/skills/x.md` as a symlink to a FIFO -- git stores
+symlinks, `os.walk` lists the link, `open()` follows it -- would block
+`initialize()` with no timeout, pre-grant inside `describe_project_content` and
+post-grant inside `_discover`, while `_content_hash` sails past it by design.
+
+**`suspected` because Windows cannot construct a FIFO**, so this was not driven.
+The regular-file half *was* measured and is adequate: parsing a 100 MB skill body
+costs 0.66 s and hashing a 100 MB covered file costs 0.08 s. This entry is only
+about the non-regular half.
+
+**The question for the owner**, which is why this is deferred: should
+`_parse_md_file` take the hash's guard, or is a FIFO at a `.md` path out of
+threat scope because whoever can plant one locally can already write
+`.venastine/` directly? The asymmetry matters only for the clone-carried symlink
+shape, where that local-write equivalence does not hold pre-grant.
+
+**Shape:** an `os.path.isfile`-style guard, or `stat.S_ISREG` on the opened fd to
+close the replace-between-check window, before `open()` in `_parse_md_file` --
+warning and skipping like every other malformed definition. Test on POSIX CI: a
+FIFO at a skill path initialises with a warning instead of hanging, with a
+subprocess timeout as the harness, since a removed guard hangs rather than fails.
+
+**Not:** capping regular-file reads. Measured adequate at 0.66 s per 100 MB;
+inventing a cap would add a failure mode to the largest legitimate manifests.
+
+## 61. A parallel batch widens the window between "the tool ran" and "the row is durable" (open, deferred batch 138)
+
+**S10-06, severity S3, `stability`, harm `suspected`.**
+`core/loop.py:1196-1244` (`_dispatch_parallel`) against `:1286-1296`
+(`_settle_one`). #42's rule is that `memory.add_tool_result()` runs *before* the
+`tool_result` event is yielded, "so emitting first made the row's durability
+depend on a consumer continuing to read". On the sequential path that is
+airtight: `_dispatch_one` has no `yield` between the dispatch returning and
+`_settle_one` persisting, so the window is zero yields wide.
+
+In a parallel group it is not. Workers park their outcomes in futures and
+`_settle_one` is reached only after `_dispatch_parallel` returns, which is after
+*every* worker has finished. In between, the frame yields each worker's narration
+out through `_run_steps` (`:1208`). Abandonment at one of those yields drops
+`settled_calls` for calls whose tools have already run -- up to
+`subagent_max_parallel` (3) of them -- and D20 has already written their
+`tool_use` blocks, so M4's pairing breaks for a whole batch: the defect #42
+closed, arriving through NA10/NA11's reordering instead of through the yield
+order.
+
+Abandonment itself is reachable: `tui/app.py:5280` calls `events.close()` on app
+shutdown and that chain reaches `_run`, so `GeneratorExit` is delivered at
+whatever yield `_run` is suspended at. **`suspected` because the trigger is a
+conjunction:** the `tool_call_start` events are emitted before anything is
+submitted (`:1784-1787`), so abandoning there loses nothing. What remains is a
+`permission_request` or an `approval_reused` notice pushed by one worker while a
+sibling's tool has already completed -- so it needs a human in the loop, or a
+reused sign-off, in the same batch as a finished call, at the moment the consumer
+goes away. A second consequence of the same shape, not a defect in itself:
+`GeneratorExit` there unwinds through `with ThreadPoolExecutor(...)`, whose
+`__exit__` is `shutdown(wait=True)`, so `close()` blocks for as long as the
+slowest tool in the batch takes.
+
+`docs/ARCHITECTURE.md` 4.8 states the guarantee as a property of ordering --
+"`memory.add_tool_result()` runs BEFORE the `tool_result` `LoopEvent` is yielded"
+-- which is still literally true per call and no longer sufficient, because the
+persist for call *n* now waits on call *n+2*.
+
+**One adjacent claim is already false and should be corrected in the same place.**
+`docs/ARCHITECTURE.md` 4.8 says abandonment is "reachable in the TUI (`_pump`
+drops the generator on any `post_message` exception)". There is no `_pump` in
+`tui/`; the only one in the tree is `_StdinReader._pump` at `main.py:627`.
+`tui/app.py:2948-2959` drains with a plain `for event in generator`, catches
+`BaseException`, and never closes the generator -- so abandonment still happens,
+by garbage collection rather than by the named mechanism. Shape 9, in the
+paragraph documenting this finding's own containment rule.
+
+**Shape:** the question is whether the durability rule or the ordering rule
+gives. Two shapes keep both: settle each future into a per-call slot as it
+completes and persist in model order once a *prefix* is contiguous; or keep the
+batch and wrap the drain so `GeneratorExit` persists whatever outcomes are in
+hand before re-raising, which answers #42 without touching NA11 at all. A test
+drives a two-call parallel batch, closes the generator at an intra-batch yield,
+and asserts one `tool_result` row per tool that actually ran.
+
+**Not:** reopening NA9/NA11's ordering decision, which is locked and whose reason
+is stated; treating the `shutdown(wait=True)` block as a separate finding, since
+it is a consequence of the same window.
+
+## 62. A truncated fold is measured against the length it no longer has (open, deferred batch 138)
+
+**S11-07, severity S4, `correctness`.** `core/compaction.py:1047-1049`, in
+`compact()`. `_truncate_oldest` shortens the span to the one-call input budget,
+and the two lines after it update `original` and leave `target` alone:
+
+```python
+segment_text, truncation_notice = _truncate_oldest(segment_text, budget)
+if truncation_notice:
+    original = len(segment_text)
+```
+
+`target` was computed at `:1021` from the pre-truncation length, so the compactor
+is told "the original is `len(truncated)` characters; your summary must be at
+most `ratio * len(untruncated)` characters". The adjacent forced-chain branch,
+eight lines up at `:1039-1040`, recomputes both -- which is what makes this a
+slip rather than a decision.
+
+`compaction_strength` is documented as "the fraction of the original character
+count a fold aims for" (`config.yaml:848-856`), and after a truncation it names
+the fraction of a length that is no longer the input. The fold is looser than the
+strength asked for, by the ratio of the two lengths. Past a span of roughly
+`budget / ratio` characters the target exceeds the text itself and the
+`len(summary) <= tolerance` check in `_summarize` passes trivially, so the fold
+can return something no smaller than what it replaces. With the shipped strength
+3 (ratio 0.15) and `_input_budget` = `window - 20,000`, the degenerate case needs
+a first compaction on a window below roughly 23,500 -- a range the same scope
+measured as already unusable for an unrelated reason (`_dependent_floor()` puts
+the derived trigger above the window there, so `used` can never reach it; that
+one is `FIX-NOW` and not in this block) -- so in practice the symptom is a looser
+fold rather than a useless one.
+
+**Shape:** recompute `target` beside `original`, matching the branch above. One
+line. `summarize_thread` needs nothing: its target is
+`config.SUMMARY_TARGET_CHARS`, an absolute, which is why the same two lines there
+are already correct.
+
+**Not:** changing `_truncate_oldest`, the budget, or the target ratios.
+
+## 63. Batch 119's yield logs a standing condition per step (open, deferred batch 138)
+
+**S11-09, severity S4, `ux`.** `core/compaction.py:701-705`, in
+`compactable_span()`. The yield is reported with `logger.info` inside a function
+called once per `compact()`, which `_maybe_compact` calls at the turn boundary
+*and* after every step while the thread is over the trigger. So on any thread at
+or below `keep_recent_turns` turns and over the trigger, the line repeats per
+step for the life of the conversation. Observed on all four evaluations of one
+probe run, with the correctly-levelled DEBUG line beside it as the control.
+
+This is the logging shape #44 removed from this module and that then came back.
+`compact()`'s own docstring: "REPORTABILITY LIVES WITH THE CALLER. How often this
+function runs -- once at the turn boundary plus once after every step -- is
+run-scope knowledge the loop has and this module lacks, which is why the
+standing-condition WARNINGs moved out of it into `_maybe_compact`'s once-per-run
+guard (#44)." `_maybe_compact`'s docstring names the symptom: "up to
+MAX_ITERATIONS + 1 identical lines per turn on a thread that stays over trigger
+and fully floored, which is how a reader gets trained past the warnings that do
+not repeat." The yielded-count line is a standing condition by that definition --
+it describes a state of the thread, not an event.
+
+S4 because INFO does not reach the transcript through `TranscriptLogHandler`
+(which routes WARNING and above), so it is a log-volume problem rather than a
+screen one. Recorded because it is the same module's own rule, and because the
+diagnostic is genuinely useful once.
+
+**Shape:** move it where the run scope is, the way #44 did -- have
+`compactable_span` report the yield in its return path's vocabulary, or demote
+the line to DEBUG and let `_maybe_compact` say it once per run under the existing
+`notices` dedup, which is the mechanism already there for exactly this.
+
+**Not:** the yield itself, which is batch 119's fix and correct; the
+`_sub_turn_span` INFO at `:715-719`, which fires at most once per thread per fold
+and is not a standing condition.
+
+## 64. Two scoring helpers raise where the scope says nothing raises (open, deferred batch 138)
+
+**S12-03, severity S3, `stability`, harm `suspected`.**
+`core/reasoning/scholar.py:329-345` (`author_standing`'s authorship loop) and
+`core/reasoning/source_scoring.py:421` (`l2_normalize`), against that module's
+"nothing here raises" contract at `source_scoring.py:28-35`. Driven against the
+real functions with synthetic malformed input:
+
+```
+l2_normalize(['a','b'])
+  -> TypeError: can't multiply sequence by non-int of type 'str'
+ScholarLookup.author_standing({'authorships': ['BAD']})
+  -> AttributeError: 'str' object has no attribute 'get'   (scholar.py:331)
+```
+
+Either propagates through `_apply_embeddings`/`_apply_scholar` -- no `try` at
+either call in `score_grounding_sources` -- through `_ground_and_score` into the
+pipeline's `except`, flipping a run that had already grounded and scored into
+durable `status='failed'`.
+
+Both stages are optional by design and both document give-up semantics. A
+malformed-but-successful response is the fourth failure mode neither handles:
+`embed_texts` converts transport and provider errors to `EmbeddingError` but
+passes a well-formed envelope with non-numeric contents straight through
+(`_check_vectors` checks batch length, dimension uniformity and emptiness, never
+element type), and `author_standing` trusts every authorship entry to be a dict.
+
+**`suspected` because the triggers are third-party malformation** -- a buggy
+embedder, a changed OpenAlex shape -- rather than model output: reachable by
+direct call, not observed from a live provider. Verified contained nearby, which
+is what makes these two the uncontained remainder: `embed_texts` wraps every
+provider exception (`core/client.py:1493-1499`), `ScholarLookup._get` catches
+fetch and parse failures per attempt (`scholar.py:247-261`), the writers degrade
+loudly and never fatally, and ensemble-candidate, reviewer-missing,
+reviewer-transient and re-synthesis failures are all contained with a trace.
+
+**Shape:** guard at the trust boundary in each helper, matching the file's
+posture of drop, clamp or trace and never raise -- an element-type check in
+`_check_vectors` or `l2_normalize` (a non-numeric vector scores 0.0 or disables
+the scorer with `failed_reason`, reusing the SQ10 fallback), and an `isinstance`
+guard per authorship entry (skip non-dicts, count the skip in the stage's
+coercion report). Test: malformed input yields fallback scores plus one trace
+line, and the run completes.
+
+**Not:** retrying a malformed payload -- unlike model JSON, a provider shape will
+not fix itself on retry; changing the give-up-on-first-outage policy, which is
+load-bearing (SQ10).
+
+## 65. A second `connect_all()` abandons a generation of MCP children silently (open, deferred batch 138)
+
+**S13-09, severity S4, `stability`.** `mcp_client/client.py:355-384`
+(`connect_all`) and `:471-525` (`disconnect_all`). `connect_all()` rebinds
+`self._ready`, `self._shutdown`, `self._done` and `self._task`
+unconditionally, so a second call abandons the first generation: the old manager
+task is still parked on `await self._shutdown.wait()` and the event it waits on
+has been replaced, so nothing can ever set it. Driven over the same in-process
+transport `tests/test_mcp_client.py`'s `client` fixture uses:
+
+| after two `connect_all()` and one `disconnect_all()` | |
+|---|---|
+| generation 2 `_done` set | True |
+| generation 1 `_done` set | **False** |
+| generation 1 `_shutdown` ever set | **False** |
+| generation 1 exit stack unwound | **False** |
+| straggler WARNING emitted | **none** |
+
+Control: one `connect_all` and one `disconnect_all` leaves `_closed ==
+['probe']` with no straggler warning, correctly.
+
+The warning is silent for a second, independent reason: `stragglers` is
+`sorted(set(self.clients) - self._closed)`, both keyed by **server name**, and
+`_closed` is never cleared by `disconnect_all`. Generation 2's clean close
+records `'probe'`, which is the key generation 1 would have had to be missing
+from. So the one diagnostic that exists reports success, and `_shutdown_loop()`
+then stops the loop with generation 1's task frozen on it holding its children --
+the exact state `disconnect_all`'s docstring says the function exists to prevent
+("the failure mode is orphaned subprocesses accumulating across sessions").
+
+**Unreachable today, and that is stated rather than hidden:** `grep -rn
+"connect_all" --include=*.py` outside `tests/` and `mcp_client/` returns exactly
+one call site, `main.py:2310`, reached once per launch. There is no second-connect
+path in production. What makes it worth recording is which future makes it live:
+F7 (`docs/ROADMAP_v2.md:3056`) says "runtime `/mcp` management is recorded as a
+candidate future section, deliberately not built here." Runtime MCP management is
+reconnect, and reconnect is this.
+
+**Shape:** make a second `connect_all` on a live client either raise or
+disconnect first -- a guard on `self._task is not None` is enough, and raising is
+the better half of D24's trade here, since silently discarding a generation of
+child processes is the failure that cannot be seen. Separately,
+`disconnect_all` should clear `self._closed` along with `self.clients` and
+`self._catalogs` at `:522-524`; leaving it is what makes the straggler check
+unable to see a second cycle. If F7 is ever built, the straggler set needs a key
+that is not the server name.
+
+**Not:** building reconnect or the `/mcp` command F7 defers; anything about
+`_ensure_loop`/`_shutdown_loop`'s module-level globals, which are a related
+single-instance assumption and would be the same future section's problem.
+
+## 66. A `_blocking_modal` comment states a park that does not happen (open, deferred batch 138)
+
+**S14-07, severity S4, `coherence`, textual 8.2.8.** `tui/app.py:4214-4221`, the
+comment above `_blocking_modal`'s `set_blocked` call, states as a measurement:
+
+> DIRECT, never call_from_thread: this runs on a worker, and a quitting app has
+> no message pump left to marshal into -- measured, that parks the worker
+> forever and breaks the shutdown release this method exists to keep working
+
+and the next statement, `:4223`, marshals through `call_from_thread` anyway.
+Driven: a worker that marshals after an unhandled UI exception has torn the app
+down gets `RuntimeError` back **immediately** -- `raised RuntimeError after
+0.00s` -- because `_loop` is None by then (`textual/app.py:1818`, reset at
+`:2303`). It does not park. There is a narrower window, between the pump stopping
+and `_shutdown()` finishing, in which the loop is still running and the marshal
+would instead succeed against a dying app; no case was found in which it parks.
+
+The conclusion the comment draws is still correct, for a reason it also gives
+("the meter touches no widget, so there is nothing to marshal"), so no behaviour
+follows from the error. What follows is a reading: this is the sentence someone
+consults when deciding whether the shutdown release is still load-bearing and how
+urgent a parked worker is. The comment one block up, at `:4005-4009`, is an audit
+(#108) correcting exactly that class of mistake in exactly that place. The same
+trap, fourteen lines down, still open.
+
+**This is also why the `_blocking_modal` `get()` park is the real cost and the
+marshal is not.** A fixer starting from this comment goes looking for an
+unbounded park the measurement says is not there, and the 600 s on `channel.get`
+is one line further on.
+
+**Shape:** narrow the sentence to what is measurable -- a marshal after teardown
+raises, and the reason to call `set_blocked` directly is that it touches no widget
+and must not be able to fail on the shutdown path. Cite the probe's shape so the
+next reader can re-take the measurement when the textual pin moves, which is what
+D22 asks of every claim about the installed package.
+
+**Not:** changing the direct `set_blocked` call, which is right.
+
+## 67. `_cmd_secrets` says "would deadlock" where it would raise (open, deferred batch 138)
+
+**S14-08, severity S4, `coherence`, textual 8.2.8.** `tui/app.py:6520-6524`,
+`_cmd_secrets()`'s docstring: "a command handler runs on the UI THREAD, and the
+blocking asks are drained by that same thread -- so calling one here would
+deadlock the app on the first `/secrets`, not fail it."
+
+It would not deadlock. `_blocking_modal` reaches `self.call_from_thread(...)` at
+`:4223`, and textual's second guard raises at once -- `if self._thread_id ==
+threading.get_ident(): raise RuntimeError("The call_from_thread method must run
+in a different thread from the app")` (`textual/app.py:1821-1824`). The raise then
+travels out through `commands.dispatch` and, before batch 135, exited the app; it
+now reaches batch 135's containment. Either way the symptom is loud, not wedged.
+
+The command's design is right and the rule it states is the right rule; only the
+stated consequence is wrong, and it is wrong in the direction that makes the
+hazard sound unrecoverable when it is in fact loud. Worth correcting because the
+sentence is the pattern the next command author copies, and "it would fail
+loudly" versus "it would deadlock" changes whether they trust a test to catch it.
+
+**Shape:** one word -- it would *raise*. Keep the rule and keep
+`action_pick_thread` named as the pattern.
+
+**Not:** restructuring `/secrets`, which is sound.
+
+## 68. `AGENTS.md`'s `_blocking_modal` bullet is split by eight unrelated ones (open, deferred batch 138)
+
+**S14-09, severity S4, `docs-drift`.** `AGENTS.md:2673-2674` and `:2708-2711`.
+The bullet in *The response channel* that documents the TUI's one
+`_blocking_modal` opens at 2673 -- "**`tui/app.py` has one `_blocking_modal`.**
+Four asks did the same six lines," -- and ends mid-clause. Its tail is at 2708,
+after eight unrelated bullets and a heading: "and the `_permission_channel` field
+each published is what `_release_permission_channel` reaches for when the app
+exits with a modal open. It is no longer the loop's channel -- it is this app's
+parked-worker queue."
+
+So the sentence a reader meets is "Four asks did the same six lines," followed by
+"**Slice 2 -- the two tools the channel existed for.**", and the explanation of
+what the field is for appears to belong to J13's whole-list write.
+
+`AGENTS.md` is the agent-context file and `CLAUDE.md` says its decisions "have
+already been broken once by someone who reasoned from the code alone", so the one
+paragraph explaining why `_permission_channel` is a single published field is
+worth being readable -- it is the fact three other TUI-lifecycle findings all
+turn on. Nothing mechanical checks prose continuity, and item 7's narrowness rule
+("a claim earns a check by having already drifted, and only if the truth is
+something the suite can compute") says nothing should.
+
+**Shape:** move the stranded tail back onto its own bullet, above the *Slice 2*
+heading. A hand fix, not a new gate.
+
+**Not:** adding a check for it.
+
+## 69. `_ask_lock`'s no-timeout argument covers half the critical section (open, deferred batch 138)
+
+**S14-10, severity S4, `coherence`, harm `suspected`.**
+`core/interaction.py:70-77` against `tui/app.py:4223-4232`. NA12's lock
+serialises every question at the producer and is given no deadline on this
+argument:
+
+> NO TIMEOUT, deliberately. Every waiter is bounded by the holder's own deadline:
+> the TUI parks for at most ATTENDED_APPROVAL_TIMEOUT_S and a run-backed CLI
+> prompt carries the same, so the queue drains on its own.
+
+`core/interaction.ask` holds the lock across `channel.ask(request)`, which for
+this shell is `_ask_blocking` -> `ask_*_blocking` -> `_blocking_modal`. The
+timeout the argument rests on is armed at `tui/app.py:4232`, and it is reached
+only after `self.call_from_thread(self.push_screen, ...)` at `:4223` returns --
+and that call waits on `future.result()` with no timeout of its own. So the
+holder is bounded by `ATTENDED_APPROVAL_TIMEOUT_S` for the second half of
+`_blocking_modal` and by nothing at all for the first.
+
+**`suspected`: no failure path was constructed.** The post-teardown marshal
+raises rather than parking (item 66), and no reachable state was found in which
+`push_screen` fails to complete. What is demonstrated is only that the sentence's
+bound does not cover the whole section it is offered about -- and because that
+sentence is the whole reason a process-wide lock has no deadline, a reader
+checking whether NA12 can wedge the harness concludes it cannot from a premise
+covering part of the section.
+
+**Shape:** state the bound as what it is -- the holder is bounded once it is
+parked on the queue, and the marshal before it is bounded by the UI thread
+remaining responsive. If that reads too weak, the narrow fix is in the shell
+rather than the leaf module: `_blocking_modal` could do the marshal before taking
+anything NA12 cares about, or the lock could be acquired around the park alone.
+
+**Not:** adding a timeout to `_ask_lock`, which would put a `config.py` number
+into a leaf module that deliberately imports nothing first-party.
+
+## 70. Three widgets measure the terminal in characters, not cells (open, deferred batch 138)
+
+**S15-02, severity S4, `ux`.** `tui/diffs.py:95` (`wrap_source` breaks on
+`len(text)`), `tui/widgets.py:2535` (`Transcript._write_padded` pads with
+`ljust(total)`), `tui/widgets.py:986` (`AgentPanel._fit` truncates on `len`), and
+`:1160` (`SessionPanel._redraw` through the same `_fit`). For single-cell text the
+two measures coincide, which is why the suite is green. For double-width text
+they part, and the row the widget sized is not the row the terminal draws:
+
+```python
+body = chr(12354) * 20          # 20 chars, 40 cells
+rows = diffs.wrap_source(body, 20)
+assert len(rows) == 1           # len says it fits; the terminal needs 2 rows
+assert cell_len(rows[0]) == 40  # Rich soft-wraps the overflow itself
+```
+
+The padding that carries a diff row's background then lands on the first visual
+row only -- the same reason `_render_diff` pre-wraps at all -- so a wrapped
+wide-char addition renders half-green. The sidebar twin: ten wide chars (`len`
+10, `cell_len` 20) pass `_fit(text, 18)` unchanged and overflow the 18-cell box
+the panel laid out against. Controls in the same probe: the same calls with ASCII
+of equal `len` behave as labelled (a 250,000-char ASCII line wraps to 3,125 rows
+in 107 ms), so the probe discriminates the measure rather than the function.
+
+**The transcript's own streaming wrap does not share this defect** --
+`markdown.wrap_display`, `plain_wrap` and `display_len` all measure `cell_len`,
+which is how the two halves can disagree about where a row ends. That is also why
+this is not coerced upward: the path that must keep live rows equal to replayed
+rows already measures correctly, and these are diff blocks and sidebar rows
+rather than the answer stream.
+
+**Shape:** measure the three sites in cells -- `wrap_source` over `cell_len` cut
+points (it can share `markdown._cut_points` semantics without importing marks,
+since diff bodies are literal source and the cut set is every character boundary,
+which is what `plain_wrap` already does for thinking text), cell-aware padding
+instead of `ljust`, and `_fit` truncating on `cell_len` with the ellipsis still
+appended by hand (`Text.truncate()` is a no-op on a wrapped line, per batch 55's
+own note). Tests: a wide-char case beside each existing ASCII width pin,
+asserting row count, padded cell width and fitted cell width.
+
+**Not:** any change to `markdown.wrap_display`/`plain_wrap`/`display_len`, which
+are correct; font or combining-mark policy beyond `cell_len`, which is the
+terminal's own answer; truncation of diff *content*, where the 40-row cap stays
+the bound.
+
+## 71. A live chat turn shows neither reasoning nor tool lines; a replay of it shows both (open, deferred batch 138)
+
+**S16-04, severity S4, `ux`.** `main.py:384-415` (`run_chat` drains through
+`run_to_completion()` and prints notices plus `Agent:` text only), against
+`:100-112` (replay prints `Thinking:` and tool lines) and `:1706-1738` (the
+research CLI prints pass, tool, activity and trace lines live). Three renderings
+of one run: live chat shows the answer only, replayed chat shows the answer plus
+the Thinking block plus the redacted tool lines, live research shows tool lines
+and volume but no content.
+
+`core/events.py:81-86` explicitly permits a draining surface to ignore `retract`
+("still correct about failures") -- that is the documented silence. There is no
+equivalent sentence for `thinking_delta` or tool-call progress on the headless
+path, so this silence is accidental rather than decided. D12 (the CLI is a
+permanent fallback, never silently less capable where it matters) and T5 (both
+shells replay through `core/replay.py` so they cannot disagree about what may be
+shown) are the invariants: live chat and replayed chat already disagree inside
+one shell, and chat-live and research-live disagree about tool visibility.
+
+S4 because nothing executes wrongly and nothing is lost -- the archive has
+everything and replay proves it. Deferred because the fix is a CLI-surface design
+choice and the current behaviour is merely quiet, never incorrect.
+
+**Shape:** either stream chat turns (iterate the loop generator, print tool-call
+one-liners and a thinking indicator, mirroring `run_research`'s volume-only rule
+for passes) or record the quiet as deliberate beside the `retract` sentence in
+`core/events.py` and the `_run()` drain comment. `main.py` only, plus tests
+asserting a live tool line and no live thinking content.
+
+**Not:** changing what is persisted or replay policy (T3/T4 stay); `retract`
+handling in the CLI, explicitly not required; any TUI work. Do not leak thinking
+content into research-style volume lines.
+
+## 72. The existing hub document is read, diffed, embedded and printed whole (open, deferred batch 138)
+
+**S17-03, severity S3, `performance`.** `project_init/generator.py:171-186`
+(`_read_existing_context`), `:279-288` (`build_diff`), `:387-396` (`say(diff)`),
+`:189-219` (`_task` embeds the whole file), called from `:366-370`. There is no
+bound anywhere on this path, while every other read on it is capped: tool reads at
+`INIT_READ_CHARS` (20 KB, `tools/builtin/project_docs.py:201,288`), manifest
+headings at 4 KB (`manifest.py:190-194`), fact files at 64 KB (`manifest.py:91-93,
+337-348`). The direct `open().read()` bypasses all of it. Measured on a
+5,400,009-byte `AGENTS.md` in a temp project:
+
+```
+FILE_BYTES: 5400009
+READ_LEN:   5400008
+DIFF_LEN:   5400079
+TASK_LEN:   5400283
+```
+
+No truncation at any stage. Control: `read_project_doc` on the same file returns
+at most 20,000 characters with a resume offset. Trigger is `/init` in a project
+whose hub is huge -- a hostile clone, or a legitimate 5 MB hand-grown
+`AGENTS.md`. The cost is paid three times over (model input billing, diff
+compute, transcript render) with no notice and no cap, and the megabyte-scale row
+into `RichLog`/stdout is the TUI freeze shape, arriving through a shell command.
+
+Deferred because the fix needs a design choice this review should not pre-empt:
+the revise-instruction arguably needs the whole file, so "cap like a tool read"
+changes what the model sees. The honest fix is probably cap-plus-disclosure --
+read the head, state the cut in both the task and the shown diff -- and that
+wording belongs to the fixer.
+
+**Shape:** bound the existing-context read with an explicit "truncated, N of M
+characters shown" carried into both `_task` and the shown diff, or page it
+through the same offset mechanism the tool offers. Test: a hub above the cap
+produces a bounded task, a bounded shown diff and a notice stating the cut;
+below the cap, byte-identical to today.
+
+**Not:** changing tool read caps or stub rendering; a manifest listing cap, since
+each listing line is already small and the count is bounded by the directory
+rather than by this file.
+
+## 73. `_tree` is the one manifest section with no second screen (open, deferred batch 138)
+
+**S17-04, severity S4, `coherence`.** `project_init/manifest.py:147-160`
+(`_SECRET_FILENAMES`, `_is_secret`), `:247-271` (`_tree`), `:231-236` (the
+comment). `_root_documents` asks the tool's own predicate; the tree asks only
+"not dotted, not `_is_secret`", and `_is_secret` covers five exact names plus
+`.env*`. The comment claims this "stops a credential FILENAME (which can name a
+service, an account or an environment) reaching the model at all". It stops five
+of them. Measured, one file per name in a temp project:
+
+```
+TREE_HAS_ID_RSA: True        TREE_HAS_PEM: True
+TREE_HAS_APIKEY: True        TREE_HAS_SECRET_KEY: True
+TREE_HAS_SECRETS_TXT: True   TREE_HAS_ENV: False
+READABLE: id_rsa False   deploy-key.pem False   secret.key False
+```
+
+So `.env*` and the five named files are screened, everything else is listed, and
+none of it is readable -- the read side holds, which caps the harm at filenames.
+The shape-9 version of the defect rather than a live leak.
+
+`secrets.txt` being both listed and readable is the locked I2 tradeoff (`.txt` is
+a readable extension by decision, not oversight) and is deliberately not filed;
+operators should not keep secrets in `.txt`.
+
+**Shape:** either extend the screen to the conventional secret shapes (key
+material suffixes, bare `id_rsa`/`id_ed25519`, `*.key`) with a test per shape, or
+narrow the comment to name exactly the set it covers.
+
+**Not:** changing what is readable; content redaction; `_DOC_EXTENSIONS`.
+
+## 74. Two headless runs build prompts with the attended catalog defaults (open, deferred batch 138)
+
+**S17-06, severity S4, `test-quality`.** `project_init/generator.py:235-237` and
+`core/compaction.py:1267-1268` call `system_prompt_for` with bare defaults, while
+`core/loop.py:2040-2042` (pass entry), `core/reasoning/orchestrator.py:613-614`
+(JSON retry), `core/loop.py:2130-2137` (chat), `agents/subagent_tool.py:281-284`
+(child) and `core/reasoning/review.py:545-548` (reviewer) all forward
+`advertisement_facts`. `with_catalogs` defaults are the attended answer
+(`callable_only=False, granted=None`, `system_prompts.py:242-248`), and both the
+initializer and the compactor run are headless in the loop's sense.
+
+Nothing diverges today because both agents' contexts already exclude both catalog
+tools -- `initializer.md` declares `allowed_tools: ["read_project_doc"]` and
+`compactor.md` declares `[]` -- so each catalog is suppressed on the context axis
+before headlessness matters. But that makes #68's fix rest on the *contents* of
+two `.md` frontmatters, and no test drives either prompt under headless facts:
+widening either `allowed_tools` to admit a gated tool silently reopens #68 ("819
+characters instructing the model to use what the run hid") on exactly these two
+runs. The reviewer was already moved to forwarding for this reason
+(`review.py:137-143`: "the day somebody widens pipeline-reviewer's
+allowed_tools"); these two were not. An unpinned invariant guarding a previously
+paid-for S2.
+
+**Shape:** forward headless facts at both call sites the way the reviewer does --
+or explicitly document the reliance on context with a test asserting both
+catalogs stay suppressed for these two agents under headless facts, so a widening
+goes red. Test: build each prompt with `callable_only=True` and assert no
+`load_skill`/`spawn_subagent` invitation survives.
+
+**Not:** changing `with_catalogs` defaults, which the TUI call sites depend on;
+changing either agent's tools.
+
+## 75. The issue template and the prose that governs it are checked against neither (open, deferred batch 138)
+
+**S18-10, severity S4, `docs-drift`.** `.github/ISSUE_TEMPLATE/audit-finding.yml`
+against `docs/CONTRIBUTING.md:78-82,140`. `:140` states the relationship and the
+obligation -- "section *Issue format* in this file is the prose source; the
+templates are its machine-readable copy. **Change both together, or the taxonomy
+drifts.**" Nothing checks either direction, and three divergences exist:
+
+1. The prose's label rule says `enhancement` is where "most open findings sit".
+   Across the 126 severity-tagged issues, `S3` + `bug` is **51** -- the largest
+   single combination -- against `S3` + `enhancement` at 9 and `S3` +
+   `documentation` at 16, with four carrying no label.
+2. The corpus contains an `[S0]` severity and a `complexity` area the template's
+   dropdowns do not offer. Both appear only on issues predating the template
+   (added 2026-08-27), which is the defensible answer, and it is written down
+   nowhere.
+3. `docs/CONTRIBUTING.md:78` makes a label part of the format -- "**Labels -- set
+   one:**", three options and a rule for choosing -- and `audit-finding.yml`
+   declares no `labels:` key at all, while both its siblings do (`docs.yml:4`,
+   `enhancement.yml:4`). So the one form whose findings carry a severity is the
+   one that applies no label, which is consistent with the corpus's four
+   unlabelled issues and means the prose's label rule has no machine-readable
+   copy at all rather than a drifting one.
+
+The drift the quoted sentence predicts has happened in the direction it did not
+anticipate: not the template falling behind the prose, but the prose falling
+behind what people filed. Nothing is wrong on any path -- a filer who picks the
+wrong label is relabelled, which `docs/CONTRIBUTING.md:115` explicitly invites --
+which is the S4 line.
+
+**Deferred because the correction needs an owner's judgement.** The prose's label
+rule is *prescriptive* and the corpus is *descriptive*, and whether 51 `S3`+`bug`
+issues mean the rule is wrong or that the rule was not followed is a decision
+about how this project wants to label things.
+
+**Shape:** three parts, smallest first. Add `labels: ["bug"]` or
+no-label-by-design to `audit-finding.yml`, whichever the owner's answer is, so
+the prose rule has a machine-readable copy. Write the `[S0]`/`complexity` answer
+into `docs/CONTRIBUTING.md` *Issue format* as two sentences (both predate the
+template, the template is the arbiter, use `S1` and `coherence`). Then reconcile
+the label rule with the corpus in whichever direction the owner picks. The check
+that would stop a recurrence belongs in `tests/test_docs_consistency.py`: parse
+the two dropdowns out of `audit-finding.yml` and assert the severity and area
+lists match the enumerations in the prose. That covers the
+template-against-prose half mechanically; the prose-against-corpus half cannot be
+checked offline and should not be -- it is a judgement, not a count.
+
+**Not:** changing the severity or area enumerations, which match between prose
+and template today and are the half of the taxonomy that has not drifted;
+`config.yml`'s contact links or the PR template, both correct.
+
+## 76. The CodeQL job contains no mechanism that can fail it (open, deferred batch 138)
+
+**S18-11, severity S4, `coherence`, harm `suspected`.**
+`.github/workflows/codeql.yml:5-8,47-78`. The header states the intent --
+"security red blocks the change that introduced it; quality red on the weekly run
+is triaged, not reverted around" -- and `github/codeql-action/analyze@v3` uploads
+SARIF to code scanning, has no fail-on-severity input, and exits 0 whatever the
+alerts say. The blocking is done by GitHub's own "Code scanning results" check,
+which is produced **on pull requests only** and whose failure threshold is a
+repository setting. On a direct push -- which is how this branch was built, 91
+commits -- alerts are recorded and nothing fails. Every `codeql` run in the
+visible history is a `push` run, and every one is `success`.
+
+So the header's first clause is true at most for pull requests. PRs are used here
+(199 of them), which is why this is small, but it rests entirely on a setting
+outside the repository and nothing in the tree records that it is relied on. This
+scope's first question is "does each job actually FAIL the build when its tool
+finds something?", and CodeQL is the one job whose answer is "not by itself"; the
+other six answer yes and were each checked.
+
+**`suspected` deliberately:** whether the PR check is configured to fail could
+not be established. `gh api repos/.../branches/main/protection` returns `403
+Resource not accessible by personal access token`, and the code-scanning
+default-setup configuration is not readable either. The claim is bounded to what
+was measured -- the workflow contains no gating and push runs cannot fail -- and
+the rest is for the owner to confirm in two clicks.
+
+**Shape:** do not add tooling. Add two sentences to `codeql.yml`'s header saying
+where the blocking actually comes from: that `analyze` only uploads, that the
+failing check is GitHub's "Code scanning results" on pull requests, and that its
+threshold is a repository setting -- so a future reader does not look for a flag
+that does not exist. Then confirm the setting (Settings -> Code security -> Code
+scanning -> "Check failure" severity) and name the chosen threshold in that
+comment, so it is recorded in the tree.
+
+**Not:** a post-`analyze` step querying the code-scanning alerts API to fail push
+runs. It is the only route and is more moving parts than S4 is worth;
+recommended against. The security/quality split itself is sound.
+
+## 77. The suite's one `integration` test runs in no workflow (open, deferred batch 138)
+
+**S19-06, severity S3, `test-quality`.** `.github/workflows/tests.yml:20-23`
+against `pytest.ini:3-6`. The workflow says:
+
+```
+# `-m integration` is deliberately NOT run: pytest.ini already excludes it
+# from the default invocation, and it currently fails for an unrelated reason
+# (issue #10 -- the child-process detector greps a truncated `ps` line). Add
+# it here when #10 closes.
+```
+
+Issue #10 closed 2026-08-24, and the fix is in the tree at
+`tests/test_mcp_integration.py:68-76`, whose comment opens "#10. 'ww' disables
+procps' line-width heuristic". The condition the workflow set for adding the job
+was met and the job was not added. Checked across every workflow, not only this
+one: `compat.yml:67`, `:91` and `publish.yml:88` all take `pytest.ini`'s `-m "not
+integration"`, and nothing anywhere passes `-m integration`.
+
+What is therefore unobserved is stated by `pytest.ini:3-6` itself: "the one
+integration test spawns a real stdio MCP server to prove §17 AC8 (no orphaned
+children), which cannot be shown in-process."
+`tests/test_mcp_integration.py`'s docstring is more specific -- "the failure mode
+is orphaned subprocesses accumulating across sessions. That is invisible to every
+other test here." So the one guarantee that cannot be shown in-process is pinned
+by exactly one test that runs only when a human types the command.
+
+Shape 2 applied to a test rather than a feature. S3 because nothing is wrong
+today and the property is at least checkable on demand, with the in-memory
+transport in `test_mcp_client.py` covering the bridge, normalisation and the
+cancel-scope fix. Deferred because adding a CI job that spawns real subprocesses
+is a decision about what CI is allowed to do, not a repair -- item 18 (*CI
+workflow follow-ups*, open) is the natural home, and this is reported separately
+only because none of its four bullets mentions the `integration` marker.
+
+**The fixture is not the work**, which was checked so a fixer knows:
+`tests/stdio_server_fixture.py`'s three lines of API -- `from mcp.server import
+MCPServer`, `@mcp.tool()`, `mcp.run()` -- all resolve against the pinned
+`mcp==2.0.0`, and `run()` defaults to `stdio`, the transport the test's
+`ServerConfig` asks for.
+
+**Shape:** a separate job in `tests.yml`, not a flag on the existing one, because
+that job's whole premise is `pytest.ini:3`'s "no process, no socket" and mixing
+them loses the statement:
+
+```
+  mcp-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps: <the same four fresh-clone steps>
+      - run: python -m pytest -m integration -q -n0
+```
+
+`-n0` because the suite is one test and xdist would spawn a worker per core for
+it. The by-hand equivalent is `python -m pytest -m integration
+tests/test_mcp_integration.py -q -n0 -p no:cacheprovider`. Then replace
+`tests.yml:20-23`'s comment with a sentence saying the job exists. **If the
+decision is that CI must not spawn subprocesses, the comment still has to
+change** -- it currently gives a reason that has expired, which is worse than
+giving the real one.
+
+**Not:** moving the test out of the `integration` marker. `pytest.ini:3-6`'s
+offline default is a locked decision and the marker is what implements it.
+
+## 78. `FakeStorage` makes eleven mirror claims and two are compared (open, deferred batch 138)
+
+**S19-07, severity S3, `test-quality`.** `tests/test_fake_storage_mirror.py:126`
+and `:167` against `tests/conftest.py:1251` (`pinned_through`) and `:1275`
+(`_turn_opener_index`). `FakeStorage` makes about eleven separate claims, in its
+own docstrings, that a method mirrors a named function in `storage.py`. The file
+issue #123 created to turn those claims into checks compares exactly two:
+`_reconstruct` against `storage._to_neutral`, and `_split_at` against
+`storage._split_at`.
+
+Unchecked, in rough order of how much algorithm each duplicates:
+`pinned_through` (`conftest.py:1251`, claiming it mirrors production "INCLUDING
+the tool-result re-inclusion that makes the pinned span whole (#88) and batch
+120's turn opener"), `_turn_opener_index` (`:1275`), `mark_turn_failed`
+(`:1316`), `list_threads`/`_activity` (`:1137`, claiming the COALESCE ordering
+"exactly as production's ORDER BY does"), `child_threads` (`:1100`, with the id
+tiebreaker), `list_memories` (`:1341`, AC6 filtering), `history_through`
+(`:1288`), `thread_preview` (`:1170`) and the three `#31` plain-dict claims.
+
+The two in the middle are the ones worth naming, because they are not shape
+claims -- they are transcriptions of a published algorithm.
+`tests/conftest.py:1251-1273` is a line-for-line copy of `storage.py:814-889`:
+the same `keep` list, the same `have`/`need` sets, the same `not pinned and role
+== "tool"` re-inclusion, the same `sorted(set(keep))`. `:1275-1286` is a
+line-for-line copy of `storage.py:786-812`. Diffed by hand, both agree today, so
+this is a missing guard and not a live divergence.
+
+The fake's own docstring states the invariant the arrangement breaks, about
+itself: "a fake that returns the pinned rows alone cannot represent the orphaned
+`tool_use` that fix exists to prevent ... and **a test passing against it would
+prove only that the fake and the code agree.**" It avoided that by copying the
+algorithm -- which makes "the fake and the code agree" true only for as long as
+someone keeps copying. `AGENTS.md:2865` makes it a convention ("if you change
+`storage.py`'s reconstruction, change the fake identically") and
+`test_fake_storage_mirror.py:22-25` says why a convention is not enough: "this
+file is the comparison. It turns a convention somebody has to remember into a
+check." It turned two of eleven.
+
+The measurement that makes this more than tidiness is #123's own, quoted at
+`:12-16`: mutating `_reconstruct`'s assistant branch to emit `"tool_calls": []`
+survived the whole suite (1406 passed), and so did `_split_at` returning
+`len(rows)` for an unfound watermark. There is no reason to expect a mutation of
+`pinned_through`'s re-inclusion loop to behave differently, and the defect it
+would reintroduce is audit #88 -- an assistant turn reaching the provider with a
+`tool_calls` block whose matching `tool` row was left behind, which
+`storage.py:839` calls "an HTTP 400 on Anthropic -- on a thread that was working
+a moment ago."
+
+S3 and not S2 because the two implementations agree today and the real one is
+additionally pinned against real SQLite in `test_storage_e2e.py`. Deferred
+because this is new test code with a negative control per method, which is a
+batch rather than a patch.
+
+**Shape:** a third class in `test_fake_storage_mirror.py`, using the shape that
+file already chose and for its stated reason ("pure functions -- no Session, no
+database"): `storage._turn_opener_index` is pure, so it compares directly over a
+table of `(rows, span)` pairs -- turn-aligned, mid-turn, empty span, span ==
+rows, and a span whose kept prefix has no `user` row at all.
+`storage.pinned_through` is not pure (it reads `_ordered_rows`), so the honest
+comparison extracts the keep-set computation into a module-level helper taking
+`(rows, span, neutral)` -- the same move `_to_neutral` and `_split_at` already
+represent, and what makes them comparable. The alternative, driving both sides
+through `test_storage_e2e.py`'s `real_storage`, needs no production change but
+puts the comparison in the module-scoped-fixture file, which `pytest.ini:54-57`
+constrains. For the remaining nine, add comparisons only where the fake
+re-derives logic (`list_threads`' COALESCE, `child_threads`' tiebreaker,
+`list_memories`' AC6 filter) and leave the `#31` plain-dict claims alone -- the
+existing reconstruction comparison covers those transitively.
+
+**Not:** `save_checkpoint`'s divergence. `AGENTS.md:2865-2867` names it as
+deliberately current and argues the cost is zero today because the guard is
+pinned against real SQLite and the fake's version is only ever used to arrange a
+compacted view. That argument is sound and is not reopened.
+
+## 79. `test_the_tree_names_every_production_module` quantifies over a typed list (open, deferred batch 138)
+
+**S19-08, severity S4, `test-quality`.** `tests/test_docs_consistency.py:378-430`.
+The gate iterates `_MAPPED_DIRS`, sixteen directory names someone typed:
+
+```python
+_MAPPED_DIRS = (
+    ".", "bin", "scripts", "core", "core/reasoning", "prompts", "security",
+    "safety", "mcp_client", "agents", "skills", "memories", "project_init",
+    "tui", "tools", "tools/builtin",
+)
+```
+
+A module in a directory the tuple does not name is never looked at, so the gate
+reports "every production module is in the tree" while quantifying over a
+hand-written list. The failure path is ordinary: add `plugins/loader.py`, forget
+the tree entry in `docs/ARCHITECTURE.md`, forget `_MAPPED_DIRS`, and the gate
+stays green -- which is the state the production half was in before batch 51
+added this test, when it "had quietly lost eight modules and two whole
+directories ... and bin/ and scripts/ entirely" (`:390-396`).
+
+**Measured: there is no live gap.** Walking the worktree with the same
+`_SKIP_DIRS` and excluding `tests/`, every directory holding a non-`__init__.py`
+`.py` or `.mjs` is already in the tuple. The control that proves the probe can
+see a directory when there is one: removing `"tools/builtin"` from the probe's
+copy makes it report that directory with fifteen modules. So this is a latent
+hole in a gate, not a missing module.
+
+The file's own header states the rule it breaks: "every check here compares a
+document against a live value -- the collected session, the registry, the
+permission dataclasses -- **never against another hand-written number.**" The
+sibling gate one function up shows what "live" means here:
+`test_the_tree_states_a_correct_count_for_every_collected_test_file` takes its
+domain from `_collected_nodeids(request)`, so a new test file cannot hide from it.
+The production half took a list instead.
+
+**Shape:** derive the directory set from the walk and keep the tuple as an
+*exclusion* list rather than an inclusion one -- walk `_walk_project()`, skip
+`tests/`, require a tree entry for every `.py`/`.mjs` found, with a short named
+allowlist for anything deliberately unlisted. That inverts the failure: an
+unlisted directory becomes a test failure naming it. If the tuple is kept, the
+cheap mitigation is to assert the reach -- `assert not <dirs with production
+files outside the tuple>`, which is four lines of the probe above.
+
+**Not:** auditing `docs/ARCHITECTURE.md`'s tree contents, a document-wide sweep
+already covered for the test half in both directions; the fence split at `:406`,
+which reads the document's first fenced block and would be a finding if the
+`assert entries` guard at `:409` were absent -- it is present, so a moved or
+reformatted tree fails loudly.
+
+## 80. Five once-per-process globals are reset only by local fixtures (open, deferred batch 138)
+
+**S19-09, severity S4, `test-quality`, harm `suspected`.**
+`tests/conftest.py:462` (`clear_client_cache`) and `:681`
+(`isolate_sandbox_probes`). That second fixture is the one batch 107 wrote after
+measuring that the suite's result depended on whether Docker Desktop happened to
+be running, and its docstring states the general problem and, in the same breath,
+that the problem was general and the fix was not: "the only resets were fixtures
+scoped to single classes in the files that test the probes themselves ... **with
+nothing applying it generally.**"
+
+Five module globals are still in exactly that state, enumerated by parsing every
+production module for module-level mutable assignments and cross-checking against
+the ten autouse fixtures:
+
+| global | what it holds | reset by |
+|---|---|---|
+| `core/client.py:556 _effort_levels_cache` | `(provider, model) -> effort levels`, once per process | `test_client_effort.py:43`, `test_context_window.py:37`, `test_sdk_conformance.py:250` -- local only |
+| `core/compaction.py:121 _context_window_warned` | models already warned about | `test_compaction.py:64` only |
+| `core/loop.py:95 _headless_notices_shown` | hidden-tool sets already logged | `test_agents.py:271`, `:298` only |
+| `security/permissions.py:96 _dynamic_approval_defaults` | D15 runtime per-tool approval defaults | `test_mcp_client.py:107` only |
+| `security/sandbox.py:1323 _sudo_rejected` | backends whose stored sudo password was refused | `test_sudo.py:116`, `:118`, `:862` only |
+
+Eight other globals of the same kind *are* reset generally, which is what makes
+these five stand out rather than being an absence of policy: `_client_cache`,
+`_context_window_cache`, `_context_window_failures` and `core.session`'s
+`_overrides` by `clear_client_cache`; `config_schema._cached` by
+`restore_config_schema_cache`; the loader state by `clear_config_loader_state`;
+`scholar._cache` by `clear_scholar_cache`; and `arxiv._cache`,
+`web_search._cache`, `fetch_url._body_cache` by `clear_network_tool_caches`.
+
+**The sharpest instance is inside `clear_client_cache` itself.** It clears three
+of `core/client.py`'s four once-per-process caches by name and misses the fourth,
+declared six lines above one of the three it does clear.
+`core/client.py:557` describes `_effort_levels_cache` as "populated lazily; the
+Anthropic branch queries the API once per process rather than per call", and
+`:563-565` describes `_context_window_cache` as "same lazy, once-per-process
+posture as the effort cache above". Two caches with one stated posture, and the
+fixture that exists to stop that posture leaking clears one. The leak the fixture
+names -- "so a previous test's queued fake responses, or a window it primed, do
+not leak into the next one" -- is available through the cache it misses:
+`clear_client_cache` drops `_client_cache` so the next test builds a fresh fake
+client, but the effort answer the *previous* fake client produced is still cached
+under `(provider, model)` and is returned without the new client being asked.
+
+The harm is the one batch 107 measured for the sixth global and
+`tests/test_probe_isolation.py` states as general: "collection order decides who
+runs the one live probe", so "which tests fail there is decided by collection
+order" and "adding a test file moved the cohort". Under `--dist loadscope` the
+cohort is also decided by which groups a worker happens to take, which
+`pytest.ini:36` and `AGENTS.md:68` both call a "scheduling lottery".
+
+**`suspected`: no currently-failing path was constructed.** Each of the five has
+a local fixture in the file that tests it, so the tests that assert on
+first-time behaviour are protected today. What is unprotected is any future test
+elsewhere -- and for `_effort_levels_cache`, any test anywhere that drives the
+real `effort_for` and then expects a differently-configured fake client to be
+asked. Twelve test files reference `effort_for` and most patch it; it was not
+established that any reaches the real function.
+
+**Shape:** two steps, cheapest first. (1) Add
+`core.client._effort_levels_cache.clear()` to `clear_client_cache`'s two halves
+and name the fourth cache in its docstring -- two lines, and it closes the one
+instance where a fixture already owns the file and misses a sibling. (2) For the
+other four, `isolate_sandbox_probes` is the precedent: one autouse fixture that
+resets process-scoped memos, each entry carrying the reason it is there. The
+argument for doing it generally is the one that fixture already made and won; the
+argument against doing all four at once is that each has a *meaning* --
+`_sudo_rejected` is a security quarantine, and `_headless_notices_shown` is
+deliberately keyed on the hidden set rather than on a flag
+(`core/loop.py:88-94`) -- so a blanket reset should be a reviewed list, not a
+loop over module attributes. A gate is also available and in this project's
+idiom: a test asserting that every once-per-process memo named in a list is
+cleared by an autouse fixture, the way `test_no_test_module_defines_its_own_settle`
+did for `settle`. That is a larger decision than the fix.
+
+**Not:** a reset for `prompts/system_prompts.py:12 passes_source_files` (loaded
+once from disk, never mutated per test) or `mcp_client/registration.py:52
+_registered` (checked: no test calls `register_all` against the global registry,
+so it cannot leak).
+
+## 81. Twenty-four env-gated skips are the guarantees nobody here has observed (open, deferred batch 138)
+
+**S19-10, severity S3, `test-quality`.** `tests/test_ssh_backend.py:72`,
+`tests/test_sudo.py:82`, `tests/test_wsl_backend.py:66`, against
+`.github/workflows/tests.yml` and `compat.yml`. Driven:
+
+```
+$ python -m pytest tests/test_wsl_backend.py tests/test_ssh_backend.py \
+      tests/test_sudo.py -n0 -p no:cacheprovider -q -rs
+409 passed, 24 skipped in 32.08s
+```
+
+Every one of the 24 is env-gated on an `all()` over variables **no workflow
+sets** -- `grep -rn "VEN_TEST_" .github/workflows/` returns nothing. Of the 34
+skip sites in the suite, the platform ones are covered by the union of two
+workflows (`tests.yml` runs everything on `ubuntu-latest`; `compat.yml`'s
+`windows-subset` runs `test_shell.py` and `test_posture.py` on
+`windows-latest`), and the by-design ones in `test_docs_consistency.py` are
+narrowed invocations. The three uncovered rows are the 18 env-gated SSH skips,
+the 6 env-gated sudo-over-SSH skips, and the 3 gated on a live `wsl.exe` probe
+that short-circuits on non-Windows.
+
+`tests/conftest.py:639-670`'s `_sandbox_probe_defaults` closes the other door on
+the same guarantees: the autouse `isolate_sandbox_probes` installs
+`WslProbe(None, "...did not answer, so WSL is not installed...")` and
+`SshProbe(None, reason="no host is configured...")` for **every** test, with the
+stated reason that "WSL and SSH go the other way for the same reason -- off by
+default in `config.yaml`, so 'nothing configured' is the state the suite
+assumes." That is a correct default, and it means the suite's other ~5,900 tests
+cannot observe a configured WSL or SSH backend either. So the live paths of
+ROADMAP_v3 §49 slices 3, 4 and 5a -- SS35-SS64, two whole execution backends, an
+SSH credential store and sudo-over-SSH -- are covered by 24 tests gated on
+variables nothing sets, plus 3 gated on a background service, inside a suite that
+otherwise pins the "nothing configured" branch everywhere.
+
+S3 because these are guards that do not guard on a reachable shipped path --
+`config.yaml` can turn either backend on. Not S2, because nothing has been shown
+to be wrong and the 409 passing mocked tests do cover argv construction, path
+translation and the notices. Not S4, because the shape is "a set of guarantees
+nobody has observed" rather than a stale claim. Deferred because standing up an
+SSH host and a WSL distro in CI is an infrastructure decision; item 18 is where
+CI follow-ups live.
+
+**Shape:** the useful output is a written statement rather than a test, because
+the fix is infrastructure. (1) Write the inventory where a reader will meet it:
+`AGENTS.md`'s Testing section states the offline contract and the fresh-clone
+requirement but not that 24 backend tests are env-gated and no automatic run sets
+the variables. One paragraph naming the variables, the count and what is
+therefore unverified turns a silent skip into a known gap -- which is what this
+project did for the `markitdown` and `providers.json` cases. (2) If any of it is
+to be covered, SSH is the cheap half: an `ubuntu-latest` job can `ssh-keygen`,
+add its own key to `~/.ssh/authorized_keys` and point `VEN_TEST_SSH_*` at
+`localhost`, exercising the real client, the real host-key handling and the real
+path translation without a second machine. WSL needs a `windows-latest` runner
+with a distro installed and is a larger decision.
+
+**Not:** turning the env gates into hard failures. A contributor without an SSH
+host must still be able to run the suite and the skip is the right mechanism;
+what is missing is that nothing in CI ever supplies the variables.
+
+## 82. The approval-timeout fixture is pinned by its value, not its effect (open, deferred batch 138)
+
+**S19-11, severity S4, `test-quality`.** `tests/conftest.py:353-373`
+(`shrink_approval_timeout`) and `tests/test_pilot_wait.py:287-302`, against
+`tui/app.py:4232`. The autouse fixture that stops an unanswered modal from
+stalling the suite for ten minutes sets `config.ATTENDED_APPROVAL_TIMEOUT_S = 5`,
+and its docstring states the contract the whole arrangement rests on: "**read at
+call time, so patching the module attribute is enough.** Nothing asserts on the
+value or on the rendered '600s' string." The pin is:
+
+```python
+assert config.ATTENDED_APPROVAL_TIMEOUT_S <= 10, (
+    "an unanswered modal will stall the suite instead of failing it -- "
+    "is the shrink_approval_timeout fixture still autouse?")
+```
+
+That asserts the fixture **ran**. It does not assert that the production reader
+at `tui/app.py:4232` -- `answer = channel.get(timeout=config.ATTENDED_APPROVAL_TIMEOUT_S)`
+-- still reads the attribute at call time. Move that expression into a default
+argument on the path to `_blocking_modal` and the default binds at import, before
+any fixture runs: the fixture keeps setting the attribute, the pin keeps passing,
+and an unanswered modal goes back to parking for 600 seconds.
+
+**That is not a hypothetical mutation.** It is recorded twice as having actually
+happened, in the sibling reader. `docs/ARCHITECTURE.md` §11: "**a default
+argument is evaluated at import, which can silently disable a fixture.** ...
+writing `timeout=config.ATTENDED_APPROVAL_TIMEOUT_S` as a *default* takes that
+away without turning anything red -- **the fixture keeps running and stops
+working.**" `docs/ROADMAP_v2.md:2049` (N2) says what was done: "the default is a
+**sentinel**, not the config constant." So `main.py:548` got a `_DEFAULT_TIMEOUT`
+sentinel resolved in the body *and* a test stating the contract. The TUI reader --
+the one the fixture's docstring actually names, and the one whose 600 s park
+`docs/ARCHITECTURE.md:818` calls "indistinguishable from forever under pytest" --
+got neither. The consequence is the failure mode `:1860` describes: mutations and
+dismissal bugs present as a hung suite rather than a red test, which batch 23
+paid for twice.
+
+S4 because nothing is wrong today and the harm is a loss of failure legibility
+rather than of correctness. It is here because the fixture's own docstring makes
+a claim about production that nothing checks, and because the exact regression has
+a recorded precedent one module over.
+
+**Shape:** assert the effect rather than the value, in the test that already owns
+this fixture -- patch `config.ATTENDED_APPROVAL_TIMEOUT_S` to ~0.05, call the
+real `_blocking_modal` path against a channel nothing puts to, and assert it
+returned in well under a second. A `queue.Empty` arriving promptly is the
+observable; a 600 s park is the regression. The existing value assertion stays --
+it answers a different question ("is the fixture still autouse") and its failure
+message is the right one for that. If driving the modal is too heavy for
+`test_pilot_wait.py`, the structural alternative is to copy N2's remedy: give
+`_blocking_modal` a `_DEFAULT_TIMEOUT` sentinel resolved in the body and pin
+*that* with the same test N2 wrote for `main.py`. That removes the mutation
+rather than detecting it, which is the better trade and is already this project's
+chosen answer for the sibling reader.
+
+**Not:** reviewing `_blocking_modal`'s dismissal paths, the `on_timeout`
+narration, or whether every dismissal produces a boolean -- item 5 is open as
+that brief. The `settle`/`pump` pair was read and is sound.
+
+## 83. The spawn sign-off has no reachable configuration on the shipped roster (open, found in batch 137, filed batch 138)
+
+**Not from any report.** This one came out of the batch-137 fix pass (A16,
+`spawnable` becoming a refusal), when three tests broke because they drove
+`subagent_tool.run` with `grill-me` and retargeting them had nowhere to go.
+Severity `S3`, `coherence`: a consent mechanism that cannot be reached by the
+configuration that ships. It was true before batch 137 and is a property of the
+shipped whitelists rather than of A16.
+
+**Measured, after the triage note for it got the mechanism wrong.** That note
+said the gated tools a sign-off would offer "are globally denied". They are not.
+Driven against the real roster with `HOME` redirected:
+
+```
+SPAWNABLE: 6 -> ['build', 'explore', 'general', 'review', 'test', 'writer']
+candidate_approvals: []  for all six
+WIDE-OPEN CONTEXT candidate_approvals: ['write_project_doc']
+  write_project_doc is_tool_allowed(bare ToolContext) = True
+does any spawnable agent declare write_project_doc? build no, explore no,
+  general no, review no, test no, writer no
+synthetic spawnable agent declaring write_project_doc -> ['write_project_doc']
+```
+
+So the real mechanism is narrower and sharper than "globally denied":
+**`write_project_doc` is the only gated-and-grantable tool there is, global
+policy allows it, and not one of the eleven shipped agents declares it** --
+spawnable or not. The other candidates never reach the list at all: `shell` and
+the file tools carry a per-call `approval_check`, which §25 R2 filters out of
+every grant path by name, and `remember` plus `spawn_subagent` are
+`GRANT_NEVER` by M17 and R4.
+
+**And "on a stock install" understates it, which a second measurement
+settled.** Driven again with every tool globally enabled -- the permissions
+dataclass swapped for one that answers `True` to everything:
+
+```
+=== STOCK ===                  === EVERY TOOL GLOBALLY ALLOWED ===
+  build     []                   build     []
+  explore   []                   explore   []
+  general   []                   general   []
+  review    []                   review    []
+  test      []                   test      []
+  writer    []                   writer    []
+                                 (no agent) ['write_project_doc']
+
+the whole gated-with-no-approval_check population:
+  remember             grantable=True  policy=never
+  spawn_subagent       grantable=True  policy=never
+  write_project_doc    grantable=True  policy=signoff_only
+```
+
+An operator cannot make this reachable, because global permissions are not
+what gates it -- the agent's own `allowed_tools` declaration is. The candidate
+set is `(the agent's declared tools) ∩ {write_project_doc}` for every
+configuration of `config.ToolPermissions`, so **the §18 sign-off cannot fire for
+any shipped agent under any configuration.** What changes it is a declaration,
+and that is a roster edit rather than a setting.
+
+**The structural statement, which is the one worth taking to a decision.**
+`GRANT_SIGNOFF_ONLY` has **exactly one member in the entire registry** --
+`write_project_doc` (`tools/registry.py:1030`) -- and that policy value exists
+for this sign-off and nothing else. #133 put it there to separate the two grant
+paths, and argued the separation from attendedness rather than from the tool:
+against the pipeline, "one `--grant-tools write_project_doc` authorises 15
+document names ... for the rest of a ten-pass run that is reading
+attacker-controlled web pages"; for the §18 sign-off it "stays offered: a human
+is answering in the moment, about one named agent, for one turn." So the one
+policy value created to make a tool offerable in this sign-off, and the one
+tool that holds it, together describe a mechanism no shipped agent can reach.
+The argument is sound. It has no instance.
+
+`grill-me` was the one agent with a non-empty candidate set, and only because it
+declares `allowed_tools: None` -- no opinion, so global policy applies and it
+inherited `write_project_doc`. It is `spawnable: false`. **So before A16 the
+shipped spawn sign-off fired only when a non-spawnable agent was spawned, which
+is exactly the defect A16 closes.** The synthetic control proves the mechanism
+itself works: a spawnable agent that declares `write_project_doc` offers a
+sign-off immediately.
+
+**Half of this was already pinned, and framed as intended**, which is why the
+entry exists rather than a bug report. `tests/test_shipped_roster.py:225-247` and
+`:293-300` already assert `candidate_approvals(child) == []` for `explore`,
+`review`, `build` and `test`, and argue it as a design property: "the one yes
+that starts the spawn creates no standing authority, and each non-inert command
+still reaches the person who gave it." That argument is sound per agent. What
+nothing pinned is the *global* claim -- that it holds for all six, which is what
+turns a narrow sign-off into an unreachable one. `writer` and `general` were the
+two unmeasured ones, and `writer` is the striking case: the agent whose name most
+suggests it would hold `write_project_doc` declares no writing tool at all.
+
+**Batch 138 pins the global claim** rather than changing behaviour, because which
+way to resolve it is the owner's: `TestTheSpawnSignoffIsUnreachableOnTheShippedRoster`
+sweeps every spawnable agent and goes red the day one declares a grantable gated
+tool -- at which point this entry is what the reader should come back to.
+
+**Shape, if it is to be resolved:** three answers, and they are not equivalent.
+(a) Accept it -- a sign-off with nothing to offer is correct fail-closed
+behaviour, and the entry becomes an *Accepted risks* note. (b) Give one spawnable
+agent `write_project_doc` so the mechanism is exercised by what ships. `writer`
+is the only plausible candidate and **this is not a roster tweak**: its
+frontmatter says "No `write`/`edit` by omission: this agent returns prose;
+whoever delegated to it decides where it lands", and its body has a section
+headed *Return prose, not a file operation* ("Where you put it is the
+delegator's decision, not yours"). So (b) reverses a stated decision in the
+same way A16 did, and wants the same treatment -- its own batch and its own
+decision record. R4's compounding-authority argument does not reach
+`write_project_doc`, so the objection to (b) is the agent's contract rather
+than the permission. (c) Decide the sign-off is for
+operator-enabled installs only and say so where §18 describes it, which costs two
+sentences and no behaviour.
+
+**Not:** widening `candidate_approvals` to stop excluding per-call
+`approval_check` tools. §25 R2 excludes them deliberately, and the stated reason
+is that leaving them in "would make the sign-off notice promise authority the
+grant does not carry, which is worse than not offering it."
+
+## 84. The test that pins R2's grant filter cannot fail from its removal (open, found and filed batch 138)
+
+**Not from any report either.** Batch 138's mutation pass turned this up while
+scoring the guard for item 83. Severity `S4`, `test-quality`.
+
+Replace `if registry.grantable(name)` with `if True` in
+`AgentManager.candidate_approvals` (`agents/manager.py:166-170`) and measure
+which tests notice:
+
+```
+test_grants.py -k never_offers_a_param_gated   A1 -> SURVIVES  (1 passed)
+test_grants.py (all 56)                        A1 -> SURVIVES  (56 passed)
+test_research_authorization.py -k offers_a_subset_of_what_the_signoff
+                                               A1 -> KILLS     (1 failed)
+```
+
+`tests/test_grants.py:1069-1087` is
+`test_the_signoff_never_offers_a_param_gated_tool`, and its docstring states
+exactly the property the mutation removes: "`candidate_approvals()` filters by
+`grantable()`, so shell/write/edit can never appear in the modal the user
+ticks. Checked against every shipped agent AND against a child with no tool
+restriction at all, **which is the widest case the filter ever sees**." It
+cannot fail from the filter's removal.
+
+**Why, measured.** The test asserts an empty intersection with `{"shell",
+"write", "edit", "read"}`, and all four are denied by global config on a stock
+install. `registry._advertised` (`tools/registry.py:164-172`) consults
+`is_tool_allowed` FIRST, so those four never reach `headless_hidden` at all,
+and `grantable()` is never asked about them. Setting `wide.allowed_tools =
+None` removes the AGENT-level narrowing and not the global denial, so "the
+widest case the filter ever sees" is not the widest case: the configuration
+the filter is actually for is a non-grantable tool that global policy
+**allows**, and the shipped config has none.
+
+So the property is genuinely pinned -- by
+`test_research_authorization.py::TestCandidates::test_the_pipeline_offers_a_subset_of_what_the_signoff_does`,
+which registers its own tools and therefore has one. That test is about the
+pipeline's subset relation; it kills this mutation incidentally. The test
+written to pin the filter is the one that cannot.
+
+This is the vacuity family `docs/REVIEW_MARATHON.md` asks reviewers to look
+for -- "a test that cannot come out the other way" -- in a test whose
+docstring claims the opposite, and the S19 scope did not find it because
+nothing in the suite was mutated during the marathon. It is recorded here
+rather than fixed because batch 138 is a bookkeeping batch; the fix is small
+and should not be mistaken for a large one.
+
+**Shape:** three lines in the existing test. Register a param-gated tool that
+global policy ALLOWS -- the `gated_pair` fixture in the same file already
+builds exactly this (`mcp__t__paramwise`, with `approval_check=lambda name,
+params: True`, named `mcp__*` so it gets the approval-required default without
+editing config dataclasses) -- and assert it is absent from
+`candidate_approvals` while the plain sibling is present. The present-sibling
+half is what makes it non-vacuous: it proves the helper is answering rather
+than empty.
+
+**Not:** removing `grantable()` from `candidate_approvals`. It is load-bearing
+on an operator-enabled install, which is the whole point above, and R2's
+argument for it is stated at `tools/registry.py:414-433`. Also not widening
+the four names the existing assertion uses: they are the right names for the
+claim "the modal the user ticks never offers a per-call tool", and the gap is
+the missing allowed case, not the chosen denied ones.
+
+## 85. Six pilot tests assert worker-thread state after a raw `pause()` (open, found and filed batch 138)
+
+**Found by batch 138's full-suite run**, which is the third batch to pay for
+this and the first to measure it. Severity `S3`, `test-quality`.
+
+`tests/test_tui.py::TestTheQuitGesture::test_quitting_by_gesture_releases_a_blocked_worker`
+failed once in a 635-second run -- against the 86 seconds `README.md` documents
+-- and passed in every other configuration tried: alone (10 passed), in its own
+class under `-n0`, three times under a narrowed `-n auto` selection, and once
+with the whole of `tests/test_tui.py` under `-n auto --dist loadscope` (443
+passed). **Not reproduced**, and that is stated rather than dressed up.
+
+What the test does:
+
+```python
+await pilot.press("ctrl+c")
+await pilot.pause()
+await pilot.press("ctrl+c")
+await pilot.pause()
+
+assert channel.puts == [False], (
+    "quitting by ctrl+c left the worker blocked on the permission channel")
+```
+
+`channel.puts` is written by a **worker thread** -- the quit gesture has to
+reach `exit()`, which calls `_release_permission_channel()`. The test waits for
+that with two raw `pause()` calls, and `AGENTS.md`'s rule says that is exactly
+what `pause` is not for: *"`await pump(pilot, n)` gives the loop `n` turns and
+is for NEGATIVE assertions only ('prove X did not happen'), where there is no
+predicate and a deadline would make every such site pay its full timeout."*
+`tests/conftest.py:249-250` carries the measurement that makes it matter:
+`pilot.pause()` costs **21ms with nothing burning CPU in-process and 1021ms
+with one busy sibling thread -- a 46x swing** -- because its exit condition is
+a process-wide CPU heuristic. A 7x-slower suite run is the condition that
+measurement describes.
+
+**Measured: six tests in that file have this shape** -- their last wait before
+a positive assertion is a raw `pause()`/`pump()` rather than a `settle()`
+predicate, AND the thing asserted is state only another thread can produce:
+
+| test | assertion |
+|---|---|
+| `test_quitting_with_a_prompt_open_releases_the_blocked_worker` | `channel.puts == [False]` |
+| `test_quitting_by_gesture_releases_a_blocked_worker` | `channel.puts == [False]` |
+| `test_a_dead_worker_leaves_a_traceback_in_the_log` | `matching` (a log record) |
+| `test_resuming_refreshes_the_todo_panel` | `spy.called` |
+| `test_a_failure_listing_threads_does_not_kill_the_tui` | `running` |
+| `test_the_request_carries_the_thread_on_screen` | `request.thread_id == thread` |
+
+The two `channel.puts` ones are a pair -- the same ARCHITECTURE §4.14 property
+("every dismissal must put a boolean on the channel") reached by two different
+keys -- so whichever of them a given run schedules against a busy sibling is
+the one that fails. **A first pass over the file counted 119 of 319 tests
+asserting positively after a raw `pause()`, and that number is wrong to act
+on:** almost all of them assert synchronous state (`app.theme == "ember"`
+after a command dispatch) which no other thread is involved in producing. The
+cross-thread subset is the risk, and it is six.
+
+**Why this is `S3` and not `S4`.** Nothing in production is wrong. But the
+failure mode is the one `docs/ARCHITECTURE.md:1860` names and batch 23 paid
+for twice: a real defect in a dismissal path presents as a flaky suite rather
+than a red test, so the next person to see this failure does what the last two
+did -- re-runs it, gets green, and learns to discount the file. That is the
+cost item 7's narrowness rule is usually protecting against, arriving from the
+other direction.
+
+**Shape:** replace the trailing `pause()` with the predicate the assertion
+already states -- `assert await settle(pilot, lambda: channel.puts == [False])`
+-- in the six sites above. `settle` exists for this, the file imports it
+already, and the two quit tests use it correctly fifteen lines earlier for
+`isinstance(app.screen, PermissionScreen)`. No new mechanism, no new fixture,
+and the negative-assertion `pump` sites stay exactly as they are. Cheap enough
+to fold into whichever batch next touches `tests/test_tui.py`.
+
+**Not:** a retry plugin, or raising the pause count. Both make the symptom
+rarer and the diagnosis harder, and `pytest-rerunfailures` is not a dependency
+of this suite. Not auditing the other 113 positive-assertion-after-pause sites:
+they are synchronous, and widening this entry to them would turn an actionable
+six into a file-wide sweep nobody will do.
+
+## Review-marathon arrivals at open issues with no register entry
+
+Two `KNOWN` findings landed on GitHub issues that are not mirrored here. Both
+were re-verified against the marathon's base commit; neither is a new defect.
+Recorded in the tree because `review/` is not, and because the issues
+themselves have not been updated -- that is an owner action.
+
+- **Issue #12** `[S3][coherence]` *ensemble disagreement is scored rather than
+  routed to verification*, from the research-pipeline scope. Verified still
+  true: `confidence_scoring.py:55, 264-280, 301-306` applies
+  `DISAGREEMENT_PENALTY_FACTOR * (1 - consistency)` to factual claims,
+  `orchestrator.py:1356-1371` routes D2 only on `retry_count` and never on
+  disagreement, and no verification pass consumes `consistency_score`. Nothing
+  to add beyond the issue's own rearchitecture analysis (pure-code gates versus
+  a new model call).
+- **Issue #8** `[S3][ux]` *the CLI has no slash-command layer*, from the
+  headless-shell scope. Verified still true: `main.py` dispatches no
+  `/command` at all -- `run_chat` treats every non-empty line as a message,
+  and three of the parser's own comments cite the absence as the reason
+  `--memories`, `--ref` and `--init` are flags (`main.py:1940-1959`,
+  `:1975-1982`). One thing to add: **item 71 above is the live-rendering half
+  of the same D12 debt**, so the two should be read together -- a shell with no
+  command layer and no live narration is less capable in two ways that compound.
