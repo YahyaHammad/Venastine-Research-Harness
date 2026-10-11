@@ -29,3 +29,20 @@ updates:
       npm-deps:
         patterns:
           - "*"
+  # Batch 141 (S18-05). Without this, nothing proposes action bumps at all --
+  # and SHA-pinning the 24 `uses:` lines would otherwise mean they are never
+  # updated again, which trades one risk for another. Dependabot updates a
+  # pinned SHA in place and rewrites the trailing version comment with it,
+  # so the pin stays readable.
+  #
+  # GROUPED, for this file's existing argument: one diff the suite
+  # adjudicates once, rather than five.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions:
+        patterns:
+          - "*"

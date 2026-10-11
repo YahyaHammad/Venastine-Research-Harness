@@ -824,11 +824,22 @@ pages, file contents, an MCP server's reply.
   matching.
 - `.gitleaksignore` fingerprints are `file:rule:line` — so an absolute `--source` makes every entry
   unmatchable. Measured in batch 128: 7 findings absolute, 0 relative, same bytes.
-- `publish.yml`'s **three independent brakes** (no push or tag trigger, `dry_run` defaults true, no
-  `NPM_TOKEN`) must all still be there, and `scripts/prepublish-check.mjs` is the gate it runs.
-- `package.json`'s `files` allowlist is the **third** copy of "keep local secrets out of a
+- ~~`publish.yml`'s **three independent brakes** (no push or tag trigger, `dry_run` defaults true, no
+  `NPM_TOKEN`) must all still be there, and `scripts/prepublish-check.mjs` is the gate it runs.~~
+  **FALSE WHEN WRITTEN, corrected batch 141 (S18-06).** PR #197 "Arm npm publish" added
+  `push: tags: ['v*']` in September 2026, `dry_run` governs `workflow_dispatch` only, and the
+  repository is already public. One brake survives -- the absent `NPM_TOKEN` -- and a fixer
+  acting on the struck text above would have reverted a merged owner decision. `AGENTS.md`
+  § *Distribution* has the state; `prepublish-check.mjs` is still the gate, now beside an
+  inlined secret scan.
+- ~~`package.json`'s `files` allowlist is the **third** copy of "keep local secrets out of a
   distribution", after `.gitignore` (→ `git push`) and `.gitattributes export-ignore`
-  (→ `git archive`). Three copies of one rule is three chances to disagree.
+  (→ `git archive`). Three copies of one rule is three chances to disagree.~~
+  **THERE WERE FIVE, and batch 140 made it one.** S18-08 counted them: the two git
+  channels, `prepublish-check.mjs`'s `FORBIDDEN`, `never_named` in the suite, and the two
+  documents that each claimed three. `package.json`'s `neverDistribute` is now the single
+  list all three channels read, and the disagreements it closed were real: `secrets.json`
+  was in neither npm-side list, and the database test missed the `-wal` sidecar.
 - **`docs/CONTRIBUTING.md` says it is the prose source and `.github/ISSUE_TEMPLATE/` its
   "machine-readable copy", with "change both together, or the taxonomy drifts".** Both halves are
   checkable and one is already drifting. **Seeded, measured, do not re-derive:** the file's label

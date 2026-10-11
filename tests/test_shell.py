@@ -322,7 +322,7 @@ class TestTheContainerRuntime:
             popen.return_value.communicate.side_effect = (
                 subprocess.TimeoutExpired(cmd="podman", timeout=60))
             run.return_value = MagicMock(returncode=0)
-            _run_docker("sleep 999", "/tmp/ws", runtime="podman")
+            _run_docker("sleep 999", "/tmp/ws", runtime="podman")  # nosec B108 - a fixture PATH STRING handed to a mocked route; nothing is created
         kills = [c[0][0][:2] for c in run.call_args_list]
         assert kills == [["podman", "kill"]]
 
@@ -402,7 +402,7 @@ class TestIsInert:
         """Attacker-planted ./ls or /workspace/ls must NOT be inert."""
         assert _is_inert("./ls") is False
         assert _is_inert("/workspace/ls") is False
-        assert _is_inert("/tmp/cat file.txt") is False
+        assert _is_inert("/tmp/cat file.txt") is False  # nosec B108 - a command string under test, not a temp path
         assert _is_inert(".\\ls") is False
 
     def test_dangerous_flags_rejected(self):
@@ -533,7 +533,7 @@ class TestScrubbedEnv:
         with patch("security.sandbox.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
                 returncode=0, stdout="", stderr="")
-            _run_subprocess_fallback("whoami", "/tmp/ws", "bash")
+            _run_subprocess_fallback("whoami", "/tmp/ws", "bash")  # nosec B108 - fixture path string, as above
         passed_env = mock_run.call_args.kwargs["env"]
         assert passed_env.get("PATHEXT") == ".COM;.EXE;.BAT"
 
@@ -547,14 +547,14 @@ class TestBackendInternals:
     def test_run_inert_timeout(self):
         with patch("security.sandbox.subprocess.run") as mock_run:
             mock_run.side_effect = subprocess.TimeoutExpired(cmd="ls", timeout=60)
-            result = _run_inert("ls", "/tmp/ws")
+            result = _run_inert("ls", "/tmp/ws")  # nosec B108 - fixture path string, as above
         assert result["return_code"] == -1
         assert "timed out" in result["stderr"]
 
     def test_run_inert_file_not_found(self):
         with patch("security.sandbox.subprocess.run") as mock_run:
             mock_run.side_effect = FileNotFoundError("no such file")
-            result = _run_inert("nonexistent", "/tmp/ws")
+            result = _run_inert("nonexistent", "/tmp/ws")  # nosec B108 - fixture path string, as above
         assert result["return_code"] == -1
         assert "not found" in result["stderr"].lower()
 
@@ -564,7 +564,7 @@ class TestBackendInternals:
             mock_run.return_value = MagicMock(
                 stdout="A" * 100, stderr="B" * 100, returncode=0,
             )
-            result = _run_inert("ls", "/tmp/ws")
+            result = _run_inert("ls", "/tmp/ws")  # nosec B108 - fixture path string, as above
         assert len(result["stdout"]) == 10
         assert len(result["stderr"]) == 10
 
@@ -575,7 +575,7 @@ class TestBackendInternals:
             mock_proc.communicate.return_value = ("out", "err")
             mock_proc.returncode = 0
             mock_popen.return_value = mock_proc
-            _run_docker("ls", "/tmp/ws", network=False)
+            _run_docker("ls", "/tmp/ws", network=False)  # nosec B108 - fixture path string, as above
         args = mock_popen.call_args[0][0]
         assert "--network" in args
         assert args[args.index("--network") + 1] == "none"
@@ -587,7 +587,7 @@ class TestBackendInternals:
             mock_proc.communicate.return_value = ("out", "err")
             mock_proc.returncode = 0
             mock_popen.return_value = mock_proc
-            _run_docker("pip install x", "/tmp/ws", network=True)
+            _run_docker("pip install x", "/tmp/ws", network=True)  # nosec B108 - fixture path string, as above
         args = mock_popen.call_args[0][0]
         assert "--network" not in args
 
@@ -601,7 +601,7 @@ class TestBackendInternals:
             )
             mock_popen.return_value = mock_proc
             mock_run.return_value = MagicMock(returncode=0)
-            result = _run_docker("sleep 999", "/tmp/ws")
+            result = _run_docker("sleep 999", "/tmp/ws")  # nosec B108 - fixture path string, as above
         assert result["return_code"] == -1
         # docker kill should have been called
         kill_calls = [c for c in mock_run.call_args_list
@@ -611,14 +611,14 @@ class TestBackendInternals:
     def test_run_subprocess_fallback_timeout(self):
         with patch("security.sandbox.subprocess.run") as mock_run:
             mock_run.side_effect = subprocess.TimeoutExpired(cmd="bash", timeout=60)
-            result = _run_subprocess_fallback("sleep 999", "/tmp/ws", "bash")
+            result = _run_subprocess_fallback("sleep 999", "/tmp/ws", "bash")  # nosec B108 - fixture path string, as above
         assert result["return_code"] == -1
         assert "timed out" in result["stderr"]
 
     def test_run_subprocess_fallback_shell_not_found(self):
         with patch("security.sandbox.subprocess.run") as mock_run:
             mock_run.side_effect = FileNotFoundError("no bash")
-            result = _run_subprocess_fallback("ls", "/tmp/ws", "bash")
+            result = _run_subprocess_fallback("ls", "/tmp/ws", "bash")  # nosec B108 - fixture path string, as above
         assert result["return_code"] == -1
         assert "not found" in result["stderr"].lower()
 
@@ -1171,7 +1171,7 @@ class TestCodeInTheSandboxAsksUnderTiered:
         make this fail on `zzlang`, which is the program the list forgot."""
         from tools.builtin.shell import _command_touches_protected
         corpus = TestTheTwoTokenisersCannotDisagree()
-        rng = random.Random(20260914)
+        rng = random.Random(20260914)  # nosec B311 - a SEEDED rng for a reproducible sweep, never a secret
         programs = ["zzlang", "frobnicate", "ruby", "php", "lua", "deno",
                     "tclsh", "Rscript"]
 
@@ -1613,7 +1613,7 @@ class TestOurContainersAreIdentifiable:
             proc.communicate.return_value = ("", "")
             proc.returncode = 0
             popen.return_value = proc
-            _run_docker("ls", "/tmp/ws")
+            _run_docker("ls", "/tmp/ws")  # nosec B108 - fixture path string, as above
         args = popen.call_args[0][0]
         assert "--label" in args
         assert args[args.index("--label") + 1] == "venastine.sandbox=1"
@@ -2229,7 +2229,7 @@ class TestTheTwoTokenisersCannotDisagree:
     def _samples(self, count):
         """Deterministic, so a failure is reproducible from the seed alone
         rather than being a flake someone reruns until it passes."""
-        rng = random.Random(20260829)
+        rng = random.Random(20260829)  # nosec B311 - a seeded rng, as above
         for _ in range(count):
             length = rng.randint(1, 14)
             yield "".join(rng.choice(self.ALPHABET) for _ in range(length))
@@ -2245,7 +2245,7 @@ class TestTheTwoTokenisersCannotDisagree:
         same reason -- a corpus that stops reaching the tier it is about
         must fail rather than pass vacuously.
         """
-        rng = random.Random(20260829)
+        rng = random.Random(20260829)  # nosec B311 - a seeded rng, as above
         for _ in range(count):
             args = "".join(rng.choice(self.ALPHABET)
                            for _ in range(rng.randint(1, 14)))

@@ -280,8 +280,11 @@ def _google_schema_keys(genai_types) -> set:
     the fake's fields for the whole test session.
     """
     keys = set(genai_types.Schema.model_fields)
-    for field in genai_types.Schema.model_fields.values():
-        alias = getattr(field, "alias", None)
+    # NOT `field`: this module imports dataclasses.field at the top, and
+    # shadowing it here is what ruff F402 flagged in batch 141 -- found only
+    # then, because the lint job is not on main and so has never run.
+    for model_field in genai_types.Schema.model_fields.values():
+        alias = getattr(model_field, "alias", None)
         if alias:
             keys.add(alias)
     return keys

@@ -213,7 +213,7 @@ function ask(question) {
  * takes on its own initiative -- it runs a network install of everything in
  * requirements.txt -- and the project's own rule for that case is D17/D31:
  *
- * NO COUNT IN THIS SENTENCE, deliberately (S18-09, batch 140). It said "17
+ * NO COUNT IN THIS SENTENCE, deliberately (batch 140). It said "17
  * pinned distributions" and the file had 22 installable lines when that was
  * measured, 18 now that batch 136 moved the test packages out. The screen
  * below prints the live number; prose that restates a computed value is a

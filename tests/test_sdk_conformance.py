@@ -151,9 +151,8 @@ def test_every_advertised_SCHEMA_constructs_against_the_REAL_pinned_types():
     the only arrangement in which the defect is visible.
     """
     with real_package("google"):
-        from tools.registry import registry
-
         import core.client as client
+        from tools.registry import registry
 
         schemas = registry.schemas(None)
         # Vacuity guard, same shape as the one above: an empty or tiny

@@ -72,7 +72,7 @@ const ROOT_PY_NOT_SHIPPED = new Set([
  * Anything matching these must never leave this machine.
  *
  * DERIVED FROM package.json's `neverDistribute`, which is the one list all
- * three channels read (batch 140, S18-01 and S18-08). It used to be a literal
+ * three channels read (batch 140). It used to be a literal
  * here, and that was the FOURTH copy of "keep local secrets out of a
  * distribution" -- `.gitignore` for push, `.gitattributes export-ignore` for
  * archive, this, and `never_named` in tests/test_docs_consistency.py. Two
@@ -107,7 +107,7 @@ const FORBIDDEN = (pkg.neverDistribute || []).flatMap((entry) => {
   const make = MATCHERS[entry.match];
   // LOUD, not skipped. A match kind this file does not know is an entry the
   // gate would silently stop enforcing -- the defensive-default shape that
-  // S18-02 files against the bandit baseline, and the one thing a denylist
+  // batch 141 files against the bandit baseline, and the one thing a denylist
   // must never do.
   if (!make) {
     throw new Error(
@@ -163,7 +163,7 @@ function unsafeBranchProblems() {
   // from silence this function's own comment warns about.
   //
   // `[\r\n]` rather than `^` with /m is belt and braces, and the reason
-  // this comment USED to give was wrong (S18-09, corrected batch 140): it
+  // this comment USED to give was wrong (corrected in batch 140): it
   // said these files are stored CRLF in the worktree. Measured -- config.py
   // is 95 LF lines and config.yaml 1030, neither containing one CRLF. `^`
   // with /m would also have worked on CRLF anyway, since `^` matches after

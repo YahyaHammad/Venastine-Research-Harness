@@ -58,12 +58,12 @@ that are pure text never skip, so they still run under
 `pytest tests/test_foo.py` while you are mid-change.
 """
 
-import io
 import fnmatch
+import io
 import json
 import os
 import re
-import subprocess
+import subprocess  # nosec B404 - the gates below drive git and pytest as subprocesses on purpose
 import sys
 from collections import Counter
 
@@ -215,7 +215,7 @@ def _collect_in_a_subprocess() -> list:
     if _COLLECTED:
         return _COLLECTED
 
-    proc = subprocess.run(
+    proc = subprocess.run(  # nosec B603 - re-collects this suite in a child to compare against the session
         [sys.executable, "-m", "pytest", "--collect-only", "-q",
          "-p", "no:cacheprovider", "-n0"],
         cwd=ROOT, capture_output=True, text=True,
@@ -655,9 +655,9 @@ def test_no_notebook_checkpoint_file_is_committed():
     Skips without git rather than falling back to a filesystem walk: the
     property is about what the repository CLAIMS, and that is a git fact.
     A walk would answer a different question and call it the same name."""
-    import subprocess
+    import subprocess  # nosec B404 - as above, deferred into the gate
     try:
-        listed = subprocess.run(
+        listed = subprocess.run(  # nosec B603, B607 - `git check-ignore` with a fixed argv; git is on PATH by assumption in a git repo
             ["git", "ls-files", "*" + _CHECKPOINT_DIR + "*"],
             cwd=_project_root(), capture_output=True, text=True,
             timeout=30)
@@ -1486,7 +1486,7 @@ def test_the_push_channel_ignores_every_sample_that_claims_it():
     `.venastine/mcp.json` was found -- it was absent from the tree's only
     `.gitignore` while four sibling paths resolved to a rule.
     """
-    import subprocess
+    import subprocess  # nosec B404 - as above, deferred into the gate
 
     claimed = [(e["label"], s) for e in _never_distribute()
                if "git" in e["channels"] for s in e["samples"]]
@@ -1494,7 +1494,7 @@ def test_the_push_channel_ignores_every_sample_that_claims_it():
 
     unignored = []
     for label, sample in claimed:
-        proc = subprocess.run(
+        proc = subprocess.run(  # nosec B603, B607 - `git` with a fixed argv, as above
             ["git", "check-ignore", "-q", "--", sample],
             cwd=ROOT, capture_output=True)
         if proc.returncode != 0:
@@ -1511,7 +1511,7 @@ def test_the_push_channel_ignores_every_sample_that_claims_it():
     # narrow pair was chosen over `.venastine/` precisely so project-tier
     # agents and skills keep travelling with a repository (D17's trust prompt
     # is the mechanism that exists for them).
-    proc = subprocess.run(
+    proc = subprocess.run(  # nosec B603, B607 - `git` with a fixed argv, as above
         ["git", "check-ignore", "-q", "--", ".venastine/agents/example.md"],
         cwd=ROOT, capture_output=True)
     assert proc.returncode != 0, (
@@ -1609,6 +1609,176 @@ def test_the_npm_gate_derives_its_denylist_rather_than_restating_it():
             f"on an unknown kind by design, so this would abort the publish "
             f"rather than silently skip the pattern -- but the publish is the "
             f"wrong place to find out.")
+
+
+# ---------------------------------------------------------------------------
+# ---- S18-02..S18-05: CI properties nothing in the repo checked ------------
+# ---------------------------------------------------------------------------
+#
+# Five findings in this scope were CI properties that no file asserted, which
+# is why they survived a hundred commits. Each fix here is the property plus
+# something that notices when it stops holding.
+
+_WORKFLOW_DIR = os.path.join(ROOT, ".github", "workflows")
+_SHA40 = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _workflow_text() -> dict:
+    out = {}
+    for name in sorted(os.listdir(_WORKFLOW_DIR)):
+        if name.endswith((".yml", ".yaml")):
+            with open(os.path.join(_WORKFLOW_DIR, name), encoding="utf-8") as f:
+                out[name] = f.read()
+    assert out, "no workflows found; repoint this if .github/ moved"
+    return out
+
+
+def test_every_action_reference_is_pinned_to_a_commit():
+    """S18-05. A tag is a mutable ref held by a third party.
+
+    All 24 `uses:` lines were floating major tags, including the three in
+    `publish.yml` -- the job that holds `id-token: write` and will hold
+    `NODE_AUTH_TOKEN`. The rule was already written down in `gitleaks.yml`
+    ("D22's exact-pin rule applies to CI tooling too"), in a file whose own
+    checkout was floating.
+
+    The trailing `# vX.Y.Z` comment is required too, and not for tidiness: a
+    bare 40-hex is unreadable in review, and it is the form Dependabot
+    updates in place.
+    """
+    unpinned, uncommented = [], []
+    for name, text in _workflow_text().items():
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("- uses:") and " uses:" not in stripped:
+                continue
+            if "uses:" not in stripped:
+                continue
+            ref = stripped.split("uses:", 1)[1].strip()
+            target = ref.split("#")[0].strip()
+            if "@" not in target:
+                unpinned.append(f"{name}: {target}")
+                continue
+            digest = target.rsplit("@", 1)[1]
+            if not _SHA40.match(digest):
+                unpinned.append(f"{name}: {target}")
+            elif "#" not in ref:
+                uncommented.append(f"{name}: {target}")
+
+    assert not unpinned, (
+        f"these `uses:` references are not pinned to a commit: {unpinned}. A "
+        f"tag can be repointed by whoever owns it and the next run inherits "
+        f"the new code with no diff here.")
+    assert not uncommented, (
+        f"these pins carry no trailing version comment: {uncommented}. "
+        f"`uses: owner/action@<sha>  # v1.2.3` is what makes a pin readable "
+        f"in review and is the form Dependabot rewrites in place.")
+
+    # Vacuity guard: this swept something.
+    pinned = sum(len([1 for line in text.splitlines() if "uses:" in line])
+                 for text in _workflow_text().values())
+    assert pinned >= 20, (
+        f"only {pinned} `uses:` lines found across the workflows; the sweep "
+        f"is not reaching them")
+
+
+def test_dependabot_can_update_a_pinned_action():
+    """The other half of S18-05, and the reason pinning is not a trap.
+
+    SHA-pinning without an update channel means the pins are never moved
+    again. `dependabot.yml` declared `pip` and `npm` only, so nothing
+    proposed action bumps -- pinned or not.
+    """
+    with open(os.path.join(ROOT, ".github", "dependabot.yml"),
+              encoding="utf-8") as f:
+        text = f.read()
+    assert "github-actions" in text, (
+        "dependabot.yml declares no `github-actions` ecosystem, so the SHA "
+        "pins the gate above requires would never be updated again. That "
+        "trades one risk for another.")
+
+
+def test_the_publish_path_scans_for_secrets_before_publishing():
+    """S18-03. A release tag published with no secret scan on the commit.
+
+    `publish.yml` declares no `needs:` and reads no other workflow's verdict,
+    so the scanners ran CONCURRENTLY with it -- and `npm publish` is
+    irreversible. Measured on the one release tag that exists, v0.2.0: two
+    runs, tests and publish, no scanner.
+
+    It is not redundant with `prepublish-check.mjs`, which matches on
+    FILENAMES: a credential pasted into a file that is SUPPOSED to ship is
+    named by no entry of its denylist.
+    """
+    text = _workflow_text()["publish.yml"]
+    assert "gitleaks detect" in text, (
+        "publish.yml does not run gitleaks. The tarball check beside it "
+        "matches filenames, so a credential inside a file that ships is not "
+        "something it can see.")
+
+    scan = text.index("gitleaks detect")
+    publish = text.rindex("npm publish")
+    assert scan < publish, (
+        "publish.yml runs the secret scan AFTER `npm publish`. A published "
+        "npm version can never be replaced, only deprecated.")
+
+    # The scan must come after the step that plants the fake credentials file
+    # for the suite, or it is scanning a deliberately-planted secret and
+    # passing only because gitleaks.toml happens to allowlist that name.
+    removal = text.index("rm -f providers.json")
+    assert removal < scan, (
+        "publish.yml scans for secrets BEFORE removing the providers.json it "
+        "copied in for the suite. That passes only because gitleaks.toml "
+        "allowlists the filename -- which is the 'it cannot happen because of "
+        "a list somewhere else' assumption the removal step itself refuses to "
+        "make.")
+
+    assert "--source ." in text, (
+        "the scan must use a RELATIVE --source: an absolute path makes every "
+        ".gitleaksignore fingerprint unmatchable (measured).")
+
+
+def test_the_bandit_job_checks_counts_as_well_as_the_baseline():
+    """S18-02. `-b` suppresses by (file, test id, message), so a second
+    finding of the same id in the same file is silent -- measured,
+    `security/sandbox.py` went 7 -> 18 B603 with this job reporting nothing.
+    """
+    text = _workflow_text()["bandit.yml"]
+    # The INVOCATION, not the name: the comment block above the step names
+    # the script too, so a substring check passes with the step disabled.
+    # Measured -- mutation A5 survived the first version of this gate.
+    assert "run: python scripts/bandit-count-check.py" in text, (
+        "bandit.yml does not run scripts/bandit-count-check.py, so a second "
+        "subprocess call in a file that already carries a baselined B603 is "
+        "reported by nothing.")
+    assert "-b .github/bandit-baseline.json" in text, (
+        "the count check runs BESIDE `-b`, not instead of it: that one "
+        "matches on message text and still catches a reworded finding at an "
+        "unchanged count.")
+    assert os.path.exists(os.path.join(ROOT, "scripts",
+                                       "bandit-count-check.py")), (
+        "the script the job runs does not exist")
+
+
+def test_pip_audit_covers_every_declared_dependency_file():
+    """S18-04, and the half batch 136 created.
+
+    The job audited `requirements.txt` and its header called that "the one
+    dependency list". Batch 136 split the suite's packages into
+    `requirements-test.txt` and declared them as pyproject's `test` extra, so
+    four distributions were audited by nothing.
+    """
+    text = _workflow_text()["pip-audit.yml"]
+    declared = [name for name in os.listdir(ROOT)
+                if name.startswith("requirements") and name.endswith(".txt")]
+    assert len(declared) >= 2, (
+        f"expected at least requirements.txt and requirements-test.txt, "
+        f"found {declared}")
+    missing = [name for name in declared if f"-r {name}" not in text]
+    assert not missing, (
+        f"pip-audit.yml audits neither of {missing}. A requirements file "
+        f"nothing audits is a dependency set with no supply-chain gate, and "
+        f"the whole point of this job is that it is the only one.")
 
 
 def test_the_launcher_never_sets_the_two_variables_that_would_break_it():
@@ -2257,7 +2427,7 @@ def _readable_docs_on_a_clean_checkout():
 
     root = _project_root()
     try:
-        listed = subprocess.run(["git", "ls-files"], cwd=root,
+        listed = subprocess.run(["git", "ls-files"], cwd=root,  # nosec B603, B607 - `git ls-files`, fixed argv
                                 capture_output=True, text=True, timeout=60)
     except (OSError, subprocess.SubprocessError):  # pragma: no cover
         pytest.skip("git is not available to ask what is tracked")

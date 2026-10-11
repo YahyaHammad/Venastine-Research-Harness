@@ -16,7 +16,10 @@ import sympy
 from pydantic import BaseModel, Field
 
 from tools.builtin._math_common import (
-    MathParseError, _split_warnings, safe_parse, serialize,
+    MathParseError,
+    _split_warnings,
+    safe_parse,
+    serialize,
 )
 
 _OPERATIONS = Literal[

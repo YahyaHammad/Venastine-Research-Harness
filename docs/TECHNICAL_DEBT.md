@@ -855,7 +855,7 @@ defect found.
   **Two things found in the baseline while doing it.** Its B314 row says
   `arxiv.py:141` and the call was at line 182 -- bandit matches anyway,
   so baseline line numbers are not an index into the file. And the file
-  is a HYBRID: all 138 `results` are `./` (Linux, the half bandit
+  is a HYBRID: all 136 `results` are `./` (Linux, the half bandit
   compares, correct) while 199 of 200 `metrics` keys are `.\` (Windows).
   The metrics block is not used for baseline comparison, so it is
   cosmetic and was left exactly as found; "fixing" it by regenerating
@@ -2763,7 +2763,7 @@ because nothing is exploitable past resource exhaustion and the model is
 handed too much rather than something false. Unchanged: choosing the number,
 or the truncate-versus-refuse question, is what this entry is deferred for,
 and §31 H7 and §51 PG8 giving two different answers is the stated reason.
-# The review marathon's deferred findings (items 49-85, batch 138)
+# The review marathon's deferred findings (items 49-86)
 
 `docs/REVIEW_MARATHON.md` scoped a pre-merge review of `navigable-agents` into
 19 independent read-only scopes. 142 findings; the six `BLOCKS-MERGE` ones were
@@ -2775,7 +2775,9 @@ half folded into item 48 above rather than opening a new entry. The last two
 were not reported by anyone -- **item 83** came out of batch 137's fix pass and
 **item 84** out of batch 138's own mutation pass -- which is the argument for
 running one on a bookkeeping batch at all. **Item 85** came out of that batch's
-full-suite run, from declining to re-run a flake until it went green.
+full-suite run, from declining to re-run a flake until it went green, and
+**item 86** out of batch 141's own gate catching a mistake batch 140 had
+already shipped past it.
 
 **Each entry below has to stand on its own, and that is deliberate.** The
 reports live in `review/`, which is gitignored -- so unlike every other item in
@@ -4534,6 +4536,61 @@ rarer and the diagnosis harder, and `pytest-rerunfailures` is not a dependency
 of this suite. Not auditing the other 113 positive-assertion-after-pause sites:
 they are synchronous, and widening this entry to them would turn an actionable
 six into a file-wide sweep nobody will do.
+
+## 86. The decision-id gate scans `.py` only, and this project ships `.mjs` (open, found and filed batch 141)
+
+**Found by the gate catching me**, which is the useful half. Severity `S4`,
+`test-quality`.
+
+`_CITATION` is `(?<![A-Za-z0-9_\-])([A-Z]{1,2}\d{1,2})(?![A-Za-z0-9_])`, so a
+marathon finding id like `S18-02` reads as the decision id `S18`, which
+resolves nowhere. Batch 131 hit that and wrote the rule into
+`tests/BREAKING_CHANGES.md`: cite the BATCH in code, and leave finding ids in
+DEVLOG, that file and the triage index.
+
+Batch 140 then shipped **four** of them anyway -- in
+`scripts/prepublish-check.mjs` (three) and `bin/venastine.mjs` (one) -- and
+`test_every_decision_id_cited_in_production_code_resolves` said nothing,
+because `_production_python()` yields `.py` and stops:
+
+```python
+for name in sorted(filenames):
+    if name.endswith(".py"):
+        yield os.path.join(dirpath, name)
+```
+
+The fifth citation, in `scripts/bandit-count-check.py`, turned the gate red
+immediately. Same batch, same mistake, same session -- caught in the `.py`
+file and invisible in the two `.mjs` ones. All five are corrected in batch
+141; the gap is this entry.
+
+**It is a gap by this repository's own definition of production code**, not by
+mine. `test_the_tree_names_every_production_module` sweeps `.py` **and**
+`.mjs`, so the tree gate and the citation gate disagree about what the project
+is made of -- and the npm launcher plus the publish gate are exactly the files
+a contributor is most likely to annotate with a finding id while fixing one.
+
+Severity `S4`: nothing misbehaves, the citations were prose, and the ids
+resolved nowhere rather than somewhere wrong. It is here because a guard whose
+domain is narrower than its name is this file's recurring subject (item 79 is
+the same shape in the tree gate), and because the evidence that it matters is
+a batch three commits old.
+
+**Shape:** the Python half works by `tokenize`, extracting comments and
+docstrings so a citation inside a string literal is not read as prose. A
+`.mjs` half needs the equivalent for `//` and `/* */`, which is the whole
+cost -- maybe thirty lines, and it must not treat a URL's `//` as a comment
+start. Two cheaper options, both honest: run the existing `_CITATION` over the
+raw `.mjs` text and accept that a citation inside a JS string would also be
+flagged (there are none today, and one would be a strange thing to write), or
+assert the narrower property that no `.mjs` file contains a marathon finding
+id at all, which is the rule batch 131 actually wrote down. The second is four
+lines and closes the observed failure; the first is closer to the gate's name.
+
+**Not:** widening `_production_python()` itself. Two gates share it, and the
+test-name gate has no business reading JavaScript -- a `.mjs` file naming a
+pytest test is not a thing that happens. Give the citation gate its own
+domain.
 
 ## Review-marathon arrivals at open issues with no register entry
 

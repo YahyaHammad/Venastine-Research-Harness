@@ -112,7 +112,7 @@ def detect_shell() -> str:
     if platform.system() == "Windows":
         for candidate in ("pwsh", "powershell"):
             try:
-                subprocess.run(
+                subprocess.run(  # nosec B603 - shell probe: argv is three literals plus a candidate from the tuple above
                     [candidate, "-NoProfile", "-Command", "exit 0"],
                     capture_output=True, timeout=5,
                 )
@@ -166,7 +166,7 @@ def _run_info(argv: list[str]) -> Optional[subprocess.CompletedProcess]:
     """One `info` call, or None when the CLI is missing or does not answer
     within the probe's 10s."""
     try:
-        return subprocess.run(argv, capture_output=True, text=True,
+        return subprocess.run(argv, capture_output=True, text=True,  # nosec B603 - container-runtime `info` probe; callers build argv from the runtime name and literals
                               timeout=10)
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -371,7 +371,7 @@ _wsl_lock = threading.Lock()
 def _wsl_distros() -> Optional[list[str]]:
     """Every installed distro's name, or None if WSL would not answer."""
     try:
-        result = subprocess.run([WSL, "-l", "-q"], capture_output=True,
+        result = subprocess.run([WSL, "-l", "-q"], capture_output=True,  # nosec B603 - WSL distro list: a module constant and two literal flags
                                 timeout=10)
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -528,7 +528,7 @@ def _wsl_workspace(workspace_dir: str) -> str:
     workspace is not answered from the last one's translation.
     """
     try:
-        result = subprocess.run(
+        result = subprocess.run(  # nosec B603 - wslpath translation; the distro name came from WSL itself and the path from config
             [WSL, "-d", wsl_distro(), "-e", "wslpath", "-a", "-u",
              workspace_dir],
             capture_output=True, timeout=10)
@@ -810,7 +810,7 @@ def _probe_ssh() -> SshProbe:
 
     version = ""
     try:
-        shown = subprocess.run([binary, "-V"], capture_output=True,
+        shown = subprocess.run([binary, "-V"], capture_output=True,  # nosec B603 - `ssh -V`; the binary was resolved by this probe
                                timeout=_SSH_PROBE_TIMEOUT_S)
         version = (shown.stderr or shown.stdout).decode(
             "utf-8", "replace").strip()
@@ -821,7 +821,7 @@ def _probe_ssh() -> SshProbe:
     identity = "uname -s; command -v bash; command -v timeout"
     argv = _ssh_connection_argv(binary, target, known) + [identity]
     try:
-        result = subprocess.run(argv, capture_output=True,
+        result = subprocess.run(argv, capture_output=True,  # nosec B603 - ssh identity probe; the remote command is the literal assembled two lines up
                                 stdin=subprocess.DEVNULL,
                                 timeout=_SSH_PROBE_TIMEOUT_S,
                                 env=_ssh_env())
@@ -2169,7 +2169,7 @@ def _run_inert(
             capture_output=True,
             text=True,
             timeout=config.SANDBOX_TIMEOUT_SECONDS,
-            shell=False,
+            shell=False,  # nosec B603 - EXECUTION ROUTE: carries the model's command by design. List form and no shell, so there is nothing to inject into; the bound is upstream -- mode gate G3, the INERT allowlist, the dangerous-flag check and the approval prompt -- not this call (ROUTE_INERT_HOST)
         )
     except subprocess.TimeoutExpired:
         return {
@@ -2228,7 +2228,7 @@ def _resolved_image_id(image: str, runtime: str = DOCKER) -> str:
     itself is about to accept.
     """
     try:
-        result = subprocess.run(
+        result = subprocess.run(  # nosec B603 - `image inspect`; runtime and image both come from config, list form
             [runtime, "image", "inspect", "--format", "{{.Id}}", image],
             capture_output=True, text=True, timeout=10,
         )
@@ -2558,7 +2558,7 @@ def _run_docker(
 
     proc = None
     try:
-        proc = subprocess.Popen(
+        proc = subprocess.Popen(  # nosec B603 - EXECUTION ROUTE: carries the model's command by design. List form and no shell, so there is nothing to inject into; the bound is upstream -- mode gate G3, the INERT allowlist, the dangerous-flag check and the approval prompt -- not this call (the container one-shot)
             docker_args,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -2576,7 +2576,7 @@ def _run_docker(
         # Kill the container explicitly — killing the CLI client
         # (proc.kill()) does NOT stop the container under the daemon.
         try:
-            subprocess.run(
+            subprocess.run(  # nosec B603 - kills the container on timeout; runtime and container name are this module's
                 [runtime, "kill", container_name],
                 capture_output=True, timeout=10,
             )
@@ -2646,7 +2646,7 @@ def _run_wsl_process(args: list, secret) -> dict:
     as_root = secret is not None
     proc = None
     try:
-        proc = subprocess.Popen(
+        proc = subprocess.Popen(  # nosec B603 - EXECUTION ROUTE: carries the model's command by design. List form and no shell, so there is nothing to inject into; the bound is upstream -- mode gate G3, the INERT allowlist, the dangerous-flag check and the approval prompt -- not this call (the WSL one-shot)
             args,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -2783,7 +2783,7 @@ def _run_ssh_process(args: list, env: dict, used_secrets: bool,
     three returns and two raises."""
     proc = None
     try:
-        proc = subprocess.Popen(
+        proc = subprocess.Popen(  # nosec B603 - EXECUTION ROUTE: carries the model's command by design. List form and no shell, so there is nothing to inject into; the bound is upstream -- mode gate G3, the INERT allowlist, the dangerous-flag check and the approval prompt -- not this call (the SSH one-shot)
             args,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -2897,7 +2897,7 @@ def _run_subprocess_fallback(
             text=True,
             timeout=config.SANDBOX_TIMEOUT_SECONDS,
             preexec_fn=preexec,
-            shell=False,
+            shell=False,  # nosec B603 - EXECUTION ROUTE: carries the model's command by design. List form and no shell, so there is nothing to inject into; the bound is upstream -- mode gate G3, the INERT allowlist, the dangerous-flag check and the approval prompt -- not this call (the insecure host fallback)
         )
     except subprocess.TimeoutExpired:
         return {
@@ -3219,7 +3219,7 @@ def _popen_session(args: list[str], *, cwd: Optional[str] = None,
     preserve that. For an interactive session there is only one stream to
     merge anyway: a pty carries both.
     """
-    return subprocess.Popen(
+    return subprocess.Popen(  # nosec B603 - EXECUTION ROUTE: carries the model's command by design. List form and no shell, so there is nothing to inject into; the bound is upstream -- mode gate G3, the INERT allowlist, the dangerous-flag check and the approval prompt -- not this call (a shell session)
         args, cwd=cwd, env=env,
         stdin=stdin,
         stdout=subprocess.PIPE,
@@ -3317,7 +3317,7 @@ class DockerSessionProcess(SessionProcess):
         # stop the container under the daemon, which is `_run_docker`'s own
         # lesson on its timeout path.
         try:
-            subprocess.run([self.runtime, "kill", self.name],
+            subprocess.run([self.runtime, "kill", self.name],  # nosec B603 - kills this session's own container; runtime and name are this module's
                            capture_output=True, timeout=10)
         except (OSError, subprocess.TimeoutExpired):
             pass
@@ -3333,7 +3333,7 @@ class HostSessionProcess(SessionProcess):
     def _terminate(self) -> None:
         if platform.system() == "Windows":
             try:
-                subprocess.run(
+                subprocess.run(  # nosec B603 - `taskkill` against this process's own child, by pid
                     ["taskkill", "/T", "/F", "/PID", str(self._proc.pid)],
                     capture_output=True, timeout=10)
             except (OSError, subprocess.TimeoutExpired):
@@ -3614,7 +3614,7 @@ def kill_labelled_containers() -> list[str]:
         return []
     runtime = probe.name
     try:
-        listed = subprocess.run(
+        listed = subprocess.run(  # nosec B603 - `ps` filtered on this process's own label, to find containers it started
             [runtime, "ps", "-q", "--filter",
              f"label=venastine.process={PROCESS_TOKEN}"],
             capture_output=True, text=True, timeout=10)
@@ -3626,7 +3626,7 @@ def kill_labelled_containers() -> list[str]:
            if line.strip()]
     if ids:
         try:
-            subprocess.run([runtime, "kill", *ids], capture_output=True,
+            subprocess.run([runtime, "kill", *ids], capture_output=True,  # nosec B603 - kills exactly the ids the runtime printed on the line above
                            timeout=30)
         except (OSError, subprocess.TimeoutExpired):
             logger.warning("Could not kill this process's containers %s",

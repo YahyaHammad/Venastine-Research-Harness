@@ -14,7 +14,10 @@ from pydantic import BaseModel, Field
 from sympy.geometry import Circle, Line, Point, Polygon, Triangle
 
 from tools.builtin._math_common import (
-    MathParseError, _split_warnings, safe_parse, serialize,
+    MathParseError,
+    _split_warnings,
+    safe_parse,
+    serialize,
 )
 
 _OPERATIONS = Literal[

@@ -32,7 +32,17 @@
 #     match that regex at all, so B105/B106 never covered this project's
 #     actual credential shape -- gitleaks is that gate, and it is a
 #     separate workflow for that reason.
-#   * `-b .github/bandit-baseline.json`: fails only on NEW issues (129
+#   * `-b .github/bandit-baseline.json`: fails on a new (file, test id,
+#     MESSAGE) triple -- which is NOT the same as "fails only on NEW
+#     issues", the sentence that stood here until batch 141. Bandit's
+#     `Issue.__eq__` matches on text/severity/cwe/confidence/filename/test
+#     and NOT on line number or code, and the comparison is set
+#     membership, so a SECOND subprocess call in a file that already
+#     carries a baselined B603 is silent. Measured: security/sandbox.py
+#     went 7 -> 18 B603 findings across this branch and this job reported
+#     none of them. `bandit-count-check.py` below is the other half, and
+#     the 21 findings it surfaced were triaged into per-site `# nosec`
+#     annotations in batch 141 rather than into this file. (129
 #     triaged at rollout: sandbox/subprocess surface, bound-param SQL in
 #     pipeline_storage, arXiv ET feed, redaction-test fixtures -- all
 #     accepted-risk with the reasoning in the rollout summary). Bandit
@@ -71,9 +81,9 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: "3.11"
           cache: pip
@@ -89,3 +99,11 @@ jobs:
           files=$(git ls-files '*.py')
           # shellcheck disable=SC2086
           bandit $files -s B101,B105,B106 -b .github/bandit-baseline.json -q
+
+      # The half `-b` cannot check. BESIDE it, not instead of it: `-b`
+      # matches on message text and still catches a reworded finding at an
+      # unchanged count, while this catches a second occurrence at an
+      # unchanged message. Neither subsumes the other, and the script's
+      # header carries the measurement.
+      - name: Bandit (a baselined file cannot absorb a second finding)
+        run: python scripts/bandit-count-check.py

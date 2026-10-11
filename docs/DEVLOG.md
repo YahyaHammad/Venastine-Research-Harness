@@ -20583,3 +20583,159 @@ Gated digits: the suite total in three documents, and
 44 -> 48.
 
 Counts 6350 -> 6354.
+
+## Batch 141 -- the jobs that could not run were hiding real red (2026-10-11)
+
+The CI half of the build and supply-chain surface: S18-02, S18-03, S18-04,
+S18-05, S18-06, and S18-09's claims 1 and 4. Split from batch 140 because
+"what must not ship" and "whether a job runs" are two subjects.
+
+**The finding under the findings.** Three of these are the same mechanism:
+`schedule` and `workflow_dispatch` resolve against the DEFAULT branch, and six
+of the eight workflows are not on `main`.
+
+```
+$ git ls-tree --name-only main .github/workflows/
+.github/workflows/publish.yml
+.github/workflows/tests.yml
+
+$ gh run list --workflow pip-audit.yml
+HTTP 404: workflow pip-audit.yml not found on the default branch
+```
+
+So `pip-audit` has produced zero runs since it was added, `codeql`'s weekly
+quality half has never fired, and the one release tag that exists was gated by
+the suite alone. **And running the checks by hand found that they were hiding
+real breakage, not just hypothetical coverage:**
+
+- **`ruff` fails on six errors**, five of them from this marathon's own fix
+  batches. `core/client.py` F402 -- batch 132's `for field in ...` shadowing
+  the `dataclasses.field` import at the top of the module. Un-sorted import
+  blocks in the three math tools batch 131 edited, in
+  `tests/test_sdk_conformance.py`, and in `tests/test_docs_consistency.py`
+  where batch 140's own `import fnmatch` went in above `import json`. Nothing
+  ran ruff, so nothing said so. All six fixed.
+- **`pip-audit` is clean** on both dependency files, which is S18-04's step 1
+  and the only thing that answers "are this branch's five new pins safe" --
+  two of them ship compiled native code and one is the dependency
+  `requirements.txt` itself calls "this project's SECURITY rests on".
+
+**S18-02, and the measurement is the batch.** `bandit.yml` says `-b` "fails
+only on NEW issues". It does not: bandit's `Issue.__eq__` matches on
+text/severity/cwe/confidence/filename/test, **not** on line number, and the
+comparison is set membership -- so the unit of suppression is (file, test id,
+message) and any number of further occurrences in that file collapse onto the
+first. Driven:
+
+```
+baseline results: 136   live results: 92
+security/sandbox.py            B603  7 -> 18
+tests/test_docs_consistency.py B404  1 -> 3    B603 1 -> 5    B607 1 -> 4
+tests/test_shell.py            B108  10 -> 12  B311 2 -> 3
+```
+
+Eleven new subprocess findings in the harness's own sandbox, across 91 commits
+of WSL and SSH work, with CI reporting nothing -- because every one landed in a
+file that already carried a baselined B603.
+
+`scripts/bandit-count-check.py` is the other half, and it is the behaviour
+bandit's own `filter_results` **docstring** describes three lines above the
+code that does not do it: group by (file, test id), fail on an increase. It
+runs BESIDE `-b`, not instead of it -- that one matches on message text and
+still catches a rewording at an unchanged count, and neither subsumes the
+other.
+
+**The owner ruled: wire it and triage the growth now.** So all 21 are
+annotated where they are, which S18-02 calls the stronger fix and which is
+line-anchored -- a moved call re-fires, the tripwire semantics
+`.gitleaksignore` deliberately chose. Two classes in the sandbox, and the
+distinction is the whole reason to write them down: twelve probes and
+lifecycle calls whose argv this module builds entirely (a runtime name from
+config, a distro name WSL printed, container ids the runtime just listed), and
+six execution routes that carry the model's command *because that is what they
+are for* -- where the honest annotation is not "no untrusted input" but "list
+form, no shell, and the bound is the mode gate, the INERT allowlist, the
+dangerous-flag check and the approval prompt, not this call".
+
+Three things the annotation work measured rather than assumed:
+
+- **`# nosec` placement.** Bandit 1.9.4 accepts it anywhere in a statement's
+  line range, verified on a copy -- which matters because two of the eighteen
+  report their `shell=False,` argument rather than the call's first line.
+- **`# nosec B603,B607` silently suppresses only B607.** The comma form
+  without a space parses as one token. `B603, B607` and `B603 B607` both work.
+  An annotation that looks like it covers two ids and covers one is this
+  batch's own subject in miniature, and it is why four findings survived the
+  first pass.
+- **The check's sensitivity for a triaged pair is the stale baseline count.**
+  All 18 sandbox sites are annotated, so live is 0 against a baseline of 7 --
+  seven findings of headroom. Measured by removing annotations one at a time:
+  green at 1, 4 and 7, red at 8. The mechanism is sound and the slack is
+  exactly the number of now-dead baseline rows, which are the same kind of
+  inert entry the header already keeps for the 65 B105/B106 ones.
+
+**S18-05: all 24 `uses:` lines were floating major tags**, including the three
+in `publish.yml` -- the job holding `id-token: write` and, once the secret
+exists, `NODE_AUTH_TOKEN`. The rule was already written down in
+`gitleaks.yml` ("D22's exact-pin rule applies to CI tooling too"), in a file
+whose own checkout was floating. SHAs resolved with `gh api`, each carrying
+the exact version the tag pointed at; `dependabot.yml` gains the
+`github-actions` ecosystem, grouped, because pinning without an update channel
+trades one risk for another. The gitleaks download gains the published digest
+and `--fail`, so absence fails at the download and substitution at the digest
+rather than both relying on `tar` choking on a non-gzip error page.
+
+**S18-03: the secret scan is on the publish path**, inlined as this file's own
+idiom prefers, and **after** the step that copies `providers.json.example`
+into place -- scanning earlier would scan a deliberately-planted fake and pass
+only because `gitleaks.toml` allowlists that name, which is the "it cannot
+happen because of a list somewhere else" assumption the removal step itself
+refuses to make. It is not redundant with `prepublish-check.mjs`, which
+matches on filenames: a credential pasted into a file that is SUPPOSED to ship
+is named by no entry of its denylist.
+
+**S18-04 also turned up a drift batch 136 created.** `pip-audit.yml`'s header
+said "`-r requirements.txt` ... the file is the one dependency list". Batch 136
+split the suite's packages out, so the job audited 18 of 22 declared
+distributions and nothing audited the other four. Both files are audited now,
+both are in the cache key, and the `pull_request` trigger is filtered to those
+two paths -- which answers the header's own objection that per-push would tax
+every PR.
+
+**S18-06 was the one where stale text is INSTRUCTION.** `CONTRIBUTING.md` told
+a contributor `publish.yml` has "three independent brakes ... no push/tag
+trigger (manual dispatch only)", and PR #197 armed the tag trigger in
+September. A fixer acting on that row reverts a merged owner decision --
+and `docs/REVIEW_MARATHON.md` repeated it to this scope's own reviewer. Both
+corrected, the marathon's bullets struck through rather than deleted, since
+what they record is the instruction the reports were produced under.
+
+**Five gates, one per finding's class**, because each of these survived a
+hundred commits by being a property no file asserted: every `uses:` is a
+40-hex SHA with a readable version comment, dependabot can update them, the
+publish path scans before publishing and after the fake credential is removed,
+the bandit job runs the count check, and pip-audit covers every declared
+requirements file.
+
+**Controls 6/7 with the equivalence control green, and the two survivors of
+the first pass were both real defects in my own work.** A5 survived because
+the gate asserted a substring the comment above the step also contains, so
+disabling the step passed -- it now asserts the invocation. A7 survived
+because my mutation cut an annotation mid-sentence, leaving `sandbox.py`
+unparseable -- and **the count check reported "none grew" on a file bandit
+could not read**, because a missing file's findings read as a decrease. The
+script now fails on bandit's `errors` list. A7 then survived a second time for
+the arithmetic above, and is killed at 8 removals.
+
+**And a gate caught a mistake batch 140 had already shipped past it, which is
+item 86.** `S18-02` in a comment reads as the decision id `S18` and resolves
+nowhere -- the trap batch 131 wrote into `tests/BREAKING_CHANGES.md`. Batch 140
+shipped four of them in `.mjs` files and the gate said nothing, because
+`_production_python()` yields `.py` and stops; the fifth, in a new `.py`
+script, turned it red immediately. All five corrected. The gap is filed rather
+than fixed: closing it needs a JS comment extractor, the Python half works by
+`tokenize`, and `test_the_tree_names_every_production_module` already sweeps
+`.py` AND `.mjs` -- so the two gates disagree about what this project is made
+of.
+
+Counts 6354 -> 6359.
