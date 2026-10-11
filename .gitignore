@@ -20,6 +20,23 @@ providers.json
 # -- that is the actual protection (SS56) -- but a committed ciphertext is
 # still an offline guessing target nobody meant to publish.
 secrets.json
+# S18-01 (batch 140). `/init --config` scaffolds BOTH of these into the
+# user's project, and `mcp.json` is where MCP servers are configured --
+# README's own entry table names `headers` as where a hosted server's
+# `Authorization` credential rides, and the harness's acknowledgement
+# screen shows those names and deliberately NEVER their values. So the
+# harness writes a credential-bearing file into a checkout and, until
+# this, `git add -A` from the project root staged it -- the same threat
+# model the WAL lines above are listed under.
+#
+# THE TWO FILES RATHER THAN `.venastine/`: the directory also holds
+# project-tier agents/ and skills/, which are meant to travel with the
+# repository (config_loader discovers them with it, and D17's trust
+# prompt exists for exactly that). Excluding it wholesale would make
+# that feature dead on arrival. package.json's `neverDistribute` is the
+# one list all three channels read; this is its `git` half.
+.venastine/mcp.json
+.venastine/settings.json
 .qwen/
 .zcode/
 # docs/REVIEW_MARATHON.md's per-scope reports. Untracked for two measured

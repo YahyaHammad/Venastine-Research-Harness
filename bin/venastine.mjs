@@ -184,7 +184,12 @@ function isReady(rt) {
   return fs.existsSync(rt.stamp) && fs.existsSync(rt.python);
 }
 
-function countPins() {
+// Non-comment lines in requirements.txt. NOT a count of pins, which is what
+// it was called until batch 140: 2 of the 18 are ranges (`rich>=14.2,<16`,
+// `cryptography>=42.0,<52`), so the screen that said "N pinned packages"
+// was promising something the file does not say. The exact set is in the
+// file the screen names, which is what makes the count enough.
+function countRequirements() {
   return fs.readFileSync(REQUIREMENTS, 'utf8')
     .split(/\r?\n/)
     .filter((line) => line.trim() && !line.trim().startsWith('#'))
@@ -205,8 +210,14 @@ function ask(question) {
  * Build the Python environment, only ever with the user's say-so.
  *
  * The consent prompt is not ceremony. This is the one action the launcher
- * takes on its own initiative -- it runs a network install of 17 pinned
- * distributions -- and the project's own rule for that case is D17/D31:
+ * takes on its own initiative -- it runs a network install of everything in
+ * requirements.txt -- and the project's own rule for that case is D17/D31:
+ *
+ * NO COUNT IN THIS SENTENCE, deliberately (S18-09, batch 140). It said "17
+ * pinned distributions" and the file had 22 installable lines when that was
+ * measured, 18 now that batch 136 moved the test packages out. The screen
+ * below prints the live number; prose that restates a computed value is a
+ * second copy of it, and this is the copy that drifted.
  * show what will run and confirm it. That is also why the bootstrap is here
  * and not in an npm `postinstall` hook, where it would run unannounced and be
  * skipped entirely under `--ignore-scripts`.
@@ -222,7 +233,7 @@ async function ensureRuntime(python, rt, { assumeYes }) {
     'Venastine needs a Python environment (first run).\n' +
     `  python  : ${python.version}  (${python.executable})\n` +
     `  venv    : ${rt.dir}\n` +
-    `  install : ${countPins()} pinned packages from requirements.txt\n`;
+    `  install : ${countRequirements()} packages from requirements.txt\n`;
 
   if (!assumeYes) {
     if (!process.stdin.isTTY) {

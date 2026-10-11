@@ -7,6 +7,9 @@
 providers.json export-ignore
 .env export-ignore
 secrets.json export-ignore
+# S18-01 (batch 140), for .gitignore's reason one channel over.
+.venastine/mcp.json export-ignore
+.venastine/settings.json export-ignore
 *.db export-ignore
 # The WAL sidecars, for .gitignore's reason one channel over (NA18).
 *.db-wal export-ignore

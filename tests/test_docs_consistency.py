@@ -59,6 +59,7 @@ that are pure text never skip, so they still run under
 """
 
 import io
+import fnmatch
 import json
 import os
 import re
@@ -1389,8 +1390,19 @@ def test_the_npm_allowlist_cannot_ship_a_secret():
     """
     files = _package_json()["files"]
 
-    never_named = {"providers.json", ".env", "app.db", "logs", "logs/",
-                   "output", "output/", "conftest.py", "tests", "tests/"}
+    # DERIVED, since batch 140. This set was the FOURTH hand-written copy of
+    # "keep local secrets out of a distribution" -- and the one that was
+    # missing `secrets.json` and the WAL sidecars while both git channels had
+    # them. It now comes from package.json's `neverDistribute`, which all
+    # three channels read. `conftest.py` and `tests` are kept by hand: they
+    # are not credential-bearing, they are the npm channel's own concern
+    # (ROOT_PY_NOT_SHIPPED in prepublish-check.mjs says why for conftest),
+    # and the list they belong to is this one rather than the shared one.
+    never_named = {"conftest.py", "tests", "tests/"}
+    for entry in _never_distribute():
+        if "npm" in entry["channels"]:
+            never_named.update(entry["samples"])
+            never_named.update(entry["value"])
     named = sorted(set(f.rstrip("/") for f in files if not f.startswith("!"))
                    & set(n.rstrip("/") for n in never_named))
     assert not named, (
@@ -1406,6 +1418,197 @@ def test_the_npm_allowlist_cannot_ship_a_secret():
         f"not skip __pycache__ or .ipynb_checkpoints on its own, and "
         f"test_no_notebook_checkpoint_file_is_committed above exists because "
         f"a checkpoint copy of a prompt file is a real thing in this tree.")
+
+
+# ---------------------------------------------------------------------------
+# ---- S18-01 / S18-08: one exclusion list, three channels, driven ----------
+# ---------------------------------------------------------------------------
+#
+# "Keep local secrets out of a distribution" had FIVE copies and no two
+# agreed, while two documents claimed three. The disagreements were not
+# cosmetic: `secrets.json` was in both git channels and in neither npm-side
+# list, `.venastine/mcp.json` was in none of the five although `/init
+# --config` writes it and README names `Authorization` as what rides in it,
+# and the npm database test was `endsWith('.db')`, which misses the `-wal`
+# sidecar that both git channels had already been fixed for.
+#
+# package.json's `neverDistribute` is now the one list. These gates check the
+# channels against it rather than against each other.
+
+_NEVER_DISTRIBUTE_FIELDS = {"label", "match", "value", "channels", "samples"}
+_CHANNELS = {"git", "archive", "npm"}
+
+
+def _never_distribute() -> list:
+    """The one list, read from where both consumers read it."""
+    entries = _package_json().get("neverDistribute")
+    assert entries, (
+        "package.json has no `neverDistribute` list. It is the single source "
+        "for three exclusion channels (batch 140, S18-01/S18-08); if it was "
+        "renamed, repoint these gates -- do not delete them, because the "
+        "thing they replaced was five hand-written lists that disagreed.")
+    return entries
+
+
+def test_every_never_distribute_entry_is_well_formed_and_drivable():
+    """An entry nothing can test is an entry that stops being enforced.
+
+    `samples` is required for exactly that reason: it is what the two gates
+    below drive, so a pattern cannot be added without a concrete path that
+    demonstrates it.
+    """
+    entries = _never_distribute()
+    assert len(entries) >= 10, (
+        f"only {len(entries)} entries; this list covers the union of "
+        f".gitignore, .gitattributes export-ignore and the npm denylist, so a "
+        f"short list means something was dropped rather than tidied")
+
+    for entry in entries:
+        missing = _NEVER_DISTRIBUTE_FIELDS - set(entry)
+        assert not missing, f"{entry.get('label')!r} is missing {missing}"
+        assert entry["value"], f"{entry['label']!r} has no patterns"
+        assert entry["samples"], (
+            f"{entry['label']!r} has no samples, so no gate can drive it")
+        unknown = set(entry["channels"]) - _CHANNELS
+        assert not unknown, (
+            f"{entry['label']!r} names unknown channels {unknown}; the three "
+            f"are git (push), archive (git archive) and npm (the tarball)")
+        assert entry["channels"], (
+            f"{entry['label']!r} excludes nothing from anywhere")
+
+
+def test_the_push_channel_ignores_every_sample_that_claims_it():
+    """DRIVEN through `git check-ignore`, so git does the matching and this
+    gate re-implements none of it.
+
+    The control is inside the same mechanism: a path no rule covers makes
+    check-ignore exit non-zero and print nothing, which is how
+    `.venastine/mcp.json` was found -- it was absent from the tree's only
+    `.gitignore` while four sibling paths resolved to a rule.
+    """
+    import subprocess
+
+    claimed = [(e["label"], s) for e in _never_distribute()
+               if "git" in e["channels"] for s in e["samples"]]
+    assert claimed, "no entry claims the git channel, so this proves nothing"
+
+    unignored = []
+    for label, sample in claimed:
+        proc = subprocess.run(
+            ["git", "check-ignore", "-q", "--", sample],
+            cwd=ROOT, capture_output=True)
+        if proc.returncode != 0:
+            unignored.append(f"{sample} ({label})")
+
+    assert not unignored, (
+        f"package.json `neverDistribute` claims the git channel for these, "
+        f"and `.gitignore` matches none of them: {unignored}. A first-party "
+        f"command writes some of these into a user's project, so `git add -A` "
+        f"from the project root would stage them -- and a published "
+        f"credential is remedied by rotation, not by a later commit.")
+
+    # The positive control: a path that must NOT be ignored, because the
+    # narrow pair was chosen over `.venastine/` precisely so project-tier
+    # agents and skills keep travelling with a repository (D17's trust prompt
+    # is the mechanism that exists for them).
+    proc = subprocess.run(
+        ["git", "check-ignore", "-q", "--", ".venastine/agents/example.md"],
+        cwd=ROOT, capture_output=True)
+    assert proc.returncode != 0, (
+        "`.venastine/agents/` is ignored. The two credential files are "
+        "excluded by name on purpose -- excluding the directory wholesale "
+        "makes project-tier agents and skills untrackable, which is the "
+        "feature workspace trust exists to serve.")
+
+
+def test_the_archive_channel_excludes_every_sample_that_claims_it():
+    """TEXTUAL, and the reason is measured rather than assumed.
+
+    `git check-attr export-ignore` is NOT a faithful driver here. Measured in
+    batch 140 against a throwaway repository: `logs/ export-ignore` makes
+    `git archive` exclude `logs/a.txt`, while `check-attr` reports
+    `unspecified` for both `logs` and `logs/a.txt` -- archive prunes the tree
+    ENTRY, and attributes apply to files. A gate built on check-attr would
+    have reported two working entries as broken and invited a "fix" to them.
+
+    Driving `git archive` instead would be faithful and vacuous: it ships only
+    TRACKED content, and every path here is untracked, so each would be absent
+    whatever `.gitattributes` said.
+
+    So this reads the patterns. The comparison is deliberately crude -- equal,
+    or a directory prefix -- because the patterns in that file are, and a
+    cleverer matcher here would be the second implementation this whole batch
+    removes.
+    """
+    with open(os.path.join(ROOT, ".gitattributes"), encoding="utf-8") as f:
+        patterns = [line.split()[0].rstrip("/")
+                    for line in f
+                    if "export-ignore" in line and not line.startswith("#")]
+    assert patterns, (
+        ".gitattributes states no export-ignore patterns; if the format "
+        "moved, repoint this -- H3/C2 is the channel it covers")
+
+    def covered(sample: str) -> bool:
+        """Equal, a directory prefix, or a glob -- on the whole path or on
+        the basename, because `*.db` is written to match `app.db` anywhere.
+
+        An APPROXIMATION of git's gitattributes matching, stated as one:
+        `fnmatch`'s `*` crosses `/` where git's does not, so this is the
+        permissive direction. That is the right way round for a gate whose
+        job is to find patterns that cover NOTHING -- it cannot produce a
+        false red, only miss a pattern that is narrower than it looks.
+        """
+        base = os.path.basename(sample)
+        return any(sample == p
+                   or sample.startswith(p + "/")
+                   or fnmatch.fnmatch(sample, p)
+                   or fnmatch.fnmatch(base, p)
+                   for p in patterns)
+
+    missing = [f"{s} ({e['label']})"
+               for e in _never_distribute() if "archive" in e["channels"]
+               for s in e["samples"] if not covered(s)]
+
+    assert not missing, (
+        f"`neverDistribute` claims the archive channel for these and "
+        f".gitattributes carries no export-ignore pattern for them: "
+        f"{missing}. That channel is `git archive` and GitHub's "
+        f"\"Download ZIP\".")
+
+
+def test_the_npm_gate_derives_its_denylist_rather_than_restating_it():
+    """The structural half, and the one that keeps the others honest.
+
+    `scripts/prepublish-check.mjs` used to carry its own FORBIDDEN literal,
+    and that copy is where `secrets.json` went missing and where the `.db`
+    test failed to cover `.db-wal`. A gate that only compared the lists would
+    pass again the moment somebody re-inlined one.
+    """
+    with open(os.path.join(ROOT, "scripts", "prepublish-check.mjs"),
+              encoding="utf-8") as f:
+        source = f.read()
+
+    assert "pkg.neverDistribute" in source, (
+        "prepublish-check.mjs no longer reads package.json's "
+        "`neverDistribute`. If it grew its own list again, that is the fourth "
+        "copy returning -- the one that was missing secrets.json and the WAL "
+        "sidecars while both git channels had them.")
+
+    assert "const FORBIDDEN = [" not in source, (
+        "prepublish-check.mjs declares a literal FORBIDDEN array again. The "
+        "list is package.json's; this file applies it.")
+
+    # Every match kind the data uses has to exist in the consumer, or the
+    # consumer throws at publish time -- which is correct behaviour and a
+    # terrible moment to discover it.
+    kinds = {entry["match"] for entry in _never_distribute()}
+    for kind in sorted(kinds):
+        assert f"{kind}:" in source or f"'{kind}':" in source, (
+            f"package.json uses match kind {kind!r} and "
+            f"prepublish-check.mjs has no matcher for it. The consumer throws "
+            f"on an unknown kind by design, so this would abort the publish "
+            f"rather than silently skip the pattern -- but the publish is the "
+            f"wrong place to find out.")
 
 
 def test_the_launcher_never_sets_the_two_variables_that_would_break_it():

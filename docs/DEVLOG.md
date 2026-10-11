@@ -20453,3 +20453,133 @@ records a scope that was already true, which is what §23 AC1b's status line and
 item 83 are for.
 
 Counts 6348 -> 6350.
+
+## Batch 140 -- five lists that each knew part of the rule (2026-10-11)
+
+The review marathon's first `FIX-NOW` surface, and the half of it about what
+must not leave this machine. S18-01 (severity `S2`), S18-08, and S18-09's
+three packaging claims. The CI half of the same scope is batch 141.
+
+**S18-01: `.venastine/mcp.json` was in none of the exclusion lists.**
+`/init --config` scaffolds `.venastine/settings.json` and `.venastine/mcp.json`
+into the user's project. `mcp.json` is where MCP servers are configured, and
+`README.md`'s own entry table names `headers` as "where a hosted server's
+credential usually rides"; the harness's acknowledgement screen shows the
+*names* of those headers and deliberately never their values, which is this
+repository classifying them as secret. Re-driven before the fix:
+
+```
+$ git check-ignore -v .venastine/mcp.json .venastine/settings.json
+(no output, exit 1)
+```
+
+Two documented commands write a credential-bearing file into a checkout, and
+`git add -A` from the project root staged it. `.gitignore`'s own WAL lines
+establish that threat model in as many words -- "without these an `add -A` from
+the repo root stages conversation content".
+
+**The one decision in it, and the evidence settled it.** S18-01 offers
+`.venastine/` wholesale or the narrow pair, and names this as the owner's call.
+It is the narrow pair, because the directory also holds project-tier `agents/`
+and `skills/` -- `core/config_loader.py` discovers them "with the repo", and
+D17's entire workspace-trust mechanism exists *because* a cloned project
+carries them. Gitignoring the directory would make that feature dead on arrival
+for anyone following the default. So the fix is the two files `/init --config`
+actually writes, and a positive control in the gate asserts
+`.venastine/agents/example.md` stays trackable.
+
+**S18-08 was the same defect one layer out, so one change closes both.** The
+rule had five copies -- `.gitignore`, `.gitattributes export-ignore`,
+`prepublish-check.mjs`'s `FORBIDDEN`, `never_named` in
+`tests/test_docs_consistency.py`, and the two documents that both claim there
+are three. No two agreed, and two disagreements were mechanical rather than
+cosmetic:
+
+- **`secrets.json`** was in both git channels, each with a comment explaining
+  why, and in neither npm-side list.
+- **`{ test: (f) => f.endsWith('.db') }`** does not match `app.db-wal`. That is
+  the exact defect both git channels had already been fixed for and written a
+  comment about ("`*.db` does not match them -- they end `-wal` and `-shm`"),
+  not carried to the third and fourth copies.
+
+**One list now, in `package.json` as `neverDistribute`**, twelve entries, each
+declaring its `match` kind, its patterns, which of the three channels must
+exclude it, and -- load-bearing -- `samples`, concrete paths the gates drive.
+`package.json` rather than a new file because both consumers already read it
+(`prepublish-check.mjs` for `files` and the version, the suite through its own
+`_package_json()`), and the denylist then sits beside the allowlist it backs
+up.
+
+Four gates replace the reading-lists-against-each-other arrangement: the entry
+shape, the push channel **driven** through `git check-ignore`, the archive
+channel, and a structural one asserting `prepublish-check.mjs` reads the shared
+key and carries no literal list of its own. An unknown `match` kind **throws**
+in the consumer rather than being skipped -- a denylist that silently stops
+enforcing a pattern is the defensive-default shape S18-02 files against the
+bandit baseline.
+
+**A measurement changed the gate's design, and without it I would have
+"fixed" two working entries.** `git check-attr export-ignore -- logs/a.txt`
+reports `unspecified`, and `logs/ export-ignore` *looks* inert because
+attributes apply to files. Driven in a throwaway repository instead:
+
+```
+.gitattributes:  logs/ export-ignore      noslashdir export-ignore
+git archive ->   logs/a.txt       absent   noslashdir/a.txt  absent
+                 keep.txt         PRESENT  keepme/a.txt      PRESENT
+```
+
+`git archive` prunes the tree **entry**, so a trailing-slash pattern works
+exactly as intended and `check-attr` simply does not answer archive's
+question. A gate built on `check-attr` would have reported `logs/` and
+`output/` as covering nothing. So the archive gate reads the patterns instead,
+and says so -- with `fnmatch`, whose `*` crosses `/` where git's does not,
+which is the permissive direction and therefore cannot produce a false red on a
+gate whose job is finding patterns that cover nothing.
+
+**The npm channel is driven end to end, which is the control that mattered.**
+`files` is an allowlist naming none of these, so no forbidden path can reach a
+tarball by accident -- which also means the second layer cannot be tested
+through the first. So the control puts `secrets.json` into `files`, creates the
+file, and asks the real gate:
+
+```
+ * Tarball contains the harness-held secret store: secrets.json
+ A published npm version cannot be replaced, only deprecated.
+```
+
+Before this batch that tarball published. Controls **6/6** with the
+equivalence control green: the `.gitignore` line removed, a `.gitattributes`
+row removed, a `FORBIDDEN` literal re-inlined, an entry stripped of its
+samples, `files` naming `secrets.json`, and the end-to-end tarball case. G
+reversed the list's order -- same set, green.
+
+**S18-09, claims 2, 3 and 5, and the report's own numbers were stale.** The
+consent screen asked the user to approve installing "N **pinned** packages",
+and `countPins()` counted non-comment lines rather than pins. The report
+measured 22 lines with 6 ranges; measured now it is **18 lines with 2 ranges**
+(`rich>=14.2,<16`, `cryptography>=42.0,<52`) -- because **batch 136 moved the
+four pytest ranges out to `requirements-test.txt`**. The count changed, the
+ranges shrank from six to two, and "pinned" is still false. An entry is
+evidence rather than instruction, and this time the entry was three days old
+and the batch that falsified it was mine.
+
+The screen now says "N packages from requirements.txt", the docstring states no
+count at all (prose restating a computed value is a second copy of it, and it
+is the copy that drifted), and `countPins` is renamed `countRequirements`
+because it never counted pins -- keeping the name while fixing the sentence
+leaves the next reader the same wrong idea in a different place.
+
+Claim 5 was the CRLF justification in `prepublish-check.mjs`: it said
+`config.py` and `config.yaml` "are stored CRLF in the worktree, which has
+already produced one false GREEN in this repo". Measured: 95 LF lines and 1030
+LF lines, not one CRLF between them. `^` with `/m` would have worked on CRLF
+anyway, since `^` matches after `\\n` and the following `\\s*` absorbs the
+`\\r`. The construct is correct either way, so it stays and only the reason
+goes.
+
+Gated digits: the suite total in three documents, and
+`test_docs_consistency.py`'s own per-file count in ARCHITECTURE's tree,
+44 -> 48.
+
+Counts 6350 -> 6354.
