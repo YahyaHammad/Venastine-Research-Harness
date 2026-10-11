@@ -4240,7 +4240,7 @@ chosen answer for the sibling reader.
 narration, or whether every dismissal produces a boolean -- item 5 is open as
 that brief. The `settle`/`pump` pair was read and is sound.
 
-## 83. The spawn sign-off has no reachable configuration on the shipped roster (open, found in batch 137, filed batch 138)
+## 83. The spawn sign-off has no reachable configuration on the shipped roster (closed, batch 139 -- ruled a deliberate scope and recorded)
 
 **Not from any report.** This one came out of the batch-137 fix pass (A16,
 `spawnable` becoming a refusal), when three tests broke because they drove
@@ -4335,21 +4335,57 @@ way to resolve it is the owner's: `TestTheSpawnSignoffIsUnreachableOnTheShippedR
 sweeps every spawnable agent and goes red the day one declares a grantable gated
 tool -- at which point this entry is what the reader should come back to.
 
-**Shape, if it is to be resolved:** three answers, and they are not equivalent.
-(a) Accept it -- a sign-off with nothing to offer is correct fail-closed
-behaviour, and the entry becomes an *Accepted risks* note. (b) Give one spawnable
-agent `write_project_doc` so the mechanism is exercised by what ships. `writer`
-is the only plausible candidate and **this is not a roster tweak**: its
-frontmatter says "No `write`/`edit` by omission: this agent returns prose;
-whoever delegated to it decides where it lands", and its body has a section
-headed *Return prose, not a file operation* ("Where you put it is the
-delegator's decision, not yours"). So (b) reverses a stated decision in the
-same way A16 did, and wants the same treatment -- its own batch and its own
-decision record. R4's compounding-authority argument does not reach
-`write_project_doc`, so the objection to (b) is the agent's contract rather
-than the permission. (c) Decide the sign-off is for
+**RULED (c) BY THE OWNER, batch 139: the subset picker is for
+operator-configured installs, and that is now written where the mechanism is
+described rather than only here.** Three answers were offered and they were not
+equivalent. (a) Accept it -- a sign-off with nothing to offer is correct
+fail-closed behaviour, and this becomes an *Accepted risks* note. Not chosen:
+the picker is not merely narrow, it is unreachable, and that belongs beside the
+mechanism rather than in the register alone. (b) Give one spawnable agent
+`write_project_doc`. Not chosen, and **it was never a roster tweak**:
+`writer` is the only plausible candidate, its frontmatter says "No
+`write`/`edit` by omission: this agent returns prose; whoever delegated to it
+decides where it lands", and its body has a section headed *Return prose, not a
+file operation* ("Where you put it is the delegator's decision, not yours"). So
+(b) reverses a stated decision the way A16 did and would want its own batch and
+its own decision record; R4's compounding-authority argument does not reach
+`write_project_doc`, so the objection is the agent's contract rather than the
+permission. (c) Decide the sign-off is for
 operator-enabled installs only and say so where §18 describes it, which costs two
-sentences and no behaviour.
+sentences and no behaviour. **This is what shipped.**
+
+**What batch 139 did.** Four places now carry the scope, each chosen because it
+is what a reader consults when deciding whether the picker is something they
+would see: `docs/ROADMAP_v2.md` §23's AC1b status (the record of what
+shipped), `AGENTS.md`'s R13 bullet and a new sibling to its "`candidates()` is
+empty on a default install, by design" bullet, `tools/registry.py`'s
+`GRANT_SIGNOFF_ONLY` registration comment, and
+`agents/manager.py`'s `candidate_approvals` docstring.
+`tui/screens.py`'s `SubagentSignoffScreen` was deliberately left alone -- its
+docstring describes the screen accurately and its own comment already says the
+no-candidates branch is reachable ("either can be reached from inside a run").
+It is the one place that got this right.
+
+Two tests pin it, both driving the **production entry point** rather than the
+helper, which is the gap that let this exist:
+`test_request_payload_offers_nothing_for_every_shipped_agent` (what
+`core/loop.py` actually asks the registry for) and
+`test_the_picker_is_reachable_only_for_an_agent_that_declines_to_narrow`, which
+registers an MCP-shaped tool and measures all three cases -- the six narrowed
+agents offer nothing, an agent declaring no `allowed_tools` offers it, and one
+naming it outright offers it. So "operator-configured" is a measurement rather
+than a sentence.
+
+**One claim in the batch-138 version of this entry did not survive
+inspection, and it was mine.** It said the picker branch "is only ever tested
+with inputs that cannot occur", citing
+`SubagentSignoffScreen("researcher", ["web_search"])`. Read in context, those
+four sites are parametrised SCREEN-SHAPE tests -- they assert which CSS dialog
+renders and which button takes focus, across every modal the app has -- so a
+placeholder agent and a placeholder tool are the right arguments and assert
+nothing false. What was genuinely missing was an end-to-end test from the real
+roster, and that is what the two above are. The criticism was aimed one layer
+off.
 
 **Not:** widening `candidate_approvals` to stop excluding per-call
 `approval_check` tools. §25 R2 excludes them deliberately, and the stated reason

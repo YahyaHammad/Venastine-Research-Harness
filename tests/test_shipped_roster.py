@@ -83,6 +83,28 @@ SPAWNABLE_LEAVES = ("build", "test", "writer", "explore", "review")
 
 
 @pytest.fixture
+def signoff_candidate_tool():
+    """A tool the spawn sign-off COULD offer, registered the way an MCP
+    server's tools are: `mcp__*` so D28 allows it and gates it, and no
+    `approval_check` so R2 does not filter it out of the grant paths.
+
+    Without this the roster sweeps below assert an empty set against an
+    empty pool, which is the vacuity `tests/test_agents.py` records hitting
+    in the same place (`_mcp_tool` "is load-bearing: ... the exclusion below
+    was true of every string ever written").
+    """
+    from tools.base import GRANT_ANYWHERE, ToolSpec
+
+    name = "mcp__probe__signoff"
+    registry.register(ToolSpec(name, {"name": name},
+                               lambda params: {"result": "ok"},
+                               grant_policy=GRANT_ANYWHERE))
+    try:
+        yield name
+    finally:
+        registry.unregister(name)
+
+@pytest.fixture
 def roster(real_harness_tier):
     """The real shipped definitions, with the user tier and the trust
     store redirected into tmp so no developer's own files leak in."""
@@ -678,3 +700,88 @@ class TestTheSpawnSignoffIsUnreachableOnTheShippedRoster:
             "a spawnable agent declaring write_project_doc must offer it; "
             "otherwise the sweep above is asserting about a helper that "
             "cannot answer non-empty, and proves nothing")
+
+    def test_request_payload_offers_nothing_for_every_shipped_agent(
+            self, roster):
+        """The same claim at the PRODUCTION entry point.
+
+        `core/loop.py` does not call `candidate_approvals`; it asks the
+        registry for `request_payload`, which builds the sign-off question.
+        Everything above drives the helper, and a helper is not where this
+        defect could hide -- it hid because nothing drove the payload from
+        the real roster, so the picker branch was only ever tested with
+        arguments hand-written by its own tests.
+        """
+        from agents import subagent_tool
+
+        spawnable = sorted(name for name, agent in roster.items()
+                           if agent.spawnable is True)
+        assert len(spawnable) >= 5, "the sweep cannot discriminate"
+
+        payloads = {name: subagent_tool.request_payload(
+            {"agent_name": name}) for name in spawnable}
+
+        for name, payload in payloads.items():
+            assert payload["agent"] == name, (
+                f"the payload for {name} is about {payload.get('agent')!r}")
+            assert payload["candidates"] == [], (
+                f"{name} now carries candidates {payload['candidates']} into "
+                f"the sign-off, so SubagentSignoffScreen takes its PICKER "
+                f"branch for a shipped agent for the first time. Read "
+                f"TECHNICAL_DEBT 83.")
+
+    def test_the_picker_is_reachable_only_for_an_agent_that_declines_to_narrow(
+            self, roster, signoff_candidate_tool):
+        """The ruling, as a measurement (TECHNICAL_DEBT 83).
+
+        `AGENTS.md` records for the PIPELINE path that "`candidates()` is
+        empty on a default install, by design ... the population both grant
+        paths serve is MCP tools, which are allowed-but-gated by default and
+        carry no `approval_check`." For the SIGN-OFF path the property is
+        stronger, and this is what makes it so: the candidate set is
+        intersected with the CHILD's reachable tools, and every spawnable
+        shipped agent narrows `allowed_tools` to built-ins. An agent file
+        cannot name `mcp__server__tool` for a server that did not exist when
+        it was written.
+
+        So configuring an MCP server -- the one thing that populates the
+        candidate pool -- does not make the picker reachable for anything
+        this project ships. What does is an agent that declines to narrow,
+        or one that names a gated tool outright, and both are user- or
+        project-tier files. That is the operator-configured scope the
+        sign-off is for, measured here rather than asserted in prose.
+        """
+        import dataclasses
+
+        from agents.manager import manager
+
+        # The pool is populated: a wide-open context can see it.
+        assert signoff_candidate_tool in manager.candidate_approvals(
+            ToolContext()), (
+            "the fixture tool is not a candidate even globally, so nothing "
+            "below is a subtraction")
+
+        for name, agent in roster.items():
+            if agent.spawnable is not True:
+                continue
+            child = manager.child_context(agent, ToolContext())
+            assert manager.candidate_approvals(child) == [], (
+                f"{name} reaches {signoff_candidate_tool} despite narrowing")
+
+        # Declines to narrow at all -- which is the shape `grill-me` had, and
+        # the reason the sign-off ever fired before A16 refused it.
+        unnarrowed = dataclasses.replace(
+            roster["review"], name="unnarrowed", allowed_tools=None)
+        offered = manager.candidate_approvals(
+            manager.child_context(unnarrowed, ToolContext()))
+        assert signoff_candidate_tool in offered, (
+            f"an agent declaring no allowed_tools must inherit global policy; "
+            f"got {offered}")
+
+        # Or names the gated tool outright.
+        named = dataclasses.replace(
+            roster["review"], name="named",
+            allowed_tools=["read_project_doc", signoff_candidate_tool])
+        assert manager.candidate_approvals(
+            manager.child_context(named, ToolContext())) == [
+                signoff_candidate_tool]

@@ -154,6 +154,19 @@ class AgentManager:
         keep out of a grant, and R4's argument is ABOUT this sign-off.
         Now both read one per-tool declaration.
 
+        EMPTY FOR EVERY SHIPPED AGENT, on every install, and that is a
+        ruled scope rather than a gap (TECHNICAL_DEBT 83, batch 139).
+        The pool this returns from is the gated-with-no-approval_check
+        set -- the MCP tools plus `write_project_doc` -- and the
+        intersection with `child_context` is what empties it: all six
+        spawnable shipped agents narrow `allowed_tools` to built-ins,
+        and an agent file cannot name `mcp__server__tool` for a server
+        that did not exist when it was written. So the sign-off's
+        PICKER branch belongs to an agent that declines to narrow, or
+        one naming a gated tool outright, which is a user- or
+        project-tier file. A shipped spawn gets the no-candidates
+        branch, which `tui/screens.py` builds deliberately.
+
         The LOOSE half of the pair: GRANT_SIGNOFF_ONLY passes here and is
         refused by the pipeline. A human answering in the moment, about
         one named agent, for one turn, is the consent write_project_doc's

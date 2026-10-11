@@ -1027,6 +1027,18 @@ registry.register(ToolSpec(
     # names the destination and the size. That is the per-call consent a
     # gate is for, which is also why --attended was never the mode at
     # issue in #133.
+    #
+    # OFFERED TO NOTHING THAT SHIPS, measured in batch 139 and ruled
+    # deliberate (TECHNICAL_DEBT 83). This is the only
+    # GRANT_SIGNOFF_ONLY registration in the registry, and no agent in
+    # agents/builtin/ declares `write_project_doc` -- so the policy
+    # value above is correct and has no shipped instance. The sign-off
+    # picker is for operator-configured installs: an agent that
+    # declines to narrow `allowed_tools`, or one naming a gated tool
+    # outright. Do not "fix" this by adding the tool to a shipped
+    # agent -- `writer` is the only plausible candidate and its own
+    # file refuses write capability in two places, so that is a
+    # decision reversal and wants its own batch.
     grant_policy=GRANT_SIGNOFF_ONLY,
     budget=BUDGET_IO))
 registry.register(ToolSpec(

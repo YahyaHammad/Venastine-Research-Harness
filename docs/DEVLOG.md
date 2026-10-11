@@ -20327,3 +20327,129 @@ defect, and saying so precisely is the difference between an attribution and an
 excuse.
 
 Counts 6345 -> 6348.
+
+## Batch 139 -- the consent mechanism that was for somebody else's install (2026-10-11)
+
+`docs/TECHNICAL_DEBT.md` 83, ruled by the owner and closed. §18's spawn
+sign-off hands a child a set of tools it may use without asking again, and §23
+AC1b turned that from a yes/no into a subset picker. **No agent this project
+ships reaches the picker**, and the ruling is that this is a deliberate scope
+rather than a gap: it is for operator-configured installs, and that is now
+written where the mechanism is described instead of only in the register.
+
+**The measurements that earned the ruling, each taken because the previous
+statement of it turned out to be wrong.** Batch 138 filed this as "no reachable
+configuration on a stock install", after correcting a triage note that had said
+the candidate tools "are globally denied". Both understated it.
+
+With **every tool globally enabled** -- the permissions dataclass swapped for
+one answering `True` to everything -- all six spawnable agents still offer
+nothing. Global permissions are not what gates this. `candidate_approvals`
+intersects the candidate pool with the CHILD's reachable set, so what gates it
+is the agent's own `allowed_tools`.
+
+With an **MCP server configured**, which is the population both grant paths
+were built for (`AGENTS.md` says so about the pipeline path: "the population
+both grant paths serve is MCP tools, which are allowed-but-gated by default and
+carry no `approval_check`"):
+
+```
+  (no agent / wide open)              ['mcp__probe__tool', 'write_project_doc']
+  build .. writer (all six)           []
+  an agent declaring NO allowed_tools ['mcp__probe__tool', 'write_project_doc']
+  one that NAMES the mcp tool         ['mcp__probe__tool']
+```
+
+So the whole mechanism is one sentence: **an agent file cannot name
+`mcp__server__tool` for a server that did not exist when it was written**, and
+every spawnable shipped agent narrows to built-ins. The picker belongs to an
+agent that declines to narrow, or one naming a gated tool outright -- a user-
+or project-tier file. `grill-me` was the one agent in that shape, and it is
+`spawnable: false`, which A16 now enforces.
+
+**The structural statement, which is what made this worth a ruling rather than
+a note.** `GRANT_SIGNOFF_ONLY` has exactly one member in the entire registry,
+`write_project_doc`, and that policy value exists for this sign-off and nothing
+else. #133 created it to split the two grant paths and argued the split from
+attendedness: against the pipeline, "one `--grant-tools write_project_doc`
+authorises 15 document names ... for the rest of a ten-pass run that is reading
+attacker-controlled web pages"; for the sign-off it "stays offered: a human is
+answering in the moment, about one named agent, for one turn." The argument is
+sound. It had no instance.
+
+**Why (c) and not the other two.** (a) *accept it* understates the case -- the
+picker is not narrow, it is unreachable, and that belongs beside the mechanism
+rather than in the register alone. (b) *give `writer` the tool* was never a
+roster tweak: `writer`'s frontmatter says "No `write`/`edit` by omission: this
+agent returns prose; whoever delegated to it decides where it lands", and its
+body has a section headed *Return prose, not a file operation*. That is a
+decision reversal of the A16 class and would want its own batch and its own
+record. R4's compounding-authority argument does not reach
+`write_project_doc`, so the objection to (b) is the agent's contract rather
+than the permission.
+
+**Four sites, chosen rather than swept.** Each is what a reader consults when
+deciding whether the picker is something they would see: `docs/ROADMAP_v2.md`
+§23's AC1b status, `AGENTS.md`'s R13 bullet plus a new sibling to its
+"`candidates()` is empty on a default install, by design" bullet,
+`tools/registry.py`'s `GRANT_SIGNOFF_ONLY` registration comment, and
+`agents/manager.py`'s `candidate_approvals` docstring.
+**`tui/screens.py` was deliberately left alone** -- `SubagentSignoffScreen`'s
+docstring describes the screen accurately, and its own comment already says the
+no-candidates branch is reachable ("BOTH branches, because either can be
+reached from inside a run -- the no-candidates one is what a nested spawn of an
+agent with no gated tools shows"). It is the one place that got this right, and
+editing it would have been a sweep rather than a fix.
+
+**Two tests, both at the PRODUCTION entry point, which is the gap that let this
+exist.** Batch 138 swept `candidate_approvals`; `core/loop.py` does not call it.
+It asks the registry for `request_payload`, and nothing drove that from the real
+roster. `test_request_payload_offers_nothing_for_every_shipped_agent` does now,
+and `test_the_picker_is_reachable_only_for_an_agent_that_declines_to_narrow`
+registers an MCP-shaped tool and measures all three cases, so
+"operator-configured" is a measurement rather than a sentence.
+
+**They are both needed, and the mutation pass is what shows it.** A3 (`return
+[]` unconditionally) killed the reachability test and **left the end-to-end one
+green** -- a `candidate_approvals` that answered nothing at all satisfies
+`assert payload["candidates"] == []` perfectly. The end-to-end test alone would
+have been the vacuity it was written to close.
+
+Mutation pass 3/3 with the equivalence control green: the child's narrowing
+ignored (A1), the `GRANT_NEVER` test inverted (A2), and `return []` (A3). G
+reordered the two predicates and wrapped the generator in `list()` -- same
+answer, green.
+
+**Negative control:** `agents/builtin/writer.md` gained `write_project_doc`,
+the end-to-end test went red, and the file was restored from bytes held in
+memory and verified by sha256 (`f7923f28975a6777` before and after). Never
+`git checkout`.
+
+**A gate caught me writing a new decision family by accident.** The AC1b
+paragraph opened `**The SCOPE of AC1b...` only after
+`test_the_map_names_every_family_the_record_defines` failed on the first
+version, which opened `**AC1b's SCOPE...`. `_DEFINITION_LEAD` is
+`^\s*(?:[-*]\s*)?\*\*([A-Z]{1,2}\d+[a-z]?)\b`, so a bold run at the start of a
+line in a record document DEFINES a family -- and `**AC1b` declared a family
+`AC` that `AGENTS.md`'s namespace map does not name. Batch 131 hit the CITATION
+half of this same gate, where `S06-01` read as the decision id `S06`; this is
+the definition half, and the lesson is the same one: in a record document, an
+id-shaped token is never just prose.
+
+**One claim from batch 138's entry did not survive inspection, and it was
+mine.** That entry said the picker branch "is only ever tested with inputs that
+cannot occur", citing `SubagentSignoffScreen("researcher", ["web_search"])`.
+Read in context, those four sites are parametrised SCREEN-SHAPE tests --
+they assert which CSS dialog renders and which button takes focus, across every
+modal the app has -- so a placeholder agent and a placeholder tool are the
+correct arguments and assert nothing false. What was genuinely missing was an
+end-to-end test from the real roster, which is what the two new ones are. The
+criticism was aimed one layer off, and the entry now says so. That is the
+second reading in two batches that measuring changed; the first was "R2's
+grantable() filter is dead code", which became item 84.
+
+No new decision id. This reverses nothing and changes no behaviour -- it
+records a scope that was already true, which is what §23 AC1b's status line and
+item 83 are for.
+
+Counts 6348 -> 6350.
