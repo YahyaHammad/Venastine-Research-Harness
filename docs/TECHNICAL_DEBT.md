@@ -4667,6 +4667,26 @@ fix — hence the register.
 credential is never the fix; rotation is", and a routine of re-blessing is
 how a real one gets blessed by accident.
 
+**And the blessings only exist in ONE scan mode (measured batch 149).** A
+no-git fingerprint is `<path>:<rule>:<line>`, which is the form this file
+holds; a COMMIT-mode fingerprint is `<sha>:<path>:<rule>:<line>`. So
+`.gitleaksignore` cannot match anything a history scan finds, and a history
+scan of this repository **can never be clean**: run without `--no-git` it
+reports the same five planted fixtures at the line numbers they had in the
+commits that introduced them, which is this item's line-number pinning
+reaching back through every commit at once. Both workflows pass `--no-git`
+and both are clean, so nothing in CI is affected -- the cost is a cycle for
+anyone who runs the tool by hand without the two flags CI uses:
+
+    gitleaks detect --source . --no-git -c .github/gitleaks.toml -v
+
+Batch 149 paid that cycle and reported "leaks found: 5" from a bare
+invocation before checking what the five were. They were the redaction
+tests' own needles: `sk-abc123def456...`, `AIzaSyA1234567890abcdef...` and
+an RSA header whose body is literally `MIIEpA...`. Worth recording because
+the wrong form is the one that looks MORE thorough, which is the same
+footgun `pip-audit` has (item 88's entry, and batch 148's correction).
+
 ## 88. Six workflows are not on `main`, so a branch's CI is reconstructed by hand (open, filed batch 145)
 
 `navigable-agents` carries six workflow files that `main` does not, so GitHub
@@ -5136,6 +5156,66 @@ is not about. The secrets one must not be touched at all yet: changing a test
 to chase a failure it has not shown again is how a real defect gets hidden
 behind a louder fixture, and this entry is the measurement the next
 occurrence gets compared against.
+
+## 98. Pass 3a is asked about the FACTUAL claims and applied to every claim (open, measured and filed batch 149)
+
+Gate D0 routes claims by type: factual claims go to 3a/3b, synthesis and
+speculative claims go straight to Pass 4. `pass3a_input` is built from
+`factual_claims` alone and says so. But the payload is validated against
+`[c.id for c in run.claims]` and applied by `_apply_grounding(run.claims,
+...)`, so a grounding entry naming a speculative claim lands on it.
+
+**Measured: it moves no tier.** `score_claim`'s non-factual branch is
+`capped_critic - assumption_penalty`; `grounding_component` is not in that
+formula at all (E9/B10 state this, and B10 exists because both fields used
+to be recorded on a speculative claim while being inert). A speculative
+claim scored MEDIUM before a `status: "grounded"` was applied to it and
+MEDIUM after.
+
+**What it does change is the artifact.** The claim then carries
+`grounding_status: "grounded"` and whatever sources the entry named, into
+`/claims`, into `output/<run_id>/` and into the stored record -- asserting
+that a speculative claim was grounded, which gate D0 says cannot happen.
+A reader auditing the routing sees a counter-example to it.
+
+**Why it is filed rather than fixed in batch 149.** §66 narrowed Pass 6b
+because its apply and its re-tier disagreed about which claims were in
+play, which produced a STALE TIER. 3a has no such disagreement -- Pass 5
+tiers every claim immediately after, from the data 3a left -- so the fix
+here would be a scope change with no measured consequence behind it, and
+S12-02's own report says not to make it ("3a/3b apply-then-tier the whole
+factual set symmetrically, so no staleness arises there"). The shape, if
+it is ever taken: `_ground_and_score(run, ..., claims=factual_claims)`,
+which is now a one-argument change, plus `claim_ids` to match -- and the
+decision to make first is whether a 3a entry about a non-factual claim is
+worth a corrective retry or a dropped-and-traced entry.
+
+## 99. Pass 6a drops an unknown claim id in silence, where 6b now says so (open, filed batch 149)
+
+§66 (A26) gave Pass 6b a trace line for an entry naming a claim outside the
+round's batch, on `review.py`'s rule: a finding a stage cannot apply is
+dropped AND traced, because dropping in silence is indistinguishable from
+applying. Pass 6a, twenty lines above it, does the same drop and says
+nothing -- `claim = next((c for c in flagged if c.id == rev["claim_id"]),
+None)` followed by `if claim:`.
+
+The asymmetry is now the only thing wrong with it, and 6a's own comment
+argues that the silence is contained rather than correct:
+
+> An omission, an empty list and an unknown id are indistinguishable here
+> -- the lookup returns None and the `if claim:` skips in silence -- which
+> is why the bound cannot be data the model supplies.
+
+That reasoning is about the LOOP BOUND, which the per-round retry counter
+settled, and it is sound. It is not a reason for the reader of a trace to
+be unable to tell an omission from a misdirected revision. 6a's checkpoint
+line reports *"revised N of M claim(s) in this retry round"*, so a drop is
+visible as a count but not as a cause.
+
+**Not fixed in batch 149** because it is not one of the surface's findings
+and the batch had already grown past both of them; the fix is
+`_note_entries_outside_the_batch(run, flagged, revisions)` with the message
+reworded for a revision, which is the same helper.
 
 ## Review-marathon arrivals at open issues with no register entry
 

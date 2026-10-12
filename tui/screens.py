@@ -824,6 +824,34 @@ class ClaimsScreen(ModalScreen[None]):
 _TIER_ORDER = ("UNVERIFIED", "UNVERIFIED_COVERAGE", "LOW", "MEDIUM", "HIGH")
 
 
+def _as_display_list(value) -> list:
+    """The members of a model-supplied list field, as text.
+
+    EVERY FIELD THIS GUARDS IS MODEL DATA READ BACK FROM A STORED RUN, AND
+    A STORED RUN MAY HAVE FAILED (batch 149). The orchestrator's except
+    block persists a snapshot before it re-raises, so a run that died in
+    Pass 5 on `assumption_flags: 123` leaves that value in the record --
+    and `/claims <run id>` then rendered it. `'; '.join(map(str, 123))`
+    raises TypeError inside `compose()`, which is NOT covered by the
+    containment batch 145 put at the `/` dispatch site: `push_screen`
+    returns an `await_mount`, so compose runs in the message pump rather
+    than in the handler's call stack, and the exception reaches Textual's
+    `_handle_exception` and takes the whole app down. Measured against the
+    real ClaimsScreen in a minimal host app.
+
+    The payload boundary now rejects each of these shapes at the pass that
+    sent them (§66 A25), which closes the producer -- but not for a record
+    written before it did, and this view's whole job is reading those.
+
+    A value that is not a list is shown as the one value it is, rather
+    than dropped: the reader asked what the run recorded, and "123" is the
+    answer.
+    """
+    if isinstance(value, (list, tuple)):
+        return [str(member) for member in value]
+    return [str(value)]
+
+
 def _render_claims(claims: list) -> str:
     if not claims:
         return "No claims recorded for this run."
@@ -844,16 +872,19 @@ def _render_claims(claims: list) -> str:
         # the view matches the report rather than the draft behind it.
         out.append(f"  {claim.get('final_text') or claim.get('text') or ''}")
         if claim.get("entities"):
-            out.append(f"  entities: {', '.join(map(str, claim['entities']))}")
+            out.append("  entities: "
+                       + ", ".join(_as_display_list(claim["entities"])))
         if claim.get("grounding_status") or claim.get("grounding_sources"):
-            sources = len(claim.get("grounding_sources") or ())
+            sources = len(_as_display_list(claim.get("grounding_sources")
+                                           or ()))
             out.append(f"  grounding: {claim.get('grounding_status') or 'none'}"
                        f" ({sources} source{'s' if sources != 1 else ''})")
         for field, label in (("fallacies", "fallacies"),
                              ("contradictions", "contradictions"),
                              ("assumption_flags", "assumptions")):
             if claim.get(field):
-                out.append(f"  {label}: {'; '.join(map(str, claim[field]))}")
+                out.append(f"  {label}: "
+                           + "; ".join(_as_display_list(claim[field])))
         if claim.get("score_breakdown"):
             out.append("  score: " + ", ".join(
                 f"{k}={v}" for k, v in claim["score_breakdown"].items()))

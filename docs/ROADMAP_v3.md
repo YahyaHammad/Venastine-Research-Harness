@@ -43,6 +43,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
+- **§66. The type that stopped at the container, and a pass that answered about more than it was asked** — **(BUILT in batch 149)** (the payload boundary declared a field's container type and not the type of what it held, so three of six crash shapes survived it and three more scored a wrong number in silence; a boolean satisfied NUMBER, so `severity: true` charged the maximum critic penalty with no trace; and Pass 6b was asked about one batch, validated against every id in the run and applied to every claim in it, while the re-tiering beside it stayed narrow)
 - **§65. Four guards measured against the wrong thing, and a cut the redactor ran after** — **(BUILT in batch 148)** (the shipped compaction strategy fell through the branch built for the state it reached, a floor applied with no reference to the window left models that can never compact saying nothing, the pipeline backstop fired EARLIER than the trigger it sits behind at every window below 200,000, #89's pin cap stopped tracking the trigger it is a fraction of, and a session's output was cut in four places with the redactor running after every one)
 - **§64. Two numbers a provider promised and one key that meant two things** — **(BUILT in batch 147)** (an unknown tool name ended the turn and left the thread unresumable, a token count that was present and not a number defeated the guard that exists to catch exactly that, and Ctrl+C during a background session's wake turn unwound a model turn from wherever it landed)
 - **§63. The write that did not land where the consent said** — **(BUILT in batch 146)** (a document NAME that is a link wrote outside the project under a consent naming the inside path, every write path translated line endings so the bytes that landed were not the bytes approved, and the one hard deny compared a path segment with exact case)
@@ -2176,3 +2177,159 @@ consumer that never passed through the wake's redaction at all.
   by the process, so no later pass can rejoin it -- but both halves ARE
   shown, on either side of a stated gap, to a reader who can ask for both.
   A stream has no "whole document" to redact exactly once. Register item 95.
+
+## §66. The type that stopped at the container, and a pass that answered about more than it was asked
+
+**Built in batch 149**, from the review marathon's research-pipeline
+surface: both `FIX-NOW` findings, **S12-01** (the S2) and **S12-02**, across
+`core/reasoning/payload_validation.py` and `core/reasoning/orchestrator.py`
+-- plus `tui/screens.py`, which no report reaches, because the record a
+S12-01 crash leaves behind is openable and opening it exited the
+application.
+
+Three answers are DECISIONS and the owner ruled all three. Two of the three
+rulings made the fix LARGER than the report asked for, and in both cases the
+measurement is what moved them: the report's suggested shape was **measured
+insufficient**, not merely improved on.
+
+**The shape.** A declared type that stops at the container, in a module
+whose entire job is to declare types:
+
+| field | declared | what pure code does with it |
+|---|---|---|
+| `entities` | nothing | builds a set, then SORTS it |
+| `asserted_by_candidates` | nothing | `len(set(...))`, then divides |
+| `per_claim_flags` values | nothing | `len()`, then multiplies |
+| `key_entities_or_subjects` | nothing | `len()` |
+| `severity` | `NUMBER` | `1.0 - severity` |
+
+The first four had no declared type at all and the fifth had one that a
+boolean satisfies. B4's rule is that a check earns its place by having a
+demonstrated consequence; every row above has one, and the module had
+written the rule without finishing the inventory.
+
+### What the code did before this
+
+- **Six crash shapes and three silent wrong answers, all through the real
+  `validate` and the real consumer.** The crashes: `entities` as null, a
+  number or a boolean (`TypeError: 'NoneType' object is not iterable`, from
+  Pass 3a's `sorted({e for c in factual_claims for e in c.entities})`),
+  `asserted_by_candidates` the same at Pass 5's
+  `len(set(claim.asserted_by_candidates))`, and a `per_claim_flags` value
+  as a number or null at `w["assumption_flag_penalty"] *
+  len(claim.assumption_flags)`. Each lands in a stage that makes **no model
+  call**, so there is nothing to retry with, and the orchestrator's except
+  block turns it into a durable `status='failed'` record.
+- **And three that did not crash, which is worse.** A STRING is iterable, so
+  `"entities": "madrid"` became six entities, each one letter, each one a
+  thing the 3a prompt then asks the model to search for ("search each
+  ONCE"). `"per_claim_flags": {"c001": "abc"}` charged a THREE-flag
+  assumption penalty for one string. `"key_entities_or_subjects": "abc"`
+  reported *"3 key entities anticipated"* from one word. And on an ensemble
+  run `"asserted_by_candidates": "abc"` scored `len(set("abc")) / 2` = 1.5,
+  which clamps to **full agreement** -- so a claim no candidate
+  corroborated was scored as unanimous.
+- **A declared container type does not close it, which is what the report
+  assumed.** S12-01's suggested shape says "presence plus container type
+  closes the crash". Measured with `entities` a LIST: `["madrid", 1947]`
+  raises `'<' not supported between instances of 'int' and 'str'`,
+  `[["madrid"]]` and `[{"name": "madrid"}]` raise `unhashable type`. The
+  pure code downstream does not merely iterate what it is given; it HASHES
+  and SORTS it, and a container type says nothing about that.
+- **A boolean is a number in Python, and `severity` is subtracted from
+  one.** `isinstance(True, (int, float))` is True, so `"severity": true`
+  passed the boundary and Pass 5 computed `1.0 - True` = 0.0 -- the
+  **maximum** critic penalty, the harshest value the field can take -- with
+  no trace line and no corrective retry. `false` took the other extreme the
+  same way. The exclusion already existed twice in the tree
+  (`source_scoring._as_number`, `confidence_scoring.source_quality`), in
+  both cases guarding a value that was supposed to have been rejected at
+  this boundary.
+- **Pass 6b was asked about one batch and applied to the whole run.** Its
+  input is `[vars(c) for c in flagged]`; its payload was validated against
+  `[c.id for c in run.claims]` and applied over `run.claims`, while the
+  re-tiering on the next line was deliberately scoped to `flagged`. Driven
+  on a two-claim run: a HIGH claim the payload never should have named came
+  out with `grounding_status='ungrounded'` and `sources=[]`, still tiered
+  **HIGH**, its breakdown still recording `source_count: 1` and
+  `source_quality: 0.9` for the source it no longer had. That breaks B10's
+  stated property -- that the breakdown alone lets a reader recompute the
+  score -- and it is the same stale-field pair `review_override` handling
+  was built to prevent, one field over.
+- **The one line the report points at does not fix it.** S12-02's "Where"
+  names `claim_ids=[c.id for c in run.claims]`, and narrowing that is the
+  first thing anyone would do. Measured: a payload naming **the batch plus
+  one extra id** -- the shape a misbehaving model actually sends -- passes
+  `claim_ids=[c.id for c in flagged]` unchanged, because `_check_ids` makes
+  a TOTAL mismatch the error and a partial one deliberately not (B5, and
+  that policy is right: a model getting nine of ten ids correct must not
+  cost a run nine passes). The apply is the fix site; the id narrowing is
+  worth doing anyway, because it makes 6b behave as 6a already did when
+  NOTHING matches.
+- **`_apply_grounding` was not the only wide half.** `_ground_and_score`
+  calls `score_grounding_sources(run, ...)` without its `claims` argument,
+  and that function's own first line is *"Rewrite every claim's
+  `grounding_sources` with computed scores"*. So every 6b round rescored
+  claims D1 had already finished with. Driven with the corpus grown by that
+  round -- which is what a grounding round does -- a claim the payload
+  never named had its `quote_verified` rewritten from `None` to `True`.
+  **The parameter that narrows it has existed since §45 and no caller had ever
+  passed it.**
+
+### The finding under the findings: the record a failure leaves is openable
+
+S12-01's severity argument is that the failure is loud and contained --
+"traced exception, durable failed record, no silent wrong report". The
+durable record is the half worth following. The orchestrator's except block
+calls `update_pipeline_run(run.run_id, run, status="failed")` with a
+snapshot of the partial run, so the claim carrying `assumption_flags: 123`
+is **persisted**, JSON keeps it byte-for-byte, and `/claims <run id>` is how
+a person looks at a failed run.
+
+`_render_claims` joined four model-supplied list fields with
+`'; '.join(map(str, value))`. Measured against the real `ClaimsScreen` in a
+minimal host app: `compose()` raises `TypeError: 'int' object is not
+iterable` and the exception **propagates to Textual's handler**, which batch
+145 already measured as exiting the whole application. The containment batch
+145 added at the `/` dispatch site cannot catch it: `push_screen` returns an
+`await_mount`, so `compose` runs in the message pump rather than in the
+handler's call stack. One site, four fields, no second copy anywhere in the
+tree.
+
+### Design Decisions Record — §66 (A25-A27)
+
+| id | decision |
+|---|---|
+| **A25** | **The boundary declares the type of a container's MEMBERS wherever pure code reads them, and a boolean is not a value of any other type.** Two new spec fields, `key_member_types` and `entry_member_types`, paired with the existing `key_types`/`entry_types` the same way `required`/`entry_required` are; a MEMBER is a dict's values or a list's elements, deliberately one concept, because Pass 4's flag lists live under claim-id keys and Pass 2's entities live in an array and the thing being declared is identical. Chosen over the report's container-only shape, which measurement showed leaves three of six crashes open, and over making the two consumers tolerant, which would put the knowledge of what a valid entity is in two modules -- the split this module exists to end. The vocabulary grew by exactly what the crashes needed and no further: Pass 4's flag LISTS are typed and the strings inside them are not, because `len()` is all that reads them, and Pass 3c's `gaps` keeps its container type with no member type for the same reason. Both are test-pinned as controls, so a later widening has to argue with a test rather than drift |
+| **A26** | **Pass 6b applies to the batch it was asked about -- the ids it is validated against, the claims its entries resolve to, and the claims whose sources are rescored -- and an entry naming a claim outside the batch is dropped AND traced.** 6a's rule, with 6a's reason ("a revision naming a claim outside it would land on one already finished"), extended to the pass that re-validates. The trace line is `review.py`'s policy for the same shape: a finding a stage cannot apply is dropped and said out loud, because dropping in silence is indistinguishable from applying, and 6b's own checkpoint reports an EFFECT and so cannot carry it. **Chosen over keeping the wide apply and re-tiering everything 6b touched**, which also clears the stale pair -- the owner raised exactly this, since one claim's update can reach a global quantity. Measured, both halves: the coupling is real and lives in the rescoring stage, which is why that stage is narrowed rather than compensated for; and an unconditional global re-tier is reproducibly harmful -- a LOW claim that D2 exhausted, forced to UNVERIFIED by `_apply_fallback`, comes back as **LOW beside the annotation saying it could not be verified**, which is the pair `run_confidence_tiering`'s own docstring says the narrow call exists to prevent. Closing the channel beats recomputing after it |
+| **A27** | **The claims view renders a model-supplied list field whatever shape it arrived in, and shows a non-list as the one value it is.** Four fields (`entities`, `fallacies`, `contradictions`, `assumption_flags`) plus the source COUNT, through one helper at one site. Not merely defensive: A25 closes the producer for every run from here on and does nothing for a record already on disk, and reading those records is this view's entire job. Shown rather than dropped, because the reader asked what the run recorded and `123` is the answer. Chosen over containing at the call site, which is batch 145's rule and cannot reach this one -- compose runs in the message pump -- and over filing it, which would leave an app-killing door open behind a producer fix |
+
+### What §66 deliberately does not change
+
+- **`_check_ids` stays a total-mismatch test (B5).** A partial match is still
+  accepted everywhere, including 6b. The fix is in the apply precisely so
+  that this policy does not have to change: nine correct ids out of ten
+  still apply, and the tenth is now dropped with a line saying so.
+- **Pass 3a keeps the wide default.** It is the first grounding, where every
+  claim is in play, and `score_grounding_sources`' docstring already
+  explains why narrowing its default to the factual set would be a second
+  rule to keep in step with gate D0 for no gain. Only the 6b caller
+  narrows. A 3a entry naming a non-factual claim still lands; measured, it
+  moves no tier, and that is `docs/TECHNICAL_DEBT.md` 98 rather than a
+  silence.
+- **`source_span` gets no type.** S12-01's suggested shape asks for `str`;
+  grepped, nothing in production reads the field except `vars(c)`
+  serialisation, which is JSON-native whatever it holds. A check with no
+  demonstrated consequence is what B4 forbids, and adding one here would
+  have been the module breaking its own rule inside the batch that enforced
+  it.
+- **Pass 6a's silent drop stays silent.** Its `if claim:` skip is
+  documented and bounded by the round counter rather than by data the model
+  supplies. Now that 6b says what it dropped, the asymmetry is worth
+  recording, and it is item 99.
+- **No element-type language for flag strings, and no re-validation of
+  assumption flags in 6b.** Both are the report's own "Not doing", and both
+  are still right: `len()` is the only reader of a flag list, and 6b not
+  re-running Pass 4 is a stated design gap (ARCHITECTURE 7.2, AGENTS.md)
+  with its own decision still unmade.
+

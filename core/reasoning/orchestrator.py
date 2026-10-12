@@ -683,7 +683,8 @@ def _apply_grounding(claims: list[Claim], grounding_entries: list[dict]) -> int:
 
 
 def _ground_and_score(run: PipelineRun, grounding_entries: list[dict], corpus,
-                      scorer=None, knobs=None, scholar=None) -> int:
+                      scorer=None, knobs=None, scholar=None,
+                      claims=None) -> int:
     """Apply Pass 3a/6b's grounding, then everything §45 derives from it.
 
     THE ONE SEAM BOTH GROUNDING SITES GO THROUGH. There are two -- Pass 3a
@@ -703,13 +704,32 @@ def _ground_and_score(run: PipelineRun, grounding_entries: list[dict], corpus,
     enough that a run dying in a later pass still carries the evidence it
     had already gathered -- the failure path being where an unattended
     run's record matters most.
+
+    `claims` NARROWS BOTH HALVES, and defaults to the whole run, which is
+    Pass 3a -- the first grounding, where every claim is in play.
+    §66 (A26) passes the 6a/6b loop's current batch instead, and it has to
+    reach the SCORING as well as the apply: `score_grounding_sources`
+    "rewrite[s] EVERY claim's grounding_sources with computed scores" by
+    default, so a 6b round recomputed the sources of claims D1 had already
+    finished with, while the re-tiering beside it was deliberately scoped
+    to the batch. Driven with the corpus grown by that round -- which is
+    what a grounding round does -- a claim the payload never named had its
+    `quote_verified` rewritten from None to True. That one moves no score
+    by design (§45 slice A), but the embedding and scholar phases run over
+    the same set and do move one, and the claim they would move is not
+    re-tiered.
+
+    A PARAMETER THAT EXISTED AND WAS NEVER PASSED. `score_grounding_sources`
+    has had `claims` since §45; the one production caller omitted it, so
+    the narrowing it was built for was available and unused.
     """
-    applied = _apply_grounding(run.claims, grounding_entries)
+    targets = run.claims if claims is None else claims
+    applied = _apply_grounding(targets, grounding_entries)
     if corpus is not None:
         run.source_documents = corpus.artifact_entries()
     knobs = knobs or {}
     score_grounding_sources(
-        run, corpus=corpus, scorer=scorer, scholar=scholar,
+        run, claims=claims, corpus=corpus, scorer=scorer, scholar=scholar,
         overrides=knobs.get("domain_overrides"),
         **{k: knobs[k] for k in ("window_chars", "max_windows",
                                  "claim_min_chars",
@@ -743,6 +763,41 @@ def _apply_critic(claims: list[Claim], critic_entries: list[dict]) -> int:
             claim.critic_severity = entry.get("severity", 0.0)
             applied.add(claim.id)
     return len(applied)
+
+
+def _note_entries_outside_the_batch(run: PipelineRun, batch: list[Claim],
+                                   *entry_lists) -> int:
+    """Say that Pass 6b answered about a claim it was not asked about.
+
+    §66 (A26). The apply is scoped to the batch, so such an entry lands on
+    nothing -- and `review.py` settled the policy for exactly this shape:
+    a finding it cannot apply is DROPPED AND TRACED, because dropping in
+    silence is indistinguishable from applying. 6b's own checkpoint line
+    reports how many claims came out clean, which is an effect and
+    therefore cannot report this.
+
+    The id cross-check does not cover it and is not meant to: B5 makes a
+    TOTAL mismatch the error and a partial one deliberately not, since a
+    model that gets nine of ten right must not cost a run nine passes.
+    Measured -- a payload naming the batch PLUS one extra id passes
+    `claim_ids=[c.id for c in flagged]` unchanged, which is why the apply
+    is where this had to be fixed and the trace is what makes the drop
+    visible.
+    """
+    known = {c.id for c in batch}
+    outside = sorted({entry.get("claim_id") for entries in entry_lists
+                      for entry in entries if isinstance(entry, dict)}
+                     - known - {None})
+    if outside:
+        run.log(
+            f"Pass 6b: {len(outside)} claim id(s) in the response name a "
+            f"claim outside this round's batch "
+            f"({', '.join(repr(i) for i in outside[:3])}) -- dropped. 6b was "
+            f"asked about {len(known)} flagged claim(s); applying an answer "
+            f"to a claim D1 had already finished with would change its "
+            f"grounding without recomputing its tier."
+        )
+    return len(outside)
 
 
 def _apply_assumption_flags(claims: list[Claim], assumptions: dict) -> int:
@@ -1335,10 +1390,27 @@ def stream_deep_research_pipeline(
 
             # --- Pass 6b: re-validate the revised subset only (batched, reuses Pass 5's code) ---
             pass6b_input = json.dumps([vars(c) for c in flagged])
-            revalidation = _parse_json_response((yield from _run_pass_with_json_retry("Pass 6b", pass6b_input, critic_model, critic_provider, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, claim_ids=[c.id for c in run.claims], effort=effort, activity=activity)))
-            _ground_and_score(run, revalidation.get("grounding", []), corpus,
-                              scorer, scoring_knobs, scholar)
-            _apply_critic(run.claims, revalidation.get("critic", []))
+            # SCOPED TO `flagged`, ALL THREE OF THEM -- the ids validated
+            # against, the claims the entries are applied to, and the
+            # claims whose sources are rescored (§66 A26). 6a was already
+            # resolved within the batch, with the reason written beside it
+            # ("a revision naming a claim outside it would land on one
+            # already finished"); 6b validated against every id in the run
+            # and applied to every claim in it, while the re-tiering below
+            # stayed narrow. So an entry naming a clean claim changed its
+            # grounding and left its tier alone: driven, a HIGH claim
+            # ended up `grounding_status='ungrounded'` with `sources=[]`
+            # beside a breakdown still recording `source_count: 1` -- which
+            # breaks B10's property that the breakdown alone lets a reader
+            # recompute the score.
+            revalidation = _parse_json_response((yield from _run_pass_with_json_retry("Pass 6b", pass6b_input, critic_model, critic_provider, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, claim_ids=[c.id for c in flagged], effort=effort, activity=activity)))
+            grounding_entries = revalidation.get("grounding", [])
+            critic_entries = revalidation.get("critic", [])
+            _ground_and_score(run, grounding_entries, corpus,
+                              scorer, scoring_knobs, scholar, claims=flagged)
+            _apply_critic(flagged, critic_entries)
+            _note_entries_outside_the_batch(run, flagged, grounding_entries,
+                                            critic_entries)
             # 6b's own checkpoint below already reports an EFFECT -- how
             # many claims came out clean -- rather than what it was asked
             # about, so it needs no count from these two.

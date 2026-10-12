@@ -22814,3 +22814,233 @@ in the tests rather than in the code:
   and `MAX_READ_CHARS` is 50,000, so `kept[-50_000:]` IS `kept`. The
   discriminating input is a buffer LARGER than the bound, which is the
   vacuity shape "an input that cannot discriminate" in its plainest form.
+
+## Batch 149 -- the type that stopped at the container, and a pass that answered about more than it was asked (2026-10-12)
+
+The research-pipeline surface, both FIX-NOW findings: **S12-01** (the S2)
+and **S12-02**. Three owner rulings, recorded as `docs/ROADMAP_v3.md`
+§66's A25-A27.
+
+**Both reports' suggested fixes were measured INSUFFICIENT**, and that is
+new. Until now the fix pass had found a suggested shape too big (batch
+148's A24, which narrowed one), half of one (S04-02 and S17-01, where the
+shape admitted the case its own probe used), or aimed at a defect already
+closed (S06-10, shut by batch 131). These two were aimed correctly, at the
+right file and the right line, and stopped short of the defect.
+
+**The shape.** A declared type that stops at the container, in the module
+whose entire job is declaring types:
+
+| field | declared | what pure code does with it |
+|---|---|---|
+| `entities` | nothing | builds a set, then SORTS it |
+| `asserted_by_candidates` | nothing | `len(set(...))`, then divides |
+| `per_claim_flags` values | nothing | `len()`, then multiplies |
+| `key_entities_or_subjects` | nothing | `len()` |
+| `severity` | `NUMBER` | `1.0 - severity` |
+
+B4's rule is that a check earns its place by having a demonstrated
+consequence. Every row above has one. The module had written the rule and
+not finished the inventory.
+
+### S12-01: six crashes, three silent wrong numbers, and a boolean
+
+Driven through the real `validate` and the real consumer, nothing
+monkeypatched. The crashes land in Pass 3a's entity dedup, Pass 5's scorer
+and the Pass 0 checkpoint -- **stages that make no model call**, so there is
+nothing to retry with, and the orchestrator's `except` turns each one into a
+durable `status='failed'` record.
+
+The three that do NOT crash are the worse half, because a string is
+iterable:
+
+| payload | what the run then did |
+|---|---|
+| `"entities": "madrid"` | six entities, each ONE LETTER, each one a thing Pass 3a's prompt asks the model to search ("search each ONCE") |
+| `"per_claim_flags": {"c001": "abc"}` | a THREE-flag assumption penalty, charged for one string |
+| `"key_entities_or_subjects": "abc"` | *"Pass 0: plan produced (3 key entities anticipated)"*, from one word |
+| `"asserted_by_candidates": "abc"` | `len(set("abc")) / 2` = 1.5, clamped to **full agreement** -- a claim no candidate corroborated, scored as unanimous |
+
+**The report's suggested shape does not close it.** S12-01 says "presence
+plus container type closes the crash". Measured with `entities` as a LIST:
+
+```
+["madrid", 1947]       TypeError: '<' not supported between 'int' and 'str'
+[["madrid"]]           TypeError: unhashable type: 'list'
+[{"name": "madrid"}]   TypeError: unhashable type: 'dict'
+```
+
+Three of six crash shapes survive a container-only check, because the pure
+code downstream does not merely iterate what it is handed -- it HASHES and
+SORTS it. The owner ruled the boundary goes as far as the crash does (A25):
+two new spec fields, `key_member_types` and `entry_member_types`, paired
+with the existing `key_types`/`entry_types` the way `required` and
+`entry_required` already are. A MEMBER is a dict's values or a list's
+elements, deliberately one concept -- Pass 4's flag lists live under
+claim-id keys and Pass 2's entities live in an array, and what is being
+declared is identical.
+
+**And a boolean is a number in Python.** `isinstance(True, (int, float))` is
+True, so `"severity": true` passed the boundary and Pass 5 computed
+`1.0 - True` = 0.0 -- the MAXIMUM critic penalty, the harshest value the
+field can take -- with no trace line and no corrective retry. `false` took
+the other extreme the same way. The exclusion already existed twice in the
+tree (`source_scoring._as_number`, `confidence_scoring.source_quality`), in
+both cases guarding a value that was supposed to have been rejected at this
+boundary. `_of_type` now applies it to every declared type, because "a
+boolean satisfies a type it was not declared as" is the defect and
+`severity` is only where the tree has reached it.
+
+**The vocabulary grew by exactly what the crashes needed.** Pass 4's flag
+LISTS are typed and the strings inside them are not, because `len()` is all
+that reads them; Pass 3c's `gaps` keeps its container type with no member
+type, because `build_coverage_gap_entries` wraps each gap without reading
+it. Both are pinned as CONTROLS, so a later widening argues with a test
+rather than drifting in. And **`source_span` got no type at all**, although
+the report's suggested shape asks for `str`: grepped, nothing in production
+reads the field except `vars(c)` serialisation, which is JSON-native
+whatever it holds. Adding it would have been the module breaking B4 inside
+the batch that enforced it.
+
+### S12-02: asked about one batch, applied to the whole run
+
+Pass 6b's input is `[vars(c) for c in flagged]`. Its payload was validated
+against `[c.id for c in run.claims]` and applied over `run.claims`, while
+the re-tiering on the next line was deliberately scoped to `flagged`.
+Driven on a two-claim run, with a payload naming the flagged claim and one
+finished one:
+
+```
+after Pass 5:  c001 UNVERIFIED ungrounded     c002 HIGH grounded (1 source)
+after 6b:      c001 LOW        partial        c002 HIGH ungrounded (0 sources)
+                                                   breakdown: source_count 1
+                                                              source_quality 0.9
+```
+
+A HIGH claim with `grounding_status='ungrounded'`, no sources, and a
+breakdown still describing the source it no longer had. That breaks B10's
+stated property -- that the breakdown alone lets a reader recompute the
+score -- and it is the stale-field pair `review_override` handling was built
+to prevent, one field over.
+
+**The one line the report points at does not fix it.** S12-02's "Where"
+names `claim_ids=[c.id for c in run.claims]`. Measured: a payload naming
+**the batch PLUS one extra id** -- the shape a misbehaving model actually
+sends -- passes `claim_ids=[c.id for c in flagged]` unchanged, because
+`_check_ids` makes a TOTAL mismatch the error and a partial one deliberately
+not (B5, and that policy is right: a model getting nine of ten ids correct
+must not cost a run nine passes). The apply is the fix site. Narrowing the
+ids is worth doing anyway, and it is **the batch's one behaviour change**:
+a 6b response naming nothing in the batch is now a corrective retry, exactly
+as 6a already behaved.
+
+**`_apply_grounding` was not the only wide half**, and no report names the
+other one. `_ground_and_score` calls `score_grounding_sources(run, ...)`
+without its `claims` argument, and that function's own first line is
+*"Rewrite every claim's `grounding_sources` with computed scores"*. So every
+6b round rescored claims D1 had already finished with. **The parameter that
+narrows it has existed since §45 and no caller had ever passed it.**
+
+### The owner's caveat, and why it points the other way
+
+The ruling came back with a condition: *"global claims/assumptions might
+also be affected by the updating of an isolated 'local' claim. if that is
+the case then it might be worth retiering updated items specifically and
+then retiering global claims unconditionally."*
+
+It is the case, and measuring it is what settled the fix:
+
+- **The coupling is real and it lives in the rescoring stage.** With the
+  corpus grown by that round -- which is what a grounding round does -- a
+  claim the payload never named had its `quote_verified` rewritten from
+  `None` to `True`. That field moves no score by design (§45 slice A says so),
+  but the scholar and embedding phases run over the same set and do move
+  one.
+- **A second candidate channel is closed by arithmetic, not by luck.**
+  `sources_scored` is a property of the WHOLE run
+  (`any(c.grounding_status is not None ...)`), so a 6b round that sets the
+  first grounding status flips it for every claim at once. Measured, no tier
+  moves: `grounding_weights[None]` is 0.0, so a claim with no status scores
+  identically under both flags. Worth stating because it is the channel that
+  looks most dangerous and is not one.
+- **The remedy offered as the second half is reproducibly harmful.** A LOW
+  claim that D2 exhausted, forced to UNVERIFIED by `_apply_fallback`, comes
+  back as **LOW beside the annotation saying it could not be verified** --
+  the pair `run_confidence_tiering`'s docstring says the narrow call exists
+  to prevent, and the one `AGENTS.md` already describes. Two earlier probes
+  failed to reproduce it, both because the claim they used was already
+  UNVERIFIED and so the fallback MOVED nothing; LOW is the only tier where
+  the forced UNVERIFIED is a change, and therefore the only one a later
+  re-tier can undo.
+
+So the channel is closed rather than compensated for: `claims` narrows the
+apply AND the rescoring together, nothing outside the batch is touched, and
+there is nothing left outside the batch to re-tier. Measured after the fix,
+the finished claim's source list is **the same object** it was before the
+round -- not merely equal, which is the assertion that matters, since with
+no corpus the rewrite is value-identical and an equality test would pass
+against the defect.
+
+An entry naming a claim outside the batch is **dropped and TRACED**, which
+is `review.py`'s policy for the same shape: dropping in silence is
+indistinguishable from applying, and 6b's own checkpoint reports how many
+claims came out CLEAN, which is an effect of the batch and cannot carry it.
+
+### The finding under the findings: the record a failure leaves is openable
+
+S12-01's severity argument is that the failure is loud and contained --
+"traced exception, durable failed record, no silent wrong report". The
+durable record is the half worth following. The pipeline's `except` calls
+`update_pipeline_run(run.run_id, run, status="failed")` with a snapshot of
+the partial run, so a run that died in Pass 5 persists
+`assumption_flags: 123`, JSON keeps it byte-for-byte, and
+`/claims <run id>` is how a person looks at a failed run.
+
+`tui/screens.py:_render_claims` joined four model-supplied list fields with
+`'; '.join(map(str, value))`. Measured against the real `ClaimsScreen` in a
+minimal host app: `compose()` raises and the exception **propagates to
+Textual's handler**, which batch 145 already measured as exiting the whole
+application -- transcript, thread view and session with it.
+
+**Batch 145's containment cannot catch it**, and that is the part worth
+keeping. It wraps the `/` handler call synchronously; `push_screen` returns
+an `await_mount`, so `compose` runs in the message pump rather than in the
+handler's call stack. The same defect class, one door over, found by
+following a persisted value instead of a code path. The owner ruled it fixed
+here (A27) for a reason the boundary fix cannot cover: records that already
+failed this way are on disk now, and reading them is this view's whole job.
+
+### Verification
+
+Full suite **6997** (+71: payload_validation 59 -> 114, orchestrator 37 ->
+41, source_corpus 36 -> 41, research_legibility 54 -> 62).
+
+Controls **19 of 19 KILLED** with the G equivalence control correct. **One
+of the 19 was a false kill on the first pass**, and the harness's own
+docstring names the trap: D4's `-k` expression was
+`"critic_entry or critic entry"`, which is not a valid pytest expression, so
+pytest exited non-zero **without running a test** and the pass scored it
+KILLED. `mutate149.py` now returns "the control cannot answer" for `rc=5`
+or a "no tests ran" summary, so a no-collect run can never be scored again.
+
+The test D4 needed did not exist either, and that was visible before the
+pass rather than after it: every 6b payload in `test_orchestrator.py` sent
+`"critic": []`, so a mutation restoring `_apply_critic(run.claims, ...)`
+would apply an empty list over every claim and change nothing. Written
+first, for once, instead of being the survivor that found it -- which is
+what the three previous batches each had.
+
+`ruff check .` clean, both bandit checks clean (62 baselined pairs, none
+grew; 0 new findings against a throwaway path-rewritten copy),
+`pip-audit` clean with `-r` on both requirement files, and gitleaks clean
+**with the two flags CI passes**. Run bare it reported *"leaks found: 5"*,
+and the five were the redaction tests' own needles at the line numbers they
+had in the commits that introduced them: `.gitleaksignore` holds no-git
+fingerprints (`path:rule:line`) and a commit-mode fingerprint carries the
+sha, so a history scan of this repository can never be clean. Both
+workflows pass `--no-git`; recorded on item 87, because the wrong form is
+the one that looks more thorough -- which is the same footgun `pip-audit`
+had in batch 148.
+
+Affected tests re-run with `env -u AGENT_WORKSPACE` (433 passed) and under
+WSL (258 passed).

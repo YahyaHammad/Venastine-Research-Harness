@@ -395,3 +395,136 @@ class TestTheRunCarriesWhatItRetrieved:
         assert applied == 1
         assert run.claims[0].grounding_status == "partial"
         assert run.source_documents == []
+
+
+class TestARevalidationRoundOnlyTouchesItsBatch:
+    """§66 (A26), and the half of it that is not about the apply.
+
+    `score_grounding_sources` "rewrite[s] EVERY claim's grounding_sources
+    with computed scores" -- its own first line -- and the one production
+    caller never passed the `claims` argument that narrows it. So a Pass
+    6b round recomputed the sources of claims D1 had already finished
+    with, while the re-tiering beside it was deliberately scoped to the
+    batch: the two halves of one round disagreed about which claims were
+    in play.
+
+    WHY THE CORPUS IS WHAT MAKES THIS VISIBLE. With no corpus and no
+    scorer the rewrite is value-identical, so an assertion on the VALUES
+    would pass against the defect. A grounding round grows the corpus --
+    that is what grounding does -- and `quote_verified` is computed
+    against it, so the finished claim's source comes back changed.
+    """
+
+    QUOTE = "the treaty was signed in nineteen forty seven"
+    PAGE = ("A page of prose about the subject. The treaty was signed in "
+            "nineteen forty seven. And some more prose after it.")
+    URL = "https://www.nist.gov/the-paper"
+
+    def _a_run(self):
+        from core.reasoning.base import Claim, PipelineRun
+        from core.reasoning.confidence_scoring import run_confidence_tiering
+
+        run = PipelineRun(user_query="q")
+        run.claims = [
+            Claim(id="c001", text="the one that gets flagged", type="factual"),
+            Claim(id="c002", text="the one that comes out clean",
+                  type="factual"),
+        ]
+        # Pass 3a, through the real seam, with nothing in the corpus yet:
+        # the model cited a page this run had not opened.
+        orchestrator._ground_and_score(
+            run,
+            [{"claim_id": "c002", "status": "grounded",
+              "sources": [{"url": self.URL, "quote": self.QUOTE,
+                           "similarity_score": 1.0}]},
+             {"claim_id": "c001", "status": "ungrounded", "sources": []}],
+            None)
+        run_confidence_tiering(run, sources_scored=True)
+        return run
+
+    def _a_grown_corpus(self):
+        corpus = SourceCorpus()
+        assert corpus.add("fetch_url",
+                          _fetch_url_result(self.URL, self.PAGE)) == 1
+        return corpus
+
+    def test_the_premise_pass_3a_left_the_quote_unchecked(self):
+        """Every assertion below is about a value MOVING or not moving, so
+        the starting value has to be the one that can move."""
+        run = self._a_run()
+        source, = run.claims[1].grounding_sources
+        assert source["quote_verified"] is None
+        assert run.claims[1].confidence_tier == "HIGH"
+        assert run.claims[0].confidence_tier == "UNVERIFIED"
+
+    def test_the_wide_default_rewrites_a_claim_the_payload_never_named(self):
+        """The premise for the narrowing, and the defect itself. Pass 3a
+        wants this breadth -- it is the first grounding, where every claim
+        is in play -- so the default stays wide and the 6b caller is what
+        narrows."""
+        run = self._a_run()
+        clean = run.claims[1]
+        flagged = [run.claims[0]]
+        before = clean.grounding_sources
+
+        orchestrator._ground_and_score(
+            run, [{"claim_id": "c001", "status": "partial", "sources": []}],
+            self._a_grown_corpus())
+
+        assert clean.grounding_sources is not before
+        assert clean.grounding_sources[0]["quote_verified"] is True, (
+            "the finished claim's source was rescored against a corpus the "
+            "round it was not part of had grown"
+        )
+        assert flagged[0].grounding_status == "partial"
+
+    def test_a_narrowed_round_leaves_that_claim_alone_entirely(self):
+        """Not "equal to what it was" -- the SAME object, because the
+        question is whether the stage ran over it at all. An earlier draft
+        of this test compared against a deepcopy and so could not tell the
+        two cases apart."""
+        run = self._a_run()
+        clean = run.claims[1]
+        flagged = [run.claims[0]]
+        before = clean.grounding_sources
+
+        applied = orchestrator._ground_and_score(
+            run, [{"claim_id": "c001", "status": "partial", "sources": []}],
+            self._a_grown_corpus(), claims=flagged)
+
+        assert clean.grounding_sources is before
+        assert clean.grounding_sources[0]["quote_verified"] is None
+        assert applied == 1
+        assert flagged[0].grounding_status == "partial", (
+            "the batch claim must still be grounded and rescored, or this "
+            "test would pass against a seam that does nothing"
+        )
+
+    def test_a_narrowed_round_drops_an_entry_naming_a_claim_outside_it(self):
+        """The apply half, at the seam rather than through the pipeline:
+        `claims` narrows what the entries can resolve against, which is
+        6a's rule applied to 6b."""
+        run = self._a_run()
+        clean = run.claims[1]
+        flagged = [run.claims[0]]
+
+        applied = orchestrator._ground_and_score(
+            run,
+            [{"claim_id": "c001", "status": "partial", "sources": []},
+             {"claim_id": "c002", "status": "ungrounded", "sources": []}],
+            None, claims=flagged)
+
+        assert applied == 1, "only the batch claim should have been touched"
+        assert clean.grounding_status == "grounded"
+        assert len(clean.grounding_sources) == 1
+
+    def test_and_run_source_documents_is_still_refreshed_from_the_whole_corpus(self):
+        """The narrowing is about which CLAIMS are rescored. The run's
+        source list is the evidence the run gathered, which is not a
+        per-claim quantity -- and this is its only writer."""
+        run = self._a_run()
+        orchestrator._ground_and_score(
+            run, [{"claim_id": "c001", "status": "partial", "sources": []}],
+            self._a_grown_corpus(), claims=[run.claims[0]])
+
+        assert [e["url"] for e in run.source_documents] == [self.URL]

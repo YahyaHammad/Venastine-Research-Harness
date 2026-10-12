@@ -716,6 +716,15 @@ machine. Most were fixed; the shapes are the brief.
   across continuation turns is the class.
 - Validation of model-shaped payloads: unhashable values where a dict key is expected, non-string
   where a string is assumed, and a field whose absence is indistinguishable from its emptiness.
+  **ANSWERED, and the unhashable value was not where this bullet looked for it** (S12-01, fixed
+  in batch 149 as §66's A25). A dict KEY was already guarded -- `_check_ids` runs after the type
+  guards, which is `review.py`'s rule and was copied deliberately. The unhashable values that
+  reached pure code were inside a declared CONTAINER: `entities` typed as an array still
+  accepted `[["madrid"]]` and `[{"name": "madrid"}]`, and Pass 3a builds
+  `sorted({e for c in factual_claims for e in c.entities})` -- so the hash raised in a stage
+  that makes no model call. Six crash shapes and three silent wrong numbers, each driven through
+  the real validator and the real consumer; the three silent ones are all a STRING being
+  iterable, which is also the third of this bullet's own shapes, one level down.
 - Artifact durability versus what the documents claim about it — including a summary line that
   asserts where the full record is while the write that would have put it there was swallowed.
 - Gates `D0`, `D1` and `D2` are **pure code** routing between passes, no model call. Write them as

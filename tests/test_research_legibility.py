@@ -695,6 +695,111 @@ class TestTheClaimsView:
         assert "found so far" in body
 
 
+class TestTheClaimsViewSurvivesAFailedRunsRecord:
+    """Batch 149, found under the payload-boundary fix rather than in any
+    review scope.
+
+    The pipeline's except block persists a snapshot of the partial run
+    before it re-raises, so a run that died in Pass 5 on a model-supplied
+    value leaves that value in a durable record -- and `/claims <run id>`
+    is how a person looks at a failed run. Four fields here are
+    model-supplied lists, and all four were joined with
+    `'; '.join(map(str, value))`, which raises on anything that is not
+    iterable.
+
+    WHY A GUARD AND NOT JUST THE BOUNDARY FIX. The boundary now rejects
+    these shapes at the pass that sent them, which closes the producer for
+    every run from here on. It does nothing for a record already on disk,
+    and reading those records is this view's entire job.
+
+    WHY IT MATTERS MORE THAN A BROKEN MODAL. `_render_claims` is called
+    from `compose()`. `push_screen` returns an `await_mount`, so compose
+    runs in Textual's message pump rather than in the `/` handler's call
+    stack -- which is outside the containment batch 145 put at that call
+    site -- and the exception reaches `_handle_exception` and takes the
+    whole application down. Measured against the real ClaimsScreen in a
+    minimal host app.
+    """
+
+    # What a run that died in Pass 5 leaves behind, per field. Each value
+    # is one the payload boundary used to accept.
+    PERSISTED = [
+        ("assumption_flags", 123, "123"),
+        ("entities", 123, "123"),
+        ("fallacies", 7, "7"),
+        ("contradictions", {"a": 1}, "'a': 1"),
+    ]
+
+    @pytest.mark.parametrize("field, value, expected", PERSISTED)
+    def test_a_non_list_value_renders_instead_of_raising(self, field, value,
+                                                         expected):
+        from tui.screens import _render_claims
+
+        body = _render_claims([{"id": "c1", "text": "a claim",
+                                "confidence_tier": "LOW", field: value}])
+
+        assert "c1" in body
+        assert expected in body, (
+            f"the value was dropped rather than shown; a reader asked what "
+            f"the run recorded, and {value!r} is the answer"
+        )
+
+    def test_the_lists_still_render_as_lists(self):
+        """The control. A guard that stringified the whole container would
+        pass every test above and turn every ordinary claim into a repr."""
+        from tui.screens import _render_claims
+
+        body = _render_claims([{
+            "id": "c1", "text": "a claim", "confidence_tier": "HIGH",
+            "entities": ["CRISPR", "Cas9"],
+            "assumption_flags": ["extrapolates", "small sample"],
+        }])
+
+        assert "entities: CRISPR, Cas9" in body
+        assert "assumptions: extrapolates; small sample" in body
+        assert "['CRISPR'" not in body
+
+    def test_a_non_list_source_collection_does_not_break_the_count(self):
+        """`len(sources or ())` was the fifth site, and the only one whose
+        failure would be a wrong NUMBER rather than a crash."""
+        from tui.screens import _render_claims
+
+        body = _render_claims([{"id": "c1", "text": "a claim",
+                                "grounding_status": "grounded",
+                                "grounding_sources": 3}])
+
+        assert "grounding: grounded" in body
+
+    def test_and_a_real_source_list_is_still_counted(self):
+        from tui.screens import _render_claims
+
+        body = _render_claims([{"id": "c1", "text": "a claim",
+                                "grounding_status": "partial",
+                                "grounding_sources": [{"url": "a"},
+                                                      {"url": "b"}]}])
+
+        assert "2 sources" in body
+
+    def test_the_whole_stored_shape_of_a_failed_run_renders(self):
+        """Not one field at a time: the record a Pass 5 crash actually
+        leaves, which carries the flags Pass 4 stored and the grounding
+        Pass 3a stored and NO tier at all, because Pass 5 is where it
+        died."""
+        from tui.screens import _render_claims
+
+        body = _render_claims([{
+            "id": "c1", "text": "a claim", "type": "factual",
+            "confidence_tier": None, "entities": ["madrid"],
+            "grounding_status": "grounded",
+            "grounding_sources": [{"url": "https://example.test/a"}],
+            "assumption_flags": 123, "score_breakdown": {},
+        }])
+
+        assert "c1" in body
+        assert "madrid" in body
+        assert "123" in body
+
+
 # ===========================================================================
 # ---- The shell: colour, copy, and the claims binding ----------------------
 # ===========================================================================

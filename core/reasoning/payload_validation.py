@@ -39,9 +39,33 @@ demonstrated consequence in #76's table, and nothing else does:
                                 `per_claim_flags`
     a declared value type       `"severity": "0.0"` -- a string that
                                 fails two passes later, in Pass 5
+    the type of its MEMBERS     `"entities": ["madrid", 1947]` -- a list,
+                                which Pass 3a then sorts
     that entry ids resolve      3a/3b answering about ids Pass 2 never
                                 issued, which grounded nothing while the
                                 trace said it had grounded everything
+
+THE FOURTH ROW IS BATCH 149, AND IT IS NOT A RICHER VOCABULARY FOR ITS OWN
+SAKE -- it is the same property as the third, asked of the values a
+container holds, because that is where the arithmetic actually happens.
+`entities` is not measured; every element of it is hashed and then
+compared against every other (`sorted({e for c in claims for e in
+c.entities})`), and `asserted_by_candidates` is hashed the same way by
+`len(set(...))`. A declared CONTAINER type closes the three container
+cases and leaves the three member cases open, each driven against the real
+consumer:
+
+    ["madrid", 1947]        TypeError: '<' not supported between
+                            instances of 'int' and 'str'
+    [["madrid"]]            TypeError: unhashable type: 'list'
+    [{"name": "madrid"}]    TypeError: unhashable type: 'dict'
+
+A MEMBER is a dict's VALUES or a list's ELEMENTS, deliberately one concept
+and one spec field per level: Pass 4's flag lists live under claim-id keys
+and Pass 2's entities live in an array, and the thing being declared is
+the same in both -- what the pure code downstream will iterate, hash, sort
+or measure. Pass 4's flag lists are typed and their STRINGS are not, which
+is the same rule: `len()` is the only thing that reads them.
 
 Not a schema language, and no new dependency (#145 tracks those). A
 richer vocabulary would let a spec describe things no pass has ever got
@@ -66,6 +90,17 @@ from typing import Any, Optional
 # they come from, and the scorer reads the same two names (§30, B9).
 from core.reasoning.base import CLAIM_TYPES, GROUNDING_STATUSES  # noqa: F401
 
+# A BOOLEAN IS NOT A NUMBER, which Python disagrees with: `isinstance(
+# True, int)` is True, so `"severity": true` satisfied this tuple and
+# Pass 5 computed `1.0 - True` as 0.0 -- the MAXIMUM critic penalty, the
+# single harshest value the field can take -- with nothing in the trace
+# and no corrective retry (batch 149). `"severity": false` took the other
+# extreme for the same reason.
+#
+# The exclusion is not new to the codebase, only to the boundary:
+# `source_scoring._as_number` and `confidence_scoring.source_quality` both
+# spell it out already, each guarding a value that is supposed to have
+# been rejected HERE. See `_of_type` below, which is what applies it.
 NUMBER = (int, float)
 
 
@@ -93,6 +128,10 @@ class Spec:
     key_types         top-level key -> permitted Python type(s)
     entry_required    keys every entry must carry (top="array")
     entry_types       entry key -> permitted Python type(s)
+    key_member_types  top-level key -> permitted type for every MEMBER of
+                      the container under it (a dict's values, a list's
+                      elements)
+    entry_member_types the same, per entry key
     enums             entry key -> the set of permitted values
     ids               entry key holding a claim id, cross-checked against
                       the claims the apply step will resolve against
@@ -107,6 +146,8 @@ class Spec:
     key_types: dict = field(default_factory=dict)
     entry_required: frozenset = frozenset()
     entry_types: dict = field(default_factory=dict)
+    key_member_types: dict = field(default_factory=dict)
+    entry_member_types: dict = field(default_factory=dict)
     enums: dict = field(default_factory=dict)
     ids: Optional[str] = None
     unique: Optional[str] = None
@@ -165,12 +206,36 @@ SPECS = {
     # before handing the plan whole to Pass 3c. So requiring all five
     # would fail runs over an omission nothing depends on. The
     # demonstrated defect is a bare list, which is what `top` catches.
-    "Pass 0": Spec(top="object"),
+    #
+    # THE ONE KEY THE ORCHESTRATOR READS IS TYPED, AND STILL NOT REQUIRED
+    # (batch 149) -- `key_types` is checked only `if key in payload`, so
+    # the defensive `.get` above keeps its meaning and an omission still
+    # costs nothing. What it stops is the read itself: `len(123)` raised
+    # inside the Pass 0 checkpoint, and `len("madrid")` did not raise at
+    # all -- it reported SIX key entities anticipated, from one word.
+    "Pass 0": Spec(top="object",
+                   key_types={"key_entities_or_subjects": list}),
 
     "Pass 2": Spec(
         top="array",
         entry_required=frozenset({"id", "text", "type"}),
-        entry_types={"id": str, "text": str},
+        # `entities` and `asserted_by_candidates` are TYPED BUT NOT
+        # REQUIRED, which is the same asymmetry `sources` carries below
+        # and for the same reason: base.py defaults both to an empty list,
+        # a claim with no entities is an ordinary answer, and
+        # `asserted_by_candidates` is required only in ensemble mode (B7).
+        # What they are not is optional to get RIGHT -- Pass 3a sorts a
+        # set built from every claim's entities, and Pass 5 measures
+        # `len(set(asserted_by_candidates))`, so both the container and
+        # its members are declared (batch 149).
+        entry_types={"id": str, "text": str, "entities": list,
+                     "asserted_by_candidates": list},
+        # str and int from base.py's own annotations -- `entities:
+        # list[str]` and `asserted_by_candidates: list[int]`. The
+        # annotations are not enforced (the comment at the top of base.py
+        # says so, and #75 is what that cost); this is where they become a
+        # check.
+        entry_member_types={"entities": str, "asserted_by_candidates": int},
         enums={"type": CLAIM_TYPES},
         # B6. Two claims sharing an id split in half: _apply_grounding
         # builds {c.id: c} (last wins) while _apply_assumption_flags uses
@@ -202,6 +267,14 @@ SPECS = {
         top="object",
         required=frozenset({"per_claim_flags"}),
         key_types={"per_claim_flags": dict},
+        # Every VALUE under those claim ids is a list, because Pass 5
+        # measures it: `w["assumption_flag_penalty"] * len(flags)` raised
+        # on `{"c001": 123}` and silently charged a THREE-flag penalty for
+        # `{"c001": "abc"}` (batch 149). The strings inside are not typed
+        # -- `len()` is all that reads them, so a type on the elements
+        # would be a check with no demonstrated consequence, which is the
+        # rule B4 states.
+        key_member_types={"per_claim_flags": list},
         ids_in_keys="per_claim_flags",
     ),
 
@@ -230,9 +303,58 @@ def _type_name(value: Any) -> str:
 
 
 def _permitted(types) -> str:
-    if not isinstance(types, tuple):
-        types = (types,)
-    return " or ".join(sorted({_type_name(t()) for t in types}))
+    return " or ".join(sorted({_type_name(t()) for t in _as_tuple(types)}))
+
+
+def _as_tuple(types) -> tuple:
+    return types if isinstance(types, tuple) else (types,)
+
+
+def _of_type(value, types) -> bool:
+    """isinstance, except that a boolean is only ever a boolean.
+
+    See the comment on NUMBER. Applied to every declared type rather than
+    to NUMBER alone, because "a boolean satisfies a type it was not
+    declared as" is the defect, and `severity` is simply the only place
+    the tree has reached it so far.
+    """
+    if isinstance(value, bool) and bool not in _as_tuple(types):
+        return False
+    return isinstance(value, types)
+
+
+def _members(container):
+    """(label, value) for everything a container holds.
+
+    A dict's VALUES, keyed by the key that named them, and a list's
+    elements by position -- so the message can say `'per_claim_flags'
+    ['c001']` or `entities[1]` and the model can find the one it got
+    wrong.
+    """
+    if isinstance(container, dict):
+        return [(f"[{key!r}]", value) for key, value in container.items()]
+    return [(f"[{index}]", value) for index, value in enumerate(container)]
+
+
+def _check_members(pass_id, container, member_types, at, prefix="") -> None:
+    for key, types in member_types.items():
+        if key not in container:
+            continue
+        value = container[key]
+        if not isinstance(value, (dict, list)):
+            # The declared CONTAINER type has already refused this, or
+            # there isn't one and the member rule has nothing to stand on.
+            # Either way, iterating here would report the members of a
+            # string.
+            continue
+        for label, member in _members(value):
+            if _of_type(member, types):
+                continue
+            raise PayloadShapeError(
+                f"{pass_id}: {prefix}{key}{label}{at} is {member!r}, which "
+                f"is {_type_name(member)}; every value in {key!r} must be "
+                f"{_permitted(types)}."
+            )
 
 
 def validate(pass_id: str, payload: Any, claim_ids=None,
@@ -291,11 +413,13 @@ def _validate_against(pass_id, payload, spec, claim_ids, ensemble,
         )
 
     for key, types in spec.key_types.items():
-        if key in payload and not isinstance(payload[key], types):
+        if key in payload and not _of_type(payload[key], types):
             raise PayloadShapeError(
                 f"{pass_id}: {key!r}{at} is {_type_name(payload[key])}; "
                 f"expected {_permitted(types)}."
             )
+
+    _check_members(pass_id, payload, spec.key_member_types, at)
 
     for key, nested in spec.nested.items():
         _validate_against(pass_id, payload[key], nested, claim_ids,
@@ -330,12 +454,14 @@ def _validate_entries(pass_id, entries, spec, claim_ids, ensemble, at) -> None:
         # raises TypeError from inside the validator rather than
         # producing a message the model can act on.
         for key, types in spec.entry_types.items():
-            if key in entry and not isinstance(entry[key], types):
+            if key in entry and not _of_type(entry[key], types):
                 raise PayloadShapeError(
                     f"{pass_id}: entry {index}{at} has {key}="
                     f"{entry[key]!r}, which is {_type_name(entry[key])}; "
                     f"expected {_permitted(types)}."
                 )
+        _check_members(pass_id, entry, spec.entry_member_types, at,
+                       prefix=f"entry {index} ")
         for key, allowed in spec.enums.items():
             if key not in entry:
                 continue
