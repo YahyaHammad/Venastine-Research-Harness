@@ -485,6 +485,40 @@ def clear_client_cache():
 
 
 @pytest.fixture(autouse=True)
+def restore_the_root_log_level():
+    """The root logger's LEVEL is global state, and `configure_logging()`
+    sets it.
+
+    Batch 148, measured rather than reasoned: `test_logging_setup.py` and
+    `tests/test_tui.py` landed on the same xdist worker for the first time
+    when this batch added 105 tests, and
+    `test_the_count_does_not_carry_into_the_next_turn` failed. Reproduced
+    with the two files alone in 3.5 seconds, so it is an order dependency
+    and not item 85's unreproduced race.
+
+    `configure_logging(level=None)` resolves to INFO and calls
+    `root.setLevel`, and that file's `_clean_root` restores the HANDLERS
+    only -- one word short of its own rule, "handlers are global state;
+    leaving one attached leaks into every later test in the session". The
+    root level decides whether an INFO record reaches pytest's capturing
+    handler at all, so what the leak reaches is every later assertion of
+    the form "nothing was logged": they pass or fail on which file ran
+    first in the same process.
+
+    Restored rather than pinned to a value, for `clear_client_cache`'s
+    reason: a test that MEANS to configure logging must still be able to,
+    and what must not survive it is the next test's view of what was
+    logged.
+    """
+    import logging
+
+    root = logging.getLogger()
+    previous = root.level
+    yield
+    root.setLevel(previous)
+
+
+@pytest.fixture(autouse=True)
 def restore_config_schema_cache():
     """`config_schema._cached` is the document this process is running on,
     and a test that calls `load(force=True)` under a patched environment

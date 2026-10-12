@@ -60,10 +60,18 @@ def _forget_context_window_warnings():
     """Same reasoning as the guard above, for the once-per-model warning
     set. It is module state, and a test that warms it makes the
     fallback-warning test below pass or fail depending on WHICH TESTS RAN
-    FIRST -- the kind of order dependency that reads as a flake."""
+    FIRST -- the kind of order dependency that reads as a flake.
+
+    BOTH SETS. Batch 148 added `_floor_warned` for A24's small-window
+    warning, which is the same kind of state with the same exposure: a test
+    that primes a 4,096-token window warms it, and the test that asserts the
+    line is emitted would then pass or fail on test order.
+    """
     compaction._context_window_warned.clear()
+    compaction._floor_warned.clear()
     yield
     compaction._context_window_warned.clear()
+    compaction._floor_warned.clear()
 
 
 def _thread(memory, turns=6, body="x" * 200):
@@ -1766,3 +1774,388 @@ class TestAFoldInsideOneTurnWhenNothingElseIsLegal:
         assert answered <= called, (
             f"the view carries tool_results for calls it cannot see: "
             f"{answered - called} -- an HTTP 400 on Anthropic")
+
+
+# ---------------------------------------------------------------------------
+# ---- Batch 148: the all-pinned door, the floor's loud half, the backstop's
+# ---- order, and the cap that stopped tracking the trigger -----------------
+# ---------------------------------------------------------------------------
+
+class TestTheAllPinnedDoorIsOpenToBothStrategies:
+    """S11-02. `if not segment and not chaining:` let the SHIPPED strategy
+    fall through the branch built for this state, into the exact harm the
+    no-progress guard twenty lines above names as its own reason.
+
+    MEASURED THROUGH REAL STORAGE FIRST, then written against the fake:
+    three pinned turns in a ten-turn thread on the real `compact()` handed
+    the compactor
+    "Summary of everything before this point:\n<previous summary>\n\n"
+    and nothing else, at a 379-character target, and the stored checkpoint
+    went from 2,489 characters to 23 -- reported as status="folded",
+    kind="compaction", "0 earlier messages compacted into a summary". That
+    matters because a fake agreeing with wrong production code is this
+    project's #35, and the fake's exclusion rule was checked against the
+    real one rather than assumed.
+    """
+
+    CHAIN = {**OVERRIDES, "strategy": "chain"}
+
+    def _chained_thread(self, memory, summaries):
+        """A thread with a checkpoint, then new turns that are ALL pinned."""
+        calls = summaries("PRIOR SUMMARY TEXT", "Second summary.")
+        _thread(memory, turns=6)
+        first = compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC",
+                                   overrides=self.CHAIN)
+        assert first["status"] == "folded", first
+        _thread(memory, turns=4)
+        memory.pin_last(8)
+        return calls
+
+    def test_a_chained_fold_with_nothing_unpinned_is_all_pinned(
+            self, fake_storage, summaries):
+        """The branch is reached on the SEGMENT, so the strategy no longer
+        decides whether the state has a name."""
+        memory = ConversationMemory()
+        calls = self._chained_thread(memory, summaries)
+        before = len(calls)
+
+        outcome = compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC",
+                                     overrides=self.CHAIN)
+
+        assert outcome["status"] == "all-pinned", outcome
+        assert outcome["kind"] == "compaction_blocked"
+        assert "/unpin" in outcome["text"]
+        assert len(calls) == before, (
+            "the compactor was called with nothing new to fold")
+
+    def test_the_premise_is_an_empty_segment_and_the_test_asserts_it(
+            self, fake_storage, summaries):
+        """Not decoration: a test whose shape silently stopped producing an
+        empty span would still pass the assertions above, because
+        `all-pinned` is also what a thread with no new rows at all reports.
+        This pins the thing the branch is about."""
+        import storage as storage_module
+
+        memory = ConversationMemory()
+        self._chained_thread(memory, summaries)
+        previous = fake_storage.latest_checkpoint(memory.thread_id)
+        # The same arguments compact() passes, overrides included: the keep
+        # floors come from them, and asking under the shipped ones would
+        # measure a thread this class never builds.
+        watermark = compaction.compactable_span(memory, None, self.CHAIN)
+
+        assert watermark is not None, "nothing was foldable at all"
+        # The REAL advances(), not a fake method: it reads `_ordered_rows`,
+        # which the fixture does fake, so the position arithmetic here is
+        # exercised rather than mocked (conftest says so where the symbol is
+        # deliberately left out of the redirect list).
+        assert storage_module.advances(
+            memory.thread_id, previous["covers_up_to_message_id"],
+            watermark), "the watermark did not move, so no-progress covers it"
+        assert fake_storage.history_through(
+            memory.thread_id, watermark,
+            after_message_id=previous["covers_up_to_message_id"]) == [], (
+            "the newly swept span is not empty, so this is an ordinary fold")
+
+    def test_the_previous_summary_is_never_handed_back_to_the_compactor(
+            self, fake_storage, summaries):
+        """The harm itself, stated as the absence it is. Chain prepends the
+        previous summary to the segment, so an empty segment makes the
+        compactor's whole input its own last answer -- 15% of it comes back,
+        and 15% of that on the next attempt."""
+        memory = ConversationMemory()
+        calls = self._chained_thread(memory, summaries)
+
+        compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC",
+                           overrides=self.CHAIN)
+
+        assert not any("PRIOR SUMMARY TEXT" in (call.get("user_goal") or "")
+                       for call in calls[1:]), (
+            "the compactor was asked to summarize its own previous summary")
+        live = fake_storage.latest_checkpoint(memory.thread_id)
+        assert live["summary_text"] == "PRIOR SUMMARY TEXT", (
+            "the stored summary was replaced by a shorter version of itself")
+
+    def test_an_ordinary_chained_fold_still_happens(self, fake_storage,
+                                                    summaries):
+        """THE CONTROL, and the one that matters: a branch reached on the
+        segment alone would also 'pass' the three tests above if it refused
+        every chained fold. New material, same strategy, same thread shape --
+        and it folds."""
+        memory = ConversationMemory()
+        calls = summaries("PRIOR SUMMARY TEXT", "Second summary.")
+        _thread(memory, turns=6)
+        compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC",
+                           overrides=self.CHAIN)
+        _thread(memory, turns=4)
+
+        outcome = compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC",
+                                     overrides=self.CHAIN)
+
+        assert outcome["status"] == "folded", outcome
+        assert "PRIOR SUMMARY TEXT" in calls[-1]["user_goal"], (
+            "chain stopped chaining")
+
+    def test_rederive_reaches_the_same_branch_as_before(self, fake_storage,
+                                                        summaries):
+        """The half that already worked, kept honest: this is the path the
+        strategy test used to cover, and it must answer exactly as it did."""
+        memory = ConversationMemory()
+        _thread(memory, turns=4)
+        memory.pin_last(4)
+        summaries("unused")
+
+        outcome = compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC",
+                                     overrides=OVERRIDES)
+
+        assert outcome["status"] == "all-pinned", outcome
+        assert fake_storage.latest_checkpoint(memory.thread_id) is None
+
+
+class TestASmallWindowSaysThatItCannotCompact:
+    """S11-03 / A24. The floor TECHNICAL_DEBT 42 raised is applied with no
+    reference to the window, so at or below 8,000 the trigger it produces is
+    above the window and `used` -- the provider's own count of what it was
+    sent -- can never reach it. Item 42's own fix section rejected exactly
+    this outcome ("compaction would then silently never run on that model");
+    it arrived from the other side, and the value is not the fix. The line
+    is.
+    """
+
+    def _window(self, mocker, window, model="small-model"):
+        mocker.patch.object(compaction, "context_limit",
+                            return_value=window)
+        return model
+
+    def test_a_4k_window_can_never_compact(self, mocker):
+        """Driven across every value the provider could report, rather than
+        at one probe point: `warn_at` collapses to 1 down here, so a test
+        asking only "does something fire" sees `warn` and reads as covered.
+        """
+        model = self._window(mocker, 4096)
+
+        answers = {compaction.should_compact(used, model,
+                                             provider_name="P")
+                   for used in range(1, 4098)}
+
+        assert answers == {"warn"}, answers
+
+    def test_and_says_so_once_naming_the_two_settings(self, mocker, caplog):
+        model = self._window(mocker, 4096)
+
+        with caplog.at_level("WARNING"):
+            compaction.derived_trigger(model, "P")
+            compaction.derived_trigger(model, "P")
+
+        lines = [r.getMessage() for r in caplog.records
+                 if r.levelname == "WARNING" and "NEVER" in r.getMessage()]
+        assert len(lines) == 1, lines
+        assert "4096" in lines[0]
+        assert "8001" in lines[0]
+        assert "warning_margin_tokens" in lines[0]
+        assert "keep_recent_tokens" in lines[0]
+
+    def test_a_window_just_above_the_floor_warns_about_its_headroom(
+            self, mocker, caplog):
+        """8,192 is the commonest real window a self-hosted or gateway
+        endpoint reports. Compaction CAN fire there -- with 191 tokens of
+        headroom, against about 12,500 for one bounded read -- so the
+        wording is the other one, and saying "can never" would be false."""
+        model = self._window(mocker, 8192)
+
+        with caplog.at_level("WARNING"):
+            compaction.derived_trigger(model, "P")
+
+        lines = [r.getMessage() for r in caplog.records
+                 if r.levelname == "WARNING"]
+        assert len(lines) == 1, lines
+        assert "191 tokens of headroom" in lines[0], lines[0]
+        assert "NEVER" not in lines[0]
+
+    @pytest.mark.parametrize("window", [16384, 32768, 64000, 200000, 1000000])
+    def test_a_window_the_floor_does_not_bind_says_nothing(self, mocker,
+                                                           caplog, window):
+        """THE CONTROL, and A24's ruling in a test. 16,384 and 32,768 leave
+        less headroom than one bounded read too, but the headroom CAP is
+        what bound them, the cap is deliberate, and the only remedy there is
+        a bigger model -- so a line naming two settings would name the wrong
+        thing. TECHNICAL_DEBT 96 records that case instead. A warning that
+        fired here would also be a warning on every stock install."""
+        model = self._window(mocker, window)
+
+        with caplog.at_level("WARNING"):
+            trigger = compaction.derived_trigger(model, "P")
+
+        assert trigger < window
+        assert [r.getMessage() for r in caplog.records
+                if r.levelname == "WARNING"] == []
+
+    def test_a_second_pair_is_still_reported(self, mocker, caplog):
+        """The dedup is keyed on (provider, model), not on the model alone:
+        the same model name behind a gateway and behind its own vendor can
+        report different windows, and the second one is news."""
+        model = self._window(mocker, 4096)
+
+        with caplog.at_level("WARNING"):
+            compaction.derived_trigger(model, "gateway")
+            compaction.derived_trigger(model, "vendor")
+
+        assert len([r for r in caplog.records
+                    if "NEVER" in r.getMessage()]) == 2
+
+
+class TestTheBackstopStaysAboveTheWorkingSetTrigger:
+    """S11-04. M6 says a pass compacts LATER than a chat turn, and the
+    backstop was a flat 20,000-token margin while batch 44 made the ordinary
+    trigger a clamped share -- so it fired EARLIER at every window below
+    200,000, and at or below 20,001 its old max(1, ...) clamped it to 1, so
+    every evaluation of every step of every pass asked compact().
+
+    THE SHIPPED TABLE IS WHY NOTHING CAUGHT IT: every entry is at or above
+    200,000, where the two were equal or already ordered. So the sweep below
+    includes the windows a provider REPORTS, which is the way in.
+    """
+
+    WINDOWS = [2048, 4096, 8192, 16384, 20001, 32768, 64000, 131072,
+               200000, 262144, 400000, 1000000]
+
+    @pytest.mark.parametrize("window", WINDOWS)
+    def test_the_order_holds_at_every_window(self, mocker, window):
+        mocker.patch.object(compaction, "context_limit", return_value=window)
+
+        backstop = compaction.thresholds("m", mode="backstop",
+                                         provider_name="P")[1]
+        working = compaction.derived_trigger("m", "P")
+
+        assert backstop > working, (
+            f"window {window}: the backstop fires {working - backstop} "
+            f"tokens before the trigger it is supposed to sit behind")
+
+    @pytest.mark.parametrize("window", [1024, 4096, 20000, 20001])
+    def test_the_clamp_to_one_is_gone(self, mocker, window):
+        """`max(1, window - 20_000)` meant "compact" for any used >= 1 --
+        /window's own refusal message describes this state ("not a window
+        anyone means to set") and guards the command rather than the number
+        a server asserts."""
+        mocker.patch.object(compaction, "context_limit", return_value=window)
+
+        assert compaction.should_compact(1, "m", mode="backstop",
+                                         provider_name="P") == ""
+
+    @pytest.mark.parametrize("window", [262144, 400000, 1000000])
+    def test_a_large_window_still_keeps_the_margin_it_always_kept(
+            self, mocker, window):
+        """THE CONTROL: above 200,000 the margin is what decides, and the
+        fix must not have quietly replaced the backstop with the trigger
+        plus one. The ordering expression only binds where the margin would
+        have broken the order."""
+        mocker.patch.object(compaction, "context_limit", return_value=window)
+
+        compact_at = compaction.thresholds("m", mode="backstop",
+                                           provider_name="P")[1]
+
+        assert compact_at == window - config.COMPACTION_PIPELINE_BACKSTOP_TOKENS
+
+    def test_the_shipped_roster_is_unmoved_except_at_the_boundary(self):
+        """What a reader of the register will want: the inversion was
+        invisible on the shipped table, so the fix is invisible there too --
+        except for the one entry that sat exactly at the crossover."""
+        moved = {}
+        for model, window in config.MODEL_CONTEXT_WINDOWS.items():
+            margin = window - config.COMPACTION_PIPELINE_BACKSTOP_TOKENS
+            compact_at = compaction.thresholds(model, mode="backstop")[1]
+            if compact_at != margin:
+                moved[model] = compact_at - margin
+
+        assert moved == {"claude-haiku-4-5": 1}, moved
+
+
+class TestThePinCapIsAFractionOfTheTriggerThatFires:
+    """S11-06. #89's cap is PIN_MAX_TRIGGER_FRACTION of the trigger, and
+    since batch 44 the trigger that decides when a thread folds is derived
+    per model -- while `pin_measurements` read the configured number bare,
+    making the cap 20,000 for every model. Both directions were wrong: 250%
+    of the trigger on an 8,192-token window, where one pin could floor the
+    thread permanently above it, and 8% on a 262,144-token one, where `pin`
+    refused what the policy allows.
+    """
+
+    def _thread_with_rows(self, memory):
+        _thread(memory, turns=3)
+        return memory.thread_id
+
+    @pytest.mark.parametrize("window", [8192, 16384, 32768, 64000, 131072,
+                                        262144, 1000000])
+    def test_the_cap_is_the_fraction_of_the_derived_trigger(
+            self, fake_storage, mocker, window):
+        mocker.patch.object(compaction, "context_limit", return_value=window)
+        memory = ConversationMemory()
+        thread_id = self._thread_with_rows(memory)
+
+        cap = compaction.pin_measurements(thread_id, 1, "m", "P")["max_tokens"]
+
+        expected = int(config.PIN_MAX_TRIGGER_FRACTION
+                       * compaction.derived_trigger("m", "P"))
+        assert cap == expected
+
+    @pytest.mark.parametrize("window", [2048, 8192, 16384, 20001, 25000])
+    def test_one_pin_can_no_longer_hold_more_than_the_whole_trigger(
+            self, fake_storage, mocker, window):
+        """The direction that is a defect rather than a conservatism: at or
+        below 25,000 the old flat cap was above half the trigger, and at or
+        below 20,001 above the whole of it -- which is the state #89 exists
+        to prevent, reached without anyone typing a number."""
+        mocker.patch.object(compaction, "context_limit", return_value=window)
+        memory = ConversationMemory()
+        thread_id = self._thread_with_rows(memory)
+
+        cap = compaction.pin_measurements(thread_id, 1, "m", "P")["max_tokens"]
+
+        assert cap < compaction.derived_trigger("m", "P")
+
+    def test_a_session_trigger_bound_to_the_pair_still_pulls_the_cap_down(
+            self, fake_storage, mocker):
+        """What the min() bought before, now bought by resolving the trigger
+        the way thresholds() does -- which also means the override has to be
+        bound to THIS pair, where the binding-free read could not tell."""
+        import core.session as session_overrides
+
+        mocker.patch.object(compaction, "context_limit", return_value=200000)
+        memory = ConversationMemory()
+        thread_id = self._thread_with_rows(memory)
+        session_overrides.set_trigger("P", "m", 12000)
+
+        cap = compaction.pin_measurements(thread_id, 1, "m", "P")["max_tokens"]
+
+        assert cap == int(config.PIN_MAX_TRIGGER_FRACTION * 12000)
+
+    def test_another_pairs_override_does_not_reach_this_cap(
+            self, fake_storage, mocker):
+        """THE CONTROL for the test above: `session.trigger_any()` answers
+        with whatever was set for ANY pair, so a test that only lowered one
+        override would pass against either implementation."""
+        import core.session as session_overrides
+
+        mocker.patch.object(compaction, "context_limit", return_value=200000)
+        memory = ConversationMemory()
+        thread_id = self._thread_with_rows(memory)
+        session_overrides.set_trigger("OTHER", "other-model", 12000)
+
+        cap = compaction.pin_measurements(thread_id, 1, "m", "P")["max_tokens"]
+
+        assert cap == int(config.PIN_MAX_TRIGGER_FRACTION
+                          * compaction.derived_trigger("m", "P"))
+
+    def test_with_no_pair_the_configured_trigger_is_still_the_answer(
+            self, fake_storage, mocker):
+        """The fallback is not a leftover: a call from outside a run has no
+        RunInfo, and the number it returns is the one every caller got
+        before #89's cap started depending on the model."""
+        mocker.patch.object(compaction, "context_limit", return_value=1000000)
+        memory = ConversationMemory()
+        thread_id = self._thread_with_rows(memory)
+
+        cap = compaction.pin_measurements(thread_id, 1)["max_tokens"]
+
+        assert cap == int(config.PIN_MAX_TRIGGER_FRACTION
+                          * config.COMPACTION_TRIGGER_TOKENS)

@@ -658,8 +658,34 @@ harness did not write.
 **Focus**
 - `effective_compaction()`'s provenance and the small-window raise. `TECHNICAL_DEBT 42` closed in
   127 — **and that entry's own diagnosis was wrong in two details**, which the batch recorded. Measure.
+  **MEASURED, and the fix for that raise produced the outcome the entry rejected** (S11-03, batch
+  148): the floor is applied with no reference to the window, so at or below 8,000 the trigger it
+  returns is ABOVE the window and compaction can never fire -- silently, while the only line the
+  user sees says a threshold is approaching, because `warn_at` collapses to 1 down there. Item
+  42's own fix section rejected exactly that ("compaction would then silently never run on that
+  model, which is the quiet-failure class this project keeps closing") for the containment it
+  declined. A24 is the loud half, and it is narrower than the report asked for: it fires only
+  where the FLOOR bound the trigger, because above that the headroom cap did and the two settings
+  the line names are not the remedy (item 96).
 - Redaction ordering relative to the cut (`test_redact_before_cut` names the invariant).
+  **ANSWERED, and the answer is four cut sites** (S11-05, fixed in batch 148 as §65's A23).
+  A session's output is cut by the producer at `max_read_chars`, by the wake's per-session
+  division, by the view's display budget and by `shell_output`'s paging, and the redactor ran
+  after every one of them. The three credential SHAPES leak at each tail cut; the PAGING route
+  leaks all seven, including the fixed-length vendor tokens, because the model asks for the
+  adjacent page itself and holds both halves. Two of those sites this scope assigned to S01 and
+  S16, and S01 never measured them, which is why the severe half was still open. The honest limit
+  is register item 95: a stream has no whole document, and the buffer's dropped middle is a cut
+  nothing above it can see across.
 - Pinning, and what a pinned message does to the arithmetic.
+  **ANSWERED TWICE** (batch 148). To the FOLD: when every row newly swept by the watermark is
+  pinned the segment is empty, and the `all-pinned` branch tested the configured STRATEGY rather
+  than the segment -- so the shipped `chain` fell through it and the compactor was handed its own
+  previous summary to shorten, 2,489 characters back as 23, reported as a successful fold of zero
+  messages (S11-02). To the CAP: #89's cap is a fraction of the trigger, and `pin_measurements`
+  read the configured trigger while batch 44 moved the firing one onto the model -- so the cap was
+  250% of the trigger at an 8,192-token window, where one pin can floor a thread permanently
+  above it, and 8% at 262,144 (S11-06, ruled as A22).
 - **Whether a cut can orphan a tool result from its call** and hand the next request a transcript the
   provider will reject — the failure that looks like a provider outage.
 - Turn folding and the turn-count bound: `TECHNICAL_DEBT 39` (a turn count holding a thread of any

@@ -89,16 +89,37 @@ def _validated_turns(params: dict) -> object:
     return last_n
 
 
-def _pinned_share(memory) -> tuple:
+def _pinned_share(memory, parent_run=None) -> tuple:
     """(tokens still protected, cap) for result text -- M14's rule that a
-    cap is stated in what the model reads, not only in a log."""
+    cap is stated in what the model reads, not only in a log.
+
+    `parent_run` is threaded through for the CAP, which is a fraction of
+    the trigger THIS model folds at (batch 148): a result sentence
+    naming a different number than the refusal would be worse than naming
+    none.
+    """
     from core.compaction import pin_measurements
 
-    m = pin_measurements(memory.thread_id, 1)
+    m = pin_measurements(memory.thread_id, 1, *_pair(parent_run))
     return m["pinned_tokens"], m["max_tokens"]
 
 
-def run(params: dict, memory=None) -> dict:
+def _pair(parent_run) -> tuple:
+    """(model, provider_name) off the enclosing run, or (None, None).
+
+    A RunInfo is built once per turn (core/loop.py) so this is available on
+    every path a model can call `pin` from -- chat, the CLI and a research
+    pass. None is not a failure: pin_measurements then measures the cap
+    against the configured trigger, which is what it did everywhere before
+    #89's cap started depending on the model.
+    """
+    if parent_run is None:
+        return None, None
+    return (getattr(parent_run, "model", None),
+            getattr(parent_run, "provider_name", None))
+
+
+def run(params: dict, memory=None, parent_run=None) -> dict:
     # params.get, not params[]: no provider validates tool inputs against
     # the schema. tools/base.py carries the one copy of why, under
     # "WHAT A CALLABLE REGISTERED BELOW MAY RAISE": a handler's exception IS
@@ -125,7 +146,7 @@ def run(params: dict, memory=None) -> dict:
     # informed rather than blind.
     from core.compaction import pin_measurements
 
-    m = pin_measurements(memory.thread_id, last_n)
+    m = pin_measurements(memory.thread_id, last_n, *_pair(parent_run))
     if m["requested_tokens"] > m["max_tokens"]:
         already = (f"{m['pinned_tokens']} tokens are already protected "
                    f"({100 * m['pinned_tokens'] // max(1, m['max_tokens'])}% "
@@ -146,7 +167,7 @@ def run(params: dict, memory=None) -> dict:
         return {"result": f"Nothing to pin -- the last {last_n} turn(s) are "
                           f"already protected, or the conversation has not "
                           f"got that far yet."}
-    pinned, cap = _pinned_share(memory)
+    pinned, cap = _pinned_share(memory, parent_run)
     return {
         "result": f"Pinned the last {last_n} turn(s) ({changed} messages). "
                   f"They will be kept verbatim rather than summarized when "
@@ -155,7 +176,7 @@ def run(params: dict, memory=None) -> dict:
     }
 
 
-def unpin_run(params: dict, memory=None) -> dict:
+def unpin_run(params: dict, memory=None, parent_run=None) -> dict:
     """The mirror of run(): releases the ordinal window instead of
     protecting it (#89). D26 called a pin reversible; until batch 16
     nothing anywhere reversed one, and `set_pinned(pinned=False)` was
@@ -173,7 +194,7 @@ def unpin_run(params: dict, memory=None) -> dict:
     if not released:
         return {"result": f"Nothing to release -- the last {last_n} "
                           f"turn(s) were not pinned."}
-    pinned, cap = _pinned_share(memory)
+    pinned, cap = _pinned_share(memory, parent_run)
     return {
         "result": f"Released the last {last_n} turn(s) ({released} message"
                   f"{'s' if released != 1 else ''}). {pinned} tokens still "

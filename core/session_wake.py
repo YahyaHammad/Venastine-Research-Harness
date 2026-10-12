@@ -24,6 +24,15 @@ RETURNED is redacted here -- the rule the design recorded: redact what is
 returned, not what is matched, so a credential-shaped line still wakes the
 agent and still arrives as `[REDACTED]`.
 
+AND BEFORE EVERY CUT, WHICH IS THE OTHER HALF (ROADMAP_v3 §65 A23). The
+paragraph above says redaction happens; it says nothing about ORDER, and the
+order was wrong: the tail was cut to a per-session budget and the slice was
+then redacted. A pattern only matches what it can see whole. `_redacted`
+below now redacts and then cuts, the producer redacts what it stores
+(core/shell_sessions.py's `_finish`), and the paging route redacts the buffer
+before it pages it -- one rule at three layers, because a layer that cuts
+cannot borrow another layer's containment.
+
 Pure apart from `record_killed_at_quit`, which writes through core.memory.
 """
 
@@ -103,17 +112,35 @@ _KILLED_BECAUSE = {
 }
 
 
-def _redacted(event: WakeEvent, tail_budget: int) -> dict:
-    """One session's result, through the real output policy."""
-    tail = event.output_tail[-tail_budget:] if tail_budget > 0 else ""
+def _redacted(event: WakeEvent, tail_budget: int) -> tuple[dict, bool]:
+    """One session's result through the real output policy, and whether the
+    budget dropped anything -- REDACTED BEFORE IT IS CUT (A23).
+
+    This used to slice `event.output_tail[-tail_budget:]` and hand the
+    slice to the policy. `_body` divides MAX_READ_CHARS by the number of
+    sessions coalesced into one wake, so two sessions reporting together cut
+    at 25,000 characters, and a credential straddling that boundary lost the
+    half its pattern anchors on while the value inside the kept half
+    survived whole. RB1's rule, one file over: the redactor sees the text
+    exactly once while it is still one string, and the budget then counts
+    characters the model will actually see (RB3).
+
+    THE CUT FLAG IS COMPUTED ON THE REDACTED SIDE for the same reason, and
+    that fixes a second thing for free: comparing the raw length against the
+    redacted one made the wake say "earlier output omitted" whenever
+    redaction merely SHORTENED the text, with nothing omitted at all.
+    """
     result = {
         "command": event.command,
         "pattern": event.pattern or "",
         "lines": list(event.lines),
-        "output_tail": tail,
+        "output_tail": event.output_tail,
     }
-    return check_output_policy(TOOL_FOR_KIND.get(event.kind, "shell_background"),
-                               result)
+    clean = check_output_policy(
+        TOOL_FOR_KIND.get(event.kind, "shell_background"), result)
+    whole = clean["output_tail"]
+    clean["output_tail"] = whole[-tail_budget:] if tail_budget > 0 else ""
+    return clean, event.output_truncated or len(clean["output_tail"]) < len(whole)
 
 
 def _what_happened(event: WakeEvent) -> str:
@@ -145,7 +172,7 @@ def _body(events: list[WakeEvent]) -> list[str]:
     budget = max(1, int(config.MAX_READ_CHARS) // max(1, len(events)))
     blocks = []
     for event in events:
-        clean = _redacted(event, budget)
+        clean, cut = _redacted(event, budget)
         where = where_ran(event.ran_on)
         block = [f"Session {event.session_id} ({event.kind}) `{clean['command']}`"
                  f" {_what_happened(event)} after {event.elapsed_s}s{where}."]
@@ -157,8 +184,6 @@ def _body(events: list[WakeEvent]) -> list[str]:
                          + ":")
             block.extend(f"  {line}" for line in clean["lines"])
         if clean["output_tail"]:
-            cut = (event.output_truncated
-                   or len(event.output_tail) > len(clean["output_tail"]))
             block.append("Last output" + (" (earlier output omitted)" if cut
                                           else "") + ":")
             block.append(clean["output_tail"].rstrip("\n"))

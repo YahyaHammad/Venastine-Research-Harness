@@ -77,7 +77,7 @@ from core.memory import ConversationMemory
 from core.provider_errors import describe
 from core.reasoning.authorization import GRANT_PICKER, NOTHING_TO_GRANT
 from core.replay import replay_entries
-from core.session_view import live_entries, stored_entries, tail_chars
+from core.session_view import live_entries, stored_entries
 from memories.tui_commands import register_memory_commands
 from project_init.tui_commands import register_init_commands
 from prompts import system_prompts
@@ -2344,9 +2344,14 @@ class VenastineApp(App):
         in one call, and the redaction is core/session_view.py's -- this
         function reads a buffer and paints, and never sees an
         unredacted command.
+
+        EVERYTHING THE BUFFER HOLDS, not `tail_chars()` of it (A23). The
+        cut moved into `live_entries`, below the redaction, because a
+        credential straddling this boundary was being offered to the
+        redactor as two fragments. The number drawn is unchanged.
         """
         buffer = shell_sessions.sessions.buffer(row.id)
-        tail, truncated = (buffer.last(tail_chars()) if buffer is not None
+        tail, truncated = (buffer.last() if buffer is not None
                            else ("", False))
         self._paint_session_entries(live_entries(row, tail, truncated))
         # THE BUFFER'S OWN COUNT, which is what the poll compares

@@ -123,6 +123,66 @@ class TestRedaction:
         text, _ = sw.build_killed_at_quit([_row(command=f"curl -H {SECRET}")])
         assert SECRET not in text
 
+    def test_the_tail_is_redacted_BEFORE_the_budget_cuts_it(self,
+                                                            monkeypatch):
+        """A23. This test's secret sits where the old test's could not: the
+        budget falls inside it. The existing test above plants one entirely
+        within the slice, which `tests/test_redact_before_cut.py` names as
+        the third way a test of this defect goes vacuous -- "a secret
+        entirely inside one page was always redacted and always will be".
+
+        The sweep over every cut position, for every pattern, is in that
+        file; this is the one case in the file the wake belongs to.
+        """
+        monkeypatch.setattr(config, "MAX_READ_CHARS", 120)
+        line = "[info] waiting for the build to finish............\n"
+        tail = line * 3 + 'password = "hunter2hunter2"\n' + line
+
+        text, _ = sw.build_wake([_event(output_tail=tail)])
+
+        assert "hunter2hunter2" not in text
+        assert policy_enforcement.REDACTION_MARKER in text
+
+    def test_redaction_alone_is_not_reported_as_omitted_output(self):
+        """The flag was `len(event.output_tail) > len(clean["output_tail"])`,
+        so a tail that FIT the budget still said "earlier output omitted" as
+        soon as the redactor shortened one value -- which it does by 30
+        characters for a `ghp_` token. The sentence is the only thing
+        telling a reader whether to call shell_output, so a false one costs
+        a tool call and a wrong belief about what the session wrote."""
+        event = _event(output_tail=f"token={SECRET}\nall done\n")
+
+        text, _ = sw.build_wake([event])
+
+        assert SECRET not in text
+        assert "earlier output omitted" not in text
+
+    def test_a_tail_the_budget_really_did_cut_still_says_so(self,
+                                                            monkeypatch):
+        """THE CONTROL: computing the flag on the redacted side must not
+        have turned it off. A fix that always reported False would pass the
+        test above and silently lose the one notice a reader acts on."""
+        monkeypatch.setattr(config, "MAX_READ_CHARS", 100)
+
+        text, _ = sw.build_wake([_event(output_tail="a" * 500)])
+
+        assert "earlier output omitted" in text
+
+    def test_the_budget_counts_characters_the_model_WILL_see(self,
+                                                             monkeypatch):
+        """RB3, which is the second thing redacting first buys: the slice is
+        taken from the redacted text, so a tail bound of 100 means 100
+        characters of what the model reads rather than 100 characters of
+        something it is not shown."""
+        monkeypatch.setattr(config, "MAX_READ_CHARS", 100)
+        tail = f"token={SECRET}\n" + "b" * 500
+
+        text, _ = sw.build_wake([_event(output_tail=tail)])
+
+        drawn = text.split("Last output (earlier output omitted):\n")[1]
+        shown = drawn.split("\nRead more with shell_output")[0]
+        assert len(shown) == 100, len(shown)
+
 
 class TestTheRecord:
 

@@ -44,13 +44,32 @@ MEASURED END TO END BEFORE ANY OF THIS WAS WRITTEN (batch 106), which is
 token at characters 4,980-5,020 came back clean in both pages, was rejoined
 by the corpus into one 10,000-character document, and appeared whole in
 `artifact_entries()`.
+
+AND NOW A SECOND TOOL THAT CUTS (batch 148, S11-05 / ROADMAP_v3 §65 A23).
+§52's gap register declined to solve this generally -- "a future tool that
+returns a long body and slices it would have to make the same choice, and
+nothing mechanical forces it to" -- and §49 had already shipped that tool
+before the sentence was written: a background session's output is cut in
+FOUR places, and the redactor ran after every one of them. Two of the four
+are pure functions and are tested below; the producer's own tail cut and
+`shell_output`'s paging need a live manager and are in
+tests/test_shell_sessions.py, under
+TestASessionsOutputIsRedactedBeforeItIsCut. The four vacuity traps above
+apply unchanged, and the third one bit the batch's own first probe: a run of
+"x" as filler leaves no word boundary before `password`, so the sweep
+reported clean rows for a secret the redactor had never matched even
+unsplit. `_straddling` below already says so, which is why it is reused
+rather than re-derived.
 """
 
 import logging
 
 import pytest
 
+import config
+from core import session_view, session_wake
 from core.reasoning.source_corpus import SourceCorpus
+from core.shell_sessions import SessionRow, WakeEvent
 from safety.policy_enforcement import REDACTION_MARKER
 from tools.builtin import fetch_url
 from tools.registry import registry
@@ -470,3 +489,132 @@ class TestTheCorpusDidNotGainASecondScan:
         assert held, "nothing was stored, so this asserted nothing"
         assert PAT not in held
         assert REDACTION_MARKER in held
+
+
+# ===========================================================================
+# ---- A23: a session's output, at the two cuts that are pure functions -----
+# ===========================================================================
+
+SESSION_FILLER = "[info] starting worker and then waiting for the build\n"
+
+
+def _session_output(secret, cut_at, budget):
+    """Program output whose last `budget` characters begin `cut_at`
+    characters into `secret`.
+
+    Same sense of `cut_at` as `_straddling` above: that many characters of
+    the secret are on the side the reader does not get. The filler is whole
+    LINES and the secret starts one, for `_straddling`'s stated reason --
+    two of the three credential shapes anchor on a word boundary, and a
+    secret welded onto the end of a filler word does not match even unsplit.
+    """
+    inside = len(secret) - cut_at
+    trail = (SESSION_FILLER * 40)[:max(0, budget - inside - 1)]
+    text = SESSION_FILLER * 12 + secret + "\n" + trail
+    assert text[-budget:].startswith(secret[cut_at:]), (cut_at, budget)
+    return text
+
+
+def _wake_event(tail, session_id="s1"):
+    return WakeEvent(session_id=session_id, call_id="call_" + session_id,
+                     kind="background", command="run.sh", shape="exited",
+                     return_code=0, elapsed_s=1.0, ran_on="host",
+                     output_tail=tail)
+
+
+def _session_row(chars):
+    return SessionRow(
+        id="s1", kind="background", command="run.sh", rationale="because",
+        pattern=None, owner_thread="t1", owner_agent=None, owner_depth=0,
+        owner_span_id=None, call_id="call_1", state="exited",
+        started_wall=0.0, timeout_s=600, match_count=0, output_chars=chars,
+        ran_on="host", tier="SANDBOXED", return_code=0)
+
+
+@pytest.fixture
+def small_read(monkeypatch):
+    """A 400-character read, so a boundary is cheap to straddle.
+
+    The real number is 50,000 and the arithmetic is identical; the existing
+    wake test (`test_a_coalesced_batch_shares_one_output_budget`) shrinks it
+    the same way and for the same reason.
+    """
+    monkeypatch.setattr(config, "MAX_READ_CHARS", 400)
+    return 400
+
+
+@pytest.mark.parametrize(
+    "label,secret,needle", SECRETS, ids=[row[0] for row in SECRETS])
+class TestTheWakesPerSessionBudgetCutsRedactedText:
+    """`_body` divides one read between the sessions a wake coalesces (SS7),
+    so two sessions reporting together cut at half of it. The slice used to
+    be taken first and handed to the policy after -- and what the policy got
+    was two fragments of one pattern."""
+
+    def test_no_interior_cut_leaves_the_secret_in_the_wake(
+            self, small_read, label, secret, needle):
+        needle = needle or secret
+        budget = small_read // 2
+        survived = [cut_at for cut_at in range(1, len(secret))
+                    if needle in session_wake.build_wake(
+                        [_wake_event(_session_output(secret, cut_at, budget)),
+                         _wake_event("unrelated output", "s2")])[0]]
+
+        assert not survived, (
+            f"{label} survived the per-session budget at offsets "
+            f"{survived} of 1..{len(secret) - 1}")
+
+    def test_the_sweep_is_not_vacuous(self, small_read, label, secret,
+                                      needle):
+        """The control the file's docstring demands: planted in the same
+        filler, with nothing cut, each secret must actually be one this
+        deployment redacts."""
+        needle = needle or secret
+        tail = SESSION_FILLER * 4 + secret + "\n" + SESSION_FILLER * 4
+
+        text, _ = session_wake.build_wake([_wake_event(tail)])
+
+        assert needle not in text, (
+            f"{label} is not recognised even uncut, so the sweep above "
+            f"proves nothing")
+        assert REDACTION_MARKER in text
+
+
+@pytest.mark.parametrize(
+    "label,secret,needle", SECRETS, ids=[row[0] for row in SECRETS])
+class TestTheSessionViewsDisplayBudgetCutsRedactedText:
+    """`live_entries` draws `tail_chars()` of a live session's output. The
+    TUI used to hand it `buffer.last(tail_chars())` -- the cut first, the
+    redaction after -- which is the same defect one surface over, at the
+    same offsets, reaching the screen and `/copy all` instead of the
+    model."""
+
+    def test_no_interior_cut_leaves_the_secret_on_the_screen(
+            self, small_read, label, secret, needle):
+        needle = needle or secret
+        survived = []
+        for cut_at in range(1, len(secret)):
+            whole = _session_output(secret, cut_at, small_read)
+            entries = session_view.live_entries(_session_row(len(whole)),
+                                                whole, False)
+            if needle in "\n".join(text for _, text in entries):
+                survived.append(cut_at)
+
+        assert not survived, (
+            f"{label} survived the display budget at offsets {survived}")
+
+    def test_the_budget_still_bounds_what_is_drawn(self, small_read, label,
+                                                   secret, needle):
+        """THE CONTROL for the test above: a fix that stopped cutting at all
+        would pass every assertion in this class, and it would paint a
+        200,000-character buffer into the pane one line at a time."""
+        whole = _session_output(secret, 1, small_read) + SESSION_FILLER * 40
+
+        entries = session_view.live_entries(_session_row(len(whole)), whole,
+                                            False)
+
+        drawn = sum(len(text) for role, text in entries if role == "output")
+        assert drawn <= small_read, drawn
+        assert drawn > small_read // 2, (
+            "nothing was drawn, so the sweep proves nothing")
+        assert any("earlier output omitted" in text for _, text in entries)

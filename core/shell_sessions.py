@@ -59,6 +59,7 @@ import config
 from core import agent_activity
 from core.ansi import PtyStream
 from core.line_pattern import compile_pattern, validate
+from safety.policy_enforcement import redact_output_text
 
 logger = logging.getLogger(__name__)
 
@@ -260,9 +261,29 @@ class OutputBuffer:
         with self._lock:
             return "".join(self._head), "".join(self._tail), self.total
 
-    def page(self, offset: int, limit: int) -> dict:
-        """Up to *limit* characters from *offset*, never across the gap."""
-        head, tail, total = self._parts()
+    def page(self, offset: int, limit: int, clean=None) -> dict:
+        """Up to *limit* characters from *offset*, never across the gap.
+
+        `clean` is a text redactor, and passing one is how a caller that
+        shows a page TO THE MODEL obeys A23: the parts are redacted before
+        the page is cut out of them, so a credential straddling a page
+        boundary is replaced while it is still one string. Measured, with
+        the redactor running after the cut instead: all seven credential
+        shapes this deployment knows arrive whole across two adjacent pages,
+        because the model asks for the second one itself and holds both
+        halves -- including the fixed-length vendor tokens, which every
+        other cut site survives. Omitting `clean` gives the raw text, which
+        is what the MONITOR's own search wants (it matches on raw output by
+        design) and what the buffer's tests read.
+
+        THE OFFSETS THEN DESCRIBE THE REDACTED DOCUMENT, which is RB3's rule
+        rather than a compromise: every offset a surface speaks is a position
+        in the text the reader was given. `[REDACTED]` is shorter than what
+        it replaces, so the two coordinate systems genuinely differ -- 210
+        characters apart on a measured 120,000-character buffer.
+        """
+        head, tail, total = (self._parts() if clean is None
+                             else self._cleaned_parts(clean))
         tail_start = total - len(tail)
         gap = ({"from": len(head), "to": tail_start}
                if tail_start > len(head) else None)
@@ -287,12 +308,55 @@ class OutputBuffer:
                     more=next_offset < total)
         return page
 
-    def last(self, chars: int) -> tuple[str, bool]:
+    def _cleaned_parts(self, clean) -> tuple[str, str, int]:
+        """The three facts page() pages over, with the redactor run FIRST.
+
+        ONE STRING WHEREVER THIS BUFFER HOLDS ONE. With nothing evicted the
+        head and the tail are adjacent, so they are redacted JOINED --
+        otherwise the head/tail seam is one more cut the redactor cannot see
+        across, and that seam sits at 10,000 characters on every session,
+        which is inside the first page of every read.
+
+        THE DROPPED MIDDLE IS THE CUT NOTHING CAN REPAIR, and it is the
+        honest limit of A23 here: half of a credential that straddled it was
+        never kept by this process, so no later pass can rejoin it. A stream
+        has no "whole document" to redact exactly once; what a layer can do
+        is redact the largest string it holds before making its own cut, and
+        say where the one it cannot cross is. The gap's own size stays in RAW
+        characters -- it counts what the program wrote and we do not have.
+
+        AND IT RUNS OUTSIDE THE LOCK. `_parts()` copies and returns, so the
+        redaction happens on strings nothing else holds -- which matters
+        because the pty reader thread is appending to this buffer while a
+        model-facing read is being built, and 6.5ms (measured, on a full
+        200,000-character buffer) under the lock would stall it for exactly
+        that long on every `shell_output` call.
+        """
+        head, tail, total = self._parts()
+        dropped = total - len(head) - len(tail)
+        if dropped > 0:
+            head, tail = clean(head), clean(tail)
+            return head, tail, len(head) + dropped + len(tail)
+        joined = clean(head + tail)
+        return joined, "", len(joined)
+
+    def last(self, chars: Optional[int] = None) -> tuple[str, bool]:
         """The most recent *chars* characters kept, and whether anything the
-        program wrote before them is missing from what is returned."""
+        program wrote before them is missing from what is returned.
+
+        NO ARGUMENT MEANS EVERY CONTIGUOUS CHARACTER THIS BUFFER HOLDS,
+        which is what a caller needs when the redactor has to see the text
+        before anything cuts it (ROADMAP_v3 §65 A23). The selection is the
+        same either way: with a dropped middle only the tail is returned,
+        because head + tail would splice two spans that are not adjacent
+        and present the join as continuous output.
+        """
         head, tail, total = self._parts()
         kept = tail if total - len(tail) > len(head) else head + tail
-        text = kept[-chars:] if chars > 0 else ""
+        if chars is None:
+            text = kept
+        else:
+            text = kept[-chars:] if chars > 0 else ""
         return text, len(text) < total
 
 
@@ -814,7 +878,25 @@ class SessionManager:
         self._post(rows, session.owner_thread if wake else None)
 
     def _finish(self, session: _Session, code: Optional[int]) -> None:
-        tail, truncated = session.output.last(int(config.MAX_READ_CHARS))
+        # REDACTED BEFORE THE CUT, not after it (A23). This read
+        # `last(int(config.MAX_READ_CHARS))` and every consumer redacted the
+        # slice it was handed -- so a credential straddling character 50,000
+        # of a session's output lost the half its pattern anchors on, and the
+        # value inside the kept half survived whole. Measured through the
+        # real redactor at every interior cut position: three of the seven
+        # shapes it knows leak, and they are the field-name-plus-value ones
+        # where only the value is the secret.
+        #
+        # HERE rather than only in the consumers, because this is where the
+        # tail becomes a FACT about the session: core/session_wake.py formats
+        # it for the model, _kill_report returns it to the model, and
+        # core/session_view.py draws it. One redaction at the producer covers
+        # all three, and each consumer still redacts what IT cuts -- the
+        # command, the matched lines, its own narrower budget.
+        whole, truncated = session.output.last()
+        clean = redact_output_text(whole)
+        tail = clean[-int(config.MAX_READ_CHARS):]
+        truncated = truncated or len(tail) < len(clean)
         with self._lock:
             if session.kill_reason:
                 session.state = KILLED
@@ -1050,7 +1132,11 @@ class SessionManager:
                                  f"conversation."}
             state = session.state
             buffer = session.output
-        page = buffer.page(offset, limit)
+        # A23: the redactor sees the buffer before this page is cut out
+        # of it. dispatch()'s own check_output_policy still runs after the
+        # return -- it covers the other keys and is the backstop -- but it
+        # cannot put back a pattern this cut would have split.
+        page = buffer.page(offset, limit, clean=redact_output_text)
         page.update(session=str(session_id), status=state)
         return page
 
@@ -1205,7 +1291,12 @@ class SessionManager:
                 ended = "bound"
                 break
             time.sleep(_INPUT_POLL_S)
-        page = session.output.page(mark, int(config.MAX_READ_CHARS))
+        # A23, as in output() above: this page is returned to the model.
+        # The MATCH slice a few lines up is deliberately raw -- the monitor
+        # matches on raw output by design, and redacting what is searched
+        # would stop a credential-shaped line waking the agent at all.
+        page = session.output.page(mark, int(config.MAX_READ_CHARS),
+                                   clean=redact_output_text)
         page.update(session=session.id, status=session.state, ended=ended,
                     ended_meaning=_ENDED_MEANING[ended])
         return page

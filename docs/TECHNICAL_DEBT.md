@@ -4956,6 +4956,187 @@ than unwind, and CN10's own handler already stops the turn at a BOUNDARY
 and writes every row it owes (CN4), so the cost of a stray press is a lost
 turn rather than an unresumable thread.
 
+## 95. A credential straddling the output buffer's DROPPED MIDDLE is still recoverable from two pages (open, measured and filed batch 148)
+
+A23 (ROADMAP_v3 §65) put the redactor above every cut a session's output
+goes through, and there is one cut it cannot be put above. `OutputBuffer`
+keeps the first `shell_session_output_head_chars` (10,000) and the most
+recent `shell_session_output_tail_chars` (190,000); everything between is
+**discarded as it arrives**. A credential that straddled that point has one
+half at the end of the head and the other at the start of the tail, and the
+middle between them was never kept by this process -- so no later pass can
+rejoin the pattern, however early it runs.
+
+**Why this is a leak and not merely a limit.** Both halves are SHOWN. The
+pages are separated by a stated gap (`{"from": 10000, "to": N}`), and a
+reader who can ask for both pages -- which the model can, that is what
+`shell_output`'s `offset` is for -- holds the two fragments the redactor
+could not match. It is the same shape as the paging defect A23 fixed, with
+the difference that here the text in between genuinely does not exist.
+
+**Measured, batch 148.** `OutputBuffer(100, 100)` fed a 1,400-character
+document reports `total_chars=1400`, hands back 200 characters in four
+pages, and states the gap at every page that reaches it. With a secret
+planted across the eviction point, each page is individually clean and the
+join is not.
+
+**What a fix would have to decide**, which is why it is filed rather than
+done:
+
+- **Redact the STREAM**, in `append`. That is the one place both halves are
+  present. But the monitor matches on raw output by design
+  (`core/session_wake.py`'s header states the rule: redact what is returned,
+  not what is matched), so redacting here would stop a credential-shaped
+  line waking an agent at all -- and a pattern can straddle an `append`
+  boundary too, since a pty delivers arbitrary chunks, so this would need
+  the carry `_wait_after_input` already keeps for matching.
+- **Keep a boundary window.** Hold the last ~200 characters of the head
+  beside the tail purely so the join can be scanned once at eviction time.
+  Cheap and bounded, and it makes `total`, `page` and the gap arithmetic
+  describe something that is neither the raw stream nor the kept text.
+- **Say so in the gap notice.** The honest minimum: the gap already tells
+  the reader that output is missing, and it could say that what sits on
+  either side of it has not been scanned as one string. Costs nothing and
+  fixes nothing.
+
+**Not urgent, and the reason is the shape of the leak:** it needs a
+credential to straddle one specific character position in a session that
+overflowed a 200,000-character buffer, and the harness's own tools do not
+page across the gap on their own -- the model has to ask. Severity S3 by
+the marathon's scale, on the same reasoning S11-05 used for the cut A23 did
+close.
+
+## 96. A window below ~50,000 tokens cannot hold one bounded read in its headroom (open, measured and filed batch 148)
+
+A24 (ROADMAP_v3 §65) made `derived_trigger` say so when the DEPENDENT
+FLOOR leaves no usable headroom, and ruled deliberately against warning in
+the neighbouring case: a window where the floor does not bind but the
+headroom CAP leaves less room than one bounded tool read.
+
+Measured, with the shipped settings:
+
+| window | headroom | one bounded read | what binds it |
+|---|---|---|---|
+| 8,192 | 191 | 12,500 | the floor (A24 warns) |
+| 10,666 | 2,665 | 12,500 | the floor (A24 warns) |
+| 16,384 | 4,096 | 12,500 | `COMPACTION_MAX_HEADROOM_FRACTION` |
+| 32,768 | 8,192 | 12,500 | `COMPACTION_MAX_HEADROOM_FRACTION` |
+| 64,000 | 16,000 | 12,500 | fine |
+
+So on a 16,384 or 32,768-token window compaction fires, folds, and the next
+`read_file` of a 50,000-character file can still overflow the window --
+which is the failure `headroom_for`'s docstring exists to prevent ("There is
+no context_length_exceeded handler anywhere in `core/` -- grep for one. The
+provider raises, `core/loop.py` retries the identical oversized prompt three
+times, and the turn dies. This number is the only thing standing between a
+thread and that").
+
+**Why A24 excluded it.** The cap is deliberate -- it is what keeps the floor
+from eating a small window whole, and what keeps the derived trigger
+positive at the bottom of the range -- and there is no setting the user can
+change to buy more headroom there. A warning naming
+`warning_margin_tokens` and `keep_recent_tokens`, which is what A24's line
+names, would be naming the wrong thing, and it would fire on every stock
+install of a 32k model.
+
+**What a fix would have to decide:**
+
+- **Bound the READS instead**, which is the direction that actually fits:
+  `max_read_chars` is a setting, and a window this small could carry a
+  smaller one. That is a cross-cutting change -- `file_ops`, `shell_output`,
+  `fetch_url` and the session tail all read it -- and it changes what a tool
+  returns rather than when a thread folds.
+- **Say it once per model anyway**, with wording that names the window
+  rather than the two settings: "this model cannot hold one full tool read
+  after a fold". Honest, unactionable, and on by default.
+- **Leave it**, on the reasoning that a 16k-window deployment is already
+  outside what the rest of the harness is sized for -- which is the same
+  reasoning that made S11-03 severity S3 rather than S2.
+
+Recorded here rather than in a warning, so that the next person reading
+`headroom_for`'s floor-and-cap argument finds the measurement instead of
+re-deriving it.
+
+## 97. Two timing-sensitive tests failed in SLOW full-suite runs and neither reproduced (open, measured and filed batch 148)
+
+Batch 148 ran the full suite five times. The three that finished in 85-100
+seconds were green. The two that were slowed by other work on the same box
+-- 792s with WSL, bandit and pip-audit competing, 366s with a previous run's
+workers still exiting -- each produced exactly one failure, in a different
+file, in a test that passes alone:
+
+| run | wall clock | failure | alone |
+|---|---|---|---|
+| 1 | 100s | (none) | -- |
+| 2 | 792s | `test_secrets.py::TestTheEnvelope::test_it_does_not_say_WHICH_part_was_wrong` | 95 passed |
+| 3 | 100s | (none) | -- |
+| 4 | 366s | `test_live_output.py::TestAResizeRelaysTheTranscript::test_a_drag_re_arms_rather_than_stacking` | 13 passed |
+| 5 | 85s | (none) | -- |
+
+**The condition is the one item 85 already measured**: `pilot.pause()` costs
+21ms with nothing burning CPU in-process and 1021ms with one busy sibling
+thread, *"a 46x swing ... A 7x-slower suite run is the condition that
+measurement describes."* These two runs were 7.9x and 3.7x slower than the
+documented 100 seconds. What is new here is that the condition reaches two
+files item 85 does not cover, through two assumptions neither of which is
+about a worker thread.
+
+**The resize one is diagnosable from its output.** The test fires three
+`resize_terminal` calls and asserts three timers were armed; it got two.
+`armed` is `[Timer(30), Timer(30)]`, so the handler ran correctly for every
+message it received -- textual simply delivered two `Resize` messages for
+three calls. **The assumption is one message per call**, and the pump is
+free to coalesce when the app is behind, which is exactly what a loaded box
+produces. The docstring is already careful about the thing it refused to do
+("asserted on the MECHANISM rather than by waiting a debounce out ... under
+eleven xdist workers the margin is whatever the box is doing, which is a
+scheduling lottery rather than a test"); what it did not question is the
+count. **Shape:** assert on the INVARIANT rather than the arity -- every
+armed timer but the last was stopped, and `_reflow_timer` is the last one --
+which is what the other two assertions already say and what holds for any
+number of delivered resizes above one.
+
+**The secrets one is NOT diagnosable**, and that is stated rather than
+dressed up:
+
+```
+    for mutate in (lambda e: e.update(n=1 << 14), ...):
+        locked_store.write_text(json.dumps(edited), encoding="utf-8")
+>       with pytest.raises(secrets.WrongPassphrase):
+E       Failed: DID NOT RAISE WrongPassphrase
+```
+
+It failed on the FIRST of three mutations -- the one editing the KDF cost
+parameter down to `MIN_SCRYPT_N` -- so `unlock(MASTER)` RETURNED on an
+envelope whose `n` no longer matched the one the key was derived under.
+Either `secrets.SCRYPT_N` was already `1 << 14` when `locked_store` created
+the store, which makes that mutation a no-op and the unlock correct, or the
+edited file was not what `unlock` read. Nothing in the output distinguishes
+them.
+
+What was checked and ruled out:
+
+- **Batch 148 did not touch it.** Nothing in that diff reaches
+  `security/secrets.py`, `AGENT_SECRETS_FILE` or `hashlib.scrypt`; the one
+  piece of shared test state it changed is the root logger's LEVEL, which
+  cannot reach key derivation.
+- **The only test that lowers `SCRYPT_N`**
+  (`test_an_existing_store_keeps_its_own_parameters`) is in the SAME class,
+  LATER in the file, and restores it with `monkeypatch` --
+  and `--dist loadscope` keeps a class's tests in collection order, so it
+  cannot have run first.
+- **No other file in `tests/` mentions `SCRYPT_N`** (grepped).
+- **`unlock()` caches no envelope**: it re-reads and re-parses the file on
+  every call, so a stale in-process copy is not available as an explanation.
+
+**Why both are filed rather than fixed.** The resize fix is small and belongs
+with item 85's six in whichever batch next touches those files -- doing it
+here would mean changing a test to chase a failure on a surface this batch
+is not about. The secrets one must not be touched at all yet: changing a test
+to chase a failure it has not shown again is how a real defect gets hidden
+behind a louder fixture, and this entry is the measurement the next
+occurrence gets compared against.
+
 ## Review-marathon arrivals at open issues with no register entry
 
 Two `KNOWN` findings landed on GitHub issues that are not mirrored here. Both

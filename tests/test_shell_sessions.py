@@ -219,6 +219,73 @@ class TestOutputBuffer:
         small.append("short")
         assert small.last(50) == ("short", False)
 
+    def test_no_argument_means_everything_contiguous_that_is_kept(self):
+        """A23 needs the largest string this buffer HAS, before any cut.
+
+        The selection is unchanged: with a dropped middle only the tail
+        comes back, because head + tail would splice two spans that are not
+        adjacent and present the join as continuous output -- which would
+        hand the redactor a line the program never wrote.
+        """
+        whole = ss.OutputBuffer(head_chars=100, tail_chars=100)
+        whole.append("abcdefghij")
+        assert whole.last() == ("abcdefghij", False)
+
+        gapped = ss.OutputBuffer(head_chars=3, tail_chars=4)
+        gapped.append("abcdefghij")
+        assert gapped.last() == ("ghij", True)
+
+    def test_and_everything_means_past_one_read(self, monkeypatch):
+        """The discriminating input, and the mutation pass is what asked
+        for it: with a 10-character buffer and MAX_READ_CHARS at 50,000,
+        `kept[-50_000:]` IS `kept`, so a `last()` that quietly applied the
+        one-read bound passed the test above. A23 needs the bound NOT
+        applied -- the redactor has to see more than one read's worth, or
+        the producer's own cut is the boundary again."""
+        monkeypatch.setattr(config, "MAX_READ_CHARS", 4)
+        buffer = ss.OutputBuffer(head_chars=100, tail_chars=100)
+        buffer.append("abcdefghij")
+
+        assert buffer.last() == ("abcdefghij", False)
+        assert buffer.last(4) == ("ghij", True)
+
+    def test_a_redactor_sees_the_parts_before_a_page_is_cut_from_them(self):
+        """`clean` is applied to the parts, so the seam between the head and
+        the tail is not a cut either. Without the join, every session has a
+        boundary at head_chars that falls inside the first page of a read.
+        """
+        buffer = ss.OutputBuffer(head_chars=5, tail_chars=100)
+        buffer.append('x = "abcdefghij"')
+        seen = []
+
+        def _spy(text):
+            seen.append(text)
+            return text
+
+        page = buffer.page(0, 100, clean=_spy)
+
+        assert seen == ['x = "abcdefghij"'], seen
+        assert page["text"] == 'x = "abcdefghij"', (
+            "the head/tail seam still cut the page")
+
+    def test_the_dropped_middle_is_still_stated_in_a_redacted_page(self):
+        """The gap's size counts what the program wrote and we do not have,
+        so it stays in RAW characters while the offsets around it describe
+        the text the reader is given (RB3)."""
+        def _shorten(text):
+            return text.replace("SECRET", "X")
+
+        buffer = ss.OutputBuffer(head_chars=5, tail_chars=6)
+        buffer.append("HEAD!" + "m" * 50 + "SECRET")
+        shortened = buffer.page(0, 100, clean=_shorten)
+        raw = buffer.page(0, 100)
+
+        assert shortened["gap"] == raw["gap"] == {"from": 5, "to": 55}
+        assert raw["total_chars"] == 61
+        assert shortened["total_chars"] == 56, (
+            "the redacted document's length is not what it says it is")
+        assert buffer.page(55, 100, clean=_shorten)["text"] == "X"
+
 
 class TestLifecycle:
 
@@ -619,3 +686,140 @@ def _wait_batch(manager, owner):
     batch = manager.wait_for_wake(owner, timeout=WAIT)
     assert batch is not None, "no wake arrived"
     return batch
+
+
+class TestASessionsOutputIsRedactedBeforeItIsCut:
+    """ROADMAP_v3 §65 A23 / S11-05, at the two sites that need a live
+    session. The invariant, the four vacuity rules and the other two sites
+    are in tests/test_redact_before_cut.py.
+
+    MEASURED BEFORE IT WAS FIXED, through the real redactor at every
+    interior cut position: the producer's cut leaks the three credential
+    SHAPES -- where the pattern matches a field-name-plus-value construct
+    and only the value is the secret -- and the paging route leaks ALL SEVEN
+    shapes this deployment knows, including the fixed-length vendor tokens
+    that survive every other cut, because the model asks for the second page
+    itself and holds both halves.
+    """
+
+    SECRET = 'password = "hunter2hunter2"'
+    NEEDLE = "hunter2hunter2"
+    #: 48 characters, so a whole number of them lands on a page boundary.
+    FILLER = "[info] starting a worker and waiting for it....\n"
+    #: Characters of the secret on the side the reader does not get. 11
+    #: leaves the VALUE whole and drops the key name the pattern anchors
+    #: on, which is the shape the sweep found leaking.
+    CUT_AT = 11
+
+    def _straddling(self, boundary):
+        """Output whose last `boundary` characters begin CUT_AT characters
+        into the secret. Whole LINES of filler, and the secret starts one:
+        two of the three shapes anchor on a word boundary, so filler welded
+        onto the secret would not match even unsplit (the trap
+        test_redact_before_cut.py names third)."""
+        inside = len(self.SECRET) - self.CUT_AT
+        trail = (self.FILLER * 20)[:max(0, boundary - inside - 1)]
+        text = self.FILLER * 10 + self.SECRET + "\n" + trail
+        assert text[-boundary:].startswith(self.SECRET[self.CUT_AT:])
+        return text
+
+    def test_the_tail_a_wake_reads_has_no_split_credential(
+            self, manager, session_starter, monkeypatch):
+        """The producer's own cut, `output.last(MAX_READ_CHARS)` in
+        `_finish`. Every consumer used to redact the slice it was handed, so
+        no consumer could put back what this boundary had already split."""
+        monkeypatch.setattr(config, "MAX_READ_CHARS", 200)
+        _start(manager)
+        process = _process(session_starter)
+        process.write(self._straddling(200))
+        process.exit(0)
+
+        event = _wait_batch(manager, "t1")[0]
+
+        assert self.NEEDLE not in event.output_tail, event.output_tail[-80:]
+        assert len(event.output_tail) == 200, (
+            "the budget stopped bounding the tail")
+        assert event.output_truncated, "a cut tail stopped saying it was cut"
+
+    def test_the_control_is_that_this_cut_can_still_be_seen(self):
+        """What the test above would look like if the order were still
+        wrong. Without this, a fixture that stopped straddling the boundary
+        -- a filler length changed, a secret reworded -- would make the test
+        above pass by testing nothing."""
+        from safety.policy_enforcement import redact_output_text
+
+        raw = self._straddling(200)
+
+        assert self.NEEDLE in redact_output_text(raw[-200:]), (
+            "the planted secret does not survive a cut-then-redact, so this "
+            "fixture cannot tell the two orders apart")
+        assert self.NEEDLE not in redact_output_text(raw), (
+            "and it is not recognised whole either, so it is not a secret "
+            "this deployment knows")
+
+    def test_a_killed_sessions_final_report_is_clean_too(
+            self, manager, session_starter, monkeypatch):
+        """`_kill_report` hands `event.output_tail` straight to the model and
+        never passed through the wake's redaction at all -- one of the three
+        consumers the producer-side fix covers at once."""
+        monkeypatch.setattr(config, "MAX_READ_CHARS", 200)
+        _start(manager)
+        process = _process(session_starter)
+        written = self._straddling(200)
+        process.write(written)
+        assert _until(lambda: manager.row("s1").output_chars == len(written))
+
+        report = manager.kill("s1", owner_thread="t1")
+
+        assert "output_tail" in report, report
+        assert self.NEEDLE not in report["output_tail"], report["output_tail"]
+
+    def test_two_adjacent_pages_of_shell_output_cannot_be_rejoined(
+            self, manager, session_starter, monkeypatch):
+        """The model-driven route, and the reason this one is the severe
+        half: the model asks for the next page itself, so both halves of a
+        split pattern are in front of it whatever either page says alone."""
+        monkeypatch.setattr(config, "MAX_READ_CHARS", 200)
+        head = self.FILLER * 8          # 384 characters, a whole line count
+        assert len(head) == 384 and len(head) % 200 != 0
+        assert len(head) < 400 < len(head) + len(self.SECRET), (
+            "the secret does not straddle a page boundary")
+        _start(manager)
+        process = _process(session_starter)
+        process.write(head + self.SECRET + "\n" + self.FILLER * 10)
+        assert _until(lambda: manager.row("s1").output_chars == 892)
+
+        pages, offset = [], 0
+        while True:
+            page = manager.output("s1", "t1", offset=offset)
+            pages.append(page["text"])
+            if not page["more"]:
+                break
+            offset = page["next_offset"]
+
+        assert len(pages) > 1, "one page, so nothing was straddled"
+        assert self.NEEDLE not in "".join(pages), (
+            "the pages rejoin into the credential the cut split")
+
+    def test_the_pages_still_cover_the_output_without_overlapping(
+            self, manager, session_starter, monkeypatch):
+        """THE CONTROL: a route that redacted everything, or returned one
+        page and stopped, would pass the assertion above. Walking
+        `next_offset` must still reconstruct what the program wrote."""
+        monkeypatch.setattr(config, "MAX_READ_CHARS", 50)
+        written = "".join("line %02d\n" % i for i in range(20))
+        _start(manager)
+        process = _process(session_starter)
+        process.write(written)
+        assert _until(lambda: manager.row("s1").output_chars == len(written))
+
+        pages, offset = [], 0
+        while True:
+            page = manager.output("s1", "t1", offset=offset)
+            pages.append(page["text"])
+            if not page["more"]:
+                break
+            offset = page["next_offset"]
+
+        assert "".join(pages) == written
+        assert len(pages) == 4

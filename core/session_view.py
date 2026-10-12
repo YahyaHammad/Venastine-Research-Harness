@@ -115,13 +115,25 @@ def live_entries(row: SessionRow, tail: str = "",
                  truncated: bool = False) -> list[ViewEntry]:
     """What a session THIS PROCESS holds shows.
 
-    `tail` is its output buffer's tail and `truncated` whether the
-    buffer dropped a middle -- taken as arguments rather than read from
-    the manager here, so this function stays pure and the caller keeps
-    the one lock-taking call it already makes.
+    `tail` is EVERYTHING its output buffer still holds and `truncated`
+    whether the buffer dropped a middle -- taken as arguments rather than
+    read from the manager here, so this function stays pure and the caller
+    keeps the one lock-taking call it already makes.
+
+    THE WHOLE BUFFER, AND THE CUT HAPPENS BELOW (ROADMAP_v3 §65 A23).
+    The caller used to pass `buffer.last(tail_chars())` and this function
+    redacted the slice, so a credential straddling character 50,000 kept the
+    half its pattern could not match on -- the same defect as the wake's,
+    measured at the same offsets. Redacting first and cutting after also
+    means `tail_chars()` counts characters that will be DRAWN, which is what
+    a display budget is for.
     """
     tool = TOOL_FOR_KIND.get(row.kind, "shell_background")
     clean = _clean(tool, row.command, row.rationale, tail)
+    whole = clean["output"]
+    budget = tail_chars()
+    clean["output"] = whole[-budget:] if budget > 0 else ""
+    truncated = truncated or len(clean["output"]) < len(whole)
     state = _STATE_WORDS.get(row.state, row.state)
     where = where_ran(row.ran_on)
     head = f"Session {row.id} ({row.kind}) — {state}{where}"

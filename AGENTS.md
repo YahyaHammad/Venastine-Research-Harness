@@ -55,7 +55,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 6817 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
+pytest                                            # 6925 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -179,7 +179,7 @@ made the move free: no import changed, and `tests/test_docs_consistency.py` is t
 opens any of these files (its `DOCS` constant is where the path now comes from).
 
 - **docs/ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49–§52, §55, §61, §62, §63 and §64 built; §53, §54 and §56–§60 recorded from the owner's requests in batches 122 and 123, specified and not yet designed) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A21 from §32 (A16 in ROADMAP_v3 §62, A17, A18 and A19 in §63, A20 and A21 in §64), W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 SS1–SS72 from §49, NW1–NW5 from §50, PG1–PG9 from §51, RB1–RB7 from §52, IO1–IO7 from §53, AT1–AT8 from §54, TR1–TR15 from §55, JV1–JV10 from §56, SM1–SM4 from §57, PR1–PR5 from §58 UI1–UI4 from §59, UH1–UH12 from §60 and CN1–CN12 from §61). Section and D-numbers are stable and cross-referenced everywhere.
+- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49–§52, §55, §61, §62, §63, §64 and §65 built; §53, §54 and §56–§60 recorded from the owner's requests in batches 122 and 123, specified and not yet designed) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A24 from §32 (A16 in ROADMAP_v3 §62, A17, A18 and A19 in §63, A20 and A21 in §64, A22, A23 and A24 in §65), W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 SS1–SS72 from §49, NW1–NW5 from §50, PG1–PG9 from §51, RB1–RB7 from §52, IO1–IO7 from §53, AT1–AT8 from §54, TR1–TR15 from §55, JV1–JV10 from §56, SM1–SM4 from §57, PR1–PR5 from §58 UI1–UI4 from §59, UH1–UH12 from §60 and CN1–CN12 from §61). Section and D-numbers are stable and cross-referenced everywhere.
 
 **Six namespaces use the same `LETTER+NUMBER` shape, and only the first is the
 record.** An id that resolves to two places is a cross-reference that fails
@@ -1667,8 +1667,20 @@ what makes an early, frequent trigger safe.
   session `/trigger` bound to its `(provider, model)`, and settings.json's
   `trigger_tokens` all outrank it, arriving at `thresholds()` through D27's existing
   per-invocation slot rather than as a fifth tier. `COMPACTION_TRIGGER_TOKENS`
-  survives as the trigger for the one caller with no model in scope,
-  `pin_measurements`, so #89's cap is unchanged.
+  survives as the trigger for a caller with no model in scope, which is
+  `pin_measurements` when nothing passed it a pair.
+  **AND THAT SENTENCE USED TO END "so #89's cap is unchanged", which was true
+  of the cap's VALUE and false of the property it bought** (batch 148,
+  S11-06). #89's cap is a fraction of the trigger, batch 44 moved the trigger
+  off this constant, and the cap kept reading the constant — so it was
+  20,000 for every model: 250% of the trigger that fires on an 8,192-token
+  window, where one pin could protect more than the whole trigger and floor
+  the thread permanently above it, and 8% of it on a 262,144-token one,
+  where `pin` refused what the policy allows. `pin_measurements` now takes an
+  optional `(model, provider_name)` and resolves the trigger the way
+  `thresholds()` does; `tools/builtin/pin.py` declares `parent_run`, which
+  already carried both. The bare read is the FALLBACK, for a call from
+  outside a run (A22).
 - **And there is a THIRD clamp, below the two above: the dependent floor**
   (TECHNICAL_DEBT 42, batch 127). `effective_compaction()` validates the trigger
   against two settings of identical form — `warning_margin_tokens` and
@@ -1795,6 +1807,18 @@ what makes an early, frequent trigger safe.
 - **A research pass compacts only at a hard backstop** (M6), near the real context
   window. Routine compaction in an unattended pass would spend on a judgment call
   nobody is watching.
+  **"Only at a hard backstop" is an ORDERING claim, and until batch 148 the
+  arithmetic broke it** (S11-04): the backstop was a flat 20,000-token margin
+  while batch 44 made the ordinary trigger a clamped share, so the backstop
+  fired EARLIER than the trigger it sits behind at every window below
+  200,000 — 4,000 tokens earlier at 64,000, 11,808 at 32,768, and at or
+  below 20,001 its `max(1, ...)` clamped it to 1, so every evaluation of
+  every step of every pass asked `compact()`. It is now
+  `max(derived_trigger(...) + 1, window - margin)`, which makes the order
+  structural rather than arithmetical. The shipped table is why nothing
+  caught it: every entry is at or above 200,000, where the two numbers were
+  equal or already in the right order, and the way in is a window a provider
+  REPORTS.
 - **`context_limit()` warns once per MODEL, not once per call.** `thresholds()`
   calls it on every evaluation and `_maybe_compact` runs at the top of every step
   of every turn — so an unknown model produced a WARNING twice a step across ten
@@ -2280,13 +2304,26 @@ And slice 1's foundations (batch 94) -- the pieces under the session tools, not 
 - **The manager lives in `core/shell_sessions.py`** (D12) and refuses a start outside `consuming()`
   (SS17): under `never` a research pass is offered shell tools, and would otherwise start a session no
   shell ever reports. **The wake text is built in `core/session_wake.py` through the real
-  `check_output_policy`**, because that text never passes through dispatch.
+  `check_output_policy`**, because that text never passes through dispatch — **and
+  before every cut, which is the other half** (batch 148, A23): a session's output is
+  cut by the producer at `max_read_chars`, by the wake's per-session division, by the
+  view's display budget and by `shell_output`'s paging, and the redactor ran after
+  each of them. A pattern only matches what it can see whole. The producer now
+  redacts what it STORES, which covers the wake, the rebuilt view and
+  `_kill_report` at once, and `OutputBuffer.page` takes an optional `clean` so the
+  model-facing routes page over redacted text while the monitor's own search still
+  matches on raw output. Measured before the fix, at every interior cut position:
+  the three credential shapes leak at each tail cut, and the PAGING route leaks all
+  seven — including the fixed-length vendor tokens — because the model asks for
+  the adjacent page itself and holds both halves.
 - **What a session's VIEW shows lives in `core/session_view.py`** (SS14, SS18, batch 98), for
   `core/replay.py`'s reason: D12 makes the CLI a permanent fallback, so what may be shown is a policy
   decision neither shell owns, and the entries are the same `(role, text)` shape a replay produces.
   Both routes -- the manager's live row and the archive's rebuilt one -- go through the real
   `check_output_policy` under the originating tool's name, which is the adopted default that the
-  session view is redacted for display.
+  session view is redacted for display. `live_entries` takes EVERYTHING the buffer
+  holds and applies `tail_chars()` after the redaction (A23); the rebuilt route draws
+  stored rows, which were redacted when they were written.
 - **`RunAgentLoop.wake_conversation` is a wrapper, not a second `_run`** (`test_grants.py` walks for
   exactly one), and it shares `_conversation_prompt` with `run_agent_conversation`, so a wake turn cannot
   run under a prompt missing the goal, the references or the checklist. It takes the run's

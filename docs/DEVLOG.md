@@ -22466,3 +22466,351 @@ and gitleaks by hand, since six workflows are not on `main` (register item
 88). Affected tests re-run with `AGENT_WORKSPACE` unset, and under WSL for
 the symlink arm of `TestTheWriteResolvesBeforeItWrites`, which takes the
 junction path on Windows.
+
+## Batch 148 -- four guards measured against the wrong thing, and a cut the redactor ran after (2026-10-12)
+
+The compaction-and-sessions surface, all six FIX-NOW findings: **S11-02**
+(the S2), **S11-03**, **S11-04**, **S11-05**, **S11-06** and **S11-08**.
+Three owner rulings, recorded as `docs/ROADMAP_v3.md` §65's A22-A24.
+**The third ruling made the fix SMALLER than the report asked for**, which
+is a first in this marathon, and **S11-05's own deferral is what the batch
+measured and then grew into**: it named two more cut sites, assigned them to
+other scopes, and said one of them would be severity S2 if anyone measured
+it. Nobody had.
+
+**Four of the six are one shape.** A guard computed against a quantity that
+stopped being the quantity it was named for:
+
+| guard | measured against | should be | falsified by |
+|---|---|---|---|
+| the `all-pinned` branch | the configured STRATEGY | the segment it is about | batch 16's strategy flip |
+| the derived trigger's floor | nothing about the window | stated when it exceeds it | batch 127's floor |
+| the pipeline backstop | a fixed 20,000-token margin | the trigger it sits behind | batch 44's derivation |
+| #89's pin cap | the configured trigger | the trigger that FIRES | batch 44's derivation |
+
+Each was correct when written. None was wrong where it was written. That is
+the marathon's shape 9 four times over in one file, and three of the four
+were falsified by batches that changed something else and had no reason to
+look here.
+
+### S11-02: the shipped strategy fell through the branch built for its state
+
+`history_through` excludes pinned rows (§21 AC2), so when every row
+newly swept by the watermark is pinned the segment is empty. The branch that
+names that state read `if not segment and not chaining:` -- and `chaining`
+is true under the shipped `compaction_strategy: chain` whenever a checkpoint
+exists. Driven through the real `compact()` with real storage, three pinned
+turns in a ten-turn thread, and only `_summarize` replaced so no model call
+is made:
+
+```
+previous summary 2489 chars, pinned rows 14 of 20
+watermark at row 10; history_through -> 2 rows, and 0 after the old watermark
+compact() -> status='folded' kind='compaction'
+text: 0 earlier messages compacted into a summary
+_summarize calls: 1
+handed 2532 chars, target 379 (15% of the previous summary)
+EXACTLY the previous summary, with the chain header and no new material? -> True
+live checkpoint summary is now 23 chars (was 2489), strategy='chain'
+```
+
+A success line for a durable 99% loss. The compactor's whole input was its
+own last answer, at the configured strength, and it compounds geometrically
+on every repeat: 15% of 15%.
+
+**The no-progress guard twenty lines above names this exact harm as its own
+reason for existing** -- *"chain would be handed an empty segment and
+summarize its own previous summary, degrading it a little on every attempt.
+Both spend a real call to achieve nothing."* It catches a watermark that has
+not MOVED; it cannot catch one that moved across a region which is entirely
+pinned, because the boundary genuinely advanced. One condition, `if not
+segment:`, and the branch is about the segment again.
+
+The test class has four assertions and two controls, and the controls are
+the half that took the thinking: three of the four also pass against a
+branch that refuses every chained fold, so one test pins the thread shape
+the class depends on -- the watermark advanced AND the new span is empty --
+and another is an ordinary chained fold that must still happen.
+
+### S11-03: a model that can never compact said nothing about it
+
+`_dependent_floor()` is `max(warning_margin_tokens, keep_recent_tokens) + 1`
+= 8,001 under the shipped settings, and it is applied with no reference to
+the window. Below itself it is simply larger than the window, and `used` is
+the provider's own count of what it was sent, so nothing can reach it:
+
+```
+   window  headroom   trigger   warn_at  reachable?
+     4096      1024      8001         1  no  -- trigger is ABOVE the window
+     8000      2000      8001         1  no  -- trigger is ABOVE the window
+     8192      2048      8001         1  yes, 191 tokens of headroom
+    10666      2666      8001         1  yes, 2665 tokens of headroom
+    16384      4096     12288      4288  yes, 4096 tokens of headroom
+    64000     16000     48000     40000  yes, 16000 tokens of headroom
+
+window 4096    every used in 1..4097    -> ['warn']
+window 8192    every used in 1..8193    -> ['compact', 'warn']
+```
+
+The `warn` column is the tell. `warn_at` collapses to 1 for every window at
+or below 10,668, so the one line the user sees -- *"Approaching the
+compaction threshold -- older messages may be summarized soon"* -- fires
+from the first measured turn onward and is false. **TECHNICAL_DEBT 42's own
+fix section rejected exactly this outcome** ("compaction would then silently
+never run on that model, which is the quiet-failure class this project keeps
+closing") for the containment it declined; the floor it chose instead
+produces it directly, from the other side.
+
+The value is not the fix. The floor stays, because the raise it removed was
+worse. What was missing is the line, and **A24 is narrower than the report
+asked for**: the report suggested warning whenever `window - trigger` is
+below one bounded read, and measured that also fires at 16,384 and 32,768 --
+where the headroom CAP bound it, where the cap is deliberate, and where the
+only remedy is a bigger model. A line naming `warning_margin_tokens` and
+`keep_recent_tokens` would be naming the wrong thing, on every stock install
+of a 32k model. So the warning fires only where the FLOOR was the operative
+value, which is at or below a 10,666-token window and nowhere above it, with
+two wordings because the remedy differs. The excluded case is register item
+96 rather than a silence.
+
+### S11-04: the backstop fired EARLIER than the trigger it sits behind
+
+M6 is an ORDERING claim -- a research pass is headless and unattended, so
+routine compaction there spends on a judgment call nobody is watching -- and
+the backstop was a flat 20,000-token margin while batch 44 made the ordinary
+trigger a clamped share:
+
+```
+   window  backstop workingset       fix  shipped order
+     4096         1      8001      8002  INVERTED, backstop 8000 earlier
+    16384         1     12288     12289  INVERTED, backstop 12287 earlier
+    20001         1     15001     15002  INVERTED, backstop 15000 earlier
+    32768     12768     24576     24577  INVERTED, backstop 11808 earlier
+    64000     44000     48000     48001  INVERTED, backstop 4000 earlier
+   131072    111072    115072    115073  INVERTED, backstop 4000 earlier
+   200000    180000    180000    180001  equal
+   262144    242144    235929    242144  correct, backstop 6215 later
+  1000000    980000    900000    980000  correct, backstop 80000 later
+```
+
+At or below 20,001 the old `max(1, ...)` clamped it to **1**, so
+`should_compact` answered `"compact"` for any `used >= 1` and every
+evaluation of every step of every pass asked `compact()`. `/window`'s own
+refusal message describes that state precisely -- *"at or below the backstop
+margin, `compact_at` clamps to its floor of 1 and every evaluation of a
+research pass compacts. That is not a window anyone means to set"* -- and
+guards the command rather than the number a server asserts, which is the
+same asymmetry TECHNICAL_DEBT 42 found for the trigger and closed for the
+trigger alone.
+
+**The shipped table is why nothing caught it.** Every entry is at or above
+200,000, where the two numbers were equal or already in the right order, so
+the inversion is invisible on the roster and universal off it -- and source
+1, what a provider SAID, has no guard at all. The test says that in both
+directions: it sweeps the provider-reported windows, and
+`test_the_shipped_roster_is_unmoved_except_at_the_boundary` asserts the fix
+moves exactly one shipped entry by exactly one token
+(`claude-haiku-4-5`, which sat on the crossover).
+
+`derived_trigger(...) + 1` rather than the fully resolved working-set
+trigger: it cannot raise, which matters on a path whose own posture is that
+a number it cannot compute must never become the reason a thread does not
+compact, and M6 speaks about the derived default rather than about a number
+a human typed.
+
+### S11-06: #89's cap stopped tracking the trigger it is a fraction of
+
+```
+   window   trigger       cap       fix  cap/trigger
+     8192      8001     20000      4000    250%   <-- one pin can hold MORE than the whole trigger
+    16384     12288     20000      6144    163%   <-- one pin can hold MORE than the whole trigger
+    25000     18750     20000      9375    107%   <-- one pin can hold MORE than the whole trigger
+    32768     24576     20000     12288     81%
+   131072    115072     20000     20000     17%
+  1000000    900000     20000     20000      2%
+```
+
+Both directions are wrong, and the top rows are the defect rather than a
+conservatism: once one pin can protect more than the whole trigger, the
+pinned set covers everything foldable, `compact()` answers `all-pinned`, and
+the thread sits permanently above its own trigger -- **the exact state #89
+exists to prevent, reached without anyone typing a number.** The bottom rows
+are a refusal the stated policy allows: 20,000 tokens of a 900,000-token
+trigger is 2%, where the docstring says 50%.
+
+`AGENTS.md` is what made it look settled: *"`COMPACTION_TRIGGER_TOKENS`
+survives as the trigger for the one caller with no model in scope,
+`pin_measurements`, so #89's cap is unchanged."* The cap's VALUE was
+unchanged. The property it bought was not, because the denominator stopped
+being the trigger.
+
+And the stated obstacle was one declared parameter away. `parent_run` is
+already in `registry._INJECTABLE_PARAMS` and already carries `model` and
+`provider_name`, so `pin_measurements` takes an optional pair and resolves
+the trigger the way `thresholds()` does. **One behaviour changes direction**
+and is tested as such: with the pair, a RAISED session `/trigger` now raises
+the cap, because a raised override IS the trigger that fires. The old
+`min()` erred strict for a good reason -- `trigger_any()` answers with
+whatever was set for ANY pair, so it could not tell whether the number
+applied to the model in front of it -- and that read is now the fallback for
+a call from outside a run.
+
+### S11-05: four cuts, and the redactor ran after every one
+
+RB1 settled this ordering one section earlier, for `fetch_url`:
+*"redacts the whole body BEFORE it is cut or held ... so the redactor sees
+the document exactly once while it is still one string."* §52's gap
+register declined to generalise it and named the tool it would happen to --
+*"a future tool that returns a long body and slices it would have to make
+the same choice, and nothing mechanical forces it to"* -- and §49 had
+already shipped that tool before the sentence was written.
+
+Swept through the real redactor at every interior cut position, over the ten
+patterns this deployment knows:
+
+```
+site                                         shapes that leak
+wake, per-session budget (25,000 chars)           3 of 7
+TUI view, pre-cut tail                            3 of 7
+_finish, output.last(MAX_READ_CHARS)              3 of 7
+shell_output, two adjacent pages joined           7 of 7   <-- model-driven
+```
+
+The three are the credential SHAPES, where the pattern matches a
+field-name-plus-value construct and only the value is the secret, so the
+value survives whole inside the kept half. The seven are the finding under
+the finding.
+
+**The paging route is the severe one, and S11-05 said so without being able
+to show it:** *"It would be severity S2 if the same ordering were shown to
+be reachable on the paging route, where the model can ask for adjacent pages
+-- that is S01's measurement to make."* S01 never made it. Measured here,
+`ghp_` leaks at every interior offset, `AKIA` at every one, `AIza` at 3..40:
+a page boundary is not a discard, so nothing is thrown away, the split is
+handed to the reader in two pieces, and the reader can ask for the next
+page.
+
+So the owner ruled the scope to all four sites, and the fix went to the
+PRODUCER for the three that read a tail -- `_finish` redacts what it stores,
+which covers the wake, the rebuilt view and `_kill_report`, a consumer that
+never passed through the wake's redaction at all. `OutputBuffer.page` takes
+an optional `clean` and applies it to the PARTS, so the head/tail seam is
+not a cut either: that seam sits at 10,000 characters on every session,
+inside the first page of every read. The monitor's own search still matches
+on raw output, which is the rule `core/session_wake.py`'s header already
+stated.
+
+Two things fall out. The budget now counts characters the model will
+actually see (RB3), which is what a budget was for. And the wake's cut
+indicator is computed on the redacted side, which fixes a false sentence for
+free: `len(event.output_tail) > len(clean["output_tail"])` was true whenever
+redaction merely SHORTENED the text -- 30 characters for one `ghp_` token --
+so the wake said "earlier output omitted" with nothing omitted at all.
+
+**What A23 cannot close is register item 95**, and it is the honest limit of
+the whole shape: the buffer discards its middle as it arrives, so half of a
+credential that straddled that point was never kept by this process and no
+pass above it can rejoin the pattern -- while both halves ARE shown, on
+either side of a stated gap, to a reader who can ask for both. A stream has
+no whole document to redact exactly once; what a layer can do is redact the
+largest string it holds before making its own cut.
+
+**And the batch's first probe fell into the trap the test file warns about.**
+`tests/test_redact_before_cut.py`'s docstring lists "planting the secret
+somewhere comfortable" third among the ways a test of this defect goes
+vacuous, and `_straddling`'s own docstring says the filler must be prose
+because two of the three credential shapes anchor on a word boundary. Probe
+B padded with a run of `x`, so `xxxxpassword = "..."` never matched even
+UNSPLIT -- and the sweep reported clean rows for a secret the redactor had
+never seen. The report's own table shares the flaw, which is why its numbers
+and probe B's agree exactly. Probe C added the control that discriminates:
+the secret embedded in the padding, nothing cut, must be redacted, and a row
+is evidence about the CUT only if its own control is clean.
+
+### S11-08: a citation that resolved to the opposite of its claim
+
+`core/session.py`'s *MODULE STATE* paragraph claimed the "same posture as
+`core/compaction.py`'s `_compacting` flag", and batch 75 replaced that flag
+with `threading.local()` -- deliberately NOT aliased, under a comment
+arguing against the sentence that sends a reader there: *"`if _compacting:`
+against a callable is always true, so a reader left holding the old name has
+to fail at import instead of quietly disabling every compaction in the
+process."* The behaviour was sound. The paragraph now says what this module
+actually relies on -- the pair binding, not serialisation -- and cites the
+thread-local for the DIFFERENCE: compaction's state is a re-entrancy flag,
+where a second reader must see what the first did, and these are per-pair
+bindings, where it must not.
+
+### The finding the fix pass turned up, in the suite rather than in the code
+
+The first full-suite run came back with **one failure nobody had reported**:
+`test_tui.py::TestTheStrippedSequencesAreRecordedOnce::test_the_count_does_not_carry_into_the_next_turn`.
+It passed alone, passed with its whole file under `-n auto` (468 passed),
+and **reproduces in 3.5 seconds** with `tests/test_logging_setup.py` plus
+that one class under `-n0`. So it is an ordinary order dependency, not
+register item 85's unreproduced worker-thread race.
+
+`configure_logging()` calls `root.setLevel(resolved_level)` -- INFO by
+default -- and `test_logging_setup.py`'s `_clean_root` restores the HANDLERS
+and not the LEVEL, under a docstring that states the rule it stops one word
+short of: *"Handlers are global state. Leaving one attached leaks into every
+later test in the session."* So does the level, and the root level is what
+decides whether an INFO record reaches pytest's capturing handler at all --
+so the leak lands on every later assertion of the form "nothing was logged".
+They pass or fail on which file ran first in that process.
+
+It surfaced now because this batch added 105 tests and changed the xdist
+distribution. The fix is an autouse fixture in `tests/conftest.py` -- there
+rather than in that one file, because five test files call
+`configure_logging` and the leak belongs to the call -- and the guard is an
+ORDERED PAIR in `test_logging_setup.py`, `test_probe_isolation.py`'s shape
+for its reason: the property is what one test leaves for the NEXT, so a
+single test cannot assert it. Recorded in `review/TRIAGE.md` as a second
+finding the fix pass discovered, with a note that it belongs to the S19
+surface by subject and is not one of its six findings.
+
+### Verification
+
+Full suite **6925** -- 6,876 passed and 49 skipped -- and the run count is
+worth stating rather than rounding. FIVE runs: three finished in 85-100
+seconds and were green, and two were slowed by other work on the same box
+(792s with WSL, bandit and pip-audit competing; 366s with a previous run's
+workers still exiting). Each of the slow ones produced exactly one failure,
+in a different file, in a test that passes alone --
+`test_secrets.py`'s envelope test and `test_live_output.py`'s resize-drag
+test. Both are register item 97 now, under the condition item 85 already
+measured: `pilot.pause()` costs 21ms idle and 1021ms with one busy sibling
+thread, *"a 46x swing"*, and those runs were 7.9x and 3.7x slower than the
+documented 100 seconds. The resize one is diagnosable -- it asserts one
+`Resize` message per `resize_terminal` call and the pump may coalesce them,
+which the entry names a shape for. The secrets one is not, and the entry
+says so instead of guessing.
+
+`ruff check .` clean, both bandit checks clean, gitleaks clean, and
+`pip-audit` clean **with `-r`, which is how CI runs it**: run bare it audits
+the whole environment and reported 109 advisories against jupyterlab, nltk
+and mistune, none of which this project depends on. The workflow's own
+comment says so ("`-r <file>`, never bare `pip-audit`: the files ARE the
+dependency list"), and the correction belongs here because the wrong form is
+the one that looks thorough. Affected tests re-run with
+`env -u AGENT_WORKSPACE`, and under WSL -- which matters on this surface
+because `OutputBuffer` is fed by a pty reader thread there and the session
+tests drive a real one.
+
+**Controls 24 of 24 KILLED**, with the G equivalence control correct
+("reword a comment in the branch under test -> EQUIVALENT"). Two of them
+SURVIVED the first pass, and both were tests of mine that could not
+discriminate -- the third consecutive batch in which the pass found the gap
+in the tests rather than in the code:
+
+- **D4** removes the pair from `pin.run`'s cap measurement and the test
+  stayed green, because a successful pin measures TWICE -- once for the cap
+  it checks and once for the share its result sentence states -- and the
+  test asserted on whichever call was last. Now it records every call and
+  asserts both carried the pair, which is also the truer claim: a refusal
+  and a result naming different caps would be worse than either.
+- **E8** makes `OutputBuffer.last()` apply the one-read bound it is supposed
+  to ignore, and the test could not see it: the buffer held 10 characters
+  and `MAX_READ_CHARS` is 50,000, so `kept[-50_000:]` IS `kept`. The
+  discriminating input is a buffer LARGER than the bound, which is the
+  vacuity shape "an input that cannot discriminate" in its plainest form.

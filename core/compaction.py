@@ -120,6 +120,17 @@ def estimated_tokens(messages) -> int:
 # about the second one.
 _context_window_warned: set = set()
 
+# The same once-per-model discipline for a DIFFERENT warning: a window so
+# small that the dependent floor leaves the trigger no usable headroom
+# (ROADMAP_v3 §65 A24). A separate set rather than a shared one, keyed on
+# the PAIR, because the two warnings answer different questions: the one
+# above is about a model missing from a table, which has no provider
+# dimension, while this one is about the number a provider REPORTED -- and
+# the same model name behind a gateway and behind its own vendor can report
+# different windows, so the pair is the thing that was warned about. Sharing
+# one set would also mean whichever fired first silenced the other.
+_floor_warned: set = set()
+
 
 # A trailing release date, as Anthropic and Google spell it.
 _DATE_SUFFIX = re.compile(r"-\d{8}$")
@@ -367,6 +378,75 @@ def _dependent_floor() -> int:
     return max(margin, keep_recent) + 1
 
 
+def _warn_if_the_floor_left_no_room(model: str, provider_name: Optional[str],
+                                    window: int, share: int, floor: int,
+                                    trigger: int) -> None:
+    """Say ONCE, per (provider, model), that the floor is now the ceiling.
+
+    TECHNICAL_DEBT 42 raised a floor under the derived trigger so that a
+    small window could not make effective_compaction() raise on every
+    turn. The floor is read from the same settings the validator reads, and
+    it is applied WITH NO REFERENCE TO THE WINDOW -- so under the shipped
+    8,000/4,000 margins it is 8,001 whatever the model holds, and at or
+    below 8,000 the trigger it produces is ABOVE the window. `used` is the
+    provider's own count of what it was sent, so it can never reach a
+    trigger above the window: compaction never fires, silently, and the
+    only line the user sees is the warn branch's "approaching the
+    compaction threshold", which collapses to warn_at == 1 down here and is
+    therefore both constant and false.
+
+    That is precisely the outcome item 42's own fix section rejected --
+    "compaction would then silently never run on that model, which is the
+    quiet-failure class this project keeps closing" -- arrived at from the
+    other side. The floor stays, because the raise it removed was worse;
+    what was missing is this line.
+
+    FIRES ONLY WHERE THE FLOOR IS THE OPERATIVE VALUE, which is A24's
+    ruling and is measured rather than guessed: the floor binds at or below
+    a 10,666-token window and nowhere above it, because headroom's cap
+    holds the share-derived trigger at 0.75*window down there. A window of
+    16,384 or 32,768 also leaves less headroom than one bounded read
+    (12,500 proxy tokens), but the CAP is what bound it, the cap is
+    deliberate (see headroom_for), and the only remedy there is a bigger
+    model -- so a warning naming two settings would name the wrong thing.
+    That case is TECHNICAL_DEBT 96, recorded rather than announced.
+
+    Two wordings for one condition, because the remedy differs: at or above
+    the window the trigger cannot be reached at all, and just below it the
+    thread folds but the next step has almost nothing to grow into.
+    """
+    if floor < share:
+        return
+    one_read = int(config.MAX_READ_CHARS) // CHARS_PER_TOKEN
+    if window - trigger >= one_read:
+        return
+    key = (provider_name or "", model)
+    if key in _floor_warned:
+        return
+    _floor_warned.add(key)
+    where = f" on {provider_name}" if provider_name else ""
+    settings = (f"compaction.warning_margin_tokens "
+                f"({config.COMPACTION_WARNING_MARGIN_TOKENS}) and "
+                f"compaction.keep_recent_tokens "
+                f"({config.COMPACTION_KEEP_RECENT_TOKENS})")
+    if trigger >= window:
+        logger.warning(
+            "Compaction can NEVER fire for %r%s: its context window is %s "
+            "tokens and the smallest trigger the settings allow is %s, which "
+            "is above it. The thread will grow until the provider refuses "
+            "the request. The floor is one token above the larger of %s -- "
+            "lowering them lowers it.", model, where, window, trigger,
+            settings)
+        return
+    logger.warning(
+        "Compaction for %r%s can only fire with %s tokens of headroom left "
+        "(window %s, trigger %s, held up by the floor rather than derived "
+        "from the window): one bounded tool read is about %s proxy tokens, "
+        "so the step after a fold can still overflow. The floor is one token "
+        "above the larger of %s -- lowering them lowers it.",
+        model, where, window - trigger, window, trigger, one_read, settings)
+
+
 def derived_trigger(model: str, provider_name: Optional[str] = None) -> int:
     """The working-set trigger for this model: its window less headroom.
 
@@ -407,9 +487,23 @@ def derived_trigger(model: str, provider_name: Optional[str] = None) -> int:
     silently stops deriving is the drift class this record is full of; the
     alternative was distrusting the provider's own number, which is a
     larger claim for a smaller gain.
+
+    AND AT OR BELOW 8,000 IT STOPS BEING A TRIGGER, which is the step the
+    paragraph above did not take (batch 148). The floor is applied
+    with no reference to the window, so below itself it is simply larger
+    than the window and nothing can reach it. Measured: a 4,096-token
+    window derives 8,001 and should_compact() answers "warn" at every value
+    from 1 to 4,097 and "compact" at none of them. The value is unchanged --
+    _warn_if_the_floor_left_no_room above is the whole fix, because what was
+    missing was never a number.
     """
     window = context_limit(model, provider_name)
-    return max(1, window - headroom_for(window), _dependent_floor())
+    share = window - headroom_for(window)
+    floor = _dependent_floor()
+    trigger = max(1, share, floor)
+    _warn_if_the_floor_left_no_room(model, provider_name, window, share,
+                                    floor, trigger)
+    return trigger
 
 
 def _trigger_is_configured() -> bool:
@@ -440,7 +534,10 @@ def thresholds(model: str, mode: str = "working_set",
     unattended and each one already returns a distillation, so routine
     compaction there would spend on a judgment call nobody is watching.
     Since batch 44 both are derived from context_limit(); what still
-    separates them is how much room each leaves.
+    separates them is how much room each leaves -- AND SINCE BATCH 148 the
+    backstop is ordered against the trigger rather than merely given a
+    bigger number, because "how much room each leaves" was answering the
+    question backwards below 200,000 (batch 148).
 
     FOUR SOURCES FOR THE WORKING-SET TRIGGER, nearest first: an explicit
     `overrides` (a `/compact --strength N`), a session `/trigger` bound to
@@ -463,8 +560,32 @@ def thresholds(model: str, mode: str = "working_set",
         overrides = {"trigger_tokens": trigger, **(overrides or {})}
     settings = config_loader.effective_compaction(overrides)
     if mode == "backstop":
+        # ABOVE THE WORKING-SET TRIGGER, STRUCTURALLY (batch 148).
+        # "A last resort" is a statement about ORDER, and this was a flat
+        # 20,000-token margin while batch 44 made the ordinary trigger a
+        # clamped share -- so the backstop left MORE room than the trigger,
+        # that is fired EARLIER, at every window below 200,000. Measured:
+        # 4,000 tokens earlier at 64,000 and at 131,072, 11,808 earlier at
+        # 32,768, and at or below 20,001 the old max(1, ...) clamped it to 1,
+        # so every evaluation of every step of every pass asked compact().
+        # M6's argument -- a pass is headless and unattended, so routine
+        # compaction there spends on a judgment call nobody is watching --
+        # was inverted for most of the roster.
+        #
+        # THE SHIPPED TABLE IS WHY NOTHING CAUGHT IT: every entry is at or
+        # above 200,000, where the two numbers were equal or already in the
+        # right order. The inversion is invisible on the table and universal
+        # off it, and source 1 -- what a provider SAID -- is the way in.
+        #
+        # derived_trigger rather than the fully resolved working-set value:
+        # it cannot raise (see its floor), and M6 speaks about the derived
+        # default rather than about a number a human typed. A configured
+        # trigger high enough to still invert this is one that is itself
+        # near or above the window, and a reachable backstop under an
+        # unreachable trigger is the right way round.
         compact_at = max(
-            1, context_limit(model, provider_name)
+            derived_trigger(model, provider_name) + 1,
+            context_limit(model, provider_name)
             - config.COMPACTION_PIPELINE_BACKSTOP_TOKENS)
         return compact_at, compact_at
     compact_at = settings["trigger_tokens"]
@@ -824,35 +945,71 @@ def _as_text(messages) -> str:
     return "\n\n".join(lines)
 
 
-def pin_measurements(thread_id, last_n: int) -> dict:
+def pin_measurements(thread_id, last_n: int, model: Optional[str] = None,
+                     provider_name: Optional[str] = None) -> dict:
     """What #89's cap is measured against, in M10's character proxy.
 
     Returns three numbers:
       requested_tokens  what the last `last_n` turns' ARCHIVE rows cost --
                         the span one more `pin(last_n)` would protect
       pinned_tokens     everything ALREADY pinned on this thread
-      max_tokens        PIN_MAX_TRIGGER_FRACTION x the resolved trigger
+      max_tokens        PIN_MAX_TRIGGER_FRACTION x the trigger that FIRES
 
     Reads the ARCHIVE (the same rows compactable_span walks), so a pinned
     prefix is counted at full weight exactly as the derived view will
     carry it. Never compared against a provider count (M10).
+
+    THE PAIR IS OPTIONAL AND THE ANSWER DEPENDS ON IT (batch 148).
+    #89's cap is a fraction OF THE TRIGGER, and since batch 44 the trigger
+    that decides when a thread folds is derived per model -- so reading the
+    configured number alone made the cap 20,000 for every model and both
+    directions wrong. Measured against the trigger that actually fires:
+    250% of it on an 8,192-token window, where one pin could protect more
+    than the whole trigger and floor the thread permanently above it, which
+    is the state #89 exists to prevent; and 8% of it on a 262,144-token
+    window, where `pin` refuses requests the stated policy allows. The
+    value was unchanged by batch 44 and the PROPERTY was not, which is the
+    marathon's shape 9, and AGENTS.md's "so #89's cap is unchanged" is the
+    sentence that made it look settled.
+
+    The stated obstacle was real and is gone: this function had no
+    (provider, model) to match a session override against, and
+    `tools/builtin/pin.py` receives `parent_run` -- already in
+    registry._INJECTABLE_PARAMS, already carrying both -- one declared
+    parameter away. With the pair the trigger is resolved exactly as
+    thresholds() resolves it, so a session `/trigger`, a configured one and
+    the derivation all reach the cap through the chain that already exists.
+    Without it the binding-free read below is the fallback, so nothing that
+    calls this from outside a run moves.
     """
     from core import config_loader
     from storage import _ordered_rows
 
     settings = config_loader.effective_compaction()
     # THE MINIMUM, and the min() is load-bearing rather than defensive.
-    # This function has no (provider, model) to match a session override
-    # against, so it reads the binding-free one -- and takes whichever
-    # trigger is SMALLER, which is safe under every binding. A raised
-    # session trigger leaves the cap stricter than it needs to be; a
-    # lowered one pulls the cap down with it. Reading the configured
-    # trigger alone would let `/trigger 12k` leave this cap at 20k, so a
-    # pin could protect more than the whole trigger and floor the thread
-    # permanently above it -- which is the exact defect #89 exists to
-    # prevent, reintroduced through a number typed in a different command.
+    # With no (provider, model) to match a session override against, this
+    # reads the binding-free one -- and takes whichever trigger is SMALLER,
+    # which is safe under every binding. A raised session trigger leaves
+    # the cap stricter than it needs to be; a lowered one pulls the cap
+    # down with it. Reading the configured trigger alone would let
+    # `/trigger 12k` leave this cap at 20k, so a pin could protect more
+    # than the whole trigger and floor the thread permanently above it --
+    # which is the exact defect #89 exists to prevent, reintroduced
+    # through a number typed in a different command.
     trigger = min(settings["trigger_tokens"],
                   session.trigger_any() or settings["trigger_tokens"])
+    if model:
+        try:
+            trigger = thresholds(model, provider_name=provider_name)[1]
+        except Exception:  # noqa: BLE001 -- see below
+            # _dependent_floor's posture, for the same reason: a cap that
+            # cannot be computed must never become the reason a pin fails.
+            # effective_compaction raises on an incoherent settings.json,
+            # and the binding-free read above is still a cap.
+            logger.debug(
+                "Could not resolve the compaction trigger for %r on %r; "
+                "measuring the pin cap against the configured trigger.",
+                model, provider_name)
     max_tokens = int(config.PIN_MAX_TRIGGER_FRACTION * trigger)
 
     rows = _ordered_rows(thread_id)
@@ -1067,13 +1224,44 @@ def compact(memory, model: str, provider_name: str,
         return seg, text
 
     segment, segment_text = _build(chaining)
-    if not segment and not chaining:
+    if not segment:
         # Everything newly foldable is pinned (#89). This used to be the
         # one silent no-progress path -- indistinguishable, at every
         # level, from "nothing needed doing" -- while the state it reports
         # is exactly what compaction_blocked's text describes, reached by
         # another door. Named now, and worded so the reader knows the way
         # out.
+        #
+        # ON THE SEGMENT, NOT ON THE STRATEGY (batch 148). This
+        # read `if not segment and not chaining:` from the day it was
+        # written, and `chaining` is true under the SHIPPED
+        # `compaction_strategy: chain` whenever a checkpoint exists -- so
+        # the default strategy fell straight through the branch built for
+        # this state. What it fell into is the harm the no-progress guard
+        # twenty lines above names as its own reason: "chain would be
+        # handed an empty segment and summarize its own previous summary,
+        # degrading it a little on every attempt". That guard catches a
+        # watermark that has not MOVED; it cannot catch a watermark that
+        # moved across a region which is entirely pinned, because the
+        # boundary genuinely advanced. This branch is the guard for that
+        # case and the strategy test removed the default from its cover.
+        #
+        # Measured through the real compact() with three pinned turns in a
+        # ten-turn thread: the compactor was handed exactly
+        # "Summary of everything before this point:\n<previous summary>\n\n"
+        # and nothing else, at a 379-character target, and the stored
+        # checkpoint went from 2,489 characters to 23 -- reported as
+        # status="folded", kind="compaction", "0 earlier messages compacted
+        # into a summary". A success line for a durable 99% loss, and it
+        # compounds geometrically on every repeat.
+        #
+        # EMPTY MEANS PINNED, exactly: history_through excludes pinned rows
+        # (§21 AC2) and excludes nothing else, so an empty segment on a
+        # watermark that advanced is this state and no other. The message
+        # is therefore as true under chain as under rederive, and an
+        # explicit /compact is refused here for the same reason the
+        # no-progress guard refuses one -- degrading a summary is not a
+        # tighter compaction of it.
         return {
             "status": "all-pinned",
             "kind": "compaction_blocked",

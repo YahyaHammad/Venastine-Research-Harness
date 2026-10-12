@@ -43,6 +43,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
+- **§65. Four guards measured against the wrong thing, and a cut the redactor ran after** — **(BUILT in batch 148)** (the shipped compaction strategy fell through the branch built for the state it reached, a floor applied with no reference to the window left models that can never compact saying nothing, the pipeline backstop fired EARLIER than the trigger it sits behind at every window below 200,000, #89's pin cap stopped tracking the trigger it is a fraction of, and a session's output was cut in four places with the redactor running after every one)
 - **§64. Two numbers a provider promised and one key that meant two things** — **(BUILT in batch 147)** (an unknown tool name ended the turn and left the thread unresumable, a token count that was present and not a number defeated the guard that exists to catch exactly that, and Ctrl+C during a background session's wake turn unwound a model turn from wherever it landed)
 - **§63. The write that did not land where the consent said** — **(BUILT in batch 146)** (a document NAME that is a link wrote outside the project under a consent naming the inside path, every write path translated line endings so the bytes that landed were not the bytes approved, and the one hard deny compared a path segment with exact case)
 - **§61. Stopping a turn that is already running** — **(BUILT in batch 124)** (a turn going the wrong way is watched to its end or the harness is killed: nothing anywhere stops one, and both keys that look like they would end the process instead) (there is no way to drive this harness except by sitting in front of it, and the open standard that would change that has no concept of the approval gate this project is built around)
@@ -1991,3 +1992,187 @@ arriving at the CLI.
   raised it again as an open question. The answer stands: the fake accepts
   anything and the conformance file is the only place that may assert about
   a pinned type's shape.
+
+## §65. Four guards measured against the wrong thing, and a cut the redactor ran after
+
+**Built in batch 148**, from the review marathon's compaction-and-sessions
+surface: six `FIX-NOW` findings across `core/compaction.py`,
+`core/session_wake.py`, `core/session_view.py` and `core/session.py` -- plus
+two files the report assigned to other scopes, because the measurement said
+the severe half of one defect was there and no other scope had measured it.
+
+Three of the answers are DECISIONS rather than fixes and the owner ruled all
+three. The third ruling NARROWED what the report suggested, which is the
+first time in this marathon a ruling has made a fix smaller.
+
+**Four of the six are one shape.** A guard computed against a quantity that
+stopped being the quantity it was named for:
+
+| guard | measured against | should be |
+|---|---|---|
+| the `all-pinned` branch | the configured STRATEGY | the segment it is about |
+| the derived trigger's floor | nothing about the window | stated when it exceeds it |
+| the pipeline backstop | a fixed 20,000-token margin | the trigger it sits behind |
+| #89's pin cap | the configured trigger | the trigger that FIRES |
+
+Each was correct when written. Each stopped being correct somewhere else:
+batch 16 flipped the default strategy to `chain`, batch 127 raised the
+floor, and batch 44 moved the trigger off the constant three of them still
+read. That is the marathon's shape 9 four times over, in one file.
+
+### What the code did before this
+
+- **The shipped compaction strategy fell through the branch built for the
+  state it reached.** `history_through` excludes pinned rows (AC2), so when
+  every row newly swept by the watermark is pinned the segment is empty --
+  and the `all-pinned` branch tested `if not segment and not chaining:`,
+  while `chaining` is true under `compaction_strategy: chain` whenever a
+  checkpoint exists. Measured through the real `compact()` with three pinned
+  turns in a ten-turn thread: the compactor was handed
+  `"Summary of everything before this point:\n<previous summary>\n\n"` and
+  nothing else, at a 379-character target, and the stored checkpoint went
+  from **2,489 characters to 23**. Reported as `status="folded"`,
+  `kind="compaction"`, *"0 earlier messages compacted into a summary"* -- a
+  success line for a durable 99% loss that compounds geometrically on every
+  repeat. The no-progress guard twenty lines above names this exact harm as
+  its own reason for existing ("chain would be handed an empty segment and
+  summarize its own previous summary, degrading it a little on every
+  attempt"); it catches a watermark that has not MOVED and cannot catch one
+  that moved across a region which is entirely pinned.
+- **A model that can never compact said nothing about it.**
+  `_dependent_floor()` is `max(warning_margin_tokens, keep_recent_tokens) +
+  1` = 8,001 under the shipped settings, and it is applied with no reference
+  to the window. At or below 8,000 the trigger it produces is ABOVE the
+  window, and `used` is the provider's own count of what it was sent, so it
+  can never reach it. Measured on a 4,096-token window: `should_compact`
+  answers `"warn"` at every value from 1 to 4,097 and `"compact"` at none of
+  them, because `warn_at` collapses to 1 down there -- so the single line
+  the user sees is *"Approaching the compaction threshold"*, from the first
+  measured turn, forever, and false. TECHNICAL_DEBT 42's own fix section
+  rejected exactly this outcome ("compaction would then silently never run
+  on that model, which is the quiet-failure class this project keeps
+  closing") for the containment it declined; the floor it chose instead
+  produces it directly. `/window` refuses anything at or below 20,000 and
+  the shipped table's smallest entry is 200,000, so the way in is source 1:
+  what a provider SAID, which has no floor at all, and 8,192 is the
+  commonest window a self-hosted or gateway endpoint reports.
+- **The backstop fired EARLIER than the trigger it sits behind.** M6 is
+  about ORDER -- a research pass is headless and unattended and each pass
+  already returns a distillation, so routine compaction there spends on a
+  judgment call nobody is watching -- and the backstop was a flat
+  20,000-token margin while batch 44 made the ordinary trigger a clamped
+  share. Measured: 4,000 tokens earlier at 64,000 and at 131,072, 11,808
+  earlier at 32,768, and at or below 20,001 the old `max(1, ...)` clamped it
+  to **1**, so every evaluation of every step of every pass asked
+  `compact()`. The shipped table is why nothing caught it: every entry is at
+  or above 200,000, where the two numbers were equal or already in the right
+  order. `/window`'s own refusal message describes the clamped state
+  precisely ("not a window anyone means to set") and guards the command
+  rather than the number a server asserts -- the same asymmetry
+  TECHNICAL_DEBT 42 found for the trigger and closed for the trigger alone.
+- **#89's pin cap was 20,000 for every model.** `pin_measurements` computed
+  `PIN_MAX_TRIGGER_FRACTION` times the CONFIGURED trigger, and since batch
+  44 the trigger that decides when a thread folds is derived per model.
+  Measured against the trigger that fires: **250%** of it on an 8,192-token
+  window, where one pin can protect more than the whole trigger and floor
+  the thread permanently above it -- the exact state #89 exists to prevent,
+  reached without anyone typing a number -- and **8%** on a 262,144-token
+  one, where `pin` refuses requests the stated policy allows. The cap's
+  VALUE was unchanged by batch 44 and the PROPERTY was not, and `AGENTS.md`
+  said the first thing in a way that implied the second ("so #89's cap is
+  unchanged"). The stated obstacle -- "this function has no (provider,
+  model)" -- was one declared parameter away: `parent_run` is already in
+  `registry._INJECTABLE_PARAMS` and already carries both.
+- **A session's output was cut in four places and the redactor ran after
+  every one of them.** The tail is cut by the producer at `MAX_READ_CHARS`,
+  cut again by the wake's per-session division, cut again by the view's
+  display budget, and paged for `shell_output` -- and in each case the slice
+  was taken first and handed to `check_output_policy` after. A pattern only
+  matches what it can see whole. Swept through the real redactor at every
+  interior cut position: the three credential SHAPES leak at each of the
+  three tail cuts -- the ones where the pattern matches a
+  field-name-plus-value construct and only the value is the secret, so the
+  value survives whole inside the kept half -- and the leaked value travels
+  into the wake text, the persisted harness row, the rebuilt view and
+  `/copy all`. RB1 settled this ordering for `fetch_url` one section
+  earlier; `§52`'s gap register declined to solve it generally and named the
+  future tool it would happen to, and `§49` had already shipped that tool
+  before the sentence was written.
+- **`core/session.py` cited a symbol that has not existed since batch 75.**
+  Its *MODULE STATE* paragraph claimed the "same posture as
+  `core/compaction.py`'s `_compacting` flag" -- a flag batch 75 replaced
+  with a `threading.local()`, deliberately NOT aliased, under a comment
+  arguing against the sentence that sends a reader there. The behaviour was
+  sound; the precedent had been reversed.
+
+### The finding under the findings: the paging route
+
+S11-05 named two more cut sites, assigned them to the S01 and S16 scopes,
+and said the leak would be severity S2 "if the same ordering were shown to
+be reachable on the paging route, where the model can ask for adjacent
+pages -- that is S01's measurement to make". S01 never made it.
+
+Measured here: **the paging route leaks all seven shapes, not three** --
+including the fixed-length vendor tokens that survive every other cut,
+because the model asks for the second page itself and holds both halves.
+`ghp_` leaks at every interior offset, `AKIA` at every one, `AIza` at 3..40.
+A page boundary is not a discard, which is what makes it different from a
+tail cut: nothing is thrown away, the split is handed to the reader in two
+pieces, and a reader that can request the next page is the one reader who
+can put them back together.
+
+So the scope went to all four sites on the owner's ruling, and the fix moved
+to the producer for the three that read a tail: `_finish` redacts what it
+stores, which covers the wake, the rebuilt view and `_kill_report` -- a
+consumer that never passed through the wake's redaction at all.
+
+### Design Decisions Record — §65 (A22-A24)
+
+| id | decision |
+|---|---|
+| **A22** | **#89's pin cap is `PIN_MAX_TRIGGER_FRACTION` of the trigger that FIRES for this model, resolved the way `thresholds()` resolves it.** `pin_measurements` takes an optional `(model, provider_name)` and `tools/builtin/pin.py` declares `parent_run` to pass it; with no pair the binding-free read is the fallback, so a call from outside a run is unmoved. Chosen over adding the derived trigger to the existing `min()`, which closes only the unsafe direction and leaves the cap at 20,000 above a 53,000-token trigger -- 2% where the policy says 50% -- and over keeping an absolute 20,000 and correcting the two documents that call it a fraction. #89's own argument is about the trigger, and the property it bought is intact at every window: the cap is never more than half of what the thread folds at. **One behaviour changes direction**: with the pair, a RAISED session `/trigger` now raises the cap, because a raised override IS the trigger that fires; the old `min()` erred strict because it could not tell whether the number applied to the model in front of it |
+| **A23** | **A session's output is redacted before every cut it goes through, at all four sites, and the layer that cuts is the layer that redacts.** The producer redacts what it stores (`_finish`), the wake redacts the whole tail before the per-session budget slices it, the view redacts before the display budget, and the paging route redacts the parts before a page is cut out of them -- `OutputBuffer.page` takes an optional `clean`, so the monitor's own search still matches on RAW output, which is the rule the design already recorded. **The head/tail seam is a cut too** and is redacted across: the parts are joined when nothing has been evicted, because that seam sits at 10,000 characters on every session, inside the first page of every read. **The offsets then describe the redacted document**, which is RB3's rule rather than a compromise -- 210 characters of drift on a measured 120,000-character buffer, and every offset a surface speaks is a position in the text the reader was given. Chosen over fixing only the two sites the report names, which leaves the boundary that produced them intact one layer down, and over a second redaction pass at each consumer, which is what RB4 declined for `source_corpus` and declined correctly. Cost measured: 6.5ms for a full 200,000-character buffer against 4.7ms for one ordinary tool result |
+| **A24** | **The floor says so when it leaves no usable headroom, once per (provider, model), and only where the FLOOR is what bound the trigger.** Two wordings for one condition, because the remedy differs: at or above the window compaction can never fire, and just below it the thread folds with almost nothing to grow into. Both name `warning_margin_tokens` and `keep_recent_tokens`, since lowering them is the one remedy that works. **Narrowed from what the report suggested**, which was to warn whenever `window - trigger` is below one bounded read: measured, that also fires at 16,384 and 32,768, where the headroom CAP bound it, the cap is deliberate (see `headroom_for`) and the only remedy is a bigger model -- so a line naming two settings would name the wrong thing, on every stock small-window install. The floor binds at or below a 10,666-token window and nowhere above it, which is where this warning fires and stops. The excluded case is register item 96 rather than a silence. The dedup is a set of its own, keyed on the PAIR: the same model name behind a gateway and behind its own vendor can report different windows |
+
+### What §65 deliberately does not change
+
+- **The floor itself, and `context_limit`'s source order.** The floor stays
+  because the raise it removed was worse, and WS6/WS10 lock the inversion
+  that puts a provider's own number above the shipped table. Distrusting
+  source 1 would defeat the case source 0 exists for; saying the
+  configuration cannot work is the deliverable.
+- **`COMPACTION_PIPELINE_BACKSTOP_TOKENS` is untouched**, and so is
+  `_input_budget`'s own `max(1_000, ...)` floor, which is honest about being
+  lossy. The backstop's margin is still what decides above 200,000 -- the
+  ordering expression binds only where the margin would have broken the
+  order, which on the shipped roster is one entry by one token.
+- **The backstop is ordered against `derived_trigger`, not against the fully
+  resolved working-set trigger.** It cannot raise, which matters on a path
+  whose own posture is that a number it cannot compute must never become the
+  reason a thread does not compact; and M6 speaks about the derived default
+  rather than about a number a human typed. A configured trigger high enough
+  to still invert the pair is one that is itself near or above the window,
+  and a reachable backstop under an unreachable trigger is the right way
+  round.
+- **Which rows `history_through` excludes, and M9's re-inclusion.** Pinned
+  rows are still never summarized and still come back verbatim; the
+  `all-pinned` branch now reports the state instead of spending a call to
+  reach it. An explicit `/compact` is refused there too, for the reason the
+  no-progress guard refuses one: degrading a summary is not a tighter
+  compaction of it.
+- **`PIN_MAX_TRIGGER_FRACTION`, and what `pin` refuses beyond the cap it
+  reads.** The fraction is the policy; this section only makes the
+  denominator the number the policy names.
+- **The monitor still matches on RAW output**, and `_match_slice` is
+  deliberately left raw. Redacting what is SEARCHED would stop a
+  credential-shaped line waking the agent at all, which is the rule
+  `core/session_wake.py`'s header already states: redact what is returned,
+  not what is matched.
+- **`MAX_READ_CHARS` and the per-session division are unchanged.** The
+  budget now counts characters the model will actually see, which is what a
+  budget was for.
+- **The eviction boundary is not closed, and cannot be by this shape.** Half
+  of a credential that straddled the buffer's dropped middle was never kept
+  by the process, so no later pass can rejoin it -- but both halves ARE
+  shown, on either side of a stated gap, to a reader who can ask for both.
+  A stream has no "whole document" to redact exactly once. Register item 95.

@@ -27,7 +27,15 @@ from tests.conftest import REDACTION_CASES, SHAPE_CASE_LABELS
 @pytest.fixture
 def _clean_root():
     """Handlers are global state. Leaving one attached leaks into every
-    later test in the session."""
+    later test in the session.
+
+    SO IS THE LEVEL, which this fixture does not restore and which
+    `configure_logging` sets on every call (batch 148). That leak is
+    handled once for the whole suite, in `conftest.py`'s
+    `restore_the_root_log_level`, because five test files call
+    `configure_logging` and the leak belongs to the call rather than to
+    this file.
+    """
     yield
     root = logging.getLogger()
     for handler in list(root.handlers):
@@ -74,6 +82,44 @@ def _stream_handlers() -> list:
     return [h for h in logging.getLogger().handlers
             if isinstance(h, logging.StreamHandler)
             and not isinstance(h, logging.FileHandler)]
+
+
+#: The level the root logger had before any test in this module ran.
+#: Captured at IMPORT, which is collection time, so it is what pytest left
+#: rather than what a neighbour test did.
+_LEVEL_AT_IMPORT = logging.getLogger().level
+
+
+def test_configure_logging_sets_the_root_level(_clean_root, tmp_path):
+    """The act, and the first half of an ORDERED PAIR (batch 148).
+
+    `tests/test_probe_isolation.py` keeps a pair for this reason: the
+    property under test is what one test leaves for the NEXT one, and a
+    single test cannot assert it -- whatever it checks at the end of its
+    own body is still inside the fixture that would have cleaned up.
+    """
+    configure_logging(log_file=str(tmp_path / "app.log"), stderr=False)
+
+    assert logging.getLogger().level == logging.INFO
+
+
+def test_and_the_root_level_does_not_outlive_that_test():
+    """The property. MEASURED, batch 148: without conftest.py's
+    `restore_the_root_log_level`, the test above leaves the root at INFO for
+    every later test in the same worker process -- and the root level is
+    what decides whether an INFO record reaches pytest's capturing handler,
+    so every later assertion of the form "nothing was logged" passes or
+    fails on which file ran first.
+
+    That is not hypothetical and it is not item 85's unreproduced race:
+    `tests/test_tui.py::TestTheStrippedSequencesAreRecordedOnce::test_the_count_does_not_carry_into_the_next_turn`
+    failed in this batch's full-suite run, because 105 new tests changed the
+    xdist distribution and put this file on that worker, and it reproduces
+    in 3.5 seconds with the two files alone under `-n0`.
+    """
+    assert logging.getLogger().level == _LEVEL_AT_IMPORT, (
+        "a previous test left the root logger's level changed, which makes "
+        "every later caplog assertion about INFO records order-dependent")
 
 
 def test_stderr_false_attaches_no_stream_handler(_clean_root, tmp_path):

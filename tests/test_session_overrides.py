@@ -262,7 +262,10 @@ def test_the_window_override_moves_the_backstop_and_the_input_budget():
 # ---------------------------------------------------------------------------
 
 def test_trigger_any_ignores_the_binding():
-    """Its one caller, pin_measurements, has no pair to match against."""
+    """Its one caller, pin_measurements, reads it when it has no pair to
+    match against -- which since batch 148 is the FALLBACK rather than the
+    only case (S11-06): with a pair it resolves the trigger through
+    thresholds(), which reads the correctly-bound override instead."""
     session.set_trigger(*PAIR, 12_000)
     assert session.trigger_any() == 12_000
     assert session.trigger_for(*OTHER_MODEL) is None
@@ -276,6 +279,10 @@ def test_the_pin_cap_follows_a_LOWERED_session_trigger(mocker):
     could protect more than the entire trigger and floor the thread
     permanently above it, which is the precise defect #89 exists to
     prevent.
+
+    WITH NO PAIR, which is what this call shape means since batch 148. The
+    binding-free read is what remains for a caller outside a run; the two
+    tests below are the same question asked the way `pin` asks it.
     """
     mocker.patch("storage._ordered_rows", return_value=[])
 
@@ -292,12 +299,57 @@ def test_the_pin_cap_follows_a_LOWERED_session_trigger(mocker):
 
 def test_a_RAISED_session_trigger_leaves_the_pin_cap_stricter(mocker):
     """The min() in the other direction. Erring strict is safe; erring
-    loose is #89 again."""
+    loose is #89 again. Also a no-pair call: see the note above."""
     mocker.patch("storage._ordered_rows", return_value=[])
 
     session.set_trigger(*PAIR, 200_000)
     assert compaction.pin_measurements("t", 1)["max_tokens"] == int(
         config.PIN_MAX_TRIGGER_FRACTION * config.COMPACTION_TRIGGER_TOKENS)
+
+
+def test_with_the_pair_a_lowered_trigger_is_read_by_BINDING(mocker):
+    """The same protection, reached the way `pin` reaches it (S11-06).
+
+    `trigger_any()` answers with whatever was set for ANY pair, which is
+    why the no-pair call takes the minimum -- it cannot tell whether the
+    number applies to the model in front of it. With the pair there is
+    nothing to guess: thresholds() resolves the override that is bound to
+    this (provider, model) and ignores one that is not.
+    """
+    mocker.patch("storage._ordered_rows", return_value=[])
+    mocker.patch.object(compaction, "context_limit", return_value=1_000_000)
+
+    session.set_trigger(*PAIR, 12_000)
+    bound = compaction.pin_measurements("t", 1, PAIR[1], PAIR[0])
+    session.clear()
+    session.set_trigger(*OTHER_MODEL, 12_000)
+    other = compaction.pin_measurements("t", 1, PAIR[1], PAIR[0])
+
+    assert bound["max_tokens"] == int(config.PIN_MAX_TRIGGER_FRACTION * 12_000)
+    assert other["max_tokens"] == int(
+        config.PIN_MAX_TRIGGER_FRACTION
+        * compaction.derived_trigger(PAIR[1], PAIR[0])), (
+        "another pair's override reached this cap")
+
+
+def test_with_the_pair_a_RAISED_trigger_RAISES_the_cap(mocker):
+    """The behaviour that changed, stated rather than discovered.
+
+    With no pair a raised override leaves the cap stricter, because the
+    min() cannot tell whose trigger it is. With the pair, a raised override
+    IS the trigger this thread folds at -- so half of it is what #89's
+    policy allows, and keeping the cap at half the configured 40,000 would
+    be refusing pins the policy permits. The property #89 bought is intact
+    either way: the cap is never more than half the trigger that fires.
+    """
+    mocker.patch("storage._ordered_rows", return_value=[])
+    mocker.patch.object(compaction, "context_limit", return_value=1_000_000)
+
+    session.set_trigger(*PAIR, 200_000)
+    cap = compaction.pin_measurements("t", 1, PAIR[1], PAIR[0])["max_tokens"]
+
+    assert cap == int(config.PIN_MAX_TRIGGER_FRACTION * 200_000)
+    assert cap < 200_000
 
 
 # ---------------------------------------------------------------------------
