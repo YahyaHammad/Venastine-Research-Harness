@@ -5217,6 +5217,113 @@ and the batch had already grown past both of them; the fix is
 `_note_entries_outside_the_batch(run, flagged, revisions)` with the message
 reworded for a revision, which is the same helper.
 
+## 100. An MCP tool's description is read as harness-authored instruction (open, filed batch 150)
+
+**What it is.** A tool schema's `description` is third-party text that the
+model reads as part of the harness's own instruction to it. Batch 150 bounded
+it at the producer (§67 A31) -- whitespace collapsed, capped, prefixed with
+`[MCP: <server>]` -- which closes the size and the forged-section halves.
+What it does not do is say to the model *this text came from somewhere
+else*.
+
+**Why it is filed rather than fixed.** It is a design decision about what a
+tool schema IS, not a bug in one. `prompts/untrusted_content` exists and is
+the envelope this project uses for exactly this class of text, but wrapping
+a tool description in it changes what EVERY MCP tool reads like to the
+model -- including the tools a well-behaved server advertises, which is all
+of them in practice. S05 owns the untrusted-content envelope and S13 named
+this as the seam rather than proposing it. The `[MCP: <server>]` prefix
+means provenance is at least STATED today, which is why the finding it came
+from is S3 and not S2.
+
+**What would settle it.** Whether a tool schema is harness instruction or
+third-party data. If it is data, the envelope applies and the prefix is the
+wrong mechanism; if it is instruction, the bound is the whole remedy and
+this item closes. Nobody has needed to decide yet because no shipped
+configuration has an MCP server at all.
+
+## 101. `requires_approval` can still return a non-boolean (open, filed batch 150)
+
+**What it is.** `security.permissions.requires_approval` ends in
+`return tool_level or context_level`, and `context_level` comes from
+`context.approval_overrides.get(tool_name, False)`. Batch 150 typed those
+values where agent definitions are PARSED (§67 A28), so a frontmatter
+`web_search: "false"` now skips the file with a warning. A `ToolContext`
+built programmatically is not parsed by anything, so
+`ToolContext(approval_overrides={"web_search": "false"})` still makes the
+function return the string `'false'`.
+
+**Why it is filed rather than fixed.** Measured, and nothing is widened: the
+return is used in boolean context everywhere, approval ORs, and every falsy
+value is already indistinguishable from an absent key -- so the worst a
+non-boolean does is tighten. It is a type claim a docstring makes and the
+signature does not enforce.
+
+**The shape the fix would take is already in this tree**, which is the
+reason to record it: `core/config_loader.py`'s `max_steps` guard REPAIRS at
+parse time and `core/loop._run` RAISES for "a programmatic caller passing a
+bad value directly [who] has no file to lose, only a bug worth naming". The
+same pair would apply here. The reason it is not done in batch 150 is that
+`requires_approval` is on the hot path of every dispatch and every
+advertisement, and adding a raise to it for a case no caller in the tree
+produces is a cost with no demonstrated consequence -- which is B4's rule,
+applied to this item rather than against it.
+
+## 102. Under WSL, a test that spawns a subprocess cannot import this project's dependencies (open, measured and filed batch 150)
+
+**What happens.** `tests/test_config_loader.py::test_re_importing_config_re_reads_the_file`
+fails under WSL and passes on Windows and in CI. The subprocess it spawns
+dies with `ModuleNotFoundError: No module named 'pydantic'`, so the
+assertion reports a return code of 1 and names none of the cause.
+
+**Why.** On this WSL box the project's dependencies are installed into the
+**user site**, not a venv:
+
+```
+/home/<user>/.local/lib/python3.14/site-packages/pydantic/__init__.py
+```
+
+Python locates the user site from `HOME` at interpreter startup. The suite
+redirects `HOME` for test isolation, and the PARENT process is unaffected
+because it imported everything before the redirect -- but
+`subprocess.run([sys.executable, "-c", program, ...])` inherits that
+environment, and the CHILD resolves its user site from the redirected
+`HOME` and finds nothing there. Reproduced directly, outside pytest:
+
+```
+$ python3 -c "import pydantic"                     # ok
+$ HOME=/tmp/nohome python3 -c "import pydantic"    # ModuleNotFoundError
+```
+
+**It is not a code defect and not a CI risk.** The test asserts a real
+property (popping `config` out of `sys.modules` under a changed environment
+must produce a `config` that sees the change) and the production code it
+guards is correct. CI installs dependencies into the runner's own
+environment rather than a user site, so `HOME` is not what finds them
+there. Confirmed pre-existing: the same test fails the same way against a
+detached worktree at `00d73a1`, which is the commit before batch 150.
+
+**Why it is filed rather than fixed.** The clean fixes each have a cost
+worth stating:
+
+- **Pass `PYTHONPATH`/`PYTHONUSERBASE` through to the child.** Smallest, but
+  it teaches one test about an environment detail, and the next subprocess
+  test has the same problem with no shared answer.
+- **Stop redirecting `HOME` for subprocess-spawning tests.** Exactly wrong:
+  the redirect exists because a probe that mounts the real app writes the
+  user's real preferences, which this project has already paid for once.
+- **Install into a venv on the WSL box.** Fixes it for everybody and is an
+  environment change rather than a repository one, so it cannot be done by
+  a commit.
+
+**What this item is really for.** `WSL verifies POSIX behaviour` is a
+standing part of per-batch verification here, so this failure appears on
+every batch that re-runs `test_config_loader.py` there, and each time it
+reads like a regression in whatever that batch touched. It is not. Anyone
+seeing one WSL-only failure in this test should check this entry before
+spending the cycle -- and should still check that the failure is THIS one,
+because a second WSL-only failure would be a different claim.
+
 ## Review-marathon arrivals at open issues with no register entry
 
 Two `KNOWN` findings landed on GitHub issues that are not mirrored here. Both

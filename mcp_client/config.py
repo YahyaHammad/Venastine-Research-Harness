@@ -189,22 +189,40 @@ def ensure_user_config() -> Optional[str]:
     return path
 
 
-def _flag(server: str, key: str, value: Any) -> bool:
-    """A JSON boolean, or False with a warning.
+def _flag(server: str, key: str, value: Any,
+          consequence: str) -> Optional[bool]:
+    """A JSON boolean, or None with a warning naming the consequence.
 
     NOT bool(value): bool("false") is True, so `"autoApprove": "false"`
     -- a plausible hand edit, and a shape other MCP hosts tolerate --
     would turn the D28 approval gate OFF on a server the user was trying
-    to keep gated. Failing closed is the only safe direction for both
-    flags: an unexpectedly-gated server prompts, an unexpectedly-enabled
-    one runs third-party code unannounced.
+    to keep gated.
+
+    WHAT IT DOES NOT DO ANY MORE IS CHOOSE THE ANSWER (batch 150). It
+    used to return False for both keys and say that failing closed was
+    "the only safe direction for both flags: an unexpectedly-gated server
+    prompts, an unexpectedly-enabled one runs third-party code
+    unannounced". That is true of `autoApprove` and backwards for
+    `disabled`, where False means NOT disabled -- so the sentence's own
+    second clause was the outcome it produced: `"disabled": "true"` ran
+    the server, and F1's consent line, which reads self.disabled, showed
+    it as live.
+
+    AND NEITHER CONSTANT IS SAFE FOR `disabled`, which is why this
+    function no longer picks one. The two plausible misspellings want
+    opposite answers -- `"true"` means stop and `"false"` means run --
+    and the only thing that distinguishes them is the value, which this
+    function exists to refuse to interpret. So the caller decides, and
+    for `disabled` the decision is the one this module already makes for
+    an entry it cannot make sense of: that one server's NAMED failure
+    (decision G). `tests/test_mcp_config.py` pins both directions.
     """
     if isinstance(value, bool):
         return value
     logger.warning(
-        "mcp.json server %r: %s must be true or false, got %r; using false.",
-        server, key, value)
-    return False
+        "mcp.json server %r: %s must be true or false, got %r; %s.",
+        server, key, value, consequence)
+    return None
 
 
 def _parse_entry(name: str, entry: Any, tier: str, path: str) -> ServerConfig:
@@ -223,19 +241,46 @@ def _parse_entry(name: str, entry: Any, tier: str, path: str) -> ServerConfig:
         logger.debug("mcp.json server %r: ignoring unrecognized keys %s",
                      name, sorted(unknown))
 
+    # accept either spelling; ours is camelCase to match the file's
+    # existing style, but a snake_case one shouldn't silently no-op
+    auto_approve = _flag(
+        name, "autoApprove",
+        entry.get("autoApprove", entry.get("auto_approve", False)),
+        "gating its tools, which is this flag's safe answer either way")
+    disabled = _flag(
+        name, "disabled", entry.get("disabled", False),
+        "refusing the entry by name, because neither answer is safe for "
+        "this flag")
+
     cfg = ServerConfig(
         name=name, tier=tier, path=path, transport="unknown",
         env=entry.get("env") or {},
         cwd=entry.get("cwd"),
         headers=entry.get("headers") or {},
-        # accept either spelling; ours is camelCase to match the file's
-        # existing style, but a snake_case one shouldn't silently no-op
-        auto_approve=_flag(
-            name, "autoApprove",
-            entry.get("autoApprove", entry.get("auto_approve", False))),
-        disabled=_flag(name, "disabled", entry.get("disabled", False)),
+        auto_approve=bool(auto_approve),
+        disabled=bool(disabled),
         raw=entry,
     )
+
+    if disabled is None:
+        # A NAMED FAILURE, not a chosen answer (batch 150). `False` ran a
+        # server the operator had written a key to stop, and `True` would
+        # skip one they had written a key to keep -- which was a defect
+        # this file's tests had already been written for once, under the
+        # name "the mirror defect". Both directions are pinned now by
+        # TestAnUnparseableDisabledIsANamedFailure, whose docstring
+        # records why the older test was replaced rather than kept green:
+        # it asserted `disabled is False`, which is STILL true here and no
+        # longer means the server runs.
+        # So the entry becomes unusable the same way a bad `args` does:
+        # transport stays 'unknown', describe() prints
+        # "UNUSABLE: 'disabled' must be true or false" on the
+        # acknowledgement screen, _transport_for raises so the server
+        # lands in failures by name, and main.py prints it. Nothing runs
+        # and nothing is silent, which is the only pair of properties
+        # both spellings can have at once. One edit fixes it.
+        cfg.error = "'disabled' must be true or false"
+        return cfg
 
     declared = str(entry.get("type") or "").lower()
     if entry.get("command"):

@@ -448,6 +448,27 @@ def _parse_md_file(path: str, kind: str, tier: str, category: str = ""):
     if not isinstance(overrides, dict):
         logger.warning("Skipping agent file %s: approval_overrides is not a mapping", path)
         return None
+    # THE VALUES TOO, not just the mapping (batch 150). The two scalar
+    # booleans below are validated for the reason stated there, and this
+    # field is the third one a restrictive agent definition uses to opt
+    # IN to prompting -- so stopping at the container left
+    # `web_search: "false"` parsing to the STRING, and
+    # requires_approval() returning 'false' from a function documented to
+    # return a bool. Measured: no value widens a gate, because approval
+    # ORs and every falsy value is already indistinguishable from the key
+    # being absent -- so this is the type boundary, not an escalation.
+    # Same warn-and-skip contract as every other typed field here; a
+    # per-key repair would leave half a policy, which is worse than no
+    # file at all for a field whose job is adding prompts.
+    if not all(isinstance(v, bool) for v in overrides.values()):
+        bad = sorted(k for k, v in overrides.items()
+                     if not isinstance(v, bool))
+        logger.warning(
+            "Skipping agent file %s: approval_overrides values must be "
+            "booleans; %s %s not.",
+            path, ", ".join(repr(k) for k in bad),
+            "is" if len(bad) == 1 else "are")
+        return None
     max_steps = fm.get("max_steps")
     # REPAIR, NOT REJECT (#45, batch 16 -- explicit owner decision). This
     # guard used to SKIP the whole file for a bad max_steps, which made it

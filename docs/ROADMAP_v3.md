@@ -43,6 +43,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
+- **§67. The gate a child could turn off, and three strings nobody here wrote** - **(BUILT in batch 150)** (the child's approval overrides filtered the parent's dict and merged the agent's raw, so a `False` in a child's frontmatter turned off a gate the parent had set -- and the tool then left the sign-off notice as well as the gate; `disabled` had no safe constant and was given a named failure instead of one; a composed `mcp__<server>__<tool>` name nothing validated made every provider request malformed from one reachable server; a tool's description, title and input_schema arrived from third-party code uncapped and unnormalised into every model call; and the non-text placeholder fired only when no text survived, so a result with text AND an image dropped the image in silence)
 - **§66. The type that stopped at the container, and a pass that answered about more than it was asked** — **(BUILT in batch 149)** (the payload boundary declared a field's container type and not the type of what it held, so three of six crash shapes survived it and three more scored a wrong number in silence; a boolean satisfied NUMBER, so `severity: true` charged the maximum critic penalty with no trace; and Pass 6b was asked about one batch, validated against every id in the run and applied to every claim in it, while the re-tiering beside it stayed narrow)
 - **§65. Four guards measured against the wrong thing, and a cut the redactor ran after** — **(BUILT in batch 148)** (the shipped compaction strategy fell through the branch built for the state it reached, a floor applied with no reference to the window left models that can never compact saying nothing, the pipeline backstop fired EARLIER than the trigger it sits behind at every window below 200,000, #89's pin cap stopped tracking the trigger it is a fraction of, and a session's output was cut in four places with the redactor running after every one)
 - **§64. Two numbers a provider promised and one key that meant two things** — **(BUILT in batch 147)** (an unknown tool name ended the turn and left the thread unresumable, a token count that was present and not a number defeated the guard that exists to catch exactly that, and Ctrl+C during a background session's wake turn unwound a model turn from wherever it landed)
@@ -2332,4 +2333,386 @@ tree.
   are still right: `len()` is the only reader of a flag list, and 6b not
   re-running Pass 4 is a stated design gap (ARCHITECTURE 7.2, AGENTS.md)
   with its own decision still unmade.
+## §67. The gate a child could turn off, and three strings nobody here wrote
 
+**Built in batch 150**, from the review marathon's `agents/` + `skills/` +
+`mcp_client/` surface: all six `FIX-NOW` findings -- S13-02, S13-03, S13-04, S13-05,
+S13-06 and S13-08 -- across
+`agents/manager.py`, `core/config_loader.py`, `mcp_client/config.py`,
+`mcp_client/registration.py`, `mcp_client/client.py` and
+`tests/test_mcp_integration.py`.
+
+Six findings, all S3, and the thing they have in common is the one the
+surface is named for: **every one of them is a boundary between this
+project's code and somebody else's** -- a project-tier agent definition, a
+hand-edited `mcp.json`, a server's own tool metadata, a server's own
+result. Five of the six are a check that stops one step short of the
+thing it is checking.
+
+Four answers were DECISIONS and the owner ruled all four. **One ruling
+contradicted the report's suggested shape outright**, which is new: until
+now the fix pass had found a suggested fix too big (§66's A24), half of one
+(S04-02, S17-01), aimed at something already closed (S06-10), or
+insufficient (§66's A25 and A26). S13-03's was aimed at a defect that is
+real and would have re-opened a different one, and a pinned test is what
+said so.
+
+### A28 -- the approval merge filters BOTH sides, and the values are typed
+
+`AgentManager.child_context` composed the child's `approval_overrides` in
+two lines: the parent's dict filtered to its `True` entries, then the
+agent's own merged **unfiltered**. So a `False` in a child's frontmatter
+overwrote the parent's `True`, and the function's own docstring says the
+opposite one line up -- *"Only True entries carry -- a False is
+indistinguishable from absent under D14's OR, so unioning can only ever
+tighten, which is what makes it safe to do silently."* Decision S2, quoted
+verbatim from the code that did not implement it.
+
+Driven through the real discovery path and the real
+`security.permissions.requires_approval`, with the global
+`ToolApprovals().web_search` at `False` so the parent's entry was the only
+thing asking:
+
+| parent says | agent `.md` declares | child's overrides | `requires_approval` |
+|---|---|---|---|
+| `{web_search: True}` | `approval_overrides: {web_search: false}` | `{'web_search': False}` | **False** |
+| `{web_search: True}` | nothing | `{'web_search': True}` | True *(control)* |
+| nothing | `approval_overrides: {get_time: true}` | `{'get_time': True}` | True *(control)* |
+
+`tests/test_agents.py` had three tests over four quadrants. The missing
+one is the one the code got wrong.
+
+**It did not heal one hop out**, either: a grandchild came back with `{}`,
+because the next `if v` dropped the `False` rather than restoring the
+`True`. The tightening was gone permanently, not suspended for one run.
+
+**And the cost is larger than the gate**, which neither the report nor the
+docstring says. `candidate_approvals` reads the same dict and is **both**
+the sign-off notice the user reads and the grant the child receives -- its
+own docstring calls keeping them one *"the whole substance of a
+sign-off"*. Measured: the loosened tool left the candidate list entirely.
+So the user was not asked at call time **and** not told at sign-off time,
+which is the one combination the sign-off exists to prevent.
+
+**Scope, measured rather than reasoned.** `active_context` builds
+`dict(agent.approval_overrides)` unfiltered and keeps it: at depth 0 there
+is no parent to overwrite, a `False` is inert under D14's OR, and the next
+hop's filter drops it. Driven both ways and pinned as a control, because
+"the other composer looks similar" is how a fix grows past its finding.
+
+**The values are typed where they are parsed**, which is the batch's own
+addition and the report's named seam into S08's file.
+`core/config_loader.py` validated the mapping and not its values, so
+`web_search: "false"` parsed to the STRING and `requires_approval`
+returned `'false'` from a function documented to return a bool. Measured:
+**no value widens a gate** -- approval ORs, so every falsy value is
+already indistinguishable from an absent key and every truthy one
+tightens -- so this is the type boundary, not an escalation. It is also
+§66's S12-01 shape one file over, and the comment three fields below it
+already states the rule for its two scalar booleans: *"Booleans are
+VALIDATED, not coerced. bool("false") is True, so `use_memory: "false"`
+would invert a deliberate opt-out with no warning -- and these two fields
+are exactly the ones a restrictive agent definition uses to opt OUT."*
+`approval_overrides` is the third such field; it opts IN to prompting.
+
+**Not done:** the three-state override. `tests/BREAKING_CHANGES.md:249`
+forbids it by name, and the finding is that the two-state rule was not
+implemented, not that it is wrong. A `False` is still legal to write and
+still inert once written.
+
+### A29 -- `disabled` has no safe constant, so it gets a named failure
+
+`mcp_client/config.py:_flag` refused to coerce and returned `False` with a
+warning for any non-boolean. Its docstring said why: *"Failing closed is
+the only safe direction for both flags: an unexpectedly-gated server
+prompts, an unexpectedly-enabled one runs third-party code
+unannounced."* True of `autoApprove`. For `disabled`, `False` means NOT
+disabled -- so the sentence's own second clause was the outcome it
+produced. Driven through the real `load_server_configs` and the real
+`describe()` that the acknowledgement screen prints:
+
+| `mcp.json` entry | `cfg.disabled` | the consent line, in full |
+|---|---|---|
+| `"disabled": "true"` | False | `srv [user] runs: rm -rf /data` |
+| `"disabled": "yes"` | False | `srv [user] runs: rm -rf /data` |
+| `"disabled": 1` | False | `srv [user] runs: rm -rf /data` |
+| `"disabled": true` | True | the same line **plus `disabled`** *(control)* |
+
+A server the operator wrote a key to stop, presented as live.
+
+**THE REPORT'S SUGGESTED SHAPE WOULD HAVE RE-OPENED THE MIRROR DEFECT,
+and a pinned test is what said so.** It proposes a per-key safe direction:
+`disabled` falls to `True`. But
+`tests/test_mcp_config.py::test_non_boolean_disabled_falls_back_to_false`
+pins `"disabled": "false"` to a server that RUNS, and its docstring names
+the alternative as a defect: *"The mirror defect: `"disabled": "false"`
+skipped a server the user meant to keep running."* The two plausible
+misspellings are one hand edit apart and want opposite answers, and the
+only thing that distinguishes them is the value -- which `_flag` exists to
+refuse to interpret, correctly.
+
+So neither constant is the answer, and the owner ruled the third option:
+**an unparseable `disabled` makes the entry UNUSABLE by name**, which is
+the mechanism this module already has for an entry it cannot make sense
+of. `transport` stays `'unknown'`, `cfg.error` carries the reason,
+`describe()` prints `srv [user] UNUSABLE: 'disabled' must be true or
+false` on the acknowledgement screen, `_transport_for` raises so the
+server lands in `failures` by name, and `main.py` prints that too. Nothing
+runs and nothing is silent, which is the only pair of properties both
+spellings can have at once; one edit fixes it. This is decision G
+verbatim -- *"an entry we cannot make sense of becomes that one server's
+named connect failure rather than a startup error for everything else."*
+
+`_flag` therefore no longer CHOOSES. It returns `Optional[bool]` and each
+caller states its own safe direction, because the difference between the
+two keys is the finding. `autoApprove` keeps falling to `False` and its
+own test passes unchanged -- pinned as a control, since a fix that spread
+to the key whose direction was already right would be the fix growing
+past its finding.
+
+### A30 -- a composed name is validated at the producer, and an invalid one is refused
+
+`registration.tool_name_for` composes `mcp__<server>__<tool>` and nothing
+validated the result. Both halves are outside this repository's control:
+the server half is a free-form key in `mcp.json`, the tool half comes from
+the server. Verified against the installed `mcp==2.0.0`:
+`Tool.model_fields["name"]` is a bare required `str` with empty
+`metadata` -- no pattern, no max length. Pinned as a test, so a pin move
+that adds one upstream is visible rather than silently duplicated.
+
+Driven through the real `register_all` over a real `ToolRegistry`, checked
+against `^[a-zA-Z0-9_-]{1,64}$` -- the tool-name rule Anthropic, OpenAI
+and Google all publish:
+
+| why it is realistic | composed name | len | registered | advertised |
+|---|---|---|---|---|
+| a dot in a hand-written `mcp.json` key | `mcp__my.server__search` | 22 | yes | yes |
+| a space from the server | `mcp__fs__read file` | 18 | yes | yes |
+| a newline from the server | `mcp__fs__read\nfile` | 18 | yes | yes |
+| ordinary naming, two long words | `mcp__plugin_engineering_pagerduty__complete_authentication_for_account` | **70** | yes | yes |
+| a server-supplied 400-char name | `mcp__s__xxxx...` | 408 | yes | yes |
+
+`registry.schemas()` is recomputed at the top of every model call (K7), so
+one such name is in the `tools` array of **every request for the rest of
+the session** whether or not the model ever chooses it. This is the
+inversion of the invariant `_manager()` states for itself -- *"One
+unreachable server must never take down the others"* -- and it is worse
+than the case that comment guards: a **reachable, working** server makes
+every request malformed. A 400 on a malformed `tools` array is not
+transient, so `core/provider_errors.is_transient` will not retry it, and
+nothing in the harness can attribute it -- the error names a tool name and
+the user configured a server.
+
+Refused, not mangled: a silently renamed tool is one the model cannot name
+back, and the prefix is not a parser, so a generated name maps to no
+server. One warning per SERVER for a bad character in the server half,
+because it poisons every name that half composes and the server is the one
+the operator can rename; one warning per TOOL otherwise, because the
+server's other tools are unaffected. That is the collision branch's shape
+deliberately -- it was written for a name that collides, this is a name
+that is invalid, and the outcome should be the same kind of outcome.
+
+**Checked here because this is the last place the fact is knowable.**
+Registration is the one function that sees the server name and the tool
+name together; `core/client.py` translates schemas and `tools/registry.py`
+dispatches, and neither has a reason to know what a provider will accept.
+
+**Decision G is not reversed, and `registration.py`'s own sentence about
+it gained a clause.** That comment said recording what was registered
+fixes the collision hazards *"without rejecting any mcp.json content,
+which decision G rules out"*. What G rules out is up-front SCHEMA
+validation of `mcp.json`; nothing in `register_all` reads the file, and a
+named per-server failure is G's own remedy. Left as written, that sentence
+would have been a claim made false by a change in the same file -- defect
+shape 9, in the file under repair, which is the trap batch 130 had to
+avoid in `sandbox.py`.
+
+**The rule is one this project's own names already satisfy.** All 31
+registered built-in names match it, measured and pinned as a control: this
+is a bound on third-party names, not a constraint the project would have
+to live down to. The prefix and the two separators spend 7 of the 64
+before either name starts.
+
+### A31 -- the third-party text in a tool schema is bounded at the producer
+
+An MCP tool's `description` went into the schema with a `[MCP: <server>]`
+prefix and no other treatment -- no cap, no whitespace normalisation.
+Measured: 50,082 characters and 4 newlines in, 50,094 and 4 out,
+advertised. The sibling producer for the same class of string,
+`core/config_loader._catalog_text`, returns **300** characters and
+collapses `"a\n## System"` to one line.
+
+The invariant is §32 A5, verbatim: *"Catalog text is normalised at the
+producer -- whitespace collapsed, capped at one constant, applied to
+`name` and `description`, at parse time, for every tier."* Of the three
+sources of third-party text that enter a model request here, two were
+capped and normalised and the third -- the one that arrives from code
+nobody here reviewed, at connection time, after the consent screen has
+been answered -- was neither. A5's reason is #131: a `description`
+containing a newline LEAVES ITS BULLET and forges a top-level section. The
+reason that exact mechanism does not fire here is only that tool schemas
+are a JSON array rather than a rendered list; the newlines still arrive,
+and what they can do then depends on a consumer. That dependence is what
+A5 exists to remove, and this project has already paid for it at the
+consumer end: `core/reasoning/authorization.py:96` takes
+`description.strip().splitlines()[0]` for the grant picker, which is a
+consumer defending itself against this producer.
+
+**The half neither report names, and the owner ruled it in.**
+`input_schema` is third-party text in the same request and `schema_for`
+passed it through untouched -- measured, a 50,082-character property
+description arrived byte-for-byte. So did `title`, which is concatenated
+INTO the description. Two bounds, because they answer different
+questions:
+
+- **`description` is normalised and capped** at `MAX_TOOL_DESCRIPTION_CHARS`
+  = 2000, applied AFTER the prefix and the title are composed in so one
+  call covers all three strings. Deliberately not
+  `MAX_CATALOG_TEXT_CHARS`: 300 is right for a one-line catalog bullet and
+  would mutilate a legitimate tool description, and sharing the constant
+  would couple two bounds that answer different questions. 2000 is 2.5x
+  the longest description this harness ships (786, `shell_interactive`).
+  The cut is visible, for `_catalog_text`'s reason.
+- **An oversized WHOLE schema loses the tool**, at
+  `MAX_TOOL_SCHEMA_CHARS` = 16384, measured on the serialised form because
+  that is what is paid. Capping the strings INSIDE `input_schema` was
+  considered and declined: a truncated enum or pattern is a tool that
+  fails at call time instead of load time, which is the harder failure to
+  trace. 16384 is ~3.6x the largest schema this harness ships (4544,
+  `shell`). A schema that will not serialise at all is refused by the same
+  gate -- it could not be sent either way, and finding out here names the
+  server instead of raising inside a provider branch.
+
+**Not done:** wrapping tool descriptions in `prompts/untrusted_content`.
+That is a real question -- a third party's text is being read as
+harness-authored instruction -- but it is a design decision about what a
+tool schema IS, it would change what every MCP tool reads like to the
+model, and S05 owns the untrusted-content envelope. Recorded as the seam.
+
+### A32 -- the placeholder is appended, and the drop is disclosed
+
+`_normalize`'s non-text placeholder was guarded by `if not text and
+blocks`, so it fired only when **no** text block produced anything. A
+result carrying text *and* non-text dropped the non-text with no
+placeholder and no log line:
+
+| blocks in | result | placeholder | log lines |
+|---|---|---|---|
+| `text("Chart generated:")`, `image`, `image` | `{'content': 'Chart generated:'}` | **no** | **0** |
+| `text("   ")`, `image` | `{'content': '   '}` | **no** | **0** |
+| `image` | `{'content': '[non-text MCP content: image]'}` | yes *(control)* | 0 |
+| `text("")` | `{'content': '[non-text MCP content: text]'}` | yes, and it says **text** | 0 |
+| `text("boom")` + `structured`, `is_error` | `{'error': 'boom'}` | -- | 0 |
+
+The rule is `AGENTS.md`'s, under its own heading: *"Nothing an
+output-policy pass alters is silent... Every altered dispatch result logs
+ONE WARNING naming the tool and what changed -- before #49 the depth cap
+replaced a whole container with a sentence and logged nothing."*
+`_normalize` altered a dispatch result and logged nothing on any of its
+three dropping paths. "Chart generated:" with no chart and no note is a
+result the model will answer from.
+
+Three things changed, and the fourth row above is why the second one is
+not cosmetic:
+
+- **The placeholder is APPENDED** to whatever text survived rather than
+  substituted for it. The all-non-text case is unchanged, because with no
+  text to append to the placeholder is the content.
+- **The kinds come from the blocks the join actually skipped**, and an
+  empty text block is not one of them. It carries nothing to drop, so
+  reporting it as non-text was the placeholder contradicting itself.
+- **One WARNING names the tool and what was dropped.** The tool name had
+  to become a PARAMETER: `_normalize` took the result alone, so #49's
+  rule was unsatisfiable in the function it applies to.
+- **A structured error payload is folded into the one error shape.** The
+  error branch dropped `structured_content` entirely, so a server
+  reporting `{code: 429, retry_after: 30}` lost the one thing that would
+  have explained the failure. In the string, not a second key: D23
+  promises `call_tool()` returns one error shape, and a second key makes
+  every consumer of a dispatch error a place that may or may not read it.
+  Bounded at `MAX_ERROR_DETAIL_CHARS` = 500, because the payload is
+  third-party and the string reaches a model.
+
+**Not done:** a multimodal tool-result path. `client.py` declines it
+explicitly and that is right -- *"the harness has no multimodal
+tool-result path, and inventing one here is scope the rest of the design
+can't carry."* The finding is that the decline should be disclosed
+consistently, not reversed. And the SUCCESS path's `result` key is still
+unbounded: an unbounded tool RESULT is `TECHNICAL_DEBT 48`, which S13-01
+measured and which is ruled DEFER, and bounding it in passing would close
+a filed item halfway and in the wrong module. Pinned as a control.
+
+### A33 -- the except branch releases both tasks
+
+Found by running S13-08's uncovered path, not by reading.
+`connect_all`'s except branch cancels the manager task and stops the loop.
+`_start()` is a SECOND task, still parked on `_ready.wait()` at that
+moment -- and it stays parked, because `_cancel_manager()` cancels the
+manager, `CancelledError` is a `BaseException` so the manager's `except
+Exception` does not run, and the `_ready.set()` in that handler is never
+reached. Left pending, asyncio reports *"Task was destroyed but it is
+pending!"* through its own logger whenever the GC reaches it.
+
+That matters more here than it would elsewhere: `tui/app.py` attaches
+`TranscriptLogHandler` to the **root** logger, so an asyncio ERROR can
+surface in a user's transcript -- a line naming nothing, attributable to
+nothing, at an arbitrary later moment. Cancelled first, while the loop is
+still running to deliver it. `cancel()` is not the no-op it looks like: a
+`run_coroutine_threadsafe` future never reports `running`, so it returns
+True and the task really is cancelled, which is measured rather than
+assumed.
+
+### S13-08: the test that could not look, and what running it found
+
+§17 AC8 is the claim that stdio servers -- child processes this harness
+spawned -- are reaped. One test could see a real process and it exercised
+one path: connect, register, dispatch, `disconnect_all()`, poll. The path
+with the **recorded history of orphaning** is the other one, and
+`connect_all`'s own comment is about it: *"A timeout here used to abandon
+the manager permanently... So one hung server orphaned every other
+server's subprocess."* That recovery was pinned only over the in-process
+transport, which the integration file's own docstring says cannot see a
+child. **So the orphan-prevention path was proven in the one environment
+that cannot observe an orphan.**
+
+The report could not run the test -- it is excluded from the review's
+permissions -- and named the exact command as the deliverable it owed.
+Run: **1 passed in 9.66s**, then the two cases added beside it.
+
+**Both pass, and that is the finding.** The per-server handshake timeout
+reaps its child and so does the caller-side timeout, which means
+`stdio_client.__aenter__` DOES clean up under cancellation -- the SDK
+behaviour S13-08 names as unmeasured, since
+`AsyncExitStack.enter_async_context` pushes its exit callback only after
+`__aenter__` returns and the stack therefore never owned that child. The
+code was right; nothing here had ever looked. The two cases are regression
+guards for a property this harness depends on and does not own, and the
+negative control is the one the report asks for by name: dropping
+`_cancel_manager()` from the except branch makes the second test report a
+leaked PID.
+
+### Design Decisions Record — §67 (A28-A33)
+
+| id | decision |
+|---|---|
+| **A28** | **A child's approval overrides are composed from the True entries of BOTH sides, and the values are typed where they are parsed.** Decision S2's stated rule, finally implemented: the parent's dict was filtered and the agent's merged raw, so a `False` in a child's frontmatter overwrote the parent's `True` and the docstring one line up was false of the line below it. It did not heal one hop out either -- the next `if v` dropped the False rather than restoring the True. The cost is larger than the gate, and that half is measured rather than reported: `candidate_approvals` reads the same dict and is both the sign-off notice and the grant the child receives, so the loosened tool left the candidate list entirely and the user was neither asked at call time nor told at sign-off time. `active_context` is deliberately NOT changed and is pinned as a control -- at depth 0 there is no parent to overwrite, a False is inert under D14's OR, and the next hop's filter drops it, all three measured. The VALUES are validated in `core/config_loader.py` beside the two scalar booleans whose comment already states the rule; measured first, and no value widens a gate, so that half is the type boundary and not an escalation. NOT the three-state override, which BREAKING_CHANGES forbids by name |
+| **A29** | **A `disabled` value that is not a JSON boolean makes the entry UNUSABLE by name, and `_flag` reports rather than chooses.** `False` meant NOT disabled, so `"disabled": "true"` connected the server and the consent line showed it as live. **Chosen over the report's per-key constant (`disabled` falls to True)**, which would have re-opened the mirror defect a pinned test names: `"disabled": "false"` is one hand edit away and wants the opposite answer, and the value is the only thing that distinguishes them -- which `_flag` exists to refuse to interpret. So neither constant is the answer and the entry is refused the way a bad `args` is: transport stays `unknown`, `describe()` prints `UNUSABLE: 'disabled' must be true or false`, `_transport_for` raises so the server lands in `failures` by name. Nothing runs and nothing is silent, which is the only pair both spellings can have at once, and it is decision G verbatim. `autoApprove` keeps falling to False, pinned as a control: it is the key whose direction was already right |
+| **A30** | **A composed `mcp__<server>__<tool>` name is validated against the rule every provider publishes, and an invalid one is refused by name.** `^[a-zA-Z0-9_-]{1,64}$`, checked in `register_all` because that is the last place the server name and the tool name are seen together. A reachable, working server could put a name in the catalogue that made EVERY request malformed -- `schemas()` is recomputed per call (K7), a 400 on a malformed `tools` array is not transient, and nothing can attribute it. Refused, not mangled: a renamed tool is one the model cannot name back and the prefix is not a parser. One warning per SERVER for a bad character in the server half, because it poisons every name that half composes and the operator can rename it; one per TOOL otherwise. Within decision G, not against it: G rules out up-front SCHEMA validation of `mcp.json`, and a named per-server failure is G's own remedy -- `registration.py`'s own sentence about G gained the clause that says so, because left as written it would have been a claim made false by a change in the same file |
+| **A31** | **Third-party text in an advertised tool schema is bounded at the producer, and an oversized schema loses the tool.** `description` is whitespace-collapsed and capped at `MAX_TOOL_DESCRIPTION_CHARS` = 2000, applied after the `[MCP: ]` prefix and the server-supplied `title` are composed in so one call covers all three strings. A5's rule, which two of the three sources of model-facing third-party text already followed. Deliberately not `MAX_CATALOG_TEXT_CHARS`: 300 is right for a one-line bullet and would mutilate a real tool description, and sharing it would couple two bounds that answer different questions. **`input_schema` is the half neither report names** and it is bounded too, by a different mechanism: the serialised whole schema is capped at `MAX_TOOL_SCHEMA_CHARS` = 16384 and the tool is refused over it, because capping the strings INSIDE a schema turns a load-time failure into a call-time one. Both constants are sized from this project's own practice -- 2.5x its longest description, ~3.6x its largest schema. A schema that will not serialise is refused by the same gate |
+| **A32** | **The non-text placeholder is appended to whatever text survived, the dropped kinds are the blocks the join actually skipped, one WARNING names the tool, and a structured error payload rides in the one error string.** The guard was `if not text and blocks`, so the disclosure was absent on exactly the half where the result still read as complete. The tool name became a PARAMETER because `_normalize` took the result alone and #49's rule -- one warning naming the tool -- was therefore unsatisfiable in the function it applies to. An empty text block is not reported as non-text: it carries nothing to drop, which was the placeholder contradicting itself. The error payload goes in the string and not a second key, because D23 promises one error shape; bounded at `MAX_ERROR_DETAIL_CHARS` = 500. NOT a multimodal result path, which `client.py` declines for stated reasons, and NOT a bound on the success path's `result` -- that is TECHNICAL_DEBT 48, ruled DEFER, and is pinned as a control |
+| **A33** | **`connect_all`'s except branch releases the `_start` task as well as the manager, and cancels it before the loop stops.** Found by running S13-08's uncovered path rather than by reading it. `_start()` is parked on `_ready.wait()` when the caller's budget expires and stays parked, because `CancelledError` is a `BaseException` so the manager's `except Exception` never reaches its `_ready.set()`. Left pending, asyncio reports "Task was destroyed but it is pending!" through its own logger at whatever moment the GC gets to it -- and `tui/app.py` attaches `TranscriptLogHandler` to the ROOT logger, so that line can surface in a user's transcript naming nothing. The ORDER is load-bearing and no return value reports it: a cancellation scheduled after `_shutdown_loop()` is never delivered |
+
+### What §67 deliberately does not change
+
+- **`active_context`'s unfiltered copy** (A28), pinned as a control
+  rather than tidied.
+- **`autoApprove` falling to `False`** (A29), for the same reason: the
+  key whose direction was already right.
+- **The strings inside `input_schema`** (A31). The tool is refused whole
+  instead; a truncated schema is a tool that fails at call time.
+- **The success path's unbounded `result`** (A32), which is
+  `TECHNICAL_DEBT 48` and ruled DEFER.
+- **`tools/registry.register` itself.** The gate lives in `register_all`
+  because MCP is the only dynamic registrant and the composed name is its
+  fact. A bound in the registry would be the fix-at-the-consumer shape
+  `AGENTS.md` names by name.

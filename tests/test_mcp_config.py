@@ -427,14 +427,129 @@ def test_non_boolean_auto_approve_falls_back_to_false(roots, value, caplog):
     assert any("autoApprove" in r.getMessage() for r in caplog.records)
 
 
-@pytest.mark.parametrize("value", ["false", "no", 0, None])
-def test_non_boolean_disabled_falls_back_to_false(roots, value):
-    """The mirror defect: `"disabled": "false"` skipped a server the user
-    meant to keep running."""
-    _write(roots["user"] / "mcp.json",
-           {"srv": {"command": "npx", "disabled": value}})
-    cfgs = mcp_config.load_server_configs(str(roots["project"]), trusted=False)
-    assert cfgs["srv"].disabled is False
+class TestAnUnparseableDisabledIsANamedFailure:
+    """`disabled` has no safe constant, which is why it no longer has one
+    (batch 150, A29).
+
+    This class REPLACES test_non_boolean_disabled_falls_back_to_false,
+    and the reason is worth keeping. That test asserted
+    `cfgs["srv"].disabled is False`, which is still true of the fixed
+    code -- the field IS False -- while the server no longer runs. An
+    assertion that holds on both sides of the change cannot discriminate,
+    so leaving it green beside the new behaviour would have been a guard
+    describing a tree that no longer exists.
+
+    Its CONCERN is kept and is the second test below: a server the
+    operator meant to keep running must not silently vanish. It does not
+    vanish; it is refused by name, with the reason, in the three places a
+    person looks.
+    """
+
+    @pytest.mark.parametrize("value", ["true", "yes", 1])
+    def test_a_truthy_non_boolean_does_not_run_the_server(self, roots, value):
+        """The defect: `"disabled": "true"` left disabled False, so the
+        server connected and ran its command, and F1's consent line --
+        which reads self.disabled -- presented it as live. The entry a
+        probe drove was
+        `{"command": "rm", "args": ["-rf", "/data"], "disabled": "true"}`
+        and the line it printed was `srv [user] runs: rm -rf /data`, with
+        no note."""
+        _write(roots["user"] / "mcp.json",
+               {"srv": {"command": "npx", "disabled": value}})
+
+        cfg = mcp_config.load_server_configs(
+            str(roots["project"]), trusted=False)["srv"]
+
+        assert cfg.transport == "unknown"
+        assert cfg.error == "'disabled' must be true or false"
+        # The three places it surfaces. describe() is the acknowledgement
+        # screen; transport 'unknown' is what makes _transport_for raise,
+        # so the server lands in failures by name rather than connecting.
+        assert "UNUSABLE" in cfg.describe()
+        assert "'disabled'" in cfg.describe()
+        assert "runs:" not in cfg.describe()
+
+    @pytest.mark.parametrize("value", ["false", "no", 0, None])
+    def test_a_falsy_non_boolean_is_refused_by_name_too(self, roots, value):
+        """The old test's concern, kept: a server the operator meant to
+        keep RUNNING must not silently disappear. It does not -- but it
+        does not silently run either, which is the point. `"false"` and
+        `"true"` are one hand edit apart and want opposite answers, so
+        the only answer that is right for both is to name the problem and
+        let one edit fix it.
+
+        `None` is included deliberately: `"disabled": null` is a key
+        written with no value, and JSON null is not a boolean. Refusing
+        it keeps one rule instead of a special case."""
+        _write(roots["user"] / "mcp.json",
+               {"srv": {"command": "npx", "disabled": value}})
+
+        cfg = mcp_config.load_server_configs(
+            str(roots["project"]), trusted=False)["srv"]
+
+        assert cfg.error == "'disabled' must be true or false"
+        assert "UNUSABLE" in cfg.describe()
+
+    def test_the_warning_names_the_server_the_key_and_the_value(
+            self, roots, caplog):
+        _write(roots["user"] / "mcp.json",
+               {"srv": {"command": "npx", "disabled": "true"}})
+
+        with caplog.at_level("WARNING", logger="mcp_client.config"):
+            mcp_config.load_server_configs(str(roots["project"]),
+                                           trusted=False)
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("'srv'" in m and "disabled" in m and "'true'" in m
+                   for m in messages), messages
+
+    def test_autoApprove_still_falls_back_to_false(self, roots):
+        """THE CONTROL, and the reason the two keys are not symmetric.
+        For `autoApprove` False IS the safe answer -- an unexpectedly
+        gated server prompts -- so that key keeps the old behaviour and
+        its own test above still passes unchanged. If this one ever
+        starts refusing the entry, the fix has spread past its
+        finding."""
+        _write(roots["user"] / "mcp.json",
+               {"srv": {"command": "npx", "autoApprove": "true"}})
+
+        cfg = mcp_config.load_server_configs(
+            str(roots["project"]), trusted=False)["srv"]
+
+        assert cfg.auto_approve is False
+        assert cfg.error is None
+        assert cfg.transport == "stdio"
+        assert "runs:" in cfg.describe()
+
+    def test_a_real_boolean_is_untouched_in_both_directions(self, roots):
+        """The second control: strict refusal must not break the
+        documented spelling. test_real_booleans_are_honoured_both_ways
+        covers the same ground from the other file section; this one
+        asserts the ERROR field specifically, because that is the thing
+        the new branch sets."""
+        _write(roots["user"] / "mcp.json", {
+            "on": {"command": "npx", "disabled": False},
+            "off": {"command": "npx", "disabled": True},
+        })
+
+        cfgs = mcp_config.load_server_configs(str(roots["project"]),
+                                              trusted=False)
+
+        assert cfgs["on"].disabled is False and cfgs["on"].error is None
+        assert cfgs["off"].disabled is True and cfgs["off"].error is None
+        assert cfgs["off"].transport == "stdio"
+        assert "disabled" in cfgs["off"].describe()
+
+    def test_the_consequence_reaches_the_flag_helper_itself(self):
+        """_flag no longer CHOOSES, which is the shape of the fix rather
+        than one of its outcomes: it reports that it could not parse, and
+        each caller states its own safe direction. A helper that returns
+        a bool again would make the asymmetry unexpressible, and the
+        docstring's old claim about 'both flags' would quietly come
+        back."""
+        assert mcp_config._flag("s", "k", True, "x") is True
+        assert mcp_config._flag("s", "k", False, "x") is False
+        assert mcp_config._flag("s", "k", "true", "x") is None
 
 
 def test_real_booleans_are_honoured_both_ways(roots):

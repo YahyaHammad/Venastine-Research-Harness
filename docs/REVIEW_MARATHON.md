@@ -753,6 +753,13 @@ machine. Most were fixed; the shapes are the brief.
   suite's **one** `integration` test, which reviewers may not run — so reason about it, read
   `mcp_client/client.py`'s own docstring about the inner bound and the outer wall clock, and report
   the exact command the fixer should run.
+  **ANSWERED, and the instruction worked exactly as intended (S13-08, fixed batch 150).** The
+  reviewer reported the command; the fixer ran it (1 passed in 9.66s) and then added the two cases
+  the one test could not be. The reasoning was right about the gap and could not settle the
+  question: the orphan-prevention path was pinned only over the in-process transport, which cannot
+  observe an orphan, and both paths turned out to be CLEAN with real children. This is the clearest
+  case the marathon has produced for a reviewer naming a command instead of guessing an outcome
+  — and for a `read-only` confidence tag meaning what it says.
 - Tools registered at runtime from a config a project ships: `registration.py` imports `permissions`
   and `tools.base` but **not** `tools.builtin` — a near-miss `tools/registry.py`'s uniqueness claim
   survives, and which a grep reports as a contradiction. It is not one.
@@ -1020,3 +1027,17 @@ Both `OWNER-DECISION` findings were then ruled and fixed (136, 137), and batch 1
 | 136 | S18-07 (owner ruling) | `requirements*.txt`, `pyproject.toml`, 5 CI jobs | 5/5 |
 | 137 | S13-07 (owner ruling, **A16**) | `agents/subagent_tool.py` + 4 documents | 4/4 |
 | 138 | the `DEFER`/`KNOWN`/`ACCEPTED` tranche | `docs/TECHNICAL_DEBT.md` 49-85 | 3/3 |
+
+**This table stops at 138 and the work did not** (noted batch 150). Batches
+139-150 cleared eight more surfaces -- secrets/logging/json_store, `tui/`
+lifecycle and rendering, file and doc tools, loop + client, compaction +
+sessions, `core/reasoning/`, and `agents/` + `skills/` + `mcp_client/` --
+and none of them added a row here. **`review/TRIAGE.md` is the live index**
+and is updated per batch; the per-batch narrative is `docs/DEVLOG.md`, which
+is where a row's worth of detail actually goes. The table is kept as the
+record of the `BLOCKS-MERGE` tranche and the two owner rulings, which is
+what it was built for, rather than extended into a third copy of a count
+that would then drift -- which is the defect shape this marathon spends most
+of its time finding. The paragraph above it says "what is left is the 86
+distinct `FIX-NOW` findings", and that was true when it was written: **17
+are left as of batch 150.**

@@ -23044,3 +23044,277 @@ had in batch 148.
 
 Affected tests re-run with `env -u AGENT_WORKSPACE` (433 passed) and under
 WSL (258 passed).
+
+## Batch 150 -- the gate a child could turn off, and three strings nobody here wrote (2026-10-12)
+
+The review marathon's `agents/` + `skills/` + `mcp_client/` surface: all six
+FIX-NOW findings -- **S13-02**, **S13-03**, **S13-04**, **S13-05**,
+**S13-06** and **S13-08**. Four owner rulings, recorded as
+`docs/ROADMAP_v3.md` §67's A28-A33.
+
+Six findings, all S3, and what they have in common is the thing the surface
+is named for: **every one is a boundary between this project's code and
+somebody else's** -- a project-tier agent definition, a hand-edited
+`mcp.json`, a server's own tool metadata, a server's own result. Five of the
+six are a check that stops one step short of what it is checking.
+
+**A suggested fix contradicted a pinned test, and that is new.** The fix
+pass has previously found a suggested shape too big (§65's A24), half of
+one (S04-02, S17-01), aimed at something already closed (S06-10), or
+insufficient (§66's A25 and A26). S13-03's is aimed correctly, at the right
+function, and adopting it would have re-opened a different defect that a
+test in the same file was written for.
+
+### S13-02: three greens around a hole, and a cost wider than the gate
+
+`AgentManager.child_context` composed the child's overrides in two lines:
+the parent's dict filtered to its `True` entries, then the agent's own
+merged **unfiltered**. Decision S2 is quoted in the docstring one line
+above it -- *"Only True entries carry -- a False is indistinguishable from
+absent under D14's OR, so unioning can only ever tighten, which is what
+makes it safe to do silently."*
+
+Driven through the real frontmatter parser and the real
+`security.permissions.requires_approval`, with the global
+`ToolApprovals().web_search` at `False` so the parent's entry was the only
+thing asking:
+
+| parent | agent `.md` | child's overrides | `requires_approval` |
+|---|---|---|---|
+| `{web_search: True}` | `web_search: false` | `{'web_search': False}` | **False** |
+| `{web_search: True}` | silent | `{'web_search': True}` | True *(control)* |
+| silent | `get_time: true` | `{'get_time': True}` | True *(control)* |
+
+`tests/test_agents.py` had three tests over four quadrants; the missing one
+is the one the code got wrong. And it did not heal one hop out -- a
+grandchild came back with `{}`, because the next `if v` dropped the `False`
+rather than restoring the `True`.
+
+**The cost is larger than the gate, and nothing says so.**
+`candidate_approvals` reads the same dict and is **both** the sign-off
+notice the user reads and the grant the child receives -- its own docstring
+calls keeping them one *"the whole substance of a sign-off"*. Measured, the
+loosened tool left the candidate list entirely:
+
+```
+agent silent  candidates=['mcp__probe__search', 'write_project_doc']  approval=True
+agent False   candidates=['write_project_doc']                        approval=False
+```
+
+So the user was not asked at call time **and** not told at sign-off time.
+
+**`active_context` needs no filter and keeps none**, measured rather than
+reasoned about: at depth 0 there is no parent to overwrite, a `False` is
+inert under D14's OR, and the next hop's filter drops it. Pinned as a
+control, because "the other composer looks similar" is how a fix grows past
+its finding -- and mutation A3 is that fix spreading, killed.
+
+**The VALUES are typed where they are parsed**, which is the report's named
+seam into S08's file and §66's S12-01 shape one file over.
+`core/config_loader.py` validated the mapping and not its contents, so
+`web_search: "false"` parsed to the STRING and `requires_approval` returned
+`'false'` from a function documented to return a bool. Measured first: **no
+value widens a gate**, because approval ORs and every falsy value already
+equals an absent key. So it is a type boundary, not an escalation -- and the
+comment three fields below had already stated the rule for its two scalar
+booleans, naming them as *"exactly the ones a restrictive agent definition
+uses to opt OUT"*. `approval_overrides` is the third; it opts IN.
+
+### S13-03: the key where failing closed has no direction
+
+`_flag` refused to coerce and returned `False` with a warning. For
+`autoApprove` that is the gated answer. For `disabled`, `False` means NOT
+disabled -- so the docstring's own second clause (*"an unexpectedly-enabled
+one runs third-party code unannounced"*) was the outcome it produced:
+
+| `mcp.json` | `cfg.disabled` | the consent line, in full |
+|---|---|---|
+| `"disabled": "true"` | False | `srv [user] runs: rm -rf /data` |
+| `"disabled": "yes"` | False | `srv [user] runs: rm -rf /data` |
+| `"disabled": 1` | False | `srv [user] runs: rm -rf /data` |
+| `"disabled": true` | True | the same line **plus `disabled`** *(control)* |
+
+**The report's suggested shape would have re-opened the mirror defect.** It
+proposes `disabled` falling to `True`. But
+`tests/test_mcp_config.py:430` pins `"disabled": "false"` to a server that
+RUNS, and its docstring names the alternative: *"The mirror defect:
+`"disabled": "false"` skipped a server the user meant to keep running."*
+The two spellings are one hand edit apart and want opposite answers, and the
+only thing distinguishing them is the value -- which `_flag` exists to
+refuse to interpret, correctly.
+
+So the owner ruled the third option: **an unparseable `disabled` makes the
+entry UNUSABLE by name**, which is the mechanism this module already has.
+`transport` stays `'unknown'`, `describe()` prints `srv [user] UNUSABLE:
+'disabled' must be true or false` on the acknowledgement screen,
+`_transport_for` raises so the server lands in `failures`, and `main.py`
+prints that too. Nothing runs and nothing is silent, which is the only pair
+of properties both spellings can have at once. It is decision G verbatim --
+*"an entry we cannot make sense of becomes that one server's named connect
+failure rather than a startup error for everything else."*
+
+`_flag` therefore no longer CHOOSES: it returns `Optional[bool]` and each
+caller states its own direction, because the difference between the keys is
+the finding. `autoApprove` is unchanged and pinned as a control.
+
+**And the old test was replaced rather than kept green.** It asserts
+`cfgs["srv"].disabled is False`, which is **still true** of the fixed code --
+the field IS False -- while the server no longer runs. An assertion that
+holds on both sides of the change cannot discriminate; this marathon's own
+vacuity catalogue has the shape. Its concern is kept as
+`test_a_falsy_non_boolean_is_refused_by_name_too`.
+
+### S13-04 and S13-05: three strings nobody here wrote
+
+Both halves of `mcp__<server>__<tool>` are outside this repository's
+control, and the SDK constrains neither -- `Tool.model_fields["name"]` is a
+bare required `str` with empty `metadata`, which is now pinned so a pin move
+upstream is visible. Driven through the real `register_all` over a real
+`ToolRegistry`:
+
+| why it is realistic | len | legal | registered | advertised |
+|---|---|---|---|---|
+| a dot in a hand-written `mcp.json` key | 22 | no | yes | yes |
+| a space from the server | 18 | no | yes | yes |
+| a newline from the server | 18 | no | yes | yes |
+| ordinary naming, two long words | **70** | no | yes | yes |
+| a server-supplied 400-char name | 408 | no | yes | yes |
+
+`registry.schemas()` is recomputed at the top of every model call (K7), so
+one such name is in the `tools` array of **every request for the rest of the
+session**. That is the inversion of this module's own invariant -- *"One
+unreachable server must never take down the others"* -- and worse than the
+case the comment guards: a **reachable, working** server makes every request
+malformed, a 400 on a malformed array is not transient, and nothing can
+attribute it (the error names a tool name; the user configured a server).
+
+Refused, not mangled: a renamed tool is one the model cannot name back.
+**Decision G is not reversed** -- what G rules out is up-front schema
+validation of `mcp.json`, nothing in `register_all` reads the file, and a
+named per-server failure is G's own remedy. `registration.py`'s own
+sentence about G gained the clause saying so, because left as written it
+would have been a claim made false by a change in the same file, which is
+the trap batch 130 had to avoid in `sandbox.py`.
+
+**The rule is one this project already satisfies.** All 31 built-in names
+match it, pinned as a control: it bounds third-party names rather than
+constraining the project. The prefix and two separators spend 7 of the 64.
+
+For S13-05, measured: a 50,082-character description with 4 newlines came
+out 50,094 with 4 newlines, advertised. `_catalog_text("z" * 50000)` returns
+**300** and collapses `"a\n## System"` to one line. A5's rule had two of the
+three sources of model-facing third-party text and not the third.
+
+**`input_schema` is the half neither report names**, and the owner ruled it
+in. It arrives untouched, a property description is model-facing text in
+the same request, and `title` is concatenated INTO the description -- both
+measured passing through whole. Two bounds, because they answer different
+questions: the description is collapsed and capped at
+`MAX_TOOL_DESCRIPTION_CHARS` = 2000 **after** the prefix and title are
+composed in, and an oversized whole schema loses the tool at
+`MAX_TOOL_SCHEMA_CHARS` = 16384. Capping the strings inside a schema was
+declined -- a truncated enum or pattern is a tool that fails at call time
+instead of load time. Both constants are sized from this project's own
+practice: 2.5x its longest description (786), ~3.6x its largest schema
+(4544).
+
+### S13-06: the disclosure that fired on the wrong half
+
+`if not text and blocks` meant the placeholder appeared only when **no**
+text block produced anything:
+
+| blocks in | result | placeholder | log |
+|---|---|---|---|
+| `text("Chart generated:")`, `image`, `image` | `{'content': 'Chart generated:'}` | **no** | **0** |
+| `text("   ")`, `image` | `{'content': '   '}` | **no** | **0** |
+| `text("")` | `{'content': '[non-text MCP content: text]'}` | yes, saying **text** | 0 |
+| `text("boom")` + `structured`, `is_error` | `{'error': 'boom'}` | -- | 0 |
+
+The rule is #49's, in `AGENTS.md` under its own heading: *"Every altered
+dispatch result logs ONE WARNING naming the tool and what changed."*
+`_normalize` altered a dispatch result and logged nothing on all three
+dropping paths. The second row is the worst and is in neither report's
+table: `'   '` is truthy, so the text survived the join, the image was
+dropped, and the model was handed three spaces that read as success.
+
+**And `_normalize` could not have obeyed the rule as written** -- it took
+`(result)` and had no tool name to name. The name is a parameter now. Rows
+three and four: an empty text block has nothing to drop, so reporting it as
+non-text was the placeholder contradicting itself; and a structured error
+payload is folded into the error STRING, because D23 promises one error
+shape and a second key makes every consumer of a dispatch error a place
+that may or may not read it. The success path's `result` stays unbounded on
+purpose -- that is TECHNICAL_DEBT 48, ruled DEFER, and pinned as a control.
+
+### S13-08: the test that could not look, and what running it found
+
+§17 AC8 is the claim that stdio servers are reaped. One test could see a
+real process and covered the graceful path. The path with the **recorded
+history of orphaning** is the other one, and `connect_all`'s own comment is
+about it: *"A timeout here used to abandon the manager permanently... So one
+hung server orphaned every other server's subprocess."* That recovery was
+pinned only over the in-process transport, which the integration file's own
+docstring says cannot see a child. **So the orphan-prevention path was
+proven in the one environment that cannot observe an orphan.**
+
+The report could not run the test and named the exact command as the
+deliverable it owed. Run: **1 passed in 9.66s**. Then the two cases beside
+it, with real children and a second fixture that never answers the
+handshake.
+
+**Both pass, and that is the finding.** The per-server handshake timeout
+reaps its child and so does the caller-side timeout, which means
+`stdio_client.__aenter__` DOES clean up under cancellation -- the SDK
+behaviour S13-08 names as unmeasured, since
+`AsyncExitStack.enter_async_context` pushes its exit callback only after
+`__aenter__` returns and the stack therefore never owned that child. The
+code was right; nothing here had looked. A `test-quality` finding that turns
+out to be exactly test quality is worth recording, because the other
+reading -- that an unobserved path is a broken one -- is the assumption this
+marathon has mostly been rewarded for.
+
+**One thing was wrong there** (A33). `connect_all`'s except branch releases
+the manager and the loop and not the `_start` task it created two lines
+earlier: that task is parked on `_ready.wait()` and stays parked, because
+`CancelledError` is a `BaseException` so the manager's `except Exception`
+never reaches its `_ready.set()`. Left pending, asyncio reports *"Task was
+destroyed but it is pending!"* through its own logger whenever the GC gets
+to it -- and `tui/app.py` attaches `TranscriptLogHandler` to the **root**
+logger, so that line can surface in a user's transcript naming nothing.
+`cancel()` is not the no-op it looks like, and that is measured: a
+`run_coroutine_threadsafe` future never reports `running`, so it returns
+True and the task really is cancelled.
+
+### Verification
+
+Full suite **7045** (+48: test_mcp_client 49 -> 78, test_config_loader
+120 -> 127, test_mcp_config 48 -> 55, test_agents 54 -> 59), plus the
+`integration` set 2 -> 4.
+
+Controls **29 of 29 KILLED** with the equivalence control correct, all five
+production files sha256-restored. **One control could not discriminate on
+its first form**, and it is the same class of thing this batch spent its
+day finding: F2 raised `SERVER_CONNECT_TIMEOUT_S`'s module default from
+20.0 to 600.0 to show that one hung handshake starves the others -- and the
+test monkeypatches that exact constant to 5.0, so the mutation was
+unobservable BY CONSTRUCTION and a working test "survived" it. A test that
+shrinks a budget cannot detect a change to that budget's default. Retargeted
+at the bound itself (`asyncio.timeout(...)` -> `contextlib.nullcontext()`),
+it kills in 65 seconds.
+
+`ruff check .` clean, both bandit checks clean, `pip-audit` clean with `-r`
+on both requirement files, gitleaks clean with CI's own two flags. Affected
+tests re-run with `env -u AGENT_WORKSPACE` and under WSL.
+
+Five doc gates caught five real things, which is worth naming because they
+are the kind a reader would have had to find: the suite total and four
+per-file tree counts; `AGENTS.md`'s claimed `A1-A27` range; a line in
+§67 that accidentally DEFINED an `S13` decision id by starting with
+`**S13-04**` (`_DEFINITION_LEAD` matches a bold id at a line start, so the
+false definition was created by line wrapping); a production comment citing
+a review finding id where the grammar requires a decision or a qualifier;
+and a production comment citing
+`test_non_boolean_disabled_falls_back_to_false` -- **the test this batch
+deleted**, which is exactly the case that gate's own message describes
+("a reader who greps the name and finds nothing concludes the thing is
+unguarded").

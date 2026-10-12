@@ -81,7 +81,31 @@ class AgentManager:
 
         Union rather than replace. Only True entries carry -- a False is
         indistinguishable from absent under D14's OR, so unioning can
-        only ever tighten, which is what makes it safe to do silently."""
+        only ever tighten, which is what makes it safe to do silently.
+
+        BOTH SIDES ARE FILTERED, and batch 150 is why. The parent's dict
+        was filtered and the agent's was merged over it raw, so a `False`
+        in the child's frontmatter OVERWROTE the parent's `True` and the
+        sentence above was false of the line below it: a parent that
+        prompts on every search spawned a child that did not, which is
+        the exact escalation the paragraph before this one describes.
+        It did not heal one hop further out either -- the next `if v`
+        dropped the False rather than restoring the True, so the
+        tightening was gone permanently rather than suspended for one
+        run. Three of the four quadrants had tests; the one the code got
+        wrong was the one with none.
+
+        The cost is not only the gate. `candidate_approvals` reads this
+        same dict, and it is BOTH the sign-off notice and the grant the
+        child receives -- measured, the loosened tool left the candidate
+        list entirely, so the user was neither asked at call time nor
+        told at sign-off time.
+
+        `active_context` needs no filter and deliberately has none: at
+        depth 0 there is no parent to overwrite, a False is inert under
+        D14's OR, and the next hop's filter drops it. Measured both
+        ways rather than reasoned about, because "the other composer
+        looks similar" is how a fix grows past its finding."""
         parent = parent_context or ToolContext()
         if agent.allowed_tools is not None:
             own = set(agent.allowed_tools)
@@ -95,7 +119,8 @@ class AgentManager:
                 if parent.allowed_tools is not None else None
             )
         overrides = {k: v for k, v in parent.approval_overrides.items() if v}
-        overrides.update(agent.approval_overrides)
+        overrides.update(
+            {k: v for k, v in agent.approval_overrides.items() if v})
         # SPAWN TARGETS COMPOSE THE SAME WAY, for C6's own reason one
         # field further out. The refusal that reads this field is checked
         # against the context a run holds, so a field that applied only at

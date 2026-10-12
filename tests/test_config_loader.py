@@ -774,6 +774,86 @@ def test_real_booleans_still_load_with_their_value(_redirect_roots):
     assert agent.use_project_context is True
 
 
+class TestApprovalOverrideValuesAreTypedToo:
+    """The mapping was validated and its VALUES were not (batch 150).
+
+    The two tests above state this file's rule for its scalar booleans:
+    validated, not coerced, because those are the fields a restrictive
+    agent definition uses to opt OUT. `approval_overrides` is the third
+    such field -- it opts IN to prompting -- and the check stopped at the
+    container, so `web_search: "false"` parsed to the STRING and
+    security.permissions.requires_approval returned 'false' from a
+    function documented to return a bool.
+
+    MEASURED, NOT ASSUMED: no value widens a gate. Approval ORs across
+    layers, so every falsy value is already indistinguishable from the
+    key being absent and every truthy one tightens. This is the type
+    boundary, which is why it is a batch-150 addition rather than part of
+    S13-02's escalation.
+    """
+
+    @pytest.mark.parametrize("value", ['"false"', '"no"', "0", "[]"])
+    def test_a_non_boolean_value_skips_the_file(self, _redirect_roots,
+                                                value, caplog):
+        _write_agent(_redirect_roots["user"], "stringy_override",
+                     ("approval_overrides:", f"  web_search: {value}"))
+
+        with caplog.at_level("WARNING", logger="core.config_loader"):
+            config_loader.initialize(str(_redirect_roots["project"]))
+
+        assert config_loader.get_agent("stringy_override") is None
+        assert any("approval_overrides" in r.getMessage()
+                   and "web_search" in r.getMessage()
+                   for r in caplog.records), [
+            r.getMessage() for r in caplog.records]
+
+    def test_the_warning_names_every_offending_key(self, _redirect_roots,
+                                                   caplog):
+        """Every key, not the first one: a definition with three bad
+        values should take one pass to fix, not three."""
+        _write_agent(_redirect_roots["user"], "several",
+                     ("approval_overrides:",
+                      '  web_search: "false"',
+                      "  get_time: true",
+                      '  fetch_url: "no"'))
+
+        with caplog.at_level("WARNING", logger="core.config_loader"):
+            config_loader.initialize(str(_redirect_roots["project"]))
+
+        messages = [r.getMessage() for r in caplog.records]
+        named = [m for m in messages if "approval_overrides" in m]
+        assert named, messages
+        assert "'fetch_url'" in named[0] and "'web_search'" in named[0]
+        assert "get_time" not in named[0], (
+            "the good key is named as if it were the problem")
+
+    def test_real_booleans_still_load(self, _redirect_roots):
+        """Control. Both directions, because a False is legal to WRITE --
+        it is merely inert once written (D14), and refusing it here would
+        be the three-state override tests/BREAKING_CHANGES.md forbids by
+        name."""
+        _write_agent(_redirect_roots["user"], "typed",
+                     ("approval_overrides:",
+                      "  web_search: true",
+                      "  get_time: false"))
+        config_loader.initialize(str(_redirect_roots["project"]))
+
+        agent = config_loader.get_agent("typed")
+        assert agent is not None
+        assert agent.approval_overrides == {"web_search": True,
+                                            "get_time": False}
+
+    def test_an_empty_mapping_is_not_an_error(self, _redirect_roots):
+        """Control: `all()` over nothing is True, and an author who
+        writes the key and no entries has written nothing wrong."""
+        _write_agent(_redirect_roots["user"], "blank",
+                     ("approval_overrides: {}",))
+        config_loader.initialize(str(_redirect_roots["project"]))
+
+        agent = config_loader.get_agent("blank")
+        assert agent is not None and agent.approval_overrides == {}
+
+
 # ---------------------------------------------------------------------------
 # ---- Undecodable content degrades, it does not abort (f3, r2-2) ----------
 # ---------------------------------------------------------------------------

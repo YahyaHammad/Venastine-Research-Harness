@@ -519,6 +519,129 @@ def test_s2_child_own_overrides_still_apply(_roots):
     assert child.approval_overrides.get("get_time") is True
 
 
+class TestTheFourthQuadrant:
+    """parent True / agent False -- the one combination the three tests
+    above do not cover, and the one the code got wrong (S13-02, A28).
+
+    The three `test_s2_*` functions take parent-True/agent-silent,
+    parent-False/agent-silent and parent-silent/agent-True. All three
+    were green. The merge filtered the PARENT's dict and applied the
+    agent's raw, so the quadrant with no test is the quadrant where a
+    `False` in a child's frontmatter overwrote the parent's `True` -- and
+    `child_context`'s own docstring says the opposite: "Only True entries
+    carry ... so unioning can only ever tighten, which is what makes it
+    safe to do silently."
+
+    Reaching it needs two custom agent definitions -- no shipped agent
+    declares approval_overrides at all -- which is why it is S3 and not
+    S2.
+    """
+
+    def test_a_child_cannot_turn_off_a_gate_its_parent_set(self, _roots):
+        """The defect, through the real policy function. The global
+        ToolApprovals().web_search is False, so the parent's context
+        entry is the ONLY thing requiring approval -- which is the exact
+        configuration child_context's docstring describes as the
+        escalation it closes."""
+        _write_harness_agent(_roots, "loosener",
+                             ["approval_overrides: {web_search: false}"])
+        config_loader.initialize(str(_roots["project"]))
+        agent = manager.get("loosener")
+
+        parent = ToolContext(approval_overrides={"web_search": True})
+        child = manager.child_context(agent, parent)
+
+        assert child.approval_overrides.get("web_search") is True
+        assert requires_approval("web_search", {}, child) is True
+
+    def test_the_tightening_survives_the_next_hop_too(self, _roots):
+        """It did not heal one hop further out: the next `if v` filter
+        dropped the False rather than restoring the True, so a grandchild
+        came back with {} and the gate was gone permanently rather than
+        suspended for one run."""
+        _write_harness_agent(_roots, "loosener",
+                             ["approval_overrides: {web_search: false}"])
+        _write_harness_agent(_roots, "quiet2")
+        config_loader.initialize(str(_roots["project"]))
+
+        parent = ToolContext(approval_overrides={"web_search": True})
+        child = manager.child_context(manager.get("loosener"), parent)
+        grandchild = manager.child_context(manager.get("quiet2"), child)
+
+        assert grandchild.approval_overrides.get("web_search") is True
+        assert requires_approval("web_search", {}, grandchild) is True
+
+    def test_the_signoff_notice_and_the_grant_name_the_tool_too(
+            self, _roots):
+        """The half the finding does not state, and the sharper cost.
+        candidate_approvals reads the same dict and is BOTH the sign-off
+        notice the user reads AND the grant the child receives -- its
+        docstring calls keeping them one "the whole substance of a
+        sign-off". So the loosened tool did not merely run ungated: it
+        left the candidate list, and the user was neither asked at call
+        time nor told at sign-off time.
+
+        A gated tool with no approval_check is the population this helper
+        draws from, which is what an MCP tool is."""
+        registry.register(ToolSpec(
+            name="mcp__q4__search",
+            schema={"name": "mcp__q4__search", "description": "d",
+                    "input_schema": {"type": "object", "properties": {}}},
+            handler=lambda params: {"content": "ok"},
+        ))
+        try:
+            _write_harness_agent(
+                _roots, "loosener",
+                ["approval_overrides: {mcp__q4__search: false}"])
+            config_loader.initialize(str(_roots["project"]))
+
+            parent = ToolContext(
+                approval_overrides={"mcp__q4__search": True})
+            child = manager.child_context(manager.get("loosener"), parent)
+
+            assert "mcp__q4__search" in manager.candidate_approvals(child)
+        finally:
+            registry.unregister("mcp__q4__search")
+
+    def test_an_agent_can_still_ADD_a_gate(self, _roots):
+        """Control one: the filter must not drop what the agent declares.
+        test_s2_child_own_overrides_still_apply asserts this from the
+        other side; stated here too because it is the property the fix
+        could most easily break -- filtering both sides is one character
+        away from filtering the wrong thing."""
+        _write_harness_agent(_roots, "strict2",
+                             ["approval_overrides: {get_time: true}"])
+        config_loader.initialize(str(_roots["project"]))
+
+        child = manager.child_context(manager.get("strict2"),
+                                      ToolContext())
+
+        assert child.approval_overrides.get("get_time") is True
+        assert requires_approval("get_time", {}, child) is True
+
+    def test_active_context_keeps_its_unfiltered_copy(self, _roots):
+        """Control two, and a SCOPE claim rather than a behaviour one.
+        active_context() composes nothing -- at depth 0 there is no
+        parent to overwrite -- so it keeps `dict(agent.approval_overrides)`
+        and a False may sit in it inertly: approval ORs, so a False is
+        indistinguishable from absent, and the next hop's filter drops it.
+
+        Pinned because "the other composer looks similar" is how a fix
+        grows past its finding. If someone ever makes this one filter
+        too, this test asks them to say why."""
+        _write_harness_agent(_roots, "loosener",
+                             ["approval_overrides: {web_search: false}"])
+        config_loader.initialize(str(_roots["project"]))
+
+        active = manager.active_context(manager.get("loosener"))
+
+        assert active.approval_overrides == {"web_search": False}
+        assert requires_approval("web_search", {}, active) is False
+        # and it cannot widen anything one hop down either
+        child = manager.child_context(manager.get("loosener"), active)
+        assert child.approval_overrides == {}
+
+
 # ---------------------------------------------------------------------------
 # ---- C6 on the third axis: spawn_targets ----------------------------------
 # ---------------------------------------------------------------------------
