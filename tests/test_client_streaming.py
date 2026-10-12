@@ -644,3 +644,198 @@ class TestThinkingIsCapturedAndKeptOutOfTheAnswer:
         tokens = list(call_model_stream(client, "GOOGLE", "m", [], "sys", []))
         assert [t.thinking_delta for t in tokens
                 if t.thinking_delta is not None] == []
+
+
+# ---------------------------------------------------------------------------
+# ---- A count that is PRESENT and not a number (S10-04, batch 147) ---------
+# ---------------------------------------------------------------------------
+# Every D21 case above omits the usage object, which is the one shape for
+# which `getattr(obj, field, 0)` fires its default -- so all three branches
+# could ship a read that returns None for a usage object that IS there, and
+# the suite stayed green. What reaches the loop is then
+# `None + None` three layers from the cause.
+#
+# The three SDKs get there for different reasons, and only one of them is
+# visible in a type annotation (see `_token_count`'s docstring, and
+# test_sdk_conformance.py, which asks the real packages):
+#
+#   google-genai  every usage field is Optional[int] = None, and a bare
+#                 usage object is truthy.
+#   anthropic     `int`, required -- and parsed with pydantic's construct(),
+#   openai        which skips validation.
+#
+# So the shape below is not a hypothetical for two of the three: it is what
+# a proxy omitting one count hands to a pinned SDK that will not refuse it.
+
+
+class TestACountThatIsPresentAndNotANumber:
+
+    def test_google_raises_and_names_the_missing_count(self, monkeypatch):
+        """A `usageMetadata` carrying `promptTokenCount` and not
+        `candidatesTokenCount` -- the shape a blocked or
+        all-thought-tokens completion produces."""
+        monkeypatch.setattr(
+            "core.client.load_provider_data",
+            lambda: {"GOOGLE": {"supports_stream_usage": True}})
+        chunks = [_google_chunk(
+            [SimpleNamespace(text="hi", function_call=None)],
+            usage=SimpleNamespace(prompt_token_count=11,
+                                  candidates_token_count=None))]
+
+        with pytest.raises(RuntimeError, match="output_tokens") as caught:
+            _drain(call_model_stream(_FakeGoogleClient(chunks), "GOOGLE",
+                                     "m", [], "sys", []))
+        # A DIFFERENT message from the nothing-at-all case, which is the
+        # point of having two: this one a reader cannot diagnose from the
+        # other, because something WAS reported.
+        assert "without usage data" not in str(caught.value)
+
+    def test_the_two_messages_stay_distinguishable(self, monkeypatch):
+        """The nothing-at-all wording is kept verbatim, so the guards that
+        match on it keep their meaning (two tests above do)."""
+        monkeypatch.setattr(
+            "core.client.load_provider_data",
+            lambda: {"GOOGLE": {"supports_stream_usage": True}})
+        chunks = [_google_chunk(
+            [SimpleNamespace(text="hi", function_call=None)],
+            usage=SimpleNamespace(prompt_token_count=None,
+                                  candidates_token_count=None))]
+
+        with pytest.raises(RuntimeError, match="without usage data"):
+            _drain(call_model_stream(_FakeGoogleClient(chunks), "GOOGLE",
+                                     "m", [], "sys", []))
+
+    def test_google_coerces_rather_than_raising_when_the_flag_is_false(
+            self, monkeypatch):
+        """The flag is the provider's own statement that it reports usage,
+        so without it a missing count is not a broken promise -- and 0 is
+        the answer the branch always meant to give. This is the half that
+        keeps a run possible against a provider that genuinely omits one
+        count."""
+        monkeypatch.setattr("core.client.load_provider_data", lambda: {})
+        chunks = [_google_chunk(
+            [SimpleNamespace(text="hi", function_call=None)],
+            usage=SimpleNamespace(prompt_token_count=11,
+                                  candidates_token_count=None))]
+
+        resp = _drain(call_model_stream(_FakeGoogleClient(chunks), "GOOGLE",
+                                        "m", [], "sys", []))
+        # Two ints, always -- which is what makes a belt in core/loop.py
+        # unnecessary rather than merely unfashionable.
+        assert resp.usage == {"input_tokens": 11, "output_tokens": 0}
+
+    def test_anthropic_is_not_exempt_despite_an_int_annotation(
+            self, monkeypatch):
+        """The branch nobody suspected, and the reason the fix is one
+        reader for three branches rather than a line in the Google one.
+
+        `anthropic.types.Usage.input_tokens` is annotated `int` and
+        REQUIRED -- which is a statement about what the server promises,
+        not about what the object holds: the SDK parses wire JSON with
+        construct(), and its own stream accumulator guards `input_tokens`
+        with `is not None` against that same annotation. Pinned against
+        the real package in test_sdk_conformance.py.
+
+        TWO ARMS, and the second one exists because the first could not
+        discriminate -- found by this batch's mutation pass. Reverting THIS
+        branch's read to `getattr(obj, field, 0)` left the None arm green,
+        because None is None wherever it is read and `_stream_usage` catches
+        it either way: that arm proves the composition, not the branch. A
+        value that is present and not a number but not None is what isolates
+        the read, and `True` is one -- a bool is an int instance in Python,
+        so `getattr` hands it through as a token count and `_token_count`
+        does not.
+        """
+        monkeypatch.setattr(
+            "core.client.load_provider_data",
+            lambda: {"ANTHROPIC": {"supports_stream_usage": True}})
+
+        def drive(usage):
+            final_message = SimpleNamespace(
+                content=[SimpleNamespace(type="text", text="hi")],
+                usage=usage)
+            client = _FakeAnthropicClient([_text_event("hi")], final_message)
+            return _drain(call_model_stream(client, "ANTHROPIC", "m", [],
+                                            "sys", []))
+
+        # The REACHABLE arm: a count the wire omitted.
+        with pytest.raises(RuntimeError, match="input_tokens"):
+            drive(SimpleNamespace(input_tokens=None, output_tokens=7))
+
+        # The ISOLATING arm: only this branch's own read can reject it.
+        with pytest.raises(RuntimeError, match="output_tokens"):
+            drive(SimpleNamespace(input_tokens=11, output_tokens=True))
+
+    def test_openai_is_not_exempt_either(self, monkeypatch):
+        """Both arms, for the reason the ANTHROPIC test above states."""
+        monkeypatch.setattr(
+            "core.client.load_provider_data",
+            lambda: {"OPENAI": {"supports_stream_usage": True}})
+
+        def drive(usage):
+            chunks = [_oai_chunk(_oai_delta(content="hi")),
+                      _oai_chunk(None, usage=usage)]
+            return _drain(call_model_stream(_FakeOpenAIClient(chunks),
+                                            "OPENAI", "m", [], "sys", []))
+
+        with pytest.raises(RuntimeError, match="output_tokens"):
+            drive(SimpleNamespace(prompt_tokens=5, completion_tokens=None))
+
+        with pytest.raises(RuntimeError, match="output_tokens"):
+            drive(SimpleNamespace(prompt_tokens=5, completion_tokens=True))
+
+    def test_a_later_chunk_without_a_count_keeps_the_one_reported(
+            self, monkeypatch):
+        """`if usage_meta:` used to overwrite both counts with whatever the
+        newest chunk held, None included. Reported beats unreported
+        whatever the order, which is the only rule that does not depend on
+        which chunk the provider chose to put its totals on."""
+        monkeypatch.setattr("core.client.load_provider_data", lambda: {})
+        chunks = [
+            _google_chunk([SimpleNamespace(text="hi", function_call=None)],
+                          usage=SimpleNamespace(prompt_token_count=11,
+                                                candidates_token_count=7)),
+            # A trailing chunk that carries a usage object and no counts.
+            _google_chunk([], usage=SimpleNamespace(
+                prompt_token_count=None, candidates_token_count=None)),
+        ]
+
+        resp = _drain(call_model_stream(_FakeGoogleClient(chunks), "GOOGLE",
+                                        "m", [], "sys", []))
+        assert resp.usage == {"input_tokens": 11, "output_tokens": 7}
+
+    @pytest.mark.parametrize("value", [True, False, "11", 11.5, -1, object()])
+    def test_present_is_not_usable(self, value, monkeypatch):
+        """`_record_window`'s rule, applied to the other nullable figure
+        these SDKs carry. A bool is an int in Python and `True` is not a
+        token count; a float, a string and a negative are not counts
+        either. Each is treated as absent, which under the flag raises
+        rather than being accumulated."""
+        monkeypatch.setattr(
+            "core.client.load_provider_data",
+            lambda: {"GOOGLE": {"supports_stream_usage": True}})
+        chunks = [_google_chunk(
+            [SimpleNamespace(text="hi", function_call=None)],
+            usage=SimpleNamespace(prompt_token_count=11,
+                                  candidates_token_count=value))]
+
+        with pytest.raises(RuntimeError, match="output_tokens"):
+            _drain(call_model_stream(_FakeGoogleClient(chunks), "GOOGLE",
+                                     "m", [], "sys", []))
+
+    def test_a_reported_zero_is_a_number_and_passes(self, monkeypatch):
+        """The control for the test above, and the discrimination the
+        coercion exists to preserve: an explicit zero is a count. It is
+        only `input == 0 AND output == 0` that D21 has ever refused, and
+        that rule is unchanged."""
+        monkeypatch.setattr(
+            "core.client.load_provider_data",
+            lambda: {"GOOGLE": {"supports_stream_usage": True}})
+        chunks = [_google_chunk(
+            [SimpleNamespace(text="hi", function_call=None)],
+            usage=SimpleNamespace(prompt_token_count=11,
+                                  candidates_token_count=0))]
+
+        resp = _drain(call_model_stream(_FakeGoogleClient(chunks), "GOOGLE",
+                                        "m", [], "sys", []))
+        assert resp.usage == {"input_tokens": 11, "output_tokens": 0}

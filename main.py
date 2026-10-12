@@ -204,6 +204,29 @@ def _await_sessions(thread_id, *, model, provider_name, effort,
     then held for the next message (SS19), so nothing is printed about them
     beyond the count.
 
+    THAT SENTENCE OUTLIVED ITS PREMISE, and ROADMAP_v3 §64's A21 is the
+    answer. Once SS5 made a wake a full model TURN with tool dispatch, "what
+    is running" during one IS the conversation -- `wake_conversation`'s own
+    docstring says "it IS that run continuing" -- and the per-turn SIGINT
+    handler CN10 installs is restored in `run_chat`'s `finally` before this
+    function is ever called. So the default handler was live here, and a
+    Ctrl+C during a wake raised `KeyboardInterrupt` from wherever it landed:
+    `_run`'s frame catches `Exception`, not `BaseException`, so it passed
+    straight through, and if it landed between the `tool_use` D20 has
+    already persisted and the `tool_result` that pairs with it, the thread
+    was left unresumable -- the very damage CN10 exists to prevent, in the
+    one place CN10 did not reach.
+
+    THE KEY STILL MEANS WHAT THE BANNER SAYS. It is not bound to stopping
+    the turn, deliberately: a press aimed at copying or pasting must not be
+    able to end a model turn, which is the measurement behind the TUI's
+    batch-57 rule ("ctrl+c copies when there is something to copy, and
+    starts a quit when there is not"). What changed is only the mechanism --
+    for the duration of each wake turn a handler of this function's own
+    DEFERS the interrupt: the sessions stop once the turn has finished and
+    written the rows it owes, which is CN10's own "the current step finishes
+    first" pointed at the sessions instead of the turn.
+
     The wake turn carries the run's own `authorization`, because it is that
     run continuing -- without it every gated call inside a wake would be
     denied for a reason about the harness rather than the request.
@@ -213,6 +236,23 @@ def _await_sessions(thread_id, *, model, provider_name, effort,
     if thread_id is None:
         return
     announced = False
+    # §64 A21. Set by the handler below instead of an unwind; read after the
+    # wake turn has finished. A list rather than a `nonlocal` because the
+    # handler is a closure over this frame either way and a one-element list
+    # cannot be rebound by accident.
+    interrupted = []
+
+    def _stop_sessions_after_this_turn(_signum, _frame):
+        # Installed only while a wake turn runs, and restored in a
+        # `finally`, so Ctrl+C while merely WAITING still takes the
+        # `except KeyboardInterrupt` below -- there is no turn to protect
+        # there, and nothing to defer for. `signal.signal` is main-thread
+        # only, which is where the CLI's chat loop and therefore this runs.
+        if not interrupted:
+            interrupted.append(True)
+            print("\n[stopping the background sessions - this turn "
+                  "finishes first]", flush=True)
+
     try:
         while True:
             live = sessions.live_for(thread_id)
@@ -231,6 +271,8 @@ def _await_sessions(thread_id, *, model, provider_name, effort,
                     return
                 continue
             text, record = build_wake(batch)
+            previous_sigint = signal.signal(
+                signal.SIGINT, _stop_sessions_after_this_turn)
             try:
                 # A wake turn may start sessions of its own, and something
                 # is still here to report them: this loop.
@@ -243,9 +285,24 @@ def _await_sessions(thread_id, *, model, provider_name, effort,
                 logger.exception("Wake turn failed")
                 print(f"\n[Error: {e}]")
                 return
+            finally:
+                # Before anything else can be printed or read, and on the
+                # error path too: outside a wake turn the interrupt belongs
+                # to the sessions and takes the handler below.
+                signal.signal(signal.SIGINT, previous_sigint)
             for notice in getattr(response, "notices", ()):
                 print(f"— {notice['text']} —")
             print(f"\nAgent: {response.text}\n")
+            if interrupted:
+                # The turn finished and wrote its rows; now the key does
+                # what it said. Returning to the prompt rather than waiting
+                # on the next batch, because the press was a request to
+                # stop waiting -- SS19 holds whatever arrives after this
+                # for the next message either way.
+                killed = sessions.kill_owned(thread_id,
+                                             shell_sessions.KILL_USER)
+                print(f"\n[stopped {len(killed)} background session(s)]")
+                return
     except KeyboardInterrupt:
         killed = sessions.kill_owned(thread_id, shell_sessions.KILL_USER)
         print(f"\n[stopped {len(killed)} background session(s)]")
@@ -361,9 +418,15 @@ def run_chat(
         #
         # Installed per turn and restored in the `finally`, so Ctrl+C at
         # the prompt still exits and Ctrl+C during the session wait
-        # still stops the SESSIONS -- `_await_sessions` catches the
-        # interrupt itself, and the aim of the key there is already
-        # right.
+        # still stops the SESSIONS.
+        #
+        # The aim of the key there was always right; the MECHANISM was
+        # not, and batch 147 fixed that end rather than this one. Because
+        # this handler is restored before `_await_sessions` is called, a
+        # Ctrl+C during a WAKE turn met the default handler and unwound
+        # the turn from wherever it landed -- so `_await_sessions` now
+        # installs a handler of its own for the duration of each wake,
+        # which defers the interrupt instead of raising it. See §64 A21.
         #
         # `signal.signal` is main-thread only, which is where this runs.
         # The CLI drains through run_to_completion, so nothing else is

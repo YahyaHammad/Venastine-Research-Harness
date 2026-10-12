@@ -264,6 +264,109 @@ class StreamToken:
 
 
 # ============================================================================
+# ---- Token usage, which every branch reports and no branch can trust -------
+# ============================================================================
+
+def _token_count(usage_obj, field: str) -> Optional[int]:
+    """One token count off a provider's usage object, or None for "this
+    provider did not report that number".
+
+    `_record_window`'s rule applied to the other nullable figure these SDKs
+    carry -- "present" is not "usable". A bool is an int in Python and is
+    not a token count; a negative count is not one either.
+
+    WHY THIS IS NOT A `getattr(obj, field, 0)` DEFAULT, which is the
+    softened form D21's own note forbids: the attribute EXISTS on all three
+    pinned SDKs and holds None, so the default never fires and the None
+    travels into `core/loop.py`'s `usage_in + usage_out`. Measured per SDK
+    (batch 147), because the three reasons are different and only one of
+    them is visible in a type annotation:
+
+      google-genai 1.0.0   every field of
+                           GenerateContentResponseUsageMetadata is
+                           Optional[int] = None, and a bare instance is
+                           TRUTHY -- so `if usage_meta:` passes and then
+                           every read is None.
+      anthropic 0.116.0    Usage.input_tokens and CompletionUsage.
+      openai 2.45.0        prompt_tokens are annotated `int` and REQUIRED,
+                           which says what the server promises rather than
+                           what the object holds: both SDKs parse wire JSON
+                           through pydantic's construct(), which skips
+                           validation. `construct_type({"output_tokens":
+                           7}, Usage)` yields input_tokens=None, and
+                           anthropic's own stream accumulator guards
+                           `input_tokens` with `is not None` against that
+                           same `int` annotation -- while assigning
+                           `output_tokens` unconditionally.
+
+    So an `int` annotation is not a runtime guarantee anywhere here, which
+    is why ONE reader serves all three branches rather than the Google one
+    that the defect was found in.
+    """
+    if usage_obj is None:
+        return None
+    value = getattr(usage_obj, field, None)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value >= 0 else None
+
+
+def _stream_usage(provider_name: str, counts: dict,
+                  supports_stream_usage: bool) -> dict:
+    """D21's usage-or-raise for all three streaming branches, and the one
+    place that turns "not reported" into a number.
+
+    RETURNS A TOTAL SHAPE: both values are ints, always. That is what makes
+    a belt in `core/loop.py` unnecessary rather than merely unfashionable --
+    the producer is where this belongs (AGENTS.md), and a consumer-side
+    guard would leave the next consumer to write its own.
+
+    D21 says a stream must not silently degrade token accounting, and the
+    guard that enforced it compared `input == 0 and output == 0`. A
+    PARTIAL report defeats that comparison without reporting anything
+    usable: `None != 0`, and once coerced, an unreported output count is
+    indistinguishable from a genuine zero. §64's A20 widens the rule to
+    match what D21 says rather than what it happened to compare: under the
+    flag, a count that is not a number raises, because the flag is the
+    per-provider statement that this provider DOES report usage and a
+    missing number is that promise broken.
+
+    Two messages, deliberately. "Completed without usage data" is kept
+    verbatim for the case it has always named -- nothing reported at all,
+    or an explicit zero for both -- so the existing guards keep their
+    meaning. The partial case gets its own line naming which count is
+    missing, because that is the one a reader cannot diagnose from the
+    other.
+
+    With the flag FALSE the coercion is all that happens, and 0 is the
+    right answer there: the flag's whole purpose is to let a provider that
+    genuinely omits usage run anyway.
+    """
+    reported_in = counts["input_tokens"]
+    reported_out = counts["output_tokens"]
+    if supports_stream_usage:
+        if (reported_in is None and reported_out is None) or (
+                reported_in == 0 and reported_out == 0):
+            raise RuntimeError(
+                f"Streaming call to {provider_name} completed without usage "
+                f"data despite supports_stream_usage=True. The stream may "
+                f"have been interrupted before the final usage chunk."
+            )
+        missing = [name for name, value in
+                   (("input_tokens", reported_in),
+                    ("output_tokens", reported_out)) if value is None]
+        if missing:
+            raise RuntimeError(
+                f"Streaming call to {provider_name} reported "
+                f"{' and '.join(missing)} as absent or not a number despite "
+                f"supports_stream_usage=True, so this step's token "
+                f"accounting would be short by it."
+            )
+    return {"input_tokens": reported_in or 0,
+            "output_tokens": reported_out or 0}
+
+
+# ============================================================================
 # ---- Tool schema translation ------------------------------------------------
 # ============================================================================
 
@@ -1264,31 +1367,31 @@ def call_model_stream(
             ]
             usage_obj = getattr(final_msg, "usage", None)
             usage = {
-                "input_tokens": getattr(usage_obj, "input_tokens", 0) if usage_obj else 0,
-                "output_tokens": getattr(usage_obj, "output_tokens", 0) if usage_obj else 0,
+                "input_tokens": _token_count(usage_obj, "input_tokens"),
+                "output_tokens": _token_count(usage_obj, "output_tokens"),
             }
 
         # D21 parity with the other two branches (audit #40). This branch
         # used to be exempt on the reasoning that get_final_message() always
         # carries usage -- which is very likely right for anthropic==0.116.0,
         # and is exactly the kind of assumption D21 exists because nobody can
-        # verify from inside. The getattr defaults above are the softened
-        # form D21's own note forbids, so on the DEFAULT provider an SDK
-        # field rename would have zeroed the budget silently, disabling both
-        # the budget stop condition and §21's compaction trigger. That is the
-        # mcp v1->v2 failure mode, and #35 is this file's live example of it.
+        # verify from inside. The getattr defaults that used to be above were
+        # the softened form D21's own note forbids, so on the DEFAULT
+        # provider an SDK field rename would have zeroed the budget silently,
+        # disabling both the budget stop condition and §21's compaction
+        # trigger. That is the mcp v1->v2 failure mode, and #35 is this
+        # file's live example of it.
         #
         # Honouring the flag rather than always raising keeps it meaning ONE
         # thing on all three providers, which is the coherence #40 is about;
         # providers.json.example ships it true for ANTHROPIC, so the default
         # posture is the checked one, and a proxy that genuinely omits usage
         # can still opt out instead of being unable to run.
-        if supports_stream_usage and usage["input_tokens"] == 0 and usage["output_tokens"] == 0:
-            raise RuntimeError(
-                f"Streaming call to {provider_name} completed without usage "
-                f"data despite supports_stream_usage=True. The stream may "
-                f"have been interrupted before the final usage chunk."
-            )
+        #
+        # Batch 147: the rule itself, and the coercion that makes `usage`
+        # two ints, are in `_stream_usage` -- one copy for three branches
+        # that carried three.
+        usage = _stream_usage(provider_name, usage, supports_stream_usage)
 
         yield StreamToken(final_response=ModelResponse(
             text=text, tool_calls=calls, usage=usage,
@@ -1308,7 +1411,11 @@ def call_model_stream(
 
         text_parts = []
         calls = []
-        usage = {"input_tokens": 0, "output_tokens": 0}
+        # None rather than 0: "not reported" has to stay distinguishable
+        # from "reported as zero" until D21 has looked at it, or the
+        # partial-report case the widened rule exists for arrives here
+        # already coerced and indistinguishable (batch 147).
+        usage = {"input_tokens": None, "output_tokens": None}
 
         for chunk in client.models.generate_content_stream(
             model=model,
@@ -1329,19 +1436,30 @@ def call_model_stream(
                         name=fc.name,
                         input=fc.args or {},
                     ))
+            # PER FIELD, and only when the field was reported. The
+            # guard used to be `if usage_meta:` -- which passes for a bare
+            # instance, because every field is Optional and the object is
+            # truthy anyway -- and then overwrote both counts with
+            # whatever it found, None included. A chunk that carries
+            # usage_metadata without a count now leaves an earlier chunk's
+            # figure alone: reported beats unreported whatever the order,
+            # which is the only rule that does not depend on which chunk
+            # the provider chose to put the totals on.
             usage_meta = getattr(chunk, "usage_metadata", None)
-            if usage_meta:
-                usage["input_tokens"] = getattr(usage_meta, "prompt_token_count", 0)
-                usage["output_tokens"] = getattr(usage_meta, "candidates_token_count", 0)
+            if usage_meta is not None:
+                for key, attribute in (
+                        ("input_tokens", "prompt_token_count"),
+                        ("output_tokens", "candidates_token_count")):
+                    reported = _token_count(usage_meta, attribute)
+                    if reported is not None:
+                        usage[key] = reported
 
-        # D21 parity with the OpenAI branch: raise if marked as supporting
-        # stream usage but the stream completed with zero usage.
-        if supports_stream_usage and usage["input_tokens"] == 0 and usage["output_tokens"] == 0:
-            raise RuntimeError(
-                f"Streaming call to {provider_name} completed without usage "
-                f"data despite supports_stream_usage=True. The stream may "
-                f"have been interrupted before the final usage chunk."
-            )
+        # D21, in the one place all three branches read it (batch 147).
+        # This is the branch the nullable-field defect was found in: the
+        # pinned google-genai declares every usage field Optional[int], so
+        # `usage` could leave here holding None and the raise could not
+        # fire -- `None != 0`.
+        usage = _stream_usage(provider_name, usage, supports_stream_usage)
 
         yield StreamToken(final_response=ModelResponse(
             text="".join(text_parts), tool_calls=calls, usage=usage,
@@ -1365,7 +1483,9 @@ def call_model_stream(
     text_parts = []
     reasoning_parts = []
     tool_fragments: dict[int, dict] = {}
-    usage = {"input_tokens": 0, "output_tokens": 0}
+    # None, for the reason the Google branch states: D21 cannot tell an
+    # unreported count from a zero one once it has been coerced.
+    usage = {"input_tokens": None, "output_tokens": None}
 
     finish_reason = None
     for chunk in client.chat.completions.create(**openai_kwargs):
@@ -1421,20 +1541,23 @@ def call_model_stream(
                         tool_fragments[idx]["arguments_parts"].append(
                             tc_delta.function.arguments
                         )
+        # Per field and only when reported -- the Google branch's shape,
+        # for its reason, and because `CompletionUsage` is parsed by the
+        # SDK's construct() and so can hold None against an `int`
+        # annotation (batch 147).
         usage_obj = getattr(chunk, "usage", None)
-        if usage_obj:
-            usage["input_tokens"] = getattr(usage_obj, "prompt_tokens", 0)
-            usage["output_tokens"] = getattr(usage_obj, "completion_tokens", 0)
+        if usage_obj is not None:
+            for key, attribute in (("input_tokens", "prompt_tokens"),
+                                   ("output_tokens", "completion_tokens")):
+                reported = _token_count(usage_obj, attribute)
+                if reported is not None:
+                    usage[key] = reported
 
     # D21: if the provider is marked as supporting stream usage but we
-    # got zero usage, the stream was likely interrupted before the final
-    # usage chunk arrived. Raise rather than silently reporting zero.
-    if supports_stream_usage and usage["input_tokens"] == 0 and usage["output_tokens"] == 0:
-        raise RuntimeError(
-            f"Streaming call to {provider_name} completed without usage "
-            f"data despite supports_stream_usage=True. The stream may "
-            f"have been interrupted before the final usage chunk."
-        )
+    # got no usable usage, the stream was likely interrupted before the
+    # final usage chunk arrived. Raise rather than silently reporting zero.
+    # One copy for three branches since batch 147.
+    usage = _stream_usage(provider_name, usage, supports_stream_usage)
 
     calls = []
     for idx in sorted(tool_fragments):

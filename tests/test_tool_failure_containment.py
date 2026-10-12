@@ -38,6 +38,9 @@ import logging
 import httpx
 import pytest
 
+from core.loop import RunAgentLoop, run_to_completion
+from tests.conftest import FakeMemory as _FakeMemory
+from tests.conftest import make_model_response, make_stream_from_response
 from tools.base import ToolSpec
 from tools.registry import ToolCallDenied, ToolRegistry
 
@@ -249,3 +252,184 @@ class TestTheArxivEndpoint:
         arxiv._call_arxiv_api("all:x", 1, "relevance")
 
         assert captured.get("follow_redirects") is True
+
+
+# ---------------------------------------------------------------------------
+# ---- ...and the LAYER ABOVE it, for the one of the two it let through -----
+# ---------------------------------------------------------------------------
+# Batch 147 (S10-03). `docs/REVIEW_MARATHON.md`'s defect shape 3: "containment
+# is a property of a LAYER, not of a function ... when you find one layer that
+# has containment, ask what the layer above does with the same class of
+# failure." dispatch() raises exactly two exceptions on purpose, and the layer
+# above caught exactly one of them -- the one a PROGRAMMER causes. The one it
+# let through is the one a MODEL causes, by inventing a tool name, or by
+# naming one whose MCP server went away between turns while its schemas are
+# still in the model's context.
+#
+# These drive the REAL `registry.dispatch` through the REAL `_dispatch_one`,
+# because a double that raises on cue would prove only that the `except`
+# catches what the double threw. The only thing patched is the model.
+
+def _loop_inputs(memory, **over):
+    base = dict(
+        memory=memory,
+        system_prompt="ignored-by-stub",
+        provider_name="ANTHROPIC",
+        model="ignored-by-stub",
+        context=None,
+        max_steps=10,
+        max_total_tokens=None,
+    )
+    base.update(over)
+    return base
+
+
+def _two_turns(mocker, calls):
+    """The model asks for `calls`, then answers. Two turns, so a test can
+    tell "the turn continued" from "the turn ended quietly"."""
+    first = make_model_response(
+        text="", tool_calls=calls,
+        usage={"input_tokens": 10, "output_tokens": 5})
+    second = make_model_response(
+        text="done", tool_calls=[],
+        usage={"input_tokens": 20, "output_tokens": 3})
+    streams = [make_stream_from_response(first),
+               make_stream_from_response(second)]
+
+    def _next(*args, **kwargs):
+        return streams.pop(0)(*args, **kwargs)
+
+    mocker.patch("core.loop.call_model_stream", side_effect=_next)
+
+
+class TestTheLoopContainsAnUnknownToolName:
+
+    def test_the_turn_survives_a_name_the_registry_does_not_hold(
+            self, mocker):
+        """THE ONE THAT MATTERS, and it is the durability half rather than
+        the error text: D20 has already persisted the assistant row with
+        the `tool_use` block before any dispatch happens, so a raise out of
+        `_dispatch_one` leaves a call nothing answers -- M4's pairing
+        broken, which `_settle_one` calls "an unresumable thread" and which
+        nothing in core/compaction.py or core/memory.py repairs.
+
+        Measured before the fix: the ValueError left `_run`, the thread was
+        stamped `turn_failed`, and one `tool_use` had no result.
+        """
+        memory = _FakeMemory()
+        _two_turns(mocker, [{"id": "c1", "name": "web_serch", "input": {}}])
+
+        response = run_to_completion(RunAgentLoop._run(**_loop_inputs(memory)))
+
+        assert response.stop_reason == "complete"
+        assert [row[0] for row in memory.tool_results] == ["c1"]
+        assert memory.failures == []
+        # Two model calls: the turn went on and told the model, which is
+        # the whole difference between losing one step and losing a run.
+        assert len(memory.assistant_messages) == 2
+
+    def test_the_model_is_told_the_name_and_what_to_do(self, mocker):
+        """Actionable in the shape `_tool_arguments`' parse errors already
+        take: what went wrong, and the thing to do instead. The NAME is
+        echoed because the model's own `tool_use` block already carries it
+        -- nothing of the exception is."""
+        memory = _FakeMemory()
+        _two_turns(mocker, [{"id": "c1", "name": "web_serch", "input": {}}])
+
+        run_to_completion(RunAgentLoop._run(**_loop_inputs(memory)))
+
+        error = memory.tool_results[0][1]["error"]
+        assert "web_serch" in error
+        assert "no tool named" in error
+        assert "Use one of the tools" in error
+        # Not the exception, and not a traceback.
+        assert "ValueError" not in error
+        assert "Traceback" not in error
+
+    def test_a_registered_tool_that_cannot_run_is_the_control(self, mocker):
+        """The control that makes the test above about the unknown NAME
+        rather than about tool failures in general: a registered tool whose
+        handler raises was contained before this fix and still is, by
+        dispatch() rather than by the loop."""
+        memory = _FakeMemory()
+        _two_turns(mocker, [{"id": "c1", "name": "web_search",
+                             "input": {"query": "x"}}])
+        mocker.patch("core.loop.registry.dispatch",
+                     return_value={"error": "web_search failed: boom"})
+
+        response = run_to_completion(RunAgentLoop._run(**_loop_inputs(memory)))
+
+        assert response.stop_reason == "complete"
+        assert memory.tool_results[0][1] == {"error": "web_search failed: boom"}
+
+    def test_a_ValueError_for_a_REGISTERED_tool_still_ends_the_turn(
+            self, mocker):
+        """The specificity, which is the whole reason this is not an
+        `except Exception`. dispatch() is documented as the fail-closed
+        backstop; a failure in the approval machinery coming back to the
+        model as a tool error would be that backstop silently gone.
+
+        `is_registered` is what draws the line, rather than the message --
+        G2's rule, a token check and never a parser.
+        """
+        memory = _FakeMemory()
+        _two_turns(mocker, [{"id": "c1", "name": "web_search",
+                             "input": {"query": "x"}}])
+        mocker.patch("core.loop.registry.dispatch",
+                     side_effect=ValueError("the approval machinery broke"))
+
+        with pytest.raises(ValueError, match="approval machinery"):
+            run_to_completion(RunAgentLoop._run(**_loop_inputs(memory)))
+
+        # And the turn is recorded as failed, which is the behaviour the
+        # unknown name used to share and should not have.
+        assert memory.failures and "approval machinery" in memory.failures[0]
+
+    def test_an_unknown_name_can_never_reach_the_parallel_backstop(self):
+        """Why the fix is in `_dispatch_one` and not in
+        `_dispatch_parallel`, whose NA14 comment claimed this case and
+        corrected it in batch 147.
+
+        `registry.parallel()` answers False for a name it does not hold --
+        deliberately, "the answer that keeps a stranger's tool sequential"
+        -- so an unknown call is always a group of ONE, and a group of one
+        takes the sequential branch. The containment the comment described
+        was in the wrong function for the failure it named.
+
+        The second partition is the control: it shows the grouping DOES
+        put siblings together, so the first result is about the unknown
+        name rather than about the partitioner refusing to group at all.
+        """
+        from core.client import ToolCallRequest
+        from core.loop import _parallel_groups
+        from tools.registry import registry as live
+
+        assert live.parallel("spawn_subagent") is True
+        assert live.parallel("web_serch") is False
+
+        def ids(calls):
+            return [[call.id for call in group]
+                    for group in _parallel_groups(calls)]
+
+        parallel_one = ToolCallRequest(id="a", name="spawn_subagent", input={})
+        unknown = ToolCallRequest(id="b", name="web_serch", input={})
+        parallel_two = ToolCallRequest(id="c", name="spawn_subagent", input={})
+
+        # An unknown name between two parallel siblings splits all three.
+        assert ids([parallel_one, unknown, parallel_two]) == [["a"], ["b"],
+                                                             ["c"]]
+        # CONTROL: the same three, reordered -- the siblings group and the
+        # unknown one is still alone.
+        assert ids([parallel_one, parallel_two, unknown]) == [["a", "c"],
+                                                             ["b"]]
+
+    def test_the_registry_itself_still_answers_a_programmer_loudly(self):
+        """Unchanged, and deliberately: `tools/registry.py`'s raise is the
+        right answer for a caller that can read a traceback. The loop is
+        the layer that knows its caller is a model, which is why the fix is
+        there and not here -- the test above this one is the same question
+        asked of the other layer."""
+        from tools.registry import registry as live
+
+        with pytest.raises(ValueError, match="Unknown tool"):
+            live.dispatch("never-registered-anywhere", {})

@@ -1111,6 +1111,63 @@ def _dispatch_one(call, *, context, run_info, response_channel, memory,
             )
         except ToolCallDenied as e:
             result = {"error": str(e)}
+        except ValueError:
+            # Batch 147. THE OTHER EXCEPTION dispatch() RAISES ON PURPOSE.
+            #
+            # Its unknown-tool guard is a ValueError and not a
+            # ToolCallDenied, deliberately: the two types separate "you
+            # misnamed it" from "policy blocks you", and that file frames
+            # the first as a caller bug. It is -- but the caller here is a
+            # language model, so the bug arrives the way a model's bugs
+            # arrive: a name it invented, a name whose MCP server went
+            # away between turns while its schemas are still in the
+            # model's context (registry.unregister()), or a name a prompt
+            # catalog advertises and nothing registered.
+            #
+            # Uncontained, that cost the whole turn AND left the thread
+            # unresumable: D20 has already persisted the assistant row
+            # carrying the `tool_use`, nothing writes a `tool_result`, and
+            # M4's pairing is broken with nothing in core/compaction.py or
+            # core/memory.py that repairs it -- `_settle_one`'s own words
+            # for that state are "an unresumable thread". Reported as this
+            # call's error instead, for the reason the parse_error branch
+            # above gives in full: the model is told what went wrong and
+            # can reissue, which is the difference between losing one step
+            # and losing a ten-pass run.
+            #
+            # `is_registered` RATHER THAN THE MESSAGE is what makes this
+            # specific. A bare `except Exception` would stop dispatch()
+            # being the fail-closed backstop it is documented as -- a real
+            # failure in the approval machinery would come back to the
+            # model as a tool error and vanish -- and matching on the text
+            # would be a parser where a token check will do (G2). The
+            # question is asked of the registry, which is the only thing
+            # that knows the answer, and a ValueError for a name that IS
+            # registered re-raises exactly as it did before.
+            #
+            # A re-registration between the raise and this line answers
+            # True and re-raises, i.e. degrades to the behaviour this
+            # replaces. That is the safe direction and it is why the
+            # check is not a cached snapshot.
+            if registry.is_registered(call.name):
+                raise
+            logger.warning(
+                "model called %r, which is not a registered tool; "
+                "reporting that to it as this call's error", call.name)
+            result = {"error": (
+                f"There is no tool named {call.name} in this run, so the "
+                f"call could not be made. Use one of the tools listed in "
+                f"this request.")}
+            # The NAME is the only thing echoed, and it is already in
+            # the thread: D20 persisted the model's own `tool_use` block
+            # before any of this. Nothing of the exception goes back,
+            # which matters here more than it looks: an error result the
+            # LOOP builds -- a denial, a parse error, this -- does not
+            # pass through `check_output_policy`, while every result
+            # dispatch() returns does, including its own error results
+            # (tests/test_tool_failure_containment.py pins that). So this
+            # is one of the few result strings in the system that no
+            # redactor will ever see.
     return _CallOutcome(
         result=result, granted=granted, notices=collected)
 
@@ -1223,12 +1280,22 @@ def _dispatch_parallel(calls, *, context, run_info, response_channel,
     # to this call's error result and the turn goes on.
     #
     # A BACKSTOP RATHER THAN THE USUAL PATH. `dispatch()` already turns a
-    # handler's exception into an error result, and ToolCallDenied is
-    # caught inside `_dispatch_one`. What reaches here is the narrower
-    # set: an unknown tool's ValueError, or a failure in the approval
-    # machinery itself. Logged with the traceback for dispatch()'s reason
-    # -- a real bug must stay findable -- and reported to the model in the
-    # shape it already understands.
+    # handler's exception into an error result, and BOTH exceptions it
+    # raises on purpose -- ToolCallDenied and the unknown-tool ValueError
+    # -- are caught inside `_dispatch_one`. What reaches here is a failure
+    # in the approval machinery itself. Logged with the traceback for
+    # dispatch()'s reason -- a real bug must stay findable -- and reported
+    # to the model in the shape it already understands.
+    #
+    # THIS COMMENT USED TO NAME THE UNKNOWN TOOL, and could not be reached
+    # by it (batch 147): `registry.parallel()` answers False for a name it
+    # does not hold, so `_parallel_groups` always put an unknown call in a
+    # group of ONE, and a group of one takes the sequential branch. The
+    # containment it described was in the wrong function for the failure
+    # it named -- so the failure ended the turn and this backstop never
+    # saw it. Both halves are fixed: `_dispatch_one` contains it for both
+    # drivers, and the sentence above no longer claims a case this cannot
+    # see.
     ordered = []
     for call, outcome, failure in settled_calls:
         if failure is not None:

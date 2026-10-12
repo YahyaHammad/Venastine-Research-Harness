@@ -16,6 +16,8 @@ the reader's exception branch, so a plain "y" would be eaten as a chat
 message instead.
 """
 
+import signal
+
 import pytest
 
 import config
@@ -268,3 +270,150 @@ class TestQuittingTheProcess:
                      side_effect=RuntimeError("also no"))
 
         main._close_sessions()  # must not raise
+
+
+class TestCtrlCDuringAWakeTurn:
+    """ROADMAP_v3 §64 (A21). The other phase of the same key.
+
+    `run_chat` installs CN10's per-turn handler and restores it in a
+    `finally` BEFORE `_await_sessions` is called, so during a wake turn the
+    default handler was live and Ctrl+C raised `KeyboardInterrupt` from
+    wherever it landed. `_run`'s frame catches `Exception`, not
+    `BaseException`, so it passed straight through -- and a press that
+    landed between the `tool_use` D20 has persisted and its `tool_result`
+    left the thread unresumable, which is the exact damage CN10 exists to
+    prevent.
+
+    The ruling is that the key must NOT be bound to stopping the turn: a
+    press aimed at copying or pasting cannot be allowed to end a model
+    turn, which is the measurement behind the TUI's batch-57 rule. So the
+    turn finishes and the sessions stop afterwards -- CN10's own "the
+    current step finishes first", pointed at the sessions instead of the
+    turn.
+    """
+
+    @staticmethod
+    def _interrupt_inside_the_wake(mocker, recorder):
+        """Replace the wake turn with one that presses Ctrl+C in the middle
+        of itself and then finishes normally, the way a real turn would
+        carry on to write the rows it owes."""
+        def fake_wake(**kwargs):
+            recorder.append(kwargs)
+            recorder.append({"handler_during_the_turn":
+                             signal.getsignal(signal.SIGINT)})
+            signal.raise_signal(signal.SIGINT)
+            # The handler runs between bytecodes; these are the bytecodes.
+            for _ in range(3):
+                pass
+            response = make_model_response(text="the turn finished")
+            response.thread_id = THREAD
+            return response
+
+        mocker.patch.object(RunAgentLoop, "wake_conversation",
+                            side_effect=fake_wake)
+
+    def test_the_turn_finishes_and_then_the_sessions_stop(
+            self, manager, session_starter, cli_stdin, fake_storage,
+            capsys, mocker):
+        """THE ONE THAT MATTERS. Before this, the press unwound the turn;
+        now it is deferred and the turn's answer still reaches the screen.
+
+        The sessions do stop -- that is what the banner promises and what
+        the key has always meant here -- and the prompt comes back, which
+        the second typed line proves by being taken as an ordinary turn.
+        """
+        recorded = []
+
+        def start_and_finish(n):
+            if n == 1:
+                # One finishes, which is what produces a wake batch at
+                # all; one keeps running, which is what the key is for.
+                _start(manager)
+                session_starter.started[-1]["process"].exit(0)
+                _start(manager, command="sleep 300", timeout_s=600)
+
+        calls = _turns(mocker, during=start_and_finish)
+        self._interrupt_inside_the_wake(mocker, recorded)
+        cli_stdin("start it", "and again")
+
+        main.run_chat(None, "ANTHROPIC", "m")
+
+        out = capsys.readouterr().out
+        # The turn ran to its end and said what it had to say.
+        assert "the turn finished" in out
+        # ...the press was acknowledged when it happened, not silently...
+        assert "this turn finishes first" in out
+        # ...and acted on afterwards.
+        assert "stopped 1 background session" in out
+        assert manager.row("s2").state == ss.KILLED
+        # The one that reported is untouched by the kill: it had already
+        # finished, which is why there was a turn to interrupt.
+        assert manager.row("s1").state != ss.KILLED
+        assert len(calls) == 2, "the prompt came back and took another turn"
+
+    def test_the_wake_turn_is_never_handed_a_cancel(
+            self, manager, session_starter, cli_stdin, fake_storage,
+            capsys, mocker):
+        """A21's negative half, and the reason this is not CN7's shape.
+        `wake_conversation` HAS a `cancel` parameter (batch 133 added it so
+        a subagent's wake could carry its parent's switch), so binding the
+        CLI's key to it would have been one line. The ruling is that the
+        key does not mean that here."""
+        recorded = []
+
+        def start_and_finish(n):
+            if n == 1:
+                # One finishes, which is what produces a wake batch at
+                # all; one keeps running, which is what the key is for.
+                _start(manager)
+                session_starter.started[-1]["process"].exit(0)
+                _start(manager, command="sleep 300", timeout_s=600)
+
+        _turns(mocker, during=start_and_finish)
+        self._interrupt_inside_the_wake(mocker, recorded)
+        cli_stdin("start it", "and again")
+
+        main.run_chat(None, "ANTHROPIC", "m")
+
+        wake_kwargs = recorded[0]
+        assert wake_kwargs.get("cancel") is None
+        assert "cancel" not in wake_kwargs
+
+    def test_the_handler_covers_the_turn_and_is_restored_after_it(
+            self, manager, session_starter, cli_stdin, fake_storage,
+            capsys, mocker):
+        """The EXTENT, which is the whole fix: a handler installed for too
+        long would swallow the interrupt that belongs to the wait, and one
+        installed for too short a time is the defect.
+
+        Asserted from inside the turn, because that is the only place the
+        difference is visible -- and against the handler in force outside
+        it, so the test cannot pass by both being the same thing.
+        """
+        recorded = []
+
+        def start_and_finish(n):
+            if n == 1:
+                # One finishes, which is what produces a wake batch at
+                # all; one keeps running, which is what the key is for.
+                _start(manager)
+                session_starter.started[-1]["process"].exit(0)
+                _start(manager, command="sleep 300", timeout_s=600)
+
+        _turns(mocker, during=start_and_finish)
+        self._interrupt_inside_the_wake(mocker, recorded)
+        outside = signal.getsignal(signal.SIGINT)
+        cli_stdin("start it", "and again")
+
+        main.run_chat(None, "ANTHROPIC", "m")
+
+        during = recorded[1]["handler_during_the_turn"]
+        assert callable(during)
+        assert during is not outside, (
+            "the wake turn ran under whatever handler was already in "
+            "force, which is the defect: run_chat restores its own in a "
+            "finally before _await_sessions is ever called")
+        assert during.__name__ == "_stop_sessions_after_this_turn"
+        assert signal.getsignal(signal.SIGINT) is outside, (
+            "the handler outlived the wake turn; the interrupt that "
+            "belongs to the WAIT would take it too")

@@ -24,12 +24,19 @@ submodule needs its package context. The mechanism is the one
 fake out of `sys.modules`, let the import machinery find the installed
 package, restore afterwards.
 
-WHAT THIS FILE DELIBERATELY DOES NOT DO. It makes no API call and asserts
-nothing about behaviour. Every check is a question about a TYPE the pinned
-package defines, which is what `_google_supports_thinking_budget` already
-does at runtime for one field. Presence-level checking finds nothing here --
-no fake invents a symbol the real package lacks -- so every check is at
-field level, which is where the divergences are.
+WHAT THIS FILE DELIBERATELY DOES NOT DO. It makes no API call -- no
+credentials, no network, no live request on any path. Presence-level checking
+finds nothing here either (no fake invents a symbol the real package lacks),
+so every check is at field level, which is where the divergences are.
+
+It used to say it asserted nothing about BEHAVIOUR, and that line outlived
+itself twice. Batch 132 added the Google schema reduction, which is a claim
+about what the translation produces; batch 147 added the usage read, which
+drives a provider branch of `call_model_stream` with real chunks and a
+hand-rolled client. Both are here rather than in the behaviour files for one
+reason: the behaviour in question is only wrong when the type is real, and
+the rest of the suite runs against the root conftest's fakes. A check that
+needs the real package belongs here; one that does not, does not.
 """
 
 import ast
@@ -38,6 +45,8 @@ import inspect
 import os
 import sys
 from types import SimpleNamespace as _SimpleNamespace
+
+import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -642,3 +651,147 @@ def test_the_openai_delta_keeps_unmodelled_reasoning_fields():
         parsed = ChoiceDelta.model_validate(
             {"content": None, "reasoning_content": "why"})
         assert getattr(parsed, "reasoning_content", None) == "why"
+
+
+# ---- Token usage, which every branch reports and no branch can trust -------
+# Batch 147 (S10-04, S10-07). `core/client.py`'s `_token_count` makes three
+# claims about three pinned SDKs, and a comment that is wrong about a
+# dependency is how #35 survived. These are those claims, asked of the
+# packages.
+
+def test_the_google_usage_fields_are_all_nullable():
+    """The reason the GOOGLE branch's `getattr(obj, field, 0)` never fired
+    its default: the attribute exists and holds None."""
+    with real_package("google"):
+        from google.genai import types as types_mod
+
+        fields = types_mod.GenerateContentResponseUsageMetadata.model_fields
+        for name in ("prompt_token_count", "candidates_token_count"):
+            assert name in fields, (
+                f"google-genai no longer carries {name}; the GOOGLE usage "
+                f"read in core/client.py names it")
+            assert fields[name].default is None, (
+                f"{name} is no longer defaulted to None on the pinned "
+                f"google-genai; _token_count's docstring says it is")
+
+        # And the half that makes `if usage_meta:` useless as a guard.
+        assert bool(types_mod.GenerateContentResponseUsageMetadata()) is True, (
+            "a bare usage object is no longer truthy on the pinned "
+            "google-genai -- the Google branch's old guard passed BECAUSE "
+            "it was, and then read None out of every field")
+
+
+def test_a_required_int_is_not_a_runtime_guarantee_on_either_other_SDK():
+    """The claim that makes the fix one reader for three branches.
+
+    `anthropic.types.Usage.input_tokens` and
+    `openai.types.CompletionUsage.prompt_tokens` are both annotated `int`
+    and REQUIRED, which reads like a guarantee and is not one: both SDKs
+    parse wire JSON through pydantic's `construct`, which skips validation.
+    So a server that omits the field produces an object that HAS it,
+    holding None, against an annotation that says that cannot happen.
+
+    The strict-validation half is asserted too, because it is what makes
+    the first half a statement about the SDK's PARSE PATH rather than about
+    pydantic: the same payload through the validating constructor raises.
+    """
+    with real_package("anthropic", "httpx"):
+        from anthropic._models import construct_type
+        from anthropic.types import Usage
+
+        assert Usage.model_fields["input_tokens"].annotation is int
+        parsed = construct_type(value={"output_tokens": 7}, type_=Usage)
+        assert getattr(parsed, "input_tokens", "absent") is None, (
+            "anthropic's construct path no longer admits a missing "
+            "input_tokens; _token_count's docstring says it does")
+        with pytest.raises(Exception):
+            Usage(output_tokens=7)
+
+    with real_package("openai", "httpx"):
+        from openai._models import construct_type
+        from openai.types import CompletionUsage
+
+        assert CompletionUsage.model_fields["prompt_tokens"].annotation is int
+        parsed = construct_type(value={"completion_tokens": 7},
+                                type_=CompletionUsage)
+        assert getattr(parsed, "prompt_tokens", "absent") is None
+        with pytest.raises(Exception):
+            CompletionUsage(completion_tokens=7)
+
+
+def test_the_anthropic_accumulator_treats_its_own_int_field_as_nullable():
+    """The SDK's own source agrees, which is the strongest form this claim
+    takes: `accumulate_event` writes `input_tokens` onto the snapshot only
+    `if event.usage.input_tokens is not None` -- a None guard on a field it
+    declares `int` -- while assigning `output_tokens` unconditionally. So
+    `get_final_message().usage.output_tokens` can be None, which is the
+    value the ANTHROPIC branch used to hand the loop."""
+    with real_package("anthropic", "httpx"):
+        import inspect
+
+        from anthropic.lib.streaming import _messages
+        from anthropic.types import MessageDeltaUsage
+
+        source = inspect.getsource(_messages.accumulate_event)
+        assert "if event.usage.input_tokens is not None" in source, (
+            "anthropic's stream accumulator no longer guards input_tokens "
+            "against None; _token_count's docstring cites that guard as "
+            "evidence that the `int` annotation is not enforced")
+        assert (MessageDeltaUsage.model_fields["output_tokens"].annotation
+                is int)
+
+
+def test_the_GOOGLE_usage_read_against_a_REAL_nullable_usage_object(
+        monkeypatch):
+    """The arrangement in which S10-04 was visible, and in which the fix is
+    visible too: the real pinned types, driven through the real branch.
+
+    Behaviour, in this file, for the reason the docstring now gives -- the
+    read is only wrong when `usage_metadata` is a real
+    GenerateContentResponseUsageMetadata. Every D21 case in
+    test_client_streaming.py omits the usage object, which is the one shape
+    for which the old `getattr(..., 0)` default actually fired.
+    """
+    monkeypatch.setattr("core.client.load_provider_data",
+                        lambda: {"GOOGLE": {"supports_stream_usage": True}})
+    with real_package("google"):
+        from google.genai import types as gt
+
+        import core.client as client
+
+        def chunk(usage_metadata):
+            return gt.GenerateContentResponse(
+                candidates=[gt.Candidate(content=gt.Content(
+                    role="model", parts=[gt.Part(text="hi")]))],
+                usage_metadata=usage_metadata)
+
+        class FakeClient:
+            def __init__(self, chunks):
+                self.models = _SimpleNamespace(
+                    generate_content_stream=lambda **kw: iter(chunks))
+
+        def drain(chunks):
+            final = None
+            for token in client.call_model_stream(
+                    FakeClient(chunks), "GOOGLE", "m", [], "sys", []):
+                if token.final_response is not None:
+                    final = token.final_response
+            return final
+
+        # CONTROL: both counts reported, so this test can see a correct
+        # read and the raises below are about the nullable field.
+        both = gt.GenerateContentResponseUsageMetadata(
+            prompt_token_count=11, candidates_token_count=7)
+        assert drain([chunk(both)]).usage == {"input_tokens": 11,
+                                              "output_tokens": 7}
+
+        # One count absent -- the shape a response with no candidate
+        # tokens produces. D21 refuses it under the flag (§64 A20).
+        partial = gt.GenerateContentResponseUsageMetadata(
+            prompt_token_count=11)
+        with pytest.raises(RuntimeError, match="output_tokens"):
+            drain([chunk(partial)])
+
+        # And a bare one, which is TRUTHY and reads None from every field.
+        with pytest.raises(RuntimeError, match="without usage data"):
+            drain([chunk(gt.GenerateContentResponseUsageMetadata())])

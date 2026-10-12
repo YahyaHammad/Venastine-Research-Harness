@@ -631,6 +631,12 @@ harness did not write.
   `try`, so a response cut mid-arguments by the token limit took a `JSONDecodeError` out of
   `call_model_stream`, out of `_run()`, and flipped a nine-pass run to `status='failed'`. That is one
   instance; the scope is every other place the loop trusts the shape of what came back.
+  **ANSWERED, and it found a second instance of the same shape** (S10-03, fixed in batch 147):
+  `registry.dispatch` raises on purpose for two things and `_dispatch_one` caught one of them,
+  and the one it let through was the one a MODEL can cause. Asking "what does the layer above do
+  with the same class of failure" found it; asking the question of the FIX found defect shape 9
+  inside it, because `_dispatch_parallel`'s containment comment named a case
+  `registry.parallel()` guarantees it can never see.
 - Retry once output is already on screen. `TECHNICAL_DEBT 25` closed in 113.
 - A cancelled turn and the rows it still owes — the most recent commit before this marathon is
   literally "A turn you can stop, and the rows a stopped turn still owes."

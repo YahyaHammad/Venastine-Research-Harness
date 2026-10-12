@@ -43,6 +43,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
+- **§64. Two numbers a provider promised and one key that meant two things** — **(BUILT in batch 147)** (an unknown tool name ended the turn and left the thread unresumable, a token count that was present and not a number defeated the guard that exists to catch exactly that, and Ctrl+C during a background session's wake turn unwound a model turn from wherever it landed)
 - **§63. The write that did not land where the consent said** — **(BUILT in batch 146)** (a document NAME that is a link wrote outside the project under a consent naming the inside path, every write path translated line endings so the bytes that landed were not the bytes approved, and the one hard deny compared a path segment with exact case)
 - **§61. Stopping a turn that is already running** — **(BUILT in batch 124)** (a turn going the wrong way is watched to its end or the harness is killed: nothing anywhere stops one, and both keys that look like they would end the process instead) (there is no way to drive this harness except by sitting in front of it, and the open standard that would change that has no concept of the approval gate this project is built around)
 
@@ -1865,3 +1866,128 @@ half of one.
   `shell.py`'s own gate has said for a long time -- "total, like everything
   else the gate calls" -- and `tools/base.py` now carries the one copy of
   why, including the half about gates that none of the six copies had.
+
+## §64. Two numbers a provider promised and one key that meant two things
+
+**Built in batch 147**, from the review marathon's loop-and-client surface:
+four `FIX-NOW` findings across `core/loop.py`, `core/client.py` and the
+tests that could not see either, plus one finding under a finding that the
+report asked for and did not have.
+
+Two of the answers are DECISIONS rather than fixes, and the owner ruled
+both. The second ruling went against all three options this batch offered,
+for a reason that turned out to be the TUI's own measurement from batch 57
+arriving at the CLI.
+
+### What the code did before this
+
+- **An unknown tool name ended the turn.** `registry.dispatch` raises
+  `ValueError` for a name it does not hold -- deliberately, because the two
+  exception types separate "you misnamed it" from "policy blocks you" --
+  and `_dispatch_one` caught only `ToolCallDenied`. So the raise left the
+  loop, `_run`'s frame stamped the thread `turn_failed`, and in a research
+  pass the orchestrator's `except Exception` recorded `status='failed'`.
+  The caller the registry frames as a programmer is, here, a language
+  model: a name it invented, a name whose MCP server went away between
+  turns while its schemas are still in the model's context, or a name a
+  prompt catalog advertises and nothing registered.
+- **And the thread was left unresumable**, which is the half that outlives
+  the turn. D20 has already persisted the assistant row carrying the
+  `tool_use` block before any dispatch happens, nothing writes a
+  `tool_result`, and M4's pairing is broken with nothing in
+  `core/compaction.py` or `core/memory.py` that repairs it --
+  `_settle_one`'s own words for that state are "an unresumable thread".
+- **The containment that was documented for this case could not be reached
+  by it.** `_dispatch_parallel`'s NA14 comment said "what reaches here is
+  the narrower set: an unknown tool's ValueError, or a failure in the
+  approval machinery itself" -- but `registry.parallel()` answers False for
+  a name it does not hold, so an unknown call is always a group of ONE and
+  a group of one takes the sequential branch. Defect shape 9 inside the fix
+  for defect shape 3.
+- **A token count that was PRESENT and not a number defeated D21.** The
+  GOOGLE branch read `getattr(usage_meta, "candidates_token_count", 0)`,
+  and on the pinned `google-genai==1.0.0` every usage field is
+  `Optional[int] = None` while a bare usage object is TRUTHY. So
+  `if usage_meta:` passed, the default never fired, and `usage` carried
+  None: D21's guard compares `== 0` and `None != 0`, so a stream that
+  reported nothing did not raise even under the flag, and
+  `core/loop.py`'s `usage_in + usage_out` died with a `TypeError` three
+  layers from the cause.
+- **The other two branches had the same defect for a reason no annotation
+  shows**, which the report asked to have audited and which changed the
+  shape of the fix. `anthropic.types.Usage.input_tokens` and
+  `openai.types.CompletionUsage.prompt_tokens` are annotated `int` and
+  REQUIRED -- and both SDKs parse wire JSON through pydantic's
+  `construct`, which skips validation. Measured:
+  `construct_type({"output_tokens": 7}, Usage)` yields
+  `input_tokens=None`, and anthropic's own stream accumulator guards
+  `input_tokens` with `is not None` against that same `int` annotation
+  while assigning `output_tokens` unconditionally. So the fix is one reader
+  for three branches rather than a line in the branch the defect was found
+  in.
+- **Ctrl+C during a wake turn unwound a model turn.** CN10 installs a
+  signal handler per turn and restores it in `run_chat`'s `finally`, and
+  `_await_sessions` -- which runs the wake turns -- is called after that
+  `finally`. So the default handler was live, `KeyboardInterrupt` rose from
+  wherever it landed, `_run`'s frame catches `Exception` rather than
+  `BaseException` and passed it straight through, and a press that landed
+  inside a wake's tool dispatch left exactly the unanswered `tool_use` CN10
+  exists to prevent. Two docstrings described this key and each was correct
+  when written: `_await_sessions` said "the interrupt is aimed at what is
+  running, not at the conversation", and SS5 then made a wake a turn --
+  after which `wake_conversation`'s own docstring says "it IS that run
+  continuing".
+- **The GOOGLE branch was covered only against a double that cannot refuse
+  anything**, and the one assertion about the translated parameters
+  encoded a model of the field no version of the SDK has had:
+  `parameters == {"type": "object"}` is true of the conftest's fake, which
+  stores the dict, and false of the real `FunctionDeclaration`, which
+  builds a `types.Schema` whose `.type` is the enum `Type.OBJECT`. It was
+  also the one input that could not discriminate -- `{"type": "object"}` is
+  a fixed point of `_reduce_for_google`, so no reduction, however broken,
+  could have failed it.
+
+### Design Decisions Record — §64 (A20-A21)
+
+| id | decision |
+|---|---|
+| **A20** | **Under `supports_stream_usage`, a token count that is not a number RAISES, and the coercion happens in one place for all three branches.** D21 says a stream must not silently degrade token accounting; what it compared was `input == 0 and output == 0`, which a PARTIAL report defeats without reporting anything usable. The flag is the per-provider statement that this provider DOES report usage, so a missing number is that promise broken, and the widened rule is what D21 already said rather than a new policy. Chosen over coercing to zero and leaving the comparison alone -- the report's shape -- because the reachable case the report itself names is `usageMetadata` omitting `candidatesTokenCount`, which that shape accepts silently with the output count as zero. **It cannot break a case that works today**: every input it raises on currently dies with a `TypeError` in `core/loop.py`, so the change is in the diagnosis, not in the outcome. Two messages are kept distinct, and the nothing-at-all wording is kept verbatim so the guards matching on it keep their meaning. With the flag FALSE only the coercion happens and both counts are zero, which is the opt-out's whole purpose -- `providers.json.example` ships GOOGLE false, so the blocked-completion shape still runs. `_stream_usage` returns two ints always, which is what makes a belt in `core/loop.py` unnecessary rather than merely unfashionable: fix at the producer |
+| **A21** | **Ctrl+C in the session wait stops the SESSIONS and never the turn, and it stops them once the running turn has finished.** The key keeps the one meaning `_await_sessions` has always advertised; what changes is that it no longer delivers it by unwinding a turn. For the duration of each wake turn that function installs a handler of its own which DEFERS the interrupt -- CN10's own "the current step finishes first", pointed at the sessions instead of the turn -- and restores it in a `finally`, so a press while merely waiting still takes the `except KeyboardInterrupt` that was always there. **Ruled against binding the key to the turn**, which was this batch's recommendation, and the owner's reason is the TUI's own measurement: a user copying or pasting around a running turn can press ctrl+c by accident, which is why batch 57 settled on "ctrl+c copies when there is something to copy, and starts a quit when there is not" and why a quit there takes two presses. Also ruled against one key doing both jobs, which CN9 refused for the TUI (*"escape stops the CONVERSATION and `ctrl+b` stops the SESSIONS, and neither quietly does the other's job"*). A stopped wait returns to the prompt with the sessions killed and anything that arrives afterwards held for the next message, which is SS19 unchanged |
+
+### What §64 deliberately does not change
+
+- **`registry.dispatch`'s exception taxonomy is untouched**, and so is its
+  unknown-tool raise. That raise is the right answer for a caller who can
+  read a traceback; the loop is the layer that knows its caller is a model,
+  which is why the containment is there and not in the registry. The
+  specificity is `registry.is_registered`, asked on the exception path
+  only: a bare `except Exception` would stop `dispatch()` being the
+  fail-closed backstop it is documented as, and matching on the message
+  would be a parser where G2 says a token check will do.
+- **No pre-flight filter of `response.tool_calls` against the registry.**
+  The S10 report declines it and names the reason: it would hide the name
+  from the model instead of telling it, so the model would reissue the same
+  call forever.
+- **`continue_conversation` still takes no `cancel`**, and the research
+  pipeline is still unstoppable through it. That is CN12's half and the S12
+  scope's call; this section's finding only establishes that a WAKE turn
+  could not be stopped, which it now can -- by the harness, at a boundary,
+  never by this key. NOT filed as a register item, because CN12 already
+  carries it: that deferral names "the research pipeline ... and so are
+  compaction and the `/grill-me` one-shot", and this function's production
+  callers are exactly `core/reasoning/json_retry.py`,
+  `core/reasoning/review.py`, `core/reasoning/orchestrator.py` and
+  `core/compaction.py` -- the things CN12 names and nothing else.
+- **CN10 itself is unchanged**, including what Ctrl+C means during an
+  ordinary CLI chat turn. The owner's reason for A21 applies to that
+  binding too -- the CLI has no selection to check and no two-press
+  confirmation, which is what the TUI added for exactly this -- and
+  reversing a locked decision is its own batch with its own decision
+  record. Filed as register item 94.
+- **The conftest's fake `genai` still validates nothing.** Batch 132 ruled
+  on that in the fake's own docstring ("This fake is NOT `extra="forbid"`
+  and does not validate -- it cannot, and that is what
+  `tests/test_sdk_conformance.py` drives the REAL package for"), and S10-07
+  raised it again as an open question. The answer stands: the fake accepts
+  anything and the conformance file is the only place that may assert about
+  a pinned type's shape.

@@ -4911,6 +4911,51 @@ workspace in exactly its sense.
 **Not:** treating this as a posture bug. The posture is frozen and correct;
 what moved is which directory the posture is ABOUT, one layer below it.
 
+## 94. The CLI's Ctrl+C stops a turn on the FIRST press, with nothing between a stray press and a stopped turn (open, filed batch 147)
+
+CN10 gave the CLI "Ctrl+C stops the turn", and the TUI's equivalent gesture
+has two protections that the CLI has neither of:
+
+- **A copy check.** `tui/app.py`'s `_copy_selection` runs first, and the
+  rule its docstring states is *"ctrl+c copies when there is something to
+  copy, and starts a quit when there is not. A press that copies never arms
+  and never quits"*. Batch 57 measured that, because `Input` and `TextArea`
+  bind ctrl+c to `copy` and a priority app binding pre-empts them
+  completely -- the clipboard stayed empty.
+- **A confirmation.** It takes two presses inside `QUIT_CONFIRM_S` (2.0s),
+  and the first one says what the second will do.
+
+In the CLI the first press cancels the running turn. **The copy check
+cannot be ported**: the selection belongs to the terminal, not to the
+process, so the harness cannot ask whether there is something to copy.
+Which terminal is in use decides whether a press with a selection even
+reaches the process -- Windows Terminal and a QuickEdit conhost copy
+instead of signalling, and others do not -- so the behaviour of this key
+varies by terminal in a way the harness cannot see or state.
+
+**Why it is filed rather than fixed.** It is the owner's reason for §64's
+A21, pointed at the binding A21 deliberately did not touch: a press aimed
+at copying must not be able to end a model turn. Reversing or qualifying
+CN10 is a locked-decision change and wants its own batch with its own
+record -- and the candidates are not equivalent:
+
+- **Two presses inside a window**, the TUI's shape. Costs a second press
+  for everyone who meant it, and the first press has to print something,
+  which during a streaming answer competes with the stream the CLI is
+  writing to the same stdout.
+- **A different key**, which the CLI cannot do: there is no key reader
+  during a turn. The CLI blocks in `run_to_completion`, so a signal is the
+  only thing that can reach it.
+- **Leave it**, on the reasoning that the CLI is a fallback (D12) and the
+  TUI is where someone works all day -- which is defensible and is the
+  reason this has not been urgent.
+
+**What is NOT at risk**, measured in batch 147: a stray press no longer
+tears a thread in half. §64's A21 made the wake turn's handler defer rather
+than unwind, and CN10's own handler already stops the turn at a BOUNDARY
+and writes every row it owes (CN4), so the cost of a stray press is a lost
+turn rather than an unresumable thread.
+
 ## Review-marathon arrivals at open issues with no register entry
 
 Two `KNOWN` findings landed on GitHub issues that are not mirrored here. Both
