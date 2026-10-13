@@ -205,7 +205,7 @@ class TestReviewerAgentDefinition:
         assert unavailable == []
 
     def test_it_does_not_read_project_context_or_thread_memory(self, reviewer, make_stage):
-        """The reviewer judges one run's artifacts. Project CONTEXT.md is
+        """The reviewer judges one run's artifacts. The project hub is
         untrusted-by-default content (D17) and thread memory is another
         conversation -- neither is evidence about whether a claim is true,
         and both are places a steer could be planted."""

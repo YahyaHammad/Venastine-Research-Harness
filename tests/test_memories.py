@@ -42,7 +42,7 @@ def _remember(fake_storage, content, scope="project", path="/proj/a",
 # ---------------------------------------------------------------------------
 
 def test_a_plain_chat_turn_counts_as_opted_in():
-    """M13. system_prompt_for() -- where CONTEXT.md is injected -- is
+    """M13. system_prompt_for() -- where the project hub is injected -- is
     reachable only when running AS an agent, so a literal reading of "an
     agent opts in" makes memories invisible in ordinary chat, which is the
     main case. That is the §25 shape: a capability a whole shell cannot

@@ -43,6 +43,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
+- **§70. A trust grant that could not persist, and a file three documents kept promising about** - **(BUILT in batch 153)** (`/init`'s trust settle was put on both the success and the failure path by audit #95, and the settle itself can raise -- `grant_trust` writes the store and re-reads every file the grant covers -- from a call outside the `try` on both of them, so a trust-store I/O failure left both config files written, the project untrusted, the notice replaced by a traceback on the CLI, and on the failure path the "wrote N files before that" accounting #95 existed to add discarded with it; the pre-write capture had the same shape from the other end, where one unreadable file under `.venastine/` killed the command before it wrote anything, three functions below a sibling that catches the same error on the same file and degrades; and the context file section 44 deleted was still named as a live fact in fifteen places across eight files, eleven of them in the suite, including a promise that it "is never special-cased out of the hash" -- a guarantee about a file that is not in the hash because it does not exist)
 - **§69. A consent prompt the model could repaint, and a refusal that read as a yes** - **(BUILT in batch 152)** (the CLI printed the security-critical half of every consent prompt with model-supplied terminal escapes in it -- the approval headline, the notice, the agent's stated reason, a reviewer's proposed correction and an MCP server's own description of its tool -- while the params block below them was safe because `json.dumps` renders an escape instead of emitting it; and `_signoff` returned the empty set for a line in which nothing named a candidate, which is the explicit `none` and which the loop spawns on, so a mistyped refusal authorised the spawn)
 - **§68. Six places the suite described itself, and two guards that could pass while scanning nothing** - **(BUILT in batch 151)** (the suite's own machinery was described in six places the tree had made false: a count of non-function-scoped fixtures wrong since batch 110 in four phrasings, a grouping contract whose worked example was numerically wrong, a worker table naming the branch CI does not take, a stub inventory missing the one entry that is not an SDK, and an offline promise that eleven `wsl.exe` calls and three test bodies both contradicted -- while the guard deciding whether the whole suite was collected compared against a copy of `pytest.ini`, and the guard forbidding a sixth copy of `settle` globbed a cwd-relative path and passed from anywhere else having read nothing)
 - **§67. The gate a child could turn off, and three strings nobody here wrote** - **(BUILT in batch 150)** (the child's approval overrides filtered the parent's dict and merged the agent's raw, so a `False` in a child's frontmatter turned off a gate the parent had set -- and the tool then left the sign-off notice as well as the gate; `disabled` had no safe constant and was given a named failure instead of one; a composed `mcp__<server>__<tool>` name nothing validated made every provider request malformed from one reachable server; a tool's description, title and input_schema arrived from third-party code uncapped and unnormalised into every model call; and the non-text placeholder fired only when no text survived, so a result with text AND an image dropped the image in silence)
@@ -2719,6 +2720,145 @@ leaked PID.
   fact. A bound in the registry would be the fix-at-the-consumer shape
   `AGENTS.md` names by name.
 ---
+
+## §70. A trust grant that could not persist, and a file three documents kept promising about
+
+**Built in batch 153**, from the review marathon's scaffolding-and-prompts
+surface: both `FIX-NOW` findings -- **S17-02** (S3) and **S17-05** (S4). Six
+owner rulings, recorded as A46-A49 plus two scope decisions below. Register
+items **107**, **108** and **109** are new.
+
+The two findings are the same sentence from opposite sides of one command.
+**`/init` IS THE ONE PLACE THE HARNESS WRITES INTO SOMEBODY'S REPOSITORY,
+AND BOTH HALVES OF WHAT IT TOLD THEM AFTERWARDS COULD BE WRONG** -- S17-02
+because the report could be replaced by a traceback, S17-05 because the
+document describing what the command authors named a file that had been
+deleted thirty-odd batches earlier.
+
+### S17-02: a settle on both paths, outside every handler on both of them
+
+Audit #95 found that a partial `/init` left a project the user had trusted
+a moment ago untrusted -- the write moves the D17 content hash, so
+`is_trusted()` answers False for content they had just authored -- and put
+the trust settle on the success path AND the failure path, with the
+`was_trusted` capture taken before the write. That fix is intact. What it
+did not notice is that **the settle itself can raise, and the call sits
+outside the `try` on both paths.**
+
+`grant_trust` raises `OSError` from either half: `_save_trust_store` writes
+the store through `json_store`, and `_content_hash` re-reads every file the
+grant covers. So a full disk, a read-only HOME, or one file an editor holds
+open took a bare `OSError` out of `generate()`.
+
+Driven through the real function, with the failure injected at the `open`
+boundary -- the shape `tests/test_project_init.py`'s own `_fail_write_of`
+already uses, so the whole chain runs:
+
+| arrangement | before | after |
+|---|---|---|
+| success path, store unwritable | raw `OSError`; **both config files on disk, the notice gone, `is_trusted` True -> False** | the notice, warning first, exit 0 |
+| write fails AND the store | raw `OSError`; **the whole report discarded, "wrote 1 file before that" with it** | `InitError` carrying the failure, the file list and the trust warning |
+| control: write fails alone | `InitError`, full report | unchanged |
+| a content file unreadable | raw `PermissionError` **before anything is written** | proceeds as untrusted, says so |
+
+On the CLI the traceback was certain: `run_init_command` catches `InitError`
+only, measured by driving it. The TUI's worker catches `Exception` as well,
+so there the same defect degraded to `/init failed: [Errno 28] ...` -- an
+error line, with the written list and the trust note lost just the same.
+
+**THE REPORT'S EVIDENCE RECIPE NO LONGER REPRODUCES, AND THE DEFECT DOES.**
+S17-02 poisoned the save by planting a directory at `<store>.tmp`. Batch 144
+gave `_replace_through_temp` a unique `<path>.<hex>.tmp` name -- because
+"two writers raced on the one name, and a failed `os.replace` left the
+leftover in the install tree forever" -- so that poison is now ignored and
+the arrangement passes. The mechanism the finding describes (full disk,
+read-only mount) is untouched. An expired recipe is not a fixed defect, and
+a batch that had only re-run the report's steps would have closed this one
+as stale.
+
+**THE PRE-WRITE HALF HAD ITS OWN ANSWER THREE FUNCTIONS UP.**
+`_read_existing_context` catches `OSError` on the project hub, degrades,
+logs a warning, and its comment says "Degrade like config_loader does with
+an unreadable hub document". `is_trusted()`'s read of that same file, nine
+lines later in the same function's flow, killed the command. One function
+answering one error two ways is what A47 closes.
+
+### S17-05: one relocation, fifteen live copies of the claim it falsified
+
+AGENTS.md's I10 reads *"Stubs are templates; only `CONTEXT.md` is
+generated"*. Section 44 moved the hub to the root `AGENTS.md` and removed
+`CONTEXT.md` outright, so that sentence is false twice over: the file does
+not exist, and the generated one is the hub.
+
+**The report names one sentence. Measured, the same claim was standing in
+fifteen places across eight files, and eleven of them are in the suite** --
+which is where a reader goes to CHECK a claim, so the stale copy is the one
+they find first. Two of the three AGENTS.md instances are unnamed by the
+report and one of them has teeth:
+
+- **I6 promises that `CONTEXT.md` "is never special-cased out of the
+  hash"** -- a guarantee about a file that is not in the hash because it
+  does not exist, which leaves the guarantee that matters (WS9 put the root
+  `AGENTS.md` in the listing precisely so a cloned hub cannot reach a
+  system prompt unasked) unstated. A reader checking the promise finds
+  nothing to check.
+- The durable-memory section still places the third context tier "beside
+  `CONTEXT.md`".
+- `tests/BREAKING_CHANGES.md` carried four live claims, including the "why"
+  column of the grant row for `write_project_doc` -- *"including
+  `.venastine/CONTEXT.md`, which is injected into every opted-in agent"*,
+  wrong in the path and the name -- and a fifth naming
+  `project_docs.CONTEXT_FILENAME`, a symbol that resolves nowhere. That
+  last one is batch 152's `_ASK_HANDLERS` shape, one document over and
+  PUBLIC rather than private, so that batch's gate cannot see it (item
+  109).
+- `tests/test_prompt_tier_boundary.py`, whose whole subject is which tier
+  leaks into a research pass, named the leaking tier by its removed
+  filename six times.
+- Three test NAMES: `test_context_md_still_counts_towards_the_hash` tests
+  `AGENTS.md` and says so in its docstring, and two in
+  `tests/test_config_loader.py` do the same.
+
+Fixed by **naming the tier or the role, not the filename** (A49), so the
+next relocation cannot make these sentences wrong again -- which is the
+whole defect shape. The past-tense accounts are left exactly as they are:
+`docs/DEVLOG.md` (14 mentions) and `docs/ROADMAP_v2.md` (25) are the
+append-only record of what happened when the file existed, and AGENTS.md's
+own "`CONTEXT.md` is gone outright" is the sentence that says so.
+
+### What §70 deliberately does not change
+
+- **`is_trusted()` keeps raising** (A48, item 107). Its other three
+  production callers are contained -- `main.load_project_config` catches
+  `(ValueError, OSError)` and exits 1 with one clean line -- and making a
+  security control answer "not trusted" where it currently refuses to start
+  is a change to D17's posture, not to this command's.
+- **No retry, no rollback, no trust-model change.** #95's U7 stands:
+  nothing is rolled back, because the hub's previous content is gone by the
+  first step, and deleting documents out of someone's project on an error
+  path is a worse failure than the one being reported.
+- **The `except` set inside the write `try` is not widened.** S17-02 says
+  it is audited and correct, and re-reading it agrees: `OSError` from
+  `makedirs`, `InitError` from `_write`/`_write_config`, `ToolCallDenied`
+  as a dead backstop.
+- **`generate()`'s other pre-write calls stay outside the `try`** (item
+  108). `manifest.is_blank`, `propose_kind` and `_config_plan` all touch
+  the filesystem before it, and an `OSError` from any of them is still a
+  traceback on the CLI. That is one handler's worth of work and a different
+  claim from this finding's.
+- **No gate over the word `CONTEXT.md`** (A49). The token is legitimate in
+  the past-tense accounts, so any gate over it needs a historical
+  allowlist -- and that allowlist would admit the three defects it was
+  built to catch.
+
+### Design Decisions Record — §70 (A46-A49)
+
+| id | decision |
+|---|---|
+| **A46** | **A trust re-grant that could not persist is REPORTED, not raised, and the warning leads the receipt.** The files are on disk, so the command did what it was asked; what the user cannot see is that the next launch will ask about this project again, so that line goes first and the exit code stays 0. `json_store` argues that "a trust grant that silently did not persist is worse than a crash" -- and that argument is about SILENCE, which this ends rather than softens. A settled run keeps the note LAST, as the footnote it has always been, and both orderings are asserted, so a fix that moved every trust line to the top could not pass. On the failure path the warning stays where the trust note already was, because the first line there is the write failure and that is the primary thing |
+| **A47** | **The pre-write trust capture degrades to UNTRUSTED and says so, and `_settle_trust` is total.** `is_trusted()` hashes every file the grant covers, so the capture is a read of somebody else's files and can fail; it sat before the `try`, and one unreadable file killed `/init` before it wrote anything. `_read_existing_context` three functions up catches `OSError` on the same file for the same reason, so this is one function stopping giving two answers to one error. **`False` rather than `True` for an unanswerable question**, which is `core/workspace_trust.py`'s own posture (`_load_trust_store` returns `{}` for anything unreadable and says it fails CLOSED in both senses): reading it as trusted would launder a cloned `.venastine/` in through a door opened by one locked file. No re-grant is attempted, and the reason is reported rather than left to be inferred from a trust prompt on the next launch |
+| **A48** | **The fix is at `/init`'s call sites, not inside the trust control.** `is_trusted()` raising is contained everywhere else it is called, and the loudest containment is the right one at startup: refusing to start names a configuration problem, where a fail-closed read would start degraded and say only "not trusted", which is also what an ordinary untrusted project says. Changing that is a D17 posture decision with its own blast radius, and it is filed with the measurement rather than taken on the way past |
+| **A49** | **A document names the TIER OR ROLE, not the filename, and the gate goes on the one sentence with a code relation.** "The project hub" is true before and after section 44, so the sentence cannot be falsified by the next relocation -- which is what made fifteen copies of one claim possible. Where the filename is the point, the current one is named. The gate is `test_the_file_agents_md_promises_is_inside_the_trust_hash`: it reads the filename out of I6's promise with a pattern that requires the name to be ADJACENT to the phrase, and checks it against `workspace_trust.content_files()`, which IS the hash's input set by construction. Adjacency is not fussiness -- batch 152 lost a gate twice to a scan that could not tell code from the prose written about it, and the paragraph this one reads from now names the old filename while explaining that it is gone. **No gate over the word itself**: it is legitimate in the past-tense accounts, and the allowlist that would permit those would permit the defect |
 
 ## §69. A consent prompt the model could repaint, and a refusal that read as a yes
 

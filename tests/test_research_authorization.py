@@ -152,9 +152,10 @@ class TestCandidates:
 
         write_project_doc resolves 15 document names to paths and
         overwrites them with no diff and no second question. One of them
-        is .venastine/CONTEXT.md, which config_loader injects into every
-        agent that opts in -- so a pipeline grant reaches M17's own
-        justification for excluding `remember` through a different tool.
+        is the project hub -- the root `AGENTS.md` -- which config_loader
+        injects into every agent that opts in, so a pipeline grant reaches
+        M17's own justification for excluding `remember` through a
+        different tool.
 
         It stays in the §18 sign-off, where a human answers about one
         named agent for one turn and the tool's notice names the

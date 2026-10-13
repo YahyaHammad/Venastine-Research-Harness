@@ -162,6 +162,48 @@ def _fail_write_of(monkeypatch, filename):
     monkeypatch.setattr(os, "open", _os_open)
 
 
+def _fail_read_of(monkeypatch, filename):
+    """Make one file unreadable the way a locked one is (S17-02).
+
+    THE SIBLING OF `_fail_write_of`, and needed for the same reason: the
+    trust capture `/init` takes before it writes hashes every file
+    `content_files()` lists, so the failure that reaches it is a READ
+    failure on somebody else's file -- one an editor holds open, one a
+    sync client is mid-write on, one whose mode the user changed. Patched
+    at both opens for the same reason that helper states: a hook on
+    `builtins.open` alone stopped firing once a caller moved to `os.open`,
+    and five tests went green against a failure that no longer happened.
+
+    `.tmp` siblings are NOT matched here. A write poison has to follow the
+    bytes through the temp file they are really written to; a read poison
+    has no such path, and matching them would make this fire on a
+    half-written file nobody is reading.
+    """
+    import builtins
+
+    real_open = builtins.open
+    real_os_open = os.open
+
+    def _is_the_target(path) -> bool:
+        if not isinstance(path, (str, os.PathLike)):
+            return False
+        return os.path.basename(os.fspath(path)) == filename
+
+    def _open(path, *args, **kwargs):
+        mode = args[0] if args else kwargs.get("mode", "r")
+        if _is_the_target(path) and "w" not in mode and "a" not in mode:
+            raise PermissionError(13, "Permission denied")
+        return real_open(path, *args, **kwargs)
+
+    def _os_open(path, flags, *args, **kwargs):
+        if _is_the_target(path) and not flags & (os.O_WRONLY | os.O_RDWR):
+            raise PermissionError(13, "Permission denied")
+        return real_os_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", _open)
+    monkeypatch.setattr(os, "open", _os_open)
+
+
 def _generate(**overrides):
     kwargs = {
         "model": "m",
@@ -1741,8 +1783,8 @@ class TestWorkspaceTrust:
         assert not workspace_trust.is_trusted(str(project))
         assert "not trusted" in notice["text"]
 
-    def test_context_md_still_counts_towards_the_hash(self, project,
-                                                      fake_agent):
+    def test_the_hub_still_counts_towards_the_hash(self, project,
+                                                   fake_agent):
         """The other half of I6: no special-casing. If AGENTS.md were
         excluded from the hash, /init would need no re-grant at all — and
         D17 would have a hole shaped exactly like this command."""
@@ -1754,6 +1796,290 @@ class TestWorkspaceTrust:
         _generate()
 
         assert workspace_trust._content_hash(str(project)) != before
+
+
+class TestTheTrustSettleIsTotal:
+    """S17-02. #95 put the trust settle on BOTH paths; the settle itself
+    could raise, and sat outside every handler on both of them.
+
+    `grant_trust` raises from either half -- `_content_hash` re-reads every
+    file the grant covers, `_save_trust_store` writes the store -- so a
+    full disk, a read-only HOME or a file an editor holds took a raw
+    `OSError` out of `generate()`. Driven before the fix, through the real
+    function with the failure injected at the `open` boundary: both config
+    files on disk, `is_trusted` True -> False, the notice GONE, and on the
+    CLI (`except InitError` only) a traceback. On the failure path it was
+    worse -- the `OSError` replaced the report, discarding exactly the
+    "wrote N files before that" accounting #95 existed to add.
+
+    THE REPORT'S OWN RECIPE NO LONGER REPRODUCES, which is worth recording
+    beside the fix: it planted a directory at `<store>.tmp`, and batch 144
+    gave `_replace_through_temp` a unique `<path>.<hex>.tmp` name, so that
+    poison is now ignored. The defect was identical; only the arrangement
+    had expired.
+
+    The pre-write capture is the same shape from the other end, and the
+    precedent for degrading rather than dying is three functions up in the
+    module under repair: `_read_existing_context` catches `OSError` on the
+    SAME file for the SAME reason.
+    """
+
+    TRUST_STORE = "trusted_projects.json"
+
+    def _trusted(self, project):
+        """A project with content to trust, trusted. Both halves matter:
+        `is_trusted()` short-circuits True for a project with nothing in
+        it, so without the agent file there is no question to ask."""
+        agents = project / ".venastine" / "agents"
+        agents.mkdir(parents=True)
+        (agents / "arrived_with_the_repo.md").write_text(
+            "---\nname: x\n---\nbody\n", encoding="utf-8")
+        root = os.path.realpath(str(project))
+        workspace_trust.grant_trust(root)
+        assert workspace_trust.is_trusted(root) is True, (
+            "the arrangement is the test: an untrusted project never "
+            "reaches the re-grant at all")
+        return root
+
+    def _config_run(self, project, **overrides):
+        """`--config` alone: no kind question, no model call, and the
+        trust settle still happens -- which is why this is the cheap way
+        to drive it."""
+        kwargs = {
+            "project_path": str(project),
+            "confirm": lambda _summary: True,
+            "notify": lambda _text: None,
+            "scaffold_docs": False,
+            "scaffold_config": True,
+        }
+        kwargs.update(overrides)
+        return generator.generate(**kwargs)
+
+    # ---- the success path ------------------------------------------------
+
+    def test_a_store_that_cannot_be_written_still_reports_the_files(
+            self, project, monkeypatch):
+        """The headline. The files are written and the user is told so --
+        where before, the whole notice was replaced by a traceback."""
+        from project_init import config_files
+
+        self._trusted(project)
+        _fail_write_of(monkeypatch, self.TRUST_STORE)
+
+        notice = self._config_run(project)
+
+        venastine = project / ".venastine"
+        assert (venastine / config_files.SETTINGS_FILENAME).is_file()
+        assert (venastine / config_files.MCP_FILENAME).is_file()
+        assert "settings.json" in notice["text"]
+        assert "mcp.json" in notice["text"]
+
+    def test_it_says_the_re_grant_did_not_happen(self, project,
+                                                 monkeypatch):
+        """And says what it costs, in the only terms the user can act on:
+        the next launch asks again. `json_store` argues that a trust grant
+        which silently did not persist is worse than a crash, and that
+        argument is about SILENCE -- this is the end of the silence, not a
+        softening of the policy."""
+        self._trusted(project)
+        _fail_write_of(monkeypatch, self.TRUST_STORE)
+
+        text = self._config_run(project)["text"]
+
+        assert "could NOT be re-granted" in text
+        assert "ask about this project" in text
+
+    def test_the_warning_leads_the_report(self, project, monkeypatch):
+        """A46. The files are on disk and the user can see them; what they
+        cannot see is the trust state, so the half that did not happen
+        goes first."""
+        self._trusted(project)
+        _fail_write_of(monkeypatch, self.TRUST_STORE)
+
+        first = self._config_run(project)["text"].splitlines()[0]
+
+        assert "could NOT be re-granted" in first, (
+            f"the warning must lead; the first line was {first!r}")
+
+    def test_a_settled_run_keeps_the_note_last(self, project):
+        """The control for the line above, and the half that pins the
+        ordering in both directions: a run whose trust settled as intended
+        keeps the note where it has always been, as the footnote it is. A
+        fix that moved every trust line to the top would pass the test
+        above and change the receipt of every successful /init."""
+        self._trusted(project)
+
+        lines = self._config_run(project)["text"].splitlines()
+
+        assert "re-granted for the updated" in lines[-1], (
+            f"the note belongs last on a settled run; got {lines!r}")
+        assert "Wrote" in lines[0]
+
+    def test_no_OSError_leaves_generate(self, project, monkeypatch):
+        """Said separately from the assertions above because the TYPE is
+        the defect: `main.run_init_command` catches `InitError` only, so
+        an `OSError` is the one shape that reaches the user as a
+        traceback. A later refactor that raised `InitError` from the
+        settle would keep every test above green and still be wrong about
+        the success path -- so this one names the class, and the test
+        below names the exit code."""
+        self._trusted(project)
+        _fail_write_of(monkeypatch, self.TRUST_STORE)
+
+        try:
+            self._config_run(project)
+        except OSError as e:          # pragma: no cover -- the regression
+            pytest.fail(f"an OSError escaped generate(): {e!r}")
+        except generator.InitError as e:   # pragma: no cover
+            pytest.fail(f"the success path raised instead of reporting: {e}")
+
+    # ---- the failure path -----------------------------------------------
+
+    def test_a_failed_re_grant_does_not_discard_the_failure_report(
+            self, project, monkeypatch):
+        """Both failures at once, which is the realistic arrangement: a
+        disk that cannot take the config file cannot take the trust store
+        either. The settle ran AFTER `failure` was captured and before it
+        was reported, so its exception threw the report away -- including
+        the file list that is the only way to tell "nothing happened" from
+        "most of it did"."""
+        from project_init import config_files
+
+        self._trusted(project)
+        _fail_write_of(monkeypatch, config_files.MCP_FILENAME)
+        _fail_write_of(monkeypatch, self.TRUST_STORE)
+
+        with pytest.raises(generator.InitError) as exc:
+            self._config_run(project)
+
+        message = str(exc.value)
+        assert "mcp.json" in message
+        assert "Wrote 1 file before that" in message
+        assert ".venastine/settings.json" in message
+        assert "could NOT be re-granted" in message
+
+    def test_a_write_failure_alone_still_reports_a_good_settle(
+            self, project, monkeypatch):
+        """The control: the trust note on the failure path must still be
+        the real one when the store wrote fine. #95's own test asserts
+        this; it is repeated here because the two poisons above are one
+        edit away from making it vacuous."""
+        from project_init import config_files
+
+        root = self._trusted(project)
+        _fail_write_of(monkeypatch, config_files.MCP_FILENAME)
+
+        with pytest.raises(generator.InitError) as exc:
+            self._config_run(project)
+
+        assert "re-granted for the updated" in str(exc.value)
+        assert workspace_trust.is_trusted(root) is True
+
+    # ---- the pre-write capture ------------------------------------------
+
+    def test_an_unreadable_trust_state_does_not_stop_the_run(
+            self, project, monkeypatch):
+        """The other end of the same sentence (A47). The capture reads
+        every file the grant covers, that read sat before the `try`, and
+        one unreadable file killed `/init` before it wrote anything -- as
+        a raw `PermissionError`, which on the CLI is a traceback.
+
+        `_read_existing_context`, three functions up in the same module,
+        catches `OSError` on the SAME file for the SAME reason and says
+        "Degrade like config_loader does". One function answering one
+        error two ways is what this closes."""
+        from project_init import config_files
+
+        self._trusted(project)
+        _fail_read_of(monkeypatch, "arrived_with_the_repo.md")
+
+        notice = self._config_run(project)
+
+        venastine = project / ".venastine"
+        assert (venastine / config_files.SETTINGS_FILENAME).is_file()
+        assert "could not be read" in notice["text"]
+        assert notice["text"].splitlines()[0].startswith(
+            "This project's trust state"), (
+            "the warning leads here too: this run did something the user "
+            "did not ask for -- it proceeded as untrusted")
+
+    def test_an_unreadable_trust_state_attempts_no_re_grant(
+            self, project, monkeypatch):
+        """I6's hole, from the new direction. An unanswerable trust
+        question reads as UNTRUSTED -- `core/workspace_trust.py`'s own
+        posture, where `_load_trust_store` returns `{}` for anything
+        unreadable and says it fails CLOSED in both senses. Reading it as
+        trusted would launder a cloned `.venastine/` in through a door
+        opened by one unreadable file, which is a worse answer than
+        asking again on the next launch."""
+        self._trusted(project)
+        granted = []
+        monkeypatch.setattr(workspace_trust, "grant_trust",
+                            lambda path: granted.append(path))
+        _fail_read_of(monkeypatch, "arrived_with_the_repo.md")
+
+        self._config_run(project)
+
+        assert granted == [], (
+            "trust was re-granted for a project whose trust state could "
+            "not be read")
+
+    def test_an_unanswerable_trust_question_reads_as_untrusted(
+            self, project, monkeypatch):
+        """A47's `False`, asserted where it is decided rather than only
+        through its consequence.
+
+        THE CONTROL FOUND THIS ONE. The end-to-end test above passed with
+        `_trust_before` returning True, because `_settle_trust` checks
+        `problem` before it looks at `was_trusted` and returns early --
+        so the belt and the braces hold the same trousers and neither was
+        pinned on its own. Both are worth having and both are pinned now:
+        this test is the capture's answer, and the one above is what
+        happens if the settle ever reads `was_trusted` first.
+        """
+        self._trusted(project)
+        _fail_read_of(monkeypatch, "arrived_with_the_repo.md")
+
+        was_trusted, problem = generator._trust_before(
+            os.path.realpath(str(project)))
+
+        assert was_trusted is False, (
+            "an unanswerable trust question must read as UNTRUSTED -- "
+            "reading it as trusted launders a cloned .venastine/ in "
+            "through a door opened by one locked file")
+        assert "could not be read" in problem, (
+            "and the reason has to reach the user, or the next launch's "
+            "trust prompt is the only evidence they get")
+
+    # ---- through the shell ----------------------------------------------
+
+    def test_the_cli_reports_a_failed_re_grant_and_exits_zero(
+            self, project, monkeypatch, capsys):
+        """A46 through the shell that had the traceback. The exit code is
+        the half a script sees, and the ruling is that files on disk are a
+        finished `/init`: the trust bookkeeping is reported, not promoted
+        to a failure. Driven through `run_init_command` rather than
+        asserted of it, because the handler set is the defect -- `except
+        InitError` is still all it catches."""
+        import main
+        from tests.conftest import FakeStdinReader
+
+        self._trusted(project)
+        _fail_write_of(monkeypatch, self.TRUST_STORE)
+
+        reader = FakeStdinReader(["y"])
+        monkeypatch.setattr(main, "_stdin_reader", lambda: reader)
+        monkeypatch.setattr(main.sys.stdin, "isatty", lambda: True)
+        args = main.build_parser().parse_args(["--init", "--project-config"])
+
+        code = main.run_init_command(args, "ANTHROPIC", "m")
+
+        out = capsys.readouterr().out
+        assert code == 0, (
+            "the CLI reported a failure for a run that wrote every "
+            "file it was asked to")
+        assert "could NOT be re-granted" in out
+        assert "settings.json" in out
 
 
 # ---------------------------------------------------------------------------

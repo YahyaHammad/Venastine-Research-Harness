@@ -5559,6 +5559,98 @@ rebuild.
 is the boundary A44 states, and `mutate152.py`'s D4 is the must-survive
 control that would turn red when somebody crosses it.
 
+## 107. `is_trusted()` raises for an unreadable file, and every caller pays for that differently (open, measured batch 153)
+
+**What was measured.** `core/workspace_trust.is_trusted` hashes every path
+`content_files()` lists -- the root `AGENTS.md` and everything under
+`.venastine/` -- and `_content_hash` opens each one with no guard. A file an
+editor holds open, a sync client is mid-write on, or whose mode the user
+changed makes it raise. Batch 153 made `/init`'s two call sites total
+(A47); the other three callers were measured rather than changed:
+
+- `core/config_loader.initialize` (`:1130`) -- reached at startup through
+  `main.load_project_config`, which catches `(ValueError, OSError)` and
+  `SystemExit(1)`s with `Configuration error: [Errno 13] Permission
+  denied`. **Contained, and the message names an errno rather than the
+  file**, so the user is told the configuration is broken and not which
+  file to unlock.
+- `main._ensure_workspace_trust` (`:2360`) -- the same `try`, same exit.
+- `main._start_mcp` (`:2488`) -- inside that function's own broad `try`,
+  which reports per server and does not stop the harness.
+
+**Why it was not fixed here (A48).** The fail-closed alternative is
+`is_trusted` answering False for an unanswerable question, which is this
+module's own posture for a damaged store (`_load_trust_store` returns `{}`
+and says it fails CLOSED in both senses). Applied to a content READ it
+changes startup from "refuse to start, name a configuration error" to
+"start degraded, print the ordinary not-trusted notice" -- and that notice
+is indistinguishable from the one an ordinary untrusted project gets, so
+the louder behaviour is arguably the right one for a security control. It
+is a D17 posture decision with its own blast radius, not a side effect of
+repairing one command.
+
+**The cheap half, if only one thing is done:** `load_project_config`'s
+message could name the path, since the `OSError` carries `filename`. That
+is a one-line change and does not touch the gate.
+
+## 108. `generate()`'s other pre-write filesystem calls are still outside its `try` (open, measured batch 153)
+
+**What was measured.** Batch 153 made the trust capture at
+`project_init/generator.py` total because it sits before the write `try`.
+Three siblings still do: `manifest.is_blank(root)` and `propose_kind(root)`
+(the kind question's inputs, both directory walks) and `_config_plan(root)`
+(`os.path.exists` per name, which does not raise). `_read_existing_context`
+and `manifest.detect_facts` are already covered -- the first catches
+`OSError` itself, the second runs inside the `try`.
+
+So an `OSError` from a walk -- a directory the user cannot list, a path
+that stopped being one mid-run -- still leaves `generate()` as an `OSError`.
+**`main.run_init_command` catches `InitError` only**, measured by driving
+it, so on the CLI that is a traceback; the TUI's worker catches `Exception`
+and degrades to an error line.
+
+**The two shapes of answer, neither taken:** widen the CLI handler to
+`OSError` (one line, and it makes the two shells agree about containment,
+which is what `project_init/generator.py`'s own docstring says this module
+exists to guarantee for policy), or move the pre-write calls inside a
+`try` that raises `InitError`. The first is a claim about every future
+escape; the second is a claim about these three. Doing both is probably
+right and is a decision rather than an edit.
+
+**Not:** a blanket `except Exception` in `run_init_command`. The TUI has
+one and says why it is acceptable there (a worker thread whose death takes
+the app); the CLI has a process to end cleanly and a traceback is more
+useful than a swallowed bug.
+
+## 109. Nothing resolves the test names `tests/BREAKING_CHANGES.md` cites (open, measured batch 153)
+
+**What was measured.** Every row in the guard log names the test that
+would break -- that is the column's whole job -- and no gate checks that
+the name exists. Batch 153 renamed three tests for S17-05 and found their
+rows by `grep`, which is the practice TECHNICAL_DEBT item 7 already
+records as the thing that gets forgotten.
+
+The same batch found one row naming a symbol that resolves nowhere:
+`project_docs.CONTEXT_FILENAME` (`tests/BREAKING_CHANGES.md:2937`),
+reworded to past tense there. **That is batch 152's S16-03 shape, one
+document over and PUBLIC rather than private**, so section 69's A44 gate
+-- which is deliberately scoped to backquoted identifiers with a leading
+underscore, in `AGENTS.md` -- cannot see it.
+
+**Why it is not a ten-line gate.** The column is prose, not a field: a row
+may name one test, two, a parametrised id (`test_x[<tier>]`), a class, a
+file, or a phrase ("Every test that writes or reads the old path -- 20-odd
+across four files"). Pinning it means deciding what counts as a citation
+first, which is A44's own lesson: the resolution rule was chosen by
+measuring three candidates against the real corpus, and two of the three
+failed on correct references. Counting `test_[a-z_]+` tokens and
+resolving them against the collected session is the probe worth writing
+before the gate.
+
+**What it would have caught.** Not this batch's defect -- the three names
+were correct until this batch renamed them. It catches the NEXT rename,
+which is the half nobody is present for.
+
 ## Review-marathon arrivals at open issues with no register entry
 
 Two `KNOWN` findings landed on GitHub issues that are not mirrored here. Both

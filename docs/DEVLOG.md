@@ -23788,3 +23788,198 @@ check.
 
 FIX-NOW: **74 done, 12 open** -- 2 on `project_init/` + `prompts/`, and
 the 10 of the self-contained tail.
+
+## Batch 153 -- a trust grant that could not persist, and a file three documents kept promising about (2026-10-13)
+
+The review marathon's scaffolding-and-prompts surface, both `FIX-NOW`
+findings -- **S17-02** (S3) and **S17-05** (S4). Four owner rulings,
+recorded as `docs/ROADMAP_v3.md` §70's A46-A49. Three register items are
+new: **107**, **108** and **109**.
+
+The two findings are one sentence from opposite sides of one command.
+**`/init` is the only place this harness writes into somebody's
+repository, and both halves of what it told them afterwards could be
+wrong** -- S17-02 because the report could be replaced by a traceback,
+S17-05 because the document describing what the command authors named a
+file that had been deleted thirty-odd batches earlier.
+
+### S17-02: the settle was put on both paths, and sits outside the handler on both
+
+Audit #95 found that a partial `/init` left a project the user had
+trusted a moment ago untrusted -- the write moves the D17 content hash,
+so `is_trusted()` answers False for content they had just authored -- and
+put the trust settle on the success path AND the failure path with the
+capture taken before the write. That fix is intact. What it did not
+notice is that **the settle itself can raise, from a call outside the
+`try` on both paths.**
+
+`grant_trust` raises `OSError` from either half: `_save_trust_store`
+writes the store through `json_store`, and `_content_hash` re-reads every
+file the grant covers. Driven through the real function, with the failure
+injected at the `open` boundary -- which is the shape
+`tests/test_project_init.py`'s own `_fail_write_of` already uses, so the
+whole chain runs:
+
+| arrangement | before | after |
+|---|---|---|
+| success path, store unwritable | raw `OSError`; **both config files on disk, the notice gone, `is_trusted` True -> False** | the notice, warning first, exit 0 |
+| write fails AND the store | raw `OSError`; **the whole report discarded, "wrote 1 file before that" with it** | `InitError` carrying the failure, the file list and the trust warning |
+| control: write fails alone | `InitError`, full report | unchanged |
+| a content file unreadable | raw `PermissionError` **before anything is written** | proceeds as untrusted, says so |
+
+On the CLI the traceback was certain, and that was driven rather than
+read: `run_init_command` catches `InitError` only, and the same handler
+given an `InitError` prints the report and returns 1. The TUI's worker
+catches `Exception` as well, so there the defect degraded to `/init
+failed: [Errno 28] ...` -- an error line, with the written list and the
+trust note lost just the same.
+
+**THE REPORT'S EVIDENCE RECIPE NO LONGER REPRODUCES, AND THE DEFECT
+DOES.** S17-02 poisoned the save by planting a directory at
+`<store>.tmp`. Batch 144 gave `_replace_through_temp` a unique
+`<path>.<hex>.tmp` name -- because "two writers raced on the one name,
+and a failed `os.replace` left the leftover in the install tree forever"
+-- so that poison is now ignored and the arrangement passes. The
+mechanism the finding describes is untouched. An expired recipe is not a
+fixed defect, and a batch that had only re-run the report's steps would
+have closed this one as stale.
+
+**THE PRE-WRITE HALF HAD ITS ANSWER THREE FUNCTIONS UP.**
+`_read_existing_context` catches `OSError` on the project hub, degrades,
+and its comment says "Degrade like config_loader does with an unreadable
+hub document". `is_trusted()`'s read of that same file, a few lines later
+in the same function's flow, killed the command. One function answering
+one error two ways is what A47 closes.
+
+The success path **reports and exits 0** (A46): the files are on disk, so
+the command did what it was asked, and the warning leads the receipt
+because the one thing the user cannot see is that the next launch will
+ask about this project again. `json_store` argues that a trust grant
+which silently did not persist is worse than a crash -- and that argument
+is about SILENCE, which this ends rather than softens. A settled run
+keeps the note last, and **both orderings are asserted**, because a fix
+that moved every trust line to the top would otherwise pass and change
+the receipt of every successful `/init`.
+
+### S17-05: one relocation, fifteen live copies of the claim it falsified
+
+AGENTS.md's I10 read *"Stubs are templates; only `CONTEXT.md` is
+generated"*. Section 44 moved the hub to the root `AGENTS.md` and removed
+`CONTEXT.md` outright, so the sentence is false twice: the file does not
+exist, and the generated one is the hub.
+
+**The report names one sentence. Measured, the same claim was standing in
+fifteen places across eight files -- and eleven of them are in the
+suite**, which is where a reader goes to CHECK a claim, so the stale copy
+is the one they find first. Two of the three AGENTS.md instances are
+unnamed by the report and one of them has teeth:
+
+- **I6 promised that `CONTEXT.md` "is never special-cased out of the
+  hash"** -- a guarantee about a file that is not in the hash because it
+  does not exist, leaving the guarantee that matters (WS9 put the root
+  `AGENTS.md` in the listing precisely so a cloned hub cannot reach a
+  system prompt unasked) unstated. A reader checking the promise finds
+  nothing to check.
+- The durable-memory section placed the third context tier "beside
+  `CONTEXT.md`".
+- `tests/BREAKING_CHANGES.md` carried four live claims, including the
+  "why" column of `write_project_doc`'s grant row -- *"including
+  `.venastine/CONTEXT.md`, which is injected into every opted-in agent"*,
+  wrong in the path and the name -- and a fifth naming
+  `project_docs.CONTEXT_FILENAME`, a symbol that resolves nowhere. That
+  last one is **batch 152's `_ASK_HANDLERS` shape, one document over and
+  PUBLIC rather than private**, so that batch's gate cannot see it (item
+  109).
+- `tests/test_prompt_tier_boundary.py`, whose whole subject is which tier
+  leaks into a research pass, named the leaking tier by its removed
+  filename six times.
+- Three test NAMES, led by `test_context_md_still_counts_towards_the_hash`
+  -- which tests `AGENTS.md` and says so in its own docstring.
+
+Fixed by **naming the tier or the role, not the filename** (A49), so the
+next relocation cannot falsify these sentences again -- which is the
+whole defect shape. The past-tense accounts are untouched: this file (14
+mentions) and `docs/ROADMAP_v2.md` (25) are the record of what happened
+when the file existed, and AGENTS.md's own "`CONTEXT.md` is gone
+outright" is the sentence that says so.
+
+**The gate is over the one sentence with a code relation**, not over the
+word. `test_the_file_agents_md_promises_is_inside_the_trust_hash` reads
+the filename out of I6's promise and checks it against
+`workspace_trust.content_files()`, which IS the hash's input set by
+construction since section 44. The pattern requires the name to be
+ADJACENT to the phrase, and that is not fussiness: batch 152 lost a gate
+twice to a scan that could not tell code from the prose written about it,
+and I6's paragraph now names the old filename while explaining that it is
+gone. A control writes `CONTEXT.md` back into that paragraph as prose and
+the gate stays green, which is the property the adjacency buys.
+
+**No gate over the word itself.** It is legitimate in the past-tense
+accounts, so a gate over the token needs a historical allowlist -- and
+that allowlist would admit the three defects it was built to catch. Said
+here rather than left as an absence, because the next reader will have
+the same idea.
+
+### The controls found two holes, and both were in the same seam
+
+14 controls: 12 KILLED, and 2 that must survive -- `CONTEXT.md` written
+back into I6's paragraph as prose, and the promise reflowed to a
+different column. Two of the twelve did not kill on their first form, and
+both for one reason:
+
+**`_trust_before` returning False makes `_settle_trust`'s `problem`
+branch unable to decide the grant.** The belt and the braces hold the
+same trousers. The end-to-end "no re-grant was attempted" test passed
+with the capture mutated to read an unreadable state as TRUSTED, because
+the settle checks `problem` first and returns early; and removing the
+`problem` branch alone did not cause a grant either, because the capture
+had already answered False.
+
+Both guards are worth having -- the second is what catches a refactor
+that reads `was_trusted` first -- so both are pinned now rather than one
+being left as scenery. The capture's own answer is asserted directly
+(`test_an_unanswerable_trust_question_reads_as_untrusted`, which the
+control is what produced), the end-to-end test is killed by the two-part
+mutation that genuinely reaches it, and the `problem` branch has its own
+control: removing it degrades the message from "could not be read" to the
+ordinary "not trusted", which is the sentence that does NOT say anything
+went wrong.
+
+### Items 107, 108 and 109
+
+**107.** `is_trusted()` still raises for an unreadable content file, and
+its three other callers pay differently: startup is contained
+(`main.load_project_config` catches `(ValueError, OSError)` and exits 1
+with `Configuration error: [Errno 13] Permission denied`, naming an errno
+rather than the file), and `_start_mcp`'s own broad `try` reports per
+server. A48 keeps it that way -- fail-closed would start degraded and
+print the ordinary not-trusted notice, which is indistinguishable from an
+ordinary untrusted project, so the louder behaviour is arguably right for
+a security control. That is a D17 posture decision, not a side effect of
+repairing one command.
+
+**108.** `generate()`'s other pre-write filesystem calls are still
+outside its `try`: `manifest.is_blank`, `propose_kind` and
+`_config_plan`. Either widen the CLI handler to `OSError` -- which would
+make the two shells agree about containment, the thing this module's
+docstring says it exists to guarantee for policy -- or move those calls
+inside. One is a claim about every future escape, the other about these
+three.
+
+**109.** Nothing resolves the test names `tests/BREAKING_CHANGES.md`
+cites, which is how three renames in this batch had to be chased by
+`grep`. Not a ten-line gate: the column is prose, and a row may name one
+test, two, a parametrised id, a class, a file, or a phrase. A44's own
+lesson applies -- the resolution rule there was chosen by measuring three
+candidates and two failed on correct references.
+
+### Verification
+
+Full suite **7095 -> 7107**. `ruff` clean; both bandit checks, `pip-audit`
+(`-r`, both files) and gitleaks with CI's own `--no-git -c` flags by hand,
+since six workflows are not on `main`. Affected tests re-run with
+`env -u AGENT_WORKSPACE` and under WSL, where the pre-write read failure
+was also driven with a real `chmod 000` rather than an injected one. All
+three held files sha256-restored.
+
+FIX-NOW: **76 done, 10 open** -- the self-contained tail, and nothing else.

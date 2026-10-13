@@ -419,7 +419,9 @@ def generate(
     # Captured BEFORE the write (I6). Afterwards the content hash has moved
     # and is_trusted() answers False for a project that WAS trusted, which
     # is exactly the state this distinction exists to tell apart.
-    was_trusted = workspace_trust.is_trusted(root)
+    #
+    # TOTAL SINCE BATCH 153, because the capture itself reads files (A47).
+    was_trusted, trust_problem = _trust_before(root)
 
     granted = lambda _name, _params: True  # noqa: E731 -- consent is above
     written = []
@@ -467,7 +469,7 @@ def generate(
     # they just authored this content, and that is as true after five of
     # eight writes as after eight. Skipping this made the failure wrong
     # about two things instead of one, and silent about the second.
-    trust_note = _settle_trust(root, was_trusted)
+    trust_note, trust_ok = _settle_trust(root, was_trusted, trust_problem)
 
     if failure is not None:
         # NAME WHAT WAS CREATED. The success path reports the files so the
@@ -493,8 +495,14 @@ def generate(
         lines.append(trust_note)
         raise InitError("\n".join(line for line in lines if line))
 
-    lines = [f"Wrote {len(written)} file{'' if len(written) == 1 else 's'}: "
-             + ", ".join(written)]
+    # THE WARNING LEADS, when there is one (A46). The files are on disk and
+    # the user can see them; what they cannot see is that the next launch
+    # will ask about this project again, so the half that did NOT happen is
+    # the half that goes first. A run whose trust settled as intended keeps
+    # the note where it has always been -- last, as the footnote it is.
+    lines = [] if trust_ok else [trust_note]
+    lines.append(f"Wrote {len(written)} file"
+                 f"{'' if len(written) == 1 else 's'}: " + ", ".join(written))
     if made:
         lines.append("Created: " + ", ".join(made))
     if already_there:
@@ -503,7 +511,8 @@ def generate(
         lines.append("Left alone: "
                      + ", ".join(".venastine/" + name
                                  for name in plan["existing"]))
-    lines.append(trust_note)
+    if trust_ok:
+        lines.append(trust_note)
     return {"kind": "init", "text": "\n".join(line for line in lines if line)}
 
 
@@ -561,7 +570,51 @@ def _write(registry, granted, name: str, content: str) -> None:
         raise InitError(result["error"])
 
 
-def _settle_trust(project_path: str, was_trusted: bool) -> str:
+def _trust_before(project_path: str) -> tuple:
+    """`is_trusted()`, made total. Returns (was_trusted, problem).
+
+    THE CAPTURE READS FILES, which is the half of I6 nobody was looking at
+    (batch 153). `is_trusted` hashes every path `content_files()`
+    lists -- the root `AGENTS.md` and everything under `.venastine/` -- and
+    `open` on any one of them can fail: a file an editor holds, a sync
+    client mid-write, a mode the user changed by hand. That read sits
+    before the `try`, so a single unreadable file killed `/init` as a raw
+    `PermissionError` before it wrote anything, and on the CLI
+    (`except InitError` only) as a traceback.
+
+    DEGRADES, and the precedent is three functions up in this same module:
+    `_read_existing_context` catches `OSError` on the SAME file for the
+    SAME reason and says "Degrade like config_loader does with an
+    unreadable hub document". One function answering one error two ways is
+    what this closes (A47).
+
+    `False` rather than `True` for an unanswerable question, which is
+    `core/workspace_trust.py`'s own posture -- `_load_trust_store` returns
+    `{}` for anything unreadable and says it fails CLOSED in both senses.
+    Read as untrusted, `_settle_trust` attempts no re-grant, and the
+    problem is REPORTED rather than inferred from a trust prompt arriving
+    on the next launch.
+
+    NOT fixed in `is_trusted` itself, deliberately (A48). Its other callers
+    are contained -- `main.load_project_config` catches `OSError` and exits
+    1 with one clean line -- and making a security control answer "not
+    trusted" where it currently refuses to start is a change to D17's
+    posture, not to this command's. `docs/TECHNICAL_DEBT.md` carries it.
+    """
+    try:
+        return workspace_trust.is_trusted(project_path), ""
+    except OSError as e:
+        logger.warning("Could not read the trust state of %s; proceeding as "
+                       "untrusted: %s", project_path, e)
+        return False, (
+            f"This project's trust state could not be read ({e}), so the run "
+            f"proceeded as if it were untrusted and no re-grant was "
+            f"attempted. You will be asked about its .venastine/ content on "
+            f"the next launch.")
+
+
+def _settle_trust(project_path: str, was_trusted: bool,
+                  problem: str = "") -> tuple:
     """I6. Re-grant only for a project that was ALREADY trusted.
 
     Writing the hub changes the D17 content hash, so a project the user
@@ -575,11 +628,41 @@ def _settle_trust(project_path: str, was_trusted: bool) -> str:
     a hole in D17 opened from a direction the trust prompt never sees.
     The hub is never special-cased out of the hash either; that would be
     the same hole with a smaller mouth.
+
+    TOTAL SINCE BATCH 153. Returns (note, settled_as_intended),
+    and the note is the whole of what the user is told about trust -- so
+    this function raising discarded it, along with everything `generate`
+    had assembled around it. #95 put the settle on both paths; the settle
+    then sat outside every handler on both of them, so a trust-store I/O
+    failure took the success path's notice and the failure path's "wrote N
+    files before that" accounting down with it. Measured: both config
+    files on disk, `is_trusted` True -> False, and a raw `OSError` out.
+
+    `grant_trust` raises from either half -- `_content_hash` re-reads the
+    files just written, `_save_trust_store` writes the store -- and
+    `OSError` is both. `json_store` argues that a trust grant which
+    silently did not persist is worse than a crash, and that argument is
+    about SILENCE: the grant still either persists or is named, and the
+    naming now reaches the user instead of the traceback handler.
+
+    `False` is returned for the grant failure and for an unreadable
+    pre-write state, and `True` for a project that was untrusted and
+    stayed that way -- nothing went wrong there, and that note is a
+    footnote rather than a warning.
     """
+    if problem:
+        return problem, False
     if not was_trusted:
         return ("This project is not trusted, so nothing here has changed "
                 "that. You will be asked about its .venastine/ content on "
-                "the next launch.")
-    workspace_trust.grant_trust(project_path)
+                "the next launch."), True
+    try:
+        workspace_trust.grant_trust(project_path)
+    except OSError as e:
+        logger.warning("Could not re-grant workspace trust for %s: %s",
+                       project_path, e)
+        return (f"Workspace trust could NOT be re-granted ({e}), so the next "
+                f"launch will ask about this project's .venastine/ content "
+                f"again."), False
     return ("Workspace trust re-granted for the updated .venastine/ content, "
-            "so the next launch will not re-ask.")
+            "so the next launch will not re-ask."), True

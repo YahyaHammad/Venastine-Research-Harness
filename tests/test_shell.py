@@ -1772,7 +1772,7 @@ class TestShellApprovalModeIsRejectedBySettingsJson:
         `cat ~/.aws/credentials` into an unprompted host read.
 
         D17's trust prompt is not a substitute: the same prompt covers a
-        README-shaped CONTEXT.md, and nobody reading it is deciding about
+        README-shaped project hub, and nobody reading it is deciding about
         their shell gate."""
         with pytest.raises(ValueError) as exc:
             self._validate({"shell_approval_mode": "never"})

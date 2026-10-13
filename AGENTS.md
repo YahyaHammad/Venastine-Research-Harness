@@ -55,7 +55,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 7095 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
+pytest                                            # 7107 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -179,7 +179,7 @@ made the move free: no import changed, and `tests/test_docs_consistency.py` is t
 opens any of these files (its `DOCS` constant is where the path now comes from).
 
 - **docs/ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49–§52, §55, §61, §62, §63, §64, §65, §66, §67, §68 and §69 built; §53, §54 and §56–§60 recorded from the owner's requests in batches 122 and 123, specified and not yet designed) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A45 from §32 (A16 in ROADMAP_v3 §62, A17, A18 and A19 in §63, A20 and A21 in §64, A22, A23 and A24 in §65, A25, A26 and A27 in §66, A28, A29, A30, A31, A32 and A33 in §67, A34, A35, A36, A37, A38 and A39 in §68, A40, A41, A42, A43, A44 and A45 in §69), W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 SS1–SS72 from §49, NW1–NW5 from §50, PG1–PG9 from §51, RB1–RB7 from §52, IO1–IO7 from §53, AT1–AT8 from §54, TR1–TR15 from §55, JV1–JV10 from §56, SM1–SM4 from §57, PR1–PR5 from §58 UI1–UI4 from §59, UH1–UH12 from §60 and CN1–CN12 from §61). Section and D-numbers are stable and cross-referenced everywhere.
+- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49–§52, §55, §61, §62, §63, §64, §65, §66, §67, §68, §69 and §70 built; §53, §54 and §56–§60 recorded from the owner's requests in batches 122 and 123, specified and not yet designed) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A49 from §32 (A16 in ROADMAP_v3 §62, A17, A18 and A19 in §63, A20 and A21 in §64, A22, A23 and A24 in §65, A25, A26 and A27 in §66, A28, A29, A30, A31, A32 and A33 in §67, A34, A35, A36, A37, A38 and A39 in §68, A40, A41, A42, A43, A44 and A45 in §69, A46, A47, A48 and A49 in §70), W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 SS1–SS72 from §49, NW1–NW5 from §50, PG1–PG9 from §51, RB1–RB7 from §52, IO1–IO7 from §53, AT1–AT8 from §54, TR1–TR15 from §55, JV1–JV10 from §56, SM1–SM4 from §57, PR1–PR5 from §58 UI1–UI4 from §59, UH1–UH12 from §60 and CN1–CN12 from §61). Section and D-numbers are stable and cross-referenced everywhere.
 
 **Six namespaces use the same `LETTER+NUMBER` shape, and only the first is the
 record.** An id that resolves to two places is a cross-reference that fails
@@ -1897,8 +1897,8 @@ is the by-id path that keeps older conversations reachable (#30).
 ### Durable memory (`memories/`, §21b)
 
 `remember(content, scope)` writes a row that outlives its thread; an opted-in run gets
-those rows injected as a third context tier beside `CONTEXT.md`. `use_memory` had been
-parsed since §14 with no consumer at all — this is its first.
+those rows injected as a third context tier beside the project hub. `use_memory` had
+been parsed since §14 with no consumer at all — this is its first.
 
 - **Turn counting's sibling trap: the fragment goes OUTSIDE `with_catalogs()`** (M13).
   That function feeds `pass_prompt()`, so a memory appended inside it lands in all ten
@@ -2922,11 +2922,11 @@ is gone outright, not kept as a fallback. `doc_path()` is one join now.
   files) and labelled documents `/init` had authored moments earlier as
   pre-existing work it had preserved. Which files a run left alone is a fact
   about that run; it belongs in its report, and is there.
-- **Stubs are templates; only `CONTEXT.md` is generated** (I10). A DEVLOG written
-  for a project with no history is confident fiction in a file that then gets
-  committed, linked from the hub and read as established. Stubs carry headings, a
-  what-belongs/what-does-not pair, and only facts the manifest established
-  deterministically.
+- **Stubs are templates; only the hub (`AGENTS.md`) is generated** (I10). A DEVLOG
+  written for a project with no history is confident fiction in a file that then
+  gets committed, linked from the hub and read as established. Stubs carry
+  headings, a what-belongs/what-does-not pair, and only facts the manifest
+  established deterministically.
 - **Discovery is a directory walk** — no model call, no tool call — so two runs on
   an unchanged project produce byte-identical input, which is what makes the
   output diffable. The manifest carries **sizes** because choosing what to read
@@ -2950,8 +2950,26 @@ is gone outright, not kept as a fallback. `doc_path()` is one join now.
   `AGENTS.md` inside the hash.
   In an untrusted project `.venastine/` may already hold agents, skills and an
   `mcp.json` that arrived with a cloned repo, and granting as a side effect of
-  `/init` would wave all of it through. `CONTEXT.md` is never special-cased out of
-  the hash — that is the same hole with a smaller mouth.
+  `/init` would wave all of it through. The root `AGENTS.md` is never
+  special-cased out of the hash — that is the same hole with a smaller mouth.
+  (It named `CONTEXT.md` until batch 153, which promised this about a file that
+  is not in the hash because it does not exist, and left the guarantee that
+  matters unstated. `test_the_file_agents_md_promises_is_inside_the_trust_hash`
+  reads the name out of this sentence and checks it against
+  `workspace_trust.content_files()`, so the promise cannot outlive the file
+  again.)
+  **Both trust calls are TOTAL** (A46, A47, batch 153), and that is locked
+  rather than defensive habit. `_trust_before` wraps the capture because it
+  READS every file the grant covers, so one file an editor holds open used
+  to kill `/init` before it wrote anything; an unanswerable question reads as
+  UNTRUSTED, which is this module's fail-closed posture and the only answer
+  that cannot launder a cloned `.venastine/` in. `_settle_trust` returns
+  `(note, settled_as_intended)` because `grant_trust` raises from both halves,
+  and it sat outside the handler on both paths — so a trust-store failure took
+  the success path's whole notice and the failure path's file list with it. A
+  re-grant that could not persist is **reported**, exit code unchanged, with
+  the warning FIRST; a settled run keeps the note last. Deleting either `try`
+  restores a defect, and `TestTheTrustSettleIsTotal` is where it fails.
 - **`/init` runs bounded** (I7). Its separate 1M budget died in batch 27 with the
   misreading that created it — the wrapper resolves the configured spend cap like
   every other path. `INIT_READ_CHARS` (well below `MAX_READ_CHARS`: each read is

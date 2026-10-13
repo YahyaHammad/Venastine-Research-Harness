@@ -3,7 +3,7 @@ test_config_loader.py
 
 ROADMAP_v2 §14 loader behavior: frontmatter parsing (AC4), three-tier
 discovery with D18/D8 precedence, settings.json merge with loud unknown
-key rejection, CONTEXT.md opt-in (AC5), and the frontmatter-only skill
+key rejection, project-hub opt-in (AC5), and the frontmatter-only skill
 catalog.
 
 All discovery roots are redirected into tmp_path: the user tier via
@@ -877,7 +877,7 @@ def test_undecodable_settings_in_untrusted_project_does_not_break_the_prompt(
     assert "could not be read" in summary
 
 
-def test_undecodable_context_md_in_trusted_project_degrades(
+def test_an_undecodable_hub_in_a_trusted_project_degrades(
         _redirect_roots, caplog):
     """A trusted project's AGENTS.md is content the USER wrote, and this
     module's policy for malformed content everywhere else is warn-and-
@@ -900,7 +900,7 @@ def test_undecodable_context_md_in_trusted_project_degrades(
     assert any("AGENTS.md" in r.getMessage() for r in caplog.records)
 
 
-def test_readable_context_md_still_loads(_redirect_roots):
+def test_a_readable_hub_still_loads(_redirect_roots):
     """Control: the degradation must not swallow the working case."""
     venastine = _redirect_roots["project"] / ".venastine"
     venastine.mkdir(parents=True, exist_ok=True)

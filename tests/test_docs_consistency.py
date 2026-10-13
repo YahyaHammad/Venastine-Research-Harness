@@ -3137,3 +3137,85 @@ def test_every_private_symbol_agents_md_names_exists_in_the_tree():
         "concludes the thing is unguarded or adds it -- which creates a "
         "second thing beside the real one. Name what exists, or delete "
         "the sentence.")
+#: The one sentence in AGENTS.md that promises a named file cannot be
+#: carved out of the D17 trust hash. The filename is captured BY THE
+#: PATTERN, adjacent to the phrase, rather than by scanning the paragraph
+#: around it -- batch 152 lost a gate twice to a scan that could not tell
+#: code from the prose written about it, and the paragraph this sits in now
+#: names the OLD filename while explaining that it is gone.
+_HASH_PROMISE = re.compile(
+    r"`([A-Za-z0-9_][A-Za-z0-9_.-]*\.[A-Za-z0-9]+)` is never "
+    r"special-cased out of the hash")
+
+
+def test_the_file_agents_md_promises_is_inside_the_trust_hash(tmp_path):
+    """AGENTS.md's I6 bullet guarantees one named file is never carved out
+    of the trust hash. That name is pinned against the hash's actual input
+    set (S17-05, batch 153).
+
+    THE SENTENCE WAS BORN STALE BY RELOCATION, which is the shape a
+    convention cannot catch: nobody edited the trust hash and forgot the
+    document. Section 44 moved the hub from `.venastine/CONTEXT.md` to the
+    root `AGENTS.md` and removed the old file outright, and this sentence
+    went on promising that `CONTEXT.md` is never special-cased out of the
+    hash -- a guarantee about a file that is not in the hash because it
+    does not exist, while the guarantee that matters (the root `AGENTS.md`
+    is in the listing, by WS9, precisely so a cloned hub cannot reach a
+    system prompt unasked) went unstated. A reader checking the promise
+    would have found nothing to check.
+
+    `content_files()` is the right thing to compare against rather than
+    `_content_hash`: it IS the hash's input set, by construction since
+    section 44 -- the digest iterates the listing, so a file the listing
+    omits cannot enter the hash. That is the relation the sentence is
+    about.
+
+    PINNED IN BOTH DIRECTIONS (`docs/ARCHITECTURE.md` section 11). A
+    membership test that passes because the listing is large tells you
+    nothing, so the fixture's listing is asserted exact, a file the
+    sentence does NOT name is asserted present, and the name this sentence
+    carried until batch 153 is asserted ABSENT -- which is what makes the
+    pass mean something: the test it would have failed is the test it ran.
+    """
+    from core import workspace_trust
+
+    collapsed = re.sub(r"\s+", " ", _agents_md())
+    promised = _HASH_PROMISE.findall(collapsed)
+    assert len(promised) == 1, (
+        f"AGENTS.md should promise exactly once that a named file is never "
+        f"special-cased out of the trust hash; found {len(promised)}: "
+        f"{promised[:4]}. Rewording that sentence means editing this "
+        f"pattern too -- a gate that silently matches nothing is the "
+        f"defect it was written for, one level up.")
+    promised = promised[0]
+
+    project = tmp_path / "proj"
+    (project / ".venastine" / "agents").mkdir(parents=True)
+    (project / ".venastine" / "agents" / "reviewer.md").write_text(
+        "---\nname: reviewer\n---\nbody\n", encoding="utf-8")
+    (project / ".venastine" / "settings.json").write_text(
+        "{}\n", encoding="utf-8")
+    (project / workspace_trust.PROJECT_CONTEXT_FILENAME).write_text(
+        "# hub\n", encoding="utf-8")
+
+    listing = workspace_trust.content_files(str(project))
+    assert sorted(listing) == [
+        ".venastine/agents/reviewer.md",
+        ".venastine/settings.json",
+        workspace_trust.PROJECT_CONTEXT_FILENAME,
+    ], (f"the fixture project should list exactly its three files and "
+        f"listed {listing}; a listing that stopped walking would make the "
+        f"check below pass or fail for the wrong reason")
+    assert "CONTEXT.md" not in listing, (
+        "the name this sentence carried until batch 153 must be absent "
+        "from the listing, or this test cannot fail on the claim it was "
+        "written to catch")
+
+    assert promised in listing, (
+        f"AGENTS.md promises that `{promised}` is never special-cased out "
+        f"of the trust hash, and `workspace_trust.content_files()` -- which "
+        f"IS the hash's input set -- does not list it: {listing}. Either "
+        f"the file moved and the sentence did not, or the sentence names a "
+        f"file that no longer exists. A promise about a file outside the "
+        f"hash is not a weaker guarantee, it is no guarantee, and it reads "
+        f"exactly like the real one.")

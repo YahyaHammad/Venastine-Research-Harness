@@ -1049,19 +1049,20 @@ Both `OWNER-DECISION` findings were then ruled and fixed (136, 137), and batch 1
 | 138 | the `DEFER`/`KNOWN`/`ACCEPTED` tranche | `docs/TECHNICAL_DEBT.md` 49-85 | 3/3 |
 
 **This table stops at 138 and the work did not** (noted batch 150). Batches
-139-152 cleared ten more surfaces -- secrets/logging/json_store, `tui/`
+139-153 cleared eleven more surfaces -- secrets/logging/json_store, `tui/`
 lifecycle and rendering, file and doc tools, loop + client, compaction +
 sessions, `core/reasoning/`, `agents/` + `skills/` + `mcp_client/`, test
-infrastructure, and the headless shell -- and none of them added a row
-here. **`review/TRIAGE.md` is the live index**
+infrastructure, the headless shell, and project scaffolding + prompts --
+and none of them added a row here. **With batch 153 every per-surface
+table is CLEAR**, and the ten findings left are the self-contained tail. **`review/TRIAGE.md` is the live index**
 and is updated per batch; the per-batch narrative is `docs/DEVLOG.md`, which
 is where a row's worth of detail actually goes. The table is kept as the
 record of the `BLOCKS-MERGE` tranche and the two owner rulings, which is
 what it was built for, rather than extended into a third copy of a count
 that would then drift -- which is the defect shape this marathon spends most
 of its time finding. The paragraph above it says "what is left is the 86
-distinct `FIX-NOW` findings", and that was true when it was written: **12
-are left as of batch 152** -- a figure batch 152 had to correct before it
+distinct `FIX-NOW` findings", and that was true when it was written: **10
+are left as of batch 153** -- a figure batch 152 had to correct before it
 could state it, since this count and `review/TRIAGE.md`'s per-surface
 tables had disagreed by four since batch 142. See that batch's DEVLOG
 entry; the tables partition the 86 exactly and are what both now say.
