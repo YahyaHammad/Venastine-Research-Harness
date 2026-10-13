@@ -10,8 +10,8 @@ These tests run against the upgraded fake sqlmodel in conftest.py
 The tests:
 
   1. create_pipeline_run() returns a UUID and persists a 'running' row
-     whose user_query matches and whose four data columns sit at their
-     empty defaults ([] / [] / [] / "").
+     whose user_query matches and whose six data columns sit at their
+     empty defaults ([] / [] / [] / [] / [] / "").
   2. update_pipeline_run(run_id, run, status='complete') flips the row's
      status, sets finished_at, and serializes claims / trace /
      coverage_gaps / final_report into their SEPARATE columns (matching
@@ -23,17 +23,22 @@ The tests:
      except block, the ORIGINAL pipeline exception still propagates (not
      the persistence error), and the persistence failure is logged at
      ERROR with the offending run_id named in the message.
-  5. load_pipeline_run() round-trips all 9 fields (id, user_query,
+  5. load_pipeline_run() round-trips all 11 fields (id, user_query,
      status, started_at, finished_at, claims, trace, coverage_gaps,
-     final_report) through create -> update -> load.
+     pass_threads, candidates, final_report) through create -> update ->
+     load, and asserts the KEY SET -- see test 8.
   6. load_pipeline_run() with a nonexistent run_id raises ValueError
      (matching update_pipeline_run's convention).
   7. load_pipeline_run() on a just-created 'running' record (no update
      yet) returns the empty defaults and finished_at=None.
+  8. ARCHITECTURE's documented record shape IS the shape load_pipeline_run
+     returns -- the relation gate, after T2 and E13 each grew the record
+     by a column and left every enumeration written about it behind.
 """
 
 import json
 import logging
+import re
 from datetime import datetime
 from uuid import UUID, uuid4
 
@@ -238,11 +243,19 @@ def test_inner_storage_failure_propagates_original_exception_and_logs_run_id(moc
 # ===========================================================================
 
 def test_load_pipeline_run_round_trips_all_fields():
-    """create -> update (with claims, trace, gaps, report, candidates)
-    -> load must return all fields intact: id, user_query, status,
-    started_at, finished_at, claims (list of raw dicts), trace (list of
-    strings), coverage_gaps (list of dicts), candidates (metadata per
-    ensemble survivor), final_report (plain text).
+    """create -> update (with claims, trace, gaps, report, pass
+    threads, candidates) -> load must return all ELEVEN fields intact:
+    id, user_query, status, started_at, finished_at, claims (list of raw
+    dicts), trace (list of strings), coverage_gaps (list of dicts),
+    pass_threads (§27's thread index), candidates (metadata per ensemble
+    survivor), final_report (plain text).
+
+    THE KEY SET IS ASSERTED, which BREAKING_CHANGES.md has said this test
+    does since §5 and which it did not do until batch 154: every
+    assertion below named one key, so a twelfth field was green and
+    dropping `pass_threads` was green. The same sentence the candidates
+    assertion already makes about `text` -- asserting the exact shape is
+    what turns a silent change into a red test.
 
     Claims come back as raw dicts (the shape vars(c) produced at write
     time), NOT reconstructed Claim dataclass instances -- the read API
@@ -263,9 +276,18 @@ def test_load_pipeline_run_round_trips_all_fields():
          "chars": 18, "text": "Candidate two's fuller response."},
     ]
 
+    run.pass_threads = [
+        {"pass": "Pass 1", "thread_id": "f1f0c3de-0000-4000-8000-00000000f00d"},
+    ]
+
     update_pipeline_run(run_id, run, status="complete")
     loaded = load_pipeline_run(run_id)
 
+    assert set(loaded) == {
+        "id", "user_query", "status", "started_at", "finished_at",
+        "claims", "trace", "coverage_gaps", "pass_threads", "candidates",
+        "final_report",
+    }, "the return shape changed; BREAKING_CHANGES.md:191 names this test"
     assert loaded["id"] == run_id
     assert loaded["user_query"] == "round-trip query"
     assert loaded["status"] == "complete"
@@ -299,6 +321,14 @@ def test_load_pipeline_run_round_trips_all_fields():
          "chars": 18},
     ]
 
+    # pass_threads: §27's index of which thread ran which pass, in the
+    # DASHED spelling the producer writes -- which is not the spelling
+    # the database stores a thread id in, and is why
+    # classify_legacy_pass_threads normalises both sides (S09-01).
+    assert loaded["pass_threads"] == [
+        {"pass": "Pass 1", "thread_id": "f1f0c3de-0000-4000-8000-00000000f00d"},
+    ]
+
     # final_report: plain text, not JSON-encoded.
     assert loaded["final_report"] == "A round-tripped report."
 
@@ -316,9 +346,10 @@ def test_load_pipeline_run_with_unknown_run_id_raises_value_error():
 def test_load_pipeline_run_returns_empty_defaults_for_running_record():
     """A just-created record (create_pipeline_run only, no
     update_pipeline_run yet) must load with status='running',
-    finished_at=None, and the four data columns at their empty defaults
-    ([] / [] / [] / ""). This is the state a hard-killed run sits in
-    if the kill happens before the first per-pass checkpoint fires."""
+    finished_at=None, and the six data columns at their empty defaults
+    ([] / [] / [] / [] / [] / ""). This is the state a hard-killed run
+    sits in if the kill happens before the first per-pass checkpoint
+    fires."""
     run_id = create_pipeline_run("fresh query")
 
     loaded = load_pipeline_run(run_id)
@@ -465,3 +496,57 @@ def test_load_pipeline_run_survives_a_legacy_null_pass_threads_column():
 
     loaded = load_pipeline_run(run_id)
     assert loaded["pass_threads"] == []
+
+
+# ---------------------------------------------------------------------------
+# ---- The documented shape, against the real one (S09-04) ------------------
+# ---------------------------------------------------------------------------
+
+# Whitespace-tolerant between the names: ARCHITECTURE's 4.14 is one long
+# line today and a later reflow must not silently empty this gate.
+_DOCUMENTED_SHAPE = re.compile(
+    r"plain dict with (\d+) fields:\s*((?:`[a-z_]+`(?:,\s*)?)+)\)")
+_DOCUMENTED_COUNT = re.compile(r"returns an? (\d+)-field dict")
+
+
+def test_the_documented_record_shape_matches_what_load_returns():
+    """§4.14 and §9 of ARCHITECTURE.md both state the size of
+    `load_pipeline_run`'s return dict, and §4.14 enumerates it. Both were
+    stale by two: T2 added `pass_threads` and E13 added `candidates`, and
+    neither batch found the sentences written about the thing it grew.
+
+    A RELATION, not a pinned number. The gate reads the count and the
+    names out of the prose and compares them to the keys the function
+    actually returns, so a twelfth column cannot land without the
+    sentence moving with it -- and so this test cannot be satisfied by
+    editing it to agree with itself.
+
+    Over the two sentences that have the relation, and no further: the
+    past-tense accounts in DEVLOG and ROADMAP say "returns 9 fields"
+    about a function that did, at the time they were written, and those
+    are the record rather than the contract.
+    """
+    import pathlib
+
+    architecture = (pathlib.Path(__file__).resolve().parents[1]
+                    / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
+    actual = sorted(load_pipeline_run(create_pipeline_run("shape query")))
+
+    enumerated = _DOCUMENTED_SHAPE.findall(architecture)
+    assert len(enumerated) == 1, (
+        f"expected exactly one enumeration of load_pipeline_run's return "
+        f"shape in ARCHITECTURE.md, found {len(enumerated)}")
+    count, names = enumerated[0]
+    documented = sorted(name.strip().strip("`") for name in names.split(","))
+    assert documented == actual, (
+        f"ARCHITECTURE.md §4.14 lists {documented}; load_pipeline_run "
+        f"returns {actual}")
+    assert int(count) == len(actual), (
+        f"ARCHITECTURE.md §4.14 says {count} fields and lists "
+        f"{len(documented)}")
+
+    bare = _DOCUMENTED_COUNT.findall(architecture)
+    assert bare, "ARCHITECTURE.md §9's 'returns an N-field dict' is gone"
+    assert {int(n) for n in bare} == {len(actual)}, (
+        f"ARCHITECTURE.md calls it a {sorted(set(bare))}-field dict; it "
+        f"has {len(actual)} fields")

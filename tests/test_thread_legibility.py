@@ -26,11 +26,14 @@ precisely so its SQL is testable without the ORM.
 """
 
 import sqlite3
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import pytest
 
 import storage
+from core.reasoning.pipeline_storage import (
+    classify_legacy_pass_threads,
+)
 from core.replay import replay_entries
 from tests.conftest import run_pass, settle
 
@@ -216,6 +219,33 @@ class TestWhatThePickerIsOffered:
 # ---- AC3: the one-time classification --------------------------------------
 # ===========================================================================
 
+# Every thread name this file puts in a classification database, and the
+# UUID each one stands for. REAL UUIDS, SPELT TWO WAYS (S09-01, batch 154):
+# `_stored` is the 32-character hex a real database holds, because that is
+# what sqlmodel's UUID type writes; `_recorded` is the dashed 36-character
+# form, because `orchestrator._record_pass_thread` records `str(thread_id)`.
+# Those two spellings meeting is the whole of tier 1, and until batch 154
+# every test here wrote ONE hand-made string on both sides -- so the
+# comparison agreed by construction and could not fail. uuid5 rather than
+# uuid4 so a failure message names the same id twice in a row.
+_THREAD_NAMES = ("before", "in-window-1", "in-window-2", "after",
+                 "inside-an-unfinished-run", "recorded", "pass-zero",
+                 "pass-four", "my-conversation", "during-broken",
+                 "beside-an-unreadable-record", "hand-written")
+_IDS = {name: uuid5(NAMESPACE_URL, "venastine/test-thread/" + name)
+        for name in _THREAD_NAMES}
+
+
+def _stored(name: str) -> str:
+    """The spelling a real `conversationthread` row holds."""
+    return _IDS[name].hex
+
+
+def _recorded(name: str) -> str:
+    """The spelling `pass_threads_json` carries."""
+    return str(_IDS[name])
+
+
 @pytest.fixture
 def legacy_db(tmp_path):
     """A database in the state §27 finds one in: `kind` has just been added
@@ -237,10 +267,10 @@ def legacy_db(tmp_path):
         ("after", "2026-08-01 14:00:00.000000"),
         ("inside-an-unfinished-run", "2026-08-01 16:00:05.000000"),
     ]
-    for thread_id, created in rows:
+    for name, created in rows:
         connection.execute(
             "INSERT INTO conversationthread (id, created_at, kind)"
-            " VALUES (?, ?, 'chat')", (thread_id, created))
+            " VALUES (?, ?, 'chat')", (_stored(name), created))
     connection.execute(
         "INSERT INTO pipelinerunrecord (id, started_at, finished_at)"
         " VALUES ('finished', '2026-08-01 12:00:00.000000',"
@@ -254,8 +284,16 @@ def legacy_db(tmp_path):
 
 
 def _kinds(connection) -> dict:
-    return dict(connection.execute(
-        "SELECT id, kind FROM conversationthread").fetchall())
+    """Every thread's kind, keyed by NAME rather than by id.
+
+    The ids are real UUIDs since batch 154 and a row reads
+    `kinds["in-window-1"]`, which says what it is about; an id this file
+    did not issue keys by its raw spelling, so a stray row is visible
+    rather than silently absent."""
+    by_stored = {_stored(name): name for name in _THREAD_NAMES}
+    return {by_stored.get(thread_id, thread_id): kind
+            for thread_id, kind in connection.execute(
+                "SELECT id, kind FROM conversationthread").fetchall()}
 
 
 class TestClassifyingLegacyThreads:
@@ -775,17 +813,36 @@ class TestTwoTierClassification:
     pass_threads_json, so that record is authoritative (tier 1) and the
     time-window heuristic is only ever needed for rows that predate it
     (tier 2) -- a set which cannot grow. That is what makes a chat thread
-    another session creates during a modern run safe (#82's headline)."""
+    another session creates during a modern run safe (#82's headline).
+
+    THE IDS HERE ARE REAL UUIDS, SPELT AS THE TWO SIDES SPELL THEM
+    (S09-01, batch 154). Every test in this class used to hand-write one
+    string -- "recorded", "pass-zero" -- on both sides of the comparison,
+    so producer format and storage format agreed by construction and all
+    four passed while tier 1 matched nothing at all. The fixture now
+    stores `_stored(name)` and records `_recorded(name)`, which are the
+    hex and dashed renderings of one UUID, so these tests fail if the
+    normalisation is removed."""
 
     def _add_run(self, connection, run_id, started, finished,
-                 recorded=None):
+                 recorded=None, raw=None):
+        """A run row. `recorded` entries name their thread by NAME; the
+        DASHED spelling is applied here, because that is the one the
+        producer writes -- `_record_pass_thread` appends
+        `str(thread_id)`. `raw` takes entries verbatim, for the cases
+        that are about an id this file cannot spell."""
         import json as _json
+        entries = raw
+        if recorded is not None:
+            entries = [{"pass": entry["pass"],
+                        "thread_id": _recorded(entry["thread_id"])}
+                       for entry in recorded]
         connection.execute(
             "INSERT INTO pipelinerunrecord"
             " (id, started_at, finished_at, pass_threads_json)"
             " VALUES (?, ?, ?, ?)",
             (run_id, started, finished,
-             _json.dumps(recorded) if recorded is not None else None))
+             _json.dumps(entries) if entries is not None else None))
         connection.commit()
 
     def test_recorded_thread_ids_are_relabelled_even_outside_any_window(
@@ -797,7 +854,8 @@ class TestTwoTierClassification:
                       [{"pass": "Pass 1", "thread_id": "recorded"}])
         legacy_db.execute(
             "INSERT INTO conversationthread (id, created_at, kind)"
-            " VALUES ('recorded', '2026-07-01 09:00:00.000000', 'chat')")
+            " VALUES (?, '2026-07-01 09:00:00.000000', 'chat')",
+            (_stored("recorded"),))
         legacy_db.commit()
 
         relabelled = classify_legacy_pass_threads(legacy_db)
@@ -816,13 +874,13 @@ class TestTwoTierClassification:
                       "2026-09-01 12:00:30.000000",
                       [{"pass": "Pass 0", "thread_id": "pass-zero"},
                        {"pass": "Pass 5", "thread_id": "pass-four"}])
-        for thread_id in ("pass-zero", "pass-four", "my-conversation"):
-            created = ("2026-09-01 12:00:05.000000" if thread_id
+        for name in ("pass-zero", "pass-four", "my-conversation"):
+            created = ("2026-09-01 12:00:05.000000" if name
                        != "my-conversation"
                        else "2026-09-01 12:00:20.000000")
             legacy_db.execute(
                 "INSERT INTO conversationthread (id, created_at, kind)"
-                " VALUES (?, ?, 'chat')", (thread_id, created))
+                " VALUES (?, ?, 'chat')", (_stored(name), created))
         legacy_db.commit()
 
         classify_legacy_pass_threads(legacy_db)
@@ -866,7 +924,8 @@ class TestTwoTierClassification:
             " '2026-08-01 18:00:30.000000', 'not json {')")
         legacy_db.execute(
             "INSERT INTO conversationthread (id, created_at, kind)"
-            " VALUES ('during-broken', '2026-08-01 18:00:10.000000', 'chat')")
+            " VALUES (?, '2026-08-01 18:00:10.000000', 'chat')",
+            (_stored("during-broken"),))
         legacy_db.commit()
 
         with caplog.at_level(logging.WARNING,
@@ -878,6 +937,105 @@ class TestTwoTierClassification:
                     if r.levelno == logging.WARNING]
         assert any("broken" in w and "unparseable" in w for w in warnings), (
             warnings)
+
+    def test_the_hex_and_dashed_spellings_are_one_id(self, legacy_db):
+        """S09-01, and the headline. `pass_threads_json` carries
+        `str(thread_id)` (dashed, 36 characters -- also what
+        output_writer.py ships and what an operator reads back) while
+        `conversationthread.id` comes out of the raw DBAPI as the 32
+        hex characters sqlmodel stores. Compared literally, `'a-b' in
+        {'ab'}` is False for every id there has ever been, so the tier
+        #82 calls authoritative relabelled nothing, ever.
+
+        Measured end to end on real SQLite in test_storage_e2e.py --
+        which is where the claim "this is the spelling a database
+        holds" belongs, because the fake sqlmodel cannot have one.
+        """
+        self._add_run(legacy_db, "modern", "2026-09-01 12:00:00.000000",
+                      "2026-09-01 12:00:30.000000",
+                      [{"pass": "Pass 1", "thread_id": "recorded"}])
+        legacy_db.execute(
+            "INSERT INTO conversationthread (id, created_at, kind)"
+            " VALUES (?, '2026-07-01 09:00:00.000000', 'chat')",
+            (_stored("recorded"),))
+        legacy_db.commit()
+        assert _recorded("recorded") != _stored("recorded"), (
+            "the premise: the two sides spell one id differently")
+
+        classify_legacy_pass_threads(legacy_db)
+
+        assert _kinds(legacy_db)["recorded"] == "research_pass", (
+            f"recorded as {_recorded('recorded')!r}, stored as "
+            f"{_stored('recorded')!r} -- tier 1 has to see one id")
+
+    def test_an_unreadable_recorded_id_names_no_thread(self, legacy_db):
+        """None rather than the string itself for something that is not a
+        UUID: a thread id IS one, so a record holding anything else is
+        not an id this function can speak about, and deciding that two
+        unparseable strings denote one thread is the direction that hides
+        a real conversation."""
+        self._add_run(legacy_db, "odd", "2026-09-01 12:00:00.000000",
+                      "2026-09-01 12:00:30.000000",
+                      raw=[{"pass": "Pass 1", "thread_id": "pass-one"}])
+        legacy_db.execute(
+            "INSERT INTO conversationthread (id, created_at, kind)"
+            " VALUES ('pass-one', '2026-07-01 09:00:00.000000', 'chat')")
+        legacy_db.commit()
+
+        classify_legacy_pass_threads(legacy_db)
+
+        assert _kinds(legacy_db)["pass-one"] == "chat"
+
+    def test_an_unreadable_recorded_id_does_not_open_that_runs_window(
+            self, legacy_db):
+        """The direction this must not fail in. A POPULATED
+        pass_threads_json is what puts a run in tier 1, whatever its ids
+        turn out to parse as -- so an id the normalisation cannot read
+        costs that one entry's membership and nothing else. Dropping the
+        whole run to the window instead would consult a modern run's
+        clock and hide the concurrent chat thread #82's headline is
+        about, which is the unrecoverable direction."""
+        self._add_run(legacy_db, "odd", "2026-09-01 12:00:00.000000",
+                      "2026-09-01 12:00:30.000000",
+                      raw=[{"pass": "Pass 1", "thread_id": "pass-one"}])
+        legacy_db.execute(
+            "INSERT INTO conversationthread (id, created_at, kind)"
+            " VALUES (?, '2026-09-01 12:00:05.000000', 'chat')",
+            (_stored("beside-an-unreadable-record"),))
+        legacy_db.commit()
+
+        classify_legacy_pass_threads(legacy_db)
+
+        assert (_kinds(legacy_db)["beside-an-unreadable-record"]
+                == "chat"), (
+            "a chat thread created during that run was hidden -- the run "
+            "fell back to its time window because one recorded id was "
+            "unreadable")
+
+    def test_a_thread_whose_own_id_is_not_a_uuid_is_left_alone(
+            self, legacy_db):
+        """The row side of the same question. Unreachable through
+        `ConversationThread.id`, reachable with a hand-edited database,
+        and the answer is the quiet one: no tier-1 match, no exception,
+        and the window still gets its say (which the no-recorded-column
+        test above exercises from the other end).
+
+        WHAT THIS KILLS is the symmetric version of the fix -- parsing
+        the ROW id too, which reads as tidier and raises `ValueError` on
+        this row. That version was written first and control C1 found it
+        unearned as well: with the recorded ids normalised, the row ids
+        are already in the spelling they are compared against."""
+        self._add_run(legacy_db, "modern", "2026-09-01 12:00:00.000000",
+                      "2026-09-01 12:00:30.000000",
+                      [{"pass": "Pass 1", "thread_id": "hand-written"}])
+        legacy_db.execute(
+            "INSERT INTO conversationthread (id, created_at, kind)"
+            " VALUES ('not-a-uuid', '2026-07-01 09:00:00.000000', 'chat')")
+        legacy_db.commit()
+
+        classify_legacy_pass_threads(legacy_db)
+
+        assert _kinds(legacy_db)["not-a-uuid"] == "chat"
 
     def test_a_database_without_the_recorded_column_classifies_by_window(
             self, tmp_path):

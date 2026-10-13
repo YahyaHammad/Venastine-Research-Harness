@@ -56,11 +56,27 @@ import contextlib
 import json
 import os
 import pathlib
+import sqlite3
 import sys
 import threading
 from datetime import UTC
+from types import SimpleNamespace
 
 import pytest
+
+# AT MODULE LEVEL, WHICH IS THE POINT. Collection happens before any
+# fixture runs, so these two bind against the root conftest's FAKE
+# sqlmodel like every other test module's imports do. Imported inside a
+# test instead, they would bind while `real_storage` has the REAL
+# sqlmodel installed -- registering PipelineRunRecord on the real
+# metadata and leaving `pipeline_storage` holding the real engine for
+# whichever module runs next in this worker.
+#
+# Neither needs the swap: classify_legacy_pass_threads() takes a DBAPI
+# connection (that is the seam), and _record_pass_thread() is a pure
+# function over a list.
+from core.reasoning.orchestrator import _record_pass_thread
+from core.reasoning.pipeline_storage import classify_legacy_pass_threads
 
 # ---------------------------------------------------------------------------
 # ---- Real sqlmodel, real sqlite --------------------------------------------
@@ -1732,3 +1748,101 @@ def test_eight_concurrent_writers_all_land(real_storage):
             f"writer {n} wrote {len(archived)} of {rows} rows; a "
             "message the model was told about is missing from the "
             "archive")
+
+
+# ---------------------------------------------------------------------------
+# ---- S09-01: the two spellings of one thread id ---------------------------
+# ---------------------------------------------------------------------------
+
+def test_a_thread_id_is_stored_in_a_spelling_str_does_not_produce(
+        real_storage):
+    """The premise the whole of tier 1 rests on, and the one claim in it
+    that only a real database can answer.
+
+    `ConversationThread.id` is a `UUID`, and sqlmodel 0.0.39 over
+    SQLAlchemy 2.0.51 stores it as 32 hex characters with no dashes --
+    while `str(thread_id)`, which is what every producer and artifact in
+    this project writes, is the dashed 36-character form. Nothing in the
+    suite's fake sqlmodel has a storage format, so this asymmetry was
+    invisible to all 44 tests in test_thread_legibility.py, which
+    hand-wrote one string on both sides of the comparison.
+
+    THIS IS A PIN, NOT A CURIOSITY. `classify_legacy_pass_threads`
+    normalises the recorded ids to hex and leaves the row ids alone, so
+    this sentence is the half of that comparison which is not expressed
+    in code. A library upgrade that changes the stored spelling fails
+    HERE, with the function named, rather than silently emptying tier 1
+    again.
+    """
+    thread_id = real_storage.create_thread()
+
+    connection = sqlite3.connect(os.environ["APP_DB_PATH"])
+    try:
+        stored = {row[0] for row in
+                  connection.execute("SELECT id FROM conversationthread")}
+    finally:
+        connection.close()
+
+    assert thread_id.hex in stored, (
+        "the database no longer holds the hex spelling. "
+        "classify_legacy_pass_threads normalises the RECORDED ids to hex "
+        "and compares the row ids as they come, which is correct only "
+        "while this holds -- it is pinned here instead of being branched "
+        "on, because no build of this project has written anything else "
+        "(sqlmodel==0.0.39 since the pin was introduced)")
+    assert str(thread_id) not in stored, (
+        "the database holds the dashed spelling too -- which would make "
+        "the literal comparison tier 1 used until batch 154 correct")
+
+
+def test_a_recorded_pass_thread_is_relabelled_with_both_sides_real(
+        real_storage):
+    """S09-01 end to end: the thread id comes from `create_thread` on
+    real SQLite, the recorded id comes from the real
+    `_record_pass_thread`, and the classification is the real one. Before
+    batch 154 this relabelled 0 rows -- `'a-b' in {'ab'}` -- and the
+    thread stayed in the picker.
+
+    The run row is inserted with raw SQL rather than through
+    `create_pipeline_run`: `core.reasoning.pipeline_storage` is not in
+    `_SWAPPED` (it binds `database.engine` at import, against the fake),
+    and nothing is gained by putting it there. The two spellings are what
+    this test is about, and both of those come from the real producers.
+
+    AN ANCIENT WINDOW, deliberately. The database is module-scoped and
+    shared, so a window around "now" would sweep every other test's chat
+    threads into the research_pass kind through TIER 2 and prove nothing
+    about tier 1.
+    """
+    thread_id = real_storage.create_thread()
+    recorded = []
+    _record_pass_thread("Pass 1", SimpleNamespace(thread_id=thread_id),
+                        recorded)
+    assert recorded == [{"pass": "Pass 1", "thread_id": str(thread_id)}]
+
+    connection = sqlite3.connect(os.environ["APP_DB_PATH"])
+    try:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS pipelinerunrecord ("
+            " id VARCHAR PRIMARY KEY, started_at DATETIME,"
+            " finished_at DATETIME, pass_threads_json TEXT)")
+        connection.execute(
+            "INSERT INTO pipelinerunrecord"
+            " (id, started_at, finished_at, pass_threads_json)"
+            " VALUES ('s09-01', '1999-01-01 00:00:00.000000',"
+            " '1999-01-01 00:00:30.000000', ?)",
+            (json.dumps(recorded),))
+        connection.commit()
+
+        relabelled = classify_legacy_pass_threads(connection)
+
+        kind = connection.execute(
+            "SELECT kind FROM conversationthread WHERE id = ?",
+            (thread_id.hex,)).fetchone()[0]
+    finally:
+        connection.close()
+
+    assert relabelled == 1, (
+        f"tier 1 relabelled {relabelled} rows: the run recorded "
+        f"{str(thread_id)!r} and the database holds {thread_id.hex!r}")
+    assert kind == "research_pass"

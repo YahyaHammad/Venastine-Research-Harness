@@ -510,9 +510,15 @@ def list_threads(
             {
                 "id": t.id,
                 "created_at": t.created_at,
-                # getattr, not t.kind: a row read back from a database
-                # whose ALTER has not run yet has no attribute at all, and
-                # a picker that raises is worse than one showing "chat".
+                # getattr, not t.kind: it absorbs a NULL on a row
+                # written before the column existed -- the additive
+                # migration never backfills (M7) -- which is what
+                # get_thread's docstring has said since batch 75. NOT a
+                # database whose ALTER has not run: the mapped class always
+                # has the attribute, and a database missing the column
+                # raises OperationalError at the SELECT above, before any
+                # attribute is read. This was the third copy of that wrong
+                # mechanism; 47257f3 removed the other two and missed it.
                 "kind": getattr(t, "kind", None) or THREAD_KIND_CHAT,
                 "preview": previews.get(t.id, ""),
             }

@@ -103,6 +103,15 @@ class MemoryManager:
         truncated list can say so, while a log line reaches nobody
         mid-conversation. Same "no silent caps" rule as §20's
         MAX_REVIEW_FINDINGS.
+
+        A CAP OF 0 MEANS OFF, IN THIS HALF TOO (batch 154). config.yaml
+        says so where the value is set, and `remember`'s available_check
+        already honours it by hiding the tool. This half did not: `rows[:0]`
+        is empty, `total > 0` fires the truncation branch, and every turn
+        got a "## Remembered" header announcing "the 0 most recent of 2"
+        with a WARNING behind it -- telling the model that remembered
+        content exists and is being withheld, while the tool that could
+        have earned it is not on the menu.
         """
         if not self.wants_memories(agent):
             return ""
@@ -111,6 +120,12 @@ class MemoryManager:
             return ""
 
         cap = config.MAX_INJECTED_MEMORIES
+        if cap <= 0:
+            # `<= 0` because the sentence is "a non-positive cap is off".
+            # Only 0 is reachable -- config_schema types this key
+            # NonNegativeInt -- so the other half of the comparison is the
+            # schema's job and not this line's.
+            return ""
         shown, total = rows[:cap], len(rows)
         header = "## Remembered"
         if total > cap:

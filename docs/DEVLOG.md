@@ -23983,3 +23983,206 @@ was also driven with a real `chmod 000` rather than an injected one. All
 three held files sha256-restored.
 
 FIX-NOW: **76 done, 10 open** -- the self-contained tail, and nothing else.
+
+## Batch 154 -- a guard that compared two spellings of one id, and a cap whose two halves disagreed (2026-10-13)
+
+The review marathon's persistence surface, all four `FIX-NOW` findings --
+**S09-01** (S3), **S09-02** (S3), **S09-03** (S4) and **S09-04** (S4).
+Four owner rulings, recorded as `docs/ROADMAP_v3.md` §71's A50-A53. Two
+register items are new: **110** and **111**.
+
+Three of the four are the same mistake at three distances. A comparison
+whose two sides were written by different people and never once met; a
+setting whose two consumers were written by different people and never
+agreed; and an enumeration that two later batches each grew past without
+either one noticing. **In all three the code and the claim about it were
+written separately and nothing ever compared them**, which is what the one
+new gate in this batch is for.
+
+### S09-01: the authoritative tier had never relabelled a single row
+
+Since T2 every research run records the exact thread ids of its passes in
+`pass_threads_json`, and #82 made that record authoritative over the
+time-window heuristic. Tier 1: "membership was recorded at run time; there
+is nothing to infer." The two sides of that comparison are spelt
+differently, and nothing had ever put them side by side:
+
+| side | written by | spelling |
+|---|---|---|
+| the record | `orchestrator._record_pass_thread`: `str(thread_id)` | `acb451c5-9c50-4236-a946-7f687d8dab0c` |
+| the row | sqlmodel 0.0.39 / SQLAlchemy 2.0.51, via `SELECT id` | `acb451c59c504236a9467f687d8dab0c` |
+
+`'a-b' in {'ab'}` is False for every id there has ever been.
+
+**DRIVEN END TO END AGAINST THE REAL MODULES ON REAL SQLITE**, because
+this is a claim about a storage format and the suite's fake `sqlmodel`
+does not have one: `storage.create_thread()` for the stored spelling, the
+real `_record_pass_thread` for the recorded one, the real
+`update_pipeline_run`, the real `classify_legacy_pass_threads`.
+Relabelled **0**, kind stayed `chat`. Control on the same database with
+the id written in the stored spelling: relabelled **1**. After the fix,
+1 and the thread leaves the picker.
+
+Nothing observable breaks today, which is why the report rates this S3 and
+not S2: every pass thread is born `research_pass` at `core/loop.py:2024`
+and every subagent thread is born `subagent`, so no producer creates the
+recorded-but-`chat` row tier 1 exists to catch. What is lost is the tier
+itself -- and the first future source that records ids without setting
+kind at birth (the compactor was exactly such a source under §27's own
+spec) brings back the §27 picker flood through the half of the
+classification nobody will think to check, because it is the half the
+docstring calls authoritative.
+
+**THE ELEVEN CLASSIFICATION TESTS COULD NOT SEE IT, AND THAT IS THE
+FINDING UNDER THE FINDING.** All four tier-1 tests hand-wrote one string
+-- `"recorded"`, `"pass-zero"` -- on both sides of the comparison, so
+producer format and storage format agreed by construction. Defect shape 7:
+a test that supplies the model's move. The fixture now issues real UUIDs
+through `uuid5` and spells them the two ways the two sides spell them --
+`_stored(name)` is hex, `_recorded(name)` is dashed -- so those four tests
+are the guard they were named for, and `_kinds()` keys by NAME so every
+assertion line still reads `kinds["in-window-1"]`.
+
+**The fix is at the comparison, not at the producer** (A50). `str()` in
+`pass_threads_json` is also what `output_writer.py` ships as
+`pass_threads.json` and what an operator reads; normalising at the
+comparison is one place, normalising at the producer is every artifact
+ever written. `_as_uuid_key` answers `None` for a value that is not a
+UUID rather than the value itself: a thread id IS one, and deciding that
+two unreadable strings denote one thread is the over-classifying
+direction.
+
+**THE CONTROLS CUT THE FIX IN HALF, AND THAT IS THE USEFUL PART OF THIS
+FINDING.** It was written normalising BOTH sides, which is the symmetric
+thing to do and reads as obviously right. C1 removed the row-side call
+and every test stayed green -- because the recorded ids are hex now and
+the column already was, so the row side had no demonstrated consequence
+(B4) over a spelling no build of this project has ever written
+(`sqlmodel==0.0.39` since the pin was introduced). What ships is one
+normalisation and a PINNED assumption: the e2e test asserts that the
+column holds hex and not dashes, and fails naming
+`classify_legacy_pass_threads` if a library upgrade changes it. A pinned
+dependency beats a branch for a case nobody can reach -- and
+`test_a_thread_whose_own_id_is_not_a_uuid_is_left_alone` is what keeps
+the symmetric version from coming back, since parsing the row ids raises
+`ValueError` through it.
+
+**The two halves of that rule pull against each other and both are
+pinned.** An unreadable recorded id costs its own entry's membership, and
+it must NOT drop its run to the window tier -- a populated
+`pass_threads_json` is what "post-T2" means, and consulting a modern run's
+clock is how the concurrent chat thread #82's headline is about gets
+hidden. Writing the loop the tidier way (`usable` depending on the parse)
+introduces exactly that, which is why
+`test_an_unreadable_recorded_id_does_not_open_that_runs_window` exists.
+
+### S09-02: a cap of 0 turned the tool off and the announcement on
+
+`config.yaml` says of `max_injected_memories`: "`0` disables the
+`remember` tool rather than injecting nothing". The tool half honours it;
+the injection half did not. `rows[:0]` is empty, `total (2) > cap (0)`
+fires the truncation branch, and the loop over `shown` appends nothing:
+
+```
+## Remembered
+
+Showing the 0 most recent of 2. Older ones exist and are not listed here.
+```
+
+plus a `WARNING` per turn telling the user to raise a value they set on
+purpose. **The model was told that remembered content exists and is being
+withheld, and the tool that could have earned it was not on the menu.**
+Measured through the real `prompt_fragment` with two visible rows, with
+the three controls the fix must not disturb: cap 0 and no rows (already
+`""`), cap 1 of 2 (still truncates, still warns), cap 2 of 2 (neither).
+
+`prompt_fragment` returns `""` for a non-positive cap, beside the existing
+`wants_memories` and empty-rows early returns (A51). `<= 0` rather than
+`== 0` because the sentence is "a non-positive cap is off"; only 0 is
+reachable, and `config_schema` typing the key `NonNegativeInt` is what
+makes that true rather than this line. **The two halves are asserted
+together in one test**, not separately, because the defect was precisely
+that they disagreed while each was individually defensible --
+`remember.available()` was not covered against this value at all.
+
+### S09-03: the third copy of a comment batch 75 deleted twice
+
+`list_threads`' `getattr` carried "a row read back from a database whose
+ALTER has not run yet has no attribute at all". It cannot: the mapped
+class always has the attribute, and a database missing the column raises
+`OperationalError` at the `SELECT` above. What the fallback absorbs is a
+NULL on a row written before the column existed (M7's migration never
+backfills) -- which is what `get_thread`'s docstring has said since batch
+75, where `47257f3` ("comments that named the wrong mechanism") removed
+this exact sentence from `get_thread` and `child_threads` and missed the
+third. Reworded; the behaviour is right and untouched.
+
+Register item **110** came out of this: no test anywhere puts a NULL in
+`kind` and asks any of the three readers what it says, so a fallback three
+functions carry has no demonstrated consequence.
+
+### S09-04: the report named three sentences; the claim was in thirteen
+
+`load_pipeline_run` returns **11** keys and the record carries **6** data
+columns. T2 added `pass_threads_json`, E13 added `candidates_json`, and
+neither batch found anything written about the thing it had just grown.
+
+| where | copies |
+|---|---|
+| `core/reasoning/pipeline_storage.py` docstrings | 3 |
+| `docs/ARCHITECTURE.md` §4.14 and §9 | 5 claims in 4 lines |
+| `tests/test_pipeline_storage.py` prose | 3 |
+| `tests/BREAKING_CHANGES.md` rows | 2 |
+
+The past-tense accounts -- three in `docs/DEVLOG.md`, one in
+`docs/ROADMAP.md` -- are the record of what the function was when they
+were written, and are untouched. A49's rule, one document over.
+
+**ONE OF THE TWO `BREAKING_CHANGES` ROWS PROMISED A SYMPTOM THE SUITE DOES
+NOT PRODUCE.** It said that adding or removing a return field makes
+`test_load_pipeline_run_round_trips_all_fields` "fail on a missing/extra
+key", and that the 9-field contract "is documented in
+`pipeline_storage.py`'s docstring". The test asserted nine keys one at a
+time and never the set, so a twelfth field was green and a dropped
+`pass_threads` was green; no docstring enumerated anything. The owner's
+ruling (A52) is that the TEST moves: the row has promised that assertion
+since §5, the candidates block three lines above it already makes the same
+argument about asserting an exact shape, and a row describing a guard that
+does not exist is the sentence a later reader checks instead of the code.
+The test now asserts the key set and round-trips `pass_threads`, which it
+never did.
+
+**The gate is a relation, over the two sentences that have one** (A53).
+`test_the_documented_record_shape_matches_what_load_returns` reads the
+count and the field names out of ARCHITECTURE's own prose and compares
+them to the keys `load_pipeline_run` actually returns -- so a twelfth
+column cannot land without the sentence moving with it, and the gate
+cannot be satisfied by editing it to agree with itself. It found its own
+first bug: it went red after the prose was corrected, because "returns a
+9-field dict" had become "returns **an** 11-field dict" and the pattern
+said `a`. No gate over the past-tense accounts, for A49's reason -- the
+allowlist that would permit them would permit the defect.
+
+### Register
+
+**110.** The thread-kind NULL fallback is in three readers and pinned by
+none. Deleting `or THREAD_KIND_CHAT` from all three would be green, and on
+a database carrying pre-§27 rows it puts every one of them back in the
+picker as `None`.
+
+**111.** `pipeline_storage`'s write and read API has never run against
+real SQLite: `core.reasoning.pipeline_storage` is not in
+`test_storage_e2e.py`'s `_SWAPPED`, so the two NULL guards that exist for
+an `ALTER`ed column are only ever exercised against a fake that has no
+notion of one. `classify_legacy_pass_threads` is unaffected and stays that
+way -- it takes a DBAPI connection precisely so its SQL is testable
+without the ORM, which is the seam this batch's two e2e tests use.
+
+### Verification
+
+Full suite **7107 -> 7117**. `ruff` clean; both bandit checks, `pip-audit`
+(`-r`, both files) and gitleaks with CI's own `--no-git -c` flags by hand,
+since six workflows are not on `main`. Affected tests re-run with
+`env -u AGENT_WORKSPACE` and under WSL. All held files sha256-restored.
+
+FIX-NOW: **80 done, 6 open** -- `S08` (3), `S05` (2) and `S03-02`.

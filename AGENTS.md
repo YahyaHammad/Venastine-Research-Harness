@@ -55,7 +55,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 7107 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
+pytest                                            # 7117 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -179,7 +179,7 @@ made the move free: no import changed, and `tests/test_docs_consistency.py` is t
 opens any of these files (its `DOCS` constant is where the path now comes from).
 
 - **docs/ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49–§52, §55, §61, §62, §63, §64, §65, §66, §67, §68, §69 and §70 built; §53, §54 and §56–§60 recorded from the owner's requests in batches 122 and 123, specified and not yet designed) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A49 from §32 (A16 in ROADMAP_v3 §62, A17, A18 and A19 in §63, A20 and A21 in §64, A22, A23 and A24 in §65, A25, A26 and A27 in §66, A28, A29, A30, A31, A32 and A33 in §67, A34, A35, A36, A37, A38 and A39 in §68, A40, A41, A42, A43, A44 and A45 in §69, A46, A47, A48 and A49 in §70), W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 SS1–SS72 from §49, NW1–NW5 from §50, PG1–PG9 from §51, RB1–RB7 from §52, IO1–IO7 from §53, AT1–AT8 from §54, TR1–TR15 from §55, JV1–JV10 from §56, SM1–SM4 from §57, PR1–PR5 from §58 UI1–UI4 from §59, UH1–UH12 from §60 and CN1–CN12 from §61). Section and D-numbers are stable and cross-referenced everywhere.
+- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49–§52, §55, §61, §62, §63, §64, §65, §66, §67, §68, §69, §70 and §71 built; §53, §54 and §56–§60 recorded from the owner's requests in batches 122 and 123, specified and not yet designed) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A53 from §32 (A16 in ROADMAP_v3 §62, A17, A18 and A19 in §63, A20 and A21 in §64, A22, A23 and A24 in §65, A25, A26 and A27 in §66, A28, A29, A30, A31, A32 and A33 in §67, A34, A35, A36, A37, A38 and A39 in §68, A40, A41, A42, A43, A44 and A45 in §69, A46, A47, A48 and A49 in §70, A50, A51, A52 and A53 in §71), W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 SS1–SS72 from §49, NW1–NW5 from §50, PG1–PG9 from §51, RB1–RB7 from §52, IO1–IO7 from §53, AT1–AT8 from §54, TR1–TR15 from §55, JV1–JV10 from §56, SM1–SM4 from §57, PR1–PR5 from §58 UI1–UI4 from §59, UH1–UH12 from §60 and CN1–CN12 from §61). Section and D-numbers are stable and cross-referenced everywhere.
 
 **Six namespaces use the same `LETTER+NUMBER` shape, and only the first is the
 record.** An id that resolves to two places is a cross-reference that fails
@@ -1914,7 +1914,14 @@ been parsed since §14 with no consumer at all — this is its first.
   memories to the resolved path; with only a `scope` string, §21's AC6 is unwriteable.
 - **Injection is capped and says so** (M14). `MAX_INJECTED_MEMORIES`, newest first,
   with "showing the 50 most recent of 73" in the fragment the model reads — not only
-  in a log, which reaches nobody mid-conversation.
+  in a log, which reaches nobody mid-conversation. **A cap of `0` is OFF, in both
+  halves, and off is silent** (A51, batch 154). `remember`'s `available_check` has
+  always hidden the tool at 0; `prompt_fragment` returned `""` for nobody, so
+  `rows[:0]` plus `total > cap` announced "showing the 0 most recent of 2" with a
+  WARNING behind it on every turn — telling the model that memories exist and are
+  being withheld, while the tool that could have earned them was not on the menu.
+  The two halves are asserted together, in one test, because the defect was that
+  they disagreed while each was separately defensible.
 - **`remember` declares `grant_policy=GRANT_NEVER`** (M17, carried by R13). It has no
   `approval_check`, so §25's R2 would make it grantable and one `--grant remember` would
   let ten unattended passes write durable memories — exactly what D26's consequence 1
@@ -2692,6 +2699,23 @@ independent bugs, both found by using the app.
   it. Under the old correlated subquery, dropping the `IS NOT NULL` guard was invisible
   to the whole suite (`x <= NULL` was already not true); as ordinary Python it now has
   teeth, and both tiers are pinned.
+  **Tier 1 compares UUIDs, not strings** (A50, batch 154), and that is locked. The two
+  sides are spelt differently — `pass_threads_json` carries `str(thread_id)` (dashed,
+  36 characters, also what `output_writer.py` ships and what an operator reads) and
+  `conversationthread.id` comes out of the raw DBAPI as the 32 hex characters sqlmodel
+  stores — so a literal `in` was False for every id there has ever been and the
+  authoritative tier had never relabelled one row. `_as_uuid_key` renders every RECORDED
+  id as hex and answers `None` for a value that is not a UUID, never the value itself.
+  **One side, and the other is pinned, not branched on** — the symmetric version was
+  written first and the controls found it unearned, since the column already holds hex;
+  `test_a_thread_id_is_stored_in_a_spelling_str_does_not_produce` asserts that against a
+  real database and fails naming the function if a library upgrade ever changes it.
+  A recorded id it cannot read costs that entry's membership and **must not** drop
+  its run to the window tier: a populated `pass_threads_json` is what "post-T2" means,
+  and consulting a modern run's clock is how the concurrent chat thread gets hidden.
+  Both halves have their own test in `TestTwoTierClassification`, whose ids are real
+  UUIDs spelt the two ways on purpose — they used to be one hand-written string on
+  both sides, which is why four tests passed against a dead tier.
 - **`param_digest` lives in `safety/policy_enforcement.py`**, beside `redact_secrets`,
   since §27's replay renderer is its second caller. It redacts BEFORE truncating, and
   a second copy is how that ordering regresses in one place and not the other.

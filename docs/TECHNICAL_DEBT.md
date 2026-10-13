@@ -5651,6 +5651,66 @@ before the gate.
 were correct until this batch renamed them. It catches the NEXT rename,
 which is the half nobody is present for.
 
+## 110. The thread-kind NULL fallback is in three readers and pinned by none (open, measured batch 154)
+
+**What was measured.** `get_thread`, `child_threads` and `list_threads`
+each read `getattr(t, "kind", None) or THREAD_KIND_CHAT`, and what that
+absorbs is a NULL on a row written before the column existed -- the
+additive migration never backfills (M7). S09-03 was the third copy of a
+comment saying it absorbed something else (a database whose ALTER has not
+run, which raises `OperationalError` at the `SELECT` instead), and batch
+154 corrected the wording.
+
+**Nothing asserts the behaviour.** A search of the suite for a thread row
+with a NULL `kind` read back through any of the three finds nothing:
+`tests/test_schema_migration.py` asserts that the column is ADDED and
+`tests/test_storage_e2e.py` asserts that the §47 lineage columns are not
+backfilled, but no test puts a NULL in `kind` and asks the picker what it
+says. So the fallback that three readers carry has no demonstrated
+consequence -- B4's test -- and deleting the `or THREAD_KIND_CHAT` from
+all three would be green.
+
+**Why it is not two lines.** The honest home is
+`tests/test_storage_e2e.py`, because the question is what a real row with
+a real NULL reads as, and that file's one module-scoped swap is the only
+place a real row exists. One test there would cover all three readers,
+which also makes it the moment to decide whether the explanation belongs
+in one place with two pointers (today: a full paragraph in `get_thread`, a
+corrected comment in `list_threads`, nothing in `child_threads`).
+
+**What it would have caught.** Not S09-03, which was about the stated
+reason rather than the behaviour. It catches the cleanup that reads three
+defensive `getattr`s, finds no test behind them, and removes them --
+which, on a database carrying pre-§27 rows, puts every one of those rows
+back in the picker as `None`.
+
+## 111. `pipeline_storage`'s write and read API has never run against real SQLite (open, measured batch 154)
+
+**What was measured.** `tests/test_storage_e2e.py` is the one place with a
+real `sqlmodel`, and its `_SWAPPED` tuple is `("sqlmodel", "config",
+"database", "storage")`. `core.reasoning.pipeline_storage` is not in it,
+so `PipelineRunRecord`, `create_pipeline_run`, `update_pipeline_run` and
+`load_pipeline_run` are exercised only against the conftest's fake --
+including the two NULL guards on `pass_threads_json` and
+`candidates_json`, which exist for a column added by an `ALTER` that the
+fake has no notion of.
+
+`classify_legacy_pass_threads` is unaffected and stays that way on
+purpose: it takes a DBAPI connection precisely so its SQL is testable
+without the ORM, and batch 154's two new e2e tests use that seam.
+
+**Why it is not an entry in a tuple.** Adding the module to `_SWAPPED`
+registers `PipelineRunRecord` on the real `SQLModel.metadata`, which must
+happen before `create_db_and_tables()` for the table to exist -- so the
+fixture's ordering becomes load-bearing in a second way, in the file whose
+own docstring says "there can be only one swap". The measurement worth
+having first is whether a real round trip finds anything the fake does
+not; `json.loads(None)` raising is the guard most likely to differ.
+
+**What it would have caught.** Nothing in this batch -- S09-01 lives at
+the DBAPI seam, which is now driven for real. It is the standing risk that
+the persistence layer's own tests prove the fake and the code agree.
+
 ## Review-marathon arrivals at open issues with no register entry
 
 Two `KNOWN` findings landed on GitHub issues that are not mirrored here. Both
