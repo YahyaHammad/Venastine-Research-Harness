@@ -44,7 +44,7 @@ import core.reasoning.pipeline_storage  # noqa: F401 -- registers PipelineRunRec
 # already run, so a FRESH database never got a pipelinerunrecord table and the
 # first research run died on "no such table". Do not "tidy" these away.
 import storage  # noqa: F401 -- registers ConversationThread, MessageLog
-from core import config_loader, shell_sessions, workspace_trust
+from core import ansi, config_loader, shell_sessions, workspace_trust
 from core.cancel import CancelToken
 from core.loop import DEFAULT_PROVIDER, RunAgentLoop
 from core.reasoning.authorization import GRANT_PICKER
@@ -54,6 +54,53 @@ from logging_setup import configure_logging
 from security import posture, protected_paths
 
 logger = logging.getLogger(__name__)
+
+
+class _Visible:
+    """Every untrusted string one prompt prints, and whether any of them
+    tried to redraw it (batch 152).
+
+    THE CLI PRINTS MODEL TEXT TO A TERMINAL, which is the one thing
+    `core/ansi.py` exists to make safe, and until this batch only the pty
+    and the TUI transcript went through it. The params block was already
+    safe -- `_render_params` runs `json.dumps`, which emits an escape as
+    `\\u001b` -- and the three lines the user actually decides on were
+    plain f-strings. Measured through the real channel: an approval
+    headline carrying CSI `2K` reached stdout with the introducer intact,
+    and CSI `2K` erases the row the approved command was drawn on.
+
+    ONE OBJECT PER PROMPT rather than one call per string, because the
+    count belongs to the QUESTION and not to any one field: the user is
+    told once that something in this call tried to redraw the prompt, not
+    once per field that did. `tui/widgets.py` keeps the same count for the
+    same reason and `tui/app.py` reads it, which is the layer that knows
+    whose text it was; here that layer is the handler.
+
+    SAID OUT LOUD, not swallowed. A silent strip leaves the display honest
+    and the user ignorant of the attempt, and the attempt is information
+    they are entitled to while deciding -- nothing a tool legitimately
+    needs to do involves moving the cursor inside a consent prompt. On the
+    paths where nothing is being decided (a replayed thread, a research
+    pass's progress lines) the strip is silent, because there is no
+    decision for the warning to inform.
+    """
+
+    def __init__(self) -> None:
+        self.controls = 0
+
+    def __call__(self, text) -> str:
+        clean, removed = ansi.for_display_counted(text)
+        self.controls += removed
+        return clean
+
+    def warn(self) -> None:
+        """One line, immediately above the question, or nothing."""
+        if not self.controls:
+            return
+        plural = "" if self.controls == 1 else "s"
+        print(f"  [!] {self.controls} terminal control sequence{plural} "
+              f"removed from the text above: something in this call tried "
+              f"to redraw this prompt")
 
 
 def _uuid_type(value: str) -> UUID:
@@ -87,7 +134,8 @@ def _print_replay(thread_id: UUID) -> None:
     except Exception as e:  # noqa: BLE001 -- a display failure must not
         # stop the session: the thread is loaded and usable either way.
         logger.warning("Could not replay thread %s: %s", thread_id, e)
-        print(f"[could not replay this thread's history: {e}]")
+        print("[could not replay this thread's history: "
+              f"{ansi.for_display(e)}]")
         return
     if not entries:
         print("(this thread has no messages yet)")
@@ -97,7 +145,12 @@ def _print_replay(thread_id: UUID) -> None:
     # (batch 65) -- and `_call` is §47's, the id of the spawn that made
     # this line, which the TUI turns into an openable run. This shell
     # prints, so it drops both.
+    # Every row here is text somebody else wrote -- the model, a tool,
+    # or a wake the harness composed around a tool's result -- replayed
+    # into a terminal, which is `core/ansi.for_display`'s whole subject
+    # (batch 152). Silent, because a replay decides nothing.
     for role, text, _links, _call in entries:
+        text = ansi.for_display(text)
         if role == "user":
             print(f"You: {text}")
         elif role == "assistant":
@@ -191,7 +244,7 @@ def _deliver_held(thread_id) -> None:
         return
     text, record = build_held(held)
     append_harness_row(thread_id, text, record)
-    print(f"— {text.splitlines()[0]} —")
+    print(f"— {ansi.for_display(text.splitlines()[0])} —")
 
 
 def _await_sessions(thread_id, *, model, provider_name, effort,
@@ -283,7 +336,7 @@ def _await_sessions(thread_id, *, model, provider_name, effort,
                         effort=effort, authorization=authorization)
             except Exception as e:
                 logger.exception("Wake turn failed")
-                print(f"\n[Error: {e}]")
+                print(f"\n[Error: {ansi.for_display(e)}]")
                 return
             finally:
                 # Before anything else can be printed or read, and on the
@@ -291,8 +344,8 @@ def _await_sessions(thread_id, *, model, provider_name, effort,
                 # to the sessions and takes the handler below.
                 signal.signal(signal.SIGINT, previous_sigint)
             for notice in getattr(response, "notices", ()):
-                print(f"— {notice['text']} —")
-            print(f"\nAgent: {response.text}\n")
+                print(f"— {ansi.for_display(notice['text'])} —")
+            print(f"\nAgent: {ansi.for_display(response.text)}\n")
             if interrupted:
                 # The turn finished and wrote its rows; now the key does
                 # what it said. Returning to the prompt rather than waiting
@@ -456,7 +509,7 @@ def run_chat(
                 )
         except Exception as e:
             logger.exception("Chat turn failed")
-            print(f"\n[Error: {e}]")
+            print(f"\n[Error: {ansi.for_display(e)}]")
             continue
         finally:
             signal.signal(signal.SIGINT, previous_sigint)
@@ -473,9 +526,9 @@ def run_chat(
         # LoopEvents. Printed BEFORE the answer, because that is when they
         # happened.
         for notice in getattr(response, "notices", ()):
-            print(f"— {notice['text']} —")
+            print(f"— {ansi.for_display(notice['text'])} —")
 
-        print(f"\nAgent: {response.text}")
+        print(f"\nAgent: {ansi.for_display(response.text)}")
         if response.stop_reason != "complete":
             # #4: name the figures, not just the reason. A user who sees
             # "token_budget_exceeded" reads it as a size problem -- the
@@ -498,7 +551,8 @@ def run_chat(
             # quietly incomplete is worse than one that admits it.
             if response.stop_reason == "cancelled" and not response.usage:
                 figures += " (the stopped step is not counted)"
-            print(f"[stopped early: {response.stop_reason}{figures}]")
+            print(f"[stopped early: {ansi.for_display(response.stop_reason)}"
+                  f"{figures}]")
         print()
 
         # SS2/SS5. The turn is over, but this conversation may not be: a
@@ -560,7 +614,7 @@ def build_research_authorization(grant_spec, attended: bool = False):
                   "picker; pass the names explicitly to grant them in a "
                   "script. Skipping:", file=sys.stderr)
             for name, description in offered:
-                print(f"  - {name}", file=sys.stderr)
+                print(f"  - {ansi.for_display(name)}", file=sys.stderr)
             return _attended_only(provider)
         granted = _pick_tools_to_grant(offered)
     else:
@@ -1037,7 +1091,7 @@ def build_attended_provider(honour_run_scope: bool = False,
         for line in rendered.splitlines():
             print(f"  {line}")
 
-    def _asker(payload: dict) -> None:
+    def _asker(payload: dict, visible) -> None:
         """Name the run that raised this, when it is not the conversation.
 
         §47 put `asking_agent` / `asking_depth` on every payload that can
@@ -1062,14 +1116,18 @@ def build_attended_provider(honour_run_scope: bool = False,
         """
         asked_by = payload.get("asking_agent")
         if asked_by:
-            print(f"  asked by {asked_by} "
+            print(f"  asked by {visible(asked_by)} "
                   f"(depth {payload.get('asking_depth') or 0})")
 
     def _approval(request) -> bool:
-        print(f"\n[approval] {request.payload.get('tool_name')}")
+        # Every untrusted field below goes through one `visible`
+        # (batch 152), and `visible.warn()` is what tells the user that
+        # something did.
+        visible = _Visible()
+        print(f"\n[approval] {visible(request.payload.get('tool_name'))}")
         # Under the header, above everything the agent wrote -- see
         # `_asker`, which is the one placement rule for the three kinds.
-        _asker(request.payload)
+        _asker(request.payload, visible)
         # §46 (EP1). The subject of the question, first. The TUI pins it
         # because a modal has a bottom edge; a terminal does not, so
         # here it is placement rather than rescue -- but a kind one
@@ -1078,10 +1136,15 @@ def build_attended_provider(honour_run_scope: bool = False,
         # both. None for every tool that declares no headline.
         headline = request.payload.get("headline")
         if headline:
+            # `splitlines()` splits on a carriage return as well as a
+            # newline, so a CR in a headline became a second $-prefixed
+            # line rather than an overwrite even before this batch --
+            # measured, and the doubled prefix is what showed it. The
+            # escape is what did the damage.
             for line in str(headline).splitlines():
-                print(f"  $ {line}")
+                print(f"  $ {visible(line)}")
         if request.notice:
-            print(f"  {request.notice}")
+            print(f"  {visible(request.notice)}")
         # §42 (RA6). Same order as the modal -- the computed notice,
         # then the agent's own claim, then the payload. Shown here as
         # well as in the TUI because a kind one shell renders and the
@@ -1089,8 +1152,10 @@ def build_attended_provider(honour_run_scope: bool = False,
         # and the CLI is where an unattended-looking run is watched
         # from.
         reason = request.payload.get("rationale")
-        print(f"  reason (the agent's own words, unverified): {reason or '(none given)'}")
+        print("  reason (the agent's own words, unverified): "
+              f"{visible(reason) if reason else '(none given)'}")
         _render_params(request.payload.get("params") or {})
+        visible.warn()
         answer = reader.ask(f"  Allow? [y/N]{clock}: ", timeout)
         if answer is None:
             print("  [no answer — denied; the run continues]")
@@ -1116,15 +1181,16 @@ def build_attended_provider(honour_run_scope: bool = False,
         multi = bool(payload.get("multi_select"))
         allow_text = payload.get("allow_text", True) is not False
 
-        print(f"\n[question] {payload.get('question', '')}")
+        visible = _Visible()
+        print(f"\n[question] {visible(payload.get('question', ''))}")
         # The one site where the header already carries the model's own
         # words, so the label follows them rather than preceding them --
         # the same order `_approval` keeps for its headline, and for the
         # reason its comment gives: a terminal has no bottom edge, so
         # this is placement rather than rescue.
-        _asker(payload)
+        _asker(payload, visible)
         for index, option in enumerate(options, start=1):
-            print(f"  {index}. {option}")
+            print(f"  {index}. {visible(option)}")
         how = []
         if options:
             how.append("numbers separated by spaces" if multi else "a number")
@@ -1133,6 +1199,7 @@ def build_attended_provider(honour_run_scope: bool = False,
         how.append("'d' to discuss it instead")
         prompt = f"  {', or '.join(how)} (blank to skip): "
 
+        visible.warn()
         answer = reader.ask(prompt, timeout)
         if answer is None:
             print("  [no answer — the model will be told nobody replied]")
@@ -1169,23 +1236,28 @@ def build_attended_provider(honour_run_scope: bool = False,
         so out loud beats leaving the user to infer it from a spawn that
         quietly did not happen.
         """
+        visible = _Visible()
         agent = request.payload.get("agent", "the subagent")
         candidates = list(request.payload.get("candidates") or [])
         if not candidates:
-            print(f"\n[subagent] {agent} needs no approval-gated tools.")
+            print(f"\n[subagent] {visible(agent)} needs no approval-gated "
+                  "tools.")
             # BOTH branches, as the modal splices it into both of its own:
             # a nested spawn of an agent with no gated tools reaches this
             # one, and `agent` here is the run about to be SPAWNED.
-            _asker(request.payload)
+            _asker(request.payload, visible)
+            visible.warn()
             answer = reader.ask(f"  Run it? [y/N]{clock}: ", timeout)
             if answer and answer.strip().lower() in ("y", "yes"):
                 return set()
             print("  [the spawn was refused]")
             return None
-        print(f"\n[subagent] {agent} may be granted, for this turn only:")
-        _asker(request.payload)
+        print(f"\n[subagent] {visible(agent)} may be granted, for this "
+              "turn only:")
+        _asker(request.payload, visible)
         for index, name in enumerate(candidates, 1):
-            print(f"  {index}. {name}")
+            print(f"  {index}. {visible(name)}")
+        visible.warn()
         answer = reader.ask(
             "  Grant which? [numbers / 'all' / 'none' / blank to refuse]"
             f"{clock}: ", timeout)
@@ -1205,6 +1277,18 @@ def build_attended_provider(honour_run_scope: bool = False,
                 chosen.add(candidates[int(piece) - 1])
             else:
                 print(f"  [ignoring {piece!r} — not one of the numbers above]")
+        if not chosen:
+            # NOTHING IN THAT LINE NAMED A TOOL (batch 152), and the
+            # empty set is already taken: it is the explicit `none`, which
+            # returned
+            # above, and `core/loop.py` spawns on "not None". So returning
+            # `chosen` here turned a mistyped refusal into an
+            # authorisation to spawn -- measured, `xyz` and `0 99` both
+            # spawned. This is the docstring's own "None for anything
+            # unparsed is belt-and-braces", which the code did for a blank
+            # line and not for a line it could not read.
+            print("  [nothing there named a tool — the spawn was refused]")
+            return None
         return chosen
 
     def _confirm(request):
@@ -1215,12 +1299,14 @@ def build_attended_provider(honour_run_scope: bool = False,
         shell how to render: an approval is a gated tool call with params,
         this is prose someone wants signed off.
         """
+        visible = _Visible()
         payload = request.payload
         body = payload.get("body", "")
         if body:
-            print(f"\n{body}")
-        answer = reader.ask(
-            f"  {payload.get('title', 'Proceed?')} [y/N]{clock}: ", timeout)
+            print(f"\n{visible(body)}")
+        title = visible(payload.get("title", "Proceed?"))
+        visible.warn()
+        answer = reader.ask(f"  {title} [y/N]{clock}: ", timeout)
         if answer is None:
             print("  [no answer — nothing was done]")
             return False
@@ -1236,16 +1322,24 @@ def build_attended_provider(honour_run_scope: bool = False,
         makes `s` mean software without anything hard-coding it), or a
         bare Enter to take the suggestion.
         """
+        visible = _Visible()
         payload = request.payload
         options = [str(o) for o in (payload.get("options") or ())]
         proposal = payload.get("proposal")
         if payload.get("blank"):
             print("\nThis folder is empty, so there is nothing to go on.")
         elif proposal:
-            print(f"\nThis looks like a {proposal} project — "
-                  f"{payload.get('reason', 'no reason given')}.")
-        labels = " or ".join(f"[{o[:1]}]{o[1:]}" for o in options)
+            print(f"\nThis looks like a {visible(proposal)} project — "
+                  f"{visible(payload.get('reason', 'no reason given'))}.")
+        # The LABELS are scrubbed and the returned value is not: what this
+        # kind answers with has to be the option as it was offered, since
+        # decode validates the answer against that list (and a scrubbed
+        # answer would fail that check for the one reason that is not the
+        # user's fault).
+        labels = " or ".join(f"[{o[:1]}]{o[1:]}" for o in
+                             (visible(o) for o in options))
         accepts = " (enter accepts the suggestion)" if proposal else ""
+        visible.warn()
         answer = reader.ask(f"  {labels}?{accepts}{clock}: ", timeout)
         if answer is None:
             print("  [no answer — nothing was chosen]")
@@ -1261,7 +1355,11 @@ def build_attended_provider(honour_run_scope: bool = False,
                    if o.lower().startswith(cleaned.lower())]
         if len(matched) == 1:
             return matched[0]
-        print(f"  [{cleaned!r} is not one of: {', '.join(options)}]")
+        # The SECOND rendering of the same list, and the one a reader
+        # does not think of as display -- found by the relation test
+        # rather than by reading this function (batch 152).
+        print(f"  [{cleaned!r} is not one of: "
+              f"{', '.join(visible(o) for o in options)}]")
         return None
 
     def _review(request):
@@ -1290,12 +1388,14 @@ def build_attended_provider(honour_run_scope: bool = False,
         `interaction.SAFE_DEFAULTS` is what makes adding a kind
         without this a FAILURE rather than a later discovery.
         """
+        visible = _Visible()
         payload = request.payload
         print()
-        print(payload.get("title", "Enter a secret"))
+        print(visible(payload.get("title", "Enter a secret")))
         body = payload.get("body", "")
         if body:
-            print(body)
+            print(visible(body))
+        visible.warn()
         answer = reader.readline_masked("  (not shown as you type): ")
         if answer is None:
             print("  [nothing was entered]")
@@ -1505,7 +1605,8 @@ def run_memory_command(args) -> int:
     for row in rows:
         marker = "global " if row["scope"] == "global" else "project"
         category = f" [{row['category']}]" if row.get("category") else ""
-        print(f"{row['id']}  {marker}{category}  {row['content']}")
+        print(f"{row['id']}  {marker}{category}  "
+              f"{ansi.for_display(row['content'])}")
     return 0
 
 
@@ -1613,9 +1714,9 @@ def run_init_command(args, provider_name: str, model: str) -> int:
             scaffold_config=args.project_config,
         )
     except InitError as e:
-        print(f"\n{e}")
+        print(f"\n{ansi.for_display(e)}")
         return 1
-    print(f"\n{notice['text']}")
+    print(f"\n{ansi.for_display(notice['text'])}")
     return 0
 
 
@@ -1649,7 +1750,8 @@ def attach_cli_refs(thread_id, specs, provider_name: str, model: str) -> None:
         except Exception as e:  # noqa: BLE001 -- a failed reference must not
             # stop the session from starting.
             logger.warning("Could not summarise thread %s: %s", source, e)
-            print(f"[--ref: could not summarise {source}: {e}]")
+            print(f"[--ref: could not summarise {source}: "
+                  f"{ansi.for_display(e)}]")
             continue
         if notice is None:
             print(f"[--ref: nothing to summarise in {source}]")
@@ -1707,10 +1809,17 @@ def _pick_tools_to_grant(offered) -> set:
     print("Granting one authorises it for THIS RUN ONLY. Nothing is saved.\n")
     granted = set()
     for name, description in offered:
-        print(f"  {name}")
+        # ONE SCRUBBER PER TOOL, because each tool is its own question.
+        # Both strings are third-party: `candidates()` exists for MCP
+        # tools, and its own docstring says the description IS the whole
+        # of informed consent here -- which is what makes an escape in it
+        # worse than an escape in an approval headline, not better.
+        visible = _Visible()
+        print(f"  {visible(name)}")
         if description:
-            print(f"      {description}")
-        if _ask(f"  Grant {name} for this run? [y/N]: ").strip().lower() in ("y", "yes"):
+            print(f"      {visible(description)}")
+        visible.warn()
+        if _ask(f"  Grant {visible(name)} for this run? [y/N]: ").strip().lower() in ("y", "yes"):
             granted.add(name)
         print()
     return granted
@@ -1766,8 +1875,13 @@ def run_research(
             # capability visible only in the TUI is the split this
             # project keeps warning about -- and it is the CLI that goes
             # silent for minutes inside a tool-heavy pass.
+            # Every field of an event that carries TEXT carries a
+            # model's or a tool's (batch 152): a pass id is composed
+            # here, a tool name can be a server's, and `event.text` is a
+            # trace
+            # line, a tool argument digest or a tool's own error.
             if event.kind == "pass_start":
-                print(f"-> {event.pass_id}", flush=True)
+                print(f"-> {ansi.for_display(event.pass_id)}", flush=True)
             elif event.kind == "pass_complete" and event.ok is False:
                 # E14/#115, L6's both-shells rule. Deliberately prints
                 # nothing: the CLI's narrative for this failure is the
@@ -1782,15 +1896,18 @@ def run_research(
                 # made no model call is done the moment it is announced,
                 # so an arrow promising something is starting would be
                 # wrong.
-                print(f".. {event.pass_id}", flush=True)
+                print(f".. {ansi.for_display(event.pass_id)}", flush=True)
             elif event.kind == "tool_call":
-                detail = f"  {event.text}" if event.text else ""
-                print(f"     > {event.tool}{detail}", flush=True)
+                detail = (f"  {ansi.for_display(event.text)}"
+                          if event.text else "")
+                print(f"     > {ansi.for_display(event.tool)}{detail}",
+                      flush=True)
             elif event.kind == "tool_result" and not event.ok:
                 # Successful results print nothing: one line per call is
                 # already the volume, and "it worked" is what the absence
                 # of a failure line says.
-                print(f"     x {event.tool}  {event.text}", flush=True)
+                print(f"     x {ansi.for_display(event.tool)}  "
+                      f"{ansi.for_display(event.text)}", flush=True)
             elif event.kind == "pass_activity":
                 # For the passes that call no tools at all -- Pass 1 and
                 # final synthesis -- this is the only sign of life
@@ -1798,7 +1915,7 @@ def run_research(
                 # the two longest passes in the run.
                 print(f"     .. {event.chars // 1000}k chars", flush=True)
             elif event.kind == "trace_line":
-                print(f"- {event.text}", flush=True)
+                print(f"- {ansi.for_display(event.text)}", flush=True)
             elif event.kind == "run_complete":
                 run = event.run
         if run is None:
@@ -1810,7 +1927,7 @@ def run_research(
                 "run_complete event")
     except Exception as e:
         logger.exception("Research pipeline failed")
-        print(f"\nPipeline failed: {e}")
+        print(f"\nPipeline failed: {ansi.for_display(e)}")
         print("If any partial results were persisted, they can be "
               "inspected via the database.")
         raise SystemExit(1)
@@ -1820,13 +1937,14 @@ def run_research(
         output_dir = write_run_artifacts(run)
     except Exception as e:
         logger.exception("Could not write artifacts")
-        print(f"\n[Warning: could not write artifacts: {e}]")
+        print("\n[Warning: could not write artifacts: "
+              f"{ansi.for_display(e)}]")
 
     # §22: no "--- Trace ---" block here any more. Every line was printed
     # as it happened, above; reprinting them would show the whole run
     # twice, with the second copy looking like a different artifact.
     print("\n--- Report ---")
-    print(run.final_report)
+    print(ansi.for_display(run.final_report))
 
     if run.run_id:
         print(f"\n[run id: {run.run_id}]")
@@ -2139,16 +2257,19 @@ def _prompt_review_decision(reader, finding, round_index,
     """
     if timeout is _DEFAULT_TIMEOUT:
         timeout = config.ATTENDED_APPROVAL_TIMEOUT_S
-    kind = finding.get("kind")
-    target = finding.get("claim_id") or "the report"
+    # Every field here is the reviewing model's own text (batch 152).
+    visible = _Visible()
+    kind = visible(finding.get("kind"))
+    target = visible(finding.get("claim_id") or "the report")
     print(f"\n[review] {kind} correction to {target} "
-          f"(severity: {finding.get('severity', 'unknown')})")
-    print(f"  why: {finding.get('reason', '(no reason given)')}")
-    print(f"  proposed: {finding.get('proposed')}")
+          f"(severity: {visible(finding.get('severity', 'unknown'))})")
+    print(f"  why: {visible(finding.get('reason', '(no reason given)'))}")
+    print(f"  proposed: {visible(finding.get('proposed'))}")
     if round_index:
         print(f"  (refinement {round_index} of "
               f"{config.MAX_REVIEW_REFINEMENTS})")
     clock = f" ({timeout}s)" if timeout else ""
+    visible.warn()
     answer = reader.ask(
         "  [a]ccept / [r]eject / [f] refine <note> / [!] reject the "
         f"rest{clock}: ", timeout)
@@ -2314,10 +2435,14 @@ def _confirm_user_level_servers(configs: dict) -> dict:
 
     for cfg in pending:
         if not interactive:
-            print(f"  - {cfg.describe()}", file=sys.stderr)
+            print(f"  - {ansi.for_display(cfg.describe())}",
+                  file=sys.stderr)
             approved.pop(cfg.name, None)
             continue
-        print(f"\nNew MCP server in your user config:\n  {cfg.describe()}")
+        visible = _Visible()
+        print("\nNew MCP server in your user config:\n  "
+              f"{visible(cfg.describe())}")
+        visible.warn()
         answer = _ask("Connect to it? [y/N]: ")
         if answer.strip().lower() in ("y", "yes"):
             mcp_config.remember_server(cfg)
@@ -2376,11 +2501,13 @@ def setup_mcp(project_path: str):
             print(f"[mcp] {len(names)} tool(s) from "
                   f"{len(client.clients)} server(s).")
         for name, why in client.failures.items():
-            print(f"[mcp] server {name!r} unavailable: {why}", file=sys.stderr)
+            print(f"[mcp] server {name!r} unavailable: "
+                  f"{ansi.for_display(why)}", file=sys.stderr)
         return client
     except Exception as e:
         logger.debug("MCP setup failed", exc_info=True)
-        print(f"[mcp] setup failed, continuing without MCP: {e}", file=sys.stderr)
+        print("[mcp] setup failed, continuing without MCP: "
+              f"{ansi.for_display(e)}", file=sys.stderr)
         # Returning None here without unwinding is how spawned stdio
         # servers become orphans: teardown_mcp(None) is a no-op, so a
         # failure AFTER connect_all() (registration raising, a partial
@@ -2692,7 +2819,7 @@ def main(argv=None) -> int:
     if not (args.memories or args.forget or args.secrets or args.tui):
         from credentials import provider_startup_issues
         for warning in provider_startup_issues(provider):
-            print(f"[warning] {warning}")
+            print(f"[warning] {ansi.for_display(warning)}")
 
     # §21b M15. AFTER load_project_config, because scoping needs the
     # resolved project path -- and before any MCP setup, since neither

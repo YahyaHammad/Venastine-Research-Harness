@@ -3014,3 +3014,126 @@ def test_the_one_copy_is_where_the_relation_says_it_is():
         f"to point at it -- a relation nobody references is a relation "
         f"about nothing")
 
+
+
+# ---------------------------------------------------------------------------
+# ---- S16-03: a documented private symbol resolves -------------------------
+# ---------------------------------------------------------------------------
+#
+# AGENTS.md named `_ASK_HANDLERS` as the CLI's table of ask handlers. There
+# is no such symbol: the CLI's is a closure-local `handlers` published as
+# `channel.rendered_kinds`, and the TUI's is an if-chain in
+# `VenastineApp._ask_blocking`. `git log -S` returns only the docs commit
+# that coined the name, so it was born stale rather than renamed without
+# update -- which is the shape no convention catches, because there was
+# never a moment when somebody edited code and forgot the document.
+
+_PRIVATE_BACKQUOTED = re.compile(r"`(_[A-Za-z0-9_]+)`")
+
+
+def _all_python_sources():
+    """Every .py file in the live tree, tests included, EXCEPT this one.
+
+    `_production_python` skips `tests`, and this gate must not: AGENTS.md
+    legitimately names test helpers, and a production-only scan would
+    report those as dangling for a reason that is not a defect.
+
+    THIS FILE IS EXCLUDED, and it is not housekeeping. The gate below
+    explains the defect it exists for by naming `_ASK_HANDLERS`, so with
+    this file in scope the dangling token resolves against the paragraph
+    written to forbid it -- measured: the control that writes that name
+    back into AGENTS.md left the gate GREEN. A gate's evidence may not
+    come from its own explanation of what it forbids, which is the same
+    correction batch 151 made to the conftest-header gate one batch
+    earlier, when two function names in its own added prose read as
+    claimed stubs.
+    """
+    here = os.path.abspath(__file__)
+    for dirpath, _dirnames, filenames in _walk_project():
+        for name in sorted(filenames):
+            if not name.endswith(".py"):
+                continue
+            path = os.path.join(dirpath, name)
+            if os.path.abspath(path) == here:
+                continue
+            yield path
+
+
+def test_every_private_symbol_agents_md_names_exists_in_the_tree():
+    """S16-03. A reader who greps for a documented symbol has to find it,
+    and a fixer who "adds the missing handler to `_ASK_HANDLERS`" must not
+    be invited to build a third registry beside the two real ones.
+
+    THE DOMAIN IS EVERY BACKQUOTED PRIVATE IDENTIFIER, not the sentence
+    that was wrong. A leading underscore is an unambiguous signal that a
+    backquoted token is code rather than English, so nothing here has to
+    guess; 131 of them were measured when this was written and 130
+    resolved.
+
+    A SUBSTRING MATCH, AND BOTH ALTERNATIVES WERE MEASURED. This file
+    already owns an AST index of defined names -- `_defined_python_names`,
+    which the cited-test-name gate uses -- and reusing it would be the
+    stronger check and no new scanner. It fails on SEVENTEEN of the 131:
+    it collects `ast.Name` Store targets and not `ast.Attribute` ones, so
+    every instance attribute the document names (`_thinking_pending`,
+    `_last_run`, `_viewing`) reads as undefined, as do four dunders.
+
+    A `tokenize` NAME index is the other candidate and the only one that
+    can tell code from prose, which is the hole this gate's own first
+    form fell into (see `_all_python_sources`). It fails on eight, and
+    three of those are not this repository's symbols at all:
+    `_check_bindings` and `_watch_theme` are Textual's, `__builtins__` is
+    CPython's, and `_compacting` is prose about a design the code
+    deliberately did not take. A coherence gate that fails on a CORRECT
+    reference to somebody else's symbol is the wrong trade, so the
+    substring match stays and its one weakness is closed by excluding
+    this file. TECHNICAL_DEBT 106 carries the two the NAME index flagged
+    that may be genuinely stale.
+
+    The substring match also answers the reader's own question most
+    directly: a name reachable by grep is a name they will find.
+
+    THE DOMAIN IS ASSERTED IN BOTH DIRECTIONS, which is ARCHITECTURE
+    section 11's instruction and what batch 151 found missing in two
+    guards: a scan that matched no tokens, or read no sources, would pass
+    while checking nothing. The floors sit below the measured 131 and 243
+    so ordinary editing does not trip them, and far enough above zero
+    that a broken pattern or a mis-rooted walk does.
+
+    WHAT IT DOES NOT COVER, said here so the next reader does not assume
+    it: a dotted path whose first component is public, such as
+    `VenastineApp._ask_blocking`, does not match this pattern as a whole
+    -- the leading `V` is not an underscore -- so only its private tail
+    would be caught if it were written alone. Widening to dotted paths
+    means deciding what a public attribute resolves against, which is a
+    different gate.
+    """
+    text = _agents_md()
+    tokens = {}
+    for match in _PRIVATE_BACKQUOTED.finditer(text):
+        line = text.count("\n", 0, match.start()) + 1
+        tokens.setdefault(match.group(1), []).append(line)
+    assert len(tokens) > 80, (
+        f"only {len(tokens)} backquoted private identifiers were found in "
+        f"AGENTS.md, and 131 were measured when this gate was written, so "
+        f"the pattern has stopped matching what it was written for")
+
+    blobs = []
+    for path in _all_python_sources():
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            blobs.append(handle.read())
+    assert len(blobs) > 150, (
+        f"the scan read {len(blobs)} python files and 243 were measured, so "
+        f"it is looking in the wrong place and would resolve nothing")
+
+    missing = sorted(
+        f"{token} (AGENTS.md:{','.join(str(n) for n in lines)})"
+        for token, lines in tokens.items()
+        if not any(token in blob for blob in blobs))
+    assert not missing, (
+        "AGENTS.md names private symbols that exist nowhere in the tree: "
+        + "; ".join(missing)
+        + ". A reader greps the documented name, finds nothing, and either "
+        "concludes the thing is unguarded or adds it -- which creates a "
+        "second thing beside the real one. Name what exists, or delete "
+        "the sentence.")

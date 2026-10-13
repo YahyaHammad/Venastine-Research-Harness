@@ -23598,3 +23598,193 @@ arrived with `9048427`, and nothing in this batch touches that file or
 that module.
 
 FIX-NOW: **75 done, 11 open.**
+
+## Batch 152 -- a consent prompt the model could repaint, and a refusal that read as a yes (2026-10-13)
+
+The review marathon's headless-shell surface, all three `FIX-NOW`
+findings -- **S16-01**, **S16-02** and **S16-03**. Six owner rulings,
+recorded as `docs/ROADMAP_v3.md` §69's A40-A45. Three register items are
+new: **104**, **105** and **106**.
+
+Both S3s are the same sentence from opposite ends. **The CLI is where a
+human authorises a tool call, and it trusted the text it was
+authorising**: S16-02 is the display, S16-01 is the answer. Neither needs
+a privileged position -- a tool call, and a mistyped word.
+
+### S16-02: the one path in the prompt that was already right is what hid it
+
+`_approval` printed the headline, the notice and the agent's stated reason
+as plain f-strings, and the params block below them has always been safe,
+because `_render_params` runs `json.dumps` and an escape comes out as
+`\u001b`. That is what made the raw half easy to miss for 46 batches: the
+escape IS visible on the screen, in the block nobody decides from.
+
+Driven through the real channel, thirteen fields across all seven kinds
+reached stdout carrying a control. The worst are not the headline:
+
+| field | before | after |
+|---|---|---|
+| approval headline | ESC | none |
+| approval notice, rationale | ESC, CR | none |
+| question text and options | ESC, CR | none |
+| sign-off agent and candidates | ESC, CR | none |
+| choice proposal, reason, options | ESC x3, CR x3 | none |
+| review kind, severity, reason, proposed | ESC x4, CR x4 | none |
+| params block | none (`\u001b`) | unchanged |
+
+**The report's mechanism is right about the outcome and wrong in one
+detail, and the detail is a defence worth keeping.** `str.splitlines()`
+splits on a carriage return as well as a newline, so a CR inside a
+HEADLINE never reached the terminal at all: it became a second line, and
+`main.py` prefixes every line with `  $ `, so the forged command arrived
+wearing a doubled prefix. What did the damage was the escape alone -- CSI
+`2K` erases the row the real command was drawn on. The single-f-string
+fields are the worse case: there the CR survives, and it overwrites the
+row the user is reading, label and all.
+
+**A second privilege-critical site, which the report does not name.**
+`_pick_tools_to_grant` prints an MCP server's own description of its tool
+and then asks one y/N per tool, and its docstring says why that text is
+the whole of the decision: "MCP exposes no read-only/write metadata, so
+nothing can tell the user that one granted tool searches a library and
+another posts to a channel". `candidates()` says the population it exists
+for IS MCP tools. Measured: `_bounded` at registration collapses
+whitespace, so a newline and a carriage return never arrive, **and the
+escape does**. A grant is wider than an approval -- it covers every call
+for the run.
+
+The fix is one helper in `core/ansi.py`, which already owns this transform
+for the pty and, since batch 145, for the TUI transcript. `for_display` is
+built out of `AnsiStripper` rather than beside it, so there is one scanner
+and one answer about what a sequence is, and both encodings come for free.
+One `_Visible` per prompt, and one line above the question when something
+was removed.
+
+**The relation found a site that reading the function did not.** The sweep
+over `_PAYLOADS` failed on `choice` the first time it ran: `_choice`
+renders the option list TWICE, and the second one -- the `[... is not one
+of: ...]` line on the unmatched path -- is not a line a reader thinks of
+as display. That is the argument for a relation over the kind table
+instead of a list of print sites, since the thing being guarded against
+is a print call nobody remembered.
+
+### S16-01: the empty set already meant something
+
+`_signoff` ignores any piece of the answer that is not a candidate number,
+says what it ignored, and falls out with whatever it collected. For a line
+in which NOTHING was a number that is the empty set -- which is already
+taken. It is the explicit `none`, which returns two branches earlier, and
+`core/loop.py:440` spawns on `answer is not None`.
+
+| typed | returned | the loop did | now |
+|---|---|---|---|
+| (blank) / (no answer) | `None` | refused | unchanged |
+| `none` | `set()` | spawns, grants nothing | unchanged |
+| `all` / `1` / `2,1` | a subset | spawns | unchanged |
+| `xyz` | **`set()`** | **SPAWNED** | `None`, refused |
+| `0 99` | **`set()`** | **SPAWNED** | `None`, refused |
+| `1 xyz` | `{remember}` | spawns | unchanged |
+
+`0 99` is the row a user reaches by miscounting rather than mistyping:
+both pieces are digits and both out of range, so they are dropped by the
+bounds check rather than the digit check and arrive at the same empty set.
+
+The function's own docstring already said what it should do -- "None for
+anything unparsed is belt-and-braces" -- and the code did that for a blank
+line and not for a line it could not read. The three cells around it were
+pinned; the hole between two green cells stayed green because no test
+typed a non-blank line that named nothing.
+
+### S16-03: a name that was never there, and a gate that twice caught its author
+
+AGENTS.md said every kind in `interaction.SAFE_DEFAULTS` must have a
+handler in `_ASK_HANDLERS`. There is no such symbol: the CLI's table is a
+closure-local `handlers` published as `channel.rendered_kinds`, the TUI's
+is an if-chain in `VenastineApp._ask_blocking`. `git log -S` returns only
+the docs commit that coined the name, so it was **born stale** -- the one
+shape no convention catches, because there was never a moment when
+somebody edited code and forgot the document.
+
+The gate is over every backquoted PRIVATE identifier in AGENTS.md, not
+over the sentence that was wrong: a leading underscore is an unambiguous
+signal that a backquoted token is code rather than English. 131 of them,
+and the resolution rule was chosen by measuring three candidates:
+
+| rule | fails on | why |
+|---|---|---|
+| substring in any `.py` | **1** | the defect, and nothing else |
+| this file's own AST index | 17 | `ast.Name` Store targets but not `ast.Attribute`, so every instance attribute the document names reads as undefined, plus four dunders |
+| `tokenize` NAME tokens | 8 | right about prose, but three are not this repository's symbols: `_check_bindings` and `_watch_theme` are Textual's, `__builtins__` is CPython's, and `_compacting` is prose about a design the code did not take |
+
+**Then the control killed the gate twice.** D1 writes `_ASK_HANDLERS` back
+into AGENTS.md; the gate stayed GREEN, because its own comment block
+explains the finding by name and a substring scan cannot tell code from
+the paragraph written to forbid it. **That is batch 151's conftest-header
+defect, one batch later, in the same session, found the same way.** The
+gate excludes its own file now. It then failed on the clean tree, because
+the replacement sentence in AGENTS.md closed by naming the symbol while
+explaining that it does not exist -- and the rule is that the document does
+not name it at all. The history moved to this entry, which no gate reads.
+
+### What the mutation pass found in this batch's own tests
+
+Three survivors on the first run, all three real:
+
+- **the approval HEADLINE was covered by nothing.** `_PAYLOADS["approval"]`
+  carries no `headline` key, so the sweep never rendered the field the
+  finding is about -- printing it raw again left every parametrised case
+  green. Covered now by a test of its own, with three spellings.
+- **`proposed` and three siblings were covered by nothing**, for the same
+  reason: `_PAYLOADS["review"]`'s finding carries `claim_id` alone, so the
+  four fields the reviewing model writes were rendered by no test.
+- **`test_the_real_command_survives_beside_the_forgery` passed against the
+  unfixed code.** It asserted the real command was still THERE and never
+  that the escape was gone, and the escape sat at the end of that same
+  line where a substring check cannot see it. Both halves now.
+
+The class docstring states the sweep's reach and its two gaps, because
+that boundary is otherwise something a later reader has to rediscover with
+a mutation.
+
+### Verification
+
+Controls **22 of 22**: 19 KILLED, and three that must not die -- the
+equivalent floor spelling, the raw headline WITH the sweep's assertion
+removed (green, which is what makes the killing version mean something),
+and the dangling name written as a dotted path with a public head, which
+is the boundary A44 states. All six held files sha256-restored.
+
+Suite 7050 -> **7095**. `ruff`, both bandit checks, `pip-audit` (`-r`,
+both files) and gitleaks with CI's own flags by hand. Affected tests
+re-run with `env -u AGENT_WORKSPACE` and under WSL.
+
+**Items 104, 105 and 106.** 104 is the boundary §69 states and declines:
+bidi and zero-width characters are the same class of problem and not the
+same kind of answer, because a bidi mark is legitimate content in Arabic
+and Hebrew text and a control character never is. 105 and 106 are two
+gates this batch worked beside and did not widen -- the decision-id gate
+reads `C0` and `C1` in `core/ansi.py` as citations, failing on the one
+that resolves nowhere and staying silent on the one that resolves to an
+unrelated ROADMAP_v2 decision; and two private names AGENTS.md documents
+(`_last_response`, `_replace_via_keyboard`) that the NAME-token index
+flags and the shipped gate cannot see.
+
+### The count this batch had to correct before it could state one
+
+`review/TRIAGE.md`'s header said **75 done, 11 open** and its own
+per-surface tables said **71/15**. The tables plus the self-contained tail
+partition the 86 distinct findings exactly -- 76 across thirteen surfaces,
+10 in the tail -- so the disagreement is in the header, by four.
+
+Two surfaces were cleared and never MARKED, which is most of what a reader
+would trip over: **build/CI/packaging** (8) across batches 139-141 and
+**`security/sandbox.py`** (9) in batch 142, both verified against this
+file's own entries rather than assumed, and both marked now. Where the
+remaining four of the old figure came from is not reconstructible from
+TRIAGE, and inventing a reason for them would be a third copy of a count
+-- which is the shape this marathon spends most of its time deleting. The
+header states the partition, because that is the number a reader can
+check.
+
+FIX-NOW: **74 done, 12 open** -- 2 on `project_init/` + `prompts/`, and
+the 10 of the self-contained tail.

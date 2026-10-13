@@ -1040,6 +1040,270 @@ class TestEveryKindIsRendered:
         assert not missing, f"tui/app.py cannot render {missing}"
 
 
+class TestNothingUntrustedCanRedrawAConsentPrompt:
+    """S16-02. The CLI printed the security-critical half of every consent
+    prompt with raw terminal escapes in it.
+
+    The params block was always safe -- `_render_params` runs
+    `json.dumps`, which emits `\\u001b` -- and the three lines the user
+    actually decides on were plain f-strings. Measured before the fix,
+    through the real channel: a headline of `cat README.md` + CSI `2K` +
+    CR + a second `$ cat .venastine/settings.json` reached stdout with the
+    introducer intact, and CSI `2K` erases the row the approved command
+    was drawn on. R1 says the description of what is being approved IS
+    the whole of informed consent, and EP1 puts the subject on the one
+    line a terminal cannot scroll away; a subject line the model can
+    repaint is neither.
+
+    A RELATION OVER `_PAYLOADS`, NOT A LIST OF PRINT SITES. That table is
+    held against `interaction.SAFE_DEFAULTS` by the guard two classes up,
+    so a kind added with an unscrubbed handler fails here without anyone
+    remembering to extend a list -- and an enumeration of `print` calls
+    could not have that property, because the thing being guarded against
+    is a NEW print call.
+
+    WHAT THE SWEEP REACHES, AND WHAT IT CANNOT. `_poison` can only reach
+    strings the table actually carries, and `_PAYLOADS` is deliberately
+    minimal -- it exists to prove that a kind is rendered at all. So the
+    sweep says nothing about `headline` (absent from the approval entry),
+    about `notice` (a field of the Request rather than of the payload), or
+    about the four fields of a review `finding` beyond `claim_id`. Each
+    has a named test below. That gap was found by the mutation pass and
+    not by reading: printing the headline raw again left the whole sweep
+    green, and the headline is the field the finding is about.
+    """
+
+    # Everything a terminal ACTS on rather than draws: C0 less the two a
+    # caller means, DEL, and the whole C1 range (U+009B is the same CSI
+    # introducer as `ESC [`, batch 145).
+    _ACTED_ON = frozenset(
+        [chr(c) for c in range(0x20) if chr(c) not in "\n\t"]
+        + [chr(0x7F)]
+        + [chr(c) for c in range(0x80, 0xA0)])
+
+    _SPOOF = "cat README.md\x1b[2K\r  $ cat .venastine/settings.json"
+
+    @classmethod
+    def _poison(cls, value):
+        """The same payload with the spoof appended to every string in it,
+        however deep. Recursive because two kinds carry their text one
+        level down -- `review` under `finding`, and every kind with
+        `options` under a list.
+        """
+        if isinstance(value, str):
+            return value + cls._SPOOF
+        if isinstance(value, dict):
+            return {k: cls._poison(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return type(value)(cls._poison(v) for v in value)
+        return value
+
+    @classmethod
+    def _strings(cls, value):
+        """Every string inside a payload, flattened."""
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, dict):
+            out = []
+            for item in value.values():
+                out.extend(cls._strings(item))
+            return out
+        if isinstance(value, (list, tuple)):
+            out = []
+            for item in value:
+                out.extend(cls._strings(item))
+            return out
+        return []
+
+    @staticmethod
+    def _render(kind, payload, notice=None, typed="n"):
+        """Ask the real channel, and give back everything the user saw.
+
+        The PROMPT counts as something the user saw: `_confirm`'s title
+        and the grant picker's tool name are interpolated into the
+        question rather than printed above it, so a test reading stdout
+        alone would miss two of the sites this covers.
+        """
+        import unittest.mock as mock
+
+        import main
+        from core import interaction
+        from tests.conftest import FakeStdinReader
+
+        reader = FakeStdinReader([typed])
+        with mock.patch.object(main, "_stdin_reader", return_value=reader):
+            channel = main.build_attended_provider()
+        answer = channel.ask(interaction.Request(
+            kind=kind, payload=payload, notice=notice))
+        return answer, reader
+
+    def test_the_poisoned_payloads_really_carry_a_control(self):
+        """Guards the guard, in the direction batch 151 spent its day on:
+        a payload with no control in it would pass the test below while
+        checking nothing, and `_poison` returning its argument unchanged
+        for some shape is exactly how that happens.
+        """
+        for kind, payload in _PAYLOADS.items():
+            poisoned = self._poison(payload)
+            assert poisoned != payload, kind
+            strings = self._strings(poisoned)
+            assert strings, f"{kind}: no strings to poison"
+            assert all(self._ACTED_ON & set(s) for s in strings), kind
+
+    @pytest.mark.parametrize("kind", sorted(_PAYLOADS))
+    def test_no_control_character_reaches_the_terminal(self, kind, capsys):
+        _, reader = self._render(kind, self._poison(_PAYLOADS[kind]))
+        shown = capsys.readouterr().out + "".join(reader.prompts)
+        leaked = sorted(self._ACTED_ON & set(shown))
+        assert not leaked, (
+            f"{kind} printed {[hex(ord(c)) for c in leaked]} to a terminal")
+
+    @pytest.mark.parametrize("kind", sorted(_PAYLOADS))
+    def test_the_prompt_says_something_was_removed(self, kind, capsys):
+        """The owner's ruling, and the half a silent strip would not give:
+        a tool call whose text tries to move the cursor is evidence about
+        the decision being asked. Nothing a tool legitimately needs to do
+        involves redrawing a consent prompt.
+        """
+        self._render(kind, self._poison(_PAYLOADS[kind]))
+        out = capsys.readouterr().out
+        assert "terminal control sequence" in out, (
+            f"{kind} stripped the controls and said nothing:\n{out}")
+
+    @pytest.mark.parametrize("kind", sorted(_PAYLOADS))
+    def test_a_clean_payload_renders_with_no_warning(self, kind, capsys):
+        """THE CONTROL. A filter that warns on everything is a filter
+        nobody reads, and a test that only ever feeds poison cannot tell
+        the two apart.
+        """
+        self._render(kind, _PAYLOADS[kind])
+        out = capsys.readouterr().out
+        assert "terminal control sequence" not in out, out
+
+    def test_the_approval_notice_is_covered_too(self, capsys):
+        """`notice` is a field of the Request rather than of the payload
+        -- `ToolSpec.approval_notice`, composed by the tool from the
+        model's own params -- so `_poison` above cannot reach it and the
+        parametrised tests say nothing about it.
+        """
+        self._render("approval", _PAYLOADS["approval"],
+                     notice="runs on the HOST" + self._SPOOF)
+        out = capsys.readouterr().out
+        assert not (self._ACTED_ON & set(out)), out
+        assert "terminal control sequence" in out
+
+    def test_the_real_command_survives_beside_the_forgery(self, capsys):
+        """What the fix is FOR, stated as the user's outcome rather than
+        as an absence of bytes. The approved command stays on the screen
+        and the forged text is still visible -- as text, on its own line,
+        wearing a second `$ ` prefix, because `str.splitlines()` splits on
+        a carriage return and the per-line prefix is applied after it.
+        Removing the escape is what stops the first line being erased.
+        """
+        self._render("approval",
+                     {"tool_name": "shell", "headline": self._SPOOF,
+                      "params": {"command": self._SPOOF}})
+        out = capsys.readouterr().out
+        # BOTH HALVES, and the second was missing. This asserted only that
+        # the real command was still there, and it passed against the
+        # UNFIXED code: the raw escape sat at the end of that same line,
+        # where a substring check cannot see it. What makes the line safe
+        # is the absence; what makes the fix worth having is the presence.
+        assert not (self._ACTED_ON & set(out)), out
+        assert "  $ cat README.md" in out, out
+        assert "  $   $ cat .venastine/settings.json" in out, out
+        assert "terminal control sequence" in out, out
+
+    def test_the_headline_is_covered_by_a_test_of_its_own(self, capsys):
+        """`headline` is absent from `_PAYLOADS["approval"]`, so the sweep
+        above never renders the field S16-02 is actually about. Found by
+        the mutation pass: printing it raw left every sweep green.
+
+        Three spellings, because the headline is the one field a shell
+        tool always has and the one place EP1 puts first. `capsys` is read
+        INSIDE the loop -- `readouterr()` clears the buffer, so a loop
+        that reads once afterwards checks only its last iteration.
+        """
+        for headline in (self._SPOOF,
+                         "ls\x9b2J",
+                         "ls\x1b]0;window title\x07"):
+            self._render("approval",
+                         {"tool_name": "shell", "headline": headline,
+                          "params": {"command": headline}})
+            out = capsys.readouterr().out
+            assert not (self._ACTED_ON & set(out)), (headline, out)
+            assert "terminal control sequence" in out, (headline, out)
+
+    def test_every_field_of_a_review_finding_is_covered(self, capsys):
+        """`_PAYLOADS["review"]`'s finding carries `claim_id` alone, so
+        `kind`, `severity`, `reason` and `proposed` -- all four written by
+        the reviewing model, and `proposed` is the text a user accepts
+        into a report -- were rendered by no test at all. The mutation
+        pass found this one too.
+        """
+        finding = {"claim_id": "c1" + self._SPOOF,
+                   "kind": "numeric" + self._SPOOF,
+                   "severity": "high" + self._SPOOF,
+                   "reason": "the figure is wrong" + self._SPOOF,
+                   "proposed": "42" + self._SPOOF}
+        self._render("review", {"finding": finding, "round": 1}, typed="r")
+        out = capsys.readouterr().out
+        assert not (self._ACTED_ON & set(out)), out
+        assert "terminal control sequence" in out, out
+
+
+    def test_the_params_block_was_already_safe(self, capsys):
+        """The other control, and the reason the fix is at the display
+        boundary rather than in the classifier or the registry: one path
+        in this prompt was always right, and it got there by rendering
+        the value instead of trusting it.
+        """
+        self._render("approval",
+                     {"tool_name": "shell", "headline": "ls",
+                      "params": {"command": self._SPOOF}})
+        out = capsys.readouterr().out
+        assert "\\u001b[2K" in out, out
+
+
+    def test_the_grant_picker_is_covered_too(self, capsys, monkeypatch):
+        """Not a kind, and the one consent prompt in this shell whose
+        whole substance is third-party text: `candidates()` exists for
+        MCP tools, its description comes from the server's own schema,
+        and `_pick_tools_to_grant`'s docstring says showing it IS the
+        informed consent. `_bounded` at registration collapses whitespace
+        -- measured, so a carriage return never arrives -- and leaves the
+        escape, which is the half that moves a cursor.
+        """
+        import main
+
+        monkeypatch.setattr(main, "_ask", lambda prompt: "n")
+        main._pick_tools_to_grant([("mcp__srv__post", "posts a message"
+                                    + self._SPOOF)])
+        out = capsys.readouterr().out
+        assert not (self._ACTED_ON & set(out)), out
+        assert "terminal control sequence" in out, out
+
+    def test_the_mcp_acknowledgement_is_covered_too(self, capsys,
+                                                    monkeypatch):
+        """`describe()` renders a file this user may not have written --
+        D31 exists because an installer can append to it -- onto the one
+        screen where they decide whether to run its command.
+        """
+        import main
+        from mcp_client import config as mcp_config
+
+        cfg = mcp_config.ServerConfig(
+            name="srv", tier="user", path="<test>", transport="stdio",
+            command="unused" + self._SPOOF)
+        monkeypatch.setattr(mcp_config, "is_known", lambda c: False)
+        monkeypatch.setattr(main.sys.stdin, "isatty", lambda: True)
+        monkeypatch.setattr(main, "_ask", lambda prompt: "n")
+        main._confirm_user_level_servers({"srv": cfg})
+        out = capsys.readouterr().out
+        assert not (self._ACTED_ON & set(out)), out
+        assert "terminal control sequence" in out, out
+
+
 class TestTheTerminalNamesTheAskingRun:
     """§47's asker line, in the shell that was dropping it (batch 76).
 
@@ -1565,6 +1829,64 @@ class TestTheDecliningDefaults:
         assert self._ask(interaction.SUBAGENT_SIGNOFF,
                          _PAYLOADS["subagent_signoff"],
                          typed="none") == set()
+
+
+    def test_a_line_naming_nothing_refuses_the_spawn(self):
+        """S16-01. `xyz` fell out of the piece loop with an empty
+        `chosen`, and the function returned it -- but the empty set is
+        already taken: it is the explicit `none`, and `core/loop.py:440`
+        spawns on "not None". So a mistyped refusal became an
+        authorisation to spawn. Measured through the real channel before
+        the fix: `xyz` returned set() and SPAWNED.
+
+        The pair either side of this were pinned (blank and unanswered)
+        and no test typed a non-blank line that named nothing, which is
+        why a hole between two green cells stayed green.
+        """
+        from core import interaction
+
+        assert self._ask(interaction.SUBAGENT_SIGNOFF,
+                         _PAYLOADS["subagent_signoff"], typed="xyz") is None
+
+    def test_a_line_of_numbers_that_name_nothing_refuses_too(self):
+        """The same hole reached with input that LOOKS like the thing the
+        prompt asked for. `0 99` is two digits, both out of range, so
+        every piece is dropped by the bounds check rather than by the
+        isdigit check -- a different route to the same empty set, and the
+        one a user hits by miscounting rather than by mistyping.
+        """
+        from core import interaction
+
+        assert self._ask(interaction.SUBAGENT_SIGNOFF,
+                         _PAYLOADS["subagent_signoff"], typed="0 99") is None
+
+    def test_a_mixed_line_still_grants_what_it_named(self):
+        """THE CONTROL FOR THE TWO ABOVE, and the reason the fix is "no
+        valid piece" rather than "any invalid piece". `1 xyz` named one
+        candidate and misspelled something else; refusing the spawn over
+        the second half would discard an answer the user did give, and
+        the per-piece message already says what was ignored.
+        """
+        from core import interaction
+
+        assert self._ask(interaction.SUBAGENT_SIGNOFF,
+                         _PAYLOADS["subagent_signoff"],
+                         typed="1 xyz") == {"remember"}
+
+    def test_the_refusal_says_which_kind_of_refusal_it_was(self, capsys):
+        """Not decoration: a user who typed a tool name instead of its
+        number gets a refused spawn, and "nothing there named a tool" is
+        the difference between a bug and an answer they can correct. The
+        blank case says "no answer"; this one cannot, because there was
+        one.
+        """
+        from core import interaction
+
+        self._ask(interaction.SUBAGENT_SIGNOFF,
+                  _PAYLOADS["subagent_signoff"], typed="remember")
+        out = capsys.readouterr().out
+        assert "nothing there named a tool" in out, out
+        assert "the spawn was refused" in out, out
 
 
 class TestAPipeDoesNotAcknowledgeAnMcpServer:

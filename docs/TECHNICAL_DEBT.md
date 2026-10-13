@@ -5459,6 +5459,106 @@ re-enact this, and this entry is what the reader should find when it does.
 **Not:** deleting the check, and not relaxing it to the highest range on the
 line. Both give back the property E13 and E14 paid for.
 
+## 104. Displayed untrusted text is filtered for controls and not for bidi or zero-width characters (open, filed batch 152)
+
+**What is not covered.** `core/ansi.for_display` removes escape sequences
+in both encodings, every control below U+0020 except newline and tab, DEL,
+and the 8-bit range U+0080-U+009F. It does not touch the bidirectional
+overrides (U+202A-U+202E, U+2066-U+2069) or the zero-width and invisible
+characters (U+200B-U+200F, U+FEFF). Those can make a terminal draw text in
+an order the bytes do not have -- the published Trojan Source class -- so
+a model-supplied headline could read as one command and be another.
+
+**Why it is not the same answer.** A control character is never legitimate
+content: there is no text in which a backspace or a CSI introducer is part
+of what the author meant to say. A bidi mark is the opposite -- it is
+ordinary content in Arabic and Hebrew text, and a filter that deletes it
+corrupts correct text to protect against incorrect text. The honest
+options are to render it visibly (`<U+202E>`), to refuse the value, or to
+leave it; section 69 A45's reasoning picks none of them because the
+decision needs a position on what this shell does with non-Latin text,
+and that position does not exist yet.
+
+**What makes it bounded rather than urgent.** The approval headline is
+printed one line per `splitlines()` segment with a `  $ ` prefix, so a
+reordering is confined to one visible line and the prefix still arrives
+first. The params block renders through `json.dumps`, which escapes
+nothing in this range but does quote it, so the bytes are visible there in
+the ordinary case. And a bidi override reorders what is shown without
+erasing it, where CSI `2K` erased.
+
+**Not:** adding the range to `_NOT_PRINTABLE` without deciding the
+question above. That would be the cheap half of an answer, in the module
+whose docstring states the cost of the C1 deletion it already does.
+
+## 105. The decision-id gate reads a Unicode control-range name as a decision citation (open, measured batch 152)
+
+**What happens.** `test_every_decision_id_cited_in_production_code_resolves`
+treats any `LETTER+NUMBER` token in production python as a citation of the
+decision record. `core/ansi.py` is prose about Unicode, so it says `C0`
+and `C1` -- and measured, this batch:
+
+- `C0` resolves nowhere, so the gate FAILED on a correct sentence about
+  the control range (batch 152 reworded its own additions to
+  `U+0000-U+001F` to get past it)
+- `C1` resolves to ROADMAP_v2's **C1**, "the permission prompt is bridged,
+  not inlined", which has nothing to do with the 8-bit control range the
+  sentence is about -- and the gate is SILENT, because resolution is all
+  it checks
+
+So one half of one sentence is a false failure and the other is a false
+pass, in the same file, about the same subject. Batch 145 wrote the `C1`
+sentences and they read as citations to the gate; they are not.
+
+**Why it is not fixed here.** The two candidate fixes both cost something
+real. An exemption list of non-citation tokens is a maintained copy of
+exactly the kind this marathon keeps deleting. Requiring citations to name
+their namespace (which `AGENTS.md` already asks for -- `gate D0`,
+`section 21 AC6`) would be the principled answer and means auditing every
+bare id in production, which is a surface of its own rather than a line.
+
+**What a reader should know meanwhile.** `C0`/`C1` in `core/ansi.py` mean
+the Unicode control ranges. The gate cannot tell, and a sentence about
+Unicode that trips it is not drift.
+
+## 106. Two private names AGENTS.md documents may be stale, and the gate that would say so costs too much here (open, measured batch 152)
+
+**What was measured.** Section 69 A44's gate resolves a documented private
+identifier by substring match over every `.py`. The stronger candidate --
+`tokenize` NAME tokens, which a comment or a string cannot produce --
+flags eight of AGENTS.md's 131, and six are explainable:
+`_check_bindings` and `_watch_theme` are Textual's symbols,
+`__builtins__` is CPython's, `_compacting` is prose about a design
+`core/compaction.py` deliberately did not take (`_is_compacting` and
+`_set_compacting` are what exist), and `__` is a convention rather than a
+name.
+
+**The two that are not explained:**
+
+- **`_last_response`** (`AGENTS.md:2620,2705`) appears in `tui/app.py`
+  only inside a comment and in `tests/test_research_legibility.py` only
+  inside a docstring. If the attribute exists it is assigned somewhere a
+  NAME token would see; the index says it is not.
+- **`_replace_via_keyboard`** (`AGENTS.md:750`) appears once in the tree,
+  in a `tui/widgets.py` docstring that quotes *its* docstring -- so the
+  thing being quoted should be a function and is not one the index can
+  find.
+
+Both are plausibly renames that left the document behind, which is the
+same defect S16-03 was and one the current gate cannot see.
+
+**Why the gate was not made stronger.** A coherence gate that fails on a
+CORRECT reference to somebody else's symbol trades one false claim for
+three. Closing this properly means either resolving upstream names (a
+dependency on installed packages, in a gate that must work offline) or an
+exemption list, and the choice is a decision rather than an edit. The
+NAME-token probe is `probe152g.py`'s shape and takes about ten lines to
+rebuild.
+
+**Not:** widening A44's pattern to dotted paths while this is open. That
+is the boundary A44 states, and `mutate152.py`'s D4 is the must-survive
+control that would turn red when somebody crosses it.
+
 ## Review-marathon arrivals at open issues with no register entry
 
 Two `KNOWN` findings landed on GitHub issues that are not mirrored here. Both

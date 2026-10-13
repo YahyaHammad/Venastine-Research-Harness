@@ -602,6 +602,129 @@ class TestThePromptIsMachineryNotOutput:
 
 
 # ---------------------------------------------------------------------------
+# ---- The one-shot form, for text handed straight to a terminal (S16-02) ----
+# ---------------------------------------------------------------------------
+
+
+class TestTheOneShotDisplayFilter:
+    """Batch 152. `main.py` prints model- and third-party text to a
+    terminal one whole string at a time, which is a THIRD consumer of this
+    module and the first that is not a stream.
+
+    It takes the transcript's answer to the unterminated carry, for the
+    transcript's reason, and it differs from both streaming consumers in
+    one place: the C0 controls. The pty leaves a lone carriage return in
+    its text because interpreting one would be emulation; at a terminal
+    the same character is not ambiguous at all, so this form removes it.
+    Both halves of that are asserted together below, because they look
+    like an inconsistency until you know they are two contracts.
+    """
+
+    def test_a_sequence_never_reaches_a_terminal(self):
+        """Every spelling `_sequence_end` knows, since a display filter
+        that handled only `ESC [` would be batch 145's defect arriving at
+        a new consumer."""
+        for text in ("a\x1b[2Kb",            # CSI, ESC form
+                     "a\x9b2Jb",             # CSI, 8-bit form
+                     "a\x1b]0;title\x07b",   # OSC terminated by BEL
+                     "a\x1b]0;title\x1b\\b",  # OSC terminated by ESC backslash
+                     "a\x1b]0;title\x9cb",   # OSC terminated by 8-bit ST
+                     "a\x1b(Bb",             # charset selection
+                     "a\x1bDb",              # two-character fallback
+                     "a\x9cb"):              # a bare C1 control
+            clean, removed = ansi.for_display_counted(text)
+            assert clean == "ab", (text, clean)
+            assert removed >= 1, text
+
+    def test_an_unterminated_sequence_is_dropped_not_released(self):
+        """The transcript's contract, for the transcript's reason: `ESC [`
+        with no final byte consumes whatever is printed after it, and what
+        is printed after this is the next line of a consent prompt."""
+        assert ansi.for_display("abc\x1b[") == "abc"
+        assert ansi.for_display("abc\x1b") == "abc"
+
+    def test_a_lone_carriage_return_goes_where_the_pty_keeps_it(self):
+        """THE ONE PLACE THE TWO CONTRACTS DISAGREE, asserted as a pair.
+
+        The pty keeps it because `working\\rdone` reading as `done` is
+        emulation and guessing is worse than showing what arrived. A
+        terminal is where the guess stops being one: a carriage return
+        returns the cursor to column 0 and the next text overwrites the
+        line the user is reading, which is the whole mechanism S16-02 is
+        about.
+        """
+        assert ansi.AnsiStripper().feed("real\rforged") == "real\rforged"
+        assert ansi.for_display("real\rforged") == "realforged"
+
+    def test_crlf_folds_and_is_not_counted(self):
+        """Counted separately from removed, because the count is what the
+        CLI says out loud: warning that controls were removed from
+        ordinary text that arrived with Windows line endings would be the
+        false positive that gets a filter turned off."""
+        assert ansi.for_display_counted("one\r\ntwo") == ("one\ntwo", 0)
+
+    def test_a_newline_and_a_tab_survive(self):
+        """The only two C0 characters a caller means. A multi-line
+        headline is legitimate -- `main.py` splits it and prefixes every
+        line -- and a tab cannot overwrite anything."""
+        assert ansi.for_display_counted("a\n\tb") == ("a\n\tb", 0)
+
+    def test_every_other_c0_and_del_are_removed(self):
+        """Backspace, vertical tab and form feed move a cursor too, so
+        leaving them would close the ESC route and keep a plainer one.
+        BEL outside a sequence is here for the same reason."""
+        for text, expected in (("rm -rf /\x08\x08\x08ls", "rm -rf /ls"),
+                               ("a\x0bb", "ab"),
+                               ("a\x0cb", "ab"),
+                               ("a\x07b", "ab"),
+                               ("a\x00b", "ab"),
+                               ("a\x7fb", "ab")):
+            assert ansi.for_display(text) == expected, text
+
+    def test_ordinary_text_is_returned_unchanged(self):
+        """THE CONTROL. A filter that returns "ab" for everything passes
+        every assertion above. Compared by codepoint so the claim is about
+        the characters and not about this file's encoding -- and the
+        C1 range stops at U+009F, which is why U+00A0 is in this list.
+        """
+        for text in ("cat README.md",
+                     "caf\u00e9",
+                     "a\u00a0b",
+                     "\u4e2d\u6587",
+                     "\U0001f600",
+                     "a\u202eb"):
+            assert ansi.for_display_counted(text) == (text, 0), \
+                [hex(ord(c)) for c in text]
+
+    def test_it_takes_whatever_an_f_string_would_have_taken(self):
+        """Twenty call sites hand this `payload.get(...)` directly, and
+        the alternative is each of them deciding how to coerce."""
+        assert ansi.for_display(None) == "None"
+        assert ansi.for_display(42) == "42"
+        assert ansi.for_display_counted("") == ("", 0)
+
+    def test_the_count_is_sequences_plus_controls(self):
+        """What the CLI prints in its one warning line. The headline case
+        from S16-02 is one sequence and one carriage return."""
+        assert ansi.for_display_counted("a\x1b[2K\rb") == ("ab", 2)
+        assert ansi.for_display_counted("a\x1b[2Kb\x9b31mc") == ("abc", 2)
+
+    def test_it_is_idempotent(self):
+        """Filtering twice is not a second answer: `main.py` scrubs a
+        field once, but a value can reach a prompt through two layers."""
+        for text in ("a\x1b[2K\rb", "plain", "a\n\tb", "a\x1b["):
+            once = ansi.for_display(text)
+            assert ansi.for_display(once) == once, text
+
+    def test_for_display_is_for_display_counted_without_the_count(self):
+        """One scanner and one answer, which is the reason the second
+        function is defined in terms of the first rather than beside
+        it."""
+        for text in ("a\x1b[2K\rb", "plain\n", "\x9b2J", None):
+            assert ansi.for_display(text) == ansi.for_display_counted(text)[0]
+
+
+# ---------------------------------------------------------------------------
 # ---- Opening ----------------------------------------------------------------
 # ---------------------------------------------------------------------------
 

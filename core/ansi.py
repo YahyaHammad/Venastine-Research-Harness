@@ -54,6 +54,42 @@ For a TRANSCRIPT the same release is a leak, because the text there is
 handed to a terminal, and `ESC [` with no final byte consumes whatever is
 printed after it as its final byte. `release_unterminated` names the two,
 and the pty's answer stays the default so nothing about SS27 moves.
+
+A THIRD CONSUMER SINCE BATCH 152, AND IT IS NOT A STREAM. `main.py` prints
+model- and third-party text to a terminal one whole string at a time -- an
+approval headline, a notice, the agent's own stated reason, a question, a
+reviewer's proposed correction, an MCP server's description of what its
+tool does. None of those is a pty's output and none is a transcript's
+deltas, but the hazard is the transcript's exactly: the text is handed to
+a terminal. Measured before the fix (batch 152), through the real channel --
+a headline of `cat README.md`, CSI `2K`, a carriage return and a second
+`$ cat .venastine/settings.json` reached stdout with the introducer
+intact, and CSI `2K` erases the row the approved command was drawn on. So
+`for_display` below takes the transcript's answer to the carry, for the
+transcript's reason, and it lives here so that the CLI composes nothing of
+its own.
+
+WHAT `for_display` REMOVES AND WHAT IT KEEPS, since a display filter
+cannot inherit the pty's answer to either. A LONE CARRIAGE RETURN GOES.
+This module leaves one in a pty's text because interpreting it would be
+emulation -- and that argument inverts at a terminal, where a carriage
+return is not ambiguous at all: it returns the cursor to column 0 and
+whatever prints next overwrites the line the user is reading. The other
+other controls below U+0020 go with it, and DEL, for the same reason
+rather than for tidiness: backspace, vertical tab and form feed move a
+cursor too.
+A newline and a tab stay, because they are the only two a caller means.
+The per-line `$ ` prefix in `main.py`'s headline loop keeps doing its own
+job: measured, `str.splitlines()` splits on a carriage return as well as a
+newline, so one inside a headline already became a second prefixed line
+rather than an overwrite, and the forged line wears a doubled prefix.
+
+NOT A BIDI OR ZERO-WIDTH FILTER, and that boundary is deliberate. U+202E
+and its family can make a terminal draw text in an order the bytes do not
+have, which is the same class of problem -- but removing them is not the
+same kind of answer, because a bidi mark is legitimate content in Arabic
+and Hebrew text while a control character is never legitimate content at
+all. TECHNICAL_DEBT 104 carries it.
 """
 
 from __future__ import annotations
@@ -172,6 +208,45 @@ class AnsiStripper:
                 self.sequences_removed += 1
             return ""
         return held
+
+
+# What `for_display` will not hand to a terminal. The 8-bit controls at
+# U+0080-U+009F are already gone by the time this applies --
+# `_sequence_end` removes every one of them -- so this is U+0000-U+001F
+# plus DEL, less the two a caller means.
+_DISPLAY_KEEPS = frozenset("\n\t")
+_NOT_PRINTABLE = (frozenset(chr(c) for c in range(0x20)) - _DISPLAY_KEEPS
+                  | frozenset("\x7f"))
+
+
+def for_display_counted(text) -> tuple[str, int]:
+    """*text* as it may be PRINTED to a terminal, and what that cost.
+
+    The count is sequences-and-controls REMOVED, and that is why this form
+    exists at all: `main.py`'s consent prompts say so out loud, because a
+    tool call whose headline tries to move the cursor is evidence about the
+    decision being asked rather than a rendering detail. Folding CRLF to
+    LF is NOT counted -- it is a normalisation, and counting it would put
+    the warning on ordinary text that arrived with Windows line endings.
+
+    Takes anything rather than only a str, so a call site can hand it the
+    same `payload.get(...)` an f-string would have interpolated, None
+    included. The alternative is twenty call sites each deciding how to
+    coerce, which is the shape this module exists to prevent.
+    """
+    stripper = AnsiStripper(release_unterminated=False)
+    scanned = stripper.feed(str(text)) + stripper.flush()
+    kept = "".join(ch for ch in scanned if ch not in _NOT_PRINTABLE)
+    return kept, stripper.sequences_removed + len(scanned) - len(kept)
+
+
+def for_display(text) -> str:
+    """`for_display_counted` without the count, for the callers printing
+    untrusted text where nothing is being decided -- a replayed thread, a
+    research pass's progress lines. Defined in terms of it rather than
+    beside it, so there is one scanner and one answer.
+    """
+    return for_display_counted(text)[0]
 
 
 def _sequence_end(s: str, i: int) -> int | None:

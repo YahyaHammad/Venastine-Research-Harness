@@ -43,6 +43,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
+- **§69. A consent prompt the model could repaint, and a refusal that read as a yes** - **(BUILT in batch 152)** (the CLI printed the security-critical half of every consent prompt with model-supplied terminal escapes in it -- the approval headline, the notice, the agent's stated reason, a reviewer's proposed correction and an MCP server's own description of its tool -- while the params block below them was safe because `json.dumps` renders an escape instead of emitting it; and `_signoff` returned the empty set for a line in which nothing named a candidate, which is the explicit `none` and which the loop spawns on, so a mistyped refusal authorised the spawn)
 - **§68. Six places the suite described itself, and two guards that could pass while scanning nothing** - **(BUILT in batch 151)** (the suite's own machinery was described in six places the tree had made false: a count of non-function-scoped fixtures wrong since batch 110 in four phrasings, a grouping contract whose worked example was numerically wrong, a worker table naming the branch CI does not take, a stub inventory missing the one entry that is not an SDK, and an offline promise that eleven `wsl.exe` calls and three test bodies both contradicted -- while the guard deciding whether the whole suite was collected compared against a copy of `pytest.ini`, and the guard forbidding a sixth copy of `settle` globbed a cwd-relative path and passed from anywhere else having read nothing)
 - **§67. The gate a child could turn off, and three strings nobody here wrote** - **(BUILT in batch 150)** (the child's approval overrides filtered the parent's dict and merged the agent's raw, so a `False` in a child's frontmatter turned off a gate the parent had set -- and the tool then left the sign-off notice as well as the gate; `disabled` had no safe constant and was given a named failure instead of one; a composed `mcp__<server>__<tool>` name nothing validated made every provider request malformed from one reachable server; a tool's description, title and input_schema arrived from third-party code uncapped and unnormalised into every model call; and the non-text placeholder fired only when no text survived, so a result with text AND an image dropped the image in silence)
 - **§66. The type that stopped at the container, and a pass that answered about more than it was asked** — **(BUILT in batch 149)** (the payload boundary declared a field's container type and not the type of what it held, so three of six crash shapes survived it and three more scored a wrong number in silence; a boolean satisfied NUMBER, so `severity: true` charged the maximum critic penalty with no trace; and Pass 6b was asked about one batch, validated against every id in the run and applied to every claim in it, while the re-tiering beside it stayed narrow)
@@ -2718,6 +2719,190 @@ leaked PID.
   fact. A bound in the registry would be the fix-at-the-consumer shape
   `AGENTS.md` names by name.
 ---
+
+## §69. A consent prompt the model could repaint, and a refusal that read as a yes
+
+**Built in batch 152**, from the review marathon's headless-shell surface:
+all three `FIX-NOW` findings -- S16-01, S16-02 and S16-03 -- across
+`main.py`, `core/ansi.py`, `AGENTS.md`, `tests/test_cli.py`,
+`tests/test_interactive_sessions.py` and
+`tests/test_docs_consistency.py`.
+
+Two S3s and one S4, and both S3s are the same sentence from opposite ends:
+**the CLI is where a human authorises a tool call, and it trusted the text
+it was authorising.** S16-02 is the display -- model-supplied escapes
+printed raw onto the line the user decides from. S16-01 is the answer --
+a line the parser could not read returned the value that means "yes,
+grant nothing", which `core/loop.py` spawns on. Neither needed a
+privileged position to exploit: a tool call and a mistyped word.
+
+### S16-02: the subject line the model could erase
+
+`_approval` printed the headline, the notice and the agent's stated reason
+as plain f-strings. The params block below them was always safe --
+`_render_params` runs `json.dumps`, which emits `\u001b` -- which is what
+made the raw half easy to miss: the escape IS visible on the screen, in
+the block nobody decides from.
+
+Measured through the real channel before the fix, with a headline of
+`cat README.md` + CSI `2K` + CR + a second `$ cat
+.venastine/settings.json`:
+
+| field | controls reaching stdout |
+|---|---|
+| approval headline | ESC |
+| approval notice | ESC, CR |
+| approval rationale | ESC, CR |
+| approval `tool_name` | ESC |
+| the asker line (§47) | ESC |
+| question text, options | ESC, CR |
+| sign-off agent, candidates | ESC, CR |
+| confirm title, body | ESC, CR |
+| choice proposal, reason, options | ESC x3, CR x3 |
+| secret title, body | ESC x2, CR x2 |
+| review kind, severity, reason, proposed | ESC x4, CR x4 |
+| params block | none -- `\u001b`, as text |
+
+**The report's mechanism is right about the outcome and wrong in one
+detail, and the detail is a partial defence worth keeping.**
+`str.splitlines()` splits on a carriage return as well as a newline, so a
+CR inside a HEADLINE never reached the terminal: it became a second line,
+and `main.py` prefixes every line with `  $ `, so the forged command
+arrived wearing a doubled prefix. What did the damage was the escape
+alone -- CSI `2K` erases the row the real command was drawn on. The
+fields printed as single f-strings are the worse case, because there the
+CR survives and overwrites the row the user is reading, label and all.
+
+**A second privilege-critical site, which the report does not name.**
+`_pick_tools_to_grant` prints an MCP server's own description of its tool
+and then asks one y/N per tool. Its own docstring says why that is the
+whole of the decision -- "MCP exposes no read-only/write metadata, so
+nothing can tell the user that one granted tool searches a library and
+another posts to a channel" -- and `candidates()` says the population it
+exists for IS MCP tools. Measured: `_bounded` at registration collapses
+whitespace, so a newline and a CR never arrive, and **the escape does**.
+A grant is wider than an approval: it covers every call for the run.
+
+The fix is at the display boundary, which is where the owner's ruling put
+it: every untrusted string this shell prints, not only the ones above a
+question. `core/ansi.py` already owns the transform for the pty and the
+TUI transcript, so the one-shot form lives there and is built out of
+`AnsiStripper` -- one scanner, one answer about what a sequence is.
+Twenty-odd call sites, one `_Visible` per prompt, and one line above the
+question when something was removed.
+
+**The relation found a site reading the function did not.** The sweep over
+`_PAYLOADS` failed on `choice` the first time it ran: `_choice` renders
+the option list TWICE, and the second rendering -- the `[... is not one
+of: ...]` line on the unmatched path -- is not the kind of line a reader
+thinks of as display. That is the argument for a relation over the kind
+table rather than a list of print sites, because the thing being guarded
+against is a print call nobody remembered.
+
+### S16-01: an empty set already meant something
+
+`_signoff`'s per-piece loop ignores anything that is not a candidate
+number, prints what it ignored, and falls out with whatever it collected.
+For a line in which NOTHING was a number, that is the empty set -- and the
+empty set is already taken. It is the explicit `none`, which returns two
+branches earlier, and `core/loop.py:440` spawns on `answer is not None`.
+
+Measured through the real channel and the real `decode`:
+
+| typed | `_signoff` returned | the loop | after |
+|---|---|---|---|
+| (blank) | `None` | refused | unchanged |
+| (no answer) | `None` | refused | unchanged |
+| `none` | `set()` | spawns, grants nothing | unchanged |
+| `all` | both candidates | spawns | unchanged |
+| `1` | one candidate | spawns | unchanged |
+| `xyz` | **`set()`** | **SPAWNS** | `None`, refused |
+| `0 99` | **`set()`** | **SPAWNS** | `None`, refused |
+| `1 xyz` | one candidate | spawns | unchanged |
+
+The two shipped rows are a mistyped refusal becoming an authorisation to
+run. `0 99` is the one a user reaches by miscounting rather than
+mistyping: both pieces are digits, both out of range, so they are dropped
+by the bounds check rather than the digit check and arrive at the same
+empty set.
+
+The function's own docstring already said what it should do -- "None for
+anything unparsed is belt-and-braces" -- and the code did that for a
+blank line and not for a line it could not read. The three neighbouring
+cells were pinned by tests; the hole between two green cells stayed green
+because no test typed a non-blank line that named nothing.
+
+### S16-03: a name that was never there
+
+AGENTS.md section 29 said every kind in `interaction.SAFE_DEFAULTS` must
+have a handler in `_ASK_HANDLERS`. There is no such symbol: the CLI's
+table is a closure-local `handlers` published for its test as
+`channel.rendered_kinds`, and the TUI's is an if-chain in
+`VenastineApp._ask_blocking`. `git log -S` returns only the docs commit
+that coined the name, so it was **born stale** rather than renamed
+without update -- the shape no convention catches, because there was never
+a moment when somebody edited code and forgot the document.
+
+The enforceable invariant exists and is green. What did not resolve was
+the name it was filed under, and the cost is a fixer who "adds the missing
+handler to `_ASK_HANDLERS`" building a third registry beside the two real
+ones.
+
+**The gate's resolution rule was chosen by measuring three candidates**
+against AGENTS.md's 131 backquoted private identifiers:
+
+| rule | fails on | why |
+|---|---|---|
+| substring in any `.py` | **1** | the defect, and nothing else |
+| this file's existing AST index | 17 | collects `ast.Name` Store targets, not `ast.Attribute`, so every instance attribute the document names reads as undefined, plus four dunders |
+| `tokenize` NAME tokens | 8 | correct about prose, but three are not this repository's symbols at all -- `_check_bindings` and `_watch_theme` are Textual's, `__builtins__` is CPython's -- and one is prose about a design the code deliberately did not take |
+
+**And the first form of the gate was defeated by its own prose.** The
+control that writes `_ASK_HANDLERS` back into AGENTS.md left it GREEN,
+because the gate's comment block explains the finding by name and a
+substring scan cannot tell code from the paragraph written to forbid it.
+That is batch 151's conftest-header defect one batch later, in the same
+session, found the same way -- by the control rather than by reading. The
+gate excludes its own file now. It then caught its author a second time:
+the replacement sentence in AGENTS.md closed by naming the symbol while
+explaining that it does not exist, and the rule is that the document does
+not name it at all.
+
+### What §69 deliberately does not change
+
+- **No classifier change.** ESC is not in `_SHELL_METACHARACTERS` and is
+  not being added. Rejecting a command for carrying an escape would move
+  the problem, not fix the display of every other untrusted field -- and
+  `headline_for` returning the command verbatim stays correct, because
+  what must be safe is the display and not the value.
+- **No registry change**, for the same reason one level down.
+- **No TUI change.** Rich `Text` does not interpret ANSI, and
+  `tui/widgets.py` has run its three transcript ingresses through
+  `AnsiStripper` since batch 145. S15 owns that claim; this batch is the
+  shell that never called it.
+- **No re-prompt loop** for the sign-off. One question, one answer, fail
+  closed. A re-prompt would be a second interaction model in the one
+  place §23 says there is exactly one.
+- **No bidi or zero-width filtering** (TECHNICAL_DEBT 104). U+202E can
+  make a terminal draw text in an order the bytes do not have, which is
+  the same class of problem -- but a bidi mark is legitimate content in
+  Arabic and Hebrew text, which a control character is never, so the
+  answer is not the same answer.
+- **The `choice` kind still ANSWERS with the option as it was offered.**
+  Only the labels are scrubbed: `decode` validates a choice against the
+  list it was given, and a scrubbed answer would fail that check for the
+  one reason that is not the user's fault.
+
+### Design Decisions Record — §69 (A40-A45)
+
+| id | decision |
+|---|---|
+| **A40** | **Untrusted text is made safe at the DISPLAY boundary, and the one-shot filter lives beside the streaming one.** `core/ansi.py` already owned this transform for the pty (SS27) and, since batch 145, for the TUI transcript; a second stripper in `main.py` would be the two-copies-of-one-decision shape that module's own docstring refuses, so `for_display` / `for_display_counted` are built out of `AnsiStripper` rather than beside it -- one scanner, one answer about what a sequence is, both encodings (`ESC [` and U+009B) for free. **Not in the classifier**: ESC is not a shell metacharacter and adding it would move the problem, since the other untrusted fields are not commands. **Not in the registry**: `headline_for` returning the model's command verbatim is correct, and what has to be safe is the display, not the value. `_render_params` stays as the worked example of a path that was always right, and it got there by RENDERING the value instead of trusting it |
+| **A41** | **A removed control is said out loud where something is being decided, and silently where nothing is.** One line above the question, naming the count, because a tool call whose headline tries to move the cursor is evidence about the decision being asked -- nothing a tool legitimately needs to do involves redrawing a consent prompt. On a replayed thread, a live answer or a research pass's progress lines the strip is silent: there is no decision for the warning to inform, and a line per stripped delta is the noise that gets a filter turned off. The count is per PROMPT and not per field, because the user is told once that this call tried to repaint, which is the same reason `tui/widgets.py` keeps one count and lets `tui/app.py` read it. Folding CRLF to LF is NOT counted -- it is a normalisation, and counting it would raise the warning on ordinary text that arrived with Windows line endings |
+| **A42** | **Every untrusted string this shell prints goes through the filter, not only the ones above a question.** The report's own framing is that the approval headline is "the privilege-critical instance of one shell-wide habit", and fixing one site of a habit is how the next copy gets written. So: the seven kinds, the review prompt, the grant picker, the MCP acknowledgement, replayed threads, live answers and notices, research-pass events, `--memories` rows, server unavailability lines, and the message of any exception that can carry model or tool text. Untrusted means ORIGINATING OUTSIDE this repository's source -- model text, a stored thread's rows, a tool's or server's own strings, a project config's text. The harness's own labels, counts, paths and prompts are not filtered, because filtering them would say the filter is about tidiness |
+| **A43** | **A line that names nothing is not the empty set, and the empty set already means something.** `_signoff` returns `None` when no piece of a non-blank line named a candidate, because `set()` is the explicit `none` -- a legitimate answer a user can give -- and the loop spawns on "not None". Measured: `xyz` and `0 99` both spawned. **A mixed line still grants what it named**: `1 xyz` grants candidate 1 and reports the piece it ignored, because refusing over the second half would discard an answer the user did give. **Not a re-prompt loop**: one question, one answer, fail closed, which is §23's shape and `interaction.decode`'s own None-versus-empty contract one layer up. The refusal says WHICH refusal it was, because a user who typed a tool name instead of its number has to be able to tell an answer from a bug |
+| **A44** | **A document names what exists, and that is gated over every backquoted private identifier rather than over the sentence that was wrong.** A leading underscore is an unambiguous signal that a backquoted token is code and not English, so nothing has to guess; 131 of them were measured, 130 resolved. The resolution rule is a substring match over every `.py` including tests, chosen by measuring the two stronger candidates and finding that both fail on correct references -- the AST index on 17 (instance attributes), a `tokenize` NAME index on 8, three of which are Textual's or CPython's symbols. **The gate excludes its own file**, because its comment block explains the defect by name and a gate's evidence may not come from its own explanation of what it forbids -- measured: the control that reintroduced the name left the gate green. The domain is asserted in both directions, which is section 11's instruction |
+| **A45** | **At a display boundary a lone carriage return is removed; on the pty path it is kept, and the two contracts disagree on purpose.** `core/ansi.py` leaves one in a pty's text because making `working CR done` read as `done` is emulation, and guessing is worse than showing what arrived. That argument inverts where the text is handed to a terminal: a carriage return is not ambiguous there, it returns the cursor to column 0 and the next text overwrites the line being read. The other controls below U+0020 go with it, and DEL, because backspace, vertical tab and form feed move a cursor too; a newline and a tab stay, as the only two a caller means. The unterminated carry takes the transcript's answer (`release_unterminated=False`) for the transcript's reason. Both halves are asserted in ONE test, so a later reader cannot tidy them into agreement |
 
 ## §68. Six places the suite described itself, and two guards that could pass while scanning nothing
 
