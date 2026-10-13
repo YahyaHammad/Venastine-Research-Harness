@@ -51,9 +51,11 @@ below swaps it back out, points `config.DB_PATH` at tmp_path, reloads
 reloaded module -- then puts all of it back.
 """
 
+import ast
 import contextlib
 import json
 import os
+import pathlib
 import sys
 import threading
 from datetime import UTC
@@ -225,6 +227,94 @@ def test_this_file_declares_no_test_class():
         f"defined\". Write the tests at module level; the helper classes "
         f"in this file are fine because pytest collects `Test*` only."
     )
+
+
+#: The scopes that outlive a single test, and so outlive nothing a loadscope
+#: group guarantees. "function" is the default and is the safe one.
+_LONG_SCOPES = ("module", "session", "class", "package")
+
+
+def _long_scoped_fixtures(tree) -> list:
+    """The names in `tree` decorated as a fixture of more than one test.
+
+    Reads the DECORATOR rather than grepping `scope="module"`, so
+    `@pytest.fixture(autouse=True, scope="session")` is found and a string
+    in a docstring is not. A positional scope is not a form pytest accepts,
+    so there is no positional case to handle.
+    """
+    found = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for decorator in node.decorator_list:
+            if not isinstance(decorator, ast.Call):
+                continue
+            target = decorator.func
+            name = getattr(target, "attr", None) or getattr(target, "id", None)
+            if name != "fixture":
+                continue
+            for keyword in decorator.keywords:
+                if (keyword.arg == "scope"
+                        and isinstance(keyword.value, ast.Constant)
+                        and keyword.value.value in _LONG_SCOPES):
+                    found.append(f"{node.name} (scope={keyword.value.value})")
+    return found
+
+
+def test_every_file_with_a_module_scoped_fixture_declares_no_test_class():
+    """The rule above, for every file in the suite rather than this one.
+
+    THE GENERAL FORM, BECAUSE THE COUNT COULD NOT BE KEPT TRUE (batch 151,
+    S19-01). Four sentences in this tree said `real_storage` was the
+    suite's only non-function-scoped fixture, which stopped being true in
+    batch 110 when `_schema_cache_is_put_back` arrived beside it; batch 128
+    corrected two of six copies and missed four, because it grepped the
+    SENTENCE and the four phrase it differently. A reader who adds a third
+    such fixture and greps for whether that is allowed should get the rule,
+    and the rule should be enforced for the file they are writing -- not
+    for the one that happened to have the fixtures in 2026.
+
+    `AGENTS.md` states the rule and this is its mechanism:
+    "If you add a module- or session-scoped fixture, its file must hold no
+    test class."
+
+    The domain is asserted in both directions, which is S19-04's finding in
+    this same batch: a walk that finds no files and a walk that finds no
+    fixtures both pass an `assert not offenders` while checking nothing.
+    """
+    tests_dir = pathlib.Path(__file__).resolve().parent
+    paths = sorted(tests_dir.glob("test_*.py"))
+    assert len(paths) > 20, (
+        f"the scan found {len(paths)} test modules under {tests_dir}, so it "
+        f"is looking in the wrong place and would pass whatever this suite "
+        f"contains")
+
+    owners, offenders = {}, {}
+    for path in paths:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        fixtures = _long_scoped_fixtures(tree)
+        if not fixtures:
+            continue
+        owners[path.name] = fixtures
+        classes = [node.name for node in tree.body
+                   if isinstance(node, ast.ClassDef)
+                   and node.name.startswith("Test")]
+        if classes:
+            offenders[path.name] = (fixtures, classes)
+
+    assert owners, (
+        "no file in the suite declares a module- or session-scoped fixture, "
+        "which has not been true since batch 110 -- the decorator shape "
+        "changed and this gate is now checking nothing")
+
+    assert not offenders, (
+        f"these files hold a fixture that outlives one test AND a `Test*` "
+        f"class, so --dist loadscope makes the class a second group and a "
+        f"worker that takes both sets the fixture up twice: {offenders}. "
+        f"Write those tests at module level, as this file does, or move "
+        f"the fixture to a conftest. The failure is a scheduling LOTTERY "
+        f"rather than a certainty, which is why it is checked here instead "
+        f"of being left to a run that puts the two groups on one worker.")
 
 
 class _Resp:

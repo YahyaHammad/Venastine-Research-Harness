@@ -2657,6 +2657,16 @@ class TestAResizeRelaysTheTranscript:
 
         Widths above `min_width` deliberately: below it they all floor to
         78, and a handler that ignored every one of them would be right.
+
+        THREE CALLS ARE NOT THREE MESSAGES, and assuming they were cost a
+        failure (TECHNICAL_DEBT 97, fixed batch 151). In a 366-second
+        full-suite run this asserted `len(armed) == 3` and got 2: the pump
+        coalesces `Resize` when the app is behind, which is what a loaded
+        box produces, and the handler had behaved correctly for every
+        message it was actually given. So the arity is a claim about
+        textual's delivery and the rest of this test is a claim about this
+        widget -- what is asserted now is the second kind, with a floor of
+        two because one delivery cannot show coalescing.
         """
         from tui import widgets
         from tui.app import VenastineApp
@@ -2678,7 +2688,11 @@ class TestAResizeRelaysTheTranscript:
             await pilot.pause()
 
         assert calls == [], "a redraw ran before the drag had settled"
-        assert len(armed) == 3, armed
+        assert len(armed) >= 2, (
+            f"only {len(armed)} Resize message(s) arrived for three "
+            f"resize_terminal calls, so there was no second redraw for the "
+            f"first to be replaced by and this test proved nothing. Not a "
+            f"coalescing failure -- a delivery one; see TECHNICAL_DEBT 97.")
         assert stopped == armed[:-1], "the pending redraw was left to fire"
         assert view._reflow_timer is armed[-1]
 

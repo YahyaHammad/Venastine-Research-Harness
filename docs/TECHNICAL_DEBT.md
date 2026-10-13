@@ -1723,14 +1723,28 @@ groups, and a non-function-scoped fixture in it is set up twice on any worker th
 ("there can be only one swap"). **Five `-n auto` runs were green and a `-n logical` run was not**,
 so it is a scheduling lottery: the two groups landing on one worker is the accident, not the
 failure. `TestConcurrentWriters` is flattened to module level and
-`test_this_file_declares_no_test_class` pins it. `real_storage` is the suite's only
-non-function-scoped fixture (`grep -rn 'scope="module"' tests/`), so it was the only file at risk --
+`test_this_file_declares_no_test_class` pins it. `test_storage_e2e.py` was the only file at risk,
 and the rule the next one inherits is: **a module- or session-scoped fixture's file must hold no
 test class.**
 
-**What remains open in this item:** the 183 classless tests in `test_tui.py`, and nothing else. The
-`test_config_edit.py` precondition this entry prescribed was never the defect, and the mode
-decision it was blocking is taken.
+**This sentence used to carry a count, and the count cited the grep that refutes it** (corrected
+batch 151, S19-01). It read "`real_storage` is the suite's only non-function-scoped fixture
+(`grep -rn 'scope="module"' tests/`)", and running that grep returns TWO -- `real_storage` and the
+`_schema_cache_is_put_back` this very entry's batch 110 added beside it. It was one of four live
+copies of that claim, in four different phrasings, which is why batch 128's sentence-grep found
+none of them; the other three were `pytest.ini` twice and `tests/test_tui.py`. All four are now the
+RULE without the number, and the rule is enforced for every file rather than described for one by
+`test_every_file_with_a_module_scoped_fixture_declares_no_test_class`.
+
+**Nothing remains open in this item.** The `test_config_edit.py` precondition this entry
+prescribed was never the defect, and the mode decision it was blocking is taken.
+
+**This paragraph said the 183 classless tests in `test_tui.py` remained open** (corrected batch
+151, S19-01). Batch 114 is the batch that classed them, this entry's own header says so, and the
+RESOLVED section immediately below says so again -- so a closed item's body named as its one piece
+of open work the thing it was closed for. Found while confirming the count above, in the same
+entry, which is the argument for reading a register entry whole rather than to the first claim that
+answers the question.
 
 ---
 
@@ -4496,7 +4510,7 @@ the four names the existing assertion uses: they are the right names for the
 claim "the modal the user ticks never offers a per-call tool", and the gap is
 the missing allowed case, not the chosen denied ones.
 
-## 85. Six pilot tests assert worker-thread state after a raw `pause()` (open, found and filed batch 138)
+## 85. Six pilot tests assert worker-thread state after a raw `pause()` (closed, batch 151; ONE of the six needed it, and this entry was wrong about why)
 
 **Found by batch 138's full-suite run**, which is the third batch to pay for
 this and the first to measure it. Severity `S3`, `test-quality`.
@@ -4575,6 +4589,58 @@ rarer and the diagnosis harder, and `pytest-rerunfailures` is not a dependency
 of this suite. Not auditing the other 113 positive-assertion-after-pause sites:
 they are synchronous, and widening this entry to them would turn an actionable
 six into a file-wide sweep nobody will do.
+
+---
+
+### RESOLVED in batch 151 -- at one site, because five did not need it
+
+**The shape above is real and the reason given for it is not.** The rule has
+two halves: *the last wait before a positive assertion is a raw
+`pause()`/`pump()`* -- a source pattern, true at all six -- and *the thing
+asserted is state only another thread can produce*, which is a claim about
+the code and is **false at five of the six**. Each producing call was read in
+`tui/app.py`:
+
+| test | what produces the asserted state | verdict |
+|---|---|---|
+| `test_quitting_by_gesture_releases_a_blocked_worker` | a POSTED key, handled by the message pump | **needs a predicate** |
+| `test_quitting_with_a_prompt_open_releases_the_blocked_worker` | `exit()` calls `_release_permission_channel()` inside itself | synchronous |
+| `test_a_dead_worker_leaves_a_traceback_in_the_log` | `on_worker_state_changed` is called by hand; `logging` fills `caplog` on this thread | synchronous |
+| `test_resuming_refreshes_the_todo_panel` | `switch_to_thread()` calls `refresh_todo_panel()` directly | synchronous; the `pump` serves the NEGATIVE assertion between them |
+| `test_a_failure_listing_threads_does_not_kill_the_tui` | every read from `action_pick_thread()` down is on the UI thread, by that function's own comment | synchronous; both assertions negative |
+| `test_the_request_carries_the_thread_on_screen` | `restart_for_config()` calls `self.exit(RestartRequest(...))`, which sets `return_value` before returning | synchronous; the `async with` exit awaits shutdown besides |
+
+**Driven rather than read.** `Pilot.pause()` was replaced with a bare
+`asyncio.sleep(0)` -- the idle heuristic gone, the loop still able to turn --
+and **all six passed**. `settle` keeps working under that patch because it
+polls, which is what lets the probe tell the two populations apart instead of
+merely breaking everything; the probe's reach was proved by sabotaging the
+same monkeypatch and watching the tests fail inside `Pilot.pause`. So at five
+sites there is nothing for a predicate to wait for, and adding one would be
+ceremony implying a race the code does not have.
+
+**Two of the six were never candidates at all**, and this entry's own
+instrument says so: `test_resuming_refreshes_the_todo_panel` and
+`test_a_failure_listing_threads_does_not_kill_the_tui` use `pump` ahead of
+NEGATIVE assertions, which is the one thing `AGENTS.md` says `pump` is for.
+
+**What was changed.** The gesture test -- the one that actually failed, in
+batch 138's 635-second run -- takes the predicate, and the correct diagnosis
+goes in beside it: the state is produced by the MESSAGE PUMP, not by another
+thread. A key is posted, `press` can return before the binding fires, and
+`pause()` ends on `wait_for_idle(0)`, a process-wide CPU heuristic with a 46x
+spread. Its pair lost its `pause()` instead of gaining a predicate, because
+asserting with no wait at all is what pins the property ARCHITECTURE 4.14
+depends on -- a quit dismisses the prompt synchronously.
+
+**What this entry is worth keeping for.** The six were found by pattern-
+matching source, and the pattern was the right place to look: it found the
+test that failed. What it could not do is say which of its hits were races,
+and five of six were not. A prescription over a population wants its
+population measured before it is applied -- which is the same lesson
+TECHNICAL_DEBT 97 records from the other end, where the arity assumption that
+failed was in a test whose docstring had already reasoned carefully about
+timing.
 
 ## 86. The decision-id gate scans `.py` only, and this project ships `.mjs` (open, found and filed batch 141)
 
@@ -5077,7 +5143,7 @@ Recorded here rather than in a warning, so that the next person reading
 `headroom_for`'s floor-and-cap argument finds the measurement instead of
 re-deriving it.
 
-## 97. Two timing-sensitive tests failed in SLOW full-suite runs and neither reproduced (open, measured and filed batch 148)
+## 97. Two timing-sensitive tests failed in SLOW full-suite runs and neither reproduced (the resize half fixed batch 151; the secrets half open, and deliberately untouched)
 
 Batch 148 ran the full suite five times. The three that finished in 85-100
 seconds were green. The two that were slowed by other work on the same box
@@ -5156,6 +5222,23 @@ is not about. The secrets one must not be touched at all yet: changing a test
 to chase a failure it has not shown again is how a real defect gets hidden
 behind a louder fixture, and this entry is the measurement the next
 occurrence gets compared against.
+
+---
+
+### The resize half, RESOLVED in batch 151
+
+`test_a_drag_re_arms_rather_than_stacking` asserts the INVARIANT now --
+`stopped == armed[:-1]` and `view._reflow_timer is armed[-1]`, which were
+already there and hold for any number of delivered resizes -- with a floor of
+**two** rather than an exact three. Two and not nothing: one delivery cannot
+show coalescing, so `assert armed` alone would have let the test go vacuous
+in precisely the direction that hides the bug. The docstring carries the
+measurement, because the arity was the one claim in that test about textual's
+DELIVERY rather than about this widget, and the rest of it had already
+reasoned carefully about timing without questioning the count.
+
+**The secrets half is untouched**, as this entry asks. It has not recurred;
+if it does, the comparison is the measurement above.
 
 ## 98. Pass 3a is asked about the FACTUAL claims and applied to every claim (open, measured and filed batch 149)
 
@@ -5323,6 +5406,58 @@ reads like a regression in whatever that batch touched. It is not. Anyone
 seeing one WSL-only failure in this test should check this entry before
 spending the cycle -- and should still check that the failure is THIS one,
 because a second WSL-only failure would be a different claim.
+
+## 103. The range gate reads a per-section sub-range as a claim about the whole family (open, measured and filed batch 151)
+
+**What happens.** `test_a_claimed_range_covers_its_whole_family` reads
+**every** `Xn-Xm` on `AGENTS.md`'s documentation-map line and compares each
+one's upper bound against the highest id that family defines. That line
+carries two kinds of range: the family claim (`A1-A39 from section 32`) and
+per-section parentheticals saying where each id lives (`A28-A33 in section
+67`). The gate cannot tell them apart, so a parenthetical whose top is not
+the family's maximum reads as a range that "stops short":
+
+```
+AssertionError: AGENTS.md's map claims a range that stops short of its family:
+  A: map claims through A33, record defines A39
+```
+
+**Why it is not a defect in the gate's purpose.** The property it exists for
+is real and was paid for: E13 and E14 sat outside the index that says where
+decisions live, and the two checks either side of this one both pass on a
+range that stops short -- the forward check asserts every claimed id is in
+the record (true of a subset) and the reverse asserts every family is named
+(E is named). Neither looks at the endpoint. Being loud is correct.
+
+**What it costs.** One cycle per batch that adds a decision family's next
+range. `A28-A33 in section 67` passed only while A33 was the highest A
+defined; batch 151 added A34-A39 and the same unchanged sentence became
+"short". The failure names a FAMILY and a number, not the parenthetical that
+produced it, so the reader's first move is to check the family claim -- which
+is correct -- and find nothing wrong with it.
+
+**Why it is filed rather than fixed.** The fix is a one-line distinction and
+the question is which line:
+
+- **Read only the first range per family**, which is the family claim by
+  position. Cheapest, and it silently stops checking a second genuine family
+  claim if one is ever written.
+- **Read only ranges outside parentheses.** Closer to the intent and a
+  parser of English punctuation, which is what this file's own
+  `_qualifier` grammar already is -- and that grammar has its own
+  discrimination test for exactly that reason.
+- **Write every per-section entry as a LIST**, which is what sections 63,
+  64, 65 and 66 already do and what batch 151 made section 67 and 68 do.
+  Costs nothing and is what the document looks like today.
+
+**The third is in force and it is a CONVENTION**, which is why this entry
+exists: batch 151's own A34 is that a convention about a document is what
+produced five copies of one sentence. Nothing checks that the next
+per-section entry is written as a list, so the next range to be added will
+re-enact this, and this entry is what the reader should find when it does.
+
+**Not:** deleting the check, and not relaxing it to the highest range on the
+line. Both give back the property E13 and E14 paid for.
 
 ## Review-marathon arrivals at open issues with no register entry
 

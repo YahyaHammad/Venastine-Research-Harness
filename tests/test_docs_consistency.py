@@ -116,17 +116,54 @@ def test_the_three_docs_state_the_same_test_count():
     )
 
 
+def _default_markexpr(config) -> str:
+    """The `-m` expression this project's addopts actually supply.
+
+    READ OFF THE LIVE CONFIG RATHER THAN RESTATED (batch 151, S19-03). The
+    line below used to compare `markexpr` against the literal
+    `"not integration"`, which is a copy of `pytest.ini`'s addopts -- so
+    adding a marker there (two lines, because `--strict-markers`) made every
+    full run read as narrowed, four gates skip, and the subprocess-collection
+    agreement stop running anywhere, with no failure to say so.
+
+    `config.getini("addopts")` returns the SHLEX-SPLIT list, measured:
+    `['-ra', '--strict-markers', '-m', 'not integration', ...]`. So `-m` and
+    its expression are two elements. The squashed `-mEXPR` spelling is legal
+    too and arrives as one.
+
+    NO EXCLUSION FOR LONG OPTIONS, and the absence is deliberate. This read
+    `arg.startswith("-m") and not arg.startswith("--")`, on the stated
+    grounds that `--strict-markers` also begins with `-m`. It does not:
+    every long option begins with `--`, so the prefix test fails at index 1
+    for all of them and the second clause could never change an answer. It
+    was removed in the batch that added it, by the control that could not
+    kill it.
+
+    Returns `""` when addopts passes no `-m` at all, which is the right
+    answer: with no default filter, an invocation that carries a markexpr
+    HAS been narrowed.
+    """
+    addopts = list(config.getini("addopts") or [])
+    for index, arg in enumerate(addopts):
+        if arg == "-m":
+            return addopts[index + 1] if index + 1 < len(addopts) else ""
+        if arg.startswith("-m"):
+            return arg[2:]
+    return ""
+
+
 def _was_narrowed(config) -> bool:
     """Whether this invocation collected less than the whole suite.
 
     pytest.ini's addopts carries `-m "not integration"`, so a default run
     already has a markexpr -- comparing against None would skip always and
     the assertion would never run, which is the failure mode this guard
-    most needs to avoid.
+    most needs to avoid. What it compares against is read out of the live
+    config by `_default_markexpr`, for the reason stated there.
     """
     if getattr(config.option, "keyword", ""):          # -k
         return True
-    if getattr(config.option, "markexpr", "") != "not integration":
+    if getattr(config.option, "markexpr", "") != _default_markexpr(config):
         return True
     # An arg naming a file or a nodeid; a bare `pytest` or `pytest tests/`
     # collects everything and is not narrowing.
@@ -134,15 +171,34 @@ def _was_narrowed(config) -> bool:
 
 
 class _FakeOption:
-    def __init__(self, keyword="", markexpr="not integration"):
+    def __init__(self, keyword="", markexpr=""):
         self.keyword = keyword
         self.markexpr = markexpr
 
 
 class _FakeConfig:
-    def __init__(self, args, **kw):
+    """The parts of a `pytest.Config` that `_was_narrowed` reads.
+
+    `markexpr` DEFAULTS TO WHAT THIS FAKE'S OWN addopts SUPPLY (batch 151,
+    S19-03). It used to default to the literal `"not integration"` -- the
+    same literal `_was_narrowed` compared against -- so
+    `test_the_default_invocation_is_not_treated_as_narrowed` asserted that
+    two copies of one string agreed with each other, and could not fail for
+    the drift it exists to catch. Deriving it here means "a default run" is
+    default by construction, whatever addopts says.
+    """
+
+    def __init__(self, args, addopts=("-m", "not integration"),
+                 markexpr=None, keyword=""):
         self.args = args
-        self.option = _FakeOption(**kw)
+        self._addopts = list(addopts)
+        if markexpr is None:
+            markexpr = _default_markexpr(self)
+        self.option = _FakeOption(keyword=keyword, markexpr=markexpr)
+
+    def getini(self, name):
+        assert name == "addopts", f"the fake was asked for {name!r}"
+        return list(self._addopts)
 
 
 def test_the_default_invocation_is_not_treated_as_narrowed():
@@ -163,6 +219,16 @@ def test_the_default_invocation_is_not_treated_as_narrowed():
     assert _was_narrowed(_FakeConfig(["."], markexpr="integration"))
     assert _was_narrowed(_FakeConfig(["tests/test_review.py"]))
     assert _was_narrowed(_FakeConfig(["tests/test_review.py::test_x"]))
+
+    # THE CASE THE LITERAL COULD NOT SEE (batch 151, S19-03). A pytest.ini
+    # that gains a marker is a two-line edit; before this, the full run it
+    # produced read as narrowed and four gates below went quiet.
+    moved = ("-m", "not integration and not slow")
+    assert not _was_narrowed(_FakeConfig(["tests"], addopts=moved))
+    # ...and a real `-m` on the command line is still narrowing, which is
+    # the half that must not be lost to make the half above pass.
+    assert _was_narrowed(
+        _FakeConfig(["tests"], addopts=moved, markexpr="not integration"))
 
 
 #: This file's own name, which is the one narrowing that still owes the
@@ -450,6 +516,122 @@ def test_no_tree_entry_names_a_test_file_that_does_not_exist():
         f"ARCHITECTURE.md's tree lists test files that do not exist: {gone}. "
         f"If one was renamed, the entry moves with it."
     )
+
+
+def test_the_default_marker_expression_is_read_and_not_restated(request):
+    """`_default_markexpr` agrees with the ini pytest itself parsed.
+
+    Live against live, which is this file's rule: the expectation is read
+    out of `config.getini("addopts")` by a second, dumber parse rather than
+    written down here. The two spellings below are the ones a hand edit to
+    `pytest.ini` could produce. The `--strict-markers` case pins that a
+    token which is not a `-m` is SKIPPED rather than guessed at, which is a
+    property of the loop and would fail if the prefix test were ever
+    loosened to a substring search -- it is not about long options being
+    excluded, and the comment here said so until the control for that
+    exclusion could not be made to kill anything.
+    """
+    addopts = list(request.config.getini("addopts"))
+    assert "-m" in addopts, (
+        "pytest.ini's addopts no longer passes `-m`. _default_markexpr "
+        "returns '' for that, which makes an UNFILTERED run the default "
+        "one -- check _was_narrowed still answers what it claims before "
+        f"changing this. addopts is {addopts}")
+    expected = addopts[addopts.index("-m") + 1]
+    assert _default_markexpr(request.config) == expected
+
+    assert _default_markexpr(
+        _FakeConfig([], addopts=("-mnot integration",))) == "not integration"
+    assert _default_markexpr(
+        _FakeConfig([], addopts=("--strict-markers",))) == ""
+
+
+# ---------------------------------------------------------------------------
+# ---- S19-05: the root conftest's own inventory ----------------------------
+# ---------------------------------------------------------------------------
+
+
+def test_the_root_conftest_header_names_every_module_it_stubs():
+    """The header's list of fakes against the modules it installs.
+
+    `conftest.py`'s first paragraph names what is injected into
+    `sys.modules`, and `_install_fake_sdks` installs one the paragraph did
+    not mention -- `markitdown`, since #144. The omission matters because
+    of what follows it: the docstring's next-but-one paragraph is a `NOT
+    faked, by explicit decision` list, which makes the first read as the
+    COMPLETE set rather than as an example. A reader asking "is markitdown
+    stubbed, or do I need it installed?" got "no" from the header and "yes"
+    from the installer, and `docs/ARCHITECTURE.md` records what that costs:
+    "a green local suite is not a green fresh install".
+
+    Both directions, because either can drift: a stub the header omits, and
+    a name the header keeps after the stub is gone. A dotted child counts
+    as named by its parent, so installing `google.genai.types` under a
+    header that says `google.genai` is not a miss.
+    """
+    import ast
+
+    with open(os.path.join(ROOT, "conftest.py"), encoding="utf-8") as handle:
+        tree = ast.parse(handle.read())
+
+    installer = next(
+        (node for node in tree.body
+         if isinstance(node, ast.FunctionDef)
+         and node.name == "_install_fake_sdks"), None)
+    assert installer is not None, (
+        "conftest.py has no _install_fake_sdks; if the stubs moved, this "
+        "gate moves with them rather than being deleted")
+
+    installed = set()
+    for node in ast.walk(installer):
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if (isinstance(target, ast.Subscript)
+                and isinstance(target.value, ast.Attribute)
+                and target.value.attr == "modules"
+                and isinstance(target.slice, ast.Constant)
+                and isinstance(target.slice.value, str)):
+            installed.add(target.slice.value)
+    assert len(installed) > 5, (
+        f"the ast walk found {sorted(installed)}, which is too few to be "
+        f"the stub set -- the assignment shape changed and this gate is "
+        f"now checking nothing")
+
+    #: THE ONE PARAGRAPH THAT IS AN INVENTORY, named rather than bounded by
+    #: what happens to follow it. This first split at "Why we fake these",
+    #: which left every backquoted name in the preamble in scope -- so the
+    #: two function names in the paragraph batch 151 added read as claimed
+    #: stubs. The rationale list below it, the `NOT faked, by explicit
+    #: decision` list below that and any prose added later are all out of
+    #: scope by construction now.
+    paragraphs = (ast.get_docstring(tree) or "").split("\n\n")
+    inventory = next(
+        (p for p in paragraphs if p.startswith("Injects fake")), "")
+    assert inventory, (
+        "conftest.py's header no longer opens a paragraph with `Injects "
+        "fake`, so this gate has nothing to read. Reword the assertion "
+        "with it -- do not delete the inventory, it is what the `NOT "
+        "faked, by explicit decision` list below it is read against.")
+    named = set(re.findall(r"`([A-Za-z_][\w.]*)`", inventory))
+    #: Named in that sentence as the DESTINATION, not as a stub.
+    named -= {"sys.modules"}
+
+    def covered(name, names):
+        return name in names or any(name.startswith(f"{n}.") for n in names)
+
+    missing = sorted(n for n in installed if not covered(n, named))
+    assert not missing, (
+        f"conftest.py stubs {missing} and its header does not say so. The "
+        f"paragraph reads as the complete set because a later one is a "
+        f"`NOT faked, by explicit decision` list, so a name missing here "
+        f"reads as a package you must install.")
+
+    stale = sorted(n for n in named if not covered(n, installed))
+    assert not stale, (
+        f"conftest.py's header claims to stub {stale} and the installer "
+        f"does not. A header naming a stub that is gone is how someone "
+        f"concludes the real package is unreachable in tests.")
 
 
 # ---------------------------------------------------------------------------

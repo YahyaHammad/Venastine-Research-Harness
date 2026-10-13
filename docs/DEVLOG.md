@@ -23318,3 +23318,283 @@ and a production comment citing
 deleted**, which is exactly the case that gate's own message describes
 ("a reader who greps the name and finds nothing concludes the thing is
 unguarded").
+## Batch 151 -- six places the suite described itself, and two guards that could pass while scanning nothing (2026-10-13)
+
+The review marathon's test-infrastructure surface: all six FIX-NOW findings
+-- **S19-01**, **S19-02**, **S19-03**, **S19-04**, **S19-05** and **S19-13**
+-- plus register items **85** and **97**, which both name "whichever batch
+next touches those files" as their home. Three owner rulings, recorded with
+the rest as `docs/ROADMAP_v3.md` §68's A34-A39.
+
+Two S3s and four S4s, and what they share is that **the subject is this
+suite itself**. Every other surface in this marathon had a production defect
+at the bottom of it. Here the production code is fine, and what is wrong is
+what the suite says about its own machinery -- a worker policy, a grouping
+contract, an offline promise, a stub inventory -- plus two guards that can
+pass while scanning nothing. So the batch is mostly subtraction: a count
+nobody could keep true is deleted and the rule it decorated is gated
+instead.
+
+**THE REPORTS WERE WRONG ABOUT THREE OF THEIR OWN CITED COPIES**, which is
+new. The fix pass has previously found a suggested shape too big (§65's
+A24), half of one (S04-02, S17-01), aimed at something already closed
+(S06-10), insufficient (§66's A25 and A26), or -- last batch -- aimed
+correctly and liable to re-open a different defect (§67's A29). This is the
+first time a finding's EVIDENCE needed correcting. S19-02 says
+`tests/test_tui.py`'s class count lives in five places with one of them
+gated. Measured: `AGENTS.md` says **71**, gated and correct;
+`.github/workflows/tests.yml` and `tests/test_tui.py` say the 183
+**classless** tests became **41** classes, which is what batch 114 did and
+is still true; `docs/TECHNICAL_DEBT.md`'s **62** sits inside a record of a
+measured run -- "all 62 classes were run standing completely alone -- 62
+processes, 251s". One live stale digit, not five. And the finding's
+sub-claim that the same sentence's "where it was 21" contradicts
+`AGENTS.md`'s 41 is wrong in the direction that matters: 21 pre-existing
+classes plus 41 new is the 62 that sentence states, so adopting the
+correction would have **introduced** an error into a sentence that was
+internally consistent.
+
+**S19-01: a count four sentences carried and nobody could keep** (A34).
+Four places said `real_storage` was the suite's only non-function-scoped
+fixture; it stopped being true in batch 110, when `_schema_cache_is_put_back`
+arrived in the same file. The register's copy is the sharpest because **it
+cites the grep that refutes it in the same sentence**. Batch 128's whole
+subject was this claim: it fixed two copies and missed four, and
+`96de26e`'s commit message records why in a line that predicted this one --
+"The duplicates were found by grepping the sentence rather than the claim,
+so two files that phrase it differently survived." The four phrasings are
+"module-scoped" twice, "such", and "non-function-scoped". **There is a
+fifth, and it is in the document that warns about this**: `AGENTS.md`
+carries the sentence batch 128 corrected to "the suite's ONLY two", true
+today and false the moment somebody adds a third -- beside a rule that never
+needed a number, two paragraphs after that same sentence says exactly this
+about its own predecessor. The count is deleted at all five and the rule is
+gated for every file by
+`test_every_file_with_a_module_scoped_fixture_declares_no_test_class`, which
+reads fixture DECORATORS rather than grepping `scope="module"`, so
+`@pytest.fixture(autouse=True, scope="session")` is found and a docstring
+mention is not. **A second defect in the same register entry, found while
+confirming the first:** item 30 is closed, its header says batch 114 closed
+it, and its body ended with "What remains open in this item: the 183
+classless tests in `test_tui.py`" -- the thing batch 114 did, as the RESOLVED
+section eight lines below says.
+
+**S19-02: the one live stale digit, and a premise dead for 37 batches**
+(A35). `pytest.ini`'s worked example said `test_tui.py` "is 62 classes and
+so 62 groups"; it is 71. Option 2 of the finding's two shapes, which is what
+its own doctrine asks for: the argument needs "the classless group was the
+floor and is not any more" and never needed the integer, so the integer is
+gone and the gated copy is the only one left. The second-order instance is
+the one that could have changed a decision: `.github/workflows/compat.yml`
+chose the parallel default because "the suite is floor-bound on test_tui.py",
+and `tests.yml` says of that same sentence, in capitals, `THE FLOOR THAT
+USED TO BIND IS GONE, AND THIS RUNNER NEVER FELT IT (batch 114...)`. Right
+conclusion, premise retired 37 batches earlier -- which is worse than being
+wrong, because someone who re-measured the floor, found it gone and changed
+that line would have been reasoning correctly.
+
+**S19-03: shape 1 inside the file written to kill shape 1** (A36).
+`_was_narrowed` decides whether this invocation collected the whole suite,
+and it compared `config.option.markexpr` against the literal
+`"not integration"` -- a copy of what `pytest.ini`'s addopts supply. Add a
+marker there, which `--strict-markers` makes a two-line change, and every
+full run reads as NARROWED: three count gates skip and
+`test_the_subprocess_collection_agrees_with_the_session`, which has no
+file-alone fallback, stops running anywhere. Silently, which the guard's own
+docstring names as the direction it most needs to avoid. That file's header
+states the rule it broke: "Every check here compares a document against a
+live value ... never against another hand-written number." **And the guard
+on the guard could not see it by construction** -- `_FakeOption.__init__`
+carried the same literal as its default, so the test asserted that two
+copies of one string agreed with each other. `config.getini("addopts")` was
+measured before being relied on: it returns the shlex-split list
+`['-ra', '--strict-markers', '-m', 'not integration', '-n', 'auto',
+'--dist', 'loadscope']`, so the parse is "find `-m`, take the next element",
+plus the squashed `-mEXPR` spelling. **A third clause excluded long
+options, on the stated grounds that `--strict-markers` also begins with
+`-m`; it does not** -- every long option begins with `--`, so the prefix
+test fails at index 1 for all of them and the clause could never change an
+answer. It was removed in the batch that added it, by the control that could
+not kill it, which is this batch's own subject arriving in its own fix.
+`_FakeConfig`
+derives its markexpr from its OWN addopts now, so a default run is default
+by construction.
+
+**S19-04: a guard that passed from one directory up** (A37). The guard
+forbidding a sixth copy of `settle` globbed `pathlib.Path("tests")` -- 124
+files from the repository root, 0 from one directory up -- and pytest does
+not change the working directory. With no assertion on the domain, **"found
+nothing" and "looked nowhere" are the same observation**, which is
+`docs/ARCHITECTURE.md` section 11's FIRST entry, named there as a measured
+survivor with "pin the input in both directions" attached. The thing guarded
+is not cosmetic: five copies of that helper existed with "budgets
+40/60/120/120/200 and two incompatible orderings", two independent bugs
+lived in them, and both were "invisible to 1246 passing tests". The guard
+exists because "a convention is what produced five copies" -- and the guard
+was a convention about the working directory. Demonstrated both ways: with
+a planted `def settle` it now fails from the parent directory, where before
+it passed.
+
+**S19-05: the file that owns the decision, describing the other branch**
+(A38). The root conftest's four-dial worker table annotated `-n logical` as
+"(what CI runs)" and CI runs the default -- so the one file that OWNS the
+`-n auto` decision was the one file describing CI as taking the other
+branch, in the line a reader opens to learn what the dials mean, and
+`AGENTS.md` names that conclusion as something "not to re-derive from the
+above". The second claim is the stub inventory: the header listed seven
+fakes and `_install_fake_sdks` installs `markitdown` too, which matters
+because the paragraph two below is a `NOT faked, by explicit decision` list
+-- so the first reads as the complete set. **The finding says neither is
+gateable and one of them is**: a list of module names against a function
+that assigns them is a document against a live value, which is that file's
+own instrument. It is gated both directions now, and **it caught the defect
+on its first run, before the fix landed**. The CI sentence stays prose and
+points at `pytest.ini`, because restating a workflow's invocation in a third
+file is what produced the finding.
+
+**S19-13: an offline promise two things made false** (A39). `pytest.ini`
+opened with "-m 'not integration' keeps the DEFAULT run strictly offline: no
+process, no socket". On Windows a default run spawned `wsl.exe` eleven times
+before any test body: `needs_wsl` was
+`pytest.mark.skipif(not _has_wsl(), ...)`, evaluated at IMPORT, and an xdist
+worker performs its own full collection. **The finding's preferred outcome
+was never available, and that was measured.** It says that if the probe moves
+off collection the sentence can stand as written, "and that is the better
+outcome, because it is the stronger claim" -- but the three `needs_wsl`
+tests drive a real distribution **in their bodies** and are not marked
+`integration`, so a default Windows run spawns processes for reasons the
+probe has nothing to do with. The sentence names its exception instead. The
+probe is still the larger half and the substance is the finding's: whether
+three tests run was decided by whether a background service answered within
+20 seconds, which is the class `TECHNICAL_DEBT 27` closed and batch 107
+measured -- "the suite's result on the primary platform was a function of
+whether a background service happened to be started" -- and
+`isolate_sandbox_probes` cannot reach it, because a `skipif` condition
+evaluated at import is upstream of every fixture.
+
+`needs_wsl` keeps its name and its three call sites and takes a **string**
+condition, which pytest evaluates in `pytest_runtest_setup`. Three
+properties were measured on pytest 9.1.1 before it was chosen rather than
+assumed: the string resolves against the MODULE's globals even for a method
+(all three sites are methods); `functools.cache` makes it one call per
+process rather than one per gated item; and deselecting the three evaluates
+it **zero** times. It is pinned by SABOTAGE, because the broken form and the
+fixed one differ by two quote characters -- the test re-imports the module
+with the probe's subprocess rigged to raise and sees whether the import
+survives.
+
+**Register item 85, applied where it was measured rather than where it
+matched.** The entry prescribed the same edit at six sites in
+`tests/test_tui.py`. **One of them was right.** Its rule has two halves: *the
+last wait before a positive assertion is a raw `pause()`/`pump()`*, a source
+pattern true at all six, and *the thing asserted is state only another
+thread can produce*, a claim about the code that is **false at five**. Each
+producing call was read: `exit()` calls `_release_permission_channel()`
+inside itself; `on_worker_state_changed` is called by hand and `logging`
+fills `caplog` on this thread; `switch_to_thread()` calls
+`refresh_todo_panel()` directly; `action_pick_thread()` runs every read on
+the UI thread by its own comment; `restart_for_config()` calls
+`self.exit(...)`, which sets `return_value` before returning. Two of the six
+were never candidates at all -- their `pump` precedes a NEGATIVE assertion,
+which is the one use `AGENTS.md` endorses.
+
+Driven as well as read, because a reading is what produced the entry:
+`Pilot.pause()` was replaced with a bare `asyncio.sleep(0)` -- the idle
+heuristic gone, the loop still able to turn -- and **all six passed**.
+`settle` keeps working under that patch because it polls, which is what
+lets the probe tell the two populations apart instead of merely breaking
+everything, and the probe's reach was proved by sabotaging the same
+monkeypatch and watching the tests fail inside `Pilot.pause`. So the
+gesture test -- the one that actually failed, in a 635-second run -- takes
+the predicate, with the correct diagnosis beside it: the state is produced
+by the MESSAGE PUMP, not by another thread. A key is POSTED, `press` can
+return before the binding fires, and `pause()` ends on `wait_for_idle(0)`, a
+CPU heuristic measured at 21ms idle against 1021ms with one busy sibling.
+**Its pair lost its `pause()` instead of gaining a predicate**: `exit()`
+releases the channel synchronously, so asserting with no wait at all is what
+pins the property ARCHITECTURE §4.14 depends on.
+
+**Register item 97's resize half.** `test_a_drag_re_arms_rather_than_stacking`
+asserted that three `resize_terminal` calls armed three timers; a loaded box
+delivered two `Resize` messages for three calls, so the handler had behaved
+correctly for every message it was given and the arity was the one claim in
+that test about textual's DELIVERY rather than about this widget. The
+invariant is asserted now -- every armed timer but the last was stopped, and
+`_reflow_timer` is the last -- with a floor of **two** rather than nothing,
+because one delivery cannot show coalescing and `assert armed` alone would go
+vacuous in the direction that hides the bug. Its secrets half is untouched,
+as that entry asks in as many words.
+
+**Two stale claims created by batch 150**, the batch immediately before this
+one, both the same figure: `pytest.ini` and `AGENTS.md:62` each said the
+`integration` opt-in was TWO tests, and it has been four since that batch.
+150 updated the three totals a gate reads and left the two nothing reads.
+Shape 9 is not only historical, and the batch that spent its day on it is not
+exempt.
+
+**The doc gate taught one thing about itself.**
+`test_a_claimed_range_covers_its_whole_family` reads every `Xn-Xm` range on
+`AGENTS.md`'s map line, so a per-section parenthetical sub-range reads as a
+family claim: `A28-A33 in §67` passed only while A33 was the highest A
+defined, and adding A39 made it "short". The earlier sections write their
+per-section ids as lists; matching them is the fix, and the gate is right to
+be loud.
+
+Suite 7045 -> **7050** (+2 in `test_wsl_backend.py`, +2 in
+`test_docs_consistency.py`, +1 in `test_storage_e2e.py`), three per-file
+tree counts, and `tests/test_docs_consistency.py` renormalised from MIXED
+(2825 CRLF / 9 bare LF) before anything else touched it, which
+`git diff --numstat` confirmed invisible.
+
+**And the first control written for S19-04's domain assertion had the
+defect it was controlling.** It deleted the assertion and expected the test
+to go red; the test passed, because deleting an assertion that currently
+HOLDS cannot make a passing test fail, and a "survivor" there says nothing
+about the assertion. The discriminating pair is the wrong domain WITH the
+assertion (red) against the wrong domain WITHOUT it (green) -- and the gap
+between those two runs is S19-04 itself, so the second is recorded as a
+must-survive control rather than deleted. Controls: **17 of 17 KILLED**,
+both must-survive controls correct, all eight held files sha256-restored.
+
+**The full-suite run found a flake this batch did not plant, and it is this
+batch's own shape.** `test_secrets.py::TestTheEnvelope::test_it_does_not_say_WHICH_part_was_wrong`
+failed with DID NOT RAISE in the run that was meant to close this batch,
+and passed alone. It tampers with three things in turn and asserts the
+three refusals are indistinguishable; the ciphertext tamper ASSIGNED
+`\x00` to the first byte. `ct` is AES-GCM output, so one envelope in 256
+already starts with that byte -- and on those the "tampered" file is
+byte-identical to the real one, `unlock(MASTER)` succeeds, and the test
+fails for a reason that has nothing to do with what it is about. Measured
+rather than inferred: **6 of 2000** fresh envelopes draw it (1/256 predicts
+7.8), and on one of them, built at the shipped `n=2**15` by deriving the
+key once and varying the nonce until the first byte came up zero, `_open`
+returned `{'ssh.h.login': 'hunter2'}` after the mutation. The edit XORs the
+byte now, which always changes it.
+
+**The assertion added beside it is the general form, and it is
+ARCHITECTURE section 11's instruction in the place this batch found it
+missing**: `assert edited != envelope` before each unlock, so a mutation
+that is not a mutation says so instead of asking the unlock to refuse the
+real file. Three of this batch's six findings are checks that cannot
+discriminate; a tamper that may not tamper is the same defect wearing the
+other sign, failing loudly once in 256 runs instead of passing quietly.
+The control plants a genuine no-op (`n=int(e["n"])`) and the test goes red
+with the new message.
+
+**A second coupling, found while fixing the first and not visible from the
+test.** The parameter edit used a literal `1 << 14`, which is exactly
+`MIN_SCRYPT_N` -- measured. One step lower and `_open` raises
+`StoreUnreadable`, a SIBLING of `WrongPassphrase` under `SecretsError`
+that this test's `pytest.raises` does not catch, so the literal was
+load-bearing with nothing recording it. It reads `secrets.MIN_SCRYPT_N`
+now, which keeps the case an edited-parameter case if the floor ever
+moves, and if the floor ever rises to meet `SCRYPT_N` the edit stops
+being an edit and the new assertion is what says so.
+
+**`tests/test_secrets.py` is not S19's surface and the fix rides here
+anyway**, because a batch is not done without one green full suite and
+this was the only thing between the two. It is pre-existing: the test
+arrived with `9048427`, and nothing in this batch touches that file or
+that module.
+
+FIX-NOW: **75 done, 11 open.**

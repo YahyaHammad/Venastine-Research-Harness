@@ -12,8 +12,15 @@ faked without asserting the assumption instead of the fact -- SS45's
 reparse point, and the two-tokeniser corpus. Each has a synthetic sibling
 that runs everywhere, so a CI that skips them still fails if the rule is
 removed.
+
+THOSE THREE ARE WHY `pytest.ini` CANNOT SAY "NO PROCESS" (batch 151,
+S19-13). They are not marked `integration`, so a default run on Windows
+drives a real distribution; that comment now names them instead of
+claiming a property this file takes away. The probe behind the marker is
+the half that was worth fixing -- see `needs_wsl` below.
 """
 
+import functools
 import os
 import platform
 from unittest.mock import MagicMock, patch
@@ -52,7 +59,14 @@ DISTRO = "Ubuntu"
 LISTING = "Ubuntu\r\ndocker-desktop\r\nkali-linux\r\n".encode("utf-16-le")
 
 
+@functools.cache
 def _has_wsl() -> bool:
+    """Is there a distribution on this machine?
+
+    CACHED, and the cache is half of batch 151's fix (S19-13): the marker
+    below evaluates its condition once per gated ITEM, so without this the
+    three tests would cost three `wsl.exe` calls instead of one.
+    """
     if platform.system() != "Windows":
         return False
     try:
@@ -63,8 +77,21 @@ def _has_wsl() -> bool:
     return result.returncode == 0 and bool(result.stdout.strip())
 
 
+#: A STRING CONDITION, NOT A BOOLEAN, and the difference is 11 subprocesses
+#: (batch 151, S19-13). `skipif(not _has_wsl(), ...)` evaluates at IMPORT, an
+#: xdist worker performs its own full collection, and this box runs 11
+#: workers -- so a default run made 11 live `wsl.exe` calls, each bounded at
+#: 20s, before a single test body. pytest evaluates a string condition in
+#: `pytest_runtest_setup` against this module's globals, so the ask happens
+#: at most once per process (the cache above) and only in a process that
+#: actually runs one of the three. Measured before it was chosen: deselect
+#: them and the probe runs zero times, and the module-globals lookup works
+#: for a method, which all three sites are.
+#:
+#: Pinned by `TestTheGateIsLazy::test_importing_this_module_asks_nothing`,
+#: which re-imports this file with the probe's subprocess sabotaged.
 needs_wsl = pytest.mark.skipif(
-    not _has_wsl(), reason="no WSL distribution on this machine")
+    "not _has_wsl()", reason="no WSL distribution on this machine")
 
 
 def _profile(tier=SANDBOXED, network=False, measured=True):
@@ -103,6 +130,56 @@ def popen():
         mock.return_value.returncode = 0
         mock.return_value.communicate.return_value = ("out", "err")
         yield mock
+
+
+# ===========================================================================
+# ---- When the probe runs (batch 151, S19-13) ------------------------------
+# ===========================================================================
+
+
+class TestTheGateIsLazy:
+    """`needs_wsl` must not ask the machine anything at import time.
+
+    An xdist worker performs its OWN full collection (xdist/remote.py holds
+    the whole item list and runs the indices the controller sends), so a
+    module-level probe runs once per worker -- 11 live `wsl.exe` calls on
+    this box, each bounded at 20s, before a single test body. It also put
+    `pytest.ini`'s "no process" claim out of reach on the primary platform.
+
+    This cannot be asserted by reading the source: the broken form and the
+    fixed one differ by two quote characters. So it is asserted by SABOTAGE
+    -- re-import the module with the probe's one subprocess call rigged to
+    raise, and see whether the import survives.
+    """
+
+    def test_importing_this_module_asks_nothing(self):
+        """The negative control is the finding: restore the boolean
+        condition and `exec_module` raises here."""
+        import importlib.util
+
+        with patch.object(
+                sandbox.subprocess, "run",
+                side_effect=AssertionError(
+                    "the WSL probe ran while the module was being "
+                    "imported -- that is once per xdist worker, during "
+                    "collection")):
+            spec = importlib.util.spec_from_file_location(
+                "wsl_backend_laziness_probe", __file__)
+            fresh = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(fresh)
+
+        assert isinstance(fresh.needs_wsl.args[0], str), (
+            "needs_wsl's condition is not a string, so pytest evaluated it "
+            "at import rather than at setup -- see the comment on needs_wsl")
+
+    def test_the_probe_is_cached(self):
+        """The string condition is evaluated once per gated ITEM, so the
+        cache is what keeps three tests at one `wsl.exe` call. Asked of
+        `functools` rather than of the call count, because the three gated
+        tests may already have run in this process."""
+        assert hasattr(_has_wsl, "cache_info"), (
+            "_has_wsl lost its cache; the marker asks it once per gated "
+            "test, so this is three subprocesses instead of one")
 
 
 # ===========================================================================

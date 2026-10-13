@@ -937,6 +937,15 @@ Every other scope judges its own tests. This scope owns the machinery they all r
   platform and therefore which guarantees nobody here has ever observed.
 - **Whether each gate in `test_docs_consistency.py` can fail.** The repo trusts those gates *instead
   of* re-reading its own documents, so a vacuous gate is worse than no gate.
+  **ANSWERED (S19-03, fixed batch 151), and the answer was in the gatekeeper rather than in a
+  gate.** Every individual gate could fail; what could not was `_was_narrowed`, which decides
+  whether any of them asserts at all and did so by comparing `markexpr` against a string literal
+  copy of `pytest.ini`'s addopts. Change the marker expression -- two lines, because
+  `--strict-markers` -- and four gates skip while one stops running anywhere, silently. The guard
+  written for exactly that failure direction shared the literal with the thing it guarded, so it
+  asserted that two copies of one string agreed. The lesson for a future scope is the one this
+  bullet half-states: ask what decides whether a check RUNS, not only whether it can fail once it
+  does.
 
 **Seeded findings — already confirmed, do not spend time re-deriving:**
 
@@ -952,6 +961,17 @@ Every other scope judges its own tests. This scope owns the machinery they all r
 
 Report them with their severity and shape, and use them as the pattern: a claim in a comment made
 false by a change somewhere else, in the file that configures how the whole suite runs.
+
+**BOTH FIXED in batch 151, and both seeds were undercounts in one direction and overcounts in the
+other.** Seed 1 named three copies; there are **five** -- the register's (`TECHNICAL_DEBT` item 30,
+the sharpest, because it cites the refuting grep in the same sentence) and `AGENTS.md`'s, which is
+the copy batch 128 *corrected* to "the suite's ONLY two" and which is therefore true today and
+false the moment somebody adds a third. The count is deleted at all five and the rule is gated for
+every file by `test_every_file_with_a_module_scoped_fixture_declares_no_test_class`. Seed 2's digit
+was right -- and the half-sentence beside it, "where it was 21", is **correct** rather than drift:
+21 pre-existing classes plus the 41 the classless tests became is the 62 the same sentence states,
+so the reading that it contradicts `AGENTS.md`'s 41 would have put an error into a consistent
+sentence. `pytest.ini` states no count at all now; `AGENTS.md`'s is the gated one.
 
 **Tests** `test_docs_consistency` · `test_probe_isolation` · `test_config_edit` (the loader-cache
 class) · `test_storage_e2e` · `test_fake_storage_mirror`
@@ -1029,15 +1049,15 @@ Both `OWNER-DECISION` findings were then ruled and fixed (136, 137), and batch 1
 | 138 | the `DEFER`/`KNOWN`/`ACCEPTED` tranche | `docs/TECHNICAL_DEBT.md` 49-85 | 3/3 |
 
 **This table stops at 138 and the work did not** (noted batch 150). Batches
-139-150 cleared eight more surfaces -- secrets/logging/json_store, `tui/`
+139-151 cleared nine more surfaces -- secrets/logging/json_store, `tui/`
 lifecycle and rendering, file and doc tools, loop + client, compaction +
-sessions, `core/reasoning/`, and `agents/` + `skills/` + `mcp_client/` --
-and none of them added a row here. **`review/TRIAGE.md` is the live index**
+sessions, `core/reasoning/`, `agents/` + `skills/` + `mcp_client/`, and test
+infrastructure -- and none of them added a row here. **`review/TRIAGE.md` is the live index**
 and is updated per batch; the per-batch narrative is `docs/DEVLOG.md`, which
 is where a row's worth of detail actually goes. The table is kept as the
 record of the `BLOCKS-MERGE` tranche and the two owner rulings, which is
 what it was built for, rather than extended into a third copy of a count
 that would then drift -- which is the defect shape this marathon spends most
 of its time finding. The paragraph above it says "what is left is the 86
-distinct `FIX-NOW` findings", and that was true when it was written: **17
-are left as of batch 150.**
+distinct `FIX-NOW` findings", and that was true when it was written: **11
+are left as of batch 151.**

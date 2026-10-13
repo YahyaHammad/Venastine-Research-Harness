@@ -2,8 +2,16 @@
 Root conftest.py -- runs before pytest collects any test module.
 
 Injects fake `openai`, `anthropic`, `google`, `google.genai`, `sqlmodel`,
-`httpx`, and `ddgs` modules into `sys.modules` BEFORE any test module
-imports a project module that would, in turn, import the real SDK.
+`httpx`, `ddgs` and `markitdown` modules into `sys.modules` BEFORE any test
+module imports a project module that would, in turn, import the real SDK.
+
+`markitdown` is the one in that list that is not an SDK: it is an optional
+extra since #144, and it is stubbed for the same reason as the rest. It was
+missing from this sentence until batch 151, which matters because
+of what the paragraph two below is -- a `NOT faked, by explicit decision`
+list, which makes this one read as the complete set rather than as an
+example. `test_the_root_conftest_header_names_every_module_it_stubs` reads
+this list back and compares it against what `_install_fake_sdks` assigns.
 
 Why we fake these and not others:
   - openai / anthropic / google.genai: real ones require live network +
@@ -862,12 +870,25 @@ else:
         detector so that spelling keeps meaning "every core". That leaves
         four dials, all in xdist's own vocabulary and none invented here:
 
-            -n auto      70% of what this process may use  (the default)
-            -n logical   all of them                       (what CI runs)
+            -n auto      70% of what this process may use  (the default,
+                         and what CI runs -- see pytest.ini)
+            -n logical   all of them; measured NOT faster, twice
             -n <N>       exactly N
             -n0          serial -- the escape hatch for a debugger, for
                          the mutation harness, and for anything that reads
                          pytest's output
+
+        THAT ANNOTATION USED TO SAY CI RAN `-n logical`, AND IT DOES NOT
+        (batch 151). It runs `python -m pytest -q` in both
+        workflows, under a comment in `tests.yml` that carries three runs
+        of paired measurements and concludes "So CI runs exactly what a
+        contributor runs". So the one file that owns this decision was the
+        one file describing CI as taking the other branch, in the line a
+        reader opens to find out what the dials mean -- and `AGENTS.md`
+        names that conclusion as something not to re-derive from the
+        measurements, which is precisely what a reader would do from here.
+        The invocation is stated in `pytest.ini` and in the workflows; this
+        table points at them rather than becoming a fourth copy.
         """
         if config.option.numprocesses != "auto":
             return None

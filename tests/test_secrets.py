@@ -110,18 +110,42 @@ class TestTheEnvelope:
         passphrase, a tampered ciphertext and an edited parameter are
         indistinguishable. Keeping them so is deliberate -- telling them
         apart would tell someone holding a stolen file that their guess
-        was structurally right."""
+        was structurally right.
+
+        EACH EDIT IS ASSERTED TO BE AN EDIT, and it is not decoration
+        (batch 151). The ciphertext tamper used to ASSIGN `\x00` to the
+        first byte, and `ct` is AES-GCM output: one envelope in 256
+        already starts with that byte, and on those the "tampered" file is
+        byte-identical, `unlock` SUCCEEDS, and this test fails with DID
+        NOT RAISE -- measured at the shipped n=2**15, and 6 of 2000 fresh
+        envelopes draw it. A XOR always changes the byte. The assertion
+        stays anyway, because it is the property the loop needs from all
+        three of these and the next one to be added.
+
+        `n` comes from `MIN_SCRYPT_N` rather than a literal `1 << 14`.
+        Those are the same number today, and the literal was load-bearing
+        in a way nothing recorded: one step BELOW the floor and `_open`
+        raises StoreUnreadable, a sibling of WrongPassphrase under
+        SecretsError that `pytest.raises` here would not catch. Reading
+        the floor keeps this an edited-parameter case rather than a
+        rejected-file case, and if the floor ever rises to meet SCRYPT_N
+        the edit stops being an edit and the assertion below says so.
+        """
         envelope = json.loads(locked_store.read_text(encoding="utf-8"))
         raised = []
         for mutate in (
-                lambda e: e.update(n=1 << 14),
+                lambda e: e.update(n=secrets.MIN_SCRYPT_N),
                 lambda e: e.update(ct=base64.b64encode(
-                    b"\x00" + base64.b64decode(e["ct"])[1:]).decode()),
+                    bytes([base64.b64decode(e["ct"])[0] ^ 0xFF])
+                    + base64.b64decode(e["ct"])[1:]).decode()),
                 lambda e: e.update(nonce=base64.b64encode(
                     b"\x00" * 12).decode()),
         ):
             edited = dict(envelope)
             mutate(edited)
+            assert edited != envelope, (
+                "this edit left the envelope unchanged, so the unlock "
+                "below is being asked to refuse the REAL file")
             locked_store.write_text(json.dumps(edited), encoding="utf-8")
             with pytest.raises(secrets.WrongPassphrase) as excinfo:
                 secrets.unlock(MASTER)

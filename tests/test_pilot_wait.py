@@ -320,16 +320,33 @@ def test_no_test_module_defines_its_own_settle():
 
     A grep test rather than a convention, because a convention is what
     produced five copies.
+
+    ANCHORED ON `__file__` AND NOT ON THE WORKING DIRECTORY, and the
+    domain is asserted before anything is asserted about it (batch 151,
+    S19-04). This scanned `Path("tests")`, which is 124 files from the
+    repository root and ZERO from one directory up -- and pytest does not
+    chdir, so `python -m pytest "<abs path>/tests/test_pilot_wait.py"` from
+    the parent directory ran this test green having read no files at all.
+    `docs/ARCHITECTURE.md` section 11's first entry is this shape by name:
+    "a check that passes by finding nothing cannot tell it looked in fewer
+    places ... pin the input in both directions."
     """
     import pathlib
 
+    tests_dir = pathlib.Path(__file__).resolve().parent
+    paths = sorted(tests_dir.glob("test_*.py"))
+    assert len(paths) > 20, (
+        f"the scan found {len(paths)} test modules under {tests_dir}, so it "
+        f"is looking in the wrong place and would pass whatever this suite "
+        f"contains")
+
     offenders = []
-    for path in sorted(pathlib.Path("tests").glob("test_*.py")):
+    for path in paths:
         for number, line in enumerate(
                 path.read_text(encoding="utf-8").splitlines(), start=1):
             if line.startswith(("async def _settle", "def _settle",
                                 "async def settle", "def settle")):
-                offenders.append(f"{path}:{number}")
+                offenders.append(f"{path.name}:{number}")
     assert not offenders, (
         "a local wait helper is back -- import `settle` from tests/conftest.py "
         f"instead: {offenders}")

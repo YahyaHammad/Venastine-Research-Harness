@@ -1158,8 +1158,21 @@ class TestQuittingIsADismissalPathToo:
             channel = app._permission_channel
             assert channel is not None and channel.puts == []
 
+            # NO WAIT, DELIBERATELY, and that is the assertion (batch
+            # 151). `exit()` calls `_release_permission_channel()` itself,
+            # before `super().exit()` -- "every exit route funnels through
+            # here, which is why the release lives here rather than on the
+            # quit binding alone" -- so the channel carries the boolean
+            # before this call returns. There used to be a `pause()` here,
+            # which was decoration: TECHNICAL_DEBT 85 read it as a
+            # cross-thread wait, and the measurement says the producing
+            # call is this line. Asserting with no wait at all is what
+            # pins the property ARCHITECTURE 4.14 relies on -- a quit
+            # dismisses the prompt synchronously, so a worker cannot be
+            # left parked by a shutdown that outran it. The gesture
+            # version of this test is the one that needs a predicate, and
+            # says why.
             app.exit()
-            await pilot.pause()
 
             assert channel.puts == [False], \
                 "exit() left the worker blocked on the permission channel"
@@ -7406,9 +7419,25 @@ class TestTheQuitGesture:
             await pilot.press("ctrl+c")
             await pilot.pause()
             await pilot.press("ctrl+c")
-            await pilot.pause()
 
-            assert channel.puts == [False], (
+            # A PREDICATE AND NOT A PAUSE, and this is the one site in
+            # TECHNICAL_DEBT 85's table of six where that matters (batch
+            # 151). A key is POSTED to the message pump, so the binding
+            # has not necessarily fired when `press` returns; what used to
+            # be here was `await pilot.pause()`, which ends on
+            # `wait_for_idle(0)` -- a process-wide CPU heuristic, 21ms with
+            # nothing burning CPU in-process and 1021ms with one busy
+            # sibling thread. That is not a guarantee that the handler ran,
+            # and in batch 138's 635-second run it was not one: this test
+            # failed with `channel.puts == []` and passed alone, in its own
+            # class, and three times under a narrowed parallel selection.
+            #
+            # The other five in that table assert state produced by one of
+            # the test's OWN statements -- measured, with `Pilot.pause`
+            # replaced by a bare `asyncio.sleep(0)`, all six still pass --
+            # so they keep their pauses and the entry carries the
+            # correction.
+            assert await settle(pilot, lambda: channel.puts == [False]), (
                 "quitting by ctrl+c left the worker blocked on the "
                 "permission channel")
 
@@ -8518,8 +8547,13 @@ class TestThisFileIsGroupedForLoadscope:
     THIS TEST IS INSIDE A CLASS BECAUSE IT IS ITS OWN FIRST SUBJECT. It is
     the mirror of `test_storage_e2e.py::test_this_file_declares_no_test_class`,
     which forbids the opposite thing in the file next door for the opposite
-    reason -- that file holds the suite's only module-scoped fixture, and a
-    class there would ask for a second one.
+    reason -- that file holds module-scoped fixtures, and a class there
+    would ask for a second setup of them. No count here (batch 151,
+    S19-01): this said "the suite's ONLY module-scoped fixture" and there
+    have been two in that file since batch 110, which is why the rule is
+    now gated for every file by
+    `test_every_file_with_a_module_scoped_fixture_declares_no_test_class`
+    rather than described by a number.
     """
 
     def test_every_test_here_is_inside_a_class(self):

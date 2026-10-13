@@ -64,8 +64,16 @@ jobs:
         run: cp providers.json.example providers.json
 
       # The parallel default, not `-n logical`, for tests.yml's measured
-      # reason (batch 109): the suite is floor-bound on test_tui.py, so
-      # asking for the other 30% of the cores is never faster.
+      # reason: asking for the other 30% of the cores was not faster under
+      # either distribution mode, alternated three runs a side (batch 109,
+      # and again in batch 110).
+      #
+      # NOT "because the suite is floor-bound on test_tui.py", which is what
+      # this said until batch 151 (S19-02). Batch 114 retired that floor and
+      # tests.yml's own comment says so in capitals -- so the conclusion here
+      # was right and its premise had been dead for 37 batches, which is
+      # worse than being wrong: someone who re-measured the floor, found it
+      # gone, and changed this line would have been reasoning correctly.
       - name: Run the suite (informational)
         run: python -m pytest -q
 
