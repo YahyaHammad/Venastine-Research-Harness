@@ -6463,16 +6463,56 @@ def _remembered_for_panel() -> "tuple[str, str] | None":
     return record["provider"], record["model"]
 
 
+#: `_config_read`'s answer when the file could not be read. A sentinel
+#: rather than None, because None is a real answer from `find()`.
+_UNREADABLE = object()
+
+
+def _config_read(app: VenastineApp, read):
+    """`read()`, or `_UNREADABLE` after writing why the file cannot answer.
+
+    THE PRODUCER'S SENTENCE, NOT THE GENERIC ONE. Every reader in
+    `config_edit` raises `ValueError` naming `config.yaml` and the remedy
+    when the document has moved under the session (batch 155), and the
+    documented workflow is exactly how it moves -- `explain()` tells
+    every container row to "Edit it in config.yaml" and nothing re-reads
+    the file (UN1).
+
+    WITHOUT THIS THE COMMAND STILL SURVIVED, which is why this is about
+    the sentence and not about a crash. Batch 135 contains `dispatch()`
+    at its call site, so a handler raising here prints "/config failed.
+    The error is in logs/app.log; the session is intact." -- true, and
+    not an answer to "I just edited that file".
+
+    `OSError` travels with `ValueError` because `read_text` raises it for
+    the file being gone or locked, and its message names the path too.
+    """
+    try:
+        return read()
+    except (ValueError, OSError) as exc:
+        app._transcript.write_error(str(exc))
+        return _UNREADABLE
+
+
 def _config_rows(argument: str) -> list:
     """The panel's offers after `/config `. Keys first, then that key's
     values once a space follows it.
 
-    CONTAINED, because this runs on every keystroke. The catalogue parses
-    `config.yaml`, which raises if the file has been deleted, locked by an
-    editor or an antivirus scan, or saved as UTF-16 -- and an exception out
-    of a suggestion callback takes the whole app down. Offering nothing is
-    the right answer to "what can I complete"; `/config <key>` is where the
-    loader's message, which names the file and the remedy, belongs.
+    CONTAINED, because the right answer to "what can I complete" over an
+    unreadable file is nothing. The catalogue parses `config.yaml`, which
+    raises if the file has been deleted, locked by an editor or an
+    antivirus scan, or saved as UTF-16.
+
+    NOT BECAUSE AN EXCEPTION HERE WOULD KILL THE APP -- it would have,
+    and this docstring said so, and that stopped being true one batch
+    later: `CommandRegistry.matching` has contained `command.complete`
+    since batch 135 and logs it. This clause stays because it
+    is narrower and quieter than that one: the four shapes named above
+    are an unreadable FILE rather than a broken completer, and the panel
+    should offer nothing without writing a traceback to app.log every
+    keystroke while someone edits in another window. `/config <key>` is
+    where the loader's message, which names the file and the remedy,
+    belongs.
     """
     typed = argument.lstrip()
     key, space, value_text = typed.partition(" ")
@@ -6527,19 +6567,26 @@ def _cmd_config(app: VenastineApp, args: str) -> None:
 
     name, _, value_text = text.partition(" ")
     remembered = _remembered_for_panel()
-    row = config_edit.find(name, remembered)
+    row = _config_read(app, lambda: config_edit.find(name, remembered))
+    if row is _UNREADABLE:
+        return
     if row is None:
-        near = config_edit.matching(name, remembered)
+        near = _config_read(app, lambda: config_edit.matching(name, remembered))
+        if near is _UNREADABLE:
+            return
         app._transcript.write_error(
             f"{name} is not a key in config.yaml."
             + (f" Did you mean {near[0].name}?" if near else
                " Type /config and a space to browse them."))
         return
     if not value_text.strip():
-        for line in config_edit.explain(
-                name, remembered=remembered,
-                cli_pinned=getattr(app, "_cli_pinned", False),
-                session_pair=(app.provider_name, app.model)):
+        lines = _config_read(app, lambda: config_edit.explain(
+            name, remembered=remembered,
+            cli_pinned=getattr(app, "_cli_pinned", False),
+            session_pair=(app.provider_name, app.model)))
+        if lines is _UNREADABLE:
+            return
+        for line in lines:
             app._transcript.write_system(line)
         return
     _config_set(app, row, value_text.strip())
@@ -6548,12 +6595,19 @@ def _cmd_config(app: VenastineApp, args: str) -> None:
 def _config_orientation(app: VenastineApp) -> None:
     """Bare `/config`. What is here and how to reach it.
 
-    NOT a listing. 132 names would fill the transcript and bury the
+    NOT a listing. 166 names would fill the transcript and bury the
     conversation, and the panel is the browser -- so this says how to open
     it, which is the one thing someone typing a bare `/config` does not yet
     know.
+
+    THE CATALOGUE READ IS GUARDED and the pending read is not, which is
+    not an oversight: the first one is what fails over a file edited
+    under the session, and it returns. Nothing reaches the second read
+    with a document the first could not build from.
     """
-    rows = config_edit.catalogue()
+    rows = _config_read(app, config_edit.catalogue)
+    if rows is _UNREADABLE:
+        return
     settable = sum(1 for row in rows if row.settable)
     app._transcript.write_system(
         f"config.yaml holds {len(rows)} settings, {settable} of them "
@@ -6570,7 +6624,7 @@ def _config_orientation(app: VenastineApp) -> None:
 
     # WHAT IS PENDING, last and only when there is any. This is the place a
     # person checks their work before applying it, and after four writes
-    # the alternative is scrolling 132 rows looking for the marker.
+    # the alternative is scrolling 166 rows looking for the marker.
     pending = config_edit.pending_changes()
     if not pending:
         return

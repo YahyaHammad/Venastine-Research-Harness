@@ -5711,6 +5711,72 @@ not; `json.loads(None)` raising is the guard most likely to differ.
 the DBAPI seam, which is now driven for real. It is the standing risk that
 the persistence layer's own tests prove the fake and the code agree.
 
+## 112. The trust prompt says every project agent's description enters every system prompt, and most never do (open, measured batch 155)
+
+**What was measured.** `_catalog_entries`' section header reads *"these
+descriptions enter EVERY system prompt in this project:"*, and
+`prompts/system_prompts.py` filters the agent catalog to `spawnable`
+agents. Project tier does not declare `spawnable` by default and
+undeclared is `False` (§32 A3/A4), so most listed project-agent
+descriptions never enter any prompt at all. The skill half of the same
+sentence is accurate -- `skill_catalog_text()` lists every skill.
+
+**Which direction it is wrong in.** Over-disclosure. The prompt claims a
+reach larger than the real one, so a person who reads it carefully
+refuses on grounds that were stronger than the facts. That is the
+fail-safe direction for a consent screen, which is why this is an entry
+and not a fix: the sentence should be split (skills: all of them; agents:
+the spawnable ones, with the rest reachable by `/agent`), and splitting it
+is a wording question somebody should answer on purpose rather than
+mid-batch.
+
+**What it would have caught.** Nothing in batch 155. It is the half of
+S08-03 the finding itself declined, recorded so the next person reading
+that header does not re-derive it.
+
+## 113. A trust-prompt entry shadowed by a harness or user definition is displayed as the project's (open, measured batch 155)
+
+**What was measured.** `_catalog_entries` parses every `.md` under the
+project's `.venastine/{agents,skills}` and shows each one's normalised
+name and description. `_tier_dirs`' precedence is harness > user > project
+(D29), and `_discover` is first-wins -- so a project definition whose name
+collides with a harness or user one is displayed in the consent screen
+while the builtin or user definition is what actually loads.
+
+**Why it is not simply a bug.** The grant genuinely covers the file: its
+bytes are in the content hash, and a later rename of the shadowing
+definition makes the project's copy live with no new prompt. So listing it
+is right and describing it as the text that will be used is wrong, and the
+fix is a per-entry note ("shadowed by the builtin of the same name") that
+needs the tier resolution `describe_project_content` does not currently
+do. Over-disclosure again, like item 112.
+
+**What it would have caught.** Nothing in batch 155; S08-03 names it and
+declines it for the same reason.
+
+## 114. `AgentManager`'s two `set()` calls have no belt, where `max_steps` does (open, measured batch 155)
+
+**What was measured.** `AgentManager.active_context` and `child_context`
+each build `set(agent.allowed_tools)`, which is the single place
+`AgentDef.allowed_tools` (an `Optional[list]`) becomes
+`ToolContext.allowed_tools` (declared `Optional[set[str]]`). Before batch
+155 an unhashable element raised `TypeError: unhashable type: 'list'`
+there, measured through the real `AgentManager`. A55 closed every
+file-borne route at the loader and deliberately left these two alone.
+
+**The asymmetry with `max_steps`.** That field has a belt in
+`core/loop._run` which raises rather than repairing, for a stated reason:
+a programmatic caller passing a bad value has no file to lose, only a bug
+worth naming. `allowed_tools` has the same shape and no belt, so a caller
+constructing an `AgentDef` directly still gets a `TypeError` from a set
+comprehension rather than a message naming the field.
+
+**Why it was not done here.** B4. Nothing in the tree constructs an
+`AgentDef` outside `_parse_md_file`, so a guard there would have no
+demonstrated consequence -- and a second answer to a question the loader
+already answers is the fix-at-the-consumer shape AGENTS.md names. The
+measurement worth having first is whether any caller ever will.
+
 ## Review-marathon arrivals at open issues with no register entry
 
 Two `KNOWN` findings landed on GitHub issues that are not mirrored here. Both

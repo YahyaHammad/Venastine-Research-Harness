@@ -510,6 +510,126 @@ def test_an_empty_spawn_targets_list_is_not_no_opinion(_redirect_roots):
 
 
 # ---------------------------------------------------------------------------
+# ---- S08-01 (batch 155): the three fields the element rule missed ---------
+# ---------------------------------------------------------------------------
+#
+# `_parse_md_file` states the rule in a comment of its own -- "ELEMENT
+# TYPES TOO, not just the container" -- and `additional_tools` and
+# `spawn_targets` paid for it. `model`, `provider` and `allowed_tools`
+# elements sat UNDER that comment unchecked, so a well-typed-but-wrong-
+# SHAPED value loaded clean and failed layers away with nothing naming
+# the file it came from.
+#
+# EVERY TEST HERE WRITES A GOOD AGENT BESIDE THE BAD ONE. "bad is absent"
+# passes five times over against a fixture that loaded nothing at all,
+# and the paired assertion is the control the review's own probe used.
+
+
+def test_a_non_string_model_skips_the_file(_redirect_roots, caplog):
+    """`model: [a, b]` loaded as `AgentDef.model == ['a', 'b']` and then
+    raised `TypeError: unhashable type: 'list'` out of the effort cache's
+    `(provider_name, model)` key -- in a subagent spawn, or in an
+    `/agent` turn, naming neither the field nor the file.
+
+    SKIPPED, NOT REPAIRED TO None, which is what this assertion
+    distinguishes: a repair would leave `bad` in the roster with
+    `model=None` and run it on whatever model the session has. An agent
+    file names a model when being a DIFFERENT model is the point, and
+    §11's critic rationale is the sharpest case of that. `max_steps` one
+    field up repairs instead, because its unusable values have no honest
+    reading and None here has one -- the wrong one.
+    """
+    _write_agent(_redirect_roots["user"], "bad", ("model: [a, b]",))
+    _write_agent(_redirect_roots["user"], "good", ("model: m1",))
+
+    with caplog.at_level("WARNING", logger="core.config_loader"):
+        config_loader.initialize(str(_redirect_roots["project"]))
+
+    agents = config_loader.get_agents()
+    assert "bad" not in agents
+    assert agents["good"].model == "m1"
+    assert any("bad.md" in record.message and "model" in record.message
+               for record in caplog.records), (
+        "nothing in the log names the file that caused it, which is the "
+        "whole complaint about the old behaviour")
+
+
+def test_a_non_string_provider_skips_the_file(_redirect_roots, caplog):
+    """`provider: 123` reached `client.api_initialization` and raised
+    `ValueError: Unknown provider: 123`. That message names the provider
+    and not the agent file that supplied it, so the warning here has to."""
+    _write_agent(_redirect_roots["user"], "bad", ("provider: 123",))
+    _write_agent(_redirect_roots["user"], "good", ("provider: ANTHROPIC",))
+
+    with caplog.at_level("WARNING", logger="core.config_loader"):
+        config_loader.initialize(str(_redirect_roots["project"]))
+
+    agents = config_loader.get_agents()
+    assert "bad" not in agents
+    assert agents["good"].provider == "ANTHROPIC"
+    assert any("bad.md" in record.message and "provider" in record.message
+               for record in caplog.records)
+
+
+def test_a_non_string_allowed_tools_element_skips_the_file(_redirect_roots):
+    """The quiet half. `['read', 123]` survives `set()`, so every
+    consumer's membership test simply never matches it and the whitelist
+    holds one fewer entry than it reads as -- no warning, nothing to
+    grep for. That is the whitelist-typo class
+    `tests/test_shipped_roster.py` documents for misspelled strings, one
+    field over and just as silent."""
+    _write_agent(_redirect_roots["user"], "bad",
+                 ("allowed_tools: [read, 123]",))
+    _write_agent(_redirect_roots["user"], "good",
+                 ("allowed_tools: [read, write]",))
+
+    config_loader.initialize(str(_redirect_roots["project"]))
+
+    agents = config_loader.get_agents()
+    assert "bad" not in agents
+    assert agents["good"].allowed_tools == ["read", "write"]
+
+
+def test_an_unhashable_allowed_tools_element_skips_the_file(_redirect_roots):
+    """The LOUD half, which the finding called silent and measurement did
+    not. `AgentManager.active_context` and `child_context` are the single
+    place this `Optional[list]` becomes `ToolContext.allowed_tools`'s
+    declared `Optional[set[str]]`, and both do it with
+    `set(agent.allowed_tools)` -- which raises `TypeError: unhashable
+    type: 'list'` on a nested list and `'dict'` on a mapping. Driven
+    through the real AgentManager both ways before this guard existed."""
+    _write_agent(_redirect_roots["user"], "nested",
+                 ("allowed_tools: [read, [write]]",))
+    _write_agent(_redirect_roots["user"], "mapping",
+                 ("allowed_tools: [read, {write: true}]",))
+    _write_agent(_redirect_roots["user"], "good", ("allowed_tools: [read]",))
+
+    config_loader.initialize(str(_redirect_roots["project"]))
+
+    agents = config_loader.get_agents()
+    assert "nested" not in agents
+    assert "mapping" not in agents
+    assert agents["good"].allowed_tools == ["read"]
+
+
+def test_a_yaml_boolean_in_allowed_tools_skips_the_file(_redirect_roots):
+    """`allowed_tools: [read, on]` -- YAML reads `on`, `yes` and `true`
+    as booleans, so this is a typo nobody has to type anything
+    non-string-looking to make. `isinstance(True, str)` is False so the
+    check catches it; `isinstance(True, int)` is True, which is the trap
+    the `max_steps` guard one field up had to spell out."""
+    _write_agent(_redirect_roots["user"], "bad",
+                 ("allowed_tools: [read, on]",))
+    _write_agent(_redirect_roots["user"], "good", ("allowed_tools: [read]",))
+
+    config_loader.initialize(str(_redirect_roots["project"]))
+
+    agents = config_loader.get_agents()
+    assert "bad" not in agents
+    assert agents["good"].allowed_tools == ["read"]
+
+
+# ---------------------------------------------------------------------------
 # ---- §15-cycle review fixes (F2/F3/F4/F6) ---------------------------------
 # ---------------------------------------------------------------------------
 

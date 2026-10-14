@@ -55,7 +55,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 7117 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
+pytest                                            # 7141 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -74,7 +74,7 @@ Test dependencies (`pytest`, `pytest-mock`, `pytest-asyncio`, and `pytest-xdist`
 
 **And a file is no longer one unit, which is the trap loadscope adds.** A file holding both module-level tests and a class is TWO groups, so a non-function-scoped fixture in it is set up twice on any worker that takes both — found by measuring, not by reading, when a `-n logical` run put `test_storage_e2e.py`'s two groups on one worker and the second `real_storage` raised `Table 'conversationthread' is already defined`. Five `-n auto` runs had been green, so it is a scheduling lottery. **If you add a module- or session-scoped fixture, its file must hold no test class** -- and nothing here states how many such fixtures exist, which is batch 151's correction (A34) to a sentence that had already made the same mistake twice. It said ONE until batch 128, which was false from batch 110; batch 128 made it "the suite's ONLY two", which is true today and false the moment somebody adds a third, beside a rule that never needed a number -- *a count written when it was true, beside a rule that did not need it*, as this sentence used to say about its own predecessor. There were four more copies in four phrasings, which is why a grep for the sentence found none of them. The rule is now enforced for the file you are writing rather than described for the file that happens to hold the fixtures today: `test_every_file_with_a_module_scoped_fixture_declares_no_test_class` reads every test module's fixture DECORATORS and fails on any file that has both, and `test_this_file_declares_no_test_class` still pins the one file that has them now.
 
-**The suite was FLOOR-BOUND and is not any more, and batch 114 is why.** The slowest single GROUP sets the wall time whatever the worker count, and under loadscope that was `tests/test_tui.py`'s 183 module-level tests — one group, because a test outside a class is grouped by MODULE — at 292 node ids and about a fifth of the suite's measured time. They were cut into 41 classes along the section banners the file already had (TECHNICAL_DEBT 30) and are **71** now, which is the rule working rather than drifting. That number is read back out of this sentence by `test_agents_md_states_the_real_test_tui_class_count` (batch 128), so a batch that adds a class here also edits this digit. Measured properly: three runs a side, ALTERNATED on one box so drift cancels instead of landing on whichever side ran second — **2:17.9 / 2:07.9 / 2:28.6 before against 1:10.7 / 1:40.6 / 1:26.3 after, a mean of 138.1s against 85.9s, 1.61×**, and the two ranges do not overlap, which is the part that makes it a result rather than a pair of averages. Against a serial run that read 8:41 the same evening, 6.1× where it was 3.8×.
+**The suite was FLOOR-BOUND and is not any more, and batch 114 is why.** The slowest single GROUP sets the wall time whatever the worker count, and under loadscope that was `tests/test_tui.py`'s 183 module-level tests — one group, because a test outside a class is grouped by MODULE — at 292 node ids and about a fifth of the suite's measured time. They were cut into 41 classes along the section banners the file already had (TECHNICAL_DEBT 30) and are **72** now, which is the rule working rather than drifting. That number is read back out of this sentence by `test_agents_md_states_the_real_test_tui_class_count` (batch 128), so a batch that adds a class here also edits this digit. Measured properly: three runs a side, ALTERNATED on one box so drift cancels instead of landing on whichever side ran second — **2:17.9 / 2:07.9 / 2:28.6 before against 1:10.7 / 1:40.6 / 1:26.3 after, a mean of 138.1s against 85.9s, 1.61×**, and the two ranges do not overlap, which is the part that makes it a result rather than a pair of averages. Against a serial run that read 8:41 the same evening, 6.1× where it was 3.8×.
 
 **What is left as the floor is one PARAMETRISED function**, and it cannot be split by any class boundary: loadscope groups every node id of a parametrised test together, and `test_every_modal_keeps_its_decision_on_screen` is 3 sizes × 19 cases = **57** of them, pinned against the collected node ids by `test_agents_md_states_the_real_modal_parametrisation` (batch 128) because `_DECISION_CASES` is computed and cannot be counted by reading. Splitting it further was measured and declined — `-n auto` is 11 workers here and the serial suite is ~520s, so the ideal worker share is ~47s and that group already sits under it. Below a bound that has stopped binding there is nothing to win.
 
@@ -179,7 +179,7 @@ made the move free: no import changed, and `tests/test_docs_consistency.py` is t
 opens any of these files (its `DOCS` constant is where the path now comes from).
 
 - **docs/ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49–§52, §55, §61, §62, §63, §64, §65, §66, §67, §68, §69, §70 and §71 built; §53, §54 and §56–§60 recorded from the owner's requests in batches 122 and 123, specified and not yet designed) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A53 from §32 (A16 in ROADMAP_v3 §62, A17, A18 and A19 in §63, A20 and A21 in §64, A22, A23 and A24 in §65, A25, A26 and A27 in §66, A28, A29, A30, A31, A32 and A33 in §67, A34, A35, A36, A37, A38 and A39 in §68, A40, A41, A42, A43, A44 and A45 in §69, A46, A47, A48 and A49 in §70, A50, A51, A52 and A53 in §71), W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 SS1–SS72 from §49, NW1–NW5 from §50, PG1–PG9 from §51, RB1–RB7 from §52, IO1–IO7 from §53, AT1–AT8 from §54, TR1–TR15 from §55, JV1–JV10 from §56, SM1–SM4 from §57, PR1–PR5 from §58 UI1–UI4 from §59, UH1–UH12 from §60 and CN1–CN12 from §61). Section and D-numbers are stable and cross-referenced everywhere.
+- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49–§52, §55, §61, §62, §63, §64, §65, §66, §67, §68, §69, §70, §71 and §72 built; §53, §54 and §56–§60 recorded from the owner's requests in batches 122 and 123, specified and not yet designed) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A57 from §32 (A16 in ROADMAP_v3 §62, A17, A18 and A19 in §63, A20 and A21 in §64, A22, A23 and A24 in §65, A25, A26 and A27 in §66, A28, A29, A30, A31, A32 and A33 in §67, A34, A35, A36, A37, A38 and A39 in §68, A40, A41, A42, A43, A44 and A45 in §69, A46, A47, A48 and A49 in §70, A50, A51, A52 and A53 in §71, A54, A55, A56 and A57 in §72), W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 SS1–SS72 from §49, NW1–NW5 from §50, PG1–PG9 from §51, RB1–RB7 from §52, IO1–IO7 from §53, AT1–AT8 from §54, TR1–TR15 from §55, JV1–JV10 from §56, SM1–SM4 from §57, PR1–PR5 from §58 UI1–UI4 from §59, UH1–UH12 from §60 and CN1–CN12 from §61). Section and D-numbers are stable and cross-referenced everywhere.
 
 **Six namespaces use the same `LETTER+NUMBER` shape, and only the first is the
 record.** An id that resolves to two places is a cross-reference that fails
@@ -1098,6 +1098,21 @@ load-bearing, and only one of them can widen anything.
   clamp, so a declaration above the ceiling RAISES it. Every other field in a definition can only
   tighten, which is exactly why this one is written down. An unusable value is repaired to `None`
   with a warning naming what it read (#45); a valid large one is honoured.
+- **`max_steps` is also the one frontmatter field that REPAIRS rather than skips** (A55, locked,
+  batch 155). Every other typed field in `_parse_md_file` warns and skips the whole file, including
+  the three the function's own "ELEMENT TYPES TOO, not just the container" comment was stated over
+  and never applied to: `model`, `provider` and the ELEMENTS of `allowed_tools`, which sat under
+  that comment with the container checked and the contents not. The asymmetry is deliberate and the
+  reason is which way `None` reads. `max_steps` has no honest reading for a bad value, so a repair
+  invents nothing; `model` and `provider` DO -- `None` means "inherit the session's" -- so repairing
+  one would leave the agent available and running on a model nobody chose for it, and an agent file
+  names a model when being a *different* model is the point (§11's critic rationale is the sharp
+  case). `allowed_tools` skips for `approval_overrides`' reason: half a whitelist is worse than no
+  file at all. Measured before the guard: `model: [a, b]` loaded clean and raised `TypeError:
+  unhashable type: 'list'` out of the effort cache's `(provider_name, model)` key; a hashable
+  non-string in `allowed_tools` survived `set()` and matched nothing, while an unhashable one raised
+  out of `AgentManager.active_context` and `child_context` -- the single place that `Optional[list]`
+  becomes `ToolContext.allowed_tools`'s declared `Optional[set[str]]`.
 - **`use_project_context` opts into the project's root `AGENTS.md`** (§44 moved that file out of
   `.venastine/`); **`use_memory` defaults to `True`** and is §21b's opt-out. Both are VALIDATED as
   booleans rather than coerced — `bool("false")` is `True`, and these are the two fields a
@@ -3033,6 +3048,22 @@ is gone outright, not kept as a fallback. `doc_path()` is one join now.
 ### Config loading and workspace trust (ROADMAP_v2 §14)
 
 `core/config_loader.py` discovers `.md` agents/skills across three tiers — harness (`<root>/{agents,skills}/builtin/`) → project (`.venastine/`, trust-gated) → user (`~/.config/venastine/`) — parses line-anchored YAML frontmatter, and merges `settings.json` (unknown keys **raise**). `core/workspace_trust.py` owns only the D17 trust store (resolved path + sorted-walk content hash); `main.py` owns the prompting UX.
+
+**THE PROJECT DOES NOT DECIDE HOW LONG ITS OWN CONSENT SCREEN IS** (A54, locked, batch 155). Every
+section of `describe_project_content()` goes through one `_bounded()` helper with a LINE bound and a
+CHAR bound — the file listing, the hub, `settings.json` + `mcp.json`, and the agent/skill catalog —
+and the marker names what was withheld in both currencies. **A bound on one axis is not a bound**,
+which is the whole reason §44's twenty-line hub cap was replaced rather than copied: twenty lines
+is no bound at all on a 2 MB `AGENTS.md` written as one line, or on twenty 100 KB lines from inside
+the cap. Measured before this: the two JSON files were pasted whole, so 2 × 2.2 MB rendered as
+**4.5 MB in 30 lines** with the `mcp.json` command the section exists to show at 99.9994% of the way
+in; the file listing had no bound (20,000 padding files = 20,001 lines); and the catalog bounded each
+description at `max_catalog_text_chars` and not the number of them (3,000 agents = 1 MB). The caps
+are sized from the largest LEGITIMATE shapes, not picked — a five-server pretty-printed `mcp.json`
+is 54 lines and 923 characters — because a cap that trims ordinary files turns its own marker into
+noise. **`content_files()` is NOT bounded and must not be**: the hash and this module's "the loader
+must read no file the trust listing omits" invariant are about that function, and what is bounded is
+only what the prompt PRINTS of its answer.
 
 **Trust is keyed to the PROJECT PATH, which is the workspace when something names it as the project -- `AGENT_WORKSPACE`, or `workspace_is_project` in `config.yaml` since batch 111 -- and `os.getcwd()` otherwise** (§44 WS7, reversing RM6; TECHNICAL_DEBT 28). RM6 recorded the opposite and the report that reopened it is what the split looked like in use: the file tools confined to the workspace while `/init` scaffolded the harness.
 

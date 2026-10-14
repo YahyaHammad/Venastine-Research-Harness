@@ -429,11 +429,33 @@ def _parse_md_file(path: str, kind: str, tier: str, category: str = ""):
     # ELEMENT TYPES TOO, not just the container. This is the lesson the
     # skills branch above already paid for with `additional_tools`: a
     # non-string element parses cleanly here and fails at first
-    # consumption, layers away from the file that caused it. The consumer
-    # here is a set membership test against an agent NAME, so a nested
-    # list or a mapping would silently never match and the agent would
-    # simply be unable to spawn anything -- the whitelist-typo class, one
-    # field over, and just as quiet.
+    # consumption, layers away from the file that caused it. THIS FIELD IS
+    # THE ONE THE RULE WAS NEVER APPLIED TO (batch 155) -- it sat under
+    # the comment stating it, with the container checked and the elements
+    # not.
+    #
+    # Its two consumers fail in OPPOSITE directions, both measured. A
+    # hashable non-string (`[read, 123]`) survives `set()` and then
+    # matches nothing, so the whitelist silently holds one fewer entry
+    # than it reads as -- the whitelist-typo class
+    # tests/test_shipped_roster.py documents for misspelled strings. An
+    # unhashable one (`[read, [write]]`, `[read, {write: true}]`) raises
+    # `TypeError: unhashable type` out of `AgentManager.active_context`
+    # and `child_context`, which are the single place this `Optional[list]`
+    # becomes `ToolContext.allowed_tools`'s declared `Optional[set[str]]`.
+    #
+    # SKIP, NOT DROP THE ELEMENT, for the reason `approval_overrides`
+    # states below: half a whitelist is worse than no file at all for a
+    # field whose job is deciding what an agent may call.
+    if allowed is not None and not all(isinstance(t, str) for t in allowed):
+        logger.warning(
+            "Skipping agent file %s: allowed_tools is not a list of strings",
+            path)
+        return None
+    # The consumer here is a set membership test against an agent NAME, so
+    # a nested list or a mapping raises where that set is built and a
+    # hashable non-string sits inert and never matches -- the same pair
+    # measured one field up.
     targets = fm.get("spawn_targets")
     if targets is not None and not isinstance(targets, list):
         logger.warning(
@@ -516,6 +538,35 @@ def _parse_md_file(path: str, kind: str, tier: str, category: str = ""):
         logger.warning(
             "Skipping agent file %s: spawnable is not a boolean", path)
         return None
+    # STRINGS OR ABSENT, and these are the other two fields the rule above
+    # was never applied to (batch 155). Both were read straight out of
+    # frontmatter and handed to code that has always assumed a string, so
+    # a well-typed-but-wrong-SHAPED value loaded clean here and failed
+    # layers away with nothing naming the file. Measured against the real
+    # resolvers, nothing monkeypatched: `provider: 123` reaches
+    # `client.api_initialization` and raises `ValueError: Unknown
+    # provider: 123`, which names the provider and not the file that
+    # supplied it; `model: [a, b]` reaches the effort cache's
+    # `(provider_name, model)` key and raises `TypeError: unhashable
+    # type: 'list'`, which names neither. Both arrive there through
+    # `agents/subagent_tool.py` and `tui/app.py`, which pass
+    # `agent.model or ...` through verbatim.
+    #
+    # SKIP RATHER THAN REPAIR TO None, which is where this parts company
+    # with `max_steps` above (#45). None is a REAL value for both fields
+    # and means "inherit the session's", so repairing would leave the
+    # agent available and running on a model nobody chose for it. A file
+    # names a model when being a DIFFERENT model is the point, and §11's
+    # critic rationale is the sharpest form of that -- "a model checking
+    # its own output for errors shares that model's blind spots". A bad
+    # `max_steps` has no honest reading, so repairing it invents nothing;
+    # an unreadable `model` has one, and it is the wrong one.
+    for key in ("model", "provider"):
+        value = fm.get(key)
+        if value is not None and not isinstance(value, str):
+            logger.warning(
+                "Skipping agent file %s: %s is not a string", path, key)
+            return None
     return AgentDef(
         name=name,
         description=_catalog_text(fm.get("description", "")),
@@ -1418,21 +1469,95 @@ def _catalog_entries(root: str, files: list) -> list:
     return out
 
 
-#: How much of the project context document the trust prompt shows. Enough
-#: to recognise what the file is for, short enough that the prompt stays
+#: How much of any ONE section of the trust prompt is printed. Enough to
+#: recognise what a file is for, short enough that the prompt stays
 #: readable -- the whole thing is what a grant covers, not what it prints.
-_HUB_PREVIEW_LINES = 20
+_SECTION_LINES = 60
+_SECTION_CHARS = 6000
+
+
+def _bounded(source: list, prefix: str, what: str) -> list:
+    """`source`'s lines, prefixed and cut to BOTH bounds, with a marker
+    naming what was withheld.
+
+    THE CONSENT PROMPT IS THE ONE PLACE A PROJECT'S CONTENT IS SHOWN TO
+    SOMEONE WHO HAS NOT TRUSTED IT YET (D17), so how long it is must not
+    be the project's choice. Every section goes through here (A54) --
+    the file listing, the hub, the two JSON files and the catalog --
+    because capping some of them leaves the prompt exactly as floodable
+    and the cap stops being worth having.
+
+    TWO BOUNDS, NOT ONE, AND THE PAIR IS THE POINT. §44 gave the hub a
+    LINE bound alone, and measured against it: a 2 MB AGENTS.md written
+    as one line printed all 2 MB in four lines, and twenty 100 KB lines
+    printed 2 MB from inside the cap. A char bound alone fails the other
+    way -- 30,000 short lines are 2.4 MB of prompt. The two JSON files
+    had neither bound: 2 x 2.2 MB rendered as 4.5 MB in 30 lines, with
+    the `mcp.json` command the section exists to show sitting at
+    99.9994% of the way in.
+
+    THE NUMBERS ARE MEASURED AGAINST THE LARGEST LEGITIMATE SHAPES
+    rather than picked. A five-server pretty-printed `mcp.json` is 54
+    lines and 923 characters; a realistic `settings.json` is 14 and 264;
+    this project's own AGENTS.md is 4,033 characters in its first 60
+    lines. All three render whole, which is what keeps the marker
+    meaningful on the files where it does appear.
+
+    THE MARKER IS NOT A COURTESY. A cut nobody is told about turns a
+    bounded prompt into one that misrepresents what it covers, and the
+    grant is over the whole file either way -- which is why the sentence
+    says so rather than stopping at an ellipsis.
+    """
+    shown: list = []
+    used = 0
+    hidden_chars = 0
+    for line in source:
+        if len(shown) >= _SECTION_LINES or used >= _SECTION_CHARS:
+            hidden_chars += len(line)
+            continue
+        room = _SECTION_CHARS - used
+        if len(line) > room:
+            # CUT WITHIN THE LINE rather than dropping it whole. A file
+            # flooded on one enormous line has exactly one line, and it
+            # is the line the section exists to show.
+            shown.append(line[:room] + "…")
+            used += room
+            hidden_chars += len(line) - room
+            continue
+        shown.append(line)
+        used += len(line)
+    out = [prefix + line for line in shown]
+    hidden_lines = len(source) - len(shown)
+    if hidden_lines or hidden_chars:
+        # Always plural. The grammar is a blemish; a marker whose wording
+        # depends on the count is one a test can match by luck.
+        out.append(
+            f"{prefix}… {hidden_lines} more lines and {hidden_chars} more "
+            f"characters of {what} are not shown here. Trust covers the "
+            f"whole file, not the part printed.")
+    return out
 
 
 def describe_project_content(project_path: str) -> str:
     """Human-readable summary shown in the trust prompt, so approving
     trust is an informed decision -- a project's settings can choose the
     provider and multiply pipeline cost via ensemble_n, and an agent's
-    or a skill's description reaches every system prompt (#131)."""
+    or a skill's description reaches every system prompt (#131).
+
+    EVERY SECTION IS BOUNDED, through `_bounded` above (A54, batch 155).
+    Two of the four used to be pasted whole and the hub was bounded on
+    one axis of two, which let a cloned project decide how long its own
+    consent screen was."""
     root = workspace_trust.venastine_dir(project_path)
     files = workspace_trust.content_files(project_path)
     lines = [f"Project content ({os.path.realpath(project_path)}):"]
-    lines += [f"  - {rel}" for rel in files]
+    # THE LISTING ITSELF IS BOUNDED TOO. `content_files()` is unchanged
+    # and still returns every covered path -- the hash and
+    # workspace_trust's "the loader must read no file the trust listing
+    # omits" invariant are about that function, not about this rendering.
+    # What is bounded is what the PROMPT prints, and 20,000 padding files
+    # under .venastine/ were 20,001 lines of it.
+    lines += _bounded(files, "  - ", "the file listing")
 
     # §44. The hub is shown VERBATIM, and it is the strongest instance of
     # this function's own stated criterion -- "the ones whose contents
@@ -1453,14 +1578,12 @@ def describe_project_content(project_path: str) -> str:
                 f"{workspace_trust.PROJECT_CONTEXT_FILENAME}: could not be "
                 f"read ({e})")
         else:
-            shown = body.splitlines()
             lines.append(
                 f"{workspace_trust.PROJECT_CONTEXT_FILENAME} would enter "
                 f"every opted-in agent's system prompt; it begins:")
-            lines += ["  | " + line for line in shown[:_HUB_PREVIEW_LINES]]
-            if len(shown) > _HUB_PREVIEW_LINES:
-                lines.append(
-                    f"  | … {len(shown) - _HUB_PREVIEW_LINES} more lines")
+            lines += _bounded(
+                body.splitlines(), "  | ",
+                workspace_trust.PROJECT_CONTEXT_FILENAME)
 
     # settings.json and mcp.json are shown VERBATIM, the rest by name.
     # These two are the ones whose contents change what runs: settings can
@@ -1487,7 +1610,7 @@ def describe_project_content(project_path: str) -> str:
             lines.append(f"{fname}: could not be read ({e})")
             continue
         lines.append(label)
-        lines += ["  | " + line for line in body.splitlines()]
+        lines += _bounded(body.splitlines(), "  | ", fname)
 
     # §32 A6. Shown AFTER the two config files rather than beside the
     # file list, because the list answers "what is here" and this
@@ -1497,8 +1620,13 @@ def describe_project_content(project_path: str) -> str:
     if entries:
         lines.append("these descriptions enter EVERY system prompt in "
                      "this project:")
-        for kind, name, description in entries:
-            lines.append(f"  | {kind[:-1]} {name}: {description}")
+        # A5 bounds each description at `max_catalog_text_chars` and
+        # nothing bounded the NUMBER of them: 3,000 project agents were
+        # 1 MB of prompt in 6,002 lines, every entry individually legal.
+        lines += _bounded(
+            [f"{kind[:-1]} {name}: {description}"
+             for kind, name, description in entries],
+            "  | ", "the agent and skill descriptions")
     return "\n".join(lines)
 
 

@@ -24186,3 +24186,265 @@ since six workflows are not on `main`. Affected tests re-run with
 `env -u AGENT_WORKSPACE` and under WSL. All held files sha256-restored.
 
 FIX-NOW: **80 done, 6 open** -- `S08` (3), `S05` (2) and `S03-02`.
+
+## Batch 155 -- a consent screen the project decided the length of, and three fields a rule was stated over but never applied to (2026-10-14)
+
+The review marathon's config-and-trust surface, all three `FIX-NOW`
+findings -- **S08-01** (S3), **S08-02** (S3) and **S08-03** (S3). Four
+owner rulings, recorded as ROADMAP_v3 §72's **A54-A57**. Register items
+**112**, **113** and **114** are new.
+
+**The load-bearing thing this batch learned is that a review finding has
+a shelf life, and this is the first one where that changed the answer.**
+
+### S08-02 was fixed nineteen batches ago and nobody knew
+
+The finding reports a crash: a structurally-broken `config.yaml` makes
+every `/config` keystroke and every `/config <key>` raise out of the
+message-pump path, and an unhandled exception reaching Textual's
+`_handle_exception` exits the whole application. That was true at
+`96de26e`, where it was measured.
+
+**Batch 135 then fixed S14-02.** It contained `dispatch()` at its call
+site in `tui/app.py` and `command.complete` inside
+`CommandRegistry.matching` -- and those are the two doors every one of the
+seven `config_edit` reads in this scope comes through. Re-driven through
+the real registry rather than through the report's two private functions:
+
+```
+---- removed ----
+  matching('/config m')          0 offers
+  dispatch('/config max_tokens') CONTAINED -> '/config failed. The error
+                                 is in logs/app.log; the session is
+                                 intact.'  (KeyError)
+  dispatch('/config')            CONTAINED -> same  (KeyError)
+---- CONTROL ----
+  matching('/config m')          20 offers
+  dispatch('/config max_tokens') handled=True  max_tokens: 16000
+```
+
+No exit, on any of the four shapes. Had I taken the report's recipe as
+the state of the world I would have shipped a crash fix for a crash that
+does not happen, and written tests whose assertion -- "it did not raise"
+-- passes against the tree as it already stands. **A stale recipe reads
+two ways, "already fixed" and "still broken", and only one of those costs
+a wrong fix.**
+
+So the finding was re-aimed rather than closed, because what is left is
+real: *"the error is in logs/app.log"* is the answer a person gets to the
+one workflow this project recommends by name. `explain()` prints *"Edit it
+in config.yaml"* for every container row, `config.py` binds at import and
+nothing re-reads the file (UN1) -- a hand-edit mid-session is the
+documented path, and that sentence is true and answers a different
+question.
+
+**Four shapes reach the readers and one was catchable.** Measured with
+the schema cache bound first, which is the production state:
+
+| edit | shape | the panel's `except (ValueError, OSError)` |
+|---|---|---|
+| a key deleted or renamed | `KeyError` | no |
+| a table flattened to a scalar | `TypeError`, from the SECOND subscript | no |
+| the file no longer parses | ruamel `ScannerError` (a `YAMLError`) | no |
+| the file is gone or locked | `OSError` | yes |
+
+The `TypeError` is a third shape neither the report nor its probe listed;
+it came out of re-driving rather than out of reading. All three now
+become **one `ValueError` naming the file and the remedy** -- the shape
+`config_schema.read_document` already chose for the same question one
+module over -- and the diagnosis inside it is a conclusion rather than a
+guess: `config.py` reads and validates this file at import, so the
+process could not have started if it did not parse. If it does not parse
+now, it has been edited since.
+
+`get_leaf` went with it. It answered exactly the question the new
+translating accessor answers, had no caller anywhere in the repository,
+and was named by no document, so leaving it would have made three copies
+of one question where there had been two.
+
+### S08-01: the rule was stated in a comment and three fields sat under it
+
+`_parse_md_file` carries this, in the agent branch, in these words:
+*"ELEMENT TYPES TOO, not just the container. This is the lesson the
+skills branch above already paid for with `additional_tools`."*
+`additional_tools` is checked. `spawn_targets` is checked. Batch 150 added
+`approval_overrides`' values. The three fields the rule was never applied
+to are `model`, `provider` and the ELEMENTS of `allowed_tools` -- and
+`allowed_tools`' container check sits **immediately above the comment
+stating the rule**.
+
+Driven through the real loader and the real consumers, nothing
+monkeypatched:
+
+```
+model_list             ACCEPTED  model=['a', 'b']
+model_int              ACCEPTED  model=123
+provider_int           ACCEPTED  provider=123
+model_map              ACCEPTED  model={'name': 'x'}
+allowed_nonstring      ACCEPTED  allowed_tools=['read', 123]
+allowed_nested         ACCEPTED  allowed_tools=['read', ['write']]
+CONTROL_additional     SKIPPED-ok
+CONTROL_spawn          SKIPPED-ok
+
+cache key tuple        : TypeError: unhashable type: 'list'
+```
+
+**The report calls the `allowed_tools` half silent and measurement found
+it half loud.** The single place `AgentDef.allowed_tools` (an
+`Optional[list]`) becomes `ToolContext.allowed_tools` (declared
+`Optional[set[str]]`) is `set(agent.allowed_tools)`, in both of
+`AgentManager`'s composers:
+
+```
+int element        active_context  allowed={123, 'read'}
+nested list        active_context  TypeError: unhashable type: 'list'
+mapping            active_context  TypeError: unhashable type: 'dict'
+bool element       active_context  allowed={True, 'read'}
+```
+
+So a *hashable* non-string sits inert, exactly as reported, and an
+*unhashable* one raises there. Both are pinned now, and the loud half is
+the one no report named.
+
+`allowed_tools: [read, on]` earns a test of its own: YAML reads `on`,
+`yes` and `true` as booleans, so it is a typo nobody has to type anything
+non-string-looking to make.
+
+**Skip rather than repair** (A55), which is where this parts company with
+`max_steps` (#45) on purpose rather than by oversight. `None` is a REAL
+value for `model` and `provider` and means "inherit the session's", so a
+repair leaves the agent available and running on a model nobody chose for
+it -- and a file names a model when being a DIFFERENT model is the point,
+of which §11's critic rationale is the sharpest case. A bad `max_steps`
+has no honest reading, so repairing it invents nothing; an unreadable
+`model` has one, and it is the wrong one. The assertion that distinguishes
+the two contracts is `"bad" not in get_agents()`, and every test writes a
+good agent beside the bad one, because "bad is absent" passes five times
+over against a fixture that loaded nothing.
+
+### S08-03: a bound on one axis is not a bound
+
+The trust prompt is the informed-consent gate for content that becomes
+instructions (D17). The finding names one unbounded section and cites a
+second as the bounded contrast. Measured, all four:
+
+| section | bound before | floods to |
+|---|---|---|
+| the file listing | none | 20,000 files = 20,001 lines, 600 KB |
+| the hub | §44's **20 lines**, nothing else | 2 MB in 4 lines; 2 MB in 23 lines |
+| `settings.json` + `mcp.json` | none | 2 x 2.2 MB = **4.5 MB in 30 lines** |
+| the agent/skill catalog | A5's 300 chars **per entry** | 3,000 agents = 1 MB in 6,002 lines |
+
+```
+padded     chars=4500744   lines=30   longest_line=2380091
+             the command is at character 4500718 of 4500744
+             (99.9994% of the way in)
+```
+
+And the section held up as the example to copy is bounded on one axis of
+the two that matter, which is why copying it was not the fix:
+
+```
+hub, one 2MB line        chars=2000160   lines=4
+hub, 20 x 100KB lines    chars=2000255   lines=23
+```
+
+One `_bounded()` helper now renders all four under a line bound AND a
+char bound, cutting WITHIN a line rather than dropping it whole -- a file
+flooded onto one line has exactly one line, and it is the line the
+section is about. After:
+
+```
+file list, 20k files     chars=2011      lines=62
+hub, one 2MB line        chars=6292      lines=5
+hub, 20k lines           chars=999       lines=64
+hub, 20 x 100KB lines    chars=6293      lines=5
+catalog, 3000 agents     chars=8388      lines=84
+padded (4.5MB)           chars=13643     lines=72
+```
+
+**What the bound buys is not that a buried command becomes visible -- it
+is that the burial does.** A project can still push its real `mcp.json`
+command past the cut; what it can no longer do is decide how long its own
+consent screen is, and what it gets instead is *"0 more lines and
+2,440,000 more characters of mcp.json are not shown here. Trust covers
+the whole file, not the part printed."* -- which is itself an answer to
+the consent question, and a better one than 4.5 MB of padding.
+
+The caps are **measured against the largest legitimate shapes rather than
+picked**: a five-server pretty-printed `mcp.json` is 54 lines and 923
+characters, a realistic `settings.json` is 14 and 264, and this project's
+own `AGENTS.md` is 4,033 characters in its first 60 lines. All three
+render whole, which is what keeps the marker a signal rather than noise --
+and the control test is exactly those three files.
+
+`content_files()` is deliberately NOT bounded. The hash and
+`workspace_trust`'s "the loader must read no file the trust listing
+omits" invariant are about that function; what is bounded is only what
+the prompt PRINTS of its answer, and the listing test asserts both halves
+so the two cannot be confused later.
+
+### The controls found a missing test and an unearned change
+
+**C13 survived.** Removing the LINE bound left both its targets green: a
+5,000-file listing and a 1,000-entry catalog are each far past 6,000
+characters, so the char bound was catching both and the line bound had no
+demonstrated consequence **in the suite**. It has one in the code, and
+measuring it is what produced the test that was missing:
+
+```
+shipped         chars=637     lines=67
+no line bound   chars=25209   lines=5006
+```
+
+A hub of 5,000 BLANK lines is 5,006 lines of consent screen for zero
+characters of content, and 25,209 characters is inside the character
+ceiling every other test in that class asserts against -- so the
+assertion has to be on the LINE COUNT, which is the property that bound
+owns. C13 kills it.
+
+**And one change was reverted by B4 rather than by a test.** I added a
+`pending_changes(rows=...)` parameter so bare `/config` would build the
+catalogue once instead of twice, and justified it with "an unreadable
+file answered twice, the second time after four lines of output about the
+first". That cannot happen: the read that fails is the FIRST one, and the
+guard around it returns. The only real effect left was building 166
+`KeyRow`s once rather than twice against a document that is cached either
+way -- 0.7ms for everything that is not the parse. **A change whose
+justification I had invented went out**, along with every sentence that
+repeated the story, in `config_edit.py`, `tui/app.py`, the test, the
+BREAKING_CHANGES row, ARCHITECTURE and A56.
+
+**A54 is also the one gate in this batch that reads a sentence rather
+than a value** (A57, A53's shape). ARCHITECTURE's round-trip sweep claims
+"all N settable scalars" **and in the same parenthesis records that the
+figure was written as 113 in batch 84 and left there through five batches
+that added thirty keys; the test counts, this sentence did not**. By this
+batch it had drifted again, to 143 against 145. A sentence that documents
+its own drift and then drifts is the argument for reading it rather than
+trusting it, so the figure is now compared to the sweep's own predicate,
+which the two share as one function.
+
+Two other stale digits came out with it, both in the surface under
+repair: `catalogue()` returns **166** rows where two docstrings said 132,
+and the two tool tables hold **56** leaves where one said 45. Neither was
+gated and neither is now -- the count that matters is the one the sweep
+walks.
+
+### Verification
+
+Suite **7117 -> 7141**: `test_config_loader` 127 -> 132,
+`test_config_edit` 92 -> 98, `test_catalog_text` 21 -> 30, `test_tui`
+468 -> 472. Controls **24 of 24** (21 KILLED, three that must not die:
+the marker reworded with the same facts, the bounds RAISED past every
+flood, and unrelated ARCHITECTURE prose edited), with all four held files
+sha256-restored.
+
+`ruff check .` clean. The decision-id gate caught a review id in a
+production docstring again -- `(S14-02)` in `tui/app.py` -- which is the
+same slip as batch 154's `S09-01` and the same gate; production cites the
+BATCH. A gate I had not met caught the other one: AGENTS.md may not name
+a private symbol that does not exist, and I had named
+the constant this batch deleted.
+
+FIX-NOW: **83 done, 3 open** -- `S05-01`, `S05-02` and `S03-02`.

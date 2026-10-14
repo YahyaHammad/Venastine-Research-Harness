@@ -8200,6 +8200,99 @@ class TestTheConfigCommandReports:
         assert "browse" in " ".join(app._transcript.errors)
 
 
+class TestAConfigEditedUnderTheSessionIsSaidNotLogged:
+    """S08-02, batch 155. `config.py` binds at import and nothing
+    re-reads the file (UN1), and `explain()` tells every container row to
+    "Edit it in config.yaml" -- so the documented workflow leaves the
+    process holding valid values over a file that has moved.
+
+    THE CRASH THIS FINDING REPORTED IS ALREADY GONE. Batch 135 (S14-02)
+    contains `dispatch()` at its call site, so every shape printed
+    "/config failed. The error is in logs/app.log; the session is
+    intact." -- true, and not an answer to "I just edited that file".
+    What is asserted here is WHICH SENTENCE arrives, which is why none
+    of these tests is a `pytest.raises`: not raising was never the
+    difficult part.
+    """
+
+    def _file_without(self, tmp_path, monkeypatch, key):
+        """A copy of config.yaml with `key:` deleted, and the module
+        pointed at it. The schema cache is deliberately NOT reloaded:
+        `config.py` validated the real file at import and nothing
+        re-reads it, which is the production state the finding is about.
+        """
+        text, _ = config_edit.read_text()
+        target = tmp_path / "config.yaml"
+        target.write_text(
+            "\n".join(line for line in text.split("\n")
+                      if not line.startswith(key + ":")),
+            encoding="utf-8", newline="")
+        monkeypatch.setattr("config_schema.CONFIG_PATH", str(target))
+        config_edit.forget_document()
+        return target
+
+    def test_one_argument_says_the_file_moved(self, tmp_path, monkeypatch):
+        target = self._file_without(tmp_path, monkeypatch, "max_tokens")
+        app = _bare_app()
+
+        _cmd_config(app, "max_tokens")
+
+        written = " ".join(app._transcript.errors)
+        assert str(target) in written
+        assert "max_tokens" in written
+        assert "relaunch" in written.lower()
+        assert not app._transcript.systems, (
+            "the command printed part of an answer before failing")
+
+    def test_a_bare_config_says_the_file_moved(self, tmp_path, monkeypatch):
+        """And says it ONCE, and says nothing else. The count is the
+        first thing this handler reads, so a file it cannot read has to
+        stop the command rather than preface it -- zero errors would mean
+        the handler raised and the generic sentence arrived instead."""
+        target = self._file_without(tmp_path, monkeypatch, "max_tokens")
+        app = _bare_app()
+
+        _cmd_config(app, "")
+
+        assert len(app._transcript.errors) == 1, app._transcript.errors
+        assert str(target) in app._transcript.errors[0]
+        assert not app._transcript.systems
+
+    def test_the_panel_offers_nothing_without_logging_a_traceback(
+            self, tmp_path, monkeypatch, caplog):
+        """What `_config_rows`'s own narrow clause is for, now that batch
+        135 contains the completer one layer out. Driven through the REAL
+        registry, because the difference is which handler catches it:
+        before batch 155 a removed key raised `KeyError` straight past
+        this clause into `CommandRegistry.matching`, which caught it and
+        wrote a traceback to app.log -- per keystroke, while someone
+        edited the file in another window."""
+        self._file_without(tmp_path, monkeypatch, "max_tokens")
+
+        with caplog.at_level(logging.ERROR, logger="tui.commands"):
+            rows = commands.matching("/config max_")
+
+        assert rows == []
+        assert not [record for record in caplog.records if record.exc_info], (
+            "a traceback per keystroke over a file someone is editing")
+
+    def test_an_untouched_copy_still_answers(self, tmp_path, monkeypatch):
+        """The control. Every test above redirects CONFIG_PATH, so
+        without this one they would all pass against a redirect that
+        never worked."""
+        text, _ = config_edit.read_text()
+        target = tmp_path / "config.yaml"
+        target.write_text(text, encoding="utf-8", newline="")
+        monkeypatch.setattr("config_schema.CONFIG_PATH", str(target))
+        config_edit.forget_document()
+        app = _bare_app()
+
+        _cmd_config(app, "max_tokens")
+
+        assert "max_tokens: 16000" in " ".join(app._transcript.systems)
+        assert not app._transcript.errors
+
+
 class TestWhatIsPendingIsVisible:
     """Batch 85. A write moves the file and leaves the session running the
     old value until a restart, so `/config` has to be able to say which of

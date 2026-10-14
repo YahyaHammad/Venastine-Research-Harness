@@ -72,6 +72,7 @@ import typing
 from typing import Any, Optional
 
 from ruamel.yaml import YAML
+from ruamel.yaml.error import YAMLError
 
 import config_schema
 
@@ -399,7 +400,27 @@ def document(fresh: bool = False):
                 return tree
 
     text, _ = read_text()
-    tree = _round_trip().load(io.StringIO(text))
+    try:
+        tree = _round_trip().load(io.StringIO(text))
+    except YAMLError as exc:
+        # TRANSLATED, NOT PROPAGATED, and `config_schema.read_document`
+        # already chose this shape for the same question one module over.
+        # Every reader in this file is reached from a slash command or a
+        # keystroke, and a ruamel error derives from `Exception` and
+        # nothing narrower -- so the shell either catches everything or
+        # catches this. It should catch this.
+        #
+        # THE DIAGNOSIS IS SOUND RATHER THAN A GUESS: `config.py` reads
+        # and validates this file at import, so the process could not
+        # have started if it did not parse. If it does not parse now, it
+        # has been edited since -- which is the workflow `explain()`
+        # recommends in so many words.
+        raise ValueError(
+            f"{config_schema.CONFIG_PATH} can no longer be parsed "
+            f"({exc}). It parsed when this session started, so it has "
+            f"been edited since and the edit left it structurally "
+            f"broken. Fix the file; the running session is unaffected "
+            f"until you relaunch.") from exc
     if stamp is not None:
         # RE-STAT AFTER THE READ. The stamp above was taken BEFORE it, so an
         # external save landing between the two stored the new tree under
@@ -429,12 +450,45 @@ def _dump(tree) -> str:
     return stream.getvalue()
 
 
-def get_leaf(tree, name: str):
-    """Read a dotted name off a round-trip tree."""
-    if "." in name:
-        table, leaf = name.split(".", 1)
-        return tree[table][leaf]
-    return tree[name]
+def _in_file(tree, name: str):
+    """What the document says for one addressable name, or `ValueError`.
+
+    THE DOCUMENT CAN DISAGREE WITH THE SCHEMA, and that is not a
+    programming error here -- it is the documented workflow. `config.py`
+    binds at import and nothing re-reads the file (UN1), while
+    `explain()` tells every container row to "Edit it in config.yaml",
+    so a hand-edit made mid-session leaves the process holding valid
+    values over a file that no longer has the key.
+
+    KeyError AND TypeError, because the file can go two ways and both
+    were measured: a deleted or renamed key raises `KeyError`, and a
+    table flattened to a scalar (`tool_permissions: off`) raises
+    `TypeError: string indices must be integers` from the SECOND
+    subscript. Neither is a `ValueError`, which is what the shell
+    catches, and neither says which file it is about.
+
+    REPLACES `get_leaf`, which answered the same question with no
+    caller anywhere in the repository and would have been a third copy
+    of this one.
+    """
+    try:
+        if "." in name:
+            table, leaf = name.split(".", 1)
+            return tree[table][leaf]
+        return tree[name]
+    except KeyError:
+        raise ValueError(
+            f"{config_schema.CONFIG_PATH} no longer has a key called "
+            f"{name}. It had one when this session started, so the file "
+            f"has been edited since; relaunch to pick the change "
+            f"up.") from None
+    except TypeError as exc:
+        raise ValueError(
+            f"{config_schema.CONFIG_PATH} can no longer be read for "
+            f"{name} ({exc}) -- the block it lives in is no longer a "
+            f"table. It was one when this session started, so the file "
+            f"has been edited since; relaunch to pick the change "
+            f"up.") from exc
 
 
 def place(tree, name: str, value: Any) -> None:
@@ -634,7 +688,7 @@ def catalogue(remembered_pair: Optional[tuple[str, str]] = None) -> list[KeyRow]
 
     The two tables are expanded rather than listed, because a row that says
     `tool_permissions · 23 entries` is not something anyone can act on, and
-    the 45 leaves are exactly the rows a person comes here for.
+    the 56 leaves are exactly the rows a person comes here for.
 
     BOTH VALUES COME FROM HERE: the file's, parsed through the cached
     document, and the session's, off the model bound at import. See
@@ -665,15 +719,16 @@ def catalogue(remembered_pair: Optional[tuple[str, str]] = None) -> list[KeyRow]
                 name=name,
                 kind="container",
                 values=f"{len(tools)} tools, each true | false",
-                in_file=tree[name],
+                in_file=_in_file(tree, name),
                 in_session=table,
                 authority=True))
             for tool in tools:
+                leaf = f"{name}.{tool}"
                 rows.append(KeyRow(
-                    name=f"{name}.{tool}",
+                    name=leaf,
                     kind="scalar",
                     values="true | false",
-                    in_file=tree[name][tool],
+                    in_file=_in_file(tree, leaf),
                     in_session=getattr(table, tool),
                     authority=True))
             continue
@@ -693,7 +748,7 @@ def catalogue(remembered_pair: Optional[tuple[str, str]] = None) -> list[KeyRow]
             # the model holds a frozenset or a tuple. Never compared for a
             # container, because `pending` is about the settable rows and a
             # container cannot be written from here.
-            in_file=tree[name],
+            in_file=_in_file(tree, name),
             in_session=getattr(config, name),
             authority=name in authority,
             environment_variable=variable,
@@ -756,15 +811,12 @@ def file_value(name: str, tree=None) -> Any:
     """What `config.yaml` itself says for `name`. `KeyRow.in_file`'s source.
 
     Kept as its own function for the callers that want one name without
-    building 132 rows to get it. `tree` is for a caller asking about many
+    building 166 rows to get it. `tree` is for a caller asking about many
     at once, and matters less than it did now that `document()` caches.
     """
     if tree is None:
         tree = document()
-    if "." in name:
-        table, leaf = name.split(".", 1)
-        return tree[table][leaf]
-    return tree[name]
+    return _in_file(tree, name)
 
 
 def explain(name: str, *,

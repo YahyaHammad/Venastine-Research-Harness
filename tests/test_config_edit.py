@@ -12,6 +12,8 @@ those two disagree only if something in the run wrote the real file.
 """
 
 import os
+import pathlib
+import re
 import shutil
 import tempfile
 
@@ -32,6 +34,41 @@ def _copy_config(tmp_path, monkeypatch):
 
 def _read(path) -> str:
     return open(path, encoding="utf-8", newline="").read()
+
+
+def _settable_scalars() -> list:
+    """The rows the round-trip sweep walks.
+
+    ONE DEFINITION, because `test_the_documented_settable_scalar_count_
+    is_the_one_the_test_walks` compares a figure in `docs/ARCHITECTURE.md`
+    against this, and a second copy of the predicate would let that gate
+    pass while the sentence described a different set of rows.
+    """
+    return [row for row in config_edit.catalogue()
+            if row.settable and row.kind != "pair"]
+
+
+def _scalarise(text: str, key: str) -> str:
+    """`key:` and its indented block replaced by `key: off`.
+
+    A table flattened by hand, which is what a half-finished edit or an
+    editor's block-delete leaves. DROPPING THE CHILDREN MATTERS: leaving
+    them indented under a scalar is a YAML syntax error, which is a
+    DIFFERENT one of the four shapes, and the point of this one is the
+    second subscript.
+    """
+    out, skipping = [], False
+    for line in text.split("\n"):
+        if line.startswith(key + ":"):
+            out.append(key + ": off")
+            skipping = True
+            continue
+        if skipping:
+            if line.startswith(" ") or not line.strip():
+                continue
+            skipping = False
+        out.append(line)
+    return "\n".join(out)
 
 
 class TestTheCatalogueCoversTheFile:
@@ -245,9 +282,7 @@ class TestTheRoundTripIsLossless:
         text, _ = config_edit.read_text()
         tree = config_edit.document()
         touched = 0
-        for row in config_edit.catalogue():
-            if not row.settable or row.kind == "pair":
-                continue
+        for row in _settable_scalars():
             if "." in row.name:
                 table, leaf = row.name.split(".", 1)
                 tree[table][leaf] = tree[table][leaf]
@@ -1135,3 +1170,159 @@ def test_the_shipped_file_is_untouched():
             f"config.yaml's {row.name} no longer matches the model this "
             f"process loaded, so something in this run wrote the real "
             f"file: it says {row.in_file!r} against {row.in_session!r}")
+
+
+# ---------------------------------------------------------------------------
+# ---- S08-02 (batch 155): a file edited under the session -------------------
+# ---------------------------------------------------------------------------
+
+
+class TestAFileEditedUnderTheSessionSaysSo:
+    """`config.py` binds at import and nothing re-reads the file (UN1),
+    while `explain()` tells every container row to "Edit it in
+    config.yaml" -- so the documented workflow produces exactly this
+    state: a process holding valid values over a file that has moved.
+
+    FOUR SHAPES REACH THESE READERS and only one was a `ValueError`
+    before batch 155. A deleted or renamed key is a `KeyError`; a table
+    flattened to a scalar is a `TypeError` from the second subscript; a
+    file that no longer parses is a ruamel `YAMLError`, which derives
+    from `Exception` and nothing narrower; a file that is gone is an
+    `OSError`. A shell can only say something about a shape it catches.
+
+    THE CACHE IS BOUND BEFORE THE REDIRECT in every test here, which is
+    the production state and the thing the review's first probe attempt
+    got wrong: with `config` unimported, the schema validates the
+    candidate and raises its OWN ValueError, so the reader's behaviour
+    is invisible. `config_schema` is imported at the top of this module
+    and `config` by the suite's conftest, so the cache is bound by
+    collection.
+
+    THESE ARE NOT ABOUT A CRASH. Batch 135 contains `dispatch()` at its
+    call site, so every one of the four shapes already printed "/config
+    failed. The error is in logs/app.log; the session is intact." -- true
+    and not an answer to "I just edited that file". What is asserted
+    here is that the exception carries the sentence instead.
+    """
+
+    def _broken(self, tmp_path, monkeypatch, transform):
+        target = _copy_config(tmp_path, monkeypatch)
+        # READ, THEN WRITE, in two statements. Written as one,
+        # `open(target, "w")` truncates the file before the argument
+        # expression runs, so `_read` returns "" and the whole class
+        # measures `tree is None` instead of the shape it names.
+        edited = transform(_read(target))
+        with open(target, "w", encoding="utf-8", newline="") as handle:
+            handle.write(edited)
+        config_edit.forget_document()
+        return target
+
+    def test_a_removed_key_names_the_file_and_the_remedy(
+            self, tmp_path, monkeypatch):
+        target = self._broken(
+            tmp_path, monkeypatch,
+            lambda text: "\n".join(line for line in text.split("\n")
+                                   if not line.startswith("max_tokens:")))
+
+        with pytest.raises(ValueError) as caught:
+            config_edit.catalogue()
+
+        message = str(caught.value)
+        assert str(target) in message
+        assert "max_tokens" in message
+        assert "relaunch" in message.lower()
+
+    def test_a_flattened_table_names_the_file_and_the_remedy(
+            self, tmp_path, monkeypatch):
+        """The SECOND subscript, not the first: `tree["tool_permissions"]`
+        answers with the scalar and `[tool]` raises `TypeError: string
+        indices must be integers`. Not a ValueError and not an OSError --
+        and this is the shape measurement found on top of the two the
+        finding reported."""
+        target = self._broken(tmp_path, monkeypatch,
+                              lambda text: _scalarise(text,
+                                                      "tool_permissions"))
+
+        with pytest.raises(ValueError) as caught:
+            config_edit.catalogue()
+
+        message = str(caught.value)
+        assert str(target) in message
+        assert "tool_permissions" in message
+        assert "relaunch" in message.lower()
+
+    def test_a_file_that_no_longer_parses_names_the_file_and_the_remedy(
+            self, tmp_path, monkeypatch):
+        """And says the diagnosis rather than guessing at it: the process
+        could not have started if this file did not parse, so if it does
+        not parse now it has been edited since."""
+        target = self._broken(
+            tmp_path, monkeypatch,
+            lambda text: text.replace("max_tokens:", "max_tokens: : :", 1))
+
+        with pytest.raises(ValueError) as caught:
+            config_edit.catalogue()
+
+        message = str(caught.value)
+        assert str(target) in message
+        assert "edited since" in message
+
+    def test_every_reader_answers_the_same_way(self, tmp_path, monkeypatch):
+        """Five entry points, one answer. `/config` reaches the document
+        through `catalogue`, `find`, `matching`, `pending_changes` and
+        `file_value`, and a shell that handles one shape per call site is
+        a shell that handles three of five."""
+        self._broken(
+            tmp_path, monkeypatch,
+            lambda text: "\n".join(line for line in text.split("\n")
+                                   if not line.startswith("max_tokens:")))
+
+        for read in (config_edit.catalogue,
+                     lambda: config_edit.find("max_tokens"),
+                     lambda: config_edit.matching("max_"),
+                     config_edit.pending_changes,
+                     lambda: config_edit.file_value("max_tokens")):
+            with pytest.raises(ValueError):
+                read()
+
+    def test_an_untouched_copy_still_answers(self, tmp_path, monkeypatch):
+        """The control, and it is not ceremony: every test above redirects
+        CONFIG_PATH, so without this one they would all pass against a
+        redirect that simply never worked."""
+        _copy_config(tmp_path, monkeypatch)
+        config_edit.forget_document()
+
+        assert config_edit.find("max_tokens").in_file == 16000
+        assert config_edit.file_value("tool_permissions.read") is not None
+        assert len(config_edit.catalogue()) > 100
+
+
+
+_DOCUMENTED_SCALARS = re.compile(r"all (\d+) settable scalars")
+
+
+def test_the_documented_settable_scalar_count_is_the_one_the_test_walks():
+    """A relation over two sentences, not a third assertion about either.
+
+    THIS FIGURE HAS DRIFTED BEFORE AND SAYS SO IN THE SAME BREATH.
+    `docs/ARCHITECTURE.md`'s own parenthesis reads "the figure was
+    written as 113 in batch 84 and left there through five batches that
+    added thirty keys; the test counts, this sentence did not" -- and by
+    batch 155 it had drifted again, to 143 against the sweep's 145. A
+    sentence that documents its own drift and then drifts is the
+    argument for reading it rather than trusting it.
+
+    `_settable_scalars` is shared with the sweep on purpose, so this
+    cannot be satisfied by a figure that is right about a different set
+    of rows.
+    """
+    text = (pathlib.Path(__file__).resolve().parents[1]
+            / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
+    figures = _DOCUMENTED_SCALARS.findall(text)
+
+    assert len(figures) == 1, (
+        f"expected exactly one \"all N settable scalars\" in "
+        f"ARCHITECTURE.md, found {figures}")
+    assert int(figures[0]) == len(_settable_scalars()), (
+        f"ARCHITECTURE.md says {figures[0]} settable scalars; the "
+        f"catalogue has {len(_settable_scalars())}")

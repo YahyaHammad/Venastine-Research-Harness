@@ -43,6 +43,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
+- **§72. A consent screen the project decided the length of, and three fields a rule was stated over but never applied to** - **(BUILT in batch 155)** (the review marathon's config-and-trust surface, all three findings: the trust prompt -- the informed-consent gate for content that becomes instructions -- pasted `settings.json` and `mcp.json` whole, so 2 x 2.2 MB rendered as 4.5 MB in 30 lines with the `mcp.json` command the section exists to show at 99.9994% of the way in, while the section the finding cited as the bounded contrast was bounded on one axis of two and a 2 MB `AGENTS.md` written as one line walked straight through it; `_parse_md_file` states "ELEMENT TYPES TOO, not just the container" in a comment and `model`, `provider` and the elements of `allowed_tools` sat under it unchecked, so `model: [a, b]` loaded clean and raised `TypeError: unhashable type: 'list'` out of the effort cache; and a `config.yaml` hand-edited mid-session -- the workflow `explain()` recommends by name -- answered a `/config` with "the error is in logs/app.log", which is true and is an answer to a different question. The crash that finding reported had already been closed by batch 135 and was found by re-driving rather than by reading)
 - **§71. A guard that compared two spellings of one id, and a cap whose two halves disagreed** - **(BUILT in batch 154)** (the review marathon's persistence surface, all four findings: tier 1 of the §27 thread classification -- the tier #82 calls authoritative over every clock comparison -- compared `str(thread_id)` as the producer records it against the hex spelling sqlmodel stores, so `'a-b' in {'ab'}` was False for every id there has ever been and the tier had never relabelled one row, while all four of its tests hand-wrote the same string on both sides; `max_injected_memories: 0` hid the `remember` tool and injected a "showing the 0 most recent of 2" header with a WARNING behind it on every turn, so the model was told that memories exist and are being withheld by a run that could never reach them; `list_threads` still carried the failure model batch 75 deleted from its two siblings; and the record's shape was stated as 9 fields and four data columns in thirteen live places after T2 and E13 each grew it by a column, including a BREAKING_CHANGES row promising a key-set assertion that did not exist)
 - **§70. A trust grant that could not persist, and a file three documents kept promising about** - **(BUILT in batch 153)** (`/init`'s trust settle was put on both the success and the failure path by audit #95, and the settle itself can raise -- `grant_trust` writes the store and re-reads every file the grant covers -- from a call outside the `try` on both of them, so a trust-store I/O failure left both config files written, the project untrusted, the notice replaced by a traceback on the CLI, and on the failure path the "wrote N files before that" accounting #95 existed to add discarded with it; the pre-write capture had the same shape from the other end, where one unreadable file under `.venastine/` killed the command before it wrote anything, three functions below a sibling that catches the same error on the same file and degrades; and the context file section 44 deleted was still named as a live fact in fifteen places across eight files, eleven of them in the suite, including a promise that it "is never special-cased out of the hash" -- a guarantee about a file that is not in the hash because it does not exist)
 - **§69. A consent prompt the model could repaint, and a refusal that read as a yes** - **(BUILT in batch 152)** (the CLI printed the security-critical half of every consent prompt with model-supplied terminal escapes in it -- the approval headline, the notice, the agent's stated reason, a reviewer's proposed correction and an MCP server's own description of its tool -- while the params block below them was safe because `json.dumps` renders an escape instead of emitting it; and `_signoff` returned the empty set for a line in which nothing named a candidate, which is the explicit `none` and which the loop spawns on, so a mistyped refusal authorised the spawn)
@@ -2720,6 +2721,164 @@ leaked PID.
   because MCP is the only dynamic registrant and the composed name is its
   fact. A bound in the registry would be the fix-at-the-consumer shape
   `AGENTS.md` names by name.
+---
+
+## §72. A consent screen the project decided the length of, and three fields a rule was stated over but never applied to
+
+**Built in batch 155**, from the review marathon's config-and-trust
+surface: all three `FIX-NOW` findings -- **S08-01** (S3), **S08-02** (S3)
+and **S08-03** (S3). Four owner rulings, recorded as A54-A57.
+
+**ONE OF THE THREE WAS ALREADY FIXED AND NOBODY KNEW.** S08-02 reported a
+crash: a structurally-broken `config.yaml` makes every `/config` keystroke
+and every `/config <key>` raise out of the message-pump path, and per §46
+an unhandled exception reaching Textual's `_handle_exception` exits the
+whole application. That was true when it was measured, at `96de26e`.
+**Batch 135 then fixed S14-02**, which contained `dispatch()` at its call
+site in `tui/app.py` and `command.complete` inside
+`CommandRegistry.matching` -- the two doors every one of those seven
+`config_edit` calls comes through. Re-driven before being fixed, the
+report's own recipe now prints *"/config failed. The error is in
+logs/app.log; the session is intact."* and the panel offers nothing. No
+exit, on any of the four shapes.
+
+So the finding was re-aimed at what was left rather than closed, because
+what was left is real: that sentence is the answer a person gets to the
+one workflow this project recommends by name. `explain()` prints *"Edit it
+in config.yaml"* for every container row, `config.py` binds at import and
+nothing re-reads the file (UN1) -- so a hand-edit mid-session is not an
+edge case, it is the documented path, and *"the error is in logs/app.log"*
+is a true statement that answers a different question.
+
+**The rule this batch is built on: re-drive a finding before fixing it.**
+A stale recipe reads two ways -- "already fixed" when the defect merely
+moved, and "still broken" when another batch closed it -- and only one of
+those costs a wrong fix. This is the first finding in the marathon where
+it changed the answer.
+
+### S08-01: the rule was stated in a comment and three fields sat under it
+
+`_parse_md_file` carries this comment, in the agent branch, in these
+words: *"ELEMENT TYPES TOO, not just the container. This is the lesson the
+skills branch above already paid for with `additional_tools`: a non-string
+element parses cleanly here and fails at first consumption, layers away
+from the file that caused it."* `additional_tools` and `spawn_targets` are
+checked. `approval_overrides`' values were added in batch 150. The three
+fields the rule was never applied to are `model`, `provider` and the
+elements of `allowed_tools` -- and `allowed_tools`' container check sits
+**immediately above** the comment stating the rule.
+
+Measured through the real loader and the real consumers, nothing
+monkeypatched:
+
+| frontmatter | loader verdict | where it fails |
+|---|---|---|
+| `model: [a, b]` | ACCEPTED, `model == ['a', 'b']` | `TypeError: unhashable type: 'list'` from the effort cache's `(provider_name, model)` key |
+| `model: 123`, `provider: 123` | ACCEPTED | `ValueError: Unknown provider: 123` out of `client.api_initialization`, naming the provider and not the file |
+| `allowed_tools: [read, 123]` | ACCEPTED | nowhere -- `set()` keeps it, every membership test misses it, the whitelist silently holds one entry fewer than it reads as |
+| `allowed_tools: [read, [write]]` | ACCEPTED | `TypeError: unhashable type: 'list'` out of `AgentManager.active_context` and `child_context` |
+
+**The report called the `allowed_tools` half silent and measurement found
+it half loud.** The single place `AgentDef.allowed_tools` (an
+`Optional[list]`) becomes `ToolContext.allowed_tools` (declared
+`Optional[set[str]]`) is `set(agent.allowed_tools)`, in both of
+`AgentManager`'s composers -- so a *hashable* non-string sits inert and an
+*unhashable* one raises there. Both are now pinned, and the loud half is
+the one no report named.
+
+`allowed_tools: [read, on]` is the shape worth having a test for on its
+own: YAML reads `on`, `yes` and `true` as booleans, so this is a typo
+nobody has to type anything non-string-looking to make.
+
+### S08-02: the sentence, not the crash
+
+Four exception shapes reach `config_edit`'s readers and exactly one was a
+`ValueError` -- the type the keystroke path already catches:
+
+| edit | shape | caught by the panel's clause |
+|---|---|---|
+| a key deleted or renamed | `KeyError` | no |
+| a table flattened to a scalar | `TypeError` from the SECOND subscript | no |
+| the file no longer parses | ruamel `YAMLError` (derives from `Exception`) | no |
+| the file is gone or locked | `OSError` | yes |
+
+The `TypeError` is a third shape neither the report nor its probe listed;
+it came out of re-driving. All three now become **one `ValueError` naming
+the file and the remedy**, which is the shape
+`config_schema.read_document` already chose for the same question one
+module over, and the diagnosis in it is a conclusion rather than a guess:
+`config.py` reads and validates this file at import, so the process could
+not have started if it did not parse.
+
+`get_leaf` went with it. It answered exactly the question the new
+translating accessor answers, had no caller anywhere in the repository,
+and was named by no document -- so leaving it would have made three
+copies of one question where there had been two.
+
+### S08-03: a bound on one axis is not a bound
+
+The trust prompt is the informed-consent gate for content that becomes
+instructions (D17). It has **four** sections; the finding named one of
+them and cited a second as the bounded contrast. Measured:
+
+| section | bound before | what it floods to |
+|---|---|---|
+| the file listing | none | 20,000 padding files = 20,001 lines, 600 KB |
+| the hub (`AGENTS.md`) | §44's **20 lines**, and nothing else | 2 MB in 4 lines (one long line); 2 MB in 23 lines (twenty 100 KB lines) |
+| `settings.json` + `mcp.json` | none | 2 x 2.2 MB = **4.5 MB in 30 lines** |
+| the agent/skill catalog | A5's 300 chars **per entry** | 3,000 agents = 1 MB in 6,002 lines, every entry individually legal |
+
+In the 4.5 MB case the `mcp.json` command the section exists to show sat
+at **99.9994% of the way in**. And the section the finding held up as the
+example to copy is bounded on one axis of the two that matter, which is
+why copying it was not the fix.
+
+**What the bound buys is not that a buried command becomes visible -- it
+is that the burial does.** A project can still push its real command past
+the cut. What it can no longer do is decide how long its own consent
+screen is, and the marker it gets instead says *"0 more lines and
+2,440,000 more characters of mcp.json are not shown here. Trust covers
+the whole file, not the part printed."* -- which is itself an answer to
+the consent question, and a better one than 4.5 MB of padding.
+
+### What §72 deliberately does not change
+
+- **`content_files()`**, which is unbounded and must stay so. The hash
+  and `workspace_trust`'s invariant -- the loader may read no file the
+  trust listing omits -- are about that function. What is bounded is what
+  the prompt PRINTS of its answer, and the listing test asserts both
+  halves so the two cannot be confused later.
+- **`agents/manager.py`'s two `set()` calls**, left as they are. The
+  loader gate closes every file-borne route; a belt there would be a
+  second answer, and the only caller left is a programmatic one with no
+  file to lose -- the asymmetry `max_steps` already settled, one field
+  over, with its belt in `core/loop._run`.
+- **`max_steps`' repair contract** (#45). It still repairs where the
+  three new fields skip, and A55 says why the two are different rather
+  than inconsistent.
+- **`_config_rows`' narrow `except (ValueError, OSError)`**, which is now
+  a narrower duplicate of a clause one layer out and stays anyway. Its
+  docstring says what it is actually for: the four shapes it names are an
+  unreadable FILE rather than a broken completer, and the panel should
+  offer nothing without writing a traceback to `app.log` on every
+  keystroke while someone edits in another window.
+- **The two adjacent consent-text overstatements** S08-03 names and
+  declines: that every project agent's description "enters EVERY system
+  prompt" when `prompts/system_prompts.py` filters the catalog to
+  `spawnable` agents, and that a harness- or user-shadowed entry is
+  displayed as the project's. Both are S4 precision about the wording,
+  separable from the paste, and both fail in the over-disclosure
+  direction.
+
+### Design Decisions Record — §72 (A54-A57)
+
+| id | decision |
+|---|---|
+| **A54** | **Every section of the trust prompt is bounded on BOTH axes, by one helper, and the marker names what was withheld in both currencies.** `_bounded(source, prefix, what)` takes 60 lines and 6,000 characters, cuts WITHIN a line rather than dropping it whole -- a file flooded onto one line has exactly one line and it is the line the section is about -- and appends a sentence saying how much is unshown and that trust covers the whole file either way. **All four sections, not the two the finding names**, because capping some of them leaves the prompt exactly as floodable and the cap stops being worth having; `_HUB_PREVIEW_LINES` is replaced rather than joined, so §44's line-only cap cannot be the shape a later section copies. The numbers are MEASURED against the largest legitimate shapes rather than picked -- a five-server pretty-printed `mcp.json` is 54 lines and 923 characters, a realistic `settings.json` is 14 and 264, this project's own `AGENTS.md` is 4,033 characters in its first 60 lines -- because a cap that trims ordinary files turns its own marker into noise. The marker is not a courtesy: a cut nobody is told about turns a bounded prompt into one that misrepresents what it covers |
+| **A55** | **`model`, `provider` and the elements of `allowed_tools` are typed at the loader, and a bad shape SKIPS the file.** The rule the function already states in a comment, applied to the three fields that sat under it unchecked. **Skip rather than repair to `None`, which is where this parts company with `max_steps` (#45) deliberately rather than by oversight**: `None` is a REAL value for `model` and `provider` and means "inherit the session's", so a repair would leave the agent available and running on a model nobody chose for it -- and an agent file names a model when being a DIFFERENT model is the point, of which §11's critic rationale ("a model checking its own output for errors shares that model's blind spots") is the sharpest case. A bad `max_steps` has no honest reading, so repairing it invents nothing; an unreadable `model` has one, and it is the wrong one. `allowed_tools` skips for `approval_overrides`' stated reason: half a whitelist is worse than no file at all for a field whose job is deciding what an agent may call. The consumers are NOT changed -- every one of them already assumes a string |
+| **A56** | **A `config.yaml` read that cannot answer raises ONE `ValueError` naming the file and the remedy, and the shell prints that sentence.** Four shapes reached the readers and one was catchable; the three that were not are translated at the producer, in `document()` and in the one accessor `catalogue()` and `file_value()` now share. **The producer AND the shell, which is not the double containment the finding warns against**: the producer decides what there is to SAY about the file, which is §16's rule for this module, and the shell decides where to put it -- the split that keeps `config_edit` testable without a terminal. The diagnosis in the sentence is a conclusion and not a guess, since `config.py` validated this file at import. The generic *"/config failed. The error is in logs/app.log"* stays underneath as the backstop for everything that is not this. **A `pending_changes(rows)` parameter was written for this path and reverted in the same batch**, by B4 rather than by a test: the story justifying it was an unreadable file answering twice in one command, and that cannot happen, because the read that fails is the first one and it returns |
+| **A57** | **The documented settable-scalar figure is pinned by a RELATION to the catalogue, sharing the sweep's own predicate.** A53's shape, applied to the figure that had already earned it: `docs/ARCHITECTURE.md`'s sentence says the sweep covers "all N settable scalars" **and in the same parenthesis records that the figure was written as 113 in batch 84 and left there through five batches that added thirty keys** -- and by batch 155 it had drifted again, to 143 against 145. A sentence that documents its own drift and then drifts is the argument for reading it rather than trusting it. The predicate is factored into one function the sweep and the gate both call, so the gate cannot pass against a figure that is right about a different set of rows |
+
 ---
 
 ## §71. A guard that compared two spellings of one id, and a cap whose two halves disagreed
