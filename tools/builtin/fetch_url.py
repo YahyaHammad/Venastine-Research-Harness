@@ -6,7 +6,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 from safety.policy_enforcement import is_url_permitted, redact_output_text
-from tools.builtin._net_common import TTLCache
+from tools.builtin._net_common import MAX_URL_CHARS, TTLCache
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +78,12 @@ _body_cache = TTLCache(CACHE_TTL_S)
 
 
 class FetchURLParams(BaseModel):
-    url: str = Field(..., description="URL to be fetched", min_length=1, max_length=400)
+    # `MAX_URL_CHARS`, not 400 spelled again: batch 156 derived the
+    # bound the two SEARCH tools use from this one, because a URL
+    # they offer past it is a route this gate refuses. Two files
+    # holding one number is the state a pair is in just before it
+    # stops being a pair, and the relation is what matters here.
+    url: str = Field(..., description="URL to be fetched", min_length=1, max_length=MAX_URL_CHARS)
     offset: int = Field(
         0,
         ge=0,

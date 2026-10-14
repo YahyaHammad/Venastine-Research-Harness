@@ -45,6 +45,18 @@ token at characters 4,980-5,020 came back clean in both pages, was rejoined
 by the corpus into one 10,000-character document, and appeared whole in
 `artifact_entries()`.
 
+AND NOW THE TWO SEARCH TOOLS (batch 156, ROADMAP_v3 §73 A59), which is
+where §52's own gap register pointed and nobody had gone. `web_search` cut
+its snippet to 300 characters and `arxiv_search` cut its abstract to 600
+and its title to 300, and in all three places `check_output_policy`
+redacted the piece that had been kept. Measured before the fix, through
+the real `_normalize` and the real `_parse_atom_feed`: a `ghp_` token
+straddling any of those cuts survived post-hoc redaction at 36 of the 39
+offsets it could straddle, and redacting the whole value first caught
+every one. The same batch added three more cuts (title, author name,
+category term) that did not exist before it, so the ordering had to land
+first or the repair would have manufactured its own straddle sites.
+
 AND NOW A SECOND TOOL THAT CUTS (batch 148, S11-05 / ROADMAP_v3 §65 A23).
 §52's gap register declined to solve this generally -- "a future tool that
 returns a long body and slices it would have to make the same choice, and
@@ -71,7 +83,7 @@ from core import session_view, session_wake
 from core.reasoning.source_corpus import SourceCorpus
 from core.shell_sessions import SessionRow, WakeEvent
 from safety.policy_enforcement import REDACTION_MARKER
-from tools.builtin import fetch_url
+from tools.builtin import arxiv, fetch_url, web_search
 from tools.registry import registry
 
 URL = "https://example.com/doc"
@@ -618,3 +630,220 @@ class TestTheSessionViewsDisplayBudgetCutsRedactedText:
         assert drawn > small_read // 2, (
             "nothing was drawn, so the sweep proves nothing")
         assert any("earlier output omitted" in text for _, text in entries)
+
+
+# ===========================================================================
+# ---- A59: the two search tools cut too, and redacted after ----------------
+# ===========================================================================
+
+def _web_rows(text, where):
+    """One DDGS row carrying `text` in the field named by `where`."""
+    row = {"title": "An ordinary title",
+           "href": "https://example.com/r0",
+           "body": "an ordinary snippet"}
+    row[where] = text
+    return [row]
+
+
+def _arxiv_feed(text, where):
+    """A one-entry Atom feed carrying `text` in `where`.
+
+    Hand-built rather than reusing `test_paging._feed`: that helper is
+    about paging and takes character COUNTS, and what this needs is a
+    specific string in a specific element.
+    """
+    fields = {"title": "An ordinary title", "summary": "An ordinary summary"}
+    fields[where] = text
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<feed xmlns="http://www.w3.org/2005/Atom"'
+        '      xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/">'
+        '<opensearch:totalResults>1</opensearch:totalResults>'
+        '<entry>'
+        '<id>http://arxiv.org/abs/2401.00001v1</id>'
+        '<title>%(title)s</title>'
+        '<summary>%(summary)s</summary>'
+        '<published>2024-01-01T00:00:00Z</published>'
+        '<author><name>Ada Lovelace</name></author>'
+        '<category term="cs.AI"/>'
+        '<link title="pdf" href="http://arxiv.org/pdf/2401.00001v1"/>'
+        '</entry></feed>' % fields)
+
+
+#: (label, the cap, the field the cut text lands in, a builder, the tool).
+#: One row per interior cut in the two search tools -- the three batch 156
+#: inherited and the three it added. A cut missing from this table is a cut
+#: nothing here sweeps, which is how §51 shipped one in the first place.
+SEARCH_CUTS = [
+    ("web_search snippet", web_search.MAX_SNIPPET_CHARS, "snippet",
+     lambda text: _web_rows(text, "body"), "web_search"),
+    ("web_search title", web_search.MAX_TITLE_CHARS, "title",
+     lambda text: _web_rows(text, "title"), "web_search"),
+    ("arxiv summary", arxiv.MAX_SUMMARY_CHARS, "summary",
+     lambda text: _arxiv_feed(text, "summary"), "arxiv_search"),
+    ("arxiv title", arxiv.MAX_TITLE_CHARS, "title",
+     lambda text: _arxiv_feed(text, "title"), "arxiv_search"),
+]
+
+
+def _straddling_at(secret, cut, kept):
+    """A value in which `secret` crosses `cut`, `kept` characters of it
+    before the boundary.
+
+    `_straddling`'s filler rule, for `_straddling`'s reason: prose and a
+    forced space, because two of the three credential SHAPES anchor on a
+    word boundary and a secret welded to the end of a filler word does not
+    match even unsplit. That trap bit batch 148's first probe.
+    """
+    head = ("some configuration prose here and there. "
+            * 400)[:cut - kept - 1] + " "
+    assert len(head) == cut - kept
+    return head + secret + " and then more prose follows after it."
+
+
+def _searched(monkeypatch, tool, payload, field):
+    """`field` of the first result, through the real `registry.dispatch`.
+
+    THE CACHE IS CLEARED PER CALL, which is not hygiene here but the
+    difference between a sweep and a single measurement repeated: both
+    tools key their cache on the query, and every offset in a sweep below
+    asks the same query. Without this the second iteration onward reads
+    the first iteration's answer and the sweep reports clean for a secret
+    it never sent.
+    """
+    if tool == "web_search":
+        web_search._cache.clear()
+        monkeypatch.setattr(web_search, "_call_ddgs",
+                            lambda *a, **kw: payload)
+        result = registry.dispatch("web_search", {"query": "x"})
+    else:
+        arxiv._cache.clear()
+        monkeypatch.setattr(arxiv, "_call_arxiv_api",
+                            lambda *a, **kw: payload)
+        result = registry.dispatch("arxiv_search", {"keywords": "x"})
+    assert "error" not in result, result
+    return result["results"][0][field]
+
+
+@pytest.mark.parametrize(
+    "label,cap,field,build,tool", SEARCH_CUTS,
+    ids=[row[0].replace(" ", "_") for row in SEARCH_CUTS])
+class TestEveryCutInTheSearchToolsRedactsFirst:
+    """One row per cut, the `ghp_` token at every offset that straddles it.
+
+    `ghp_` and not the whole table here: the question this class asks is
+    whether a given CUT has the redaction above it, and the fixed-length
+    vendor token is defeated by every interior cut, so it answers that
+    question at every offset. Which patterns survive which offsets is a
+    different question and `TestEveryPatternAtTheSnippetCut` below is
+    where the whole table is swept.
+    """
+
+    def test_no_interior_cut_leaves_the_secret(
+            self, monkeypatch, label, cap, field, build, tool):
+        survived = []
+        for kept in range(1, len(PAT)):
+            got = _searched(monkeypatch, tool,
+                            build(_straddling_at(PAT, cap, kept)), field)
+            if PAT[:kept] in got and kept >= 4:
+                survived.append(kept)
+
+        assert not survived, (
+            f"{label} kept {len(survived)} secret prefixes at offsets "
+            f"{survived[:6]}... of 1..{len(PAT) - 1}")
+
+    def test_the_sweep_is_not_vacuous(
+            self, monkeypatch, label, cap, field, build, tool):
+        """The cut must actually BE where this row says it is.
+
+        Without this, a row naming the wrong cap plants its secret
+        somewhere comfortable -- wholly inside the kept text or wholly
+        outside it -- and the sweep above passes by never splitting
+        anything. The assertion is that the value came back AT the cap,
+        which only happens if the text really was longer than it.
+        """
+        got = _searched(monkeypatch, tool,
+                        build("x " + "filler words here " * 400), field)
+
+        assert len(got) == cap, (
+            f"{label} came back {len(got)} characters long, so {cap} is "
+            f"not the cut this row is about and the sweep above split "
+            f"nothing")
+
+
+@pytest.mark.parametrize(
+    "label,secret,needle", SECRETS, ids=[row[0] for row in SECRETS])
+class TestEveryPatternAtTheSnippetCut:
+    """The whole pattern table at one cut, for the reason
+    `TestEveryPatternAtEveryCut` gives: the ten patterns do NOT behave
+    alike, and the open-quantifier ones (`sk-`, `sk-ant-`, `xox`) are
+    defeated only by a cut inside their first 14 to 26 characters because a
+    long enough prefix still matches on its own. A class that swept one
+    pattern would test three of the ten by accident and seven not at all.
+    """
+
+    def test_no_interior_cut_leaves_the_secret_recoverable(
+            self, monkeypatch, label, secret, needle):
+        needle = needle or secret
+        survived = []
+        for kept in range(1, len(secret)):
+            snippet = _searched(
+                monkeypatch, "web_search",
+                _web_rows(_straddling_at(secret, web_search.MAX_SNIPPET_CHARS,
+                                         kept), "body"),
+                "snippet")
+            if needle in snippet:
+                survived.append(kept)
+
+        assert not survived, (
+            f"{label} survived the snippet cut at offsets {survived} of "
+            f"1..{len(secret) - 1}")
+
+    def test_the_sweep_is_not_vacuous(self, monkeypatch, label, secret,
+                                      needle):
+        """Each planted secret must be one this deployment's redactor
+        recognises, or the sweep above proves nothing about it."""
+        needle = needle or secret
+        snippet = _searched(
+            monkeypatch, "web_search",
+            _web_rows(_straddling_at(secret, web_search.MAX_SNIPPET_CHARS,
+                                     len(secret) + 40), "body"),
+            "snippet")
+
+        assert needle not in snippet, (
+            f"{label} is not recognised by the redactor even unsplit, so "
+            f"the sweep above proves nothing")
+
+
+class TestTheSearchToolsStillReturnWhatTheyAlwaysDid:
+    """The control the three classes above need: an ordinary result is
+    byte-identical to what it was before any of this, because a redactor
+    that altered clean text would pass every assertion above by ruining
+    everything."""
+
+    def test_an_ordinary_snippet_is_untouched(self, monkeypatch):
+        body = "an ordinary snippet about entropy and nothing else"
+
+        snippet = _searched(monkeypatch, "web_search",
+                            _web_rows(body, "body"), "snippet")
+
+        assert snippet == body
+
+    def test_an_ordinary_abstract_is_untouched(self, monkeypatch):
+        summary = "We show that the thing is the case, under assumptions."
+
+        got = _searched(monkeypatch, "arxiv_search",
+                        _arxiv_feed(summary, "summary"), "summary")
+
+        assert got == summary
+
+    def test_a_secret_wholly_inside_the_kept_text_is_still_redacted(
+            self, monkeypatch):
+        """The case that was never broken, asserted so the fix cannot be
+        'stop redacting'."""
+        snippet = _searched(monkeypatch, "web_search",
+                            _web_rows("here it is: " + PAT, "body"),
+                            "snippet")
+
+        assert PAT not in snippet
+        assert REDACTION_MARKER in snippet

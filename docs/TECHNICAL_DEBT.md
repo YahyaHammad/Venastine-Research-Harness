@@ -2992,7 +2992,7 @@ comment at `:262-268` already refuses both; it is cited here so the next reader
 does not re-propose them. No change to `_SECRET_PATTERNS`, which stay the input
 side's whole vocabulary by decision.
 
-## 53. `resolve=False` checks dotted IP literals and no other numeric form (open, deferred batch 138)
+## 53. `resolve=False` checks dotted IP literals and no other numeric form (open for the BEHAVIOUR, comment corrected batch 156)
 
 **S05-04, severity S4, `coherence`.** `tools/builtin/web_search.py:114-123`
 carries the comment "An IP LITERAL is still checked"; `resolve=False`'s semantics
@@ -3013,6 +3013,16 @@ the file that decides what the model is shown.
 not apply to them), or narrow the comment to "a dotted-decimal or bracketed IPv6
 literal is still checked". Test: the three non-dotted spellings through
 `_normalize`'s real filter, asserting dropped.
+
+**THE COMMENT HALF IS DONE (batch 156)** and the behaviour half is what stays
+open. §73 rewrote `_normalize` for S05-01 and S05-02, and leaving a claim
+measured false in the function being rewritten is how a batch creates defect
+shape 9 in the file it is repairing -- so the comment now says "a dotted-decimal
+or bracketed IPv6 literal", which is what the code does. Nothing about the
+FILTER changed: the three numeric spellings are still allowed there, still
+refused by the only socket-opener in the scope, and the test this item asks for
+is still unwritten. Re-measure before fixing; a comment that is now right is the
+reason a later reader might think the behaviour is too.
 
 **Not:** any change to `fetch_url`, which is correct; DNS at filter time for
 names, where the documented latency tradeoff stands; any change to

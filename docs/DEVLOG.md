@@ -24448,3 +24448,253 @@ a private symbol that does not exist, and I had named
 the constant this batch deleted.
 
 FIX-NOW: **83 done, 3 open** -- `S05-01`, `S05-02` and `S03-02`.
+
+## Batch 156 -- three cuts the redactor ran after, and the one result path that never passed it (2026-10-14)
+
+The review marathon's last three `FIX-NOW` findings -- **S05-01** (S3),
+**S05-02** (S3) and **S03-02** (S4). Five owner rulings, recorded as
+ROADMAP_v3 §73's **A58-A62**. **The marathon's 86 `FIX-NOW` findings are
+now all closed.**
+
+**The load-bearing thing this batch learned is that a document asserting
+an invariant is the reason nobody measures whether the code has it.**
+
+### S05-01 and S05-02 are one defect wearing two numbers
+
+S05-02: the two search tools cut their third-party text and let
+`registry.dispatch`'s `check_output_policy` redact the piece that was
+KEPT, so a credential straddling the cut is invisible to both halves --
+the kept prefix is not the token and the dropped suffix is gone. S05-01:
+four sibling values in the same two functions have no cap at all.
+
+**Every cap S05-01 asks for is a NEW CUT.** Adding them without S05-02's
+ordering would have manufactured four more straddle sites in the fields
+being repaired. So the ordering landed first and the caps came free.
+
+Measured through the real `_normalize` and the real `_parse_atom_feed`,
+nothing monkeypatched:
+
+```
+web_search snippet cut = 300
+  secret-prefix survived post-hoc redaction at kept=4..39 (36 of 39)
+  at kept=35: snippet tail    : 'iguration ghp_<31 of the 36 secret
+                                 characters, all 35 kept>'
+  post-hoc redact changes it  : False
+  WHOLE-BODY redact catches it: True   (CONTROL)
+  redact-then-cut would give  : 'iguration [REDACTED] and then more prose foll'
+arxiv summary cut = 600, title cut = 300
+  summary  survives at kept=4..39 (36 rows)
+  title    survives at kept=4..39 (36 rows)
+```
+
+`param_digest` had already written the reason down -- "truncating first
+cuts a credential below the 20 characters its pattern needs" -- and
+`fetch_url` had already fixed the same ordering for its own body in §52.
+**§52's gap register declined to solve it generally**, saying "a future
+tool that returns a long body and slices it would have to make the same
+choice, and nothing mechanical forces it to". Two such tools were already
+in the tree when that sentence was written. One helper now owns the order
+and a TABLE of cut points owns the sweep, so a sixth cut is a row rather
+than a rediscovery.
+
+### The finding names four fields and there are six
+
+| field | before | after |
+|---|---|---|
+| `web_search` title | **5,000** | 300 + flag |
+| `web_search` url (`href`) | **5,020** | dropped past 400 + warning |
+| arXiv author `<name>` | **5,000** | 200 |
+| arXiv category `term` | **5,000** | 40 |
+| arXiv `pdf_url` | **5,021** | dropped past 400 + flag |
+| arXiv `arxiv_id` | **5,000** | 64 + flag, and both routes withheld |
+| *(control)* title / summary | 300 / 600 + flag | unchanged |
+
+The two the finding misses are `web_search`'s own `href` and `arxiv_id`,
+and the second matters more than its size: **both `full_*_url` recovery
+routes are built from it**, so one uncapped field was three uncapped
+values wearing one name, and a 5,000-character `<id>` made each route
+5,022 characters long.
+
+**The lists were capped and the values in them were not.** 25 authors at
+5,000 characters each is 125,000 characters of model-facing text that
+every count-based cap reports as bounded -- batch 126's "which axis"
+question asked one level down, which is where it had not been asked.
+
+**A URL is DROPPED rather than cut** (A58), and the derivation is the
+argument: `fetch_url` already bounds the URL the model may ASK for at
+`max_length=400`, measured -- 401 characters is refused by its own gate,
+400 is accepted. So a longer URL is one THIS HARNESS refuses to fetch,
+and offering it is offering a route to nowhere. The constant moved into
+`_net_common.py` and `fetch_url` reads it, because two files holding one
+number is the state a pair is in just before it stops being a pair. Half
+an abstract is still an abstract; half a URL is a fetchable-looking
+string that is not the resource, and no production code consumes
+`pdf_url` or either `full_*_url` -- the only references are the three
+lines that build them, so they exist to be shown and fetched.
+
+### S05-01's third bullet turned out to be the row count
+
+The bullet asks for a byte ceiling on the `ddgs` response, and that is
+not available: the library buffers the body and owns the socket, so
+nothing above it sees bytes. What it CAN bound is what it keeps -- and
+measured, it was keeping everything:
+
+```
+web_search  asked for 5, provider gave 5000 -> 5000 results
+arxiv_search asked for 5, feed had 5000      -> 5000 results
+
+ArxivSearchParams max_results bound: [Ge(ge=1), Le(le=20)]
+WebSearchParams   num_results bound: [Ge(ge=1), Le(le=10)]
+```
+
+**Both schemas advertise a bound and neither enforced it on the way
+out**, so every per-value cap above was multiplied by a number nothing
+bounded. A62 keeps a documented bound rather than inventing a policy,
+which is why it is a slice. arXiv's `total_results` is deliberately
+untouched: its whole job is saying what was NOT returned, and cutting it
+with the rows would delete the signal that there is more.
+
+### S03-02 measured worse than its rating, and this repo had already claimed the property
+
+`dispatch()` has exactly two `return`s -- the refusal early-return and
+the one at the bottom -- and only the second passed `check_output_policy`.
+Driven through it:
+
+```
+spawn_subagent unknown-agent refusal:
+  TOKEN IN RESULT    : True
+  text               : "Unknown agent: '<the whole 40-character
+                        ghp_ token, verbatim>'
+                        is not one of this harness's agents."
+  redactor WOULD cut : True   (CONTROL: the token is recognised)
+check_input_policy on the SAME params:
+  'spawn_subagent call refused by policy: an argument contains what
+   looks like a credential'
+```
+
+Of the eight tools carrying a `refusal_check`, **seven render a field
+name and a problem and never a value** -- `invalid_params`' discipline,
+swept over every registered param model and every wrong-typed shape, zero
+echoes. The eighth interpolates the model-supplied `agent_name`. So the
+finding's premise, "no reachable secret-bearing refusal input", was
+false: the whole credential reached the model and the transcript.
+
+**And the refusal returns ABOVE `check_input_policy`, which refuses those
+same params.** One path, both scanners skipped -- on a surface where §25
+(R5) argues the input half exists precisely because "the parameters were
+chosen by a model reading an attacker's web page".
+
+**`docs/ARCHITECTURE.md` asserted the invariant in the same breath as the
+workaround that existed because it did not hold.** Batch 146 wrote that
+"every result `dispatch()` returns" passes the redactor, "including its
+own error results -- **the refusal path was the first member of that
+set**", inside the parenthesis explaining why `invalid_params` renders
+the field and never the value. The refusal path was not a member of that
+set. A reader checking the structure found it documented as handled,
+which is the most likely reason this was read as S4 rather than measured.
+
+The fix is the SINK, not the producer: `spawn_subagent` still names the
+agent it could not find, because an ordinary mistyped name is what makes
+that refusal actionable, and a fix that stopped interpolating it would
+have passed the redaction test by making the message useless.
+
+**`tools/base.py`'s rule stays and its reason changes** (A60). As written
+it said the refusal path "is the one result path that does NOT pass
+through the output redactor" -- true, and the hole this closes. The rule
+survives because the redactor it now passes through is a pattern GUESS:
+register item 52 measured sixteen of twenty-two credential shapes
+surviving it, and five were re-confirmed this batch against a `ghp_`
+control it does catch:
+
+```
+item 52 re-drive -- does the redactor still miss these?
+  github_pat_    survives=True
+  gho_           survives=True
+  sk-proj-       survives=True
+  npm_           survives=True
+  Bearer         survives=True
+  ghp_ CONTROL   survives=False
+```
+
+A refusal that does not echo cannot leak what no pattern knows.
+
+### A fourth defect, in the function being rewritten
+
+`web_search._normalize` did `r.get("title", "(untitled)")`, which
+substitutes only for an ABSENT key -- and `{"title": null}` is a present
+one with a null value, which is the lesson `tools/base.py` states for
+tool arguments arriving from the provider end instead of the model end.
+Measured, one malformed row raised `ValidationError` out of `_normalize`,
+which `run` caught as a failed attempt, **retried twice**, and reported
+as `"search failed after 3 attempts: 1 validation error for
+SearchResult"`. Ten good results lost to one bad one, plus two pointless
+re-queries of the provider.
+
+`arxiv._parse_atom_feed` fixed the identical defect in batch 117 --
+"SKIPPED, NOT RAISED ... Raising here aborted the whole search over one
+malformed entry" -- and the cure was one file over the whole time. A61
+applies it: the helper answers `None` for a non-string and the CALLER
+decides what that means, because the two tools answer differently and
+should. `web_search` substitutes its existing placeholder, and drops a
+row only when the `url` -- the result's identity -- is missing or
+unusable, which is the call that function already made for a url its
+policy filter refuses.
+
+### The controls found a missing test again
+
+**C18 survived.** It changed the truncation flag from measuring the
+REDACTED length to measuring the raw one, and both targets stayed green,
+because every other row in the file uses clean text where the two lengths
+are equal. The case only this distinction sees:
+
+```
+raw len      621
+redacted len 591            (cap 600)
+flag on REDACTED length (shipped): False
+flag on RAW length (the control)  : True
+```
+
+`[REDACTED]` is ten characters where a `ghp_` token is forty, so
+redaction can bring a value back under the cap -- and a flag read off the
+raw length then claims the abstract was cut AND offers a
+`full_summary_url` to recover text the model already has in full. So the
+assertion has to be on a value redaction SHRINKS, and that test exists
+because a control proved it missing. **Second batch running** that a
+control has found a test the batch had not thought to write (batch 155's
+C13 was the first), which is now the strongest argument in the
+convention's favour.
+
+### Register item 53's cheaper half
+
+`_normalize`'s comment claimed "An IP LITERAL is still checked". Measured
+with `resolve=False`, which is what that filter uses:
+`http://2130706433/` (decimal for 127.0.0.1), `http://0x7f.0.0.1/` and
+`http://0x7F000001/` are all **allowed** -- `ipaddress.ip_address` parses
+none of them, so the "name is taken on trust" branch takes them. All
+three are refused on the resolving path, which is the only socket-opener
+in the scope, so no SSRF follows. Leaving a claim measured false in the
+function being rewritten is how a batch creates defect shape 9 in the
+file it is repairing, so the comment now says what the code does. **The
+behaviour half stays open as item 53**, and the item now says which half
+is which -- a comment that is right is the reason a later reader might
+think the behaviour is too.
+
+### Verification
+
+Suite **7141 -> 7212**: `test_paging` 94 -> 121,
+`test_redact_before_cut` 77 -> 108, `test_tool_failure_containment`
+18 -> 27, `test_tool_arguments` 27 -> 31. Controls **27 of 27** (23
+KILLED, four that must not die: the caps RAISED past every probe, both
+warnings reworded with the same facts, and the refusal string reworded),
+with all six held files sha256-restored.
+
+`ruff check .` clean. The decision-id gate caught nothing this batch --
+production cites the BATCH, which is now habit. A different gate caught
+something new: `_DEFINITION_LEAD` in `test_docs_consistency.py` reads a
+line LEADING with a bolded `[A-Z]\d+` as a decision definition, so
+`**S05-01 NAMES FOUR FIELDS...` opening a paragraph registered as
+defining decision **S5** and the claimed-range gate reported the S family
+as under-claimed. §72 avoided this by accident, its paragraphs opening
+with words; §73 does it on purpose.
+
+FIX-NOW: **86 done, 0 open.** The queue is closed.

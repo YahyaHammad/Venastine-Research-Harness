@@ -1049,22 +1049,22 @@ Both `OWNER-DECISION` findings were then ruled and fixed (136, 137), and batch 1
 | 138 | the `DEFER`/`KNOWN`/`ACCEPTED` tranche | `docs/TECHNICAL_DEBT.md` 49-85 | 3/3 |
 
 **This table stops at 138 and the work did not** (noted batch 150). Batches
-139-155 cleared eleven more surfaces -- secrets/logging/json_store, `tui/`
+139-156 cleared eleven more surfaces -- secrets/logging/json_store, `tui/`
 lifecycle and rendering, file and doc tools, loop + client, compaction +
 sessions, `core/reasoning/`, `agents/` + `skills/` + `mcp_client/`, test
 infrastructure, the headless shell, and project scaffolding + prompts --
 and none of them added a row here. **With batch 153 every per-surface
 table is CLEAR**; batch 154 then cleared the persistence group (S09-01 to
-S09-04) and batch 155 the config-and-trust group (S08-01 to S08-03), and the three
-findings left are the self-contained tail. **`review/TRIAGE.md` is the live index**
+S09-04), batch 155 the config-and-trust group (S08-01 to S08-03) and batch 156
+the last three (S05-01, S05-02, S03-02). **The `FIX-NOW` queue is closed.** **`review/TRIAGE.md` is the live index**
 and is updated per batch; the per-batch narrative is `docs/DEVLOG.md`, which
 is where a row's worth of detail actually goes. The table is kept as the
 record of the `BLOCKS-MERGE` tranche and the two owner rulings, which is
 what it was built for, rather than extended into a third copy of a count
 that would then drift -- which is the defect shape this marathon spends most
 of its time finding. The paragraph above it says "what is left is the 86
-distinct `FIX-NOW` findings", and that was true when it was written: **3
-are left as of batch 155** -- a figure batch 152 had to correct before it
+distinct `FIX-NOW` findings", and that was true when it was written: **0
+are left as of batch 156** -- a figure batch 152 had to correct before it
 could state it, since this count and `review/TRIAGE.md`'s per-surface
 tables had disagreed by four since batch 142. See that batch's DEVLOG
 entry; the tables partition the 86 exactly and are what both now say.

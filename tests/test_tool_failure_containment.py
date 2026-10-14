@@ -433,3 +433,110 @@ class TestTheLoopContainsAnUnknownToolName:
 
         with pytest.raises(ValueError, match="Unknown tool"):
             live.dispatch("never-registered-anywhere", {})
+
+
+class TestOneMalformedRowDoesNotLoseTheSearch:
+    """A61 (batch 156). `arxiv._parse_atom_feed` learned this in batch 117
+    -- "SKIPPED, NOT RAISED ... Raising here aborted the whole search over
+    one malformed entry" -- and `web_search._normalize` never did.
+
+    Measured (batch 156) before the fix: a single DDGS row with
+    `{"title": null}` raised `ValidationError` out of `_normalize`, which
+    `run` caught as a failed attempt, RETRIED TWICE, and then reported as
+    "search failed after 3 attempts: 1 validation error for SearchResult".
+    Ten good results lost to one malformed one, plus two pointless
+    re-queries of the provider.
+
+    THE KEY IS PRESENT, which is the whole trap: `r.get("title",
+    "(untitled)")` substitutes only for an ABSENT key, and `{"title":
+    null}` is a present one with a null value. `tools/base.py` states this
+    for tool arguments ("a key may be missing, misspelled, or present with
+    a value of the wrong type"); it is the same lesson arriving from the
+    provider end instead of the model end.
+    """
+
+    @pytest.mark.parametrize("bad", [
+        None, 123, ["x"], {"k": "v"}, True,
+    ], ids=["null", "int", "list", "dict", "bool"])
+    def test_a_wrong_typed_title_does_not_fail_the_search(self, mocker, bad):
+        from tools.builtin import web_search
+
+        web_search._cache.clear()
+        rows = [{"title": "Good", "href": "https://example.com/a",
+                 "body": "b"},
+                {"title": bad, "href": "https://example.com/b", "body": "b"}]
+        mocker.patch.object(web_search, "_call_ddgs", return_value=rows)
+
+        result = web_search.run({"query": "entropy"})
+
+        assert "error" not in result, result
+        assert result["result_count"] == 2
+        assert result["results"][0]["title"] == "Good"
+
+    def test_a_wrong_typed_snippet_does_not_fail_the_search(self, mocker):
+        from tools.builtin import web_search
+
+        web_search._cache.clear()
+        mocker.patch.object(
+            web_search, "_call_ddgs",
+            return_value=[{"title": "t", "href": "https://example.com/a",
+                           "body": 123}])
+
+        result = web_search.run({"query": "entropy"})
+
+        assert "error" not in result, result
+        assert result["results"][0]["snippet"] == ""
+
+    def test_the_provider_is_called_once_not_three_times(self, mocker):
+        """The cost half, and the one a result-shape assertion misses: the
+        retry loop treated a malformed row as a transient outage and asked
+        the provider twice more for the same broken answer."""
+        from tools.builtin import web_search
+
+        web_search._cache.clear()
+        calls = []
+
+        def counting(*a, **kw):
+            calls.append(a)
+            return [{"title": None, "href": "https://example.com/a",
+                     "body": "b"}]
+
+        mocker.patch.object(web_search, "_call_ddgs", counting)
+        web_search.run({"query": "entropy"})
+
+        assert len(calls) == 1, (
+            f"the provider was asked {len(calls)} times for one malformed "
+            f"row")
+
+    def test_a_row_that_is_not_a_row_at_all_is_skipped(self, mocker):
+        from tools.builtin import web_search
+
+        web_search._cache.clear()
+        mocker.patch.object(
+            web_search, "_call_ddgs",
+            return_value=["not a dict",
+                          {"title": "Good", "href": "https://example.com/a",
+                           "body": "b"}])
+
+        result = web_search.run({"query": "entropy"})
+
+        assert result["result_count"] == 1
+        assert result["results"][0]["title"] == "Good"
+
+    def test_a_search_where_every_row_is_malformed_still_answers(
+            self, mocker):
+        """Not an error, and not a crash: an empty result set with the
+        tool's own "No results found." message, which is a thing the model
+        can act on."""
+        from tools.builtin import web_search
+
+        web_search._cache.clear()
+        mocker.patch.object(web_search, "_call_ddgs",
+                            return_value=[{"title": None, "href": None,
+                                           "body": None}])
+
+        result = web_search.run({"query": "entropy"})
+
+        assert "error" not in result, result
+        assert result["result_count"] == 0
+        assert result["message"]

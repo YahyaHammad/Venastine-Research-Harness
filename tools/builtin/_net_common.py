@@ -5,11 +5,17 @@ What the two network-backed search tools share. `_math_common.py`'s
 precedent, one directory over: a private module the built-in tools import
 from, never registered and never advertised.
 
-TODAY THAT IS ONE THING: the in-process response cache. `web_search.py` and
-`arxiv.py` each carried a `_cache_get` / `_cache_set` pair that was
+TWO THINGS NOW. The first is the in-process response cache: `web_search.py`
+and `arxiv.py` each carried a `_cache_get` / `_cache_set` pair that was
 identical apart from the type of the value being stored, plus a
 `CACHE_TTL_S = 300` each, plus a bare dict each. Three copies of an expiry
 rule is how one of them comes to be measured in minutes.
+
+The second is `ThirdPartyText` (batch 156, ROADMAP_v3 §73), which is where
+the two search tools now bound and redact the strings they did not write.
+It is here rather than in either tool for the reason the cache is: both
+were doing the same thing to the same kind of value, and the one that got
+it wrong got it wrong in the half the other had already fixed.
 
 There are THREE callers now -- `fetch_url.py` joined them in ROADMAP_v3 §51 --
 and the third is why §52 gave this class a size bound as well as a time one.
@@ -25,9 +31,14 @@ a factory would make the params class harder to read to save two lines.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from typing import Any, Optional
+
+from safety.policy_enforcement import redact_output_text
+
+logger = logging.getLogger(__name__)
 
 # ROADMAP_v3 §52 (RB6). How many entries any one of these may hold.
 #
@@ -50,6 +61,115 @@ from typing import Any, Optional
 # body to ~64 KB whatever the encoding, so PG6's refusal to raise that cap is
 # what turns this count into a memory bound at all.
 MAX_ENTRIES = 128
+
+
+# ROADMAP_v3 §73 (A58). How long a URL this harness is willing to SHOW the
+# model may be.
+#
+# DERIVED, NOT PICKED, and the derivation is the argument for dropping an
+# over-long URL rather than cutting it: `fetch_url` already bounds the URL
+# the model may ASK for, at `max_length=400` on `FetchURLParams.url`.
+# Measured (batch 156), a 401-character URL comes back from fetch_url's own
+# gate as an "Invalid arguments" refusal while a 400-character one is
+# accepted. So a longer URL is one THIS HARNESS refuses to take, and
+# offering it in a search result is offering a route to nowhere.
+#
+# ONE DEFINITION: `fetch_url` reads it from here rather than spelling 400
+# again. The two were the same number in two files, which is the state a
+# pair of numbers is in just before it stops being a pair.
+MAX_URL_CHARS = 400
+
+
+class ThirdPartyText:
+    """One tool call's worth of strings nobody here wrote, REDACTED and
+    THEN cut.
+
+    ORDER IS THE WHOLE POINT, and it is RB1's point restated for the two
+    tools RB1 did not reach. `fetch_url` redacts its whole body above both
+    the hold and the slice, because a pattern only matches what it can see
+    whole; `web_search` and `arxiv_search` cut first and let
+    `registry.dispatch`'s `check_output_policy` redact the piece that was
+    kept. A fixed-length credential straddling such a cut is then invisible
+    to both halves -- the kept prefix is not the token and the dropped
+    suffix is gone. Measured (batch 156) at all three of their cut points:
+    a `ghp_` token survived post-hoc redaction at 36 of the 39 offsets it
+    could straddle, and redacting the whole value first caught every one.
+
+    TWO KINDS OF VALUE, because a cut means different things to them (A58).
+    `text()` cuts and flags: half an abstract is still an abstract, and PG4
+    says the flag is owed. `url()` DROPS and flags: half a URL is not a
+    URL, it is a fetchable-looking string that is not the resource, and
+    `pdf_url` and arXiv's `full_*_url` pair exist precisely to be the route
+    the model takes to recover what was cut. A broken route offered as a
+    route is worse than an absent one, which the flag makes visible.
+
+    TOTAL OVER WHATEVER THE PROVIDER EMITTED, for the reason `tools/base.py`
+    gives about tool arguments: a key that is present with a wrong-typed
+    value is not an absent key, and `r.get("title", "(untitled)")` returns
+    None for `{"title": null}` rather than the default. Both accessors
+    answer None for a non-string instead of raising, and the caller decides
+    what an absent value means -- which is a decision the two tools make
+    differently and should (A61).
+
+    ONE WARNING PER CALL, not per value (#49, RB2). Redacting here means
+    `check_output_policy` finds nothing left to alter, so the obligation to
+    say that something WAS altered moves here with the redaction; and a
+    feed with twenty-five authors must not produce twenty-five warning
+    lines. The count is carried on the instance and `report()` spends it.
+    The match is never echoed, for the reason `check_output_policy` and
+    `fetch_url._redacted` both state: this function exists because
+    something credential-shaped was found, so quoting it to say so would
+    put it in app.log and every sink a WARNING reaches.
+    """
+
+    def __init__(self, tool: str) -> None:
+        self._tool = tool
+        self._redacted = 0
+
+    def text(self, value: Any, cap: int) -> tuple:
+        """`(text, truncated)` -- `value` redacted and THEN cut to `cap`.
+
+        `(None, False)` for anything that is not a string, so a caller can
+        tell "the provider did not give me this" from "it gave me an empty
+        one" and choose its own substitute.
+
+        THE FLAG COUNTS REDACTED CHARACTERS, which is RB3's consequence
+        arriving here: redaction can SHRINK a value past the cap, and when
+        it does there is nothing further the cut is withholding. A flag
+        measured on the raw length would claim there is.
+        """
+        if not isinstance(value, str):
+            return None, False
+        clean = self._clean(value)
+        return clean[:cap], len(clean) > cap
+
+    def url(self, value: Any, cap: int = MAX_URL_CHARS) -> tuple:
+        """`(url, withheld)` -- a URL past `cap` is DROPPED, not cut (A58).
+
+        `(None, False)` for a non-string or an empty one: nothing was
+        withheld, there was nothing there. `(None, True)` says a URL was
+        found and is not being shown, which is the fact the flag carries.
+        """
+        if not isinstance(value, str) or not value:
+            return None, False
+        clean = self._clean(value)
+        if len(clean) > cap:
+            return None, True
+        return clean, False
+
+    def _clean(self, value: str) -> str:
+        clean = redact_output_text(value)
+        if clean != value:
+            self._redacted += 1
+        return clean
+
+    def report(self) -> None:
+        """The one warning this call owes (#49), or silence."""
+        if self._redacted:
+            logger.warning(
+                "Output policy altered %s result: credentials replaced in "
+                "%d value(s) before they were cut.",
+                self._tool, self._redacted)
 
 
 class TTLCache:

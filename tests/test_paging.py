@@ -46,6 +46,7 @@ import pytest
 
 from core.reasoning.source_corpus import MAX_DOCUMENT_CHARS, SourceCorpus
 from tools.builtin import arxiv, fetch_url, web_search
+from tools.builtin._net_common import MAX_URL_CHARS
 
 URL = "https://example.com/doc"
 BLOCKED = "https://blocked.example/page"
@@ -561,7 +562,9 @@ class TestTheCorpusHoldsWhatTheModelRead:
 # ===========================================================================
 
 def _feed(n_entries, start_at=0, summary_chars=100, total=None,
-          n_authors=1, title_chars=None, n_categories=1):
+          n_authors=1, title_chars=None, n_categories=1,
+          author_chars=None, category_chars=None, id_chars=None,
+          pdf_chars=None, summary_text=None):
     """An Atom feed in arXiv's own shape, including the OpenSearch elements
     the real API returns -- measured against it in batch 105.
 
@@ -570,6 +573,12 @@ def _feed(n_entries, start_at=0, summary_chars=100, total=None,
     existing callers changed. `title_chars=None` keeps the short
     `Paper <n>` title rather than substituting a padded one, because a test
     about paging should not have to think about a title at all.
+
+    `author_chars`, `category_chars`, `id_chars` and `pdf_chars` are batch
+    156 and follow the same rule for the same reason: each pads ONE VALUE
+    rather than lengthening a list, which is the axis batch 126 did not
+    ask about, and each defaults to None so that every caller written
+    before them is untouched.
     """
     def one(i):
         number = 2000 + start_at + i
@@ -577,18 +586,27 @@ def _feed(n_entries, start_at=0, summary_chars=100, total=None,
                  else "T" * title_chars)
         # Distinct names: an identical one repeated would not catch a cut
         # that kept the LAST n rather than the first n.
-        authors = "".join(f"<author><name>Author {a}</name></author>"
-                          for a in range(n_authors))
-        categories = "".join(f'<category term="cs.A{c}"/>'
-                             for c in range(n_categories))
+        authors = "".join(
+            "<author><name>%s</name></author>"
+            % (f"Author {a}" if author_chars is None else "A" * author_chars)
+            for a in range(n_authors))
+        categories = "".join(
+            '<category term="%s"/>'
+            % (f"cs.A{c}" if category_chars is None else "C" * category_chars)
+            for c in range(n_categories))
+        identifier = (f"{number}.00001v1" if id_chars is None
+                      else "i" * id_chars)
+        pdf = (f"http://arxiv.org/pdf/{number}.00001v1" if pdf_chars is None
+               else "http://arxiv.org/pdf/" + "p" * pdf_chars)
         return f"""<entry>
-          <id>http://arxiv.org/abs/{number}.00001v1</id>
+          <id>http://arxiv.org/abs/{identifier}</id>
           <title>{title}</title>
-          <summary>{'s' * summary_chars}</summary>
+          <summary>{summary_text if summary_text is not None
+                    else 's' * summary_chars}</summary>
           <published>2024-01-0{(i % 9) + 1}T00:00:00Z</published>
           {authors}
           {categories}
-          <link title="pdf" href="http://arxiv.org/pdf/{number}.00001v1"/>
+          <link title="pdf" href="{pdf}"/>
         </entry>"""
 
     entries = "".join(one(i) for i in range(n_entries))
@@ -1214,3 +1232,396 @@ class TestTheSchemasSayHowToPage:
         assert field in schema["properties"]
         assert field not in schema.get("required", [])
         assert schema["properties"][field].get("description")
+
+
+# ===========================================================================
+# ---- A58: the caps bounded the lists and not the values in them -----------
+# ===========================================================================
+
+class TestTheCapsBoundTheVALUESAndNotOnlyTheLists:
+    """Batch 156. Batch 126 asked "which axis" and answered it for the
+    LISTS: 25 authors, 20 categories, 300 characters of title, 600 of
+    abstract. It never asked the same question of the values IN those
+    lists, and nothing bounded them.
+
+    Measured (batch 156) through the real `_parse_atom_feed`: a
+    5,000-character `<name>`, a 5,000-character category `term`, a
+    5,021-character pdf href and a 5,000-character `<id>` all passed
+    through byte-for-byte, while the 5,000-character title in the same
+    entry was cut to 300 with its flag -- which is the control that proves
+    the probe was reaching the caps that do exist. 25 authors at 5,000
+    characters each is 125,000 characters of model-facing text that every
+    count-based cap reports as bounded.
+    """
+
+    def test_one_enormous_author_name_is_cut(self, mocker):
+        mocker.patch.object(arxiv, "_call_arxiv_api",
+                            return_value=_feed(1, author_chars=5000))
+
+        entry = arxiv.run({"keywords": "x"})["results"][0]
+
+        assert len(entry["authors"][0]) == arxiv._MAX_AUTHOR_CHARS
+
+    def test_one_enormous_category_term_is_cut(self, mocker):
+        mocker.patch.object(arxiv, "_call_arxiv_api",
+                            return_value=_feed(1, category_chars=5000))
+
+        entry = arxiv.run({"keywords": "x"})["results"][0]
+
+        assert len(entry["categories"][0]) == arxiv._MAX_CATEGORY_CHARS
+
+    def test_a_full_list_of_enormous_names_is_bounded_on_both_axes(self):
+        """The product, which is the number that matters: neither cap alone
+        bounds 100 authors of 5,000 characters each."""
+        entries, _ = arxiv._parse_atom_feed(
+            _feed(1, n_authors=100, author_chars=5000))
+
+        authors = entries[0]["authors"]
+        assert len(authors) == arxiv._MAX_AUTHORS
+        assert max(len(name) for name in authors) == arxiv._MAX_AUTHOR_CHARS
+        assert (sum(len(name) for name in authors)
+                <= arxiv._MAX_AUTHORS * arxiv._MAX_AUTHOR_CHARS)
+
+    def test_an_ordinary_entry_is_byte_identical(self):
+        """The control every row above needs. These caps are measured
+        against the largest LEGITIMATE shapes, so a real entry must pass
+        through untouched and carry no flag -- a cap that trims ordinary
+        values turns its own flag into noise."""
+        entries, _ = arxiv._parse_atom_feed(_feed(1, n_authors=3,
+                                                  n_categories=2))
+
+        entry = entries[0]
+        assert entry["authors"] == ["Author 0", "Author 1", "Author 2"]
+        assert entry["categories"] == ["cs.A0", "cs.A1"]
+        assert entry["arxiv_id"] == "2000.00001v1"
+        assert entry["pdf_url"] == "http://arxiv.org/pdf/2000.00001v1"
+        for flag in ("id_truncated", "pdf_url_truncated", "title_truncated",
+                     "categories_truncated", "authors_truncated"):
+            assert flag not in entry, flag
+
+
+class TestAURLIsDroppedRatherThanCut:
+    """A58. Half an abstract is still an abstract; half a URL is a
+    fetchable-looking string that is not the resource. `pdf_url` and the
+    `full_*_url` pair exist to BE the route the model takes, so a cut one
+    spends a tool call proving itself broken.
+    """
+
+    def test_an_over_long_pdf_url_is_absent_and_flagged(self, mocker):
+        mocker.patch.object(arxiv, "_call_arxiv_api",
+                            return_value=_feed(1, pdf_chars=5000))
+
+        entry = arxiv.run({"keywords": "x"})["results"][0]
+
+        assert entry["pdf_url"] is None
+        assert entry["pdf_url_truncated"] is True
+
+    def test_a_pdf_url_at_the_bound_is_kept_whole(self, mocker):
+        """The boundary from the other side, so the drop is a bound rather
+        than a refusal of everything long."""
+        pad = MAX_URL_CHARS - len("http://arxiv.org/pdf/")
+        mocker.patch.object(arxiv, "_call_arxiv_api",
+                            return_value=_feed(1, pdf_chars=pad))
+
+        entry = arxiv.run({"keywords": "x"})["results"][0]
+
+        assert len(entry["pdf_url"]) == MAX_URL_CHARS
+        assert "pdf_url_truncated" not in entry
+
+    def test_a_search_result_with_an_unusable_url_is_dropped_whole(
+            self, mocker):
+        """For `web_search` the url is the result's identity, so dropping
+        it drops the result -- the same call `_normalize` already makes for
+        a url its policy filter refuses, and the one
+        `_parse_atom_feed` makes for an entry with no id."""
+        rows = _hits(1) + [{"title": "t",
+                            "href": "https://example.com/" + "u" * 500,
+                            "body": "b"}]
+        mocker.patch.object(web_search, "_call_ddgs", return_value=rows)
+
+        result = web_search.run({"query": "x"})
+
+        assert result["result_count"] == 1
+        assert result["results"][0]["url"] == "https://example.com/r0"
+
+    def test_the_url_bound_is_the_one_fetch_url_accepts(self):
+        """A RELATION, not a third copy of 400.
+
+        This is what makes the drop a derivation rather than a taste: a URL
+        these tools offer past `fetch_url`'s own `max_length` is a route
+        this harness refuses to take, so offering it is offering a route to
+        nowhere. Read off the live pydantic field, because the point is
+        that the two cannot drift -- two files holding one number is the
+        state a pair is in just before it stops being a pair.
+        """
+        bound = [getattr(m, "max_length", None)
+                 for m in fetch_url.FetchURLParams.model_fields["url"].metadata
+                 if getattr(m, "max_length", None) is not None]
+
+        assert bound == [MAX_URL_CHARS], (
+            "fetch_url's URL bound and the one the search tools offer "
+            "against are no longer the same number")
+
+
+class TestACutIdTakesItsRecoveryRoutesWithIt:
+    """A58's sharpest case. `full_summary_url` and `full_authors_url` are
+    both `https://arxiv.org/abs/{arxiv_id}`, so an id that was cut yields
+    a URL that 404s -- and PG4 exists so the model can reach what it
+    WANTED. A broken route offered as a route is worse than an absent one,
+    which is why the flag says the id was cut and the keys stay away.
+    """
+
+    def test_a_cut_id_is_flagged(self, mocker):
+        mocker.patch.object(arxiv, "_call_arxiv_api",
+                            return_value=_feed(1, id_chars=5000))
+
+        entry = arxiv.run({"keywords": "x"})["results"][0]
+
+        assert len(entry["arxiv_id"]) == arxiv._MAX_ID_CHARS
+        assert entry["id_truncated"] is True
+
+    def test_neither_recovery_route_is_offered_for_a_cut_id(self, mocker):
+        """Both routes, and the conditions that would otherwise produce
+        them: a long abstract AND a long author list, so each `if` above is
+        reached and each declines."""
+        mocker.patch.object(
+            arxiv, "_call_arxiv_api",
+            return_value=_feed(1, id_chars=5000, summary_chars=5000,
+                               n_authors=100))
+
+        entry = arxiv.run({"keywords": "x"})["results"][0]
+
+        assert entry["summary_truncated"] is True
+        assert entry["authors_truncated"] is True
+        assert "full_summary_url" not in entry
+        assert "full_authors_url" not in entry
+
+    def test_an_ordinary_id_still_gets_both_routes(self, mocker):
+        """The control: the guard must be about the id being CUT, not
+        about the routes being gone."""
+        mocker.patch.object(
+            arxiv, "_call_arxiv_api",
+            return_value=_feed(1, summary_chars=5000, n_authors=100))
+
+        entry = arxiv.run({"keywords": "x"})["results"][0]
+
+        assert entry["full_summary_url"].endswith(entry["arxiv_id"])
+        assert entry["full_authors_url"].endswith(entry["arxiv_id"])
+
+
+class TestWebSearchBoundsItsTitleToo:
+    """S05-01 (A58, batch 156): the field named for `web_search`, and the one the
+    snippet beside it had covered since §51. Measured, a 5,000-character
+    title came back whole from the same result whose snippet was cut to
+    300 with a flag.
+    """
+
+    def test_a_long_title_is_cut_and_says_so(self, mocker):
+        rows = [{"title": "T" * 5000,
+                 "href": "https://example.com/r0",
+                 "body": "b" * 50}]
+        mocker.patch.object(web_search, "_call_ddgs", return_value=rows)
+
+        hit = web_search.run({"query": "x"})["results"][0]
+
+        assert len(hit["title"]) == web_search.MAX_TITLE_CHARS
+        assert hit["title_truncated"] is True
+
+    def test_an_ordinary_title_carries_no_flag(self, mocker):
+        mocker.patch.object(web_search, "_call_ddgs", return_value=_hits(1))
+
+        hit = web_search.run({"query": "x"})["results"][0]
+
+        assert hit["title"] == "Result 0"
+        assert hit["title_truncated"] is False
+
+    def test_the_title_gets_a_flag_and_no_route(self):
+        """The asymmetry `arxiv.py` already argues for the same field: a
+        title past the cap is a malformed result rather than a long one,
+        and the route to the page is the `url` sitting next to it either
+        way. A `full_title_url` here would be a key naming a route this
+        tool has no business inventing."""
+        assert "full_title_url" not in web_search.SearchResult.model_fields
+        assert "title_truncated" in web_search.SearchResult.model_fields
+
+
+class TestRedactionCanPutAValueBackUnderTheCap:
+    """RB3's consequence, arriving at the two search tools (A59).
+
+    THIS CLASS EXISTS BECAUSE A CONTROL PROVED IT MISSING. C18 changed the
+    truncation flag from measuring the redacted length to measuring the raw
+    one, and every other row in this file stayed green -- they all use
+    clean text, where the two lengths are equal. So the distinction had no
+    demonstrated consequence in the suite even though it has one in the
+    code, which is B4's test and the same thing batch 155's C13 found one
+    batch earlier.
+
+    The case: redaction REPLACES, and `[REDACTED]` is ten characters where
+    a `ghp_` token is forty. Measured, a 621-character abstract carrying
+    one comes back as 591 against a cap of 600. A flag read off the raw
+    length then claims the abstract was cut AND offers a
+    `full_summary_url` for text the model already has in full -- a false
+    claim plus a tool call that answers nothing.
+    """
+
+    def _shrinking_summary(self):
+        """An abstract over the cap raw and under it redacted.
+
+        Derived from the live cap and the live redactor rather than
+        hardcoded, so a later cap change cannot quietly make this test
+        measure something else -- and both preconditions are ASSERTED
+        below, because a fixture computed from the code under test is
+        exactly the kind that passes by accident.
+        """
+        from safety.policy_enforcement import redact_output_text
+
+        token = "ghp_" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8"
+        filler = "some ordinary prose about entropy here. "
+        pad = arxiv.MAX_SUMMARY_CHARS - len(token) + 15
+        body = (filler * 40)[:pad] + token + " tail."
+
+        assert len(body) > arxiv.MAX_SUMMARY_CHARS, (
+            "the fixture is not over the cap, so nothing is being cut")
+        assert len(redact_output_text(body)) <= arxiv.MAX_SUMMARY_CHARS, (
+            "redaction does not bring the fixture back under the cap, so "
+            "this test cannot see the distinction it is about")
+        return body
+
+    def test_a_value_redaction_shrinks_under_the_cap_is_not_flagged(
+            self, mocker):
+        body = self._shrinking_summary()
+        mocker.patch.object(arxiv, "_call_arxiv_api",
+                            return_value=_feed(1, summary_text=body))
+
+        entry = arxiv.run({"keywords": "x"})["results"][0]
+
+        assert "summary_truncated" not in entry, (
+            "the abstract fits once redacted, so nothing is being "
+            "withheld by the cut and the flag claims otherwise")
+        assert "full_summary_url" not in entry, (
+            "a route was offered to recover text the model already has")
+        assert len(entry["summary"]) <= arxiv.MAX_SUMMARY_CHARS
+
+    def test_the_same_length_of_CLEAN_text_is_still_flagged(self, mocker):
+        """THE CONTROL. Without it the test above passes for a build that
+        never flags anything -- and the only difference between the two
+        fixtures is whether the over-cap characters are a credential."""
+        body = "x " + "ordinary words here " * 60
+        assert len(body) > arxiv.MAX_SUMMARY_CHARS
+        mocker.patch.object(arxiv, "_call_arxiv_api",
+                            return_value=_feed(1, summary_text=body))
+
+        entry = arxiv.run({"keywords": "x"})["results"][0]
+
+        assert entry["summary_truncated"] is True
+        assert entry["full_summary_url"]
+        assert len(entry["summary"]) == arxiv.MAX_SUMMARY_CHARS
+
+
+class TestTheRowCountIsBoundedToo:
+    """A62, and the axis that multiplies every other cap in this file.
+
+    Both schemas advertise a bound -- `num_results` is `le=10` and
+    `max_results` is `le=20` -- and neither was enforced on the way OUT.
+    Measured (batch 156): a call asking for 5 was handed 5,000 rows by the
+    provider and returned all 5,000. Per-value caps under an unbounded row
+    count are not a bound, which is batch 126's "which axis" question
+    asked a third time.
+
+    `_call_ddgs` is where S05-01's third bullet wanted a byte ceiling, and
+    it cannot have one: the library buffers the response and owns the
+    socket, so nothing above it ever sees bytes. What this layer can bound
+    is what it KEEPS, which is the quantity that reaches the model.
+    """
+
+    @pytest.mark.parametrize("asked", [1, 5, 10])
+    def test_web_search_keeps_only_what_was_asked_for(self, mocker, asked):
+        rows = _hits(5000)
+        mocker.patch.object(web_search, "_call_ddgs", return_value=rows)
+
+        result = web_search.run({"query": "x", "num_results": asked})
+
+        assert result["result_count"] == asked
+        assert len(result["results"]) == asked
+
+    @pytest.mark.parametrize("asked", [1, 5, 20])
+    def test_arxiv_keeps_only_what_was_asked_for(self, mocker, asked):
+        mocker.patch.object(arxiv, "_call_arxiv_api",
+                            return_value=_feed(200, total=99999))
+
+        result = arxiv.run({"keywords": "x", "max_results": asked})
+
+        assert len(result["results"]) == asked
+
+    def test_the_kept_rows_are_the_FIRST_ones(self, mocker):
+        """A cut that kept the LAST n satisfies every count assertion above
+        and hands back the least relevant hits -- the same property batch
+        126 asserted about the author list, one level out."""
+        mocker.patch.object(web_search, "_call_ddgs",
+                            return_value=_hits(50))
+
+        result = web_search.run({"query": "x", "num_results": 3})
+
+        assert [r["url"] for r in result["results"]] == [
+            "https://example.com/r0", "https://example.com/r1",
+            "https://example.com/r2"]
+
+    def test_arxivs_total_still_reports_what_the_QUERY_has(self, mocker):
+        """The bound must not touch `total`. Its whole job is saying what
+        was NOT returned, which a count of what was cannot -- so cutting
+        the rows and leaving the total is the correct pair, and cutting
+        both would delete the signal that there is more."""
+        mocker.patch.object(arxiv, "_call_arxiv_api",
+                            return_value=_feed(200, total=99999))
+
+        result = arxiv.run({"keywords": "x", "max_results": 5})
+
+        assert result["total_results"] == 99999
+        assert len(result["results"]) == 5
+
+    def test_a_provider_returning_FEWER_rows_is_not_padded(self, mocker):
+        """THE CONTROL. A bound that also became a floor would pass every
+        assertion above and invent results."""
+        mocker.patch.object(web_search, "_call_ddgs", return_value=_hits(2))
+
+        result = web_search.run({"query": "x", "num_results": 10})
+
+        assert result["result_count"] == 2
+
+    @pytest.mark.parametrize("name", ["web_search", "arxiv_search"])
+    def test_neither_tool_can_return_more_than_its_schema_advertises(
+            self, mocker, name):
+        """The RELATION, read off the two schemas rather than restating 10
+        and 20. This is what makes the bound a kept promise instead of a
+        third number: the figure asserted here is the one the model is
+        shown when it reads the tool description."""
+        if name == "web_search":
+            module, field, call = web_search, "num_results", "_call_ddgs"
+            params_model, payload = web_search.WebSearchParams, _hits(5000)
+            query = {"query": "x"}
+        else:
+            module, field, call = arxiv, "max_results", "_call_arxiv_api"
+            params_model = arxiv.ArxivSearchParams
+            payload = _feed(200, total=99999)
+            query = {"keywords": "x"}
+
+        ceiling = max(m.le for m in params_model.model_fields[field].metadata
+                      if hasattr(m, "le"))
+        mocker.patch.object(module, call, return_value=payload)
+        module._cache.clear()
+
+        result = module.run(dict(query, **{field: ceiling}))
+
+        assert len(result["results"]) <= ceiling, (
+            f"{name} returned more rows than its own schema advertises")
+        # The ceiling has to be reachable, or this passes on a tool that
+        # returns nothing.
+        assert len(result["results"]) == ceiling
+
+
+def _bounds(module, field):
+    """The `le` constraints on one advertised field of a tool's params."""
+    params = (web_search.WebSearchParams if module is web_search
+              else arxiv.ArxivSearchParams)
+    return [m for m in params.model_fields[field].metadata
+            if hasattr(m, "le")]

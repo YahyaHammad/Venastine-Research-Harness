@@ -43,6 +43,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
+- **§73. Three cuts the redactor ran after, and the one result path that never passed it** - **(BUILT in batch 156)** (the review marathon's last three findings, closing its `FIX-NOW` queue: `web_search` and `arxiv_search` cut their third-party text and let `registry.dispatch` redact the piece that was kept, so a `ghp_` token straddling any of the three cuts survived at 36 of the 39 offsets it could straddle -- RB1's defect in the two tools RB1 did not reach, and §52's gap register had declined to solve it generally while two such tools were already in the tree; the per-LIST caps bounded 25 authors and not the 5,000 characters each could carry, and two of the six unbounded values were named by no finding, one of them the `arxiv_id` that both recovery URLs are built from, while the row COUNT both schemas advertise a bound for was enforced in neither, so a request for five results returned all 5,000 rows a provider chose to send; and `dispatch()`'s refusal early-return was the one result path that never passed the output redactor, which `docs/ARCHITECTURE.md` had already asserted it did -- measured, a credential the model put in an `agent_name` came back whole, on a path that also returns above the input scanner written for exactly that value)
 - **§72. A consent screen the project decided the length of, and three fields a rule was stated over but never applied to** - **(BUILT in batch 155)** (the review marathon's config-and-trust surface, all three findings: the trust prompt -- the informed-consent gate for content that becomes instructions -- pasted `settings.json` and `mcp.json` whole, so 2 x 2.2 MB rendered as 4.5 MB in 30 lines with the `mcp.json` command the section exists to show at 99.9994% of the way in, while the section the finding cited as the bounded contrast was bounded on one axis of two and a 2 MB `AGENTS.md` written as one line walked straight through it; `_parse_md_file` states "ELEMENT TYPES TOO, not just the container" in a comment and `model`, `provider` and the elements of `allowed_tools` sat under it unchecked, so `model: [a, b]` loaded clean and raised `TypeError: unhashable type: 'list'` out of the effort cache; and a `config.yaml` hand-edited mid-session -- the workflow `explain()` recommends by name -- answered a `/config` with "the error is in logs/app.log", which is true and is an answer to a different question. The crash that finding reported had already been closed by batch 135 and was found by re-driving rather than by reading)
 - **§71. A guard that compared two spellings of one id, and a cap whose two halves disagreed** - **(BUILT in batch 154)** (the review marathon's persistence surface, all four findings: tier 1 of the §27 thread classification -- the tier #82 calls authoritative over every clock comparison -- compared `str(thread_id)` as the producer records it against the hex spelling sqlmodel stores, so `'a-b' in {'ab'}` was False for every id there has ever been and the tier had never relabelled one row, while all four of its tests hand-wrote the same string on both sides; `max_injected_memories: 0` hid the `remember` tool and injected a "showing the 0 most recent of 2" header with a WARNING behind it on every turn, so the model was told that memories exist and are being withheld by a run that could never reach them; `list_threads` still carried the failure model batch 75 deleted from its two siblings; and the record's shape was stated as 9 fields and four data columns in thirteen live places after T2 and E13 each grew it by a column, including a BREAKING_CHANGES row promising a key-set assertion that did not exist)
 - **§70. A trust grant that could not persist, and a file three documents kept promising about** - **(BUILT in batch 153)** (`/init`'s trust settle was put on both the success and the failure path by audit #95, and the settle itself can raise -- `grant_trust` writes the store and re-reads every file the grant covers -- from a call outside the `try` on both of them, so a trust-store I/O failure left both config files written, the project untrusted, the notice replaced by a traceback on the CLI, and on the failure path the "wrote N files before that" accounting #95 existed to add discarded with it; the pre-write capture had the same shape from the other end, where one unreadable file under `.venastine/` killed the command before it wrote anything, three functions below a sibling that catches the same error on the same file and degrades; and the context file section 44 deleted was still named as a live fact in fifteen places across eight files, eleven of them in the suite, including a promise that it "is never special-cased out of the hash" -- a guarantee about a file that is not in the hash because it does not exist)
@@ -2721,6 +2722,146 @@ leaked PID.
   because MCP is the only dynamic registrant and the composed name is its
   fact. A bound in the registry would be the fix-at-the-consumer shape
   `AGENTS.md` names by name.
+---
+
+## §73. Three cuts the redactor ran after, and the one result path that never passed it
+
+**Built in batch 156**, from the review marathon's last three `FIX-NOW`
+findings, which closes its queue -- **S05-01** (S3), **S05-02** (S3)
+and **S03-02** (S4). Five owner rulings, recorded as A58-A62. The marathon's
+86 `FIX-NOW` findings are now all closed.
+
+**THE TWO S05 FINDINGS ARE ONE DEFECT WEARING TWO NUMBERS, AND FIXING
+EITHER ALONE WOULD HAVE BEEN WORSE THAN FIXING NEITHER.** S05-02 says the
+two search tools cut their third-party text and let
+`registry.dispatch`'s `check_output_policy` redact the piece that was
+kept, so a credential straddling the cut is invisible to both halves --
+the kept prefix is not the token and the dropped suffix is gone. S05-01
+says four sibling values in the same two functions have no cap at all.
+But every cap S05-01 asks for is a NEW CUT, so adding them without
+S05-02's ordering would have manufactured four more straddle sites in the
+fields being repaired. The ordering lands first; the caps are then free.
+
+Measured through the real `_normalize` and the real `_parse_atom_feed`,
+nothing monkeypatched. A `ghp_` token straddling any of the three existing
+cuts survived post-hoc redaction at **36 of the 39 offsets it could
+straddle**, and redacting the whole value first caught every one.
+`param_digest` had already written the reason down -- "truncating first
+cuts a credential below the 20 characters its pattern needs" -- and
+`fetch_url` had already fixed the same ordering for its own body in §52
+(RB1). §52's gap register declined to solve it generally, saying "a future
+tool that returns a long body and slices it would have to make the same
+choice, and nothing mechanical forces it to". Two such tools were already
+in the tree.
+
+**THE FINDING NAMES FOUR FIELDS AND THERE ARE SIX.** Measured: a 5,000-char
+`web_search` title, a 5,000-char arXiv author `<name>`, a 5,000-char
+category `term` and a 5,021-char pdf `href` all passed through
+byte-for-byte while the title in the same entry was cut to 300 with its
+flag -- the control proving the probe reached the caps that do exist. The
+two the finding does not name are `web_search`'s own `href`, kept at 5,020
+characters, and `arxiv_id`, which is not merely displayed: it is the input
+to `full_summary_url` and `full_authors_url`, so one uncapped field was
+three uncapped values wearing one name, and a 5,000-char `<id>` made each
+route 5,022 characters long.
+
+The lists were capped and the values in them were not. 25 authors at
+5,000 characters each is 125,000 characters of model-facing text that
+every count-based cap reports as bounded -- batch 126's "which axis"
+question asked one level down, which is where it had not been asked.
+
+**THE THIRD FINDING MEASURED WORSE THAN ITS RATING, AND THE DOCUMENT HAD
+ALREADY CLAIMED THE PROPERTY.** The finding is rated S4 on the premise
+that there is "no reachable secret-bearing refusal input, only the
+unguarded structural bypass". `dispatch()` has exactly two `return`s --
+the refusal early-return and the one at the bottom -- and only the second
+passed `check_output_policy`. Driven through it: of the eight tools
+carrying a `refusal_check`, seven render a field name and a problem and
+never a value, which is `invalid_params`' discipline and holds across
+every registered param model and every wrong-typed shape, zero echoes.
+The eighth interpolates the model-supplied `agent_name`, so
+`spawn_subagent` with a `ghp_` token in it returned **the whole
+credential** to the model and the transcript.
+
+And the harness has a scanner for precisely that input.
+`check_input_policy` refuses the same params with "an argument contains
+what looks like a credential" -- it runs BELOW the refusal return, so one
+path skipped both scanners. §25 (R5) argues the input half exists because
+"the parameters were chosen by a model reading an attacker's web page";
+this is the path that argument was not reaching.
+
+**`docs/ARCHITECTURE.md` asserted the invariant in the same sentence as
+the workaround that exists because it did not hold.** Batch 146 wrote
+that "every result `dispatch()` returns" passes the output redactor,
+"including its own error results -- the refusal path was the first member
+of that set", in the parenthesis explaining why `invalid_params` renders
+the field and never the value. The refusal path was not a member of that
+set. A reader checking the structure found it documented as handled,
+which is the most likely reason this was read as S4 rather than measured.
+
+**AND THE REPAIR TURNED UP A FOURTH DEFECT IN THE FUNCTION IT WAS
+REWRITING.** `web_search._normalize` did `r.get("title", "(untitled)")`,
+which substitutes only for an ABSENT key -- and `{"title": null}` is a
+present one with a null value, the lesson `tools/base.py` states for tool
+arguments arriving from the provider end instead of the model end.
+Measured, a single malformed row raised `ValidationError` out of
+`_normalize`, which `run` caught as a failed attempt, **retried twice**,
+and reported as "search failed after 3 attempts". Ten good results lost
+to one bad one, plus two pointless re-queries. `arxiv._parse_atom_feed`
+learned this in batch 117 -- "SKIPPED, NOT RAISED ... Raising here aborted
+the whole search over one malformed entry" -- and the cure was one file
+over the whole time.
+
+### What §73 deliberately does not change
+
+- **`fetch_url`'s body redaction.** It was already correct, and §52 is
+  where it is argued. The only change to that file is that its
+  `max_length` now READS the shared constant instead of spelling 400
+  again, because the two search tools derive their URL bound from it.
+- **`check_output_policy`.** The consumer is not the bug. "Fix at the
+  producer" is the rule the two search tools were breaking, and the
+  registry change is a call site rather than a change to what the
+  function does.
+- **The individual refusal strings, including the one that echoed.**
+  `spawn_subagent` still names the agent it could not find, because an
+  ordinary mistyped name is what makes that refusal actionable; the fix
+  is the sink, which is the one place that covers the next tool. Removing
+  the name would have passed the test by making the message useless.
+- **`tools/base.py`'s rule that a refusal must not echo a value.** Kept,
+  with its reason replaced -- see A60. The sentence that made it
+  load-bearing is exactly the hole this section closes, and the rule
+  survives on a different and weaker-looking argument that is in fact the
+  durable one.
+- **The list-count caps** (25 authors, 20 categories) and the per-value
+  caps' companions: 300 for a title, 600 for an abstract. Those were
+  measured in §51 and batch 126 and are not re-derived here.
+- **The pattern set itself.** Register item 52 holds the measured table of
+  sixteen credential shapes `redact_output_text` does not know, and it is
+  the reason A60 keeps the producer-side rule. Widening it is a product
+  decision with documented exclusions on both sides and is not this
+  section's business.
+- **`resolve=False`'s behaviour at the search filter.** Register item 53
+  stays open for it. What changed is the COMMENT, which claimed "an IP
+  LITERAL is still checked" and is false for `http://2130706433/`,
+  `http://0x7f.0.0.1/` and `http://0x7F000001/` -- all allowed there,
+  all refused by the only socket-opener in the scope. Leaving a claim
+  measured false in the function being rewritten is how a batch creates
+  defect shape 9 in the file it is repairing.
+- **`content_files()` and the MCP result path.** The first is §72's
+  business and the second is register item 48, which is what is left of
+  the producer-bound rule after this section closes the built-in
+  producers.
+
+### Design Decisions Record — §73 (A58-A62)
+
+| id | decision |
+|---|---|
+| **A58** | **Every third-party VALUE is bounded, not only the list it sits in -- and a URL-shaped one is DROPPED rather than cut.** Six fields, not the four the finding names: `web_search`'s title and `href`, and arXiv's author `<name>`, category `term`, `pdf_url` and `arxiv_id`. The caps are derived from the longest legitimate shape of each value, because a cap that trims an ordinary entry turns its own flag into noise -- an author byline ("The ATLAS and CMS Collaborations" is 32 characters) gets 200; a category `term` from arXiv's taxonomy, whose longest member is `cond-mat.stat-mech` at 18, gets 40; an id, 17 characters in its longest real form, gets 64. **The URL bound is `fetch_url`'s own `max_length`, read from one constant rather than spelled twice**, and that derivation is the argument for dropping: a URL past it is one THIS HARNESS refuses to fetch, so offering it is offering a route to nowhere. Half an abstract is still an abstract; half a URL is a fetchable-looking string that is not the resource, and `pdf_url` and the `full_*_url` pair exist precisely to BE the route. **A cut `arxiv_id` therefore takes both recovery routes with it**, since they are assembled from it -- PG4 asks for a route to what the model WANTED, and a broken one answers a question nobody asked. Every drop and every cut is flagged (#49): `id_truncated`, `pdf_url_truncated`, `title_truncated` |
+| **A59** | **The two search tools redact above every cut, through one helper, and the truncation flag counts REDACTED characters.** RB1's move applied to the two tools RB1 did not reach, in `_net_common.ThirdPartyText` rather than twice -- both were doing the same thing to the same kind of value, and the one that got it wrong got it wrong in the half the other had already fixed. **The ordering lands before the new caps, not after**, because each new cap is a new cut and the repair would otherwise have manufactured four more straddle sites. The flag reads the redacted length, which is RB3's consequence: `[REDACTED]` is ten characters where a `ghp_` token is forty, so redaction can bring a value back under the cap, and a flag measured on the raw length would then claim an abstract was cut AND offer a route to recover text the model already has in full -- measured, 621 characters becoming 591 against a cap of 600. **One warning per call rather than per value** (#49, RB2): redacting here leaves `check_output_policy` nothing to alter, so the obligation to say something WAS altered moves with the redaction, and a feed with twenty-five authors must not produce twenty-five lines |
+| **A60** | **The refusal path passes `check_output_policy`, like every other result -- and `tools/base.py`'s rule that a refusal must not echo a value stays, with a new reason.** The sink and not the producer, which is the same split as the handler containment two lines below it in the same function: a refusal string is written by whichever tool owns the gate, and the registry boundary is the one place that covers the gate nobody has written yet. **The rule above it is kept rather than retired, and its basis changes.** As written it said the refusal path "is the one result path that does NOT pass through the output redactor" -- true, and the hole this closes. The rule survives because the redactor it now passes through is a PATTERN GUESS and not a decision procedure: register item 52 measured sixteen of twenty-two credential shapes surviving it, and five of those were re-confirmed this batch against a `ghp_` control it does catch. A refusal that does not echo cannot leak what no pattern knows; one that echoes is covered only for the shapes somebody thought of |
+| **A62** | **The row COUNT is bounded to the number the caller asked for, in both tools.** The axis that multiplies every other cap in this section, and the one S05-01's third bullet is really about. Both schemas advertise a bound -- `num_results` is `le=10`, `max_results` is `le=20` -- and neither was enforced on the way OUT: measured (batch 156), a call asking for five results was handed 5,000 rows by the provider and returned all 5,000, so the per-value caps A58 adds were multiplied by a number nothing bounded. **This is a documented bound being kept rather than a new policy**, which is why it is a slice and not a refusal. The finding asks for a byte ceiling on the `ddgs` response and it cannot have one -- the library buffers the body and owns the socket, so nothing above it sees bytes -- but what this layer keeps is the quantity that reaches the model, and that it can bound. **No flag, where every other cut in this section gets one**: nothing is withheld from a caller that asked for five and received five, so the over-delivery is a provider fact for the log rather than a truncation for the result. arXiv's `total_results` is deliberately untouched, because its whole job is saying what was NOT returned and cutting it with the rows would delete the signal that there is more |
+| **A61** | **Both search tools are total over whatever the provider emitted, and a malformed row is skipped or substituted rather than fatal.** `arxiv`'s batch-117 rule applied to `web_search`, which had the identical defect for the identical reason: a present key with a null value is not an absent key, so the `"(untitled)"` default never fired and one bad row cost the whole search plus two retries. **The helper answers `None` for a non-string and the CALLER decides what that means**, because the two tools answer differently and should: `web_search` substitutes its existing placeholder for a title and an empty string for a snippet, and drops a row only when the `url` -- the result's identity, the thing that makes it citable and fetchable -- is missing or unusable, which is the call that function already made for a URL its policy filter refuses. Nothing is dropped silently: each skip and each withheld URL names the reason and never the content |
+
 ---
 
 ## §72. A consent screen the project decided the length of, and three fields a rule was stated over but never applied to

@@ -106,12 +106,25 @@ BUDGETS = frozenset({BUDGET_COMPUTE, BUDGET_IO, BUDGET_HUMAN})
 # found file_ops' two gates were the one exception in the tree, reaching
 # `os.path.join(WORKSPACE_ROOT, None)` before any prompt and any handler.
 #
-# AND A REFUSAL MUST NOT ECHO A VALUE. The refusal path returns its reason
-# as the result directly, which is the one result path that does NOT pass
-# through the output redactor -- so a refusal that interpolated the model's
-# input would be a sink the scanner never sees. `invalid_params` below
-# renders the field and the problem and never the value, which is the shape
+# AND A REFUSAL MUST NOT ECHO A VALUE. `invalid_params` below renders the
+# field and the problem and never the value, which is the shape
 # shell_sessions chose first.
+#
+# THE REASON CHANGED IN BATCH 156 AND THE RULE DID NOT. As first written
+# this said the refusal path "is the one result path that does NOT pass
+# through the output redactor", which was true and is the hole batch 156
+# closed in tools/registry.py -- measured, a `ghp_` token the model put in
+# an `agent_name` came back whole. So the sentence that made this rule
+# load-bearing is gone, and the rule stays, because the redactor it now
+# passes through is a PATTERN GUESS rather than a decision procedure:
+# register item 52 measured sixteen of twenty-two credential shapes
+# surviving it, and batch 156 re-confirmed five of those (`github_pat_`,
+# `gho_`, `sk-proj-`, `npm_`, a `Bearer` header) against a `ghp_` control
+# it does catch. A refusal that does not echo cannot leak what no pattern
+# knows; one that echoes is covered only for the shapes somebody thought
+# of. That is defence in depth rather than a belt the registry made
+# redundant -- and it is cheaper here than anywhere else, because the field
+# name is what makes a refusal actionable and the value never was.
 # ===========================================================================
 
 def invalid_params(tool_name: str, model, params) -> Optional[str]:

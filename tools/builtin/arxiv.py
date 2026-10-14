@@ -31,7 +31,7 @@ import httpx
 from defusedxml import DefusedXmlException
 from pydantic import BaseModel, Field, field_validator
 
-from tools.builtin._net_common import TTLCache
+from tools.builtin._net_common import MAX_URL_CHARS, ThirdPartyText, TTLCache
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +106,33 @@ _MAX_AUTHORS = 25
 # `_parse_atom_feed`.
 MAX_TITLE_CHARS = 300
 MAX_CATEGORIES = 20
+
+# Batch 156 (ROADMAP_v3 §73). THE CAPS ABOVE BOUND THE LISTS AND NOT THE
+# VALUES IN THEM, which is the "which axis" question of batch 126 asked
+# again one level down: `authors` kept 25 of them and `categories` 20, and
+# a single `<name>` or a single `term` could be any length at all.
+# Measured (batch 156) through the real parser, a 5,000-character author
+# name, a 5,000-character category term and a 5,021-character pdf href all
+# came back byte-for-byte while the 5,000-character title in the same entry
+# was cut to 300 with its flag -- the control that proves the probe was
+# reaching the caps.
+#
+# DERIVED, each from the longest legitimate shape of the value it bounds,
+# because a cap that trims an ordinary entry turns its own flag into noise:
+#
+#   * an author name is a person or a collaboration byline. The longest
+#     plausible is the latter ("The ATLAS and CMS Collaborations" is 32
+#     characters); 200 clears every real one several times over.
+#   * a category `term` comes from arXiv's published taxonomy, whose
+#     longest member is `cond-mat.stat-mech` at 18 characters. The longest
+#     appearing anywhere in this repository is `physics.gen-ph` at 14.
+#   * an id is `2401.00001v1` (12) in the new scheme or
+#     `math.GT/0309136v2` (17) in the old -- 17 is the longest of either
+#     form present in this repository, and 64 is not reachable by a
+#     well-formed one.
+_MAX_AUTHOR_CHARS = 200
+_MAX_CATEGORY_CHARS = 40
+_MAX_ID_CHARS = 64
 
 # One instance per tool, never shared: an equal key string from an
 # arXiv query and a web query would otherwise collide.
@@ -313,6 +340,7 @@ def _parse_atom_feed(xml_text: str) -> tuple:
     entries = root.findall("atom:entry", ATOM_NS)
     total = _total_results(root)
 
+    third = ThirdPartyText("arxiv_search")
     results = []
     for index, entry in enumerate(entries):
         raw_id = _text_of(entry, "atom:id")
@@ -332,20 +360,38 @@ def _parse_atom_feed(xml_text: str) -> tuple:
                 index + 1, len(entries),
                 "id" if raw_id is None else "title")
             continue
-        arxiv_id = raw_id.split("/abs/")[-1] if "/abs/" in raw_id else raw_id
+        raw_arxiv_id = (raw_id.split("/abs/")[-1]
+                        if "/abs/" in raw_id else raw_id)
+        # THE ID IS NOT JUST DISPLAYED, it is the input to the two recovery
+        # URLs below, so an unbounded one is three unbounded values wearing
+        # one name -- measured (batch 156), a 5,000-character `<id>` made
+        # `full_summary_url` 5,022 characters long. Cut and flagged like any
+        # other text (A58); what the cut costs is handled where the routes
+        # are built, because a route assembled from half an id is a route to
+        # nowhere and that is the one thing a route must not be.
+        arxiv_id, id_truncated = third.text(raw_arxiv_id, _MAX_ID_CHARS)
 
-        full_title = title_text.replace("\n", " ")
-        title = full_title[:MAX_TITLE_CHARS]
-        title_truncated = len(full_title) > MAX_TITLE_CHARS
-        full_summary = (_text_of(entry, "atom:summary") or "").replace("\n", " ")
-        summary = full_summary[:MAX_SUMMARY_CHARS]
+        title, title_truncated = third.text(
+            title_text.replace("\n", " "), MAX_TITLE_CHARS)
+        summary, summary_truncated = third.text(
+            (_text_of(entry, "atom:summary") or "").replace("\n", " "),
+            MAX_SUMMARY_CHARS)
         # §51 (PG8/PG4). The cap stays -- it bounds model-facing text from a
         # source nobody here wrote, which is #131's lesson -- but a value cut
         # at it now SAYS it was cut. Until §51 a 600-character abstract and
         # one that happened to be 600 characters long were the same thing to
         # a reader, so the model could not tell an abstract it had all of
         # from one it had the first two thirds of.
-        summary_truncated = len(full_summary) > MAX_SUMMARY_CHARS
+        #
+        # REDACTED ABOVE THE CUT SINCE BATCH 156 (RB1, A59), which is the
+        # half §51 got the wrong way round. Both of these were sliced and
+        # `registry.dispatch` redacted the slice; measured, a `ghp_` token
+        # straddling either cut survived post-hoc redaction at 36 of its 39
+        # possible offsets. `fetch_url` had already fixed the same ordering
+        # for its own body, and `param_digest` had written down the reason
+        # before either of them. The flags now count REDACTED characters,
+        # which is RB3's consequence: redaction can shrink a value back
+        # under the cap, and when it does the cut is withholding nothing.
 
         # `is not None` on the ELEMENT was not enough: `<published></published>`
         # is present with `.text` of None, and `None[:10]` is a TypeError
@@ -376,9 +422,17 @@ def _parse_atom_feed(xml_text: str) -> tuple:
         # DROPPED BEFORE THE CUT for both, so the cap counts values the
         # model can actually use: filtering after the slice would let a
         # nameless element consume one of the 25 or 20 places.
+        #
+        # AND THE CAP ON EACH VALUE, not only on the count (batch 156). The
+        # two bounds answer different questions and the lists had only the
+        # first: 25 authors of 5,000 characters each is 125,000 characters
+        # of model-facing text that every count-based cap reports as
+        # bounded. Each value is cut through the same helper as the title
+        # and the abstract, so it is redacted first for the same reason.
         all_authors = [
             name for name in (
-                _text_of(author, "atom:name")
+                third.text(_text_of(author, "atom:name"),
+                           _MAX_AUTHOR_CHARS)[0]
                 for author in entry.findall("atom:author", ATOM_NS)
             ) if name
         ]
@@ -386,16 +440,24 @@ def _parse_atom_feed(xml_text: str) -> tuple:
         authors = all_authors[:_MAX_AUTHORS]
         all_categories = [
             term for term in (
-                c.get("term")
+                third.text(c.get("term"), _MAX_CATEGORY_CHARS)[0]
                 for c in entry.findall("atom:category", ATOM_NS)
             ) if term
         ]
         categories = all_categories[:MAX_CATEGORIES]
 
-        pdf_url = None
+        # DROPPED, NOT CUT (A58), and this is the field that makes the
+        # distinction concrete. `pdf_url` exists to be fetched; cut to a cap
+        # it becomes a fetchable-looking string that is not the paper, and
+        # the model spends a tool call finding that out. Measured, a
+        # 5,021-character href passed through byte-for-byte before this.
+        # `MAX_URL_CHARS` is fetch_url's own limit, so anything past it is a
+        # route this harness would refuse anyway.
+        pdf_url, pdf_withheld = None, False
         for link in entry.findall("atom:link", ATOM_NS):
             if link.get("title") == "pdf":
-                pdf_url = link.get("href")
+                pdf_url, pdf_withheld = third.url(link.get("href"),
+                                                  MAX_URL_CHARS)
 
         entry_result = {
             "arxiv_id": arxiv_id,
@@ -412,7 +474,9 @@ def _parse_atom_feed(xml_text: str) -> tuple:
             # shell. The abs page is the route, and it is a URL `fetch_url`
             # will take.
             entry_result["summary_truncated"] = True
-            entry_result["full_summary_url"] = f"https://arxiv.org/abs/{arxiv_id}"
+            if not id_truncated:
+                entry_result["full_summary_url"] = (
+                    f"https://arxiv.org/abs/{arxiv_id}")
         if author_count > _MAX_AUTHORS:
             # PG8's shape exactly, including the recovery route PG4 asks
             # for: the abs page lists every author and `fetch_url` will
@@ -422,7 +486,15 @@ def _parse_atom_feed(xml_text: str) -> tuple:
             # the summary's key is absent whenever the abstract fit.
             entry_result["authors_truncated"] = True
             entry_result["author_count"] = author_count
-            entry_result["full_authors_url"] = f"https://arxiv.org/abs/{arxiv_id}"
+            # GUARDED ON THE ID, like `full_summary_url` above and for the
+            # same reason (A58): the route is assembled from `arxiv_id`, so
+            # an id that was cut yields a URL that 404s. PG4 asks for a
+            # route to what the model WANTED; a broken one answers a
+            # question nobody asked, and `authors_truncated` still says the
+            # list was cut.
+            if not id_truncated:
+                entry_result["full_authors_url"] = (
+                    f"https://arxiv.org/abs/{arxiv_id}")
         # THESE TWO GET A FLAG AND NO ROUTE, and the asymmetry is deliberate
         # rather than an omission to be tidied up later. #49's rule is that
         # nothing is altered silently, so the flag is owed. But PG4 exists so
@@ -435,8 +507,17 @@ def _parse_atom_feed(xml_text: str) -> tuple:
             entry_result["title_truncated"] = True
         if len(all_categories) > MAX_CATEGORIES:
             entry_result["categories_truncated"] = True
+        # THE THREE FLAGS BATCH 156 OWES, same rule (#49): nothing here is
+        # altered silently. `id_truncated` is the one that matters most,
+        # because a cut id is a citation that does not resolve and the model
+        # has no other way to know.
+        if id_truncated:
+            entry_result["id_truncated"] = True
+        if pdf_withheld:
+            entry_result["pdf_url_truncated"] = True
         results.append(entry_result)
 
+    third.report()
     return results, total
 
 
@@ -466,6 +547,20 @@ def run(params: dict) -> dict:
                 xml_text = _call_arxiv_api(search_query, parsed.max_results,
                                            parsed.sort_by, parsed.start)
                 results, total = _parse_atom_feed(xml_text)
+                # A62. `max_results` is advertised `le=20` and reaches the
+                # provider, which is free to ignore it -- measured (batch
+                # 156), a feed of 5,000 entries against a request for 5
+                # returned all 5,000. The per-entry caps above are
+                # multiplied by this number, so bounding them without
+                # bounding it is not a bound. `total` is unaffected and
+                # still reports what the QUERY has, which is the figure
+                # that says what was not returned.
+                if len(results) > parsed.max_results:
+                    logger.warning(
+                        "arxiv_search kept %d of %d entries: the feed "
+                        "carried more than the %d asked for.",
+                        parsed.max_results, len(results), parsed.max_results)
+                    results = results[:parsed.max_results]
                 _cache.set(cache_key, (results, total))
                 break
             except _FeedTooLarge:

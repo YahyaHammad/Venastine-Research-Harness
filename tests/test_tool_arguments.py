@@ -654,3 +654,121 @@ class TestTheGatesAreTotalOverWhateverTheModelEmitted:
         ok = registry.dispatch("read", {"path": "notes.txt"})
         assert ok.get("content") == "hello"
 
+
+
+# ---------------------------------------------------------------------------
+# ---- A60: the refusal path is a result path -------------------------------
+# ---------------------------------------------------------------------------
+
+#: A GitHub personal access token: `ghp_` plus exactly 36 characters. The
+#: fixed-length case, so no prefix of it matches and the redactor either
+#: replaces the whole thing or nothing.
+_PAT = "ghp_" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8"
+
+
+class TestARefusalIsRedactedLikeAnyOtherResult:
+    """S03-02 (A60, batch 156). `dispatch()` has exactly two `return`s: the
+    refusal early-return and the one at the bottom, and only the second
+    passed `check_output_policy`. Four other paths were covered -- the
+    success path, the handler-exception path, the depth cap and the
+    input-refusal path through `ToolCallDenied` -- which is what made the
+    gap hard to see from any one of them.
+
+    THE REPORT RATED THIS S4 ON "no reachable secret-bearing refusal
+    input" AND THAT PREMISE WAS FALSE. Measured (batch 156) through this
+    very function: of the eight tools carrying a `refusal_check`, seven
+    render a field name and a problem and never a value -- `invalid_params`
+    discipline, swept over every registered param model and every
+    wrong-typed shape, zero echoes. The eighth interpolates the
+    model-supplied `agent_name`, so `spawn_subagent` with a `ghp_` token
+    in it returned the whole credential.
+
+    AND THE HARNESS HAS A SCANNER FOR EXACTLY THAT INPUT. `check_input_policy`
+    refuses the same params with "an argument contains what looks like a
+    credential" -- it just runs BELOW the refusal return, so one path
+    skipped both scanners. §25 (R5) argues the input half exists because
+    "the parameters were chosen by a model reading an attacker's web
+    page"; this is the path that argument was not reaching.
+
+    WHAT IS ASSERTED IS THE ABSENCE OF THE SECRET, not the presence of a
+    marker -- `test_redact_before_cut.py` states why at length, and the
+    control below is what keeps "redact everything" from passing.
+    """
+
+    def test_a_credential_in_a_refused_argument_does_not_come_back(self):
+        from tools.registry import registry
+
+        result = registry.dispatch(
+            "spawn_subagent", {"agent_name": _PAT, "task": "do a thing"})
+
+        assert "error" in result, result
+        assert _PAT not in result["error"]
+        assert _PAT[:20] not in result["error"], (
+            "a prefix of the token survived, which is the failure mode a "
+            "marker-presence assertion would have missed")
+
+    def test_the_refusal_still_says_which_name_was_not_found(self):
+        """THE CONTROL, and the reason the fix is at the sink rather than
+        in the message. An ordinary mistyped name is what makes this
+        refusal actionable, so a fix that stopped interpolating it would
+        pass the test above by making the message useless."""
+        from tools.registry import registry
+
+        result = registry.dispatch(
+            "spawn_subagent", {"agent_name": "resercher", "task": "x"})
+
+        assert "resercher" in result["error"]
+
+    def test_every_refusal_family_goes_through_the_redactor(self):
+        """The RELATION, over every registered `refusal_check` rather than
+        the one tool that happened to echo.
+
+        This is the guard that survives the next tool: a refusal family
+        added later cannot reintroduce the sink, because the sink is gone
+        rather than because its author read `tools/base.py`. Each tool is
+        driven with a credential-shaped value in each of its own declared
+        properties, and anything that comes back as a refusal must not
+        carry the token.
+        """
+        from tools.registry import ToolCallDenied, registry
+
+        checked = 0
+        leaked = []
+        for tool in _statically_registered():
+            if registry._tools[tool].refusal_check is None:
+                continue
+            for prop in _declared_properties(tool):
+                reason = registry.refusal_reason(tool, {prop: _PAT})
+                if reason is None:
+                    continue
+                checked += 1
+                # THREE WAYS OUT, and all three are checked. The shipped
+                # config denies the file tools, and that denial correctly
+                # fires ABOVE the refusal -- fail-closed, and its message
+                # is static. So ToolCallDenied is an acceptable exit and
+                # what matters is that no exit carries the token.
+                try:
+                    answer = str(registry.dispatch(tool, {prop: _PAT}))
+                except ToolCallDenied as denied:
+                    answer = str(denied)
+                if _PAT in answer:
+                    leaked.append(f"{tool}.{prop}")
+
+        assert checked, "no refusal was reached, so this proves nothing"
+        assert not leaked, (
+            f"{len(leaked)} refusal(s) carried the credential out of "
+            f"dispatch: {leaked}")
+
+    def test_the_input_scanner_would_have_caught_it_too(self):
+        """Measured, and recorded here because it is why this is a
+        security finding and not a tidiness one: the refusal returns ABOVE
+        `check_input_policy`, so the path skipped both scanners. If this
+        ever starts returning None the ordering argument above has
+        changed and this batch's reasoning needs re-reading."""
+        from safety.policy_enforcement import check_input_policy
+
+        refusal = check_input_policy(
+            "spawn_subagent", {"agent_name": _PAT, "task": "do a thing"})
+
+        assert refusal is not None
+        assert _PAT not in refusal

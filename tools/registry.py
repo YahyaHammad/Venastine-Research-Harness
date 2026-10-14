@@ -760,7 +760,33 @@ class ToolRegistry:
         if refused is not None:
             logger.info("%s refused before approval: %s",
                         tool_name, refused)
-            return {"error": refused}
+            # THROUGH THE REDACTOR, like every other result (batch 156,
+            # A60). This was the one `return` in this function that did
+            # not, and it is a result path: the success path, the
+            # handler-exception path and the depth cap all pass the call
+            # below, and this one went straight out.
+            #
+            # IT WAS NOT A THEORETICAL HOLE. Measured (batch 156) through
+            # this very function: `spawn_subagent` with an `agent_name` of
+            # `ghp_` plus 36 characters came back as "Unknown agent:
+            # '<the whole token>' is not one of this harness's agents" --
+            # the full credential, to the model and to the transcript,
+            # from a value the model chose. And the harness has a scanner
+            # for exactly that input: `check_input_policy` BELOW refuses
+            # the same params with "an argument contains what looks like
+            # a credential". The refusal returned above it, so both
+            # scanners were skipped on one path -- §25 (R5) exists
+            # because "the parameters were chosen by a model reading an
+            # attacker's web page", and this is where that argument was
+            # not being applied.
+            #
+            # THE SINK AND NOT THE PRODUCER, which is the same split the
+            # handler containment two inches below uses: a refusal string
+            # is written by whichever tool owns the gate, and this is the
+            # one place that covers the next one. `tools/base.py` still
+            # asks producers not to echo a value, for a reason that
+            # survives this change and is stated there.
+            return check_output_policy(tool_name, {"error": refused})
 
         spec = self._tools[tool_name]
 
