@@ -10,10 +10,16 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 
-from sympy.geometry import Point, Line, Circle, Polygon, Triangle
 from pydantic import BaseModel, Field
+from sympy.geometry import Circle, Line, Point, Polygon, Triangle
 
-from tools.builtin._math_common import safe_parse, serialize, MathParseError
+from tools.builtin._math_common import (
+    MathParseError,
+    _split_warnings,
+    parse_params,
+    safe_parse,
+    serialize,
+)
 
 _OPERATIONS = Literal[
     "distance", "midpoint", "is_collinear", "line_intersection",
@@ -31,6 +37,15 @@ class GeometryParams(BaseModel):
     center: Optional[list[str]] = Field(None, description="Center point [x, y] for circle operations - optional, defaults to [0, 0] (origin) when omitted")
     evaluate: bool = Field(False, description="If true, return numeric approximation (e.g. 12.566... instead of 4*pi). Default false keeps exact symbolic form.")
     precision: int = Field(15, ge=1, le=50, description="Significant digits when evaluate is true")
+    symbols: Optional[list[str]] = Field(
+        None,
+        description=(
+            "Multi-character symbol names used in the coordinates or radius, "
+            "e.g. ['mass', 'width']. Declare them or they are read as "
+            "products of single letters: 'mass' becomes a*m*s**2. Single "
+            "letters and names containing an underscore are safe without this."
+        ),
+    )
 
 
 TOOL_SCHEMA = {
@@ -47,16 +62,28 @@ TOOL_SCHEMA = {
 }
 
 
-def _to_point(coords: list[str]) -> Point:
-    return Point(*[safe_parse(c) for c in coords])
+def _to_point(coords: list[str], symbols=None, rewritten=None) -> Point:
+    return Point(*[safe_parse(c, symbols=symbols, rewritten=rewritten)
+                   for c in coords])
 
 
 def run(params: dict) -> dict:
-    parsed = GeometryParams(**params)
+    try:
+        parsed = parse_params(GeometryParams, params)
+    except MathParseError as e:
+        return {"error": str(e)}
+    # One `rewritten` set across every coordinate and the radius: this tool
+    # could not reach `symbols=` at all, so a multi-character coordinate was
+    # rewritten into a product of single letters (batch 131).
+    rewritten: set = set()
+    syms = parsed.symbols or None
+
+    def to_point(coords):
+        return _to_point(coords, syms, rewritten)
 
     try:
         op = parsed.operation
-        pts = [_to_point(p) for p in parsed.points] if parsed.points else []
+        pts = [to_point(p) for p in parsed.points] if parsed.points else []
 
         if op == "distance":
             if len(pts) < 2:
@@ -83,13 +110,13 @@ def run(params: dict) -> dict:
         elif op == "circle_area":
             if parsed.radius is None:
                 return {"error": "circle_area requires 'radius'."}
-            center = _to_point(parsed.center) if parsed.center is not None else Point(0, 0)
-            result = Circle(center, safe_parse(parsed.radius)).area
+            center = to_point(parsed.center) if parsed.center is not None else Point(0, 0)
+            result = Circle(center, safe_parse(parsed.radius, symbols=syms, rewritten=rewritten)).area
         elif op == "circle_circumference":
             if parsed.radius is None:
                 return {"error": "circle_circumference requires 'radius'."}
-            center = _to_point(parsed.center) if parsed.center is not None else Point(0, 0)
-            result = Circle(center, safe_parse(parsed.radius)).circumference
+            center = to_point(parsed.center) if parsed.center is not None else Point(0, 0)
+            result = Circle(center, safe_parse(parsed.radius, symbols=syms, rewritten=rewritten)).circumference
         elif op == "polygon_area":
             if len(pts) < 3:
                 return {"error": f"polygon_area requires at least 3 points (got {len(pts)})."}
@@ -145,4 +172,13 @@ def run(params: dict) -> dict:
         except Exception:
             pass
 
-    return {"result": serialize(result), "operation": op}
+    # H6, one batch late (batch 143). The evaluate block above stays where it is: a tail
+    # handler contains the one call that can fail without restructuring the
+    # function around it, which is `discrete_math`'s shape.
+    try:
+        out: dict = {"result": serialize(result, what=op), "operation": op}
+    except MathParseError as e:
+        return {"error": str(e)}
+    if rewritten:
+        out["warnings"] = _split_warnings(rewritten)
+    return out

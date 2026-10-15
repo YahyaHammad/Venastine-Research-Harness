@@ -40,6 +40,8 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.dirname(HERE);
 const REQUIREMENTS = path.join(ROOT, 'requirements.txt');
 const MAIN = path.join(ROOT, 'main.py');
+const CONFIG_FILE = path.join(ROOT, 'config.yaml');
+const CONFIG_UPDATE = path.join(ROOT, 'config_update.py');
 
 /**
  * ~/.config/venastine ON EVERY PLATFORM, Windows included.
@@ -51,6 +53,16 @@ const MAIN = path.join(ROOT, 'main.py');
  * across two locations by platform is the bug this constant exists to avoid.
  */
 const CONFIG_HOME = path.join(os.homedir(), '.config', 'venastine');
+
+/**
+ * Where config_update.py keeps the pristine copy and the user's mirror.
+ *
+ * Spelled in two languages, so a docs-consistency test holds this against
+ * `config_update.STATE_DIRNAME`. Node owns only the two cheap halves -- the
+ * post-session copy below, and the doctor lines -- because everything else
+ * needs a YAML parser and this file has ZERO dependencies by design.
+ */
+const CONFIG_STATE = path.join(CONFIG_HOME, 'config-state');
 
 const MIN_PYTHON = [3, 11];
 
@@ -172,7 +184,12 @@ function isReady(rt) {
   return fs.existsSync(rt.stamp) && fs.existsSync(rt.python);
 }
 
-function countPins() {
+// Non-comment lines in requirements.txt. NOT a count of pins, which is what
+// it was called until batch 140: 2 of the 18 are ranges (`rich>=14.2,<16`,
+// `cryptography>=42.0,<52`), so the screen that said "N pinned packages"
+// was promising something the file does not say. The exact set is in the
+// file the screen names, which is what makes the count enough.
+function countRequirements() {
   return fs.readFileSync(REQUIREMENTS, 'utf8')
     .split(/\r?\n/)
     .filter((line) => line.trim() && !line.trim().startsWith('#'))
@@ -193,8 +210,14 @@ function ask(question) {
  * Build the Python environment, only ever with the user's say-so.
  *
  * The consent prompt is not ceremony. This is the one action the launcher
- * takes on its own initiative -- it runs a network install of 17 pinned
- * distributions -- and the project's own rule for that case is D17/D31:
+ * takes on its own initiative -- it runs a network install of everything in
+ * requirements.txt -- and the project's own rule for that case is D17/D31:
+ *
+ * NO COUNT IN THIS SENTENCE, deliberately (batch 140). It said "17
+ * pinned distributions" and the file had 22 installable lines when that was
+ * measured, 18 now that batch 136 moved the test packages out. The screen
+ * below prints the live number; prose that restates a computed value is a
+ * second copy of it, and this is the copy that drifted.
  * show what will run and confirm it. That is also why the bootstrap is here
  * and not in an npm `postinstall` hook, where it would run unannounced and be
  * skipped entirely under `--ignore-scripts`.
@@ -210,7 +233,7 @@ async function ensureRuntime(python, rt, { assumeYes }) {
     'Venastine needs a Python environment (first run).\n' +
     `  python  : ${python.version}  (${python.executable})\n` +
     `  venv    : ${rt.dir}\n` +
-    `  install : ${countPins()} pinned packages from requirements.txt\n`;
+    `  install : ${countRequirements()} packages from requirements.txt\n`;
 
   if (!assumeYes) {
     if (!process.stdin.isTTY) {
@@ -253,6 +276,77 @@ function run(cmd, args) {
   const r = spawnSync(cmd, args, { stdio: 'inherit', windowsHide: true });
   if (r.error) throw r.error;
   if (r.status !== 0) throw new Error(`${path.basename(cmd)} ${args[0]} exited ${r.status}`);
+}
+
+/**
+ * Put the user's own settings back into config.yaml after npm replaced it.
+ *
+ * npm replaces a package directory WHOLESALE on update -- measured with
+ * `npm pack` and two installs into a scratch prefix: an edited
+ * `max_tokens: 31337` came back as the shipped `16000`. `config.yaml` ships
+ * inside the package (CONFIG_ARCHITECTURE.md locks it to one location for a
+ * security reason that this problem does not touch), so without this the
+ * update silently discards every value the user set.
+ *
+ * `config_update.py` owns every decision; this call owns none of them. It
+ * runs on every launch and does nothing on almost all of them -- the module
+ * imports no first-party code until it has decided there is a merge to do,
+ * because `import config_schema` alone costs 294ms of pydantic and ruamel.
+ *
+ * THE STATUS IS DELIBERATELY UNCHECKED. A configuration-history feature must
+ * not be able to stop the harness from starting; the module says so itself by
+ * always exiting 0, and this is the other half of that promise.
+ *
+ * `firstRun` is the one fact Python cannot work out for itself: it is read
+ * from the venv stamp BEFORE ensureRuntime() builds it. Without it, an
+ * install that was already in use when this feature arrived would have its
+ * edited config.yaml recorded as the pristine baseline, and those edits would
+ * be lost at the next update instead of preserved by it.
+ */
+function syncConfig(rt, firstRun) {
+  try {
+    spawnSync(rt.python, [CONFIG_UPDATE, ...(firstRun ? ['--first-run'] : [])], {
+      stdio: 'inherit',
+      cwd: ROOT,
+      windowsHide: true,
+    });
+  } catch {
+    // See above: never fatal.
+  }
+}
+
+/**
+ * Mirror config.yaml AFTER the session, so a /config write survives an update.
+ *
+ * This is the common upgrade order and the whole feature misses its own case
+ * without it: change a setting, exit, `npm update` days later, launch. By
+ * then npm has replaced the file, so the only copy of that change is the one
+ * taken here. The next launch's mirror is too late.
+ *
+ * THIS USED TO BE FOUR LINES OF fs.copyFileSync HERE, and they were the one
+ * writer not subject to the module's rule 1 ("the mirror is refreshed only
+ * when the version still matches"). They copied whenever a `version` file
+ * existed -- so a merge that FAILED, which deliberately leaves the version
+ * and the mirror untouched so the next launch can retry, was followed at
+ * session end by the newly shipped config.yaml being copied over the mirror.
+ * The user's settings were then gone from every copy, permanently, and the
+ * retry found nothing to restore. The state directory is also global while
+ * this file's ROOT is not, so a checkout run overwrote an npm install's
+ * mirror with the checkout's own config.yaml.
+ *
+ * So the decision lives in Python, where it is tested, and this spawns it.
+ * An interpreter start at session EXIT costs nothing anybody is waiting for.
+ */
+function mirrorConfig(rt) {
+  try {
+    spawnSync(rt.python, [CONFIG_UPDATE, '--mirror'], {
+      stdio: 'inherit',
+      cwd: ROOT,
+      windowsHide: true,
+    });
+  } catch {
+    // Never fatal, for syncConfig's reason.
+  }
 }
 
 /** Walks up from cwd the way dotenv's find_dotenv(usecwd=True) now does. */
@@ -306,6 +400,32 @@ function childEnv() {
   return env;
 }
 
+/**
+ * One line about the config merge, WITHOUT starting Python.
+ *
+ * --venastine-doctor returns before ensureRuntime(), so there may be no
+ * interpreter to ask. Everything here is a plain text file for that reason.
+ */
+function configStateSummary() {
+  try {
+    // installs.json maps an install directory to its state subdirectory.
+    // READ, never recomputed: config_update.py owns that naming, and two
+    // languages agreeing about a hash by inspection would fail silently --
+    // the mirror would be written where the merge does not look.
+    const installs = JSON.parse(
+      fs.readFileSync(path.join(CONFIG_STATE, 'installs.json'), 'utf8'));
+    const dir = path.join(CONFIG_STATE, installs[fs.realpathSync(ROOT)]);
+    const version = fs.readFileSync(path.join(dir, 'version'), 'utf8').trim();
+    const record = path.join(dir, 'last-update.txt');
+    const last = fs.existsSync(record)
+      ? `, last merged ${fs.statSync(record).mtime.toISOString().slice(0, 10)}`
+      : '';
+    return `${dir} (tracking ${version}${last})`;
+  } catch {
+    return `${CONFIG_STATE} (not tracked yet; the next launch starts it)`;
+  }
+}
+
 function doctor(python, rt) {
   const cwd = process.cwd();
   const env = childEnv();
@@ -325,6 +445,8 @@ function doctor(python, rt) {
     `  log file      : ${env.AGENT_LOG_FILE || path.join(cwd, 'logs', 'app.log')}`,
     `  output dir    : ${env.AGENT_OUTPUT_DIR || path.join(cwd, 'output')}`,
     `  workspace     : ${env.AGENT_WORKSPACE || path.join(cwd, 'workspace')}`,
+    `  config.yaml   : ${CONFIG_FILE}`,
+    `  config state  : ${configStateSummary()}`,
   ];
   process.stdout.write(lines.join('\n') + '\n');
 }
@@ -348,7 +470,15 @@ async function main() {
   const python = findPython();
   const rt = runtimePaths();
 
+  // BEFORE ensureRuntime, which is what makes it an answer: "has this install
+  // ever been launched?" is the only way to know whether the config.yaml in
+  // front of us is pristine or already edited. See syncConfig().
+  const firstRun = !isReady(rt);
+
   if (wantReinstall) {
+    // The venv only. The config state in CONFIG_STATE is the user's own
+    // settings history and has nothing to do with a broken environment --
+    // removing it here would throw away the edits an update is about to need.
     fs.rmSync(rt.dir, { recursive: true, force: true });
     process.stdout.write(`Removed ${rt.dir}\n`);
   }
@@ -359,6 +489,7 @@ async function main() {
   }
 
   await ensureRuntime(python, rt, { assumeYes });
+  syncConfig(rt, firstRun);
 
   // Let the child own the terminal's interrupt. Without this, Ctrl+C kills
   // the launcher first and the harness loses its chance to shut down.
@@ -373,6 +504,8 @@ async function main() {
     env: childEnv(),
     windowsHide: false,
   });
+
+  mirrorConfig(rt);
 
   if (child.error) fail(`Could not start the harness: ${child.error.message}`);
   if (child.signal) process.exit(128 + (os.constants.signals[child.signal] || 0));

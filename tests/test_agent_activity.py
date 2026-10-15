@@ -21,16 +21,19 @@ Discovery roots are redirected into tmp_path exactly as test_agents.py
 does, so the real agents/builtin never leaks in.
 """
 
+from uuid import uuid4
+
 import pytest
 
 import config
 from agents import subagent_tool
-from core import agent_activity
+from core import agent_activity, config_loader
 from core.agent_activity import AgentActivity, AgentSpan
-from core import config_loader
 from core.loop import RunAgentLoop
-from tools.context import ToolContext, RunInfo
+from tests.conftest import make_model_response
+from tools.context import ToolContext
 from tools.registry import registry
+from tui.widgets import AgentRow
 
 
 @pytest.fixture
@@ -63,12 +66,19 @@ class Recorder(AgentActivity):
 
     def __init__(self):
         self.events = []
+        self.bound = []
 
     def enter(self, span):
         self.events.append(("enter", span.name, span.depth))
 
     def exit(self, span):
         self.events.append(("exit", span.name, span.depth))
+
+    def bind(self, span_id, thread_id):
+        # §47. Recorded as (span id, thread id) so a test can assert
+        # WHICH run was addressed, which is the thing a name and a
+        # depth could never say.
+        self.bound.append((span_id, thread_id))
 
     @property
     def live(self):
@@ -141,6 +151,222 @@ class TestTheSpanClosesWhateverHappens:
         span = AgentSpan("explore", 1)
         with pytest.raises(Exception):
             span.name = "review"
+
+
+class TestASpanKnowsWhoItIsAndWhatItCameFrom:
+    """§47. Batch 59's span was a (name, depth) pair, and two runs that
+    agree on both are indistinguishable -- which is why the sink had to
+    pop by last match and hope. An identity is what makes a row in a panel
+    a thing you can open rather than a thing you can only read."""
+
+    def test_two_spans_sharing_a_name_and_depth_have_different_ids(self):
+        """The exact case the last-match scan exists for: one goal turn
+        spawning `explore` twice."""
+        first = AgentSpan("explore", 1)
+        second = AgentSpan("explore", 1)
+
+        assert first.id and second.id
+        assert first.id != second.id, (
+            "two runs of the same agent at the same depth got the same id, "
+            "so nothing downstream can tell them apart")
+
+    def test_the_positional_pair_still_constructs(self):
+        """Every existing call site and test writes `AgentSpan(name,
+        depth)`. The new fields are defaulted, not inserted."""
+        span = AgentSpan("explore", 1)
+
+        assert (span.name, span.depth) == ("explore", 1)
+        assert span.parent_id is None
+
+    def test_a_nested_span_names_its_parent(self):
+        sink = Recorder()
+        with agent_activity.span(sink, "outer", 1) as outer:
+            with agent_activity.span(sink, "inner", 2) as inner:
+                pass
+
+        assert inner.parent_id == outer.id
+        assert outer.parent_id is None
+
+    def test_siblings_share_a_parent_and_not_an_id(self):
+        """Two spawns in one turn are siblings, not a chain. The panel
+        draws a chain today because that is what RUNS; the data model has
+        to be a tree anyway, or parallel spawns would need it rebuilt."""
+        sink = Recorder()
+        with agent_activity.span(sink, "root", 1) as root:
+            with agent_activity.span(sink, "explore", 2) as first:
+                pass
+            with agent_activity.span(sink, "explore", 2) as second:
+                pass
+
+        assert first.parent_id == second.parent_id == root.id
+        assert first.id != second.id
+
+    def test_current_is_the_innermost_open_span(self):
+        sink = Recorder()
+        assert agent_activity.current() is None
+        with agent_activity.span(sink, "outer", 1) as outer:
+            assert agent_activity.current() is outer
+            with agent_activity.span(sink, "inner", 2) as inner:
+                assert agent_activity.current() is inner
+            assert agent_activity.current() is outer, (
+                "the parent did not come back into force, so the next "
+                "sibling would be parented to a run that has finished")
+        assert agent_activity.current() is None
+
+    def test_a_raising_run_restores_the_previous_span(self):
+        """The `finally` that closes the span closes the context too.
+        A token that outlived its frame is worse than no lineage: the
+        next sibling would be recorded as a child of a finished run."""
+        sink = Recorder()
+        with agent_activity.span(sink, "outer", 1) as outer:
+            with pytest.raises(RuntimeError):
+                with agent_activity.span(sink, "inner", 2):
+                    raise RuntimeError("the provider fell over")
+            assert agent_activity.current() is outer
+
+        assert agent_activity.current() is None
+
+
+class TestBindCarriesTheAddressAndNothingElse:
+    """The channel learns WHICH thread a run is writing. Not what is in
+    it -- everything a shell shows it reads back from the archive, which
+    is what keeps §18/D6 intact."""
+
+    def test_bind_reaches_the_sink_with_the_open_spans_id(self):
+        sink = Recorder()
+        with agent_activity.span(sink, "explore", 1) as span:
+            agent_activity.bind(sink, "thread-A")
+
+        assert sink.bound == [(span.id, "thread-A")]
+
+    def test_the_innermost_run_is_the_one_bound(self):
+        sink = Recorder()
+        with agent_activity.span(sink, "outer", 1) as outer:
+            agent_activity.bind(sink, "thread-outer")
+            with agent_activity.span(sink, "inner", 2) as inner:
+                agent_activity.bind(sink, "thread-inner")
+
+        assert sink.bound == [(outer.id, "thread-outer"),
+                              (inner.id, "thread-inner")]
+
+    def test_binding_with_no_span_open_is_a_no_op(self):
+        """Every top-level run_agent_conversation takes this path -- the
+        CLI's chat, a test calling it directly -- which is why the call
+        site needs no branch."""
+        sink = Recorder()
+        agent_activity.bind(sink, "thread-A")
+
+        assert sink.bound == []
+
+    def test_binding_nothing_records_nothing(self):
+        sink = Recorder()
+        with agent_activity.span(sink, "explore", 1):
+            agent_activity.bind(sink, None)
+
+        assert sink.bound == []
+
+    def test_a_sink_that_raises_on_bind_does_not_take_down_the_run(self):
+        """Display machinery, the same posture as enter and exit."""
+        class Broken(AgentActivity):
+            def bind(self, span_id, thread_id):
+                raise ValueError("widget exploded")
+
+        ran = []
+        with agent_activity.span(Broken(), "explore", 1):
+            agent_activity.bind(Broken(), "thread-A")
+            ran.append(True)
+
+        assert ran == [True]
+
+    def test_none_is_still_a_working_sink(self):
+        with agent_activity.span(None, "explore", 1):
+            agent_activity.bind(None, "thread-A")
+
+
+class TestASpawnRecordsWhoSpawnedIt:
+
+    def test_the_child_thread_names_its_parent_call_and_agent(
+            self, _roots, mocker, fake_storage):
+        """The edge existed before this as the child's uuid stringified
+        into the parent's tool-result row -- a repr inside a JSON blob,
+        which nothing can query and replay skips outright."""
+        _write_harness_agent(_roots, "worker")
+        config_loader.initialize(str(_roots["project"]))
+
+        captured = {}
+        mocker.patch.object(
+            RunAgentLoop, "run_agent_conversation",
+            side_effect=lambda **kw: (captured.update(kw),
+                                      make_model_response(text="x"))[1])
+
+        parent_thread = fake_storage.create_thread()
+        memory = type("M", (), {"thread_id": parent_thread})()
+
+        subagent_tool.run({"agent_name": "worker", "task": "t"},
+                          parent_context=ToolContext(),
+                          memory=memory, call_id="call_7")
+
+        assert captured["thread_parent"] == parent_thread
+        assert captured["thread_parent_call"] == "call_7"
+        assert captured["thread_agent"] == "worker"
+
+    def test_a_spawn_reached_directly_records_no_parent(
+            self, _roots, mocker, fake_storage):
+        """dispatch() injects both; a caller that reaches run() by hand --
+        which is most of this suite -- gets a child with no recorded
+        parent, exactly as it did before §47."""
+        _write_harness_agent(_roots, "worker")
+        config_loader.initialize(str(_roots["project"]))
+
+        captured = {}
+        mocker.patch.object(
+            RunAgentLoop, "run_agent_conversation",
+            side_effect=lambda **kw: (captured.update(kw),
+                                      make_model_response(text="x"))[1])
+
+        subagent_tool.run({"agent_name": "worker", "task": "t"},
+                          parent_context=ToolContext())
+
+        assert captured["thread_parent"] is None
+        assert captured["thread_parent_call"] is None
+
+    def test_call_id_is_injectable(self):
+        """Declared on the handler and injected by name, which is the
+        §18 mechanism the registry's own comment anticipates. It is NOT
+        in params: those are the model's, and a model that could write
+        its own call id could claim a line it did not make."""
+        from tools.registry import _INJECTABLE_PARAMS
+
+        assert "call_id" in _INJECTABLE_PARAMS
+        assert "call_id" in registry._injectable["spawn_subagent"]
+
+    def test_the_running_child_is_bound_before_it_finishes(
+            self, _roots, mocker, fake_storage):
+        """The whole reason bind() is a third call rather than a field on
+        the span: the row has to become openable WHILE the run is going,
+        and the span opens before the thread exists."""
+        _write_harness_agent(_roots, "worker")
+        config_loader.initialize(str(_roots["project"]))
+
+        sink = Recorder()
+        seen = {}
+
+        def _run(**kwargs):
+            memory = type("M", (), {"thread_id": "child-thread"})()
+            agent_activity.bind(sink, memory.thread_id)
+            seen["bound_during_the_run"] = list(sink.bound)
+            return make_model_response(text="x")
+
+        mocker.patch.object(RunAgentLoop, "run_agent_conversation",
+                            side_effect=_run)
+
+        subagent_tool.run({"agent_name": "worker", "task": "t"},
+                          parent_context=ToolContext(), activity=sink)
+
+        assert seen["bound_during_the_run"], (
+            "nothing was bound while the child was still running, so a "
+            "sidebar row could only be opened after it finished")
+        assert seen["bound_during_the_run"][0][1] == "child-thread"
 
 
 # ---------------------------------------------------------------------------
@@ -351,7 +577,7 @@ class TestTheAgentPanel:
             await pilot.pause()
 
             assert panel.display is True
-            assert "explore" in panel.renderable.plain
+            assert "explore" in panel.content.plain
 
     @pytest.mark.asyncio
     async def test_a_spawn_with_no_active_agent_still_gets_a_root_row(self):
@@ -364,10 +590,10 @@ class TestTheAgentPanel:
         async with app.run_test() as pilot:
             await pilot.pause()
             panel = app.query_one("#agent-panel", AgentPanel)
-            panel.show(None, [("explore", 1)])
+            panel.show(None, [AgentRow("explore", 1)])
             await pilot.pause()
 
-            lines = [ln for ln in panel.renderable.plain.splitlines() if ln]
+            lines = [ln for ln in panel.content.plain.splitlines() if ln]
             assert lines[0] == "agent"
             assert lines[1] == "default"
             assert lines[2].startswith("  "), "the spawn row is not indented"
@@ -385,10 +611,10 @@ class TestTheAgentPanel:
         async with app.run_test() as pilot:
             await pilot.pause()
             panel = app.query_one("#agent-panel", AgentPanel)
-            panel.show("plan", [("explore", 1), ("review", 2)])
+            panel.show("plan", [AgentRow("explore", 1), AgentRow("review", 2)])
             await pilot.pause()
 
-            rows = [ln for ln in panel.renderable.plain.splitlines() if ln]
+            rows = [ln for ln in panel.content.plain.splitlines() if ln]
             indents = [len(ln) - len(ln.lstrip(" ")) for ln in rows[1:]]
 
         assert indents == [0, 2, 4], (
@@ -408,9 +634,10 @@ class TestTheAgentPanel:
             await pilot.pause()
             panel = app.query_one("#agent-panel", AgentPanel)
             panel.show("pipeline-reviewer",
-                       [("pipeline-reviewer", 1), ("pipeline-reviewer", 2)])
+                       [AgentRow("pipeline-reviewer", 1),
+                        AgentRow("pipeline-reviewer", 2)])
             await pilot.pause()
-            rows = panel.renderable.plain.splitlines()
+            rows = panel.content.plain.splitlines()
 
         too_wide = [r for r in rows if len(r) > AgentPanel.WIDTH]
         assert not too_wide, (
@@ -433,12 +660,12 @@ class TestTheAgentPanel:
             panel = app.query_one("#agent-panel", AgentPanel)
             panel.show("explore", [])
             await pilot.pause()
-            before = panel.renderable.spans
+            before = panel.content.spans
 
             app.theme = "gruvbox"
             app.restyle_sidebar()
             await pilot.pause()
-            after = panel.renderable.spans
+            after = panel.content.spans
 
         assert before and after, "the panel drew no styled spans at all"
         assert [s.style for s in before] != [s.style for s in after], (
@@ -463,7 +690,7 @@ class TestTheSinkDrivesThePanel:
             with agent_activity.span(app._activity, "explore", 1):
                 await pilot.pause()
                 await pilot.pause()
-                shown = panel.display and "explore" in panel.renderable.plain
+                shown = panel.display and "explore" in panel.content.plain
             await pilot.pause()
             await pilot.pause()
             cleared = not panel.display
@@ -473,21 +700,864 @@ class TestTheSinkDrivesThePanel:
 
     @pytest.mark.asyncio
     async def test_two_spans_sharing_a_name_pop_one_at_a_time(self):
-        """A goal turn can spawn `explore` twice. Popping the FIRST match
-        instead of the last would leave the panel one row off for the rest
-        of the run."""
+        """A goal turn can spawn `explore` twice, and before §47 the sink
+        could not tell the two rows apart -- it removed the LAST entry
+        matching (name, depth) and hoped. Removing by span id makes the
+        question disappear rather than answering it more carefully, so
+        this now asserts the identities as well as the shape."""
         from tui.app import VenastineApp
 
         app = VenastineApp("ANTHROPIC", "test-model", {})
         async with app.run_test() as pilot:
             await pilot.pause()
             sink = app._activity
-            with agent_activity.span(sink, "explore", 1):
-                with agent_activity.span(sink, "explore", 1):
+            with agent_activity.span(sink, "explore", 1) as outer:
+                with agent_activity.span(sink, "explore", 1) as inner:
                     depth_two = list(sink._stack)
                 depth_one = list(sink._stack)
             depth_zero = list(sink._stack)
 
-        assert depth_two == [("explore", 1), ("explore", 1)]
-        assert depth_one == [("explore", 1)]
+        assert [(r.name, r.depth) for r in depth_two] == [
+            ("explore", 1), ("explore", 1)]
+        assert [r.span_id for r in depth_two] == [outer.id, inner.id], (
+            "the two rows are indistinguishable, which is the state that "
+            "forced the last-match removal in the first place")
+        assert [r.span_id for r in depth_one] == [outer.id], (
+            "the INNER span exited, so the outer row is the one that "
+            "must remain")
         assert depth_zero == []
+
+class TestTheLoopBindsTheThreadItJustCreated:
+    """The production call site, driven rather than stubbed. Every test
+    above patches run_agent_conversation out, so without this one the
+    mutation "bind is never called" survives them all -- and the symptom
+    it would ship is a sidebar row that draws and cannot be opened."""
+
+    def test_a_run_under_a_span_binds_its_new_thread(
+            self, _roots, mocker, fake_storage):
+        config_loader.initialize(str(_roots["project"]))
+        mocker.patch("core.loop.run_to_completion",
+                     return_value=make_model_response(text="done"))
+
+        sink = Recorder()
+        with agent_activity.span(sink, "worker", 1) as span:
+            response = RunAgentLoop.run_agent_conversation(
+                user_goal="t", model="test-model", activity=sink)
+
+        assert sink.bound == [(span.id, response.thread_id)], (
+            f"the loop bound {sink.bound!r}; the open span must learn the "
+            "id of the thread its run just created")
+
+    def test_a_top_level_run_binds_nothing(
+            self, _roots, mocker, fake_storage):
+        """The CLI's chat, and every test that calls this directly. No
+        span is open, so there is nothing to address -- which is why the
+        call site needs no branch."""
+        config_loader.initialize(str(_roots["project"]))
+        mocker.patch("core.loop.run_to_completion",
+                     return_value=make_model_response(text="done"))
+
+        sink = Recorder()
+        RunAgentLoop.run_agent_conversation(
+            user_goal="t", model="test-model", activity=sink)
+
+        assert sink.bound == []
+
+    def test_a_resumed_thread_is_bound_too(
+            self, _roots, mocker, fake_storage):
+        """Resuming does not reclassify and does not re-parent, but the
+        run is still writing to a thread and a shell watching it still
+        needs the address."""
+        config_loader.initialize(str(_roots["project"]))
+        mocker.patch("core.loop.run_to_completion",
+                     return_value=make_model_response(text="done"))
+        existing = fake_storage.create_thread()
+
+        sink = Recorder()
+        with agent_activity.span(sink, "worker", 1) as span:
+            RunAgentLoop.run_agent_conversation(
+                user_goal="t", model="test-model", thread_id=existing,
+                activity=sink)
+
+        assert sink.bound == [(span.id, existing)]
+
+class TestAPanelRowCarriesTheThreadItStandsFor:
+    """§47. The row is drawn from an AgentRow now, and an armed one carries
+    its thread id as style metadata -- the mechanism batch 58 built for
+    URLs, reused rather than re-derived."""
+
+    @staticmethod
+    def _threads(panel):
+        """Every `agent_thread` a click could read off this panel, in row
+        order. Read through `get_style_at`, which is the call a click
+        handler makes -- asserting on the Text's spans would prove the
+        metadata was attached and not that it survives to the screen.
+
+        SCANNED OVER THE WIDGET'S HEIGHT, not over the content lines, and
+        the two differ: `#agent-panel` has `padding-top: 1`, so the row
+        holding the Nth line of text is at y = N + 1. That offset is the
+        whole argument for metadata over arithmetic -- a click handler
+        computing a row index would have to know about the padding, the
+        header and the blank line, and would be free to disagree with the
+        widget that drew them."""
+        found = []
+        for y in range(panel.region.height):
+            style = panel.get_style_at(0, y)
+            meta = (getattr(style, "meta", None) or {})
+            if meta.get("agent_thread"):
+                found.append(meta["agent_thread"])
+        return found
+
+    @pytest.mark.asyncio
+    async def test_a_bound_row_is_armed_with_its_thread(self):
+        from tui.app import VenastineApp
+        from tui.widgets import AgentPanel
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            panel = app.query_one("#agent-panel", AgentPanel)
+            panel.show(None, [AgentRow("explore", 1, "s1", "thread-child")],
+                       "thread-root")
+            await pilot.pause()
+
+            found = self._threads(panel)
+
+        assert found == ["thread-root", "thread-child"], (
+            f"the panel offered {found!r}; the root row stands for the "
+            "conversation and each spawn row for its own run")
+
+    @pytest.mark.asyncio
+    async def test_an_unbound_row_is_armed_with_nothing(self):
+        """Between `enter` and `bind` a run has no thread yet. Arming the
+        row anyway and failing on the click would be a lie told to save
+        nobody any time."""
+        from tui.app import VenastineApp
+        from tui.widgets import AgentPanel
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            panel = app.query_one("#agent-panel", AgentPanel)
+            panel.show(None, [AgentRow("explore", 1, "s1")], "thread-root")
+            await pilot.pause()
+
+            found = self._threads(panel)
+
+        assert found == ["thread-root"], (
+            f"the panel offered {found!r}; a run with no thread yet has "
+            "nothing to open")
+
+    @pytest.mark.asyncio
+    async def test_a_session_with_no_thread_arms_no_root(self):
+        """A session that has not had a turn has no conversation to open,
+        and painting the panel must not be what creates one."""
+        from tui.app import VenastineApp
+        from tui.widgets import AgentPanel
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            panel = app.query_one("#agent-panel", AgentPanel)
+            panel.show(None, [AgentRow("explore", 1, "s1")])
+            await pilot.pause()
+
+            found = self._threads(panel)
+
+        assert found == []
+
+    @pytest.mark.asyncio
+    async def test_two_rows_of_one_agent_offer_two_threads(self):
+        """The case (name, depth) could never express. Both rows say
+        `explore`; they are different runs and open different threads."""
+        from tui.app import VenastineApp
+        from tui.widgets import AgentPanel
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            panel = app.query_one("#agent-panel", AgentPanel)
+            panel.show(None, [AgentRow("explore", 1, "s1", "thread-1"),
+                              AgentRow("explore", 2, "s2", "thread-2")],
+                       "thread-root")
+            await pilot.pause()
+
+            found = self._threads(panel)
+
+        assert found == ["thread-root", "thread-1", "thread-2"]
+
+    @pytest.mark.asyncio
+    async def test_painting_the_panel_does_not_start_a_conversation(self):
+        """`self._memory`, not `self.memory`: the property CREATES a thread
+        on first use, and refresh_agent_panel runs at mount and on every
+        span. A panel that opened a thread would leave a phantom empty
+        conversation in the picker for every launch."""
+        from tui.app import VenastineApp
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.refresh_agent_panel()
+            await pilot.pause()
+
+            assert app._memory is None, (
+                "drawing the sidebar created a conversation thread")
+
+
+class TestTheSinkKeepsIdentifiedRows:
+
+    @pytest.mark.asyncio
+    async def test_a_bind_gives_the_running_row_its_address(self):
+        """The whole point of slice 1's third sink call, seen from the
+        panel: the row becomes openable WHILE the run is still going."""
+        from tui.app import VenastineApp
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            sink = app._activity
+
+            with agent_activity.span(sink, "explore", 1) as span:
+                before = [row.thread_id for row in sink._stack]
+                agent_activity.bind(sink, "thread-child")
+                after = [(row.span_id, row.thread_id) for row in sink._stack]
+
+        assert before == [None], "a row had an address before its run had one"
+        assert after == [(span.id, "thread-child")]
+
+    @pytest.mark.asyncio
+    async def test_a_bind_reaches_the_panel_through_the_message_path(self):
+        """The sink runs on the worker thread and posts; nothing here
+        touches a widget directly. This drives that path rather than the
+        sink's own list."""
+        from tui.app import VenastineApp
+        from tui.widgets import AgentPanel
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            panel = app.query_one("#agent-panel", AgentPanel)
+
+            with agent_activity.span(app._activity, "explore", 1):
+                agent_activity.bind(app._activity, "thread-child")
+                await pilot.pause()
+                await pilot.pause()
+                armed = TestAPanelRowCarriesTheThreadItStandsFor._threads(panel)
+
+        assert "thread-child" in armed, (
+            f"the panel offered {armed!r}; the bind never reached it")
+
+    @pytest.mark.asyncio
+    async def test_only_the_bound_span_gets_the_address(self):
+        """Two runs open at once, one bound. The other must not inherit
+        an address that is not its own."""
+        from tui.app import VenastineApp
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            sink = app._activity
+
+            with agent_activity.span(sink, "outer", 1) as outer:
+                with agent_activity.span(sink, "inner", 2) as inner:
+                    agent_activity.bind(sink, "thread-inner")
+                    rows = {r.span_id: r.thread_id for r in sink._stack}
+
+        assert rows == {outer.id: None, inner.id: "thread-inner"}
+
+
+    @pytest.mark.asyncio
+    async def test_the_row_removed_is_the_one_that_ENDED(self):
+        """The case last-match gets wrong, driven on the sink directly.
+
+        Through `span()` the two rows always nest, so removing the last
+        match happens to be right and the old code was never wrong in
+        practice. It is wrong the moment two runs of one agent are open as
+        PEERS and either may finish first -- which is what slice 8 makes
+        ordinary, and why the identity is built now rather than then.
+
+        Driven through enter/exit rather than `with`, because a context
+        manager cannot express "the outer one ended first" and that is
+        exactly the state under test."""
+        from tui.app import VenastineApp
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            sink = app._activity
+            first = AgentSpan("explore", 1)
+            second = AgentSpan("explore", 1)
+
+            sink.enter(first)
+            sink.enter(second)
+            sink.bind(second.id, "thread-second")
+            sink.exit(first)
+
+            left = [(r.span_id, r.thread_id) for r in sink._stack]
+
+        assert left == [(second.id, "thread-second")], (
+            f"the sink left {left!r}; removing the LAST row matching "
+            "(name, depth) would have dropped the run that is still going "
+            "and kept the one that ended -- with its address attached")
+
+    @pytest.mark.asyncio
+    async def test_binding_a_span_that_already_exited_changes_nothing(self):
+        """Reachable: a run whose thread is created as the app is torn
+        down. A row that is gone needs no address, and inventing one
+        would put a row back."""
+        from tui.app import VenastineApp
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            sink = app._activity
+
+            with agent_activity.span(sink, "explore", 1) as span:
+                pass
+            sink.bind(span.id, "thread-child")
+
+            assert sink._stack == []
+
+class TestASpanNamesTheCallThatStartedIt:
+    """§47 slice 4. Without this the transcript's `spawn_subagent` line
+    cannot be paired with a RUNNING child at all -- it would have to wait
+    for the tool result, which is the moment the run is already over."""
+
+    def test_a_span_carries_no_call_by_default(self):
+        """The compactor and the reviewer are agent-shaped runs that no
+        tool call starts."""
+        assert AgentSpan("compactor", 1).call_id is None
+
+    def test_the_helper_passes_it_through(self):
+        sink = Recorder()
+        with agent_activity.span(sink, "explore", 1, "call_7") as span:
+            assert span.call_id == "call_7"
+
+    def test_a_spawn_opens_its_span_with_the_call_id(
+            self, _roots, mocker, fake_storage):
+        """dispatch() injects the id; the handler brackets the child run
+        with it, and the sink is what carries the pairing to a shell."""
+        _write_harness_agent(_roots, "worker")
+        config_loader.initialize(str(_roots["project"]))
+
+        seen = {}
+
+        class Watcher(AgentActivity):
+            def enter(self, span):
+                seen["call_id"] = span.call_id
+
+        mocker.patch.object(
+            RunAgentLoop, "run_agent_conversation",
+            side_effect=lambda **kw: make_model_response(text="x"))
+
+        subagent_tool.run({"agent_name": "worker", "task": "t"},
+                          parent_context=ToolContext(),
+                          activity=Watcher(), call_id="call_7")
+
+        assert seen["call_id"] == "call_7", (
+            f"the span reported {seen.get('call_id')!r}; a shell cannot "
+            "pair the transcript's line with a running child without it")
+
+class TestTheSourcesThatWereSilent:
+    """§47 slice 6, and batch 59's named follow-on. Five things in this
+    harness create a subagent-kind thread; two of them opened no span, so
+    a shell watching the agent stack saw nothing at all while they ran.
+
+    The REVIEWER is deliberately not here. It runs from the research
+    orchestrator, which carries no sink at all, and threading one there
+    is the same plumbing the passes need -- doing it twice is two copies
+    that can disagree, so it goes with slice 7 rather than being
+    half-built now.
+    """
+
+    def test_the_initializer_reports_itself(self, _roots, mocker,
+                                            fake_storage):
+        """/init is a long agent-shaped run -- it reads the project and
+        drafts a document -- and until now nothing on screen said so."""
+        from project_init import generator
+
+        _write_harness_agent(_roots, config.INITIALIZER_AGENT)
+        config_loader.initialize(str(_roots["project"]))
+        mocker.patch.object(
+            RunAgentLoop, "run_agent_conversation",
+            side_effect=lambda **kw: make_model_response(text="a document"))
+        # `_task` renders the manifest into prose, so the seam to
+        # stub is the task text rather than the manifest shape --
+        # what is under test is the SPAN, not what /init reads.
+        mocker.patch.object(generator, "_task",
+                            return_value="draft the hub document")
+
+        sink = Recorder()
+        generator._run_initializer(str(_roots["project"]), "software", None,
+                                   "m", "ANTHROPIC", sink)
+
+        assert [(kind, name) for kind, name, _d in sink.events] == [
+            ("enter", config.INITIALIZER_AGENT),
+            ("exit", config.INITIALIZER_AGENT)]
+
+    def test_the_initializer_runs_one_level_down(self, _roots, mocker,
+                                                 fake_storage):
+        """Derived from the depth the run starts at rather than written as
+        a 1 -- `_compactor_depth`'s rule, one command over, so a second
+        count cannot disagree with the first."""
+        from project_init import generator
+
+        _write_harness_agent(_roots, config.INITIALIZER_AGENT)
+        config_loader.initialize(str(_roots["project"]))
+        mocker.patch.object(
+            RunAgentLoop, "run_agent_conversation",
+            side_effect=lambda **kw: make_model_response(text="a document"))
+        # `_task` renders the manifest into prose, so the seam to
+        # stub is the task text rather than the manifest shape --
+        # what is under test is the SPAN, not what /init reads.
+        mocker.patch.object(generator, "_task",
+                            return_value="draft the hub document")
+
+        sink = Recorder()
+        generator._run_initializer(str(_roots["project"]), "software", None,
+                                   "m", "ANTHROPIC", sink)
+
+        assert [d for _k, _n, d in sink.events] == [1, 1]
+
+    def test_a_failing_initializer_still_closes_its_row(self, _roots, mocker,
+                                                        fake_storage):
+        """The context manager's whole reason: /init raises InitError on an
+        empty document, and a row describing a run that is over would stay
+        on screen for the session."""
+        from project_init import generator
+
+        _write_harness_agent(_roots, config.INITIALIZER_AGENT)
+        config_loader.initialize(str(_roots["project"]))
+        mocker.patch.object(
+            RunAgentLoop, "run_agent_conversation",
+            side_effect=RuntimeError("the provider fell over"))
+        # `_task` renders the manifest into prose, so the seam to
+        # stub is the task text rather than the manifest shape --
+        # what is under test is the SPAN, not what /init reads.
+        mocker.patch.object(generator, "_task",
+                            return_value="draft the hub document")
+
+        sink = Recorder()
+        with pytest.raises(RuntimeError):
+            generator._run_initializer(str(_roots["project"]), "software",
+                                       None, "m", "ANTHROPIC", sink)
+
+        assert sink.live == [], "the initializer's row outlived its run"
+
+    def test_the_initializer_records_what_it_was(self, _roots, mocker,
+                                                 fake_storage):
+        """No parent thread, deliberately: /init scaffolds a project, it is
+        not a child of the conversation the command was typed in -- and
+        `generate()` is shell-agnostic and has no conversation to name."""
+        from project_init import generator
+
+        _write_harness_agent(_roots, config.INITIALIZER_AGENT)
+        config_loader.initialize(str(_roots["project"]))
+        captured = {}
+        mocker.patch.object(
+            RunAgentLoop, "run_agent_conversation",
+            side_effect=lambda **kw: (captured.update(kw),
+                                      make_model_response(text="doc"))[1])
+        # `_task` renders the manifest into prose, so the seam to
+        # stub is the task text rather than the manifest shape --
+        # what is under test is the SPAN, not what /init reads.
+        mocker.patch.object(generator, "_task",
+                            return_value="draft the hub document")
+
+        generator._run_initializer(str(_roots["project"]), "software", None,
+                                   "m", "ANTHROPIC", None)
+
+        assert captured["thread_agent"] == config.INITIALIZER_AGENT
+        assert captured.get("thread_parent") is None
+
+    def test_the_compactor_says_whose_conversation_it_summarised(self,
+                                                                 mocker):
+        """It already had a span. What it did not have was a way to say
+        which thread the summary is OF -- and it is a child of that thread
+        in the only sense that matters."""
+        from core import compaction
+
+        captured = {}
+
+        class FakeLoop:
+            """`_summarize` takes the loop class as an ARGUMENT, so the
+            seam is a parameter rather than a patch."""
+
+            @staticmethod
+            def run_agent_conversation(**kwargs):
+                captured.update(kwargs)
+                return make_model_response(text="short")
+
+        agent = type("A", (), {"name": "compactor", "model": None,
+                               "provider": None, "max_steps": 1})()
+        manager = type("M", (), {
+            "active_context": staticmethod(lambda *a, **k: None),
+            "system_prompt_for": staticmethod(lambda *a, **k: "p")})()
+        compaction._summarize(
+            FakeLoop, manager, agent, "base", "long text", 10,
+            100, "m", "ANTHROPIC", 0, None,
+            parent_thread_id="thread-being-compacted")
+
+        assert captured["thread_parent"] == "thread-being-compacted"
+        assert captured["thread_agent"] == "compactor"
+
+class TestTheSinkReachesTheInitializerFromTheSHELL:
+    """The tests above call the run's own function, which leaves the
+    plumbing between the shell and it untested -- and that is exactly
+    where a sink gets dropped. The same gap slice 4's mutation pass found
+    on the other side of `AgentRow`.
+    """
+
+    def test_generate_hands_the_sink_down(self, _roots, mocker,
+                                          fake_storage):
+        """`generate()` is the shell-agnostic entry point and the span is
+        two calls below it."""
+        from project_init import generator
+
+        seen = {}
+
+        def _record(*args):
+            seen["activity"] = args[5]
+            raise generator.InitError("stopping -- the sink is the subject")
+
+        mocker.patch.object(generator, "_run_initializer",
+                            side_effect=_record)
+        sink = Recorder()
+
+        with pytest.raises(generator.InitError):
+            generator.generate(project_path=str(_roots["project"]),
+                               model="m", provider_name="ANTHROPIC",
+                               kind="software", confirm=lambda _s: True,
+                               activity=sink)
+
+        assert seen["activity"] is sink, (
+            "generate() dropped the sink on the way to the run")
+
+    @pytest.mark.asyncio
+    async def test_the_init_command_hands_over_the_APPS_sink(self, mocker):
+        """The last hop, and the easy one to write as None: the shell has
+        to reach for `app._activity`."""
+        from tests.conftest import settle
+        from tui.app import VenastineApp
+
+        captured = {}
+
+        def _fake_generate(**kwargs):
+            captured.update(kwargs)
+            return {"kind": "init", "text": "done"}
+
+        mocker.patch("project_init.generator.generate",
+                     side_effect=_fake_generate)
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.query_one("#prompt").text = "/init --software"
+            await pilot.press("enter")
+            assert await settle(pilot, lambda: "activity" in captured), \
+                "/init never reached generate()"
+            sink = app._activity
+
+        assert captured["activity"] is sink
+
+class TestAResearchPassReportsItself:
+    """§47 slice 7, and the other half of batch 59's follow-on. A research
+    run is mostly passes and each takes minutes; until now the panel stayed
+    blank for the part worth watching."""
+
+    def _drain(self, gen):
+        from tests.conftest import drain
+
+        return drain(gen)
+
+    def test_a_pass_opens_and_closes_a_span(self, mocker):
+        from core.loop import RunAgentLoop
+
+        mocker.patch.object(
+            RunAgentLoop, "_run",
+            side_effect=lambda *a, **kw: iter(
+                [type("E", (), {"final_response":
+                                make_model_response(text="done")})()]))
+
+        sink = Recorder()
+        self._drain(RunAgentLoop.stream_deep_research_mode(
+            "input", "m", "Pass 1", activity=sink))
+
+        assert [(k, n) for k, n, _d in sink.events] == [
+            ("enter", "Pass 1"), ("exit", "Pass 1")]
+        assert sink.live == []
+
+    def test_a_pass_runs_one_level_down(self, mocker):
+        from core.loop import RunAgentLoop
+
+        mocker.patch.object(
+            RunAgentLoop, "_run",
+            side_effect=lambda *a, **kw: iter(
+                [type("E", (), {"final_response":
+                                make_model_response(text="done")})()]))
+
+        sink = Recorder()
+        self._drain(RunAgentLoop.stream_deep_research_mode(
+            "input", "m", "Pass 1", activity=sink))
+
+        assert [d for _k, _n, d in sink.events] == [1, 1]
+
+    def test_an_abandoned_pass_still_closes_its_row(self, mocker):
+        """§22 records abandonment: a TUI quitting mid-run raises
+        GeneratorExit inside the generator. The span has to close on that
+        too, or the panel keeps a row for a pass nobody is running."""
+        from core.loop import RunAgentLoop
+
+        def _forever(*a, **kw):
+            while True:
+                yield type("E", (), {"final_response": None})()
+
+        mocker.patch.object(RunAgentLoop, "_run", side_effect=_forever)
+
+        sink = Recorder()
+        gen = RunAgentLoop.stream_deep_research_mode(
+            "input", "m", "Pass 1", activity=sink)
+        next(gen)
+        assert sink.live == [("Pass 1", 1)]
+        gen.close()
+
+        assert sink.live == [], "an abandoned pass left its row on screen"
+
+    def test_a_pass_thread_says_which_pass_it_was(self, mocker):
+        """No parent THREAD -- a pass is a child of the RUN, and a run is
+        not a conversation. §27's T2 already indexes them on the run."""
+        from core import loop as loop_mod
+        from core.loop import RunAgentLoop
+
+        captured = {}
+        original = loop_mod.ConversationMemory
+
+        def _spy(**kwargs):
+            captured.update(kwargs)
+            return original(**kwargs)
+
+        mocker.patch.object(loop_mod, "ConversationMemory", _spy)
+        mocker.patch.object(
+            RunAgentLoop, "_run",
+            side_effect=lambda *a, **kw: iter(
+                [type("E", (), {"final_response":
+                                make_model_response(text="done")})()]))
+
+        self._drain(RunAgentLoop.stream_deep_research_mode(
+            "input", "m", "Pass 3a"))
+
+        assert captured["agent_name"] == "Pass 3a"
+        assert "parent_thread_id" not in captured or \
+            captured["parent_thread_id"] is None
+
+    def test_the_pass_is_bound_so_it_can_be_opened_while_it_runs(self,
+                                                                 mocker):
+        from core.loop import RunAgentLoop
+
+        mocker.patch.object(
+            RunAgentLoop, "_run",
+            side_effect=lambda *a, **kw: iter(
+                [type("E", (), {"final_response":
+                                make_model_response(text="done")})()]))
+
+        sink = Recorder()
+        response = self._drain(RunAgentLoop.stream_deep_research_mode(
+            "input", "m", "Pass 1", activity=sink))
+
+        assert [thread for _span, thread in sink.bound] == [
+            response.thread_id], (
+                f"the pass bound {sink.bound!r}; a row with no address "
+                "cannot be opened until the run is over")
+
+
+class TestTheOrchestratorCarriesTheSink:
+    """The threading itself. Batch 59 stopped at
+    `stream_deep_research_mode`'s signature and said so; this is the rest
+    of the chain, and each hop is a place it can be dropped."""
+
+    @staticmethod
+    def _fake_pass(captured):
+        """A stand-in for `stream_deep_research_mode`: a GENERATOR that
+        returns a response, because `_run_pass` drains it with
+        `yield from` and reads the return value."""
+        def _run(**kwargs):
+            captured.update(kwargs)
+            return
+            # Unreachable by design -- its presence is what makes this a
+            # generator, which is what `_run_pass` needs to drain it with
+            # `yield from`. Do not "clean up" this line.
+            yield
+        return _run
+
+    def test_a_pass_runner_hands_it_down(self, mocker):
+        from core.reasoning import orchestrator
+
+        captured = {}
+        mocker.patch.object(orchestrator.RunAgentLoop,
+                            "stream_deep_research_mode",
+                            side_effect=self._fake_pass(captured))
+
+        sink = Recorder()
+        try:
+            list(orchestrator._run_pass("Pass 1", "in", "m", "ANTHROPIC",
+                                        activity=sink))
+        except Exception:                                       # noqa: BLE001
+            # The fake returns no response, which the real one never does.
+            # What is under test is the ARGUMENT, and it was captured
+            # before anything downstream could object to the answer.
+            pass
+
+        assert captured["activity"] is sink
+
+    def test_the_retrying_pass_runner_hands_it_down(self, mocker):
+        from core.reasoning import orchestrator
+
+        captured = {}
+        mocker.patch.object(orchestrator.RunAgentLoop,
+                            "stream_deep_research_mode",
+                            side_effect=self._fake_pass(captured))
+
+        sink = Recorder()
+        try:
+            list(orchestrator._run_pass_with_json_retry(
+                "Pass 2", "in", "m", "ANTHROPIC", activity=sink))
+        except Exception:                                       # noqa: BLE001
+            pass
+
+        assert captured["activity"] is sink
+
+    def test_the_reviewer_gets_one_too(self, _roots, mocker,
+                                       fake_storage):
+        """Moved here from slice 6 deliberately: the reviewer runs from
+        the orchestrator, so it needs the same plumbing the passes do and
+        building it twice would be two copies that can disagree.
+
+        AND IT OPENS A SPAN, which is the half this test asserted its way
+        past for a batch. Forwarding a sink is not being visible:
+        `run_agent_conversation` only ever calls `bind()`, and `bind()` is
+        a no-op with no span open, so the reviewer handed down a channel
+        that could learn nothing about it. The row, ctrl+g, opening it
+        while it runs and the modal's "asked by" line all followed from
+        the span, not from the argument -- which is the leaf-versus-chain
+        trap one level up: the hop was tested and the thing the hop is
+        FOR was not.
+
+        Patched on `core.loop` rather than on the review module, which
+        imports the loop INSIDE the function to avoid an import cycle.
+        """
+        from core.reasoning import review as review_module
+
+        _write_harness_agent(_roots, review_module.REVIEWER_AGENT)
+        config_loader.initialize(str(_roots["project"]))
+
+        captured = {}
+        mocker.patch.object(
+            RunAgentLoop, "run_agent_conversation",
+            side_effect=lambda **kw: (captured.update(kw),
+                                      make_model_response(text="[]"))[1])
+
+        class _Run:
+            """Answers whatever the reviewer prompt asks for. The
+            prompt's SHAPE is `_reviewer_prompt`'s business and has
+            its own tests; what is under test here is one argument."""
+
+            trace = []
+            claims = []
+            final_report = ""
+            user_query = "q"
+
+            def log(self, _message):
+                pass
+
+            def __getattr__(self, _name):
+                return []
+
+        run = _Run()
+        sink = Recorder()
+        try:
+            review_module.run_review(run, "m", "ANTHROPIC", activity=sink)
+        except Exception:                                       # noqa: BLE001
+            pass
+
+        assert captured.get("activity") is sink
+        assert captured.get("thread_agent")
+        assert [(kind, name) for kind, name, _depth in sink.events] == [
+            ("enter", review_module.REVIEWER_AGENT),
+            ("exit", review_module.REVIEWER_AGENT)], (
+            f"the sink saw {sink.events}; a reviewer that opens no span "
+            "cannot be drawn, opened or named on a modal, however faithfully "
+            "the argument reaches it")
+        assert sink.events[0][2] == 1, (
+            "the reviewer draws one level below the run, like a pass -- and "
+            "the number is derived from its context, never written as a 1")
+
+    def test_a_corrective_retry_hands_the_sink_down(self, mocker):
+        """The hop batch 73 missed. A retry reaches the model through
+        `continue_conversation`, which drains its own loop -- so a subagent
+        spawned while the model is being corrected about JSON is visible
+        through this channel or not at all, which is the reason
+        `tui/app.py`'s one-shot path carries it.
+
+        No span here: the caller's own brackets the whole
+        attempt-and-retry sequence, and a row per correction would report
+        one run as several."""
+        from core.loop import RunAgentLoop
+        from core.reasoning import json_retry
+
+        captured = {}
+
+        def _continue(**kwargs):
+            captured.update(kwargs)
+            return make_model_response(text="still not json")
+
+        mocker.patch.object(RunAgentLoop, "continue_conversation",
+                            side_effect=_continue)
+        sink = Recorder()
+        try:
+            json_retry.retry_until_json(
+                make_model_response(text="not json"), label="Pass 2",
+                system_prompt="p", model="m", provider_name="ANTHROPIC",
+                max_retries=1, activity=sink)
+        except ValueError:
+            # Both attempts are prose, which is the shape that exercises
+            # the retry at all. What is under test is the argument.
+            pass
+
+        assert captured.get("activity") is sink
+        assert sink.events == [], (
+            "a corrective attempt opened a span of its own; the caller's "
+            "span already covers the whole sequence")
+
+    def test_a_review_refinement_hands_the_sink_down(self, _roots, mocker,
+                                                     fake_storage):
+        """A refinement continues the reviewer's thread after that run's
+        span has closed, so it draws no row -- but anything it SPAWNS has
+        to reach the panel, and the walk dropped the sink."""
+        from core.loop import RunAgentLoop
+        from core.reasoning import review as review_module
+
+        _write_harness_agent(_roots, review_module.REVIEWER_AGENT)
+        config_loader.initialize(str(_roots["project"]))
+
+        captured = {}
+
+        def _continue(**kwargs):
+            captured.update(kwargs)
+            return make_model_response(text="[]")
+
+        mocker.patch.object(RunAgentLoop, "continue_conversation",
+                            side_effect=_continue)
+
+        class _Run:
+            trace = []
+
+            def log(self, _message):
+                pass
+
+        sink = Recorder()
+        review_module._refine(
+            {"kind": "text", "claim_id": "C1"}, "a note", _Run(),
+            model="m", provider_name="ANTHROPIC", thread_id=uuid4(),
+            authorization=None, activity=sink)
+
+        assert captured.get("activity") is sink

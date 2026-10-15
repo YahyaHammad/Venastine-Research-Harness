@@ -19,10 +19,14 @@ it still resolves, because ctrl+p's command palette can select one of
 Textual's own built-in themes and a whitelist here would silently forget
 it.
 
-Built on textual.theme.Theme (verified against the pinned textual 1.0.0,
+Built on textual.theme.Theme (verified against the installed textual,
 per D22's rule about not assuming a dependency's API shape). Textual
 derives the full variable set from these anchors, so each theme only
 declares the colours that actually differ.
+
+`Theme` gained an `ansi: bool` when the pin moved to 8.2.8, and nothing
+here sets it: these fourteen are RGB palettes, which is the whole
+premise of the contrast floors they are held to.
 """
 
 import logging
@@ -228,13 +232,13 @@ DIFF_TINT = 0.8
 
 
 #: The eight Theme slots `role_styles` reads. Every one of them but
-#: `primary` is Optional[str] on textual's own Theme, and three of the
-#: twelve built-ins the command palette offers do leave one blank or
-#: fill it with a vocabulary Rich cannot read: textual-dark has no
-#: `background`, textual-light no `foreground`, textual-ansi nothing
-#: but `ansi_*` names. Reading them raw is what made selecting
-#: textual-dark kill the harness AT MOUNT -- and keep killing it,
-#: since watch_theme had already remembered the name (batch 64).
+#: `primary` is Optional[str] on textual's own Theme, and four of the
+#: twenty-one built-ins the command palette offers do leave one blank
+#: or fill it with a vocabulary Rich cannot read: textual-dark has no
+#: `background`, textual-light no `foreground`, and ansi-dark and
+#: ansi-light nothing but `ansi_*` names. Reading them raw is what made
+#: selecting textual-dark kill the harness AT MOUNT -- and keep killing
+#: it, since watch_theme had already remembered the name (batch 64).
 _SLOTS = ("primary", "secondary", "accent", "warning", "error",
           "success", "foreground", "background")
 
@@ -252,18 +256,25 @@ _RESOLVED: dict[tuple, dict[str, str]] = {}
 def _rich(colour: str) -> str:
     """Textual's `ansi_*` colour names in Rich's vocabulary.
 
-    textual-ansi fills every slot with `ansi_blue`/`ansi_default` --
-    the terminal's own sixteen, which is the entire point of that
-    theme -- and Rich's Style.parse does not know the prefix. It knows
+    An ANSI theme fills every slot with `ansi_blue`/`ansi_default` --
+    the terminal's own sixteen, which is the entire point of those
+    themes -- and Rich's Style.parse does not know the prefix. It knows
     the names underneath it: textual.color.ANSI_COLORS is exactly the
     ANSI subset of rich.color.ANSI_COLOR_NAMES (verified by set
-    difference against the pinned 1.0.0, per D22), and `ansi_default`
-    is Rich's `default`. A translation, then, rather than a guess.
+    difference against the installed package -- 16 of 235, re-checked
+    when the pin moved to 8.2.8), and `ansi_default` is Rich's
+    `default`. A translation, then, rather than a guess.
+
+    There was ONE such theme (`textual-ansi`) until 8.2.5 replaced it
+    with `ansi-dark` and `ansi-light`, and `Theme` grew an `ansi` flag
+    in the same release. Nothing here reads the flag: a name can be
+    renamed again and the `ansi_` prefix is the thing this function is
+    actually about.
 
     Not doing it was never a crash, which is why it lasted: Rich's
     Text.render resolves a style string with `default=Style.null()`,
     so an unparseable one renders PLAIN and says nothing. Twenty-five
-    of the thirty-four roles were silently unstyled on textual-ansi --
+    of the thirty-four roles were silently unstyled on the ANSI theme --
     the uniformly white transcript this section exists to fix, reached
     by a different road.
     """
@@ -285,7 +296,7 @@ def _palette(theme: Theme) -> dict[str, str]:
     #D8A441 and differs from the raw slot on 41 values across the
     fourteen shipped themes. And it is 48x slower than role_styles
     itself. Reaching for it only where a slot is actually None leaves
-    all fourteen byte-identical and costs the other twenty-four themes
+    all fourteen byte-identical and costs the other twenty-one built-ins
     eight getattrs.
     """
     raw = tuple(getattr(theme, slot) for slot in _SLOTS)
@@ -310,7 +321,7 @@ def _tint(colour: str, background: str,
     standalone themes, whose panels carry the identity, visibly so.
 
     None when either end is one of the terminal's own sixteen, which
-    is textual-ansi and nothing else: there is no RGB there to blend,
+    is the ANSI themes and nothing else: there is no RGB there to blend,
     so there is no band to draw. Not a hypothetical guard -- textual's
     Color.parse raises on Rich's `default`, and blending two ANSI
     colours in textual hands back one of them unchanged, so both
@@ -329,7 +340,7 @@ def role_styles(theme: Theme) -> dict[str, str]:
     `tool_error` is a failed tool call rather than "amber".
 
     Reads the RESOLVED palette rather than the Theme's own slots,
-    which is batch 64: three of the twenty-six themes ctrl+p offers
+    which is batch 64: four of the thirty-five themes ctrl+p offers
     leave a slot at None or fill it with textual's `ansi_*` names,
     and one of them took the whole app down at mount. `_palette`
     fills and translates; nothing below can see the difference.
@@ -346,8 +357,30 @@ def role_styles(theme: Theme) -> dict[str, str]:
         # longest text on screen and the thing most often actually read;
         # tinting it costs contrast to say something the label already said.
         "assistant": "",
+        # ROADMAP_v3 §49 (SS14): a line of a background session's own
+        # output, quoted into a session view. PLAIN, for `assistant`'s
+        # reason and one better: it is not the harness's voice and not
+        # the model's, it is what a program printed, and a view of a
+        # failing test run is read line by line rather than skimmed.
+        # `system` was the alternative and is wrong twice -- dimmed and
+        # italic is the worst possible treatment for forty lines of
+        # output, and it would claim the harness said them.
+        #
+        # `foreground` EXPLICITLY, not `""` like `assistant`. The empty
+        # slot means "inherit", which is right for the body text of a
+        # pane that has no other colour in force and wrong for a block
+        # quoted inside a frame of `system` lines. It is also the one
+        # deliberately unstyled slot, and tests/test_themes.py says so.
+        "output": palette["foreground"],
         # The harness talking about itself.
         "system": "dim italic",
+        # ROADMAP_v3 §49 (SS5): the harness starting a turn with a
+        # background session's result. In the tool call's hue, since it is
+        # the far end of one, and bold italic so it is neither that call
+        # (plain accent) nor the reply's label (bold accent). Not `dim`:
+        # this line opens a turn the reader did not ask for, and `system`
+        # alone is dimmed (test_dim_is_the_system_role_alone).
+        "wake": f"bold italic {palette['accent']}",
         # §38: the model's reasoning, when tui.show_thinking renders it
         # inline. `secondary` because thinking is the answer's quieter
         # sibling rather than a severity or an identity -- it already
@@ -397,7 +430,7 @@ def role_styles(theme: Theme) -> dict[str, str]:
         #
         # Unless there is no background to set. `_tint` answers None on
         # a theme whose colours are the terminal's own sixteen --
-        # textual-ansi and nothing else -- and the row then takes the
+        # an ANSI theme and nothing else -- and the row then takes the
         # severity colour as its FOREGROUND, which is what git, diff
         # and patch all do in a sixteen-colour terminal. A solid band
         # was the alternative, and DIFF_TINT's comment above turns that
@@ -497,7 +530,7 @@ def styles_for(app) -> dict[str, str]:
     preferences._remember's deliberate non-latching, and for the
     reason that module states: a warning fires there on a human's own
     action, and fires here on every line drawn. Silence is precisely
-    what let textual-light and textual-ansi render unstyled for as
+    what let textual-light and the ANSI themes render unstyled for as
     long as they did -- Rich resolves an unparseable style with
     `default=Style.null()` and says nothing -- so a contained failure
     that reported nothing would be the same defect wearing a better

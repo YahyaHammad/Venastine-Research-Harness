@@ -13,6 +13,13 @@ Rev. 1 sketch's `depth: int` parameter and `allowed_tools=` kwarg are
 both gone: depth lives on ToolContext.subagent_depth, and §15 replaced
 allowed_tools with context= everywhere.
 
+§47 added two more declared names, `memory` and `call_id`, and they are
+what the child's thread records as its PARENT. The spawn already returned
+`subagent_thread_id` to the model, so the edge existed -- as a repr
+inside a JSON blob in one message row, which nothing could query and
+replay skips. Stored on the child's own row, it survives the process and
+lets a `▸ spawn_subagent` line still open its run tomorrow.
+
 core.loop is imported INSIDE run(), not at module top: tools/registry.py
 imports this module to register it, and core.loop imports tools.registry
 -- a top-level import here would close that cycle at import time.
@@ -50,6 +57,38 @@ TOOL_SCHEMA = {
 }
 
 
+def has_agents() -> bool:
+    """ToolSpec.available_check (TECHNICAL_DEBT 13, batch 110).
+
+    The schema above tells the model to name an "Agent name exactly as
+    listed in the Available agents catalog". With no SPAWNABLE agent
+    discovered there is no such catalog, so the tool's only possible
+    answer is `Unknown agent` -- a schema the model can see, choose, and
+    never get value from, which is the fetch_url damage class §15 exists
+    to fix. `load_skill.has_skills` is the same declaration for the same
+    reason, and `pin`, `unpin` and `remember` each carry one.
+
+    Reads the SAME function prompt assembly uses (agent_catalog_text, via
+    prompts/system_prompts.with_catalogs) rather than a parallel check, so
+    "advertised" and "catalogued" cannot drift apart. That is the whole
+    point of the choice: batch 51 shipped two spawnable agents, so the
+    live instance of this was gone and only the asymmetry remained.
+
+    ROSTER-WIDE, NOT PER-RUN, because `available_check` takes no context.
+    It answers "is there any spawnable agent at all". A run whose
+    `spawn_targets` empties the list is still the business of
+    `refusal_reason` and of `agent_catalog_text(targets)`, which read the
+    same restriction from the two sides it has.
+
+    Imported inside the function for the reason the module docstring
+    gives about core.loop: tools/registry.py imports this module, and
+    prompts/system_prompts.py imports the registry.
+    """
+    from prompts import system_prompts
+
+    return bool(system_prompts.agent_catalog_text())
+
+
 def refusal_reason(params: dict, context=None):
     """Why this spawn would be refused, or None (§32 A7, #70).
 
@@ -73,6 +112,12 @@ def refusal_reason(params: dict, context=None):
     if parent.subagent_depth >= config.SUBAGENT_MAX_DEPTH:
         return (f"Maximum subagent nesting depth "
                 f"({config.SUBAGENT_MAX_DEPTH}) reached")
+    # Depth first, which is the order the docstring above pins; then
+    # whether there are arguments to read at all (batch 146). A refusal
+    # rather than a raise, because this runs above dispatch()'s
+    # containment -- tools/base.py carries the one copy of what that costs.
+    if not isinstance(params, dict):
+        return "spawn_subagent requires an object of arguments."
     name = params.get("agent_name")
     task = params.get("task")
     if not name or not task:
@@ -80,9 +125,58 @@ def refusal_reason(params: dict, context=None):
                 "'task'.")
     from agents.manager import manager
 
-    if manager.get(name) is None:
-        return (f"Unknown agent: {name!r} is not "
-                f"in the available agents catalog.")
+    agent = manager.get(name)
+    if agent is None:
+        # "the roster", not "the catalog", and the distinction is the one
+        # A16 turns on: `manager.get` reads the ROSTER (every agent the
+        # loader discovered) while `agent_catalog_text()` is the CATALOG
+        # (the spawnable subset). This message claimed the catalog was the
+        # membership test for as long as it was not -- so for an agent that
+        # was in the roster and off the catalog, the catalog's answer was
+        # "absent" and this function's was "spawn it", and the one string a
+        # model ever sees about membership described a test that was not
+        # being run. Defect shape 9 inside the function that owns the
+        # contract. The wording was wrong whichever way A16 had gone.
+        return (f"Unknown agent: {name!r} is not one of this harness's "
+                f"agents.")
+    # A16 (ROADMAP_v3 §62), which REVERSES §32 A3/A4's "advertisement
+    # only". Before this, `refusal_reason` never read `spawnable`, so
+    # `spawn_subagent` would spawn any agent the loader had discovered, by
+    # name -- including one that A3's asymmetry had deliberately left OFF
+    # the catalog. A3 argued that a stranger's silence must get the safe
+    # answer, and the measured consequence of "reads as false" was that the
+    # agent became INVISIBLE rather than unreachable: a project-tier agent
+    # omitting the field was absent from the prompt a user might read and
+    # callable by any text that named it. For the careless author the
+    # default was safe; for the adversarial one it was the quieter option,
+    # which is the opposite ranking from the one A3 argues.
+    #
+    # BEFORE spawn_targets and after the unknown-agent check: an unknown
+    # name must still report that it is unknown rather than that it is not
+    # permitted, and this is a property of the agent being spawned where
+    # spawn_targets is a property of the parent.
+    #
+    # `is not True` rather than `not`, because `None` means undeclared at
+    # the user and project tiers and A3's reading of silence is unchanged --
+    # only its consequence is.
+    if getattr(agent, "spawnable", None) is not True:
+        return (f"{name!r} is not a spawnable agent. It can be used by hand "
+                f"with /agent, which is unaffected.")
+    # LAST, because the checks above are the live contract this
+    # docstring describes and an unknown name must still report that it
+    # is unknown rather than that it is not permitted.
+    #
+    # A REFUSAL RATHER THAN A NARROWING, which is the whole point of the
+    # field. C6 caps the child's tools at the parent's, so without this
+    # a parent that should not be delegating the work at all gets a
+    # child that runs anyway with pieces missing -- `plan` spawning
+    # `build` came back unable to `write` or `edit`, and neither side
+    # could tell. Refusing says so in a sentence the model can act on,
+    # and A7 means it says so BEFORE a human is asked to sign anything.
+    if parent.spawn_targets is not None and name not in parent.spawn_targets:
+        return (f"{name!r} is not an agent this one may spawn. "
+                f"Available here: "
+                f"{', '.join(sorted(parent.spawn_targets)) or 'none'}.")
     return None
 
 
@@ -133,11 +227,14 @@ def request_payload(params: dict, context=None) -> dict:
 
 
 def run(params: dict, parent_context=None, parent_run=None,
-        response_channel=None, signoff=None, activity=None) -> dict:
-    from core.loop import (
-        RunAgentLoop, DEFAULT_PROVIDER, DEFAULT_SYSTEM_PROMPT,
-    )
+        response_channel=None, signoff=None, activity=None,
+        memory=None, call_id=None, cancel=None) -> dict:
     from agents.manager import manager
+    from core.loop import (
+        DEFAULT_PROVIDER,
+        DEFAULT_SYSTEM_PROMPT,
+        RunAgentLoop,
+    )
 
     parent = parent_context or ToolContext()
     # §32 A7. The SAME function the loop consulted before deciding
@@ -201,38 +298,141 @@ def run(params: dict, parent_context=None, parent_run=None,
     #
     # `child.subagent_depth` and not a local count: C3 already maintains
     # that number and a second one would be free to disagree with it.
-    with agent_activity.span(activity, agent.name, child.subagent_depth):
-        response = RunAgentLoop.run_agent_conversation(
-            user_goal=task,
-            model=model,
-            provider_name=provider,
-            max_steps=agent.max_steps or config.MAX_ITERATIONS,
-            context=child,
-            effort=effort,
-            # `child`, not the agent's own context: C6 intersects with
-            # the parent, so a parent that excluded spawn_subagent must not
-            # have the catalog re-invite its child to spawn one (review
-            # f19).
-            # #68: the child's own facts, not the parent's. A subagent
-            # spawned from a headless run inherits no channel, so its
-            # catalogs must be decided by what IT can call -- the same
-            # values handed to run_agent_conversation two lines below.
-            system_prompt=manager.system_prompt_for(
-                agent, DEFAULT_SYSTEM_PROMPT, context=child,
-                callable_only=response_channel is None,
-                granted=granted),
-            response_channel=response_channel,
-            granted_tools=granted if (response_channel is not None
-                                      and granted) else None,
-            # §27 AC1. A spawned agent's thread is not a conversation
-            # anyone will resume, and one goal-mode turn can spawn several.
-            thread_kind=THREAD_KIND_SUBAGENT,
-            # The recursion. Inherited exactly as response_channel is, and
-            # for the same reason: the child is a run in its own right and
-            # whatever is watching this stack is watching that one too.
-            activity=activity,
-        )
+    from core import shell_sessions
+
+    # ROADMAP_v3 §49 (SS9). Everything the child's first turn and any wake
+    # turn after it share. A wake IS that run continuing -- the same
+    # prompt, context, channel, grant and sink -- so the two calls take one
+    # dict rather than two argument lists that could drift apart.
+    common = dict(
+        model=model,
+        provider_name=provider,
+        max_steps=agent.max_steps or config.MAX_ITERATIONS,
+        context=child,
+        effort=effort,
+        # `child`, not the agent's own context: C6 intersects with
+        # the parent, so a parent that excluded spawn_subagent must not
+        # have the catalog re-invite its child to spawn one (review
+        # f19).
+        # #68: the child's own facts, not the parent's. A subagent
+        # spawned from a headless run inherits no channel, so its
+        # catalogs must be decided by what IT can call -- the same
+        # values handed to run_agent_conversation below.
+        system_prompt=manager.system_prompt_for(
+            agent, DEFAULT_SYSTEM_PROMPT, context=child,
+            callable_only=response_channel is None,
+            granted=granted),
+        response_channel=response_channel,
+        granted_tools=granted if (response_channel is not None
+                                  and granted) else None,
+        # The recursion. Inherited exactly as response_channel is, and
+        # for the same reason: the child is a run in its own right and
+        # whatever is watching this stack is watching that one too.
+        activity=activity,
+        # ROADMAP_v3 §61 (CN7). Inherited exactly as `activity` above is,
+        # and for a sharper version of the same reason: the child is a
+        # run in its own right, and a stop aimed at the turn that spawned
+        # it has to reach it, or the parent waits out a child it has
+        # already asked to end.
+        cancel=cancel,
+    )
+    with agent_activity.span(activity, agent.name, child.subagent_depth,
+                             call_id) as span:
+        # ROADMAP_v3 §49 (SS17). The child is a wake CONSUMER: a session it
+        # starts is reported inside this call and nowhere else, which is
+        # what makes starting one allowed at all in this run.
+        with shell_sessions.consuming():
+            try:
+                response = RunAgentLoop.run_agent_conversation(
+                    user_goal=task,
+                    # §27 AC1. A spawned agent's thread is not a
+                    # conversation anyone will resume, and one goal-mode
+                    # turn can spawn several.
+                    thread_kind=THREAD_KIND_SUBAGENT,
+                    # §47. WHO spawned this thread, stored on the child's
+                    # own row.
+                    #
+                    # `memory` and `call_id` are injected by dispatch() the
+                    # same way the values in `common` are -- the parent's
+                    # live ConversationMemory, and the model's id for THIS
+                    # call. Both are None on a path that reaches run()
+                    # directly (every test that calls it by hand), and the
+                    # child is then simply a thread with no recorded
+                    # parent, which is what it was before that batch.
+                    #
+                    # THE CALL ID IS WHAT MAKES THE EDGE SPECIFIC. One turn
+                    # can spawn `explore` three times, so the agent name
+                    # identifies the roster entry and not the run; the call
+                    # id is the only thing that ties one child to one
+                    # `▸ spawn_subagent` line.
+                    thread_parent=getattr(memory, "thread_id", None),
+                    thread_parent_call=call_id,
+                    thread_agent=agent.name,
+                    **common,
+                )
+                # SS9. The child does not answer its parent while its own
+                # background sessions are still running: it sleeps HERE, is
+                # woken here, and returns once there is nothing left to
+                # report. D6 is untouched -- what crosses back is still one
+                # distilled answer.
+                response = _sleep_for_sessions(response, common)
+            except BaseException:
+                # A child that RAISED has no thread to report to, and its
+                # sessions would outlive the run that started them --
+                # holding slots against the process-wide cap for as long
+                # as their timeouts. The SPAN is the handle: it is frozen
+                # and carries no address, so the child's thread id may
+                # never have reached this frame, while every session
+                # records the span it was started inside.
+                shell_sessions.sessions.kill_by_span(
+                    span.id, shell_sessions.KILL_OWNER_FAILED)
+                raise
     return {
         "result": response.text,
         "subagent_thread_id": str(response.thread_id),
     }
+
+
+def _sleep_for_sessions(response, common: dict):
+    """Stay inside the spawn while the child's sessions report (SS9, SS20).
+
+    Returns the response the child ends on: its first answer when it
+    started no sessions, or the answer to the last wake it was given.
+
+    THE LIMIT IS WHY THIS TERMINATES. A subagent has no user to type a
+    message, so the consecutive-wake count it shares with every other
+    owner can never be reset from outside -- past it the manager stops
+    handing out batches and holds them instead. SS20 makes that the end of
+    the run rather than a wait for something that cannot happen: the
+    remaining sessions are stopped, and the results of stopping them are
+    what the one final wake carries.
+    """
+    from core import shell_sessions
+
+    sessions = shell_sessions.sessions
+    thread_id = response.thread_id
+    while True:
+        batch = sessions.wait_for_wake(thread_id)
+        if batch:
+            response = _wake(response, thread_id, batch, common)
+            continue
+        if not sessions.suspended(thread_id):
+            return response
+        sessions.kill_owned(thread_id, shell_sessions.KILL_WAKE_LIMIT)
+        held = sessions.take_held(thread_id)
+        if held:
+            response = _wake(response, thread_id, held, common)
+        # Anything that last turn started has nobody left to report to,
+        # and nothing after this point will ever wake this thread again.
+        sessions.kill_owned(thread_id, shell_sessions.KILL_WAKE_LIMIT)
+        return response
+
+
+def _wake(response, thread_id, events, common: dict):
+    """One wake turn in the child's own thread, under its own run."""
+    from core.loop import RunAgentLoop
+    from core.session_wake import build_wake
+
+    text, record = build_wake(events)
+    return RunAgentLoop.wake_conversation(
+        thread_id=thread_id, text=text, harness=record, **common)

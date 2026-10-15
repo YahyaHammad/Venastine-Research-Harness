@@ -85,8 +85,56 @@ documents = ["markitdown==0.1.6", "protobuf==7.35.1"]
 # neither was ever in requirements.txt.
 pdf = ["markdown", "weasyprint"]
 
+# S18-07, batch 136. These four were at the bottom of requirements.txt, and
+# `dynamic = ["dependencies"]` above reads that file, so they were hard
+# requirements of the DISTRIBUTION: `pip install venastine-research-harness`
+# resolved a test runner and its scheduler, and bin/venastine.mjs installed
+# the same set into every end user's venv.
+#
+# NAMED HERE RATHER THAN READ FROM THE FILE, because setuptools'
+# `optional-dependencies` is all-or-nothing: making this one group dynamic
+# would force `documents` and `pdf` into files of their own, which is churn
+# to two groups that work in order to avoid typing four names. The names are
+# therefore in two places, and `test_the_test_extra_matches_requirements_test`
+# is what stops them drifting -- #144's rule is that a hand-maintained
+# duplicate is only as good as the gate over it.
+#
+# Floors, not pins, matching requirements-test.txt: D22's argument for
+# pinning is about packages whose behaviour CI's RESULT depends on.
+test = [
+    "pytest>=8.0",
+    "pytest-mock>=3.14",
+    "pytest-asyncio>=1.0",
+    "pytest-xdist>=3.6",
+]
+
 [tool.setuptools.dynamic]
 dependencies = { file = ["requirements.txt"] }
+
+[tool.ruff]
+# Lint gate (lint.yml), judged against the 3.11 floor even though
+# developers may run 3.12/3.13 locally -- UP modernisations must be valid
+# where CI runs, not just where they were written.
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+ignore = [
+  # Long docstring/comment lines are the record (decision ids, trace
+  # excerpts, URLs). Reflowing them for a ruler would bury the content.
+  "E501",
+  # `Optional[X]` is this codebase's idiom (300+ sites); `X | None`
+  # rewrites are churn with zero behaviour change.
+  "UP045",
+  # Deferred imports are architectural: tools/registry.py <-> agents/
+  # subagent_tool.py would cycle at import time, and several tests import
+  # only after arranging fixtures/patches.
+  "E402",
+  # printf-style `%` is the logging convention (AGENTS.md: interpolate via
+  # logger args, never f-strings at the call site) and the user-facing
+  # string idiom; mass conversion is churn for no behaviour change.
+  "UP031",
+]
 
 [tool.setuptools]
 # DECLARATIVE ONLY -- this project is run from a checkout, not installed.

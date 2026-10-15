@@ -28,8 +28,6 @@ import pytest
 
 from core.reasoning.base import Claim
 from core.reasoning.confidence_scoring import (
-    score_claim,
-    run_confidence_tiering,
     AUTHORITY_FULL_CREDIT,
     CRITIC_WEIGHT_FACTOR,
     DISAGREEMENT_PENALTY_FACTOR,
@@ -39,9 +37,10 @@ from core.reasoning.confidence_scoring import (
     SOURCE_QUALITY_FLOOR,
     TIER_THRESHOLDS,
     default_weights,
+    run_confidence_tiering,
+    score_claim,
 )
 from core.reasoning.orchestrator import FLAGGED_TIERS
-
 
 # ---------------------------------------------------------------------------
 # ---- Regression case 1: well-grounded factual, clean critic -> HIGH ----
@@ -831,7 +830,6 @@ class TestSourceQualityScalesTheGrounding:
         """arXiv is not peer reviewed, and §45 says so in the one place it
         changes an outcome. This is the behaviour a reader of a report is
         entitled to rely on."""
-        import config
         from core.reasoning.source_scoring import classify_domain
 
         _, authority = classify_domain("https://arxiv.org/abs/2005.14165")
@@ -1046,7 +1044,6 @@ class TestTheScoringSectionsResolve:
         """A schema question, not a range one. §14's loud-rejection rule is
         what makes adding a setting a deliberate act, and §45 does not
         soften it."""
-        import json
 
         from core import config_loader
 

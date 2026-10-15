@@ -88,7 +88,6 @@ from core.loop import RunAgentLoop
 from core.reasoning.pipeline_storage import load_pipeline_run
 from tests.conftest import make_model_response, pass_stream, run_pipeline
 
-
 # ---------------------------------------------------------------------------
 # ---- Mock helper ----------------------------------------------------------
 # ---------------------------------------------------------------------------
@@ -512,29 +511,52 @@ def test_a_pass_6a_response_naming_nothing_still_exhausts_the_loop(mocker):
     assert call_log.count("Pass 6a") == max_retries
 
 
+def _pass_6b_naming(*claim_ids, status="ungrounded", critic=(),
+                    severity=0.9):
+    """A 6b payload that answers about exactly these claims.
+
+    The INTERESTING shape is the batch plus one extra, not the extra
+    alone: B5 makes a TOTAL id mismatch the error and a partial one
+    deliberately not, so a response that names the flagged claim AND a
+    finished one passes the id cross-check whatever `claim_ids` is set to.
+    That is why batch 149's fix is in the APPLY and not in the one line
+    S12-02's report points at.
+    """
+    return json.dumps({
+        "grounding": [{"claim_id": cid, "sources": [], "status": status}
+                      for cid in claim_ids],
+        "critic": [{"claim_id": cid, "fallacies": ["a fallacy"],
+                    "contradictions": [], "severity": severity}
+                   for cid in critic],
+    })
+
+
 def test_a_retry_round_does_not_re_tier_a_claim_outside_its_batch(mocker):
-    """#74 defect 2. run_confidence_tiering() re-tiered the WHOLE run once
-    per round, so a 6c response naming a claim outside the current batch
-    could recompute one that was already finished -- and Pass 6c then leaves
-    the result alone, because `if claim.annotation is None` is false.
+    """#74 defect 2, and batch 149 (§66 A26) for the half it left open.
+    run_confidence_tiering() re-tiered the WHOLE run once per round, so a
+    6b response naming a claim outside the current batch could recompute
+    one that was already finished -- and Pass 6c then leaves the result
+    alone, because `if claim.annotation is None` is false.
 
-    C1 is clean at D1 and never enters the batch. 6c names it anyway, as
-    ungrounded, which for a factual claim is an immediate UNVERIFIED. Scoped
-    to the batch, C1 keeps the tier D1 gave it.
+    C1 is clean at D1 and never enters the batch. 6b names it anyway,
+    alongside the claim it WAS asked about, as ungrounded -- which for a
+    factual claim is an immediate UNVERIFIED. Scoped to the batch, C1
+    keeps the tier D1 gave it.
 
-    Only the TIER is asserted. 6c's payload still reaches C1's grounding
-    fields, because nothing validates that a pass answered about what it was
-    asked -- that is #76, and it has a different fix site.
+    THE GROUNDING HALF IS NOW ASSERTED TOO. This test used to say only the
+    tier was in scope, because "nothing validates that a pass answered
+    about what it was asked -- that is #76, and it has a different fix
+    site". #76 became the payload boundary, which gave Pass 6b a
+    `claim_ids` argument and left the apply wide: the entry still landed,
+    so C1 ended up `grounding_status='ungrounded'` with `sources=[]` and a
+    HIGH tier computed from the source it no longer had. The stale PAIR is
+    what the two assertions below pin, and either one alone would pass
+    against the other half of the defect.
     """
     max_retries = config.MAX_PIPELINE_RETRIES
     payloads = _one_claim_stuck_through_retry_payloads()
-    payloads["Pass 6b"] = [
-        json.dumps({
-            "grounding": [{"claim_id": "C1", "sources": [], "status": "ungrounded"}],
-            "critic": [],
-        })
-        for _ in range(max_retries)
-    ]
+    payloads["Pass 6b"] = [_pass_6b_naming("C2", "C1")
+                           for _ in range(max_retries)]
     mocker.patch.object(
         RunAgentLoop, "stream_deep_research_mode",
         side_effect=pass_stream(_build_pass_mock([], payloads)),
@@ -550,6 +572,154 @@ def test_a_retry_round_does_not_re_tier_a_claim_outside_its_batch(mocker):
         f"got {c1.confidence_tier}"
     )
     assert c1.annotation == "[HIGH]"
+    assert c1.grounding_status == "grounded", (
+        f"6b was not asked about C1, so its grounding must not move; "
+        f"got {c1.grounding_status!r}"
+    )
+    assert len(c1.grounding_sources) == 1, (
+        f"C1's source was replaced by the empty list 6b sent for it; "
+        f"got {c1.grounding_sources!r}"
+    )
+    # The PREMISE, because every assertion above is about a claim NOT
+    # being touched: the claim 6b was asked about did move.
+    c2 = run.claim_by_id("C2")
+    assert c2.grounding_status == "ungrounded", (
+        "the batch claim's own entry did not apply either, so this test "
+        "would pass against an apply that does nothing at all"
+    )
+
+
+def test_the_trace_names_the_ids_pass_6b_answered_about_outside_its_batch(mocker):
+    """§66 (A26). The apply drops the entry, and review.py settled long ago
+    that a finding a stage cannot apply is dropped AND TRACED -- dropping
+    in silence is indistinguishable from applying.
+
+    6b's own checkpoint line cannot carry this: it reports how many claims
+    came out CLEAN, which is an effect of the batch, not an account of
+    what the response contained.
+    """
+    max_retries = config.MAX_PIPELINE_RETRIES
+    payloads = _one_claim_stuck_through_retry_payloads()
+    payloads["Pass 6b"] = [_pass_6b_naming("C2", "C1", critic=["C2", "C3"])
+                           for _ in range(max_retries)]
+    mocker.patch.object(
+        RunAgentLoop, "stream_deep_research_mode",
+        side_effect=pass_stream(_build_pass_mock([], payloads)),
+    )
+
+    run = run_pipeline(
+        user_query="test query", model="claude-test", provider_name="ANTHROPIC",
+    )
+
+    dropped = [line for line in run.trace if "outside this round's batch" in line]
+    assert dropped, (
+        f"nothing in the trace says 6b answered about C1 and C3; got "
+        f"{run.trace}"
+    )
+    assert "'C1'" in dropped[0] and "'C3'" in dropped[0], dropped[0]
+    assert "2 claim id(s)" in dropped[0], dropped[0]
+
+
+def test_a_clean_pass_6b_round_leaves_no_such_trace_line(mocker):
+    """The control. A line that appears whatever the response said would
+    report nothing, and this is the ordinary case -- 6b answering about
+    exactly the claim it was handed."""
+    max_retries = config.MAX_PIPELINE_RETRIES
+    payloads = _one_claim_stuck_through_retry_payloads()
+    payloads["Pass 6b"] = [_pass_6b_naming("C2") for _ in range(max_retries)]
+    mocker.patch.object(
+        RunAgentLoop, "stream_deep_research_mode",
+        side_effect=pass_stream(_build_pass_mock([], payloads)),
+    )
+
+    run = run_pipeline(
+        user_query="test query", model="claude-test", provider_name="ANTHROPIC",
+    )
+
+    assert not [line for line in run.trace
+                if "outside this round's batch" in line], run.trace
+
+
+def test_a_pass_6b_critic_entry_about_a_clean_claim_is_dropped_too(mocker):
+    """The other apply. `_apply_critic` writes `fallacies`,
+    `contradictions` and `critic_severity`, and `critic_severity` is the
+    one Pass 5 subtracts from 1.0 -- so an entry landing on a finished
+    claim changes the number its tier was computed from while the tier
+    stays where D1 left it.
+
+    This test exists because the mutation pass could not otherwise see
+    `_apply_critic`'s scope: every other 6b payload in this file sends
+    `"critic": []`, and applying an empty list over every claim in the run
+    changes nothing.
+    """
+    max_retries = config.MAX_PIPELINE_RETRIES
+    payloads = _one_claim_stuck_through_retry_payloads()
+    payloads["Pass 6b"] = [_pass_6b_naming("C2", critic=["C2", "C1"])
+                           for _ in range(max_retries)]
+    mocker.patch.object(
+        RunAgentLoop, "stream_deep_research_mode",
+        side_effect=pass_stream(_build_pass_mock([], payloads)),
+    )
+
+    run = run_pipeline(
+        user_query="test query", model="claude-test", provider_name="ANTHROPIC",
+    )
+
+    c1 = run.claim_by_id("C1")
+    assert c1.critic_severity == 0.0, (
+        f"6b was not asked about C1, so a severity it reported for C1 must "
+        f"not land; got {c1.critic_severity}"
+    )
+    assert c1.fallacies == []
+    assert c1.confidence_tier == "HIGH"
+    # The premise: the entry for the claim 6b WAS asked about did land.
+    assert run.claim_by_id("C2").critic_severity == 0.9
+    assert run.claim_by_id("C2").fallacies == ["a fallacy"]
+
+
+def test_a_pass_6b_response_naming_NOTHING_in_the_batch_is_corrected(mocker):
+    """§66 (A26) narrowed `claim_ids` to the batch as well, which makes 6b
+    behave exactly as 6a already did: a response in which NOT ONE id
+    matches is a pass with no effect at all, and B5 says that is worth a
+    corrective retry.
+
+    This is the behaviour change the fix carries, and it is here rather
+    than implied: before it, a 6b response about any id in the RUN was
+    accepted, which is why the same payload used to finish a run.
+    """
+    from core.reasoning.payload_validation import PayloadShapeError
+
+    max_retries = config.MAX_PIPELINE_RETRIES
+    payloads = _one_claim_stuck_through_retry_payloads()
+    payloads["Pass 6b"] = [_pass_6b_naming("C1")
+                           for _ in range(max_retries)]
+    corrective: list = []
+
+    def fake_continue(*, thread_id, message, system_prompt, model,
+                      provider_name="ANTHROPIC", **kwargs):
+        # The corrective turn gets the same unusable payload back, so
+        # every attempt fails and the pass raises rather than recovering.
+        corrective.append(message)
+        resp = make_model_response(text=_pass_6b_naming("C1"))
+        resp.thread_id = thread_id
+        return resp
+
+    mocker.patch.object(
+        RunAgentLoop, "stream_deep_research_mode",
+        side_effect=pass_stream(_build_pass_mock([], payloads)),
+    )
+    mocker.patch.object(RunAgentLoop, "continue_conversation",
+                        side_effect=fake_continue)
+
+    with pytest.raises(PayloadShapeError, match="claim_id"):
+        run_pipeline(user_query="test query", model="claude-test",
+                     provider_name="ANTHROPIC")
+
+    assert len(corrective) == config.MAX_JSON_RETRIES, (
+        f"a shape failure must re-enter §3's corrective loop like a parse "
+        f"failure does; got {len(corrective)} corrective turn(s)"
+    )
+    assert "C1" in corrective[0], corrective[0]
 
 
 def test_parse_json_response_strips_code_fences():
@@ -969,8 +1139,9 @@ def test_json_retry_path_calls_continue_conversation_on_malformed_json(mocker):
     trace-line format belongs in the unit test of
     _run_pass_with_json_retry (see tests/test_json_retry.py).
     """
-    import config
     from uuid import uuid4
+
+    import config
     fake_thread_id = uuid4()
 
     def fake_run_dr_mode(*, pass_input, model, pass_id, provider_name="ANTHROPIC", **kwargs):
@@ -1779,7 +1950,9 @@ class TestOneIdResolutionForTheWholePipeline:
         claims built any other way -- §20's corrections, a future resume."""
         from core.reasoning.base import Claim
         from core.reasoning.orchestrator import (
-            _apply_assumption_flags, _apply_critic, _apply_grounding,
+            _apply_assumption_flags,
+            _apply_critic,
+            _apply_grounding,
         )
 
         first = Claim(id="C1", text="first", type="factual")

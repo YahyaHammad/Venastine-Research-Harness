@@ -6,9 +6,9 @@ The dependencies listed below are **not** part of the project's own source but a
 
 > **Scope.** Two things are covered here: the project's **declared direct** dependencies — the pins in `requirements.txt` and the extras in `pyproject.toml` — and, under *Non-code third-party material* below, the third-party **text** the repository reproduces.
 >
-> The transitive dependency closure is *not* enumerated: `matplotlib` alone pulls numpy, pillow, kiwisolver and fonttools, and `mcp==2.0.0` brings `httpx2` (see the note at `requirements.txt:47`). For the full closure, run `pip-licenses` against a resolved environment — see *How to regenerate* below.
+> The transitive dependency closure is *not* enumerated: `matplotlib` alone pulls numpy, pillow, kiwisolver and fonttools, and `mcp==2.0.0` brings `httpx2` (see the note beside the `mcp` pin in `requirements.txt`). For the full closure, run `pip-licenses` against a resolved environment — see *How to regenerate* below.
 
-> Versions shown are the pins from `requirements.txt` / `pyproject.toml` at the time this file was created. Where a range is used (e.g. `textual>=1.0,<2.0`) the exact resolved version will vary.
+> Versions shown are the pins from `requirements.txt` / `pyproject.toml` at the time this file was created. Where a range is used (e.g. `rich>=14.2,<16`) the exact resolved version will vary.
 
 ## Runtime / core dependencies
 
@@ -22,12 +22,19 @@ The dependencies listed below are **not** part of the project's own source but a
 | pydantic | `==2.13.4` | MIT | Yes | https://pypi.org/project/pydantic/ |
 | sympy | `==1.13.3` | BSD-3-Clause | Yes | https://pypi.org/project/sympy/ |
 | sqlmodel | `==0.0.39` | MIT | Yes | https://pypi.org/project/sqlmodel/ |
-| python-dotenv | `==1.0.1` | BSD-3-Clause | Yes | https://pypi.org/project/python-dotenv/ |
+| python-dotenv | `==1.2.2` | BSD-3-Clause | Yes | https://pypi.org/project/python-dotenv/ |
 | matplotlib | `==3.10.3` | PSF / BSD-Compatible | Yes | https://pypi.org/project/matplotlib/ |
 | pyyaml | `==6.0.3` | MIT | Yes | https://pypi.org/project/PyYAML/ |
-| textual | `>=1.0,<2.0` | MIT | Yes | https://pypi.org/project/textual/ |
-| rich | `>=13,<16` | MIT | Yes | https://pypi.org/project/rich/ |
+| ruamel.yaml | `==0.19.1` | MIT | Yes | https://pypi.org/project/ruamel.yaml/ |
+| textual | `==8.2.8` | MIT | Yes | https://pypi.org/project/textual/ |
+| rich | `>=14.2,<16` | MIT | Yes | https://pypi.org/project/rich/ |
 | mcp | `==2.0.0` | MIT | Yes | https://pypi.org/project/mcp/ |
+| google-re2 | `==1.1.20251105` | BSD-3-Clause | Yes | https://pypi.org/project/google-re2/ |
+| cryptography | `>=42.0,<52` | Apache-2.0 OR BSD-3-Clause | Yes | https://pypi.org/project/cryptography/ |
+
+`google-re2` (added 2026-09-15, ROADMAP_v3 §49) and `cryptography` (added 2026-09-24, ROADMAP_v3 §49 slice 5a) are the dependencies above that ship **compiled native code**. Taking `google-re2` first: its wheels carry the RE2 C++ library (BSD-3-Clause) and, as RE2 depends on it, Abseil (Apache-2.0). The paragraph under *What this means* holds for it unchanged — pip fetches the wheel onto the user's machine and this project redistributes nothing — so no inbound `NOTICE` obligation arises. Where no wheel exists (musl/Alpine, glibc older than 2.28), pip builds the source distribution locally, which is the user's build rather than a distribution by this project.
+
+`cryptography` was **already in the install closure** before it was declared — `google-genai==1.0.0` → `google-auth>=2.14.1` → `cryptography>=38.0.3`, with no extra marker — so declaring it added no package to an install and no licence surface that was not already present; it made an existing transitive dependency into a pinned direct one, because the harness-held secret store (ROADMAP_v3 §49 slice 5a, SS57) rests on it. Its wheels carry a **Rust** extension and a statically linked **OpenSSL** (Apache-2.0); the dual licence above is the project's own, and the paragraph under *What this means* holds for it unchanged — pip fetches the wheel onto the user's machine and this project redistributes nothing, so no inbound `NOTICE` obligation arises. Wheels exist for CPython 3.7+ on Windows (x64, x86), macOS (arm64, x86_64) and manylinux/musllinux (x86_64, aarch64); where none does, pip builds the sdist locally and needs a Rust toolchain, which is the user's build rather than a distribution by this project.
 
 ## Test dependencies (not used by end users during runtime, only for CI and developer testing)
 
@@ -36,6 +43,10 @@ The dependencies listed below are **not** part of the project's own source but a
 | pytest | `>=8.0` | MIT | Yes |
 | pytest-mock | `>=3.14` | MIT | Yes |
 | pytest-asyncio | `>=1.0` | Apache-2.0 | Yes |
+| pytest-xdist | `>=3.6` | MIT | Yes |
+| execnet | transitive (via `pytest-xdist`) | MIT | Yes |
+
+`execnet` is listed although nothing declares it: it is `pytest-xdist`'s only dependency and the process that actually runs each worker, so a reader auditing what a `pip install -r requirements.txt` puts on the machine would otherwise have to go and find it. Both are permissive, so the no-copyleft claim under *What this means* is unchanged.
 
 ## Optional dependencies (`pyproject.toml` extras)
 
@@ -50,13 +61,20 @@ The dependencies listed below are **not** part of the project's own source but a
 
 ## Non-code third-party material
 
-**No third-party source code is included in this repository.** Measured, not assumed: 166 tracked
+**No third-party source code is included in this repository.** Measured, not assumed: all 200 tracked
 Python files carry no foreign copyright header and no `SPDX-License-Identifier`; a sweep for
 copied or adapted code ("adapted from", "copied from", "taken from", "vendored", "borrowed from")
-returns only this project's own design prose; and the only tracked files that are neither `.py`
-nor `.md` are `LICENSE`, `prompts/universal_system_prompt`, `prompts/untrusted_content`,
-`research-mode-birds-eye.mermaid` and `tui/app.tcss` — all first-party. There are no bundled
-fonts, images or data files.
+returns only this project's own design prose; and the 34 tracked files that are neither `.py`
+nor `.md` are first-party without exception — the licence texts, configuration and packaging
+(`config.yaml`, `pyproject.toml`, `requirements.txt`, `package.json`, `pytest.ini`, the `.github/`
+workflows and issue templates, the dotfiles), the two prompt texts, `bin/venastine.mjs` and
+`scripts/prepublish-check.mjs`, `docs/assets/research-mode-birds-eye.mermaid`, `tui/app.tcss`, the two
+`.example` templates, and one screenshot of this project's own interface. **No third-party
+fonts, images or data files are bundled.**
+
+*(Counts restated in batch 83. The figure had been 166 against 200, the enumeration named
+five of the thirty-four, and the closing sentence said there were no images at all while the
+screenshot was tracked. The claim itself held throughout; only its arithmetic had drifted.)*
 
 What the repository *does* reproduce is third-party **text**:
 

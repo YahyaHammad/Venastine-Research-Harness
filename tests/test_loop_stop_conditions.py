@@ -19,17 +19,16 @@ make_stream_from_response) instead of core.loop.call_model.
 """
 
 from core.loop import RunAgentLoop, run_to_completion
-from tests.conftest import make_model_response, make_stream_from_response
-
 
 # ---------------------------------------------------------------------------
 # ---- Shared helper: a fake ConversationMemory that records calls -------
 # ---------------------------------------------------------------------------
-
 # ROADMAP_v2 §21 gave _run() three new things to call on a memory, and
 # this fake existed in three near-identical copies. One class, in
 # conftest -- see FakeMemory there for why.
 from tests.conftest import FakeMemory as _FakeMemory
+from tests.conftest import make_model_response, make_stream_from_response
+
 
 def _build_run_inputs(memory):
     """Returns the kwargs _run expects: memory + the standard ordered

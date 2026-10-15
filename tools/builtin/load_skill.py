@@ -55,6 +55,16 @@ def run(params: dict) -> dict:
     # and persisted no tool_result for the tool_use id. An error dict
     # lets the model see what it got wrong and correct itself, which is
     # what the unknown-name branch two lines down already does.
+    #
+    # THE ONE OF THESE WRITTEN IN THE PAST TENSE, and therefore the one
+    # that stayed true: four siblings said the same thing in the PRESENT
+    # tense, and dispatch() has contained a handler's exception since
+    # well before they were written. The last two clauses are the
+    # precise ones -- the parallel path converts a raise into THIS call's
+    # error result so the siblings' finished work and the tool_use id's
+    # reply both survive. tools/base.py carries the one copy of all of it
+    # now, including the half none of these mentioned: a GATE's raise is
+    # not contained (batch 146).
     name = params.get("name")
     if not name:
         return {"error": "load_skill requires a 'name' -- the skill's name "

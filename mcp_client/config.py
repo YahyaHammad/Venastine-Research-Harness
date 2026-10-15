@@ -11,6 +11,14 @@ the same rule core/config_loader.py and core/workspace_trust.py follow:
   user     ~/.config/venastine/mcp.json      -- you authored it
   project  <project>/.venastine/mcp.json     -- trust-gated (D17)
 
+THE USER ONE IS CREATED EMPTY AT STARTUP IF IT IS ABSENT (batch 121,
+owner request). "You authored it" was doing double duty: it is the
+security argument for why that tier needs no trust prompt, and it was
+also the reason nothing ever created the file -- which left the path
+discoverable only from this docstring. Two plausible homes (the harness
+root, and here) and no way to tell from inside a session means an edit
+goes into a file nothing reads. See ensure_user_config.
+
 THE PROJECT PATH IS `.venastine/mcp.json`, NOT `<project>/mcp.json`.
 §17/D11 put it at the project root to match Claude Code's convention, but
 workspace_trust hashes only `.venastine/`, and is_trusted() returns True
@@ -125,7 +133,7 @@ class ServerConfig:
             rendered = json.dumps(self.raw, indent=2, sort_keys=True,
                                   default=str)
             lines.append("  full entry:")
-            lines.extend(f"    {l}" for l in rendered.splitlines())
+            lines.extend(f"    {line}" for line in rendered.splitlines())
         return "\n".join(lines)
 
 
@@ -137,22 +145,84 @@ def project_config_path(project_path: str) -> str:
     return os.path.join(os.path.realpath(project_path), ".venastine", "mcp.json")
 
 
-def _flag(server: str, key: str, value: Any) -> bool:
-    """A JSON boolean, or False with a warning.
+def ensure_user_config() -> Optional[str]:
+    """Create the user-level mcp.json if absent. Returns the path, or None.
+
+    Batch 121, owner request: "users don't know whether user-level
+    mcp.json is at the harness root or ~/.config/venastine". A file that
+    exists answers that; a docstring does not.
+
+    BEHAVIOUR-NEUTRAL BY CONSTRUCTION. `{"mcpServers": {}}` loads as zero
+    servers, and it is the one shape _read_file does not warn about -- an
+    empty `{}` trips its "no 'mcpServers' object" branch, so the obvious
+    seed would have printed a warning about the harness's own file at
+    every launch. The skeleton comes from §24's render_mcp() rather than
+    being retyped here, so the two tiers cannot drift.
+
+    NEVER OVERWRITES, and the check is existence rather than content: a
+    file someone emptied by hand is still their file.
+
+    An OSError is a DEBUG line and None. A read-only config directory is
+    a reason not to have the convenience, not a reason not to start --
+    every other store in that directory fails the same way, except the
+    trust store, which raises because a security decision that silently
+    did not persist is worse than a crash. This is not one of those.
+
+    mode=0o600 like its two siblings there: the entries can carry an
+    Authorization header, and on the temp file rather than the
+    destination because os.replace carries the source's mode across
+    (#19). trailing_newline because a human edits this one -- §24's
+    scaffold passes it for exactly that reason.
+    """
+    from project_init.config_files import render_mcp
+
+    path = user_config_path()
+    if os.path.exists(path):
+        return None
+    try:
+        write_json_atomic(path, render_mcp(), mode=0o600,
+                          trailing_newline=True)
+    except OSError as e:
+        logger.debug("Could not create %s: %s", path, e)
+        return None
+    logger.info("Created user-level mcp.json at %s", path)
+    return path
+
+
+def _flag(server: str, key: str, value: Any,
+          consequence: str) -> Optional[bool]:
+    """A JSON boolean, or None with a warning naming the consequence.
 
     NOT bool(value): bool("false") is True, so `"autoApprove": "false"`
     -- a plausible hand edit, and a shape other MCP hosts tolerate --
     would turn the D28 approval gate OFF on a server the user was trying
-    to keep gated. Failing closed is the only safe direction for both
-    flags: an unexpectedly-gated server prompts, an unexpectedly-enabled
-    one runs third-party code unannounced.
+    to keep gated.
+
+    WHAT IT DOES NOT DO ANY MORE IS CHOOSE THE ANSWER (batch 150). It
+    used to return False for both keys and say that failing closed was
+    "the only safe direction for both flags: an unexpectedly-gated server
+    prompts, an unexpectedly-enabled one runs third-party code
+    unannounced". That is true of `autoApprove` and backwards for
+    `disabled`, where False means NOT disabled -- so the sentence's own
+    second clause was the outcome it produced: `"disabled": "true"` ran
+    the server, and F1's consent line, which reads self.disabled, showed
+    it as live.
+
+    AND NEITHER CONSTANT IS SAFE FOR `disabled`, which is why this
+    function no longer picks one. The two plausible misspellings want
+    opposite answers -- `"true"` means stop and `"false"` means run --
+    and the only thing that distinguishes them is the value, which this
+    function exists to refuse to interpret. So the caller decides, and
+    for `disabled` the decision is the one this module already makes for
+    an entry it cannot make sense of: that one server's NAMED failure
+    (decision G). `tests/test_mcp_config.py` pins both directions.
     """
     if isinstance(value, bool):
         return value
     logger.warning(
-        "mcp.json server %r: %s must be true or false, got %r; using false.",
-        server, key, value)
-    return False
+        "mcp.json server %r: %s must be true or false, got %r; %s.",
+        server, key, value, consequence)
+    return None
 
 
 def _parse_entry(name: str, entry: Any, tier: str, path: str) -> ServerConfig:
@@ -171,19 +241,46 @@ def _parse_entry(name: str, entry: Any, tier: str, path: str) -> ServerConfig:
         logger.debug("mcp.json server %r: ignoring unrecognized keys %s",
                      name, sorted(unknown))
 
+    # accept either spelling; ours is camelCase to match the file's
+    # existing style, but a snake_case one shouldn't silently no-op
+    auto_approve = _flag(
+        name, "autoApprove",
+        entry.get("autoApprove", entry.get("auto_approve", False)),
+        "gating its tools, which is this flag's safe answer either way")
+    disabled = _flag(
+        name, "disabled", entry.get("disabled", False),
+        "refusing the entry by name, because neither answer is safe for "
+        "this flag")
+
     cfg = ServerConfig(
         name=name, tier=tier, path=path, transport="unknown",
         env=entry.get("env") or {},
         cwd=entry.get("cwd"),
         headers=entry.get("headers") or {},
-        # accept either spelling; ours is camelCase to match the file's
-        # existing style, but a snake_case one shouldn't silently no-op
-        auto_approve=_flag(
-            name, "autoApprove",
-            entry.get("autoApprove", entry.get("auto_approve", False))),
-        disabled=_flag(name, "disabled", entry.get("disabled", False)),
+        auto_approve=bool(auto_approve),
+        disabled=bool(disabled),
         raw=entry,
     )
+
+    if disabled is None:
+        # A NAMED FAILURE, not a chosen answer (batch 150). `False` ran a
+        # server the operator had written a key to stop, and `True` would
+        # skip one they had written a key to keep -- which was a defect
+        # this file's tests had already been written for once, under the
+        # name "the mirror defect". Both directions are pinned now by
+        # TestAnUnparseableDisabledIsANamedFailure, whose docstring
+        # records why the older test was replaced rather than kept green:
+        # it asserted `disabled is False`, which is STILL true here and no
+        # longer means the server runs.
+        # So the entry becomes unusable the same way a bad `args` does:
+        # transport stays 'unknown', describe() prints
+        # "UNUSABLE: 'disabled' must be true or false" on the
+        # acknowledgement screen, _transport_for raises so the server
+        # lands in failures by name, and main.py prints it. Nothing runs
+        # and nothing is silent, which is the only pair of properties
+        # both spellings can have at once. One edit fixes it.
+        cfg.error = "'disabled' must be true or false"
+        return cfg
 
     declared = str(entry.get("type") or "").lower()
     if entry.get("command"):
@@ -228,7 +325,7 @@ def _read_file(path: str, tier: str) -> dict:
         # utf-8-sig: mcp.json is commonly copied between hosts and hand
         # edited, so a BOM is realistic and would otherwise be reported as
         # invalid JSON at character 0.
-        with open(path, "r", encoding="utf-8-sig") as f:
+        with open(path, encoding="utf-8-sig") as f:
             data = json.load(f)
     except (OSError, ValueError) as e:
         logger.warning("Could not read %s-level mcp.json at %s: %s", tier, path, e)
@@ -322,7 +419,7 @@ def _read_store() -> tuple:
     if not os.path.exists(path):
         return {}, False
     try:
-        with open(path, "r", encoding="utf-8-sig") as f:
+        with open(path, encoding="utf-8-sig") as f:
             data = json.load(f)
     except (OSError, ValueError):
         logger.warning("Could not read %s; re-confirming every user-level "

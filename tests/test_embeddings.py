@@ -23,8 +23,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from core.client import (EmbeddingError, EmbeddingResult, embed_texts,
-                         PROVIDERS_WITHOUT_EMBEDDINGS)
+from core.client import (
+    PROVIDERS_WITHOUT_EMBEDDINGS,
+    EmbeddingError,
+    EmbeddingResult,
+    embed_texts,
+)
 
 
 def _openai_response(vectors, prompt_tokens=11, order=None):

@@ -98,7 +98,7 @@ def test_prompt_unchanged_before_initialize():
 
 def test_the_shared_fixture_loads_real_and_isolates_everything_else(
         real_harness_tier):
-    """The pin for the conftest fixture nineteen sites lean on. Three
+    """The pin for the shared conftest fixture other suites lean on. Three
     properties, each one of the ways a future edit could quietly break
     them:
 

@@ -26,7 +26,6 @@ from core.reasoning.payload_validation import (
     validate,
 )
 
-
 # ---------------------------------------------------------------------------
 # ---- The registry (B11) ---------------------------------------------------
 # ---------------------------------------------------------------------------
@@ -435,3 +434,233 @@ class TestAssertedByCandidatesIsRequiredOnlyInEnsembleMode:
         validate("Pass 2", [{"id": "c1", "text": "t", "type": "factual",
                              "asserted_by_candidates": [1, 2]}],
                  ensemble=True)
+
+# ---------------------------------------------------------------------------
+# ---- The members of a container (batch 149) -------------------------------
+# ---------------------------------------------------------------------------
+
+def _a_claim(**over) -> dict:
+    raw = {"id": "c1", "text": "a claim", "type": "factual"}
+    raw.update(over)
+    return raw
+
+
+class TestTheContainerIsDeclaredWhereItsMembersAreRead:
+    """The three fields pure code iterates, measures or hashes.
+
+    Each rejection has its control immediately below it, which for these
+    is sharper than usual: all three fields are OPTIONAL, so a validator
+    that merely demanded them would pass every rejection here and fail
+    every ordinary run.
+    """
+
+    @pytest.mark.parametrize("value", [None, 123, 1.5, "madrid",
+                                       {"madrid": 1}, True])
+    def test_entities_must_be_an_array(self, value):
+        """Pass 3a builds `sorted({e for c in claims for e in c.entities})`.
+        None, a number and a boolean raise there; a STRING does not -- it
+        iterates characters, so one entity became six, each a letter, and
+        each one a thing the prompt then asks the model to search for."""
+        with pytest.raises(PayloadShapeError, match="entities"):
+            validate("Pass 2", [_a_claim(entities=value)])
+
+    @pytest.mark.parametrize("value", [["madrid"], [], ["madrid", "1947"]])
+    def test_an_array_of_strings_is_accepted(self, value):
+        validate("Pass 2", [_a_claim(entities=value)])
+
+    def test_and_an_absent_entities_key_is_accepted(self):
+        """The control that matters most: base.py defaults the field to an
+        empty list, and a claim with no named entity is an ordinary
+        answer, so this is TYPED BUT NOT REQUIRED."""
+        validate("Pass 2", [_a_claim()])
+
+    @pytest.mark.parametrize("value", [5, None, "abc", True])
+    def test_asserted_by_candidates_must_be_an_array(self, value):
+        """Pass 5 computes `len(set(claim.asserted_by_candidates))` and
+        divides by the roster size. `5` raises; `"abc"` scored
+        `len(set("abc")) / 2` -- a numerator above the denominator, which
+        clamps to FULL agreement, so a claim no candidate corroborated was
+        scored as unanimous."""
+        with pytest.raises(PayloadShapeError, match="asserted_by_candidates"):
+            validate("Pass 2", [_a_claim(asserted_by_candidates=value)],
+                     ensemble=True)
+
+    def test_an_array_of_candidate_numbers_is_accepted(self):
+        validate("Pass 2", [_a_claim(asserted_by_candidates=[1, 2])],
+                 ensemble=True)
+
+    @pytest.mark.parametrize("value", [123, None, "abc", {"k": 1}, 1.5, True])
+    def test_every_per_claim_flag_value_must_be_an_array(self, value):
+        """Pass 5 computes `penalty * len(claim.assumption_flags)`. The
+        numbers raise; `"abc"` charged a THREE-flag penalty for one
+        string, and `{"k": 1}` charged one flag for one key."""
+        with pytest.raises(PayloadShapeError, match="per_claim_flags"):
+            validate("Pass 4", {"per_claim_flags": {"c1": value}},
+                     claim_ids=["c1"])
+
+    def test_a_list_of_flags_is_accepted(self):
+        validate("Pass 4", {"per_claim_flags": {"c1": ["an assumption"]}},
+                 claim_ids=["c1"])
+
+    def test_and_an_empty_flag_list_is_accepted(self):
+        """assumption_audit.md asks the model to omit a clean claim rather
+        than send an empty list, but a model that sends one has still said
+        the same thing, and `len([])` is 0."""
+        validate("Pass 4", {"per_claim_flags": {"c1": []}}, claim_ids=["c1"])
+
+    @pytest.mark.parametrize("value", [123, None, "abc", {"a": 1}, True])
+    def test_pass_0s_key_entities_must_be_an_array(self, value):
+        """The Pass 0 checkpoint reports
+        `len(run.plan.get('key_entities_or_subjects', []))`. The numbers
+        raise; `"abc"` reported THREE key entities anticipated, from one
+        word."""
+        with pytest.raises(PayloadShapeError, match="key_entities_or_subjects"):
+            validate("Pass 0", {"key_entities_or_subjects": value})
+
+    def test_and_pass_0_still_accepts_a_plan_without_that_key(self):
+        """preliminary_plan.md names five keys and the orchestrator reads
+        one of them DEFENSIVELY. Requiring it would fail a run over an
+        omission nothing depends on -- so the type is checked only when
+        the key is there."""
+        validate("Pass 0", {"outline": ["a point"]})
+        validate("Pass 0", {})
+
+
+class TestTheMembersAreDeclaredToo:
+    """The owner's ruling, and the measurement behind it: a declared
+    CONTAINER type does not close the crash, because the pure code
+    downstream HASHES and SORTS what it iterates."""
+
+    @pytest.mark.parametrize("value, why", [
+        (["madrid", 1947], "sorted() cannot order an int against a str"),
+        ([["madrid"]], "a list is unhashable"),
+        ([{"name": "madrid"}], "a dict is unhashable"),
+        ([None], "None orders against nothing"),
+        ([1, 2], "two numbers are not two entity names"),
+    ])
+    def test_an_entity_that_is_not_a_string_is_rejected(self, value, why):
+        """Every one of these is a LIST, so the container check accepts it
+        and `sorted({...})` is where it lands."""
+        with pytest.raises(PayloadShapeError, match="entities"):
+            validate("Pass 2", [_a_claim(entities=value)])
+
+    @pytest.mark.parametrize("value", [[{"k": 1}], [[1]], ["1"], [None],
+                                       [True]])
+    def test_a_candidate_number_that_is_not_a_number_is_rejected(self, value):
+        with pytest.raises(PayloadShapeError, match="asserted_by_candidates"):
+            validate("Pass 2", [_a_claim(asserted_by_candidates=value)],
+                     ensemble=True)
+
+    def test_the_message_names_the_member_that_was_wrong(self):
+        """#76's whole complaint is that
+        `'str' object has no attribute 'items'` names neither the pass nor
+        the field. A member needs one more thing than a field does: WHICH
+        member, since the model sent a list and has to find the item."""
+        with pytest.raises(PayloadShapeError) as caught:
+            validate("Pass 2", [_a_claim(entities=["madrid", 1947])])
+        message = str(caught.value)
+        assert "Pass 2" in message
+        assert "entry 0" in message
+        assert "entities[1]" in message, message
+        assert "1947" in message
+        assert "string" in message
+
+    def test_a_flag_LIST_is_checked_and_the_strings_in_it_are_not(self):
+        """B4's rule, kept rather than quietly widened: `len()` is the
+        only thing that reads a flag list, so a type on its elements would
+        be a check with no demonstrated consequence. This is the control
+        that says the vocabulary did not grow further than the crash."""
+        validate("Pass 4", {"per_claim_flags": {"c1": [1, None, {"k": 2}]}},
+                 claim_ids=["c1"])
+
+    def test_and_pass_3cs_gaps_members_are_not_checked_either(self):
+        """Same rule, second instance. `build_coverage_gap_entries` wraps
+        each gap in a dict without reading it, so the CONTAINER is typed
+        (a string there would produce one entry per character) and the
+        members are not."""
+        validate("Pass 3c", {"gaps": [{"gap": "x"}, "a bare string", 7],
+                             "coverage_score": 0.5})
+
+
+class TestABooleanIsNotANumber:
+
+    @pytest.mark.parametrize("value", [True, False])
+    def test_a_boolean_severity_is_rejected(self, value):
+        """`isinstance(True, int)` is True, so this satisfied NUMBER and
+        Pass 5 computed `1.0 - True` as 0.0 -- the maximum critic penalty,
+        with no trace line and no corrective retry. `false` took the
+        opposite extreme the same way."""
+        with pytest.raises(PayloadShapeError, match="severity"):
+            validate("Pass 3b", [{"claim_id": "c1", "severity": value}],
+                     claim_ids=["c1"])
+
+    @pytest.mark.parametrize("value", [0, 1, 0.4, 0.0, 1.0])
+    def test_a_number_severity_is_still_accepted(self, value):
+        """The control, and it has to include 0 and 1: JSON has one number
+        type, and a validator that rejected the integers alongside the
+        booleans would refuse the two values the rubric asks for most."""
+        validate("Pass 3b", [{"claim_id": "c1", "severity": value}],
+                 claim_ids=["c1"])
+
+    def test_the_rule_is_the_one_the_scorer_already_applies(self):
+        """Not a new idea, only a new place for it. `source_quality`
+        excludes bools from the same tuple when it reads a source's two
+        numbers -- guarding a value that was supposed to have been
+        rejected here."""
+        import inspect
+
+        from core.reasoning import confidence_scoring
+
+        source = inspect.getsource(confidence_scoring.source_quality)
+        assert "isinstance(v, bool)" in source
+
+
+class TestWhatEachOfTheseChecksIsFor:
+    """The consequence, not the rejection.
+
+    A test that only asserts "the boundary refuses this" stays green if
+    the pure code downstream is later made tolerant -- at which point the
+    comment justifying the check is false and nothing says so (defect
+    shape 9, which this marathon has now found eleven times). So each
+    check is pinned to the code that reads the value.
+    """
+
+    def test_pass_5_measures_the_flag_list_it_is_given(self):
+        from core.reasoning.base import Claim
+        from core.reasoning.confidence_scoring import score_claim
+
+        claim = Claim(id="c1", text="t", type="factual")
+        claim.assumption_flags = 123
+        with pytest.raises(TypeError, match="has no len"):
+            score_claim(claim)
+
+    def test_pass_5_hashes_the_candidate_list_it_is_given(self):
+        from core.reasoning.base import Claim
+        from core.reasoning.confidence_scoring import score_claim
+
+        claim = Claim(id="c1", text="t", type="factual")
+        claim.asserted_by_candidates = [{"candidate": 1}]
+        with pytest.raises(TypeError, match="unhashable"):
+            score_claim(claim, ensemble_n=2)
+
+    def test_pass_3a_still_sorts_a_set_built_from_every_claims_entities(self):
+        """A source relation, because the expression is inline in the
+        orchestrator and cannot be called. If it ever stops being a
+        `sorted(set)`, the member type on `entities` needs its reason
+        re-stated rather than silently kept."""
+        assert "sorted({e for c in factual_claims for e in c.entities})" \
+            in _orchestrator_source()
+
+    def test_pass_0s_checkpoint_still_measures_the_plan_key(self):
+        assert "len(run.plan.get('key_entities_or_subjects', []))" \
+            in _orchestrator_source()
+
+    def test_and_a_claim_object_accepts_every_one_of_these_values(self):
+        """The premise under all of it: base.py's annotations are
+        ANNOTATIONS. Nothing between the payload and the pure code would
+        have stopped any of these, which is why the boundary is the fix
+        site."""
+        from core.reasoning.base import Claim
+
+        claim = Claim(id="c1", text="t", type="factual", entities=None)
+        assert claim.entities is None

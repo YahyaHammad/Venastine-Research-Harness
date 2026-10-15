@@ -23,29 +23,26 @@ ignores it entirely.
 import ast
 import collections
 import inspect
-import queue
 
 import pytest
 
 import config
 import core.loop
-
-from core.approval import GrantBudget, RunAuthorization
-from core.interaction import ResponseChannel
-from core.client import StreamToken
-from core.loop import RunAgentLoop
-from core.reasoning.authorization import candidates
 from agents.manager import manager
 from core import config_loader, interaction
-from tools.base import GRANT_SIGNOFF_ONLY, ToolSpec
-from tools.context import RunInfo, ToolContext
-from tools.registry import registry
-from tests.conftest import make_model_response
-
+from core.approval import GrantBudget, RunAuthorization
+from core.client import StreamToken
+from core.interaction import ResponseChannel
+from core.loop import RunAgentLoop
+from core.reasoning.authorization import candidates
 
 # ROADMAP_v2 §21 gave _run() more to call on a memory. One stand-in, in
 # conftest -- see FakeMemory there.
 from tests.conftest import FakeMemory as _Mem
+from tests.conftest import make_model_response
+from tools.base import GRANT_SIGNOFF_ONLY, ToolSpec
+from tools.context import RunInfo, ToolContext
+from tools.registry import registry
 
 
 class _AnswerChannel:
@@ -692,11 +689,17 @@ def _raise_policy(mocker, *tool_names):
     cases did. The configuration the claim is about is one where the tool IS
     callable and the gate is the only thing left standing.
 
-    ToolApprovals.shell is the RATCHET (see tools/builtin/shell.py): True
-    forces "always ask" whatever the posture says, so the case does not
+    ToolApprovals.shell used to be the RATCHET (see tools/builtin/shell.py):
+    True forced "always ask" whatever the posture said, so the case did not
     depend on which sandbox happens to be available on the machine running
-    the suite.
+    the suite. The field is gone -- shell approval lives solely in
+    shell_approval_mode -- so the posture is set to `always` instead, which
+    is the same always-ask by the only route that remains.
     """
+    import dataclasses
+
+    from security import posture
+
     real_perms, real_approvals = config.ToolPermissions, config.ToolApprovals
 
     def _perms():
@@ -706,10 +709,13 @@ def _raise_policy(mocker, *tool_names):
         return p
 
     def _approvals():
-        a = real_approvals()
-        if "shell" in tool_names:
-            a.shell = True
-        return a
+        return real_approvals()
+
+    if "shell" in tool_names:
+        mocker.patch.object(
+            posture, "_posture",
+            dataclasses.replace(posture.current(),
+                                shell_approval_mode="always"))
 
     mocker.patch("config.ToolPermissions", _perms)
     mocker.patch("config.ToolApprovals", _approvals)
@@ -895,13 +901,44 @@ class TestAnAnsweredCallActuallyRuns:
         the live one and this only reads what it was called with.
         """
         config_loader.initialize(str(real_harness_tier))
+        # A SPAWNABLE FIXTURE, because A16 (batch 137) closed the only
+        # route this test used to have. `manager.candidate_approvals` is
+        # EMPTY for all six spawnable shipped agents on a stock install --
+        # each narrows `allowed_tools` and the gated tools a sign-off would
+        # offer are globally denied -- while `grill-me`, which this test
+        # used, declares no `allowed_tools` at all and so inherited
+        # everything. It is `spawnable: false`.
+        #
+        # So the shipped spawn sign-off was reachable only by spawning a
+        # NON-SPAWNABLE agent, which is the defect A16 closes. The feature
+        # is still reachable -- an operator who enables tools, or a
+        # user/project agent that declares no narrowing and opts in -- and
+        # this fixture is shaped like that. Without it the assertion below
+        # compares an empty set to an empty set, which is the vacuity
+        # test_review.py makes the same move to avoid.
+        roster = dict(config_loader.get_agents())
+        roster["signoff-fixture"] = config_loader.AgentDef(
+            name="signoff-fixture", description="a spawnable fixture",
+            model=None, provider=None, allowed_tools=None,
+            approval_overrides={}, use_project_context=False,
+            use_memory=False, max_steps=None, body="Body.",
+            tier="harness", path="<fixture>", spawnable=True)
+        # BOTH lookups, because they are separate functions: the catalog
+        # reads `get_agents()` and `manager.get` reads `get_agent(name)`,
+        # so patching only the plural one leaves refusal_reason looking at
+        # the real roster and refusing the fixture.
+        mocker.patch.object(config_loader, "get_agents", lambda: roster)
+        mocker.patch.object(config_loader, "get_agent",
+                            lambda name: roster.get(name))
         spy = mocker.patch.object(registry, "dispatch",
                                   wraps=registry.dispatch)
 
         _drive_real(
             mocker,
-            [("spawn_subagent", {"agent_name": "grill-me", "task": "a"}),
-             ("spawn_subagent", {"agent_name": "grill-me", "task": "b"})],
+            [("spawn_subagent",
+              {"agent_name": "signoff-fixture", "task": "a"}),
+             ("spawn_subagent",
+              {"agent_name": "signoff-fixture", "task": "b"})],
             [{"write_project_doc"}], spawn=True)
 
         passed = [c.kwargs.get("signoff") for c in spy.call_args_list]
@@ -1071,42 +1108,78 @@ def test_the_loops_authorization_cannot_outlive_one_tool_call():
     """Read the source, because no behaviour can see this.
 
     Two mutations matter here and NEITHER changes an observable outcome
-    today: hoisting the authorization out of `for call in
-    response.tool_calls:`, and replacing the guarded callback with a bare
-    `lambda n, p: True`. Both survive the entire suite, because nothing can
-    currently reach that dispatch call gated and un-authorized -- the three
-    other reasons `needs_approval` is turned off are each short-circuited
-    INSIDE dispatch before its gate. The scope is correct and undefended,
-    which is precisely the state a fourth reason added later would turn
-    into a silent "approve everything".
+    today: widening the authorization's scope beyond one call, and
+    replacing the guarded callback with a bare `lambda n, p: True`. Both
+    survive the entire suite, because nothing can currently reach that
+    dispatch call gated and un-authorized -- the three other reasons
+    `needs_approval` is turned off are each short-circuited INSIDE dispatch
+    before its gate. The scope is correct and undefended, which is
+    precisely the state a fourth reason added later would turn into a
+    silent "approve everything".
 
     The call ID makes the first mutation FAIL CLOSED rather than open; this
     makes both of them fail LOUDLY. Structural on purpose, in the shape
     test_rationale.py already uses when it asserts on what a function
     receives rather than on what it decides.
+
+    §47 SLICE 8 MOVED THE BODY AND MADE THE INVARIANT STRONGER, so this
+    moved with it rather than being deleted. The per-call body used to be
+    `for call in response.tool_calls:` inside `_run`, and what this test
+    pinned was that the authorization never escaped that loop -- one
+    indent out and one approval covered every later call in the turn.
+    NA9's partition needs the body callable from two drivers, so it is
+    `_dispatch_one` now: a function whose whole scope is ONE call.
+
+    That is a better invariant, and the assertions below say so rather than
+    re-checking the old one. There is no enclosing iteration left to hoist
+    out of, so the widening cannot be WRITTEN here; what has to be pinned
+    instead is that it cannot come BACK -- no loop inside `_dispatch_one`,
+    and nothing about authorization in `_run`, which is the frame that now
+    sees every call in the turn. A `for` added around this body, or a
+    dispatch call moved up into `_run`, is the same defect wearing the
+    shape the refactor made available.
     """
     tree = ast.parse(inspect.getsource(core.loop))
-    run = next(n for n in ast.walk(tree)
-               if isinstance(n, ast.FunctionDef) and n.name == "_run")
 
-    per_call = next(
-        (n for n in ast.walk(run)
-         if isinstance(n, ast.For)
-         and ast.unparse(n.iter) == "response.tool_calls"), None)
-    assert per_call is not None, "the per-call loop was renamed or removed"
+    def function(name):
+        found = [n for n in ast.walk(tree)
+                 if isinstance(n, ast.FunctionDef) and n.name == name]
+        assert len(found) == 1, (
+            f"expected exactly one {name}; found {len(found)}. If it was "
+            f"renamed, point this test at the new name rather than "
+            f"letting it pass on a function it cannot see.")
+        return found[0]
 
-    inside = {id(n) for n in ast.walk(per_call)}
-    stores = [n for n in ast.walk(run)
+    per_call = function("_dispatch_one")
+    run = function("_run")
+
+    # ONE CALL PER FRAME, and no iteration to widen it back out.
+    loops = [n for n in ast.walk(per_call)
+             if isinstance(n, (ast.For, ast.AsyncFor, ast.While))]
+    assert not loops, (
+        "_dispatch_one gained a loop. Its whole guarantee is that its "
+        "scope IS one tool call, so an authorization declared in it "
+        "covers one call by construction; a loop reintroduces exactly the "
+        "widening the call id was chosen to fail closed against.")
+
+    stores = [n for n in ast.walk(per_call)
               if isinstance(n, ast.Name) and n.id == "authorized_call"
               and isinstance(n.ctx, ast.Store)]
     assert len(stores) == 3, (
         f"expected the declaration plus two authorizing branches, "
         f"found {len(stores)}")
-    assert all(id(n) in inside for n in stores), (
-        "an assignment to authorized_call escaped the per-call loop; one "
-        "approval would then cover every later call in the same turn")
 
-    calls = [n for n in ast.walk(run)
+    # And nothing about authorization at TURN scope. `_run` is the frame
+    # that sees every call in the response, so it is the one place a
+    # hoisted decision could still be written.
+    escaped = [n for n in ast.walk(run)
+               if isinstance(n, ast.Name) and n.id == "authorized_call"]
+    assert not escaped, (
+        "authorized_call appears in _run, which sees every call in the "
+        "turn. One approval there covers all of them -- the widening this "
+        "test exists for, at the one altitude that can still express it.")
+
+    calls = [n for n in ast.walk(tree)
              if isinstance(n, ast.Call)
              and isinstance(n.func, ast.Attribute)
              and n.func.attr == "dispatch"]
@@ -1114,6 +1187,10 @@ def test_the_loops_authorization_cannot_outlive_one_tool_call():
         f"the loop must have exactly ONE dispatch call site -- two that "
         f"must agree about authorization is the defect batch 60 fixed; "
         f"found {len(calls)}")
+    assert id(calls[0]) in {id(n) for n in ast.walk(per_call)}, (
+        "the dispatch call left _dispatch_one. Wherever it went sees more "
+        "than one call, which is what the per-call frame exists to "
+        "prevent.")
 
     callback = {k.arg: k.value for k in calls[0].keywords}.get(
         "approval_callback")

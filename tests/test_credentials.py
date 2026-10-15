@@ -89,23 +89,40 @@ def test_a_permissive_umask_does_not_widen_it(_in_tmp):
 
 
 @posix_only
-def test_rewriting_an_existing_file_keeps_the_mode(_in_tmp):
-    """save_credentials is called again whenever a key is changed or a
-    provider added, and O_TRUNC on an existing file does NOT reset its
-    mode -- so a file that was created 0644 before this fix stays 0644.
+def test_rewriting_an_existing_file_repairs_a_loose_mode(_in_tmp):
+    """THE FIX GREW A MIGRATION IN BATCH 108, and this test said to come
+    here and say so rather than delete it. So: it did, and here is why.
 
-    Recorded as behaviour rather than fixed: repairing a pre-existing
-    file's mode is a migration, and the honest scope here is "new writes
-    are safe". A user who ran an older version should check the file.
+    This used to assert 0644 -- that a file created world-readable by an
+    older version STAYED world-readable, because `O_TRUNC` on an existing
+    file does not reset its mode. It was recorded as behaviour rather than
+    fixed, on the honest scope "new writes are safe", with a note that a
+    user who ran an older version should check the file themselves.
+
+    Batch 108 made the write atomic to stop an interrupted save destroying
+    every stored key, and `write_json_atomic` is temp-file-plus-
+    `os.replace` with the mode applied to the TEMP file. `os.replace`
+    carries the source's mode across, so the destination's old mode is
+    not preserved -- it is replaced. Measured on this machine: 0644 before
+    the save, **0600 after**, content intact.
+
+    That is the migration arriving as a side effect, and it is the right
+    direction: a `providers.json` left readable by every account on the
+    machine is repaired the next time a key is saved, instead of waiting
+    for a user to read a docstring. The scope note above is now obsolete,
+    which is the one thing worth keeping from it.
     """
     (_in_tmp / "providers.json").write_text("{}", encoding="utf-8")
     os.chmod(_in_tmp / "providers.json", 0o644)
 
     credentials.save_credentials("ANTHROPIC", "sk-ant-secret-value")
 
-    assert _mode(_in_tmp / "providers.json") == 0o644, (
-        "if this now reports 0o600, the fix grew a migration -- update "
-        "this test and say so in the docstring rather than deleting it")
+    assert _mode(_in_tmp / "providers.json") == 0o600, (
+        "an atomic write replaces the destination, so a loose mode on an "
+        "existing file should be repaired rather than carried forward")
+    # The discriminating half: a writer that produced an empty file would
+    # satisfy the mode assertion above.
+    assert "ANTHROPIC" in credentials.load_provider_data()
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +208,8 @@ def test_the_trust_store_write_is_still_atomic(tmp_path, monkeypatch):
     workspace_trust._save_trust_store({"/a": "1"})
 
     assert store.exists()
-    assert not (tmp_path / "trusted_projects.json.tmp").exists()
+    assert _debris(tmp_path, store) == [], (
+        "a temp file was left beside the store")
 
 
 # ---------------------------------------------------------------------------
@@ -402,3 +420,202 @@ def test_an_absolute_providers_path_does_not_name_a_directory_it_never_checked(
     assert "Copy providers.json.example" in message, (
         "the remedy must survive -- it is the half of #24 that made the "
         "message actionable.")
+
+
+
+# ---------------------------------------------------------------------------
+# ---- The write is atomic too (batch 108) -----------------------------------
+# ---------------------------------------------------------------------------
+#
+# #19 was about the MODE, and it left the other half of the same line
+# unexamined. `_write_secret_json` wrote `O_TRUNC` straight over the live
+# file, so a crash, a full disk or a kill between the truncate and the
+# flush destroyed every stored provider key at once -- and unlike the
+# secrets store, this file is in use for every user who has ever saved a
+# credential. `json_store.py` was extracted to delete exactly this pattern
+# and says so in its own docstring; these two files were the last stores
+# still carrying a private copy of it.
+
+class _DiesMidWrite:
+    """A value `json.dump` refuses, reached after bytes are already out.
+
+    `json.dump` writes incrementally, so this is a write that dies PARTWAY
+    rather than one that never starts -- which is the only kind that can
+    tell a truncate-in-place apart from a temp-file-and-replace.
+    """
+
+
+def _dying_dump(monkeypatch):
+    """Make the next provider write fail once it has begun."""
+    real = json.dump
+
+    def dump(payload, handle, **kwargs):
+        payload = dict(payload)
+        payload["zzz_dies_here"] = _DiesMidWrite()
+        return real(payload, handle, **kwargs)
+
+    monkeypatch.setattr(json, "dump", dump)
+
+
+def test_an_interrupted_write_leaves_the_previous_keys(_in_tmp, monkeypatch):
+    credentials.save_credentials("openai", "sk-the-first-key")
+    before = (_in_tmp / "providers.json").read_bytes()
+    _dying_dump(monkeypatch)
+
+    with pytest.raises(TypeError):
+        credentials.save_credentials("anthropic", "sk-ant-the-second-key")
+
+    assert (_in_tmp / "providers.json").read_bytes() == before
+    data = credentials.load_provider_data()
+    assert data["openai"]["API_KEY"] == "sk-the-first-key"
+
+
+def test_an_interrupted_write_leaves_no_temp_file(_in_tmp, monkeypatch):
+    credentials.save_credentials("openai", "sk-the-first-key")
+    _dying_dump(monkeypatch)
+
+    with pytest.raises(TypeError):
+        credentials.save_credentials("anthropic", "sk-ant-the-second-key")
+
+    assert _debris(_in_tmp, _in_tmp / "providers.json") == [], (
+        "a temp file was left beside the store")
+
+
+def test_the_bare_relative_default_still_writes(_in_tmp):
+    """`LLM_PROVIDERS_FILE` defaults to the bare name `providers.json`, so
+    `os.path.dirname` of it is `""` -- and `os.makedirs("")` RAISES rather
+    than doing nothing.
+
+    Nothing could reach that before batch 108, because all six of
+    `write_json_atomic`'s callers built an absolute path. Routing the two
+    secret stores through it made a path SHAPE able to decide whether the
+    write works, and this is the shape that ships.
+    """
+    credentials.save_credentials("openai", "sk-a-key-for-the-bare-path")
+
+    assert (_in_tmp / "providers.json").exists()
+    assert (credentials.load_provider_data()["openai"]["API_KEY"]
+            == "sk-a-key-for-the-bare-path")
+
+
+# ---------------------------------------------------------------------------
+# ---- S07-02: the rename is inside the handler too -------------------------
+# ---------------------------------------------------------------------------
+#
+# The two assertions above used to read `not (dir / "providers.json.tmp")
+# .exists()`, and batch 144 gave `write_json_atomic` a UNIQUE temp name --
+# which would have left both of them passing whatever was on disk. They ask
+# the directory now, which is also what they always meant.
+
+
+def _debris(directory, destination) -> list:
+    """Every file in `directory` that is not the destination itself.
+
+    The assertion the fix needs, rather than one fixed name: the temp file
+    is `<path>.<hex>.tmp` now, because a fixed sibling raced between two
+    writers -- the defect `config_edit.py:510` measured for `config.yaml`
+    and answered, in the file one directory over from the shared helper
+    that had neither half of the answer.
+    """
+    return sorted(p.name for p in directory.iterdir()
+                  if p.name != os.path.basename(str(destination)))
+
+
+def _failing_replace(monkeypatch):
+    """`os.replace` raising where it really raises.
+
+    On Windows a plain `open()` takes no FILE_SHARE_DELETE, so any other
+    process merely READING the destination makes the rename fail -- an
+    editor, a sync client, a backup, a virus scanner, or a second harness
+    instance in the same directory, which `docs/PRIVACY.md` makes a
+    supported configuration. Patched rather than staged, because the real
+    trigger is a second process and the thing under test is what the
+    handler covers.
+    """
+    import json_store
+
+    def _boom(src, dst):
+        raise PermissionError(5, "another process has the file open")
+
+    monkeypatch.setattr(json_store.os, "replace", _boom)
+
+
+def test_a_failed_rename_leaves_no_provider_debris(_in_tmp, monkeypatch):
+    """S07-02, the reachable half and the one that matters most.
+
+    `providers.json.tmp` held EVERY stored provider key in cleartext --
+    `save_credentials` reads the whole file, mutates one entry and writes
+    all of it back -- at a name `.gitignore` and `.gitattributes` did not
+    cover, so `git add -A` staged it and `git archive` shipped it. The
+    destination is correctly untouched either way; the debris was not.
+    """
+    credentials.save_credentials("openai", "sk-the-first-key")
+    before = (_in_tmp / "providers.json").read_bytes()
+    _failing_replace(monkeypatch)
+
+    with pytest.raises(PermissionError):
+        credentials.save_credentials("anthropic", "sk-ant-the-second-key")
+
+    assert (_in_tmp / "providers.json").read_bytes() == before, (
+        "the destination was damaged, which is the half that always worked")
+    assert _debris(_in_tmp, _in_tmp / "providers.json") == [], (
+        "the temp file survived a failed rename, holding every stored key")
+
+
+def test_two_writers_do_not_share_one_temp_name(_in_tmp, monkeypatch):
+    """The other half of the unique name, and `config_edit`'s own reason
+    for it: "two writers raced on the one name".
+
+    Driven by capturing what the helper opens rather than by racing two
+    processes -- the property is that two calls never choose the same
+    path, which a race can only sample.
+    """
+    import json_store
+
+    seen = []
+    real_open = json_store.os.open
+
+    def _record(path, *args, **kwargs):
+        seen.append(path)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(json_store.os, "open", _record)
+
+    credentials.save_credentials("openai", "sk-the-first-key")
+    credentials.save_credentials("anthropic", "sk-ant-the-second-key")
+
+    assert len(seen) == 2, f"expected two writes, saw {seen}"
+    assert seen[0] != seen[1], (
+        f"both writes opened {seen[0]}; a fixed temp name is what left a "
+        f"leftover in the install tree forever when one of them failed")
+    for path in seen:
+        assert path.endswith(".tmp"), path
+        assert "providers.json" in os.path.basename(path), (
+            f"{path} does not name the store it belongs to, so a human "
+            f"finding it cannot tell what it is")
+
+
+def test_the_sweep_never_deletes_a_file_this_call_did_not_create(
+        _in_tmp, monkeypatch):
+    """`O_EXCL` on a unique name is what makes the sweep safe, and this is
+    the claim `json_store.py` makes in a comment.
+
+    The sweep unlinks the temp file on any failure. If the open could ever
+    SUCCEED on a path another writer created, that unlink would delete
+    someone else's work-in-progress. Forced here by pinning the random
+    suffix, which is the only way to collide on purpose -- `os.urandom(4)`
+    is otherwise 4 billion names.
+    """
+    import json_store
+
+    monkeypatch.setattr(json_store.os, "urandom",
+                        lambda n: bytes([0xa1, 0xb2, 0xc3, 0xd4]))
+    squatter = _in_tmp / "providers.json.a1b2c3d4.tmp"
+    squatter.write_text("another writer got here first", encoding="utf-8")
+
+    with pytest.raises(FileExistsError):
+        credentials.save_credentials("openai", "sk-the-first-key")
+
+    assert squatter.exists(), "the sweep deleted another writer's temp file"
+    assert squatter.read_text(encoding="utf-8") == (
+        "another writer got here first")

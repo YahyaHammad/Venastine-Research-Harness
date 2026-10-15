@@ -58,10 +58,27 @@ not extra_data, not anywhere. Restarting the harness is the guaranteed
 way back to the derived number.
 
 MODULE STATE, written from the UI thread and read from worker threads.
-Same posture as core/compaction.py's `_compacting` flag and for the same
-reason: these are single assignments of an int or a tuple, so there is no
-half-set state to observe. Tests clear it in an autouse fixture, which is
-the rule every other module-level cache in this project follows.
+What makes a concurrent read safe here is not serialisation but the pair
+binding: every entry is a single assignment of a tuple, and a peer run
+reading it gets a value only if the (provider, model) it asks about is the
+one that was set -- so another agent's number is not merely unlikely to be
+read, it does not match. Tests clear it in an autouse fixture, which is the
+rule every other module-level cache in this project follows.
+
+THIS USED TO CITE core/compaction.py's `_compacting` FLAG as the same
+posture, and that symbol has not existed since batch 75 -- which batch 148
+is where anyone noticed. It was replaced by
+`_reentrancy = threading.local()` with `_is_compacting()` /
+`_set_compacting()`, deliberately NOT aliased -- the comment there says why:
+"`if _compacting:` against a callable is always true, so a reader left
+holding the old name has to fail at import instead of quietly disabling
+every compaction in the process". So the precedent had been reversed from a
+module flag to per-thread state, because NA9 removed the premise that one
+agent runs at a time, and a reader checking this module against its stated
+example found an argument against the sentence that sent them there. The
+precedent is still worth citing -- for the DIFFERENCE: compaction's state is
+a re-entrancy flag, where a second reader must see what the first did, and
+these are per-pair bindings, where it must not.
 """
 
 import logging
@@ -113,14 +130,21 @@ def trigger_any() -> Optional[int]:
     """The trigger override IGNORING the pair binding.
 
     Exists for exactly one caller: compaction.pin_measurements, which
-    computes #89's cap as PIN_MAX_TRIGGER_FRACTION x the trigger and has
-    no model in scope to match against. That caller takes the MINIMUM of
-    this and the configured trigger, which is safe under every binding --
-    a raised session trigger leaves the cap stricter than it needs to be,
-    and a lowered one pulls the cap down with it. Reading the configured
-    trigger alone would let `/trigger 12k` leave pins capped at 20k, able
-    to floor a thread permanently above its own trigger, which is the
-    defect #89 exists to prevent.
+    computes #89's cap as PIN_MAX_TRIGGER_FRACTION x the trigger. That
+    caller takes the MINIMUM of this and the configured trigger, which is
+    safe under every binding -- a raised session trigger leaves the cap
+    stricter than it needs to be, and a lowered one pulls the cap down with
+    it. Reading the configured trigger alone would let `/trigger 12k` leave
+    pins capped at 20k, able to floor a thread permanently above its own
+    trigger, which is the defect #89 exists to prevent.
+
+    ITS FALLBACK, SINCE BATCH 148, rather than its only answer. That caller
+    had no model in scope and now takes an optional one, because #89's cap
+    is a fraction of the trigger that FIRES and since batch 44 that is
+    derived per model (batch 148). With the pair it resolves the trigger
+    through thresholds(), which reads the correctly-BOUND session override;
+    this read is what remains for a call from outside a run, where there is
+    no pair to bind against.
 
     Do not reach for this anywhere the pair IS available.
     """

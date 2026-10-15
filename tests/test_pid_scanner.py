@@ -24,7 +24,6 @@ WHAT WOULD MAKE THESE VACUOUS:
     like procps does: without ww it truncates every line at 80 columns.
 """
 
-import os
 import subprocess
 import sys
 

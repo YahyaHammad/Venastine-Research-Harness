@@ -20,10 +20,21 @@ import os
 import sys
 from logging.handlers import RotatingFileHandler
 
-# Top-level, not inside format(): this runs on every log record, and
-# safety/policy_enforcement.py is a leaf (stdlib imports only, nothing
-# from this project), so there is no cycle to dodge.
-from safety.policy_enforcement import redact_secrets
+# Top-level, not inside format(): this runs on every log record. There is
+# no cycle to dodge, and the reason is the direction rather than a leaf:
+# `safety/policy_enforcement.py` imports `security.posture` and
+# `security.secrets` and nothing else from this project, the edge runs
+# safety -> security and never the reverse, and batch 37 kept THIS module
+# out of `security/` precisely so it could sit above both. The sentence
+# here used to say policy_enforcement was "a leaf (stdlib imports only,
+# nothing from this project)", which stopped being true when value
+# redaction landed; batch 144 corrected the sentence, not the import.
+#
+# ONE NAME, not two. The formatter used to compose
+# `redact_live_values(redact_secrets(...))` itself, which was both a
+# smaller vocabulary than tool output's and the opposite order from the
+# other site that composed the same two passes (batch 144).
+from safety.policy_enforcement import redact_diagnostic_text
 
 __all__ = ["configure_logging"]
 
@@ -73,7 +84,89 @@ class _RedactingFormatter(logging.Formatter):
     """
 
     def format(self, record):
-        return redact_secrets(super().format(record))
+        # SS61, on the sink this docstring calls the fourth one. The
+        # harness's OWN secrets come out unconditionally and FIRST, which
+        # is `redact_diagnostic_text`'s order and no longer this line's
+        # choice: a value this process put into a subprocess and then
+        # logged is a leak nobody opted into, and app.log is the sink that
+        # KEEPS it across runs.
+        #
+        # THE SAME VOCABULARY AS TOOL OUTPUT since batch 144.
+        # This composed `redact_secrets` alone -- the seven vendor tokens
+        # -- so a quoted `password =` assignment, a `<password>` element
+        # and a URL's userinfo all reached the file in cleartext while the
+        # identical string was redacted on its way to the model. Driven,
+        # four of issue #167's seven cases were redacted here and three
+        # were not; the four are the control that proves this formatter
+        # was attached and firing while it happened.
+        #
+        # Belt and braces rather than redundancy: nothing is supposed to
+        # log a secret at all, `Secret` has no `__str__` to print, and
+        # `lock()` names its reason rather than quoting anything. This
+        # catches the traceback, which renders values nobody chose to
+        # format -- exactly the case this formatter exists for, and the
+        # case `fetch_url` relies on when it logs the URL it failed on.
+        return redact_diagnostic_text(super().format(record))
+
+
+class _OwnerOnlyRotatingFileHandler(RotatingFileHandler):
+    """`RotatingFileHandler`, except the file is created 0600 (batch 144).
+
+    `RotatingFileHandler` takes no mode, so `logs/app.log` was created
+    under the process umask: measured 0o644 on WSL at `umask 022`, against
+    `providers.json` and `secrets.json` at 0o600, every one of which this
+    project argues for at length. Every other account on the machine could
+    read a file that holds, per `docs/PRIVACY.md`, "INFO and above by
+    default ... including provider/HTTP traces ... may still contain query
+    text" -- and, until the vocabulary was fixed in this same batch, a third
+    party's cleartext password whenever one arrived inside a URL.
+
+    The project has already filed this exact shape at this exact severity
+    for the file one directory over. Issue #19 was "providers.json is
+    written with no explicit mode, so plaintext API keys land 0644", and
+    its argument survives verbatim in `credentials.py`.
+
+    0600 AT CREATION, never `open()` then `os.chmod` -- the rule
+    `credentials.py` states and the trap it names, which is that a
+    post-write chmod leaves a window in which the file is on disk under
+    the umask. `_open` is the one place to do it because ROTATION creates
+    files too: `doRollover` renames `app.log` to `app.log.1` and then
+    calls `_open` for a fresh one, so a mode applied once at construction
+    would be correct for one file out of four. A rename carries the mode,
+    so the three backups inherit 0600 from the file they used to be.
+
+    AN EXISTING LOOSE FILE IS LEFT ALONE, deliberately, and this is the
+    one place this handler differs from `credentials.py`'s sibling
+    (`test_rewriting_an_existing_file_repairs_a_loose_mode` pins that the
+    provider store REPAIRS a 0644 file on its next write). The log's path
+    is not the harness's to decide: `configure_logging` records that
+    "the user can still point AGENT_LOG_FILE anywhere they want", so a
+    file at that path may be one the user made group-readable on purpose,
+    and silently tightening it would be this module overruling them. The
+    existing file ages out on its own instead -- it becomes `.1`, then
+    `.2`, `.3`, and is deleted -- while everything created from here on is
+    0600.
+
+    Windows is a no-op, exactly as `credentials.py` records for its
+    sibling: `os.open`'s mode there controls only the read-only flag.
+    """
+
+    def _open(self):
+        # The flags are derived rather than hardcoded so the mode argument
+        # cannot quietly disagree with `self.mode`. In practice this is
+        # always append -- `RotatingFileHandler` forces "a" whenever
+        # `maxBytes` is set, which `configure_logging` always sets.
+        flags = os.O_WRONLY | os.O_CREAT
+        flags |= os.O_TRUNC if "w" in self.mode else os.O_APPEND
+        fd = os.open(self.baseFilename, flags, 0o600)
+        try:
+            return os.fdopen(fd, self.mode, encoding=self.encoding,
+                             errors=self.errors)
+        except BaseException:
+            # `os.fdopen` takes ownership on success only, so a failure
+            # here would leak the descriptor for the life of the process.
+            os.close(fd)
+            raise
 
 
 def _resolve_level(level):
@@ -142,7 +235,7 @@ def configure_logging(
         root.removeHandler(handler)
         try:
             handler.close()
-        except (OSError, IOError):
+        except OSError:
             # Closing should not fail loudly, but if a handler is in a
             # weird state we still want to proceed with fresh handlers.
             pass
@@ -165,7 +258,7 @@ def configure_logging(
         if log_dir and not os.path.isdir(log_dir):
             os.makedirs(log_dir, exist_ok=True)
 
-        file_handler = RotatingFileHandler(
+        file_handler = _OwnerOnlyRotatingFileHandler(
             log_file,
             maxBytes=max_bytes,
             backupCount=backup_count,

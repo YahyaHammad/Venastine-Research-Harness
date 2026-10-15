@@ -29,7 +29,6 @@ conversation, not a person.
 
 import config
 
-
 TOOL_SCHEMA = {
     "name": "todo_write",
     "description": (
@@ -76,8 +75,11 @@ def _normalise(raw) -> tuple:
     """Validate one list. Returns (items, error) -- exactly one is truthy.
 
     Every failure is an error result the model can correct, never an
-    exception: a bare KeyError or TypeError here escapes the loop's
-    ToolCallDenied handler and takes down the whole turn. pin.py's rule.
+    exception -- tools/base.py carries the one copy of why, under "WHAT A
+    CALLABLE REGISTERED BELOW MAY RAISE". The short version is not the one
+    this used to give: a raise here is CONTAINED, and what an error result
+    buys is a message the model can act on instead of a generic wrapper
+    (batch 146).
     """
     if not isinstance(raw, (list, tuple)):
         return None, ("todo_write requires 'items' to be a list of "

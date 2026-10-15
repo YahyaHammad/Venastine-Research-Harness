@@ -11,10 +11,13 @@ modal, and the user's answer unblocks it. Nothing here is async-aware --
 the blocking side is a thread, not a coroutine.
 
 EVERY RENDERABLE BUILT FROM A NON-LITERAL IS WRAPPED IN `Text(...)`
-(batch 42, RA1). Textual renders a `str` through `Text.from_markup`, so
-a square bracket in a tool argument, a claim, a thread preview or an
-`ask_user` option is CONSOLE MARKUP here -- and these screens exist to
-show a person exactly what a model asked for. Two live failures:
+(batch 42, RA1). Textual parses a `str` as MARKUP, so a square bracket
+in a tool argument, a claim, a thread preview or an `ask_user` option
+is a tag here -- and these screens exist to show a person exactly what
+a model asked for. It was Rich's console markup until the textual pin
+moved and is Textual's own grammar now; nothing below changed with it,
+which is the point of re-measuring rather than assuming. Two live
+failures:
 
   * `sed -i "s/[/]//" f.txt` in a permission payload
     raised MarkupError inside compose(). The screen was pushed and
@@ -28,14 +31,25 @@ show a person exactly what a model asked for. Two live failures:
     The severity was silently absent from every review modal since
     §20 -- an unconditional defect, needing no adversary at all.
 
-`markup=False` IS NOT THE FIX, and looks like it is. On the pinned
-textual 1.0.0 `Static.__init__` stores the flag and assigns
-`self._content` directly; the `visual` property then calls
-`render_str()` -> `Text.from_markup` unconditionally and never reads
-it. Only the `renderable` SETTER honours it, and no constructor goes
-through the setter -- so `Static(x, markup=False)` still raises,
-measured. `render_str` returns a `Text` unaltered, which is why
-wrapping works and is the only thing here that does.
+`markup=False` WORKS NOW AND IS STILL NOT THE FIX, which is a
+different sentence from the one that stood here. On textual 1.0.0 the
+flag was stored by `__init__` and never read by the `visual`
+property, so `Static(x, markup=False)` raised anyway -- measured then.
+Since the pin moved it is honoured: `visualize(self, content,
+markup=self._render_markup)`, and all four payloads below render
+literally -- measured again.
+
+The wrap stays, for two reasons that outlived the version fact. It
+covers `Selection` and `Button`, which take no such flag and both
+parse what they are given. And it is one rule for one file, where the
+flag would be a per-constructor argument somebody adding the next
+screen has to remember -- which is exactly the failure RA1 is.
+
+What a bare `str` still does on 8.2.8, measured:
+  `sed -i "s/[/]//" f.txt` raises, `[bold]x` renders as `x`,
+  `[HIGH] rated` renders as ` rated`, and `[1, 2]` survives intact.
+That last one is why the rule cannot be a scan for brackets: the
+shapes that fail are not the ones a reader expects to be dangerous.
 
 A literal written in THIS file is left alone: it is ours and it is
 reviewed. The rule is mechanical, so it holds for the next screen
@@ -49,7 +63,13 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import (
-    Button, Input, Label, ListItem, ListView, SelectionList, Static,
+    Button,
+    Input,
+    Label,
+    ListItem,
+    ListView,
+    SelectionList,
+    Static,
 )
 from textual.widgets.selection_list import Selection
 
@@ -97,6 +117,33 @@ class ScrollBox(VerticalScroll):
     Bindings are `ScrollableContainer`'s minus the horizontal ones:
     there is nothing to scroll sideways, because the text wraps.
     """
+
+
+def asker_label(asked_by, depth) -> list:
+    """`[Label]` naming the run that raised a question, or `[]` (§47).
+
+    ONE SENTENCE FOR THE THREE MODALS THAT CAN BE ASKED FROM INSIDE A RUN.
+    §47 gave it to the permission modal alone; batch 75's review found the
+    sign-off and the model's own question without it, which is where it
+    matters most now that three children of one turn can each be asking:
+    three sign-off screens naming the grandchild and nothing about who
+    asked are three identical screens.
+
+    Empty at depth 0, and that is the right SCOPE rather than a gap: the
+    asking run is then the conversation you are looking at, which needs no
+    label.
+
+    Returned as a LIST so a caller splices it into its widget list without
+    a branch, which is what keeps the placement rule (directly under the
+    title, above anything the agent wrote) in one shape across the three.
+
+    `Text(...)` for RA1's reason -- an agent name comes from a file whose
+    author is not necessarily this project.
+    """
+    if not asked_by:
+        return []
+    return [Label(Text(f"asked by {asked_by} (depth {depth})"),
+                  id="permission-asker")]
 
 
 class PermissionScreen(ModalScreen[bool]):
@@ -147,9 +194,9 @@ class PermissionScreen(ModalScreen[bool]):
     command was merely the part somebody noticed was missing.
 
     Nothing caught it because every assertion about this screen reads
-    `.visual._renderable.plain`, the string the widget was built from,
-    which a widget of zero height still reports in full. §46's tests
-    assert on the rendered REGION for that reason.
+    the widget's own VISUAL -- the string it was built from, which a
+    widget of zero height still reports in full. §46's tests assert on
+    the rendered REGION for that reason.
 
     The headline is DISPLAY ONLY and is also inside `params`, which is
     still rendered whole below it. That duplication is deliberate for
@@ -161,10 +208,26 @@ class PermissionScreen(ModalScreen[bool]):
     BINDINGS = [("escape", "deny", "Deny")]
 
     def __init__(self, tool_name: str, params: dict, notice: str = None,
-                 rationale: str = None, headline: str = None):
+                 rationale: str = None, headline: str = None,
+                 asked_by: str = None, depth: int = 0):
         super().__init__()
         self._tool_name = tool_name
         self._params = params
+        # ROADMAP_v2 §47. WHICH run raised this question, when it was
+        # not the conversation itself. A subagent's approvals have
+        # always surfaced here -- the channel is inherited -- and the
+        # modal said only which TOOL was asked for, so "Allow shell?"
+        # over a chat turn and over a nested agent two levels down
+        # were the same screen.
+        #
+        # None for a top-level turn, and that is the right scope
+        # rather than a gap: the asking run is then the conversation
+        # you are looking at, which needs no label. It becomes
+        # load-bearing when two questions can be pending at once,
+        # which is why it is a prerequisite for §47's last slice
+        # rather than a nicety.
+        self._asked_by = asked_by
+        self._depth = depth
         # §46 (EP2). What this call is asking to DO -- for `shell`, the
         # command. Resolved by the registry from whichever param the
         # tool declared and passed in already a string, for the reason
@@ -205,6 +268,11 @@ class PermissionScreen(ModalScreen[bool]):
             rendered = f"{self._notice}\n\n{rendered}"
         widgets = [Label(Text(f"Allow {self._tool_name}?"),
                          id="permission-title")]
+        # DIRECTLY under the title, above the headline and everything the
+        # agent wrote: RA6's ordering says a harness fact is read before an
+        # agent's claim, and which run is asking is the most harness-y fact
+        # on the screen. See `asker_label` for the rest.
+        widgets.extend(asker_label(self._asked_by, self._depth))
         if self._headline:
             # `Text(...)` is not optional here (batch 42, RA1). This is
             # the most attacker-influenced string on the screen -- a
@@ -351,16 +419,26 @@ class SubagentSignoffScreen(ModalScreen[object]):
 
     BINDINGS = [("escape", "refuse", "Refuse")]
 
-    def __init__(self, agent: str, candidates: list):
+    def __init__(self, agent: str, candidates: list, asked_by: str = None,
+                 depth: int = 0):
         super().__init__()
         self._agent = agent
         self._candidates = list(candidates)
+        # §47, extended by batch 75's review. WHICH run wants to spawn
+        # this one -- a different agent from `self._agent`, which is the
+        # one about to be spawned. It matters more here than on the
+        # permission modal: three children of one turn each spawning a
+        # grandchild produce three of these screens, and without this they
+        # name the grandchild and nothing else, so they are identical.
+        self._asked_by = asked_by
+        self._depth = depth
 
     def compose(self) -> ComposeResult:
         if not self._candidates:
             yield Vertical(
                 Label(Text(f"Run {self._agent}?"),
                       id="permission-title"),
+                *asker_label(self._asked_by, self._depth),
                 Static(Text(f"{self._agent} needs no approval-gated "
                             f"tools."),
                        id="permission-params"),
@@ -376,6 +454,10 @@ class SubagentSignoffScreen(ModalScreen[object]):
         yield Vertical(
             Label(Text(f"What may {self._agent} use without asking again?"),
                   id="grant-title"),
+            # BOTH branches, because either can be reached from inside a
+            # run -- the no-candidates one is what a nested spawn of an
+            # agent with no gated tools shows.
+            *asker_label(self._asked_by, self._depth),
             Static(
                 "Space toggles, then choose. Anything left unticked still "
                 "prompts you if the subagent tries it.\nRunning with none "
@@ -444,18 +526,26 @@ class QuestionScreen(ModalScreen[object]):
     BINDINGS = [("escape", "dismiss_unanswered", "No answer")]
 
     def __init__(self, question: str, options=(), multi_select: bool = False,
-                 allow_text: bool = True):
+                 allow_text: bool = True, asked_by: str = None,
+                 depth: int = 0):
         super().__init__()
         self._question = question
         self._options = list(options)
         self._multi = bool(multi_select)
         self._allow_text = bool(allow_text)
+        # §47, added by batch 75's review. "The assistant has a question"
+        # is the right title for a chat turn and an understatement for a
+        # subagent two levels down, whose question surfaces on the parent's
+        # screen exactly as its approvals do.
+        self._asked_by = asked_by
+        self._depth = depth
 
     def compose(self) -> ComposeResult:
         # The question is the MODEL's, so its length is the one thing
         # this screen does not choose -- bounded and scrollable for the
         # same reason the payload block is.
         widgets = [Label("The assistant has a question", id="question-title"),
+                   *asker_label(self._asked_by, self._depth),
                    ScrollBox(Static(Text(self._question), id="question-body"),
                              id="question-body-box")]
 
@@ -476,8 +566,17 @@ class QuestionScreen(ModalScreen[object]):
             # at `width: auto` an option wider than the dialog was
             # CLIPPED, and the same label at `width: 100%` wraps to two
             # centred lines instead.
+            #
+            # `Text(option)` for batch 42's reason (RA1), which had
+            # not reached a Button: these are the MODEL's words, and
+            # measured on both the old pin and the new one, a
+            # `Button` given a `str` sends it through markup parsing
+            # and raises on an unbalanced tag -- inside compose(), so
+            # the screen is pushed and never drawn. The multi-select
+            # branch above already wraps its `Selection`; this branch
+            # simply had not.
             widgets.append(ScrollBox(
-                *[Button(option, variant="primary",
+                *[Button(Text(option), variant="primary",
                          id=f"question-opt-{index}")
                   for index, option in enumerate(self._options)],
                 id="question-options"))
@@ -725,6 +824,34 @@ class ClaimsScreen(ModalScreen[None]):
 _TIER_ORDER = ("UNVERIFIED", "UNVERIFIED_COVERAGE", "LOW", "MEDIUM", "HIGH")
 
 
+def _as_display_list(value) -> list:
+    """The members of a model-supplied list field, as text.
+
+    EVERY FIELD THIS GUARDS IS MODEL DATA READ BACK FROM A STORED RUN, AND
+    A STORED RUN MAY HAVE FAILED (batch 149). The orchestrator's except
+    block persists a snapshot before it re-raises, so a run that died in
+    Pass 5 on `assumption_flags: 123` leaves that value in the record --
+    and `/claims <run id>` then rendered it. `'; '.join(map(str, 123))`
+    raises TypeError inside `compose()`, which is NOT covered by the
+    containment batch 145 put at the `/` dispatch site: `push_screen`
+    returns an `await_mount`, so compose runs in the message pump rather
+    than in the handler's call stack, and the exception reaches Textual's
+    `_handle_exception` and takes the whole app down. Measured against the
+    real ClaimsScreen in a minimal host app.
+
+    The payload boundary now rejects each of these shapes at the pass that
+    sent them (§66 A25), which closes the producer -- but not for a record
+    written before it did, and this view's whole job is reading those.
+
+    A value that is not a list is shown as the one value it is, rather
+    than dropped: the reader asked what the run recorded, and "123" is the
+    answer.
+    """
+    if isinstance(value, (list, tuple)):
+        return [str(member) for member in value]
+    return [str(value)]
+
+
 def _render_claims(claims: list) -> str:
     if not claims:
         return "No claims recorded for this run."
@@ -745,16 +872,19 @@ def _render_claims(claims: list) -> str:
         # the view matches the report rather than the draft behind it.
         out.append(f"  {claim.get('final_text') or claim.get('text') or ''}")
         if claim.get("entities"):
-            out.append(f"  entities: {', '.join(map(str, claim['entities']))}")
+            out.append("  entities: "
+                       + ", ".join(_as_display_list(claim["entities"])))
         if claim.get("grounding_status") or claim.get("grounding_sources"):
-            sources = len(claim.get("grounding_sources") or ())
+            sources = len(_as_display_list(claim.get("grounding_sources")
+                                           or ()))
             out.append(f"  grounding: {claim.get('grounding_status') or 'none'}"
                        f" ({sources} source{'s' if sources != 1 else ''})")
         for field, label in (("fallacies", "fallacies"),
                              ("contradictions", "contradictions"),
                              ("assumption_flags", "assumptions")):
             if claim.get(field):
-                out.append(f"  {label}: {'; '.join(map(str, claim[field]))}")
+                out.append(f"  {label}: "
+                           + "; ".join(_as_display_list(claim[field])))
         if claim.get("score_breakdown"):
             out.append("  score: " + ", ".join(
                 f"{k}={v}" for k, v in claim["score_breakdown"].items()))
@@ -815,7 +945,8 @@ class ConfirmScreen(ModalScreen[bool]):
             ScrollBox(Static(Text(self._body), id="permission-params"),
                       id="permission-params-box"),
             Horizontal(
-                Button(self._confirm_label, variant="success", id="allow"),
+                Button(Text(self._confirm_label), variant="success",
+                       id="allow"),
                 Button("No", variant="error", id="deny"),
                 id="permission-buttons"),
             id="permission-dialog",
@@ -893,6 +1024,114 @@ class ProjectKindScreen(ModalScreen[object]):
         self.dismiss(None)
 
 
+class AgentPickerScreen(ModalScreen[object]):
+    """Pick a run to read. Dismisses with a thread id, or None (§47).
+
+    THE KEYBOARD ROUTE to what the sidebar offers on a click. The
+    sidebar is deliberately not focusable -- batch 59 refused a tab
+    stop and refused to take the arrow keys the suggestion panel
+    uses -- so making its rows clickable made navigation reachable by
+    mouse only. A key-bound picker keeps the panel as it is and
+    mirrors ctrl+t, which is already this project's answer to
+    "choose a thread".
+
+    Only runs that HAVE a thread are listed. A row for one that
+    cannot be opened would be a control that does nothing, which is
+    the rule the sidebar's unbound rows already follow.
+    """
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, runs: list[dict]):
+        super().__init__()
+        self._runs = runs
+
+    def compose(self) -> ComposeResult:
+        items = [
+            # Indented by the LINEAGE LEVEL the app read off
+            # `widgets.lineage_rows`, which is the walk the sidebar
+            # indents by -- not `AgentRow.depth`, which is the spawn
+            # bound and parts company with the column wherever a span
+            # adds a display level without adding a spawn level.
+            # `Text(...)` for RA1's reason: an agent name comes from a
+            # file this project did not necessarily write. Finished
+            # runs read muted: they open like any other row, so the
+            # mark is de-emphasis rather than a warning, and `live`
+            # defaults True so a hand-built row renders as running.
+            ListItem(
+                Label(Text(
+                    f"{'  ' * run.get('level', 0)}{run['label']}")),
+                classes="" if run.get("live", True) else "finished")
+            for run in self._runs
+        ]
+        children = [Label("Read which run?", id="agent-picker-title")]
+        if items:
+            children.append(ListView(*items, id="agent-picker-list"))
+        else:
+            children.append(Static(
+                "Nothing is running, and this conversation has not "
+                "started yet.", id="agent-picker-empty"))
+        yield Vertical(*children, id="agent-picker-dialog")
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        index = event.list_view.index
+        if index is not None and 0 <= index < len(self._runs):
+            self.dismiss(self._runs[index]["thread_id"])
+        else:
+            self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class SessionKillScreen(ModalScreen[object]):
+    """Pick a background session to stop. Dismisses with a session id, or
+    None to cancel (ROADMAP_v3 §49, SS2).
+
+    ALWAYS A PICKER, including for a single session, and that is a
+    decision rather than a simplification. §49's adopted default killed
+    outright when exactly one was live and showed this list only for
+    several, which made one key mean two things -- and the destructive
+    one was the case that needed no confirmation. A one-row list costs a
+    keypress and removes the mistyped-ctrl+b case entirely.
+
+    It is also the only thing on screen that says what is running until
+    the sidebar panel lands, which is why the rows carry the command and
+    not just an id.
+
+    The rows arrive already rendered and already REDACTED: the command
+    goes through the same output policy the model's own view of it does,
+    because a modal is a display surface like any other and a secret does
+    not become safe by being shown to the person who typed it.
+    """
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, rows: list[dict]):
+        super().__init__()
+        self._rows = rows
+
+    def compose(self) -> ComposeResult:
+        items = [ListItem(Label(Text(row["label"]))) for row in self._rows]
+        children = [Label("Stop which session?", id="session-kill-title")]
+        if items:
+            children.append(ListView(*items, id="session-kill-list"))
+        else:
+            children.append(Static("Nothing is running.",
+                                   id="session-kill-empty"))
+        yield Vertical(*children, id="session-kill-dialog")
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        index = event.list_view.index
+        if index is not None and 0 <= index < len(self._rows):
+            self.dismiss(self._rows[index]["id"])
+        else:
+            self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class ThreadPickerScreen(ModalScreen[object]):
     """Pick a thread to resume. Dismisses with a UUID, or None to cancel.
 
@@ -936,6 +1175,72 @@ class ThreadPickerScreen(ModalScreen[object]):
         index = event.list_view.index
         if index is not None and 0 <= index < len(self._threads):
             self.dismiss(self._threads[index]["id"])
+        else:
+            self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class SecretScreen(ModalScreen[object]):
+    """Ask for one secret, masked (ROADMAP_v3 §49 slice 5a, SS59).
+
+    THE FIRST MASKED INPUT IN THIS PROJECT, which is why it is its own
+    screen rather than a flag on QuestionScreen. The KIND is what tells a
+    shell how to render (§23 AC1), and here the rendering IS the substance: a
+    flag that a screen forgot to read would show the passphrase in clear
+    while every test about the plumbing still passed.
+
+    Four properties this screen owes, none of which QuestionScreen has:
+
+      * `password=True`, so the characters are never drawn;
+      * the value is dismissed and NOTHING ELSE. It is not put in a
+        reactive, not logged, not echoed into the transcript, and not kept
+        on the screen object past `dismiss` -- `on_button_pressed` reads
+        the widget and hands the string straight out;
+      * Escape and the Cancel button dismiss with None, which
+        `interaction.decode` turns into the declining default. A dismissed
+        passphrase prompt must not become an empty passphrase, because an
+        empty passphrase is an authentication ATTEMPT (SS59);
+      * Enter submits, because a password field that needs a mouse is a
+        password field people paste into something else first.
+    """
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, title: str, body: str = "",
+                 confirm_label: str = "Unlock"):
+        super().__init__()
+        self._title = title
+        self._body = body
+        self._confirm_label = confirm_label
+
+    def compose(self) -> ComposeResult:
+        widgets = [Label(Text(self._title), id="permission-title")]
+        if self._body:
+            widgets.append(
+                ScrollBox(Static(Text(self._body), id="permission-params"),
+                          id="permission-params-box"))
+        widgets.append(Input(password=True, id="secret-value"))
+        widgets.append(Horizontal(
+            Button(Text(self._confirm_label), variant="success",
+                   id="secret-ok"),
+            Button("Cancel", variant="error", id="secret-cancel"),
+            id="permission-buttons"))
+        yield Vertical(*widgets, id="permission-dialog")
+
+    def on_mount(self) -> None:
+        self.query_one("#secret-value", Input).focus()
+
+    def _submit(self) -> None:
+        self.dismiss(self.query_one("#secret-value", Input).value)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self._submit()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "secret-ok":
+            self._submit()
         else:
             self.dismiss(None)
 

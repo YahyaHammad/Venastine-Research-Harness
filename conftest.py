@@ -2,8 +2,16 @@
 Root conftest.py -- runs before pytest collects any test module.
 
 Injects fake `openai`, `anthropic`, `google`, `google.genai`, `sqlmodel`,
-`httpx`, and `ddgs` modules into `sys.modules` BEFORE any test module
-imports a project module that would, in turn, import the real SDK.
+`httpx`, `ddgs` and `markitdown` modules into `sys.modules` BEFORE any test
+module imports a project module that would, in turn, import the real SDK.
+
+`markitdown` is the one in that list that is not an SDK: it is an optional
+extra since #144, and it is stubbed for the same reason as the rest. It was
+missing from this sentence until batch 151, which matters because
+of what the paragraph two below is -- a `NOT faked, by explicit decision`
+list, which makes this one read as the complete set rather than as an
+example. `test_the_root_conftest_header_names_every_module_it_stubs` reads
+this list back and compares it against what `_install_fake_sdks` assigns.
 
 Why we fake these and not others:
   - openai / anthropic / google.genai: real ones require live network +
@@ -33,12 +41,16 @@ can't easily, since the failure mode is "Python imports the wrong
 file at startup" and that happens before any test runs. If a regression
 appears (tool warnings vanish from output despite being emitted), check
 this first.
+
+SECOND JOB SINCE BATCH 109: this file decides how many workers `-n auto`
+spends, and gives each worker its own matplotlib cache. Both have to be
+here rather than in `tests/conftest.py` -- see the section at the bottom.
 """
 
+import os
 import sys
+import tempfile
 import types
-import json
-
 
 # ---------------------------------------------------------------------------
 # ---- Fake openai ---------------------------------------------------------
@@ -290,6 +302,52 @@ def _build_fake_google_module():
             self.include_thoughts = include_thoughts
             self.thinking_budget = thinking_budget
 
+    class _FakeSchemaField:
+        """Just the `.alias` that `_google_schema_keys` reads."""
+
+        def __init__(self, alias=None):
+            self.alias = alias
+
+    class _FakeSchema:
+        """`types.Schema`, faithful in the ONE respect production depends on:
+        the set of keys it can carry.
+
+        `core/client.py`'s `_google_schema_keys` reads `model_fields` (and
+        each field's camelCase `alias`) to decide which JSON Schema keys the
+        pinned SDK can accept, because the real `Schema` is `extra="forbid"`
+        and a key it has no field for is a `ValidationError` rather than
+        something ignored (batch 132). A fake with no `Schema` at all made
+        that an `AttributeError`, and a fake with an EMPTY field set would be
+        worse -- the reduction would strip every key and the tests here would
+        pass against schemas that are not what production sends.
+
+        These are the 22 fields of `google-genai==1.0.0`. The alias is the
+        camelCase spelling, which is how JSON Schema writes them and is the
+        half that makes `anyOf` recognisable at all. This fake is NOT
+        `extra="forbid"` and does not validate -- it cannot, and that is what
+        `tests/test_sdk_conformance.py` drives the REAL package for.
+        """
+
+        _NAMES = (
+            "any_of", "default", "description", "enum", "example", "format",
+            "items", "max_items", "max_length", "max_properties", "maximum",
+            "min_items", "min_length", "min_properties", "minimum",
+            "nullable", "pattern", "properties", "property_ordering",
+            "required", "title", "type",
+        )
+
+        model_fields = {
+            name: _FakeSchemaField(
+                alias=name.split("_")[0] + "".join(
+                    part.title() for part in name.split("_")[1:]))
+            for name in _NAMES
+        }
+
+        def __init__(self, **kw):
+            for key, value in kw.items():
+                setattr(self, key, value)
+
+    types_mod.Schema = _FakeSchema
     types_mod.ThinkingConfig = _FakeThinkingConfig
     types_mod.FunctionDeclaration = _FakeFunctionDeclaration
     types_mod.Tool = _FakeTool
@@ -711,3 +769,128 @@ def _install_fake_sdks():
 
 
 _install_fake_sdks()
+
+
+# ---------------------------------------------------------------------------
+# ---- Running the suite in parallel (batch 109) ----------------------------
+# ---------------------------------------------------------------------------
+#
+# WHY THIS IS IN THE *ROOT* CONFTEST AND NOT tests/conftest.py. Both are
+# loaded before collection, but only this one is loaded before
+# `pytest_cmdline_main`, and that is where xdist resolves `-n auto` into a
+# number. pytest reads `<rootdir>/conftest.py` as an INITIAL conftest; a
+# `pytest_xdist_auto_num_workers` in any other file is simply never called,
+# silently, and `-n auto` would go back to meaning every core.
+
+#: What `-n auto` spends. NOT a tuning constant to raise -- the whole point
+#: is that a contributor can run the suite and keep using the machine, and
+#: most of them are on the laptop they are also reading code on. Someone who
+#: wants the rest of the box says so with `-n logical`.
+_CPU_SHARE = 0.7
+
+
+def _usable_cpus() -> int:
+    """The cores this process may actually run on.
+
+    `os.cpu_count()` reports the MACHINE, not the allowance: a cgroup quota
+    or a CPU affinity mask makes it an overcount, and CI is exactly where
+    both live. Prefer the narrower answers where the interpreter has them,
+    and fall back only when it does not.
+    """
+    counter = getattr(os, "process_cpu_count", None)      # 3.13+
+    if counter is not None:
+        count = counter()
+        if count:
+            return count
+    if hasattr(os, "sched_getaffinity"):                  # POSIX
+        return len(os.sched_getaffinity(0)) or 1
+    return os.cpu_count() or 1
+
+
+def _worker_id() -> str:
+    """This process's xdist worker id ("gw3"), or "" in a serial run.
+
+    The environment variable rather than `config.workerinput`, because the
+    one caller below runs at import time -- before there is a config to
+    ask.
+    """
+    return os.environ.get("PYTEST_XDIST_WORKER", "")
+
+
+def _isolate_matplotlib_cache() -> None:
+    """Give each xdist worker its own MPLCONFIGDIR.
+
+    THE ONE SHARED MUTABLE RESOURCE THE PARALLELISATION AUDIT FOUND.
+    Everything else the suite writes is already per-process or per-test:
+    xdist hands each worker its own `tmp_path_factory` basetemp
+    (`.../popen-gwN`), HOME is redirected with `monkeypatch.setenv`, the
+    askpass socket takes an ephemeral port, and `sandbox`'s known_hosts
+    file is an `mkstemp` path in a process global. The font cache is not.
+    It lives at one path for the whole machine and is BUILT ON FIRST USE
+    (~5s, which AGENTS.md already records), so on a cold cache every worker
+    would race to write the same file.
+
+    SERIAL RUNS ARE LEFT ALONE, deliberately: with no worker id there is no
+    race, and redirecting anyway would throw away the user's warm cache and
+    pay the 5s on every run.
+    """
+    worker = _worker_id()
+    if not worker or os.environ.get("MPLCONFIGDIR"):
+        return
+    path = os.path.join(tempfile.gettempdir(), f"venastine-mpl-{worker}")
+    os.makedirs(path, exist_ok=True)
+    os.environ["MPLCONFIGDIR"] = path
+
+
+_isolate_matplotlib_cache()
+
+
+try:
+    import xdist  # noqa: F401
+except ImportError:                                       # pragma: no cover
+    # NOT DECORATION. pluggy's `check_pending()` rejects a hook
+    # implementation whose spec no loaded plugin registered, so defining
+    # the function below unconditionally would turn `pytest -p no:xdist`
+    # into a PluginValidationError instead of a plain missing-plugin
+    # message -- a confusing failure on the one invocation someone reaches
+    # for when they suspect xdist.
+    pass
+else:
+    def pytest_xdist_auto_num_workers(config):
+        """`-n auto` is 70% of the cores, rounded, never fewer than one.
+
+        xdist publishes this hook for exactly this purpose, which is why
+        nothing here mutates `config.option` or depends on hook ordering
+        against xdist's own `pytest_cmdline_main`.
+
+        Rounded half-up, so the table is statable: 2 cores -> 1 worker,
+        4 -> 3, 6 -> 4, 8 -> 6, 10 -> 7, 12 -> 8, 16 -> 11.
+
+        `-n logical` RETURNS None ON PURPOSE, deferring to xdist's own
+        detector so that spelling keeps meaning "every core". That leaves
+        four dials, all in xdist's own vocabulary and none invented here:
+
+            -n auto      70% of what this process may use  (the default,
+                         and what CI runs -- see pytest.ini)
+            -n logical   all of them; measured NOT faster, twice
+            -n <N>       exactly N
+            -n0          serial -- the escape hatch for a debugger, for
+                         the mutation harness, and for anything that reads
+                         pytest's output
+
+        THAT ANNOTATION USED TO SAY CI RAN `-n logical`, AND IT DOES NOT
+        (batch 151). It runs `python -m pytest -q` in both
+        workflows, under a comment in `tests.yml` that carries three runs
+        of paired measurements and concludes "So CI runs exactly what a
+        contributor runs". So the one file that owns this decision was the
+        one file describing CI as taking the other branch, in the line a
+        reader opens to find out what the dials mean -- and `AGENTS.md`
+        names that conclusion as something not to re-derive from the
+        measurements, which is precisely what a reader would do from here.
+        The invocation is stated in `pytest.ini` and in the workflows; this
+        table points at them rather than becoming a fourth copy.
+        """
+        if config.option.numprocesses != "auto":
+            return None
+        usable = _usable_cpus()
+        return max(1, min(usable, int(usable * _CPU_SHARE + 0.5)))

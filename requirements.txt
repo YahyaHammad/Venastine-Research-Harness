@@ -23,9 +23,61 @@ sqlmodel==0.0.39
 python-dotenv==1.2.2
 matplotlib==3.10.3
 pyyaml==6.0.3
-# ROADMAP_v2 §16 TUI. Upper-bounded per D22 -- the mcp lesson was that an
-# unpinned dependency mid-major-version-transition migrates you by accident.
-textual>=1.0,<2.0
+# config.yaml, via config_schema.py. TWO YAML PARSERS IN ONE TREE IS
+# DELIBERATE -- do not "unify" them. pyyaml above parses agent/skill
+# frontmatter, where nothing is ever written back and ~70 tests pin the
+# behaviour; ruamel is here for the half pyyaml cannot do, which is
+# preserving a hand-authored file's comments across a WRITE. Since batch 84
+# two modules do exactly that -- config_edit.py behind /config, and
+# config_update.py putting a user's values back after an npm update replaces
+# the file -- while the IMPORT path still uses typ="safe". (This said
+# "nothing writes config.yaml yet ... this pin is bought for the config
+# editor that will", which those batches made false.)
+#
+# EXACT, for the reason `mcp` and `textual` are exact: an upper bound lets a
+# MINOR change behaviour underneath CI and makes CI's result depend on when
+# it ran. Two facts to re-measure when this pin moves: 0.18 REMOVED the
+# module-level `load()` / `safe_load()` functions, so the `YAML()` object API
+# is the only one, and `typ="safe"` is what refuses `!!python/...` tags in a
+# file that decides the tool permissions.
+ruamel.yaml==0.19.1
+# ROADMAP_v2 §16 TUI. EXACT, and this comment is textual's OWN record
+# rather than a line borrowed from D22's, which is about `mcp`. The
+# `>=1.0,<2.0` it replaces was written BEFORE 2.0 existed -- 1.0.0 shipped
+# 2024-12-12 and 2.0.0 on 2025-02-16 -- so it was a
+# don't-migrate-me-by-accident ceiling and never a judgement about 2.x.
+# Nothing in the repo had evaluated 2.x, and the ceiling then sat there
+# for twenty months while upstream reached 8.2.8.
+#
+# Exact for the reason batch 32 made `mcp` exact: an upper bound stops a
+# MAJOR and lets a MINOR change behaviour underneath CI, which makes CI's
+# result depend on when it ran.
+#
+# Moving it again is a deliberate step. Each of these was verified in hand
+# against the installed package rather than read from a changelog, and
+# each is what to re-measure next time:
+#   * `Static.renderable` is `.content` since 6.0.0 (`.visual` is the
+#     rendered form). 43 sites across 8 test files read it.
+#   * `Static.update` sends a Rich `Text` through `visualize()`, which
+#     converts it with `console=widget.app.console` -- so updating an
+#     UNMOUNTED widget raises NoActiveAppError, and the suite builds these
+#     panels bare everywhere. `tui.widgets.as_content` is the answer.
+#     The conversion also drops `no_wrap` / `overflow`, silently; those
+#     are `text-wrap` / `text-overflow` in app.tcss now.
+#   * Textual markup replaced Rich markup at 2.0.0, and `markup=False` IS
+#     honoured now -- on 1.0.0 it was stored and never read, which is what
+#     tui/screens.py's `Text(...)` rule was written against (RA1).
+#   * `textual-ansi` is GONE. `ansi-dark` / `ansi-light` replaced it at
+#     8.2.5, `Theme` grew an `ansi: bool`, and the built-in roster is 21
+#     rather than 12 -- so SELECTABLE_THEMES in tests/test_themes.py, and
+#     every documented test count, moves with the pin.
+#   * `dim` is resolved into the drawn COLOUR now instead of reaching the
+#     cell as an attribute, which is what a test reading a drawn style
+#     off the compositor sees.
+#   * The kitty keyboard protocol reaches the WINDOWS driver since 6.6.0.
+#     Batch 54's `shift+enter` note was written against its absence.
+# Then re-run the TUI pilots dependabot.yml names -- ~410 run_test sites.
+textual==8.2.8
 
 # Imported DIRECTLY at tui/widgets.py:8-9 (`rich.syntax.Syntax`,
 # `rich.text.Text`) and previously undeclared -- present only because
@@ -33,7 +85,9 @@ textual>=1.0,<2.0
 # chosen by whatever textual's own range resolved to. Upper-bounded per D22
 # for D22's own reason, and this was the one package the project imported
 # without declaring, i.e. the one place such a migration would be silent.
-rich>=13,<16
+# The FLOOR is textual's, not a guess: 8.2.8 requires `rich>=14.2.0`, so
+# `>=13` stated a version this project can no longer be installed with.
+rich>=14.2,<16
 
 # ROADMAP_v2 §17 MCP client. Upper-bounded per D22 -- and D22 exists
 # BECAUSE of this package: it was mid-major-version transition when §17
@@ -62,11 +116,81 @@ rich>=13,<16
 # to hold on both versions.
 mcp==2.0.0
 
-# --- Test dependencies -------------------------------------------------
-# Previously absent, which the docs recorded as a known open item since
-# §14: the suite has always needed pytest and pytest-mock, and §16's TUI
-# pilot tests add pytest-asyncio. Listed now so `pip install -r` produces
-# a working suite instead of one that fails at import.
-pytest>=8.0
-pytest-mock>=3.14
-pytest-asyncio>=1.0
+# ROADMAP_v3 §49 (SS8). The engine for a monitor session's pattern -- a
+# regex the MODEL wrote, matched against program output nobody controls,
+# inside the harness's own process. Imported by core/line_pattern.py and
+# nowhere else.
+#
+# NOT the stdlib `re`, and the reason was measured: `re` holds the GIL for
+# the whole match, so `(a+)+$` against 25 a's and a `b` froze EVERY thread
+# for 1.9 s -- the TUI's included -- and each extra character doubles it.
+# RE2 matches in linear time, releases the GIL, and refuses backreferences
+# and lookaround at compile time, so the agent is told instead of the
+# harness hanging.
+#
+# EXACT, for the reason textual and mcp are exact. BSD-3-Clause; wheels
+# for cp310-cp314 on Windows (x64, x86, arm64), macOS 13-15 (arm64,
+# x86_64) and manylinux_2_28 (x86_64, aarch64). There is NO wheel for musl
+# (Alpine) or glibc older than 2.28, where pip builds the sdist and needs a
+# C++ toolchain and Abseil. Another package ships a module named `re2`
+# that falls back to `re`, which is why core/line_pattern.py refuses a
+# `re2` from any other distribution. What to re-measure when this moves:
+# `re2.Options` still has `log_errors` and `max_mem`; a compile error is
+# still `re2.error` and still silent with `log_errors = False` (it writes
+# to stderr through Abseil otherwise, which paints over Textual); and the
+# wheel list above.
+google-re2==1.1.20251105
+
+# ROADMAP_v3 §49 slice 5a (SS57). AES-256-GCM for the harness-held secret
+# store, and scrypt is the stdlib's -- `hashlib` has the KDF and no cipher,
+# so this is the dependency or a hand-rolled AEAD, and this repository
+# ships a `cryptography-verification` skill whose whole subject is not
+# doing the second one.
+#
+# DECLARING IT ADDS NOTHING TO AN INSTALL, measured rather than assumed:
+# google-genai==1.0.0 -> google-auth>=2.14.1 -> cryptography>=38.0.3, with
+# no extra marker, so it is already in the hard closure of the line above.
+# What the declaration buys is that a dependency this project's SECURITY
+# rests on is pinned by this project rather than by whatever google-auth
+# happens to resolve to.
+#
+# Apache-2.0 OR BSD-3-Clause -- permissive, so THIRD_PARTY_NOTICES.md's
+# no-copyleft claim still holds. It is the SECOND dependency shipping
+# compiled native code (google-re2 was the first): the wheels carry a Rust
+# extension and OpenSSL, and that file's paragraph names both now.
+#
+# A FLOOR AND A CEILING rather than an exact pin, like `rich`: an exact pin
+# here would fight google-auth's own floor on a resolver that has to
+# satisfy both. The floor is the AEAD API this uses, which has been stable
+# since 3.x; the ceiling is D22's rule, so a MAJOR cannot change behaviour
+# underneath CI. What to re-measure when it moves: `AESGCM` still raises
+# `cryptography.exceptions.InvalidTag` with NO message (the store relies on
+# the three failure causes being indistinguishable), and the wheel list
+# still covers this project's platforms.
+cryptography>=42.0,<52
+
+# TECHNICAL_DEBT 18, batch 116. A PRODUCTION dependency: `arxiv.py` imports
+# it at module load, and pyproject.toml reads this file for its dependency
+# list via `dynamic = ["dependencies"]`.
+#
+# THE TIDY THIS COMMENT WARNED ABOUT HAS NOW HAPPENED, and the warning was
+# right about the risk and wrong about the mechanism. It said a tidy of the
+# test block "would drop it from the shipped set", as though the shipped set
+# were something other than this file -- it was not, which is why the test
+# block itself shipped. Batch 136 (S18-07) moved that block to
+# requirements-test.txt, so the distinction is real now and defusedxml is
+# unambiguously on the shipped side of it. It stayed because this paragraph
+# said why; that is the comment earning its place rather than the claim it
+# happened to get wrong.
+#
+# stdlib ElementTree expands declared entities on a feed this project does
+# not write (Bandit B405/B314). Pinned exactly rather than floored, the way
+# textual is: item 18 asks for "version-pinned re-verification", and a
+# parser's refusals are exactly what a silent minor bump could change.
+defusedxml==0.7.1
+
+# Test dependencies live in requirements-test.txt, NOT here (S18-07,
+# batch 136). pyproject.toml reads THIS file for `[project].dependencies`
+# via `dynamic`, so anything below this line is a hard requirement of the
+# published package and of every end user's venv. Install the suite's own
+# packages with `pip install -r requirements-test.txt`.

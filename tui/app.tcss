@@ -33,10 +33,67 @@
     scrollbar-size-vertical: 1;
 }
 
+/* Section 47. The switcher holding the live transcript and the read-only
+   view. Both children stay mounted; only `current` changes -- which is what
+   lets a running turn keep writing to the live pane while a stored thread is
+   on screen, with nothing to buffer and nothing to flush on the way back. */
+#pane {
+    height: 1fr;
+}
+
 #transcript {
     height: 1fr;
     border: solid $panel;
     padding: 0 1;
+}
+
+/* The accent border is the whole affordance: at a glance this is not the
+   conversation you are having. The prompt is disabled underneath it, so the
+   read-only rule is visible rather than merely true. */
+#thread-view {
+    height: 1fr;
+    border: solid $accent;
+    padding: 0 1;
+}
+
+/* The lineage trail. `height: auto` and hidden until the viewer opens, so
+   the live conversation costs no row for a trail it does not need -- the
+   GoalBanner rule, which every conditional row in #main follows. */
+/* ROADMAP_v3 §49 (SS14). THE SAME BOX as #transcript and #thread-view --
+   `border: solid` and `padding: 0 1` -- and that is load-bearing rather
+   than tidy: a hidden pane measures 0 and borrows the on-screen pane's
+   width (Transcript._region_width), so four panes that are not the same
+   box would each write at another one's width. The accent border is
+   #thread-view's affordance, for #thread-view's reason: at a glance this
+   is not the conversation you are having. */
+#session-view {
+    height: 1fr;
+    border: solid $accent;
+    padding: 0 1;
+}
+
+/* ROADMAP_v3 §55 (TR10). One tool call: the whole command and what it
+   printed. The FOURTH pane, and the same box for the paragraph above --
+   `test_the_panes_measure_the_same_width_when_shown` holds that, and a
+   different gutter here would silently rewrap every row the live
+   transcript wrote while this one was up. Accent border, same reason:
+   this is not the conversation you are having. */
+#call-view {
+    height: 1fr;
+    border: solid $accent;
+    padding: 0 1;
+}
+
+#thread-crumb {
+    height: auto;
+    padding: 0 1;
+    /* One line, elided rather than wrapped: a trail that reflowed
+       would take a second row from the transcript below it. The
+       ellipsis is the point -- the segment you are standing on is
+       the last one, so the cut belongs at the far end. Moved off
+       the Rich Text for `#agent-panel`'s reason. */
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
 }
 
 /* Batch 55, the slash-command suggestions. Directly above the prompt
@@ -68,6 +125,14 @@
        the right, which is the corner #prompt's meter uses one box
        down, so titles sit left and status sits right throughout. */
     border-subtitle-color: $text-muted;
+    /* `render()` pads every row to the panel width itself, and the
+       pin on that arithmetic is a test that no drawn row is wider
+       than the panel. This is the net under it, moved off the Rich
+       Text for `#agent-panel`'s reason: a row that ever does
+       overrun clips visibly instead of reflowing into a height the
+       budget did not count. */
+    text-wrap: nowrap;
+    text-overflow: clip;
 }
 
 /* Batch 54. `height: auto` with a `max-height` -- batch 49's shape, for
@@ -88,7 +153,8 @@
     height: auto;
     max-height: 6;
     padding: 0 1;
-    /* The placeholder, which a TextArea has no other way to carry. Muted
+    /* The placeholder, carried by the border title rather than TextArea's
+       native in-box one (assigning both drew it twice). Muted
        is already this sheet's vocabulary for a hint (#usage-line,
        #todo-panel, #research-progress), so it reads as one rather than
        as a heading. */
@@ -119,6 +185,27 @@
 #agent-panel {
     height: auto;
     padding-top: 1;
+    /* The rows are sized by the widget (AgentPanel.WIDTH lays out
+       against 18) and must not be re-wrapped underneath it: a
+       miscalculation should clip where it can be seen rather than
+       reflow where it cannot. This used to be `no_wrap` /
+       `overflow` on the Rich Text itself, which stopped meaning
+       anything when the textual pin moved -- a Content carries
+       neither flag and the conversion drops both. See
+       `widgets.as_content`. */
+    text-wrap: nowrap;
+    text-overflow: clip;
+}
+
+/* ROADMAP_v3 §49 (SS14). The same box as #agent-panel above, because it is
+   the same kind of widget in the same twenty columns: rows sized by the
+   widget (SessionPanel.WIDTH, which is AgentPanel.WIDTH) and clipped rather
+   than reflowed, for that block's reason. */
+#session-panel {
+    height: auto;
+    padding-top: 1;
+    text-wrap: nowrap;
+    text-overflow: clip;
 }
 
 #effort-raven {
@@ -227,6 +314,25 @@ ReviewScreen {
    claims about the call, and flush against each other they do not. */
 #permission-title {
     text-style: bold;
+    margin-bottom: 1;
+}
+
+/* Section 47. Which run raised the question, when it was not the
+   conversation itself. Muted and unbold: it qualifies the title rather
+   than competing with it, and it sits directly under it because RA6
+   reads a harness fact before anything the agent wrote.
+
+   It eats the title's margin, so the pair reads as one heading rather
+   than as two blocks -- which is what the margin exists to separate.
+
+   ONE ID ACROSS THE THREE MODALS that can be asked from inside a run
+   (batch 75: the sign-off and the model's own question joined the
+   permission prompt). Ids are per-screen, so one rule styles all three
+   and there is nothing to keep in step -- the same reason
+   `screens.asker_label` is one function. */
+#permission-asker {
+    color: $text-muted;
+    margin-top: -1;
     margin-bottom: 1;
 }
 
@@ -400,6 +506,72 @@ ClaimsScreen {
     height: auto;
     max-height: 8;
     margin-bottom: 1;
+}
+
+/* Section 47's run picker, the keyboard route to what the sidebar
+   offers on a click. Narrower than the thread picker because its rows
+   are agent names and an indent rather than a uuid plus a preview,
+   and it takes the accent border the read-only pane takes: both say
+   the same thing, that what you are about to look at is not the
+   conversation you are having. */
+#agent-picker-dialog {
+    width: 48;
+    height: auto;
+    max-height: 20;
+    padding: 1 2;
+    border: thick $accent;
+    background: $surface;
+}
+
+#agent-picker-title {
+    text-style: bold;
+    padding-bottom: 1;
+}
+
+#agent-picker-list {
+    height: auto;
+    max-height: 14;
+}
+
+/* Finished runs read muted. They open like any other row, so this is
+   de-emphasis rather than a warning -- and a muted hue rather than the
+   `dim` attribute, which is the transcript's vocabulary (test_themes
+   pins it to the system role) while this list is a modal, where
+   UNVERIFIED_COVERAGE already set the precedent that quiet names a
+   different state rather than a broken one. */
+#agent-picker-list .finished {
+    color: $text-muted;
+}
+
+AgentPickerScreen {
+    align: center middle;
+}
+
+/* ROADMAP_v3 §49 (SS2): the kill picker. Wider than the run picker
+   because its rows carry a command as well as a name, and a command cut
+   at 48 columns is exactly the "which one is this?" the picker exists to
+   answer. */
+#session-kill-dialog {
+    width: 72;
+    height: auto;
+    max-height: 20;
+    padding: 1 2;
+    border: thick $accent;
+    background: $surface;
+}
+
+#session-kill-title {
+    text-style: bold;
+    padding-bottom: 1;
+}
+
+#session-kill-list {
+    height: auto;
+    max-height: 14;
+}
+
+SessionKillScreen {
+    align: center middle;
 }
 
 #thread-dialog {

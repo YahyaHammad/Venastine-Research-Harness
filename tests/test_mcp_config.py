@@ -427,14 +427,129 @@ def test_non_boolean_auto_approve_falls_back_to_false(roots, value, caplog):
     assert any("autoApprove" in r.getMessage() for r in caplog.records)
 
 
-@pytest.mark.parametrize("value", ["false", "no", 0, None])
-def test_non_boolean_disabled_falls_back_to_false(roots, value):
-    """The mirror defect: `"disabled": "false"` skipped a server the user
-    meant to keep running."""
-    _write(roots["user"] / "mcp.json",
-           {"srv": {"command": "npx", "disabled": value}})
-    cfgs = mcp_config.load_server_configs(str(roots["project"]), trusted=False)
-    assert cfgs["srv"].disabled is False
+class TestAnUnparseableDisabledIsANamedFailure:
+    """`disabled` has no safe constant, which is why it no longer has one
+    (batch 150, A29).
+
+    This class REPLACES test_non_boolean_disabled_falls_back_to_false,
+    and the reason is worth keeping. That test asserted
+    `cfgs["srv"].disabled is False`, which is still true of the fixed
+    code -- the field IS False -- while the server no longer runs. An
+    assertion that holds on both sides of the change cannot discriminate,
+    so leaving it green beside the new behaviour would have been a guard
+    describing a tree that no longer exists.
+
+    Its CONCERN is kept and is the second test below: a server the
+    operator meant to keep running must not silently vanish. It does not
+    vanish; it is refused by name, with the reason, in the three places a
+    person looks.
+    """
+
+    @pytest.mark.parametrize("value", ["true", "yes", 1])
+    def test_a_truthy_non_boolean_does_not_run_the_server(self, roots, value):
+        """The defect: `"disabled": "true"` left disabled False, so the
+        server connected and ran its command, and F1's consent line --
+        which reads self.disabled -- presented it as live. The entry a
+        probe drove was
+        `{"command": "rm", "args": ["-rf", "/data"], "disabled": "true"}`
+        and the line it printed was `srv [user] runs: rm -rf /data`, with
+        no note."""
+        _write(roots["user"] / "mcp.json",
+               {"srv": {"command": "npx", "disabled": value}})
+
+        cfg = mcp_config.load_server_configs(
+            str(roots["project"]), trusted=False)["srv"]
+
+        assert cfg.transport == "unknown"
+        assert cfg.error == "'disabled' must be true or false"
+        # The three places it surfaces. describe() is the acknowledgement
+        # screen; transport 'unknown' is what makes _transport_for raise,
+        # so the server lands in failures by name rather than connecting.
+        assert "UNUSABLE" in cfg.describe()
+        assert "'disabled'" in cfg.describe()
+        assert "runs:" not in cfg.describe()
+
+    @pytest.mark.parametrize("value", ["false", "no", 0, None])
+    def test_a_falsy_non_boolean_is_refused_by_name_too(self, roots, value):
+        """The old test's concern, kept: a server the operator meant to
+        keep RUNNING must not silently disappear. It does not -- but it
+        does not silently run either, which is the point. `"false"` and
+        `"true"` are one hand edit apart and want opposite answers, so
+        the only answer that is right for both is to name the problem and
+        let one edit fix it.
+
+        `None` is included deliberately: `"disabled": null` is a key
+        written with no value, and JSON null is not a boolean. Refusing
+        it keeps one rule instead of a special case."""
+        _write(roots["user"] / "mcp.json",
+               {"srv": {"command": "npx", "disabled": value}})
+
+        cfg = mcp_config.load_server_configs(
+            str(roots["project"]), trusted=False)["srv"]
+
+        assert cfg.error == "'disabled' must be true or false"
+        assert "UNUSABLE" in cfg.describe()
+
+    def test_the_warning_names_the_server_the_key_and_the_value(
+            self, roots, caplog):
+        _write(roots["user"] / "mcp.json",
+               {"srv": {"command": "npx", "disabled": "true"}})
+
+        with caplog.at_level("WARNING", logger="mcp_client.config"):
+            mcp_config.load_server_configs(str(roots["project"]),
+                                           trusted=False)
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("'srv'" in m and "disabled" in m and "'true'" in m
+                   for m in messages), messages
+
+    def test_autoApprove_still_falls_back_to_false(self, roots):
+        """THE CONTROL, and the reason the two keys are not symmetric.
+        For `autoApprove` False IS the safe answer -- an unexpectedly
+        gated server prompts -- so that key keeps the old behaviour and
+        its own test above still passes unchanged. If this one ever
+        starts refusing the entry, the fix has spread past its
+        finding."""
+        _write(roots["user"] / "mcp.json",
+               {"srv": {"command": "npx", "autoApprove": "true"}})
+
+        cfg = mcp_config.load_server_configs(
+            str(roots["project"]), trusted=False)["srv"]
+
+        assert cfg.auto_approve is False
+        assert cfg.error is None
+        assert cfg.transport == "stdio"
+        assert "runs:" in cfg.describe()
+
+    def test_a_real_boolean_is_untouched_in_both_directions(self, roots):
+        """The second control: strict refusal must not break the
+        documented spelling. test_real_booleans_are_honoured_both_ways
+        covers the same ground from the other file section; this one
+        asserts the ERROR field specifically, because that is the thing
+        the new branch sets."""
+        _write(roots["user"] / "mcp.json", {
+            "on": {"command": "npx", "disabled": False},
+            "off": {"command": "npx", "disabled": True},
+        })
+
+        cfgs = mcp_config.load_server_configs(str(roots["project"]),
+                                              trusted=False)
+
+        assert cfgs["on"].disabled is False and cfgs["on"].error is None
+        assert cfgs["off"].disabled is True and cfgs["off"].error is None
+        assert cfgs["off"].transport == "stdio"
+        assert "disabled" in cfgs["off"].describe()
+
+    def test_the_consequence_reaches_the_flag_helper_itself(self):
+        """_flag no longer CHOOSES, which is the shape of the fix rather
+        than one of its outcomes: it reports that it could not parse, and
+        each caller states its own safe direction. A helper that returns
+        a bool again would make the asymmetry unexpressible, and the
+        docstring's old claim about 'both flags' would quietly come
+        back."""
+        assert mcp_config._flag("s", "k", True, "x") is True
+        assert mcp_config._flag("s", "k", False, "x") is False
+        assert mcp_config._flag("s", "k", "true", "x") is None
 
 
 def test_real_booleans_are_honoured_both_ways(roots):
@@ -477,3 +592,96 @@ def test_list_args_still_accepted(roots):
     cfg = mcp_config.load_server_configs(str(roots["project"]),
                                          trusted=False)["srv"]
     assert cfg.args == ["-y", "pkg"]
+
+
+# ---------------------------------------------------------------------------
+# ---- Batch 121: the user tier is created, so its location is not a guess ---
+# ---------------------------------------------------------------------------
+
+class TestTheUserTierGetsARealFile:
+    """Owner request, from a session where an mcp.json edit went into a
+    file the harness never reads: "users don't know whether user-level
+    mcp.json is at the harness root or ~/.config/venastine". A file that
+    exists answers that. A docstring does not.
+    """
+
+    def test_it_creates_the_skeleton_and_says_where(self, roots):
+        import json
+
+        path = mcp_config.ensure_user_config()
+
+        assert path == str(roots["user"] / "mcp.json"), (
+            "the created path is the return value because it is what the "
+            "launcher prints -- naming the file IS the feature")
+        with open(path, encoding="utf-8") as f:
+            assert json.load(f) == {"mcpServers": {}}
+
+    def test_the_skeleton_is_the_one_shape_that_warns_about_nothing(
+            self, roots, caplog):
+        """BEHAVIOUR-NEUTRAL, and that is a property of the CONTENT. An
+        empty `{}` trips _read_file's "has no 'mcpServers' object" branch,
+        so the obvious seed would have warned about the harness's own file
+        at every launch for the rest of time.
+
+        ASSERTS ON WARNING+ RECORDS, NOT ON `caplog.text` BEING EMPTY.
+        That is the claim -- the seeded shape warns about nothing -- and it
+        is also the only version that does not depend on what configured
+        logging earlier in the process: ensure_user_config logs its own
+        creation at INFO, and whether caplog has that record already
+        depends on the run. WSL caught it serially while Windows passed it,
+        which is TECHNICAL_DEBT 27's shape in a new place.
+        """
+        import logging
+
+        mcp_config.ensure_user_config()
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            cfgs = mcp_config.load_server_configs(
+                str(roots["project"]), trusted=True)
+
+        assert cfgs == {}
+        assert [r for r in caplog.records
+                if r.levelno >= logging.WARNING] == [], caplog.text
+
+    def test_it_never_overwrites_a_file_someone_wrote(self, roots):
+        _write(roots["user"] / "mcp.json",
+               {"mine": {"command": "npx", "args": ["-y", "pkg"]}})
+
+        assert mcp_config.ensure_user_config() is None, (
+            "None is how the caller knows not to announce anything")
+        cfgs = mcp_config.load_server_configs(
+            str(roots["project"]), trusted=False)
+        assert "mine" in cfgs, "it overwrote a real configuration"
+
+    def test_an_emptied_file_is_still_that_persons_file(self, roots):
+        """The check is EXISTENCE, not content. Someone who cleared the
+        file out meant to clear it out, and re-seeding would be the
+        harness arguing with them."""
+        path = roots["user"] / "mcp.json"
+        path.write_text("", encoding="utf-8")
+
+        assert mcp_config.ensure_user_config() is None
+        assert path.read_text(encoding="utf-8") == ""
+
+    def test_a_directory_it_cannot_write_is_not_a_failed_startup(
+            self, roots, monkeypatch):
+        """A convenience that cannot be delivered is not a reason to
+        refuse to start. The trust store raises on a failed write because
+        a security decision that silently did not persist is worse than a
+        crash; this is not one of those."""
+        from json_store import write_json_atomic as real
+
+        def _explodes(*a, **k):
+            raise OSError("read-only file system")
+
+        monkeypatch.setattr(mcp_config, "write_json_atomic", _explodes)
+        assert mcp_config.ensure_user_config() is None
+        assert real is not None            # the import is the point
+
+    def test_the_skeleton_comes_from_the_one_that_already_existed(self):
+        """§24's /init writes the project tier's skeleton. Two copies of
+        "what an empty mcp.json looks like" is two things to keep in
+        agreement, so this asserts they ARE one."""
+        from project_init.config_files import render_mcp
+
+        assert render_mcp() == {"mcpServers": {}}

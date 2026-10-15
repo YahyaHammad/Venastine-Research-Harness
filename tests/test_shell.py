@@ -12,12 +12,15 @@ import os
 import platform
 import random
 import shlex
+import signal
 import subprocess
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 import config
+from security import protected_paths, sandbox
 from security.capability import (
     CONTAINED,
     UNAVAILABLE,
@@ -27,13 +30,13 @@ from security.capability import (
     validate_mode,
 )
 from security.sandbox import (
+    _SHELL_METACHARACTERS,
     HOST_READ,
     INERT,
     SANDBOXED,
     SANDBOXED_NET,
     UNKNOWN,
     SandboxUnavailable,
-    _SHELL_METACHARACTERS,
     _escapes_workspace,
     _is_inert,
     _needs_network,
@@ -49,8 +52,7 @@ from security.sandbox import (
     is_docker_available,
     run_sandboxed,
 )
-from security import protected_paths
-from tests.conftest import rebind_posture, set_posture
+from tests.conftest import set_posture
 from tools.builtin.shell import _shell_approval_check, _shell_approval_notice
 
 # Batch 39 builds command strings containing backslashes. Written as
@@ -101,21 +103,20 @@ class TestDetectShell:
 # ===========================================================================
 
 class TestDockerAvailable:
-    """is_docker_available() is lru_cached for the process (review f41),
-    so each case has to clear it -- otherwise the first test's answer
-    would be the only one any of them measured."""
+    """is_docker_available() answers from a probe memoised for the process
+    (review f41), so each case has to reset it -- otherwise the first
+    test's answer would be the only one any of them measured.
+
+    ROADMAP_v3 §49 (SS22) moved the memo from an lru_cache on this function
+    to `sandbox._runtime_probe`, which remembers WHICH runtime answered and
+    why none did, so the reset is that module's."""
 
     @pytest.fixture(autouse=True)
     def _clear_probe_cache(self):
-        # getattr, so removing the cache makes the COUNT test fail with
-        # its own message rather than erroring every case in this class
-        # on a missing attribute -- an error that masks the assertion is
-        # the same "environment could not manifest the failure" shape the
-        # revert-check discipline exists to catch.
-        clear = getattr(is_docker_available, "cache_clear", lambda: None)
-        clear()
+        from security import sandbox
+        sandbox._reset_runtime_probe()
         yield
-        clear()
+        sandbox._reset_runtime_probe()
 
     def test_docker_found(self):
         with patch("security.sandbox.subprocess.run") as mock_run:
@@ -144,6 +145,233 @@ class TestDockerAvailable:
             is_docker_available()
             is_docker_available()
             assert mock_run.call_count == 1
+
+
+class TestTheContainerRuntime:
+    """ROADMAP_v3 §49 (SS22-SS24). Docker first; Podman when Docker is not
+    installed or does not answer; a Podman that cannot enforce the limits
+    is not a runtime at all; and the CLI a route invokes is the one the
+    probe found."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_probe(self):
+        from security import sandbox
+        sandbox._reset_runtime_probe()
+        yield
+        sandbox._reset_runtime_probe()
+
+    @staticmethod
+    def _info_json(rootless=True, cgroups="v2",
+                   controllers=("cpu", "memory", "pids")):
+        import json
+        return json.dumps({"host": {
+            "cgroupVersion": cgroups,
+            "cgroupControllers": list(controllers),
+            "security": {"rootless": rootless}}})
+
+    @staticmethod
+    def _runner(answers):
+        """A subprocess.run stand-in that answers by (cli, plain|json).
+
+        A key that is absent raises FileNotFoundError, which is what a CLI
+        that is not installed does. The shape of the real outputs is from
+        batch 93's measurement: Podman's plain `info` carries
+        `buildahVersion`, Docker's does not.
+        """
+        calls = []
+
+        def run(argv, **_kwargs):
+            calls.append(list(argv))
+            key = (argv[0], "json" if "--format" in argv else "plain")
+            if key not in answers:
+                raise FileNotFoundError(argv[0])
+            returncode, stdout = answers[key]
+            return subprocess.CompletedProcess(argv, returncode, stdout, "")
+
+        run.calls = calls
+        return run
+
+    _PODMAN_PLAIN = (0, "host:\n  arch: amd64\n  buildahVersion: 1.42.0\n")
+    _DOCKER_PLAIN = (0, "Client:\n Version: 28.0\nServer:\n Containers: 0\n")
+
+    def _probe_with(self, answers):
+        from security import sandbox
+        run = self._runner(answers)
+        with patch("security.sandbox.subprocess.run", side_effect=run):
+            name = sandbox.container_runtime()
+        return name, run.calls
+
+    def test_docker_wins_whenever_it_answers(self):
+        name, calls = self._probe_with({
+            ("docker", "plain"): self._DOCKER_PLAIN,
+            ("podman", "plain"): self._PODMAN_PLAIN,
+            ("podman", "json"): (0, self._info_json())})
+        assert name == "docker"
+        assert not [c for c in calls if c[0] == "podman"], (
+            "Podman is asked only when Docker cannot run a container")
+
+    def test_podman_runs_the_sandbox_when_docker_is_not_installed(self):
+        name, _ = self._probe_with({
+            ("podman", "plain"): self._PODMAN_PLAIN,
+            ("podman", "json"): (0, self._info_json())})
+        assert name == "podman"
+
+    def test_podman_runs_the_sandbox_when_dockers_daemon_does_not_answer(self):
+        name, _ = self._probe_with({
+            ("docker", "plain"): (1, "Cannot connect to the Docker daemon"),
+            ("podman", "plain"): self._PODMAN_PLAIN,
+            ("podman", "json"): (0, self._info_json())})
+        assert name == "podman"
+
+    def test_with_neither_there_is_no_runtime_and_the_reason_names_both(self):
+        from security import sandbox
+        name, _ = self._probe_with({})
+        assert name is None
+        with patch("security.sandbox.subprocess.run",
+                   side_effect=AssertionError("must not probe again")):
+            assert sandbox.is_docker_available() is False
+        reason = sandbox._known_unavailable_reason()
+        assert "Docker" in reason and "Podman" in reason
+
+    @pytest.mark.parametrize("json_answer, said", [
+        ((0, _info_json.__func__(cgroups="v1")), "cgroups v1"),
+        ((0, _info_json.__func__(controllers=("cpu", "memory"))), "pids"),
+        ((0, "not json at all"), "could not be read"),
+        ((125, ""), "would not report"),
+    ])
+    def test_a_podman_that_cannot_enforce_the_limits_is_refused(
+            self, json_answer, said, caplog):
+        """SS24. Rootless Podman on cgroups v1 accepts `--memory` and
+        ignores it, and one with a controller missing cannot bind that
+        flag -- and a Podman whose setup cannot be READ is refused too,
+        because not knowing whether the limits bind is not a reason to
+        assume they do."""
+        from security import sandbox
+        with caplog.at_level("WARNING", logger="security.sandbox"):
+            name, _ = self._probe_with({
+                ("podman", "plain"): self._PODMAN_PLAIN,
+                ("podman", "json"): json_answer})
+            sandbox.container_runtime()
+        assert name is None
+        assert said in sandbox._known_unavailable_reason()
+        warned = [r for r in caplog.records
+                  if "No container runtime can run the sandbox" in r.message]
+        assert len(warned) == 1, "a refusal is said once per process"
+
+    def test_a_rootful_podman_is_trusted_on_either_cgroup_version(self):
+        """Only ROOTLESS can fail: a rootful runtime owns the cgroup tree."""
+        name, _ = self._probe_with({
+            ("podman", "plain"): self._PODMAN_PLAIN,
+            ("podman", "json"): (0, self._info_json(rootless=False,
+                                                     cgroups="v1"))})
+        assert name == "podman"
+
+    @pytest.mark.parametrize("rootless_v1, expected", [(True, None),
+                                                       (False, "docker")])
+    def test_a_docker_that_is_really_podman_is_checked_as_podman(
+            self, rootless_v1, expected):
+        """The podman-docker shim answers `docker info` with Podman's own
+        output. Without this the limit check would be skipped by NAME."""
+        info = (self._info_json(cgroups="v1") if rootless_v1
+                else self._info_json())
+        name, _ = self._probe_with({
+            ("docker", "plain"): self._PODMAN_PLAIN,
+            ("docker", "json"): (0, info)})
+        assert name == expected
+
+    def test_the_podman_path_probes_once_per_process(self):
+        from security import sandbox
+        run = self._runner({("podman", "plain"): self._PODMAN_PLAIN,
+                            ("podman", "json"): (0, self._info_json())})
+        with patch("security.sandbox.subprocess.run", side_effect=run):
+            for _ in range(3):
+                assert sandbox.is_docker_available() is True
+        assert [c[:2] for c in run.calls] == [
+            ["docker", "info"], ["podman", "info"], ["podman", "info"]]
+
+    def test_known_runtime_reads_the_probe_and_never_runs_it(self):
+        """The route reads this, and a test that patched availability must
+        not have real `docker`/`podman` subprocesses run under it -- CI's
+        runners ship Podman, so the argv would change there."""
+        from security import sandbox
+        with patch("security.sandbox.subprocess.run",
+                   side_effect=AssertionError("known_runtime probed")):
+            assert sandbox.known_runtime() == "docker"
+        self._probe_with({("podman", "plain"): self._PODMAN_PLAIN,
+                          ("podman", "json"): (0, self._info_json())})
+        assert sandbox.known_runtime() == "podman"
+
+    def test_the_route_invokes_the_runtime_the_probe_found(
+            self, monkeypatch, tmp_path):
+        from security import sandbox
+        monkeypatch.setattr(config, "INERT_COMMANDS", ["ls"])
+        monkeypatch.setattr(sandbox, "_runtime_probe",
+                            sandbox.RuntimeProbe("podman"))
+        monkeypatch.setattr(sandbox, "_log_image_identity",
+                            lambda runtime="docker": None)
+        with patch("security.sandbox.subprocess.Popen") as popen:
+            popen.return_value.communicate.return_value = ("", "")
+            popen.return_value.returncode = 0
+            result = run_sandboxed("python x.py", str(tmp_path),
+                                   docker_available=True)
+        assert popen.call_args[0][0][:2] == ["podman", "run"]
+        assert result["ran_on"] == "container"
+
+    def test_a_timed_out_podman_container_is_killed_by_podman(self):
+        with patch("security.sandbox.subprocess.Popen") as popen, \
+             patch("security.sandbox.subprocess.run") as run:
+            popen.return_value.communicate.side_effect = (
+                subprocess.TimeoutExpired(cmd="podman", timeout=60))
+            run.return_value = MagicMock(returncode=0)
+            _run_docker("sleep 999", "/tmp/ws", runtime="podman")  # nosec B108 - a fixture PATH STRING handed to a mocked route; nothing is created
+        kills = [c[0][0][:2] for c in run.call_args_list]
+        assert kills == [["podman", "kill"]]
+
+    def test_the_image_is_inspected_by_the_runtime_that_runs_it(self):
+        """Docker and Podman keep separate image stores, so EP7's line has
+        to ask the one that will run the container."""
+        from security import sandbox
+        sandbox._resolved_image_id.cache_clear()
+        with patch("security.sandbox.subprocess.run") as run:
+            run.return_value = MagicMock(returncode=0, stdout="sha256:1\n")
+            sandbox._resolved_image_id("img", "podman")
+        sandbox._resolved_image_id.cache_clear()
+        assert run.call_args[0][0][:3] == ["podman", "image", "inspect"]
+
+    def test_the_unavailable_message_carries_the_probes_reason(
+            self, monkeypatch, tmp_path):
+        from security import sandbox
+        monkeypatch.setattr(config, "INERT_COMMANDS", ["ls"])
+        set_posture(monkeypatch, allow_insecure_fallback=False)
+        monkeypatch.setattr(sandbox, "_runtime_probe", sandbox.RuntimeProbe(
+            None, "rootless Podman on cgroups v1 cannot enforce the "
+                  "sandbox's memory, CPU and process limits", refused=True))
+        with pytest.raises(SandboxUnavailable, match="cgroups v1"):
+            run_sandboxed("python x.py", str(tmp_path),
+                          docker_available=False)
+
+    def test_the_approval_notice_names_the_runtime(self, monkeypatch):
+        """Podman and Docker are different products, and the person
+        approving a command is told which one isolates it."""
+        from security import sandbox
+        from tools.builtin import shell as shell_tool
+        monkeypatch.setattr(sandbox, "_runtime_probe",
+                            sandbox.RuntimeProbe("podman"))
+        with patch("tools.builtin.shell.is_docker_available",
+                   return_value=True):
+            notice = shell_tool._shell_approval_notice(
+                {"command": "python x.py"})
+        assert "Runs in a Podman container" in notice
+
+    def test_the_shipped_image_is_fully_qualified(self):
+        """SS23. Measured: stock Ubuntu Podman resolved `python:3.13-slim`
+        only through a `shortnames.conf` alias, with no search registries
+        configured -- an alias another distro need not ship."""
+        import yaml
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "config.yaml"), encoding="utf-8") as f:
+            image = yaml.safe_load(f)["sandbox_docker_image"]
+        assert image.startswith("docker.io/"), image
 
 
 # ===========================================================================
@@ -175,7 +403,7 @@ class TestIsInert:
         """Attacker-planted ./ls or /workspace/ls must NOT be inert."""
         assert _is_inert("./ls") is False
         assert _is_inert("/workspace/ls") is False
-        assert _is_inert("/tmp/cat file.txt") is False
+        assert _is_inert("/tmp/cat file.txt") is False  # nosec B108 - a command string under test, not a temp path
         assert _is_inert(".\\ls") is False
 
     def test_dangerous_flags_rejected(self):
@@ -288,24 +516,97 @@ class TestScrubbedEnv:
         assert "PATH" in env
         assert "HOME" in env
 
+    def test_the_fallback_shell_is_given_pathext(self, monkeypatch):
+        """Without PATHEXT, `powershell -c "& 'prog' args"` STARTS an
+        external program and returns immediately instead of waiting: the
+        model was told every build and test suite on this route exited 0
+        with no output, 0.37s after launch, while the work was only
+        starting -- and the wall clock, the route's one bound on Windows,
+        was gone before it.
+
+        Asserted on the env the REAL `_run_subprocess_fallback` passes
+        rather than on the frozenset, so dropping the name is what goes
+        red and not merely renaming it. Platform-neutral on purpose: the
+        allowlist is shared by every route, so the guard holds on the
+        Linux runner too, where the value is simply absent from the
+        environment unless a test puts it there."""
+        monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT")
+        # `Popen`, not `run`, since batch 142 -- see `_FallbackProc`.
+        with patch("security.sandbox.subprocess.Popen") as mock_popen:
+            mock_popen.return_value = _FallbackProc()
+            _run_subprocess_fallback("whoami", "/tmp/ws", "bash")  # nosec B108 - fixture path string, as above
+        passed_env = mock_popen.call_args.kwargs["env"]
+        assert passed_env.get("PATHEXT") == ".COM;.EXE;.BAT"
+
 
 # ===========================================================================
 # ---- Backend internals ----------------------------------------------------
 # ===========================================================================
+
+class _FallbackProc:
+    """What `_run_subprocess_fallback` drives since batch 142.
+
+    `subprocess.run` cannot be the call any more: on a timeout it
+    kills the child and then waits for EOF on the pipes, and an
+    orphaned grandchild still holds the write end -- measured at
+    30.21s against a 5s bound, and unbounded in principle. So the
+    route owns a `Popen` and this stands in for it.
+
+    *timeouts* is how many `communicate` calls raise before one
+    answers: 1 is the ordinary timeout (the wall clock fires, the
+    drain succeeds), 2 is the Windows shape above (the drain cannot
+    finish either, and the call must still return)."""
+
+    pid = 4242
+
+    def __init__(self, *, timeouts=0, out="", err="", rc=0,
+                 survives_kill=False):
+        self._timeouts = timeouts
+        self._out, self._err = out, err
+        self.returncode = rc
+        self._survives_kill = survives_kill
+        self.waits = []
+        #: Every `timeout=` this was handed, in order. The drain's
+        #: bound is an ARGUMENT, and a test asserting only the
+        #: returned dict cannot see it go away -- which is the
+        #: Windows half of S02-03 (30.21s against a 5s bound).
+        self.timeouts_seen = []
+        self.terminated = False
+        self.killed = False
+
+    def communicate(self, timeout=None):
+        self.timeouts_seen.append(timeout)
+        if self._timeouts > 0:
+            self._timeouts -= 1
+            raise subprocess.TimeoutExpired("bash", timeout)
+        return self._out, self._err
+
+    def wait(self, timeout=None):
+        self.waits.append(timeout)
+        if self._survives_kill:
+            raise subprocess.TimeoutExpired("bash", timeout)
+        return self.returncode
+
+    def terminate(self):
+        self.terminated = True
+
+    def kill(self):
+        self.killed = True
+
 
 class TestBackendInternals:
 
     def test_run_inert_timeout(self):
         with patch("security.sandbox.subprocess.run") as mock_run:
             mock_run.side_effect = subprocess.TimeoutExpired(cmd="ls", timeout=60)
-            result = _run_inert("ls", "/tmp/ws")
+            result = _run_inert("ls", "/tmp/ws")  # nosec B108 - fixture path string, as above
         assert result["return_code"] == -1
         assert "timed out" in result["stderr"]
 
     def test_run_inert_file_not_found(self):
         with patch("security.sandbox.subprocess.run") as mock_run:
             mock_run.side_effect = FileNotFoundError("no such file")
-            result = _run_inert("nonexistent", "/tmp/ws")
+            result = _run_inert("nonexistent", "/tmp/ws")  # nosec B108 - fixture path string, as above
         assert result["return_code"] == -1
         assert "not found" in result["stderr"].lower()
 
@@ -315,7 +616,7 @@ class TestBackendInternals:
             mock_run.return_value = MagicMock(
                 stdout="A" * 100, stderr="B" * 100, returncode=0,
             )
-            result = _run_inert("ls", "/tmp/ws")
+            result = _run_inert("ls", "/tmp/ws")  # nosec B108 - fixture path string, as above
         assert len(result["stdout"]) == 10
         assert len(result["stderr"]) == 10
 
@@ -326,7 +627,7 @@ class TestBackendInternals:
             mock_proc.communicate.return_value = ("out", "err")
             mock_proc.returncode = 0
             mock_popen.return_value = mock_proc
-            _run_docker("ls", "/tmp/ws", network=False)
+            _run_docker("ls", "/tmp/ws", network=False)  # nosec B108 - fixture path string, as above
         args = mock_popen.call_args[0][0]
         assert "--network" in args
         assert args[args.index("--network") + 1] == "none"
@@ -338,7 +639,7 @@ class TestBackendInternals:
             mock_proc.communicate.return_value = ("out", "err")
             mock_proc.returncode = 0
             mock_popen.return_value = mock_proc
-            _run_docker("pip install x", "/tmp/ws", network=True)
+            _run_docker("pip install x", "/tmp/ws", network=True)  # nosec B108 - fixture path string, as above
         args = mock_popen.call_args[0][0]
         assert "--network" not in args
 
@@ -352,7 +653,7 @@ class TestBackendInternals:
             )
             mock_popen.return_value = mock_proc
             mock_run.return_value = MagicMock(returncode=0)
-            result = _run_docker("sleep 999", "/tmp/ws")
+            result = _run_docker("sleep 999", "/tmp/ws")  # nosec B108 - fixture path string, as above
         assert result["return_code"] == -1
         # docker kill should have been called
         kill_calls = [c for c in mock_run.call_args_list
@@ -360,18 +661,62 @@ class TestBackendInternals:
         assert len(kill_calls) == 1
 
     def test_run_subprocess_fallback_timeout(self):
-        with patch("security.sandbox.subprocess.run") as mock_run:
-            mock_run.side_effect = subprocess.TimeoutExpired(cmd="bash", timeout=60)
-            result = _run_subprocess_fallback("sleep 999", "/tmp/ws", "bash")
+        # `subprocess.run` as well as `Popen`, because a timeout now
+        # RECLAIMS -- and on Windows that is a real `taskkill /PID
+        # 4242` against whatever holds that pid on this machine.
+        with patch("security.sandbox.subprocess.Popen") as mock_popen, \
+             patch("security.sandbox.subprocess.run"):
+            mock_popen.return_value = _FallbackProc(timeouts=1)
+            result = _run_subprocess_fallback("sleep 999", "/tmp/ws", "bash")  # nosec B108 - fixture path string, as above
         assert result["return_code"] == -1
         assert "timed out" in result["stderr"]
 
     def test_run_subprocess_fallback_shell_not_found(self):
-        with patch("security.sandbox.subprocess.run") as mock_run:
-            mock_run.side_effect = FileNotFoundError("no bash")
-            result = _run_subprocess_fallback("ls", "/tmp/ws", "bash")
+        with patch("security.sandbox.subprocess.Popen") as mock_popen:
+            mock_popen.side_effect = FileNotFoundError("no bash")
+            result = _run_subprocess_fallback("ls", "/tmp/ws", "bash")  # nosec B108 - fixture path string, as above
         assert result["return_code"] == -1
         assert "not found" in result["stderr"].lower()
+
+    @pytest.mark.integration
+    @pytest.mark.skipif(platform.system() != "Windows",
+                        reason="bash always waits; the defect was powershell's")
+    def test_a_real_program_is_reported_with_its_own_exit_code(self, tmp_path):
+        """The behavioural half of the PATHEXT fix, and the assertion the
+        route never had: every other fallback test above patches
+        `subprocess.run`, so none of them can observe that the shell did
+        not wait for what it launched.
+
+        `integration` because it spawns a real external process, which
+        pytest.ini's default run excludes ("strictly offline: no process,
+        no socket"). Run it with `pytest -m integration`.
+
+        Pre-fix this returned 0.37s / rc=0 / empty stdout with zero lines
+        written; the marker file is what makes "did not wait"
+        distinguishable from "ran and said nothing"."""
+        marker = tmp_path / "progress.txt"
+        script = (
+            "import time,sys;"
+            "f=open(r'%s','w');"
+            "f.write('done');f.flush();f.close();"
+            "time.sleep(2);"
+            "print('PROGRAM_RAN');"
+            "sys.exit(7)" % str(marker)
+        )
+        command = "& '%s' -c \"%s\"" % (sys.executable, script.replace('"', '`"'))
+        # "powershell" by name, NOT detect_shell(): under the test config
+        # `config.SHELL_BINARY` is '/bin/bash', which on Windows is a
+        # WinError 2 before any of this is exercised. powershell is the
+        # shell whose waiting behaviour PATHEXT decides and it ships with
+        # the platform this test is gated to, so naming it keeps the guard
+        # measuring the thing it is named after.
+        result = _run_subprocess_fallback(command, str(tmp_path), "powershell")
+        detail = "rc=%r stdout=%r stderr=%r marker=%r" % (
+            result.get("return_code"), result.get("stdout"),
+            result.get("stderr"), marker.exists())
+        assert marker.exists(), "returned before the program ran: " + detail
+        assert "PROGRAM_RAN" in (result["stdout"] or ""), detail
+        assert result["return_code"] != 0, detail
 
 
 # ===========================================================================
@@ -465,7 +810,7 @@ class TestRunSandboxedRouting:
         monkeypatch.setattr(config, "INERT_COMMANDS", ["ls"])
         set_posture(monkeypatch, allow_insecure_fallback=False)
         with patch("security.sandbox.is_docker_available", return_value=False):
-            with pytest.raises(SandboxUnavailable, match="Docker is not available"):
+            with pytest.raises(SandboxUnavailable, match="No container runtime"):
                 run_sandboxed("python script.py", ws)
 
     def test_docker_available_param_overrides_probe(self, monkeypatch, ws):
@@ -504,22 +849,29 @@ class TestRunSandboxedRouting:
 class TestShellApprovalCheck:
 
     def test_base_approval_true(self, monkeypatch):
-        monkeypatch.setattr(config, "ToolApprovals", lambda: type("A", (), {"shell": True})())
+        set_posture(monkeypatch, shell_approval_mode="always")
         assert _shell_approval_check("shell", {"command": "ls"}) is True
 
     def test_inert_no_approval(self, monkeypatch):
-        monkeypatch.setattr(config, "ToolApprovals", lambda: type("A", (), {"shell": False})())
         monkeypatch.setattr(config, "INERT_COMMANDS", ["ls", "cat"])
         assert _shell_approval_check("shell", {"command": "ls -la"}) is False
 
-    def test_docker_no_approval(self, monkeypatch):
-        monkeypatch.setattr(config, "ToolApprovals", lambda: type("A", (), {"shell": False})())
+    def test_docker_code_asks_under_tiered(self, monkeypatch):
+        """§48 (CE1). This was `test_docker_no_approval`, pinning that a
+        contained command ran unasked in the shipped posture. It no longer
+        does: it may run code. The old answer is the `contained` mode's,
+        pinned directly below."""
         monkeypatch.setattr(config, "INERT_COMMANDS", ["ls"])
+        with patch("tools.builtin.shell.is_docker_available", return_value=True):
+            assert _shell_approval_check("shell", {"command": "python x.py"}) is True
+
+    def test_docker_no_approval_under_contained(self, monkeypatch):
+        monkeypatch.setattr(config, "INERT_COMMANDS", ["ls"])
+        set_posture(monkeypatch, shell_approval_mode="contained")
         with patch("tools.builtin.shell.is_docker_available", return_value=True):
             assert _shell_approval_check("shell", {"command": "python x.py"}) is False
 
     def test_fallback_no_auto_approve_requires_approval(self, monkeypatch):
-        monkeypatch.setattr(config, "ToolApprovals", lambda: type("A", (), {"shell": False})())
         monkeypatch.setattr(config, "INERT_COMMANDS", ["ls"])
         set_posture(monkeypatch, allow_insecure_fallback=True)
         set_posture(monkeypatch, auto_approve_fallback=False)
@@ -527,7 +879,6 @@ class TestShellApprovalCheck:
             assert _shell_approval_check("shell", {"command": "python x.py"}) is True
 
     def test_fallback_auto_approve_no_approval(self, monkeypatch):
-        monkeypatch.setattr(config, "ToolApprovals", lambda: type("A", (), {"shell": False})())
         monkeypatch.setattr(config, "INERT_COMMANDS", ["ls"])
         set_posture(monkeypatch, allow_insecure_fallback=True)
         set_posture(monkeypatch, auto_approve_fallback=True)
@@ -565,12 +916,11 @@ class TestRegistryIntegration:
 def _tiered(monkeypatch, tmp_path):
     """Shipped §28 posture, with a real empty workspace to measure against.
 
-    ToolApprovals.shell False is the SHIPPED value since §28 -- the mode is
-    the gate. Tests that want the ratchet set it back to True explicitly.
+    The mode is the gate and the ONLY gate: `tool_approvals` deliberately
+    has no `shell` key, so there is no stub to set back. Tests that want
+    shell gated set the posture to `always` explicitly.
     """
     set_posture(monkeypatch, shell_approval_mode="tiered")
-    monkeypatch.setattr(config, "ToolApprovals",
-                        lambda: type("A", (), {"shell": False})())
     monkeypatch.setattr(config, "WORKSPACE_DIR", str(tmp_path))
     return str(tmp_path)
 
@@ -658,8 +1008,19 @@ class TestTheGateWeighsNetwork:
         assert _asks("pip install evil-package") is True
         assert _asks("wget http://a/b") is True
 
-    def test_a_contained_command_without_network_is_not(self, _tiered):
+    def test_a_contained_command_without_network_is_not(self, _tiered,
+                                                        monkeypatch):
+        """Under `contained` (§48, CE2), which is where this answer lives
+        now. Under the shipped `tiered` the same command asks, because it
+        may run code -- the test directly below."""
+        set_posture(monkeypatch, shell_approval_mode="contained")
         assert _asks("python script.py") is False
+
+    def test_under_tiered_it_asks_for_running_code(self, _tiered):
+        """§48 (CE1). No network, and a container -- and still asked about,
+        for the capability G4 never read."""
+        assert classify_command("python script.py", _tiered).runs_code
+        assert _asks("python script.py") is True
 
     def test_the_two_are_the_same_command_shape(self, _tiered):
         """Both are non-inert and both run in a container. The ONLY thing
@@ -693,7 +1054,7 @@ class TestAnUnmeasurableCommandIsNeverAutoApproved:
         branch approves it for having no network."""
         blank = CommandProfile(tier=UNKNOWN, measured=False,
                                escapes_workspace=False, writes=False,
-                               network=False, reason="")
+                               runs_code=False, network=False, reason="")
         assert auto_approved(blank, CONTAINED) is False
         assert auto_approved(blank, UNCONTAINED) is False
 
@@ -719,16 +1080,18 @@ class TestTheModeIsTheGateAndTheFieldIsTheRatchet:
     def test_tiered_sits_between_them(self, _tiered):
         assert (_asks("ls -la"), _asks("cat /etc/shadow")) == (False, True)
 
-    def test_the_approvals_field_still_forces_always(self, _tiered,
-                                                     monkeypatch):
-        """D14's one-way ratchet. SHELL_APPROVAL_MODE is the gate, but
-        ToolApprovals.shell can only ever tighten it -- and `never` is the
-        mode where that has to hold or the field is decorative."""
+    def test_no_approvals_field_can_force_shell_approval(self, _tiered,
+                                                         monkeypatch):
+        """The ratchet is gone, not defaulted off. A stale stub built the
+        old way -- a `ToolApprovals` carrying `shell = True` -- must not
+        resurrect it: `requires_approval` falls through to the dynamic
+        default and the mode alone decides. `never` plus the stub still
+        asks about nothing."""
         set_posture(monkeypatch, shell_approval_mode="never")
         monkeypatch.setattr(config, "ToolApprovals",
                             lambda: type("A", (), {"shell": True})())
-        assert _asks("cat /etc/shadow") is True
-        assert _asks("ls -la") is True
+        assert _asks("cat /etc/shadow") is False
+        assert _asks("ls -la") is False
 
     def test_a_bogus_mode_raises_rather_than_defaulting(self, _tiered,
                                                         monkeypatch):
@@ -754,16 +1117,15 @@ class TestTheModeIsTheGateAndTheFieldIsTheRatchet:
         # used to carry a second copy that nothing enforced, so this line
         # could have passed against a tuple the gate never consulted.
         from security.capability import APPROVAL_MODES
-        assert APPROVAL_MODES == ("always", "tiered", "never")
+        assert APPROVAL_MODES == ("always", "tiered", "contained", "never")
         assert fresh.SHELL_APPROVAL_MODE in APPROVAL_MODES
 
-    def test_the_shipped_approvals_field_is_the_ratchet_not_the_gate(self):
-        """§28 flipped this to False and the two must move together: with
-        it True the tool's check can never lower the answer, because
-        approval_needed ORs it with requires_approval and BOTH read this
-        field. A future edit setting it back True silently disables
-        `tiered` without disabling the setting."""
-        assert config.ToolApprovals().shell is False
+    def test_shell_has_no_approvals_field_only_a_mode(self):
+        """`tool_approvals` deliberately has no `shell` key: shell approval
+        is governed solely by `shell_approval_mode`, so there is no second
+        switch that can disagree with it. `tool_permissions.shell` stays --
+        the D14 floor still needs somewhere to live."""
+        assert not hasattr(config.ToolApprovals(), "shell")
         assert config.ToolPermissions().shell is False
 
 
@@ -790,6 +1152,209 @@ class TestTheFallbackFlagsStillMeanWhatTheyMeant:
         assert _asks("python x.py", docker=False) is False
         assert containment_for(classify_command("python x.py", _tiered),
                                docker_available=False) == UNAVAILABLE
+
+
+# ===========================================================================
+# ---- Batch 92: code in the sandbox (§48) ----------------------------------
+# ===========================================================================
+
+# Every one of these answered False through the real gate with Docker up
+# before §48. Deliberately NOT all interpreters: the point of the list is
+# that the fix names none of them.
+_CODE_SHAPES = [
+    'python -c "print(1)"',
+    "python3 -c pass",
+    'bash -c "echo hi"',
+    "sh run.sh",
+    "./run.sh",
+    "python run.py",
+    "node run.js",
+    "perl -e 1",
+    '"python" run.py',
+    "python3.13 run.py",
+    "echo print(1) | python",
+    "find . -exec cat {} ;",
+    "pytest",
+    "make",
+    "rm -rf data",
+    "ls -la && cat notes.txt",
+]
+
+
+class TestCodeInTheSandboxAsksUnderTiered:
+    """§48 (CE1), amending G4. G4 approved any contained command without
+    network, which is every way of running code there is: an interpreter's
+    `-c`, a script the auto-approved `write` tool has just made, a test
+    runner's conftest.py, a Makefile."""
+
+    @pytest.mark.parametrize("command", _CODE_SHAPES)
+    def test_it_asks_with_docker_up(self, command, _tiered):
+        profile = classify_command(command, _tiered)
+        assert profile.runs_code is True
+        assert profile.network is False
+        assert containment_for(profile, docker_available=True) == CONTAINED
+        assert _asks(command, docker=True) is True
+
+    @pytest.mark.parametrize("command", ["ls", "ls -la", "cat notes.txt",
+                                         "grep pip notes.txt",
+                                         "wc -l notes.txt"])
+    def test_a_read_only_command_still_does_not(self, command, _tiered):
+        profile = classify_command(command, _tiered)
+        assert (profile.tier, profile.runs_code) == (INERT, False)
+        assert _asks(command, docker=True) is False
+
+    @pytest.mark.parametrize("command", [
+        "cat .ven*/settings.json; true",
+        "python -c \"print(open('.venastine/settings.json').read())\"",
+    ])
+    def test_code_reading_a_protected_segment_is_asked_about(self, command,
+                                                            _tiered):
+        """The leak §48 measured. The token check cannot see either
+        spelling -- a glob in one, a string inside a program in the other
+        -- and both ran unasked while SECURITY.md, protected_paths.py and
+        `_command_touches_protected` said such a spelling met a human.
+        The first assertion is what makes the second one about CE1 rather
+        than about the token check."""
+        from tools.builtin.shell import _command_touches_protected
+        assert _command_touches_protected(command) is None
+        assert _asks(command, docker=True) is True
+
+    def test_no_language_is_listed_so_none_can_be_missed(self, _tiered):
+        """The generality pin. Over generated commands -- an inert first
+        word, a random string, and a first word nobody would put on a list
+        -- the gate asks with Docker up EXACTLY when the command is not
+        INERT or names a protected segment. A list of interpreters would
+        make this fail on `zzlang`, which is the program the list forgot."""
+        from tools.builtin.shell import _command_touches_protected
+        corpus = TestTheTwoTokenisersCannotDisagree()
+        rng = random.Random(20260914)  # nosec B311 - a SEEDED rng for a reproducible sweep, never a secret
+        programs = ["zzlang", "frobnicate", "ruby", "php", "lua", "deno",
+                    "tclsh", "Rscript"]
+
+        # Metacharacter-free arguments. The generative corpus almost always
+        # draws a metacharacter, so it yields few INERT commands -- 24 in
+        # 2200 on the first run, which the floor below caught -- and, worse,
+        # few clean non-inert ones. `zzlang abc` with plain arguments is the
+        # case that separates "not INERT" from "on an interpreter list".
+        def clean():
+            return "".join(rng.choice("abc-./= ")
+                           for _ in range(rng.randint(1, 14)))
+
+        commands = (list(corpus._commands(400)) + list(corpus._samples(400))
+                    + ["%s %s" % (rng.choice(config.INERT_COMMANDS), clean())
+                       for _ in range(500)]
+                    + ["%s %s" % (rng.choice(programs), clean())
+                       for _ in range(500)])
+        seen = {"inert": 0, "other": 0}
+        for command in commands:
+            profile = classify_command(command, _tiered)
+            seen["inert" if profile.tier == INERT else "other"] += 1
+            expected = (profile.tier != INERT
+                        or _command_touches_protected(command) is not None)
+            assert _asks(command, docker=True) is expected, (
+                command, profile.tier)
+        assert seen["inert"] > 100 and seen["other"] > 100, seen
+
+
+class TestContainedModeIsTodaysRule:
+    """§48 (CE2). The rule `tiered` had before §48, under a name that says
+    what it trusts -- so a user who accepts code in the container is not
+    pushed to `never`, which would also stop asking about host reads."""
+
+    @pytest.fixture
+    def _contained(self, _tiered, monkeypatch):
+        set_posture(monkeypatch, shell_approval_mode="contained")
+        return _tiered
+
+    @pytest.mark.parametrize("command", _CODE_SHAPES)
+    def test_code_in_the_container_runs_unasked(self, command, _contained):
+        assert _asks(command, docker=True) is False
+
+    @pytest.mark.parametrize("command", [
+        "curl https://x", "pip install evil-package",
+        "echo hi && curl http://evil", "pip --version; python run.py"])
+    def test_a_network_command_still_asks(self, command, _contained):
+        assert _asks(command, docker=True) is True
+
+    def test_a_host_read_still_asks(self, _contained):
+        assert _asks("cat /etc/passwd", docker=True) is True
+
+    def test_a_literal_protected_segment_still_asks(self, _contained):
+        """The override sits BELOW the protected-segment check."""
+        assert _asks("python .venastine/x.py", docker=True) is True
+
+    def test_an_unmeasured_call_is_not_argued_through(self, _contained):
+        """G5 in the override, not only in the rule it bypasses."""
+        assert _asks(["python", "x.py"], docker=True) is True
+        assert _asks("   ", docker=True) is True
+
+    def test_the_host_fallback_is_not_the_container(self, _contained,
+                                                    monkeypatch):
+        """The override is for what a container CONFINES. With Docker down
+        and the fallback on but not auto-approved, code runs on the host,
+        and that asks in this mode as it does in every other."""
+        set_posture(monkeypatch, allow_insecure_fallback=True,
+                    auto_approve_fallback=False)
+        assert _asks("python x.py", docker=False) is True
+
+
+class TestTheFallbackOptInFollowsTheMode:
+    """§48 (CE5, CE6). The opt-in is honoured wherever the mode reaches it,
+    and `always` returns before it does."""
+
+    @pytest.mark.parametrize("mode,asks", [
+        ("always", True), ("tiered", False), ("contained", False),
+        ("never", False)])
+    def test_code_on_the_host_fallback(self, mode, asks, _tiered,
+                                       monkeypatch):
+        set_posture(monkeypatch, shell_approval_mode=mode,
+                    allow_insecure_fallback=True, auto_approve_fallback=True)
+        assert _asks("python x.py", docker=False) is asks
+
+    @pytest.mark.parametrize("mode", ["always", "tiered", "contained",
+                                      "never"])
+    def test_the_badge_says_no_ask_exactly_when_the_gate_does_not_ask(
+            self, mode, _tiered, monkeypatch):
+        """UN3 held against the GATE rather than against the flags. The
+        badge said "host shell, no ask" under `always`, measured, while the
+        gate asked about every command."""
+        from security import posture
+        set_posture(monkeypatch, shell_approval_mode=mode,
+                    allow_insecure_fallback=True, auto_approve_fallback=True)
+        labels = [label for label, _ in posture.current().unsafe_reasons()]
+        assert ("host shell, no ask" in labels) is (
+            not _asks("python x.py", docker=False))
+
+
+class TestRunsCodeIsItsOwnDimension:
+    """§48 (CE7). G1: a missing dimension is a missing field."""
+
+    def test_every_producer_states_it(self, _tiered):
+        assert classify_command("ls", _tiered).runs_code is False
+        assert classify_command("cat /etc/passwd", _tiered).runs_code is False
+        assert classify_command("python x.py", _tiered).runs_code is True
+        assert classify_command("curl https://x", _tiered).runs_code is True
+        assert classify_command("", _tiered).runs_code is True
+        assert classify_command(["ls"], _tiered).runs_code is True
+
+    def test_it_alone_decides_a_contained_answer(self):
+        """`writes` False throughout, so a rule that read `writes` instead
+        -- or dropped `runs_code` from either branch -- answers wrongly."""
+        import dataclasses
+        base = CommandProfile(tier=SANDBOXED, measured=True,
+                              escapes_workspace=False, writes=False,
+                              runs_code=False, network=False, reason="")
+        code = dataclasses.replace(base, runs_code=True)
+        assert auto_approved(base, CONTAINED) is True
+        assert auto_approved(code, CONTAINED) is False
+        assert auto_approved(base, UNCONTAINED) is True
+        assert auto_approved(code, UNCONTAINED) is False
+
+    def test_it_is_required(self):
+        """No default, so a second producer cannot leave it unsaid."""
+        with pytest.raises(TypeError):
+            CommandProfile(tier=INERT, measured=True, escapes_workspace=False,
+                           writes=False, network=False, reason="")
 
     def test_a_host_read_never_probes_docker(self, _tiered):
         """An ordering the pre-§28 ladder had: its inert step returned
@@ -1104,7 +1669,7 @@ class TestOurContainersAreIdentifiable:
             proc.communicate.return_value = ("", "")
             proc.returncode = 0
             popen.return_value = proc
-            _run_docker("ls", "/tmp/ws")
+            _run_docker("ls", "/tmp/ws")  # nosec B108 - fixture path string, as above
         args = popen.call_args[0][0]
         assert "--label" in args
         assert args[args.index("--label") + 1] == "venastine.sandbox=1"
@@ -1207,13 +1772,15 @@ class TestShellApprovalModeIsRejectedBySettingsJson:
         `cat ~/.aws/credentials` into an unprompted host read.
 
         D17's trust prompt is not a substitute: the same prompt covers a
-        README-shaped CONTEXT.md, and nobody reading it is deciding about
+        README-shaped project hub, and nobody reading it is deciding about
         their shell gate."""
         with pytest.raises(ValueError) as exc:
             self._validate({"shell_approval_mode": "never"})
         message = str(exc.value)
         assert "deliberately not supported" in message
-        assert "SHELL_APPROVAL_MODE" in message
+        # Where the gate DOES live -- name and file together, so the message
+        # cannot keep pointing at a file the value has left.
+        assert "shell_approval_mode in config.yaml" in message
         assert "unknown key" not in message
 
     def test_every_value_is_rejected_the_same_way(self):
@@ -1275,19 +1842,30 @@ class TestQuotingCannotHideAnEscape:
         assert _asks(command, docker=False) is True
 
     @pytest.mark.parametrize("command", QUOTED_ESCAPES)
-    def test_and_with_docker_up_it_is_simply_contained(self, command, _tiered):
-        """The cost of the fix, measured. In the DEFAULT posture a quoted
-        command is still auto-approved -- it just runs in the container,
-        where `/etc/passwd` is the container's own."""
+    def test_and_with_docker_up_it_is_simply_contained(self, command, _tiered,
+                                                       monkeypatch):
+        """The cost of the fix, measured -- under `contained`, which holds
+        the rule this was written against (§48, CE2). There a quoted
+        command is still auto-approved; it just runs in the container,
+        where `/etc/passwd` is the container's own. Under the shipped
+        `tiered` it asks, for being non-inert rather than for being quoted
+        (CE1)."""
+        set_posture(monkeypatch, shell_approval_mode="contained")
         profile = classify_command(command, _tiered)
         assert containment_for(profile, docker_available=True) == CONTAINED
         assert _asks(command, docker=True) is False
 
-    def test_a_legitimate_quoted_workspace_path_still_works(self, _tiered):
-        """The friction this fix actually costs someone: none, under
-        Docker. A workspace file whose name has a space in it is
-        SANDBOXED rather than INERT, and still runs without a prompt."""
+    def test_a_legitimate_quoted_workspace_path_still_works(self, _tiered,
+                                                            monkeypatch):
+        """The friction this fix costs someone: none, under Docker in
+        `contained`. A workspace file whose name has a space in it is
+        SANDBOXED rather than INERT, and runs without a prompt there. Under
+        `tiered` it asks (§48, CE1) -- the price of refusing to tell a
+        quoted filename from a quoted program, which is G2's price."""
+        set_posture(monkeypatch, shell_approval_mode="contained")
         assert _asks('cat "my notes.txt"', docker=True) is False
+        set_posture(monkeypatch, shell_approval_mode="tiered")
+        assert _asks('cat "my notes.txt"', docker=True) is True
 
     def test_the_classifier_and_the_executor_agree_on_every_token(
             self, _tiered):
@@ -1654,19 +2232,28 @@ class TestBackslashCannotHideAnEscape:
         assert _asks(command, docker=False) is True
 
     @pytest.mark.parametrize("command", BACKSLASH_ESCAPES)
-    def test_and_with_docker_up_it_is_simply_contained(self, command, _tiered):
-        """The cost of the fix, measured. In the DEFAULT posture an escaped
-        command is still auto-approved -- it just runs in the container,
-        where /etc/passwd is the container's own."""
+    def test_and_with_docker_up_it_is_simply_contained(self, command, _tiered,
+                                                       monkeypatch):
+        """The cost of the fix, measured -- under `contained`, which holds
+        the rule this was written against (§48, CE2). There an escaped
+        command is still auto-approved; it just runs in the container,
+        where /etc/passwd is the container's own. Under the shipped
+        `tiered` it asks, for being non-inert (CE1)."""
+        set_posture(monkeypatch, shell_approval_mode="contained")
         profile = classify_command(command, _tiered)
         assert containment_for(profile, docker_available=True) == CONTAINED
         assert _asks(command, docker=True) is False
 
-    def test_a_legitimate_escaped_workspace_path_still_works(self, _tiered):
-        """The friction this fix actually costs someone on POSIX: none,
-        under Docker. A workspace file whose name has a space in it is
-        SANDBOXED rather than INERT, and still runs without a prompt."""
+    def test_a_legitimate_escaped_workspace_path_still_works(self, _tiered,
+                                                             monkeypatch):
+        """The friction this fix costs someone on POSIX: none, under Docker
+        in `contained`. A workspace file whose name has a space in it is
+        SANDBOXED rather than INERT, and runs without a prompt there. Under
+        `tiered` it asks (§48, CE1)."""
+        set_posture(monkeypatch, shell_approval_mode="contained")
         assert _asks("cat notes" + BS + " file.txt", docker=True) is False
+        set_posture(monkeypatch, shell_approval_mode="tiered")
+        assert _asks("cat notes" + BS + " file.txt", docker=True) is True
 
     def test_the_windows_spelling_is_the_priced_regression(self, _tiered):
         """Stated as a test so the cost cannot be forgotten and then
@@ -1698,7 +2285,7 @@ class TestTheTwoTokenisersCannotDisagree:
     def _samples(self, count):
         """Deterministic, so a failure is reproducible from the seed alone
         rather than being a flake someone reruns until it passes."""
-        rng = random.Random(20260829)
+        rng = random.Random(20260829)  # nosec B311 - a seeded rng, as above
         for _ in range(count):
             length = rng.randint(1, 14)
             yield "".join(rng.choice(self.ALPHABET) for _ in range(length))
@@ -1714,7 +2301,7 @@ class TestTheTwoTokenisersCannotDisagree:
         same reason -- a corpus that stops reaching the tier it is about
         must fail rather than pass vacuously.
         """
-        rng = random.Random(20260829)
+        rng = random.Random(20260829)  # nosec B311 - a seeded rng, as above
         for _ in range(count):
             args = "".join(rng.choice(self.ALPHABET)
                            for _ in range(rng.randint(1, 14)))
@@ -1997,6 +2584,67 @@ class TestProtectedSegmentsAlwaysAsk:
         assert _asks("cat notes.txt") is False
         assert _asks("ls -la") is False
 
+    @pytest.mark.parametrize("spelling", [
+        ".VENASTINE", ".VeNaStInE", ".Venastine"])
+    def test_a_case_spelled_reference_is_caught_too(self, _tiered, spelling):
+        """Batch 146. The segment list is compared case-folded now, and
+        this classifier has TWO branches that read it: the raw token, and
+        the realpath of the token. Only the second was reached through
+        `protected_segment`, so folding there left the raw branch
+        case-sensitive -- and the raw branch is the one for a token that
+        does not resolve to anything, which is where a spelling the
+        filesystem would accept is hardest to see.
+
+        An approval here rather than a deny, which is what makes widening
+        it safe: this classifier only ever ADDS a prompt.
+
+        THE THIRD CASE IS THE ONE THAT DISCRIMINATES, and the mutation
+        pass is why it is here: the first two are answered by the resolved
+        branch as well, because with no such directory on disk `realpath`
+        returns the path unchanged and the segment is still in it. A
+        traversal that CANCELS the segment resolves to a path carrying
+        nothing to find, so only the raw-token branch can answer -- which
+        is the branch the fold had to reach.
+        """
+        assert _asks("cat %s/settings.json" % spelling) is True
+        assert _asks("grep --path=%s/mcp.json x" % spelling) is True
+        assert _asks("cat %s/../notes.txt" % spelling) is True
+
+    def test_only_the_raw_branch_can_answer_a_cancelled_traversal(self,
+                                                                  _tiered):
+        """The proof that the case above is the discriminating one, stated
+        as an assertion rather than left in a docstring.
+
+        If `realpath` ever stopped cancelling the traversal, the test above
+        would quietly become a third copy of the first two and the raw
+        branch would be uncovered again. So this reads the resolved branch's
+        own answer for that token and requires it to be None.
+        """
+        from security.protected_paths import protected_segment
+
+        for spelling in (".venastine", ".VENASTINE"):
+            token = "%s/../notes.txt" % spelling
+            resolved = os.path.realpath(
+                os.path.join(config.WORKSPACE_DIR, token))
+            assert protected_segment(resolved) is None, (
+                f"the resolved branch finds a segment in {resolved!r}, so "
+                f"the test above no longer isolates the raw-token branch")
+            assert _asks("cat " + token) is True
+
+    def test_the_folded_set_is_what_both_branches_read(self):
+        """The relation, not a third spelling of the list. `shell.py`
+        imports the folded set rather than computing its own, because one
+        derived value computed twice in two modules is how the two
+        comparisons came to differ in the first place.
+        """
+        from security import protected_paths
+        from tools.builtin import shell as shell_module
+
+        assert (shell_module.PROTECTED_SEGMENTS_FOLDED
+                is protected_paths.PROTECTED_SEGMENTS_FOLDED)
+        assert protected_paths.PROTECTED_SEGMENTS_FOLDED == {
+            s.casefold() for s in protected_paths.PROTECTED_SEGMENTS}
+
     def test_the_routing_is_unchanged_it_still_classifies_inert(self, _tiered):
         """EP6: approval and execution are one decision written twice --
         but this control is approval-side ONLY. When approved, the
@@ -2014,8 +2662,6 @@ class TestProtectedSegmentsAlwaysAsk:
         to keep commands out of."""
         set_posture(monkeypatch, shell_approval_mode="tiered",
                     allow_insecure_fallback=True, auto_approve_fallback=True)
-        monkeypatch.setattr(config, "ToolApprovals",
-                            lambda: type("A", (), {"shell": False})())
         monkeypatch.setattr(config, "WORKSPACE_DIR", str(tmp_path))
         assert _asks("touch .venastine/notes.txt", docker=False) is True
         # The control: the same opt-in still covers an ordinary write.
@@ -2026,8 +2672,6 @@ class TestProtectedSegmentsAlwaysAsk:
         is an opt-out of ALL approval and already auto-approves a host
         read of /etc/shadow. G3: the mode is the gate."""
         set_posture(monkeypatch, shell_approval_mode="never")
-        monkeypatch.setattr(config, "ToolApprovals",
-                            lambda: type("A", (), {"shell": False})())
         monkeypatch.setattr(config, "WORKSPACE_DIR", str(tmp_path))
         assert _asks("cat .venastine/settings.json") is False
 
@@ -2037,3 +2681,452 @@ class TestProtectedSegmentsAlwaysAsk:
         assert ".venastine" in notice
         plain = _shell_approval_notice({"command": "cat notes.txt"})
         assert ".venastine" not in plain
+
+
+class TestTheContainerArgvUsesTheOneTokeniser:
+    """`_docker_argv` calls `_inert_argv`, and does not re-do it (batch 108).
+
+    `_inert_argv`'s docstring is explicit that it is ONE copy because the
+    tokenisation is load-bearing -- "two copies of the rule would be two
+    tokenisers free to drift, and the gap between two of them is where
+    #157 arrived, twice". The container branch was the second copy, a bare
+    `shlex.split(command)`, and it had already drifted in two ways:
+    `posix=True` unconditionally where `_inert_argv` reads
+    `posix=(platform.system() != "Windows")`, and no fallback for the
+    ValueError an unbalanced quote raises.
+
+    WHAT WOULD MAKE THE FIRST TEST BELOW VACUOUS, and it is why the second
+    one exists. The drift is NOT observable: measured over 398,184
+    generated strings that `_SHELL_METACHARACTERS` admits, `.split()`,
+    `shlex.split(posix=True)` and `shlex.split(posix=False)` agree every
+    time -- because the only characters the two modes disagree about are
+    the three the regex rejects. So a behavioural test cannot kill a
+    mutation that puts `shlex.split` back, and pretending otherwise would
+    be the "needle matches its own haystack" survivor shape. The second
+    test pins the CALL instead, which is the thing that was wrong.
+    """
+
+    def _trailing(self, command):
+        """What the container would actually exec, with the `docker run`
+        preamble dropped."""
+        argv = sandbox._docker_argv(
+            command, "/ws", network=False, argv=True, runtime=sandbox.DOCKER,
+            name="n")
+        return argv[argv.index(config.SANDBOX_DOCKER_IMAGE) + 1:]
+
+    def test_the_container_and_the_host_agree_on_every_inert_command(self):
+        corpus = TestTheTwoTokenisersCannotDisagree()
+        seen_inert = 0
+        for command in corpus._commands(4000):
+            if not _is_inert(command):
+                continue
+            seen_inert += 1
+            assert self._trailing(command) == sandbox._inert_argv(command)
+        assert seen_inert > 20, (
+            "the corpus stopped producing INERT commands, so this "
+            "measured nothing")
+
+    def test_the_container_branch_calls_inert_argv(self, monkeypatch):
+        """The identity pin, because the behaviour is identical either way.
+
+        A sentinel rather than a source scan: if the branch is rewritten
+        to tokenise for itself, this argv never appears and the test
+        fails, which a `shlex.split` mutation cannot dodge.
+        """
+        monkeypatch.setattr(sandbox, "_inert_argv",
+                            lambda command: ["SENTINEL", command])
+
+        assert self._trailing("cat notes.txt") == ["SENTINEL",
+                                                   "cat notes.txt"]
+
+# ===========================================================================
+# ---- TECHNICAL_DEBT 34 (batch 117): the flag table, made true -------------
+# ===========================================================================
+
+class TestTheInertTierDoesNotClaimWritesItCannotSee:
+    """`classify_command` reports `writes=False` for an inert command on the
+    strength of `_DANGEROUS_FLAGS`, and that table was not doing the job its
+    own comment described.
+
+    Measured before the change: `uniq in.txt out.txt`, `tree -o out.txt` and
+    `date -s 2024-01-01` were all inert with `_escapes_workspace` False, and
+    `diff` -- the one table key that WAS inert -- had an empty set, so the
+    check was skipped for it and the table guarded nothing at all.
+    """
+
+    def test_a_writing_flag_on_an_inert_command_is_not_inert(self):
+        """`tree -o FILE` and `date -s TIME` write. Both were inert."""
+        assert _is_inert("tree -o out.txt") is False
+        assert _is_inert("date -s 2024-01-01") is False
+
+    def test_the_reading_forms_of_the_same_commands_still_are(self):
+        """The guard is the FLAG, not the command -- otherwise this is a
+        tier change dressed up as a bug fix."""
+        assert _is_inert("tree notes") is True
+        assert _is_inert("date") is True
+        assert _is_inert("diff a.txt b.txt") is True
+
+    def test_the_equals_spelling_of_a_dangerous_flag_is_caught(self):
+        """`--output=x` is ONE token, equal to neither `-o` nor `--output`,
+        so an exact-match check passed it. `sort` is not on the inert list,
+        so it is added here the way `test_dangerous_flags_rejected` adds
+        `find` -- the denylist logic is what is under test, not the list.
+        """
+        original = list(config.INERT_COMMANDS)
+        config.INERT_COMMANDS.append("sort")
+        try:
+            assert _is_inert("sort notes.txt") is True
+            assert _is_inert("sort -o out.txt notes.txt") is False
+            assert _is_inert("sort --output out.txt notes.txt") is False
+            # The two spellings that used to pass:
+            assert _is_inert("sort --output=out.txt notes.txt") is False
+            assert _is_inert("sort -o=out.txt notes.txt") is False
+        finally:
+            config.INERT_COMMANDS[:] = original
+
+    def test_uniq_is_off_the_list_because_its_write_is_positional(self):
+        """THE STRUCTURAL ONE. GNU `uniq IN OUT` writes to its second
+        positional argument, so no entry in a table of FLAGS can catch it.
+        Removed from `config.INERT_COMMANDS` instead of guarded, because
+        teaching the classifier which positions are outputs is what
+        `_escapes_workspace`'s G2 argument forbids.
+        """
+        assert "uniq" not in config.INERT_COMMANDS
+        assert _is_inert("uniq in.txt out.txt") is False
+
+    def test_a_write_outside_the_workspace_was_always_refused(self):
+        """Why the above was claim-accuracy and not an escape: the path
+        check reads every token after the first as a path, so the dangerous
+        version of the positional write never got out regardless of what
+        the tier called it."""
+        assert _escapes_workspace("uniq in.txt /etc/passwd", "/workspace") is True
+        assert _escapes_workspace("uniq in.txt out.txt", "/workspace") is False
+
+
+# ===========================================================================
+# ---- S02-03 (batch 142): a reported timeout has to have stopped the work --
+# ===========================================================================
+
+class TestTheTimedOutFallbackStopsTheWork:
+    """H7, quoted in this module's own `SessionProcess` docstring: "an IO
+    bound that reports a timeout must have stopped the work, and a kill
+    that can hang stops nothing". The one-shot host fallback reported a
+    timeout and stopped the shell only.
+
+    Measured before the fix. POSIX: the call returned on time, 3.00s
+    against a 3s bound, and `pgrep -a sleep` listed FOUR survivors --
+    with the control in the same run showing `start_new_session=True`
+    alone changes nothing, because nothing signalled the group. Windows:
+    30.21s against a 5s bound, 76 lines of work completed, because
+    `subprocess.run` drains pipes the orphan still holds.
+
+    The comparison that made it a defect rather than a platform limit is
+    the other three one-shot routes: `_run_docker` kills the container,
+    `_run_wsl_process` relies on a measured fact, and `_run_ssh_process`
+    SAYS in the result the model reads that the remote command may still
+    be running. This route neither reclaimed the work nor disclosed that
+    it had not -- and it is the one with no isolation, so what it left
+    behind was running with the user's own authority."""
+
+    @staticmethod
+    def _run(monkeypatch, proc, system, taskkill=None):
+        """Drive the route with the platform answered.
+
+        `subprocess.run` is ALWAYS replaced, and that is not
+        tidiness: the double's pid is 4242, so a Windows
+        reclamation here would send a real `taskkill /T /F /PID
+        4242` at whatever process on the machine running the
+        suite happens to hold that pid."""
+        monkeypatch.setattr(sandbox.platform, "system",
+                            lambda: system)
+        # The rlimits too, because answering the platform reaches
+        # `_unix_resource_limits`, which then does `import resource` --
+        # absent on Windows, where this file mostly runs. They are
+        # S02-06's subject, not this class's, and the real POSIX
+        # behaviour is what the suite under WSL exercises.
+        monkeypatch.setattr(sandbox, "_unix_resource_limits",
+                            lambda *a, **kw: None)
+        monkeypatch.setattr(sandbox.subprocess, "Popen",
+                            lambda *a, **kw: proc)
+        calls = [] if taskkill is None else taskkill
+        monkeypatch.setattr(sandbox.subprocess, "run",
+                            lambda args, **kw: calls.append(
+                                list(args)))
+        return _run_subprocess_fallback(
+            "sleep 999", "/tmp/ws", "bash")  # nosec B108 - fixture path string, as above
+
+    def test_the_group_is_signalled_and_not_only_the_shell(
+            self, monkeypatch):
+        """The defect itself: TERM to the GROUP, which is what reaches a
+        shell's children (SS15)."""
+        sent = []
+        monkeypatch.setattr(sandbox.os, "getpgid", lambda pid: pid,
+                            raising=False)
+        monkeypatch.setattr(sandbox.os, "killpg",
+                            lambda pgid, sig: sent.append((pgid, sig)),
+                            raising=False)
+        proc = _FallbackProc(timeouts=1)
+        result = self._run(monkeypatch, proc, "Linux")
+        assert sent == [(4242, signal.SIGTERM)]
+        assert result["return_code"] == -1
+
+    def test_a_survivor_is_forced_and_then_disclosed(self, monkeypatch):
+        """TERM, grace, KILL -- and when it outlives even that, the
+        stderr says so rather than asserting a stop that did not
+        happen. `_run_ssh_process`'s honesty is the precedent, and this
+        route needs it more: it has no isolation."""
+        sent = []
+        monkeypatch.setattr(sandbox.os, "getpgid", lambda pid: pid,
+                            raising=False)
+        monkeypatch.setattr(sandbox.os, "killpg",
+                            lambda pgid, sig: sent.append((pgid, sig)),
+                            raising=False)
+        proc = _FallbackProc(timeouts=1, survives_kill=True)
+        result = self._run(monkeypatch, proc, "Linux")
+        assert sent == [(4242, signal.SIGTERM), (4242, sandbox._SIGKILL)]
+        assert "may still be running" in result["stderr"]
+
+    def test_a_reclaimed_timeout_says_the_work_was_stopped(
+            self, monkeypatch):
+        """The control for the sentence above: when the reclamation DID
+        work, the message must not hedge."""
+        monkeypatch.setattr(sandbox.os, "getpgid", lambda pid: pid,
+                            raising=False)
+        monkeypatch.setattr(sandbox.os, "killpg", lambda pgid, sig: None,
+                            raising=False)
+        result = self._run(monkeypatch, _FallbackProc(timeouts=1), "Linux")
+        assert "process group were killed" in result["stderr"]
+        assert "may still be running" not in result["stderr"]
+
+    def test_on_windows_the_tree_is_killed_by_pid(self, monkeypatch):
+        """There are no process groups to signal here, so `taskkill /T`
+        is the tree walk -- the same call the session path makes."""
+        calls = []
+        self._run(monkeypatch, _FallbackProc(timeouts=1), "Windows",
+                  taskkill=calls)
+        assert calls == [["taskkill", "/T", "/F", "/PID", "4242"]]
+
+    def test_the_drain_is_bounded_so_an_orphan_cannot_hold_the_call(
+            self, monkeypatch):
+        """THE WINDOWS HALF. The second `communicate` is the hand-over of
+        whatever was already written, and it waits for EOF -- which an
+        orphan holding the write end never sends. Two timeouts here, so
+        the drain fails too, and the call must still come back with the
+        bound it promised."""
+        proc = _FallbackProc(timeouts=2)
+        result = self._run(monkeypatch, proc, "Windows")
+        assert result["return_code"] == -1
+        assert "timed out" in result["stderr"]
+        # THE BOUND ITSELF. Two calls: the wall clock, then the
+        # drain -- and the drain's has to be a number. `None`
+        # there is the defect, because EOF never comes while an
+        # orphan holds the write end.
+        assert len(proc.timeouts_seen) == 2, proc.timeouts_seen
+        assert proc.timeouts_seen[0] == config.SANDBOX_TIMEOUT_SECONDS
+        assert proc.timeouts_seen[1] == sandbox._DRAIN_AFTER_KILL_S
+
+    def test_the_child_leads_its_own_group_on_posix_only(self):
+        """`start_new_session` is necessary for the killpg above and is
+        NOT `_isolation_kwargs()`: a session is stopped from elsewhere
+        through `kill()`, while a one-shot is waited on in the function
+        itself, so taking it out of the console's group on WINDOWS would
+        only stop Ctrl+C reaching it while `taskkill /T` already
+        reclaims the tree."""
+        for system, expected in (("Linux", True), ("Windows", False)):
+            with patch("security.sandbox.platform.system",
+                       return_value=system), \
+                 patch("security.sandbox._unix_resource_limits",
+                       return_value=None), \
+                 patch("security.sandbox.subprocess.Popen") as popen:
+                popen.return_value = _FallbackProc()
+                _run_subprocess_fallback("ls", "/tmp/ws", "bash")  # nosec B108 - fixture path string, as above
+            kwargs = popen.call_args.kwargs
+            assert kwargs.get("start_new_session", False) is expected
+            assert "creationflags" not in kwargs
+
+    def test_an_interrupt_reclaims_before_it_unwinds(self, monkeypatch):
+        """The cost of the group change, paid rather than ignored: the
+        child no longer shares the console's group, so a Ctrl+C the
+        terminal delivered did not reach it. Without this the fix would
+        trade a timeout orphan for an interrupt orphan."""
+        sent = []
+        monkeypatch.setattr(sandbox.os, "getpgid", lambda pid: pid,
+                            raising=False)
+        monkeypatch.setattr(sandbox.os, "killpg",
+                            lambda pgid, sig: sent.append(sig),
+                            raising=False)
+
+        class _Interrupted(_FallbackProc):
+            def communicate(self, timeout=None):
+                raise KeyboardInterrupt
+
+        with pytest.raises(KeyboardInterrupt):
+            self._run(monkeypatch, _Interrupted(), "Linux")
+        assert sent == [signal.SIGTERM]
+
+    def test_the_child_is_given_no_console(self, monkeypatch):
+        """`subprocess.run(capture_output=True)` left stdin INHERITED.
+        SS70 measured the identical omission on the WSL one-shot -- a
+        command there read a string written to the harness's own stdin,
+        a second reader of the console beside the CLI's one (N1). Every
+        other route already passed DEVNULL."""
+        with patch("security.sandbox.subprocess.Popen") as popen:
+            popen.return_value = _FallbackProc()
+            _run_subprocess_fallback("ls", "/tmp/ws", "bash")  # nosec B108 - fixture path string, as above
+        assert popen.call_args.kwargs["stdin"] == subprocess.DEVNULL
+
+    def test_a_normal_run_still_reports_its_own_output_and_code(self):
+        """The equivalence half: none of the above may change what a
+        command that finishes reports."""
+        with patch("security.sandbox.subprocess.Popen") as popen:
+            popen.return_value = _FallbackProc(out="hi\n", err="warn",
+                                               rc=3)
+            result = _run_subprocess_fallback("echo hi", "/tmp/ws", "bash")  # nosec B108 - fixture path string, as above
+        assert result == {"stdout": "hi\n", "stderr": "warn",
+                          "return_code": 3}
+
+
+class TestTheDangerousFlagSpellingFamily:
+    """S01-01 (batch 142): the residual of the defect above.
+
+    Batch 117 made the table true for the spellings it ENUMERATED. The
+    parsers accept a small language: GNU `date` and `tree` both use
+    `getopt_long`, where a short option with a required argument takes
+    it attached (`-sSTRING` is POSIX getopt behaviour) and an
+    unambiguous long-option prefix resolves. So three spellings were
+    guarded and the rest of the family auto-approved -- a profile of
+    `tier=INERT, writes=False, measured=True`, and under `tiered` that
+    is covered by `auto_approved`.
+
+    Traced token by token in the report; reproduced here as the table,
+    because the thing that was wrong was a list of points standing in
+    for a shape."""
+
+    @pytest.mark.parametrize("command", [
+        "date -s 2024-01-01",      # exact, guarded since 117
+        "date --set=2024-01-01",   # `=` head, guarded since 117
+        "date -s2024-01-01",       # attached short argument
+        "date --s 2024-01-01",     # long option abbreviated
+        "date --se=2024-01-01",    # both at once
+        "tree -o out.txt",         # exact, guarded since 117
+        "tree -oout.txt",          # attached short argument
+        "tree -ao out.txt",        # a bundle of short options
+    ])
+    def test_every_spelling_the_parser_accepts_is_not_inert(
+            self, command):
+        assert _is_inert(command) is False
+
+    @pytest.mark.parametrize("command", [
+        "date", "date -u", "tree", "tree notes", "tree -L 2",
+    ])
+    def test_the_reading_forms_are_still_inert(self, command):
+        """THE CONTROL, and the reason the rule is not "any flag on a
+        tabled tool": these are the ordinary uses, and a guard that
+        prompts for them is a tier change dressed up as a fix."""
+        assert _is_inert(command) is True
+
+    def test_a_bare_end_of_options_marker_is_not_a_flag(self):
+        """`--` is a prefix of every long option, so a prefix rule that
+        forgot it would refuse every command carrying one."""
+        assert _is_inert("date --") is True
+
+    def test_the_long_prefix_rule_errs_toward_asking(self):
+        """`--s` resolves to `--set` for `date` and this does not try to
+        decide whether a prefix is unambiguous -- that needs the tool's
+        whole option list, which is the parsing G2 keeps out of the
+        classifier. A false positive costs a PROMPT; a false negative
+        costs the prompt the tier requires."""
+        dangerous = frozenset({"-s", "--set"})
+        assert sandbox._names_dangerous_flag("--se", dangerous) is True
+        assert sandbox._names_dangerous_flag("--set", dangerous) is True
+        # NOT the other direction: `--setting` is not an
+        # abbreviation of `--set`, and getopt rejects it rather than
+        # resolving it. Erring toward asking is not erring in every
+        # direction -- a rule that matched this would refuse any
+        # long flag beginning with a dangerous one's letters.
+        assert sandbox._names_dangerous_flag("--setting", dangerous) is False
+        assert sandbox._names_dangerous_flag("--x", dangerous) is False
+
+    def test_a_value_carrying_a_dangerous_letter_is_read_as_a_value(self):
+        """Rule 3's limit, written down: a token with a non-letter in it
+        is a flag plus its argument, so only the FIRST letter is read as
+        a flag. `tree -P*.txt` is not a write.
+
+        Its sibling `tree -Pfoo` IS refused, because a purely alphabetic
+        token is a bundle as far as this can tell. That asymmetry is the
+        accepted cost and it costs a prompt."""
+        dangerous = frozenset({"-o"})
+        assert sandbox._names_dangerous_flag("-P*.txt", dangerous) is False
+        assert sandbox._names_dangerous_flag("-Pfoo", dangerous) is True
+
+    def test_the_table_is_still_consulted_by_command(self):
+        """The flags are per-tool. `tree`'s `-o` must not make `cat -o`
+        non-inert, or the table has become a global denylist."""
+        assert _is_inert("cat -oout.txt") is True
+
+    def test_an_attached_path_does_not_hide_from_the_escape_check(self):
+        """THE HALF THE REPORT GOT WRONG, and this test is how it was
+        found. S01-01 argues severity S3 rather than S2 on the grounds
+        that "`_escapes_workspace` reads every token as a path
+        regardless of this table, so an out-of-workspace write still
+        lands at HOST_READ and always asks". Measured in batch 142:
+
+            tree -o /etc/passwd        escapes=True
+            tree -o/etc/passwd         escapes=False
+            tree --output=/etc/passwd  escapes=True
+
+        True for the spelling the report traced and false for the
+        attached one, because a token that does not start with `/`
+        reads as RELATIVE and lands under the root. So for that
+        spelling neither half saw it.
+
+        It is not only about writes: `grep -f FILE` and `file -f FILE`
+        are inert commands whose short option takes a file, so this
+        was an auto-approved READ of a host file -- and `file -f`
+        echoes every unopenable line, which is the content."""
+        for command in ("tree -o/etc/passwd", "grep -f/etc/passwd x",
+                        "file -f/etc/shadow", "cat -A/etc/passwd"):
+            assert _escapes_workspace(command, "/workspace") is True, \
+                command
+
+    def test_a_flag_that_carries_no_path_still_passes(self):
+        """The control, and the reason the clause is sound: the tail of
+        `-la` is `a` and the tail of `-n5` is `5`. Both are relative
+        and land inside the workspace -- which is how this function has
+        always passed flags, without recognising one. A rule that
+        refused them would prompt for `ls -la`."""
+        for command in ("ls -la", "head -n5 notes.txt", "date --",
+                        "grep -i pattern notes.txt"):
+            assert _escapes_workspace(command, "/workspace") is False, \
+                command
+
+
+class TestTheNetworkListIsNotSpelledTwice:
+    """`NETWORK_ALLOWED_COMMANDS` is fourteen lowercase bare names, and
+    Windows spells several of them with `.exe`.
+
+    `curl.exe` matched nothing, which failed CLOSED -- it ran with
+    `--network none` -- but not harmlessly: `not profile.network` is a
+    condition for skipping approval in this module, so the same program was
+    both denied the egress it needed and eligible for a shortcut the bare
+    spelling is not.
+    """
+
+    def test_an_exe_suffix_still_names_the_same_program(self):
+        assert _needs_network("curl.exe https://example.com", False) is True
+        assert _needs_network("wget.exe https://example.com", False) is True
+
+    def test_case_does_not_decide_it_either(self):
+        assert _needs_network("CURL https://example.com", False) is True
+        assert _needs_network("Curl.EXE https://example.com", False) is True
+
+    def test_a_path_qualified_spelling_still_matches(self):
+        """The behaviour that already worked, kept under test because the
+        normalisation now happens in one helper rather than inline."""
+        assert _needs_network("/usr/bin/pip install x", False) is True
+
+    def test_the_carve_out_is_unchanged(self):
+        """An inert command's arguments still never grant network, which is
+        the one thing the normalisation must not widen."""
+        assert _needs_network("grep curl notes.txt", True) is False
+        assert _needs_network("cat curl.exe", True) is False

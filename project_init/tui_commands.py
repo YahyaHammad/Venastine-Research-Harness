@@ -14,7 +14,8 @@ run the work off the UI thread, render a diff into the transcript, and put
 a modal in front of a human.
 """
 
-from tui.commands import SlashCommand, registry as commands
+from tui.commands import SlashCommand
+from tui.commands import registry as commands
 
 
 def _split_init_flags(args: str) -> tuple:
@@ -113,6 +114,10 @@ def _cmd_init(app, args: str) -> None:
 
         try:
             notice = generate(
+                # §47. `getattr`, matching /summary and /compact: a stub
+                # app in the suite has no sink, and every span call site
+                # takes None without a branch.
+                activity=getattr(app, "_activity", None),
                 model=app.model,
                 provider_name=app.provider_name,
                 kind=kind,

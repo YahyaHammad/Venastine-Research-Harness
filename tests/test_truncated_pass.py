@@ -33,11 +33,15 @@ pass is detected AT THE PASS.
 
 import pytest
 
-import config
 from core.loop import RunAgentLoop
 from core.reasoning import orchestrator
-from tests.conftest import (drain, make_model_response, pass_stream,
-                            run_pass, well_shaped)
+from tests.conftest import (
+    drain,
+    make_model_response,
+    pass_stream,
+    run_pass,
+    well_shaped,
+)
 
 
 def _pass_returning(mocker, response):

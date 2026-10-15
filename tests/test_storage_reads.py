@@ -22,7 +22,6 @@ import pytest
 
 import storage
 
-
 # ---------------------------------------------------------------------------
 # ---- A canned thread -------------------------------------------------------
 # ---------------------------------------------------------------------------
@@ -260,3 +259,55 @@ def test_every_role_reconstructs_to_its_neutral_shape(thread):
     }
     assert history[4] == {
         "role": "tool", "tool_call_id": "tc1", "content": "search results"}
+
+# ---------------------------------------------------------------------------
+# ---- Batch 120: a MID-TURN watermark re-adds the turn's request ------------
+# ---------------------------------------------------------------------------
+
+def test_a_mid_turn_watermark_brings_back_the_turns_request(thread):
+    """Batch 120, register item 40. A sub-turn fold puts the watermark
+    inside a turn, so the turn's own request falls on the covered side --
+    and the model would read a paraphrase of the question it is answering
+    rather than the question. M5's objection to folding the current turn at
+    all; re-adding the request verbatim is what answers it.
+
+    Row 3 is mid-turn-2 (rows 2..5), so the first KEPT row is row 4, a
+    `tool` row -- not a `user` row. That is the test, and it needs no
+    column on the checkpoint.
+    """
+    kept = storage.pinned_through(THREAD_ID, thread[3]["id"])
+
+    assert [k["role"] for k in kept] == ["user"]
+    assert kept[0]["content"] == "second question"
+
+
+def test_a_turn_aligned_watermark_re_adds_nothing(thread):
+    """The pre-batch-120 contract, unchanged and asserted as such. Row 5
+    ends turn 2, so the tail opens with row 6's `user` row and the request
+    is already in it -- re-adding it would put the same message in the
+    prompt twice, growing the context compaction just ran to shrink."""
+    assert storage.pinned_through(THREAD_ID, thread[5]["id"]) == []
+
+
+def test_the_re_added_request_keeps_its_archive_position(thread):
+    """One index into the existing `keep` list, so the existing sort places
+    it. A pinned row from an OLDER turn belongs before the request and a
+    pinned row from inside this turn belongs after it, which is why this is
+    not two lists concatenated -- either order would be wrong half the
+    time."""
+    thread[1]["pinned"] = True          # an older turn's assistant row
+
+    kept = storage.pinned_through(THREAD_ID, thread[3]["id"])
+
+    assert [k["role"] for k in kept] == ["assistant", "user"], (
+        "the re-added request is out of archive order")
+
+
+def test_a_pinned_request_is_not_re_added_twice(thread):
+    """`set()` covers it. A duplicated user row is not a wire error, but it
+    is the context this feature exists to shrink."""
+    thread[2]["pinned"] = True          # the turn's own request, pinned
+
+    kept = storage.pinned_through(THREAD_ID, thread[3]["id"])
+
+    assert [k["role"] for k in kept] == ["user"]

@@ -38,8 +38,17 @@ import pytest
 
 from core import interaction
 from core.interaction import (
-    APPROVAL, CHOICE, CONFIRM, QUESTION, REVIEW, SAFE_DEFAULTS,
-    SUBAGENT_SIGNOFF, Request, ResponseChannel, ask, decode,
+    APPROVAL,
+    CHOICE,
+    CONFIRM,
+    QUESTION,
+    REVIEW,
+    SAFE_DEFAULTS,
+    SUBAGENT_SIGNOFF,
+    Request,
+    ResponseChannel,
+    ask,
+    decode,
 )
 
 
@@ -394,7 +403,19 @@ class TestQuestion:
 def test_the_module_is_a_leaf():
     """Matches core/approval.py: core/loop.py, main.py, tui/app.py and
     core/reasoning/ all depend on this and it depends on none of them. A
-    project import here would invert that and eventually cycle."""
+    project import here would invert that and eventually cycle.
+
+    `threading` was added by §47 slice 8 (NA12), which serialises questions
+    with a module-level lock so no shell is ever handed two at once. It is
+    listed here rather than the allowlist being loosened to "any stdlib":
+    what this test is about is PROJECT imports, and every stdlib name it
+    permits was permitted one at a time, on purpose, so that adding one is
+    a decision somebody made rather than a category that grew.
+
+    `collections` arrived the same way, via Ruff's UP035 (`typing.Callable`
+    is a deprecated alias for `collections.abc.Callable`): stdlib to
+    stdlib, no behaviour change, recorded here rather than absorbed.
+    """
     import ast
     import pathlib
 
@@ -406,4 +427,47 @@ def test_the_module_is_a_leaf():
             imported.update(alias.name.split(".")[0] for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:
             imported.add(node.module.split(".")[0])
-    assert imported <= {"dataclasses", "typing", "logging"}, imported
+    assert imported <= {
+        "collections", "dataclasses", "typing", "logging",
+        "threading"}, imported
+
+
+class TestTheSecretKind:
+    """ROADMAP_v3 §49 slice 5a (SS59).
+
+    Every assertion here is about the EMPTY answer, because that is the one
+    a dismissed modal, a torn-down screen, a non-tty terminal and a shell
+    with no branch for this kind all produce -- and an empty password is
+    not "no password", it is an authentication ATTEMPT made on nobody's
+    behalf. On a remote account that is a step toward a lockout.
+
+    The mutation pass found this missing: `decode` could return "" for a
+    dismissal and nothing noticed, because the parametrized invariants only
+    cover the `None` answer.
+    """
+
+    def test_an_empty_string_is_NOT_an_answer(self):
+        request = interaction.Request(kind=interaction.SECRET)
+        assert interaction.decode(request, "") is None
+
+    def test_a_real_string_is(self):
+        request = interaction.Request(kind=interaction.SECRET)
+        assert interaction.decode(request, "hunter2") == "hunter2"
+
+    def test_whitespace_IS_an_answer_and_is_not_trimmed(self):
+        """A passphrase may legitimately be spaces, and trimming one would
+        silently change what the user typed into something that does not
+        open their store."""
+        request = interaction.Request(kind=interaction.SECRET)
+        assert interaction.decode(request, "  pass  ") == "  pass  "
+
+    @pytest.mark.parametrize("raw", [None, True, False, 0, 1, [], {},
+                                     b"bytes", object()])
+    def test_nothing_that_is_not_a_string_becomes_a_password(self, raw):
+        """`str(raw)` would turn a widget, a bool or a dict into something
+        that gets TRIED against a real account."""
+        request = interaction.Request(kind=interaction.SECRET)
+        assert interaction.decode(request, raw) is None
+
+    def test_the_declining_default_is_None_rather_than_empty(self):
+        assert interaction.SAFE_DEFAULTS[interaction.SECRET] is None

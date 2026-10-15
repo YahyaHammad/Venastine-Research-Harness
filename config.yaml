@@ -1,0 +1,1030 @@
+# Venastine harness configuration.
+#
+# Every tunable value the harness has. `config.py` reads this file once at
+# import through `config_schema.py` and publishes the values as module
+# attributes, so the names here are the lower-cased form of the constants the
+# code uses: `max_tokens` is `config.MAX_TOKENS`.
+#
+# WHY THE HISTORY IS NOT IN HERE. Each of these numbers was argued, several
+# were reversed once, and the arguments run to hundreds of lines -- they live
+# in CONFIG_ARCHITECTURE.md, section by section, under the name used here.
+# Read it before changing a value. The comments below say what a value DOES;
+# that document says why it is what it is.
+#
+# THREE THINGS TO KNOW BEFORE EDITING.
+#
+# 1. This file ships with the harness and has exactly ONE location, beside
+#    config.py. There is no user-level or project-level copy and no
+#    environment variable that redirects it. That absence is deliberate and
+#    is a security property rather than an oversight: settings.json refuses
+#    shell_approval_mode, ensemble_models, critic_model and embedder_model by
+#    name precisely because a project's settings.json beats the user's and
+#    arrives with a directory you cloned.
+#
+# 2. Keys marked AUTHORITY decide what this harness may do to its host, or
+#    name a provider it sends your research content to. Nothing UNATTENDED
+#    can change them -- not a tool call, not a settings file, not an
+#    environment variable. This file is the only route and it needs a
+#    human: `/config` writes one, but only after saying what the key
+#    permits and asking (batch 84).
+#
+# 3. Values are read ONCE, at startup. Editing this file while the harness is
+#    running changes nothing until the next launch.
+#
+# A missing key, an unknown key, a duplicated key or a value of the wrong
+# type is a startup error naming the key. There are no defaults behind this
+# file.
+
+# ======================================================================
+# Model and loop
+# ======================================================================
+
+# The model every path uses when nothing more specific speaks.
+# --model > settings.json default_model > this. AGENT_MODEL overrides.
+model_name: claude-sonnet-5
+
+# Per-call OUTPUT ceiling, sent as max_tokens / max_output_tokens /
+# max_completion_tokens. On current Anthropic models it bounds thinking
+# and response text together, so effort spends from the same budget.
+max_tokens: 16000
+
+# The default step ceiling: every chat turn, every research pass, and any
+# agent whose frontmatter names no max_steps or names an invalid one.
+max_iterations: 50
+
+# How many more times ONE model call is attempted when the provider fails in
+# a way that can pass: a dropped connection, a 408/409/429/5xx, or an error
+# sent inside a stream that had already opened. Total attempts per call is
+# this plus one. The openai and anthropic SDKs still retry a request that
+# fails before its stream opens, inside each attempt. 0 turns this off.
+model_call_max_retries: 2
+
+# Seconds before the first of those retries. Each later retry waits twice as
+# long, with up to 25% jitter either way; a server's retry-after can make a
+# wait longer, never shorter, capped at 60s.
+model_call_retry_base_delay_s: 3.0
+
+# ======================================================================
+# Subagents
+# ======================================================================
+
+# How deep spawn_subagent may nest, checked against
+# ToolContext.subagent_depth.
+subagent_max_depth: 2
+
+# How many calls of one response may run at once, for tools whose ToolSpec
+# declares `parallel`. A ceiling, not a target: more calls run in waves of
+# this size. 1 makes the parallel path behave exactly like the sequential
+# one, which is the escape hatch if concurrency is ever suspect.
+subagent_max_parallel: 3
+
+# ======================================================================
+# Deep research pipeline
+# ======================================================================
+
+# Revise/re-validate loop iterations per claim before the pipeline falls
+# back.
+max_pipeline_retries: 2
+
+# Corrective follow-up attempts when a pass returns malformed JSON.
+# Total attempts per pass is this plus one.
+max_json_retries: 2
+
+# ======================================================================
+# Ensemble mode
+# ======================================================================
+
+# Run Pass 1 once per `ensemble_models` entry. A settings.json
+# `ensemble_mode` outranks this; the roster below has no settings key.
+ensemble_mode: false
+
+# AUTHORITY -- no settings.json key exists at any tier, because a roster chooses
+# which providers N research passes call. N is its length and is never
+# configured separately. Fewer than two DISTINCT (provider_name, model)
+# pairs is refused: one model cannot disagree with itself.
+# null, with ensemble_mode false, is the shipped configuration. Example:
+#   ensemble_models:
+#     - {provider_name: ANTHROPIC, model: claude-opus-5}
+#     - {provider_name: OPENAI, model: gpt-5.1}
+ensemble_models: null
+
+# ======================================================================
+# Sampling-parameter support
+# ======================================================================
+
+# Models that reject temperature / top_p / top_k outright. core/client.py
+# omits those parameters entirely for anything listed. Steering on these
+# happens through prompting and model_effort_levels instead.
+models_rejecting_sampling_params:
+  - claude-fable-5
+  - claude-mythos-5
+  - claude-opus-4-7
+  - claude-opus-4-8
+  - claude-opus-5
+  - claude-sonnet-5
+
+# ======================================================================
+# Critic and embedder routing
+# ======================================================================
+
+# AUTHORITY -- names a provider every claim is sent to. `/critic` writes a
+# user-tier store that OUTRANKS this, and settings.json rejects the key by
+# name at every tier. null means no special routing.
+critic_model: null
+
+# AUTHORITY -- names a provider that receives claim text and the text of every
+# page a run fetched. `/embedder` outranks this. null means no special
+# routing.
+embedder_model: null
+
+# Per-embedder similarity floor and ceiling, matched by model-name PREFIX
+# (the longest matching prefix wins).
+similarity_calibration:
+  text-embedding-3:
+    floor: 0.1
+    ceiling: 0.65
+  text-embedding-ada:
+    floor: 0.7
+    ceiling: 0.92
+  e5-:
+    floor: 0.7
+    ceiling: 0.92
+  multilingual-e5:
+    floor: 0.7
+    ceiling: 0.92
+  bge-:
+    floor: 0.55
+    ceiling: 0.85
+  gte-:
+    floor: 0.55
+    ceiling: 0.88
+  nomic-embed:
+    floor: 0.4
+    ceiling: 0.8
+  embed-english:
+    floor: 0.25
+    ceiling: 0.8
+  voyage:
+    floor: 0.35
+    ceiling: 0.85
+  gemini-embedding:
+    floor: 0.35
+    ceiling: 0.85
+
+# For an embedder that matches no prefix above.
+default_similarity_calibration:
+  floor: 0.25
+  ceiling: 0.85
+
+# The query/passage prefixes asymmetric embedders need, matched by
+# model-name prefix. An embedder absent from here is sent bare text.
+embedder_prefixes:
+  e5-:
+    query: 'query: '
+    passage: 'passage: '
+  multilingual-e5:
+    query: 'query: '
+    passage: 'passage: '
+  bge-:
+    query: 'Represent this sentence for searching relevant passages: '
+    passage: ''
+  gte-:
+    query: ''
+    passage: ''
+  nomic-embed:
+    query: 'search_query: '
+    passage: 'search_document: '
+  gemini-embedding:
+    query_task_type: RETRIEVAL_QUERY
+    passage_task_type: RETRIEVAL_DOCUMENT
+  text-embedding-004:
+    query_task_type: RETRIEVAL_QUERY
+    passage_task_type: RETRIEVAL_DOCUMENT
+
+# ======================================================================
+# Source authority: domain classes
+# ======================================================================
+
+# Class name -> authority score. The second table, below, maps hosts onto
+# these names, so a score is changed in one place.
+domain_authority_classes:
+  restricted_registry: 0.9 # .gov .mil .int .edu, gov.uk, ac.uk...
+  intergovernmental: 0.9 # WHO, UN, World Bank, OECD, EU
+  standards_body: 0.88 # IETF, W3C, ISO, NIST, IEC
+  peer_reviewed_publisher: 0.85
+  established_news: 0.65
+  preprint_server: 0.6 # not peer reviewed; §45 SQ5 refines this
+  reference_tertiary: 0.55 # encyclopaedias -- a pointer to a source
+  generic_org: 0.55 # an unrestricted registry, small bump
+  generic_commercial: 0.45
+  blog_platform: 0.3
+  forum_qa: 0.25
+  social_media: 0.15
+  content_farm: 0.1
+
+# The score for a host that matches no suffix below; its class reads
+# "unknown".
+default_domain_authority: 0.45
+
+# Host suffix -> a class name from the table above. The `<kind>.<cc>`
+# second-level forms are derived in source_scoring.py, not listed here.
+domain_authority_suffixes:
+
+  # Restricted registries. The bare TLDs; the `<kind>.<cc>`
+  # second-level forms are derived in source_scoring.py rather than
+  # listed.
+  gov: restricted_registry
+  mil: restricted_registry
+  int: restricted_registry
+  edu: restricted_registry
+
+  # Intergovernmental bodies, whose hosts are ordinary .org/.int
+  # names.
+  who.int: intergovernmental
+  un.org: intergovernmental
+  europa.eu: intergovernmental
+  oecd.org: intergovernmental
+  imf.org: intergovernmental
+  worldbank.org: intergovernmental
+  iaea.org: intergovernmental
+
+  # Standards bodies.
+  ietf.org: standards_body
+  rfc-editor.org: standards_body
+  w3.org: standards_body
+  iso.org: standards_body
+  iec.ch: standards_body
+  ieee.org: standards_body
+  unicode.org: standards_body
+  ecma-international.org: standards_body
+
+  # Peer-reviewed publishers and indexes.
+  nature.com: peer_reviewed_publisher
+  science.org: peer_reviewed_publisher
+  sciencemag.org: peer_reviewed_publisher
+  nejm.org: peer_reviewed_publisher
+  thelancet.com: peer_reviewed_publisher
+  bmj.com: peer_reviewed_publisher
+  cell.com: peer_reviewed_publisher
+  pnas.org: peer_reviewed_publisher
+  sciencedirect.com: peer_reviewed_publisher
+  springer.com: peer_reviewed_publisher
+  link.springer.com: peer_reviewed_publisher
+  onlinelibrary.wiley.com: peer_reviewed_publisher
+  wiley.com: peer_reviewed_publisher
+  tandfonline.com: peer_reviewed_publisher
+  sagepub.com: peer_reviewed_publisher
+  acm.org: peer_reviewed_publisher
+  aps.org: peer_reviewed_publisher
+  acs.org: peer_reviewed_publisher
+  plos.org: peer_reviewed_publisher
+  frontiersin.org: peer_reviewed_publisher
+  mdpi.com: peer_reviewed_publisher
+  jstor.org: peer_reviewed_publisher
+  pubmed.ncbi.nlm.nih.gov: peer_reviewed_publisher
+
+  # Preprint servers and repositories -- not peer reviewed.
+  arxiv.org: preprint_server
+  biorxiv.org: preprint_server
+  medrxiv.org: preprint_server
+  chemrxiv.org: preprint_server
+  ssrn.com: preprint_server
+  papers.ssrn.com: preprint_server
+  osf.io: preprint_server
+  researchsquare.com: preprint_server
+  semanticscholar.org: preprint_server
+
+  # News organisations with a correction policy and a masthead.
+  # An ALLOWLIST, because "news site" is not a property of a
+  # domain suffix and the alternative is scoring every .com that
+  # publishes articles.
+  reuters.com: established_news
+  apnews.com: established_news
+  bbc.com: established_news
+  bbc.co.uk: established_news
+  ft.com: established_news
+  economist.com: established_news
+  nytimes.com: established_news
+  washingtonpost.com: established_news
+  wsj.com: established_news
+  theguardian.com: established_news
+  npr.org: established_news
+  pbs.org: established_news
+  bloomberg.com: established_news
+  nikkei.com: established_news
+  afp.com: established_news
+  dw.com: established_news
+
+  # Tertiary references -- they summarise sources rather than
+  # being one.
+  wikipedia.org: reference_tertiary
+  wikimedia.org: reference_tertiary
+  wiktionary.org: reference_tertiary
+  britannica.com: reference_tertiary
+  org: generic_org
+
+  # Blog and newsletter platforms: the host says nothing about
+  # the author.
+  medium.com: blog_platform
+  substack.com: blog_platform
+  wordpress.com: blog_platform
+  blogspot.com: blog_platform
+  blogger.com: blog_platform
+  tumblr.com: blog_platform
+  wixsite.com: blog_platform
+  ghost.io: blog_platform
+  reddit.com: forum_qa
+  quora.com: forum_qa
+
+  # Forums and Q&A. Often correct, never attributable.
+  stackexchange.com: forum_qa
+  stackoverflow.com: forum_qa
+  news.ycombinator.com: forum_qa
+  4chan.org: content_farm
+
+  # Social media. Speculation and unattributed claims travel here
+  # fastest, which is the whole reason a claim needs grounding
+  # elsewhere.
+  x.com: social_media
+  twitter.com: social_media
+  facebook.com: social_media
+  instagram.com: social_media
+  tiktok.com: social_media
+  threads.net: social_media
+  linkedin.com: social_media
+  mastodon.social: social_media
+  bsky.app: social_media
+  youtube.com: social_media
+  vk.com: social_media
+  weibo.com: social_media
+  t.me: social_media
+
+  # Aggregators that republish without attribution, and image
+  # boards with no text to ground anything in. The measured
+  # case: a Pinterest pin scored similarity 1.0 on a Nobel
+  # Prize claim.
+  pinterest.com: content_farm
+  answers.com: content_farm
+  ehow.com: content_farm
+  scribd.com: content_farm
+  coursehero.com: content_farm
+  chegg.com: content_farm
+
+# How far a stated reason may move a source's authority score, in either
+# direction.
+authority_adjustment_cap: 0.15
+
+# ======================================================================
+# The sources/ artifact
+# ======================================================================
+
+# Whether the sources/ artifact keeps the fetched page text alongside the
+# scores, or the scores alone.
+persist_source_text: true
+
+# ======================================================================
+# Scholarly authority (OpenAlex)
+# ======================================================================
+
+# Whether the OpenAlex lookup runs at all. Off ships no outbound
+# scholarly requests.
+scholar_lookup: false
+
+# The OpenAlex base URL.
+scholar_api_url: https://api.openalex.org
+
+# Per-request timeout, in seconds.
+scholar_timeout_s: 8.0
+
+# Retries per request; total attempts is this plus one.
+scholar_max_retries: 2
+
+# How long a lookup is cached in-process, in seconds.
+scholar_cache_ttl_s: 900
+
+# Sent as OpenAlex's `mailto` parameter when non-empty, which is their
+# polite-pool convention. Blank sends no address and is the shipped value:
+# an address here leaves the machine on every lookup.
+scholar_mailto: ''
+
+# The three weights below split one score and a settings.json
+# `source_scoring` block can override each. They are expected to sum to 1.
+scholar_venue_weight: 0.4
+scholar_citation_weight: 0.4
+scholar_author_weight: 0.2
+
+# OpenAlex location type -> venue credit. `unknown` is the fallback for an
+# unrecognised type, and a work with no location at all takes
+# `repository`.
+scholar_venue_credit:
+  journal: 1.0
+  conference: 1.0
+  book series: 0.85
+  repository: 0.55 # arXiv, bioRxiv, institutional repositories
+  unknown: 0.6
+
+# The h-index at which author credit saturates.
+scholar_h_saturation: 60
+
+# Below this many works in a field-year cohort, the citation percentile is
+# not trusted.
+scholar_min_cohort_size: 200
+
+# A work younger than this has not had time to accrue citations, so the
+# citation term is not held against it.
+scholar_min_citation_age_days: 60
+
+# The authority a retracted work is given outright, whatever else it
+# scores.
+scholar_retracted_authority: 0.05
+
+# ======================================================================
+# Reasoning effort
+# ======================================================================
+
+# Reasoning effort when nothing more specific speaks: --effort >
+# settings.json `effort` > this, with settings.json `tui.effort` winning
+# inside the TUI. null sends no effort at all.
+default_effort: high
+
+# Known effort levels per model, for providers whose API exposes no
+# capability query. An EMPTY list means the model accepts none, which is
+# different from being absent -- absent falls through to the list below.
+model_effort_levels:
+  gpt-4o: []
+  gpt-4o-mini: []
+  gpt-4.1: []
+  gpt-4.1-mini: []
+  gpt-4.1-nano: []
+  gpt-3.5-turbo: []
+
+# Used for a model with no entry above.
+default_effort_levels:
+  - low
+  - medium
+  - high
+  - xhigh
+  - max
+  - ultra
+
+# Effort level -> Google thinking_budget in tokens. -1 hands the choice to
+# the model.
+google_thinking_budgets:
+  low: 2048
+  medium: 8192
+  high: 16384
+  xhigh: 24576
+  ultra: 32768
+  max: -1
+
+# ======================================================================
+# Database
+# ======================================================================
+
+# The SQLite file behind the conversation database. APP_DB_PATH overrides;
+# the npm launcher points it at ~/.config/venastine so state is global
+# while artifacts stay local.
+db_path: app.db
+
+# ======================================================================
+# File-ops workspace
+# ======================================================================
+
+# The file tools' read-write root, and a PERMISSION BOUNDARY: file_ops
+# auto-approves writes inside it. AGENT_WORKSPACE overrides, and naming it
+# also makes the resolved workspace the project path -- so pointing it at a
+# home directory would auto-approve writes there for every project. Writing
+# the path HERE moves the workspace alone; the key below moves the project
+# with it.
+workspace_dir: ./workspace
+
+# Whether that workspace is also the PROJECT: what workspace trust asks about,
+# which .venastine/ supplies settings and agents, where /init scaffolds, and
+# what project-scoped memories belong to. Naming AGENT_WORKSPACE has always
+# done this; the key is the same statement made in the file, for the reader
+# who has no variable to set. Either route suffices, and neither is needed to
+# work inside a project you launched from -- that is already the project.
+workspace_is_project: false
+
+# Hard reject before opening, in both directions (25 MB).
+max_file_size_bytes: 25000000
+
+# Per-read line ceiling. A larger `count` is clamped, with a note in the
+# result rather than silently.
+max_read_lines: 500
+
+# Per-read character ceiling, and the truncation point for sandboxed
+# stdout and stderr.
+max_read_chars: 50000
+
+# ======================================================================
+# /init
+# ======================================================================
+
+# The agent /init runs.
+initializer_agent: initializer
+
+# Most characters read_project_doc returns per file.
+init_read_chars: 20000
+
+# Step ceiling for the /init run when its agent names none.
+init_max_steps: 12
+
+# ======================================================================
+# MCP teardown
+# ======================================================================
+
+# Seconds allowed for MCP session teardown at shutdown before the harness
+# stops waiting.
+teardown_budget_s: 10.0
+
+# ======================================================================
+# Shell and sandbox
+# ======================================================================
+
+# The shell the sandbox runs commands through. EMPTY means auto-detect,
+# which is the shipped value. AGENT_SHELL overrides.
+shell_binary: ''
+
+# AUTHORITY -- part of the frozen security posture. Enables the weak
+# host-subprocess backend, which is unbounded code on the host. Bound once
+# at first read and frozen, so no tool call, settings file, environment
+# variable or slash command can move it.
+allow_insecure_sandbox_fallback: false
+
+# AUTHORITY -- runs that fallback with no per-run prompt. The pair above and
+# here reads as worse than either alone. Honoured under `tiered` and
+# `contained`; under `always` every command still asks, this one included.
+auto_approve_sandbox_fallback: false
+
+# AUTHORITY -- part of the frozen security posture. Lets the agent ask
+# for a command to run in WSL (ROADMAP_v3 §49, slice 3). It is NOT a
+# weaker container: a command there reaches this harness's own
+# config.yaml and ~/.config, gets no memory, CPU or process limit, and
+# can start Windows programs with your full authority -- Windows
+# interop is a kernel feature there and survives an emptied
+# environment. Only a read-only command whose every argument is inside
+# the workspace runs there without asking; everything else meets a
+# prompt under `tiered` and `contained` alike. Shown on the startup
+# banner and the TUI badge whenever it is on.
+allow_wsl_backend: false
+
+# Which WSL distribution the backend runs in. EMPTY means the first one
+# `wsl.exe -l -q` lists, which is WSL's own default. A name that is not
+# installed is refused with the installed names, rather than passed to
+# `wsl.exe` -- which answers an unknown distro by exiting 4294967295
+# and writing its complaint to stdout in UTF-16, so the failure would
+# read as the command's rather than the configuration's.
+wsl_distro: ''
+
+# AUTHORITY -- part of the frozen security posture. Lets the agent ask
+# for a command to run on the remote host configured below (ROADMAP_v3
+# §49, slice 4). A remote host is not a sandbox and not a weaker one: it
+# is a machine this harness cannot look at. It gets no memory, CPU or
+# process limit -- those belong to the remote -- and the credentials it
+# uses are ones you issued, not ones this harness controls.
+# NOTHING runs there without asking you first, not even a read-only
+# command: "inside the workspace" is a question about a filesystem this
+# process cannot resolve, so it is not asked. Shown on the startup
+# banner and the TUI badge whenever it is on.
+allow_ssh_backend: false
+
+# The one remote host the SSH backend reaches. The agent asks for
+# `backend: "ssh"` and gets THIS host; it never names a host itself,
+# for the reason `wsl_distro` is not the agent's either -- which machine
+# this harness may reach is your question, and which command needs it is
+# the agent's.
+ssh_host: ''
+ssh_user: ''
+ssh_port: 22
+
+# The private key to authenticate with. EMPTY offers whatever a running
+# ssh-agent holds. This harness NEVER asks for, holds or stores a
+# passphrase: if the key is encrypted, load it into an agent with
+# `ssh-add` first. Measured, and the reason the backend passes
+# BatchMode=yes: without it, an encrypted key with no agent makes ssh
+# wait forever for a passphrase on a terminal this process does not own.
+ssh_identity_file: ''
+
+# Where a command runs on the remote. REQUIRED when the backend is on,
+# and deliberately not defaulted to the login home: a command that runs
+# somewhere nobody named is the failure this backend is most able to
+# cause, and nothing here can see where it landed.
+ssh_remote_workspace: ''
+
+# The remote's host key, PINNED. Run `ssh-keyscan -p <port> <host>` and
+# paste its output here (the `#` banner line is ignored). A host whose
+# key does not match this is refused -- not prompted about, because a
+# prompt on first use is a question a headless run has nobody to ask,
+# and because a key that CHANGES is exactly the case worth refusing.
+ssh_host_key: ''
+
+# Which `ssh` program to run. EMPTY prefers the operating system's own
+# (%SYSTEMROOT%\System32\OpenSSH\ssh.exe on Windows) and falls back to
+# PATH. Not PATH first: on the machine this was built, PATH resolves to
+# a git-for-Windows build while the OS ships its own, and the two report
+# different text for the same failure.
+ssh_binary: ''
+
+# AUTHORITY -- THE gate for shell approval, and part of the frozen posture.
+#   always    -- every command asks
+#   tiered    -- read-only commands from inert_commands, every argument
+#                inside the workspace, run unprompted; every other command
+#                asks, including anything that can run code
+#   contained -- anything that runs in the container without network runs
+#                unprompted, code included; reads outside the workspace and
+#                network commands still ask
+#   never     -- nothing asks
+# An unknown value raises at startup rather than falling back, because one
+# direction of a fallback asks about everything and the other about
+# nothing, and a typo cannot pick. Rejected by name from settings.json at
+# every tier: a cloned repo could otherwise set `never`.
+# Shell approval is governed solely here: `tool_approvals` deliberately has
+# no `shell` key, so there is no second switch that can disagree with this.
+shell_approval_mode: tiered
+
+# The image sandboxed commands run in, under Docker or Podman (whichever
+# runs the sandbox -- ROADMAP_v3 §49, SS22). Fully qualified so Podman
+# resolves it without a short-name alias (SS23). AGENT_SANDBOX_IMAGE
+# overrides.
+sandbox_docker_image: docker.io/library/python:3.13-slim
+
+# Wall-clock ceiling for one sandboxed command.
+sandbox_timeout_seconds: 120
+
+# Memory ceiling for the sandbox, in MB.
+sandbox_memory_mb: 2048
+
+# CPU-time ceiling for the sandbox, in seconds.
+sandbox_cpu_seconds: 30
+
+# Process ceiling for the sandbox.
+sandbox_max_pids: 200
+
+# Background and monitor shell sessions (ROADMAP_v3 §49, SS12-SS13).
+#
+# The longest a session may run. An agent asking for more is started with
+# this and told so -- never refused.
+shell_session_timeout_cap_s: 3600
+
+# How long an INTERACTIVE shell may sit with nothing typed into it
+# before it is closed (ROADMAP_v3 §49, SS25). Unlike a background
+# command, an interactive session does not block your prompt, so this is
+# the only thing that stops a forgotten shell holding a container open
+# until its timeout cap. Measured from the last input, not the last
+# output: a program printing to itself is still one nobody is using.
+shell_session_idle_timeout_s: 600
+
+# How many sessions of any kind may be live at once, counted across the
+# main agent and every subagent. Each is its own container under the
+# memory ceiling above. An interactive shell counts here -- it holds a
+# container like any other -- even though it does not block your prompt.
+shell_session_max_live: 4
+
+# How many times in a row finished sessions may wake the agent with no
+# message from you. Past it, waking stops, the prompt unblocks, and the
+# results wait for your next message.
+shell_session_max_consecutive_wakes: 10
+
+# How much of a session's output is kept, in memory only and never on
+# disk: its first characters and its most recent ones. The middle is
+# dropped, and the agent is told where.
+shell_session_output_head_chars: 10000
+shell_session_output_tail_chars: 190000
+
+# ======================================================================
+# Output redaction and tool isolation
+# ======================================================================
+
+# AUTHORITY -- the master switch for pattern-based redaction of everything
+# leaving a tool, and part of the frozen posture. There is deliberately no
+# settings.json key. VENASTINE_REDACT_OFF can only ever turn redaction
+# OFF for a run, never on, and is bound at the same moment as this.
+redact_tool_outputs: true
+
+# Wall clock for one BUDGET_COMPUTE tool call, and the CPU ceiling handed
+# to the isolated child process that runs it.
+tool_compute_timeout_s: 20
+
+# First words that make a sandboxed command need the network. Anything not
+# listed runs with networking off.
+network_allowed_commands:
+  - pip
+  - pip3
+  - curl
+  - wget
+  - git
+  - npm
+  - yarn
+  - pnpm
+  - apt
+  - apt-get
+  - yum
+  - dnf
+  - brew
+  - cargo
+
+# Read-only inspection commands eligible for the auto-approved inert tier
+# under `shell_approval_mode: tiered`. Sound as a bare token list only
+# because that tier executes argv with no shell, so the tokens ARE the
+# arguments.
+#
+# WHAT BELONGS HERE, after batch 117 found two things that did not. A
+# command qualifies only if it cannot write, and "cannot write" has to hold
+# for its ARGUMENTS as well as its name:
+#
+#   * A writing FLAG is guarded by `_DANGEROUS_FLAGS` in security/sandbox.py
+#     -- `tree -o FILE` and `date -s TIME` were inert with no entry there
+#     until batch 117, so the tier reported `writes=False` about a write.
+#   * A writing POSITIONAL cannot be guarded at all. `uniq IN OUT` writes to
+#     its second argument with no flag to catch, so `uniq` was REMOVED from
+#     this list rather than given an entry that could not work. Teaching the
+#     classifier which positions are outputs would make it a shell parser,
+#     which security/sandbox.py's own G2 argument forbids.
+#
+# The bound that still held throughout: `_escapes_workspace` reads every
+# token after the first as a path, so a write aimed outside the workspace
+# was refused regardless. What was wrong was the profile's claim, not the
+# containment.
+inert_commands:
+  - ls
+  - cat
+  - pwd
+  - echo
+  - grep
+  - wc
+  - head
+  - tail
+  - date
+  - whoami
+  - uname
+  - which
+  - where
+  - type
+  - file
+  - stat
+  - du
+  - df
+  - tree
+  - diff
+  - md5sum
+  - sha256sum
+
+# ======================================================================
+# Research grants and review
+# ======================================================================
+
+# Ceiling on granted tool calls in one run, across every grant.
+max_granted_tool_calls: 150
+
+# How long an attended approval waits for an answer before giving up on
+# it.
+attended_approval_timeout_s: 600
+
+# Whether a finished research run is reviewed. A settings.json
+# `research.subagent_review` outranks this; --no-review escapes it for one
+# run.
+subagent_review: false
+
+# Findings kept from one review; the rest are dropped with a warning.
+max_review_findings: 25
+
+# Rounds a single finding may be refined before it is recorded as
+# rejected.
+max_review_refinements: 3
+
+# ======================================================================
+# Compaction
+# ======================================================================
+
+# How much of the model's context window a thread may fill before
+# compaction folds it. What the fraction really names is the HEADROOM --
+# the remainder, which the step after the trigger fires has to fit inside,
+# because nothing in the harness recovers from a prompt that overflows the
+# window. A bare share gets that wrong at both ends of the roster: 0.10 of
+# 1M is 100k and 0.10 of 64k is 6.4k, while ONE capped tool read is 12,500
+# proxy tokens. Hence the two clamps below.
+compaction_trigger_fraction: 0.90
+
+# The headroom never shrinks below this, however small the window. Sized
+# from max_read_chars (50,000 chars = 12,500 proxy tokens, the largest a
+# single bounded read can return) plus the assistant turn that asked for
+# it. Binds under a ~160k window and nowhere above one, so a 262k or 1M
+# thread gets exactly the fraction above and a 64k thread keeps a usable
+# margin instead of 6.4k.
+compaction_min_headroom_tokens: 16000
+
+# ...and never grows past this share of the window, which is what stops
+# the floor above from eating a small window whole -- 16k of a 32k window
+# is half of it. This is the clamp that keeps the trigger positive and
+# above keep_recent_tokens at the bottom of the range.
+compaction_max_headroom_fraction: 0.25
+
+# The trigger used when NO MODEL IS IN SCOPE. A settings.json
+# `compaction.trigger_tokens` overrides it.
+compaction_trigger_tokens: 40000
+
+# The early warning fires this many tokens BEFORE the trigger. Must stay
+# strictly below the trigger, or the warning arrives after the thing it
+# warns about; the loader refuses a pair that cannot work.
+compaction_warning_margin_tokens: 8000
+
+# Recent conversation held out of a fold verbatim.
+compaction_keep_recent_tokens: 4000
+
+# Recent turns held out of a fold verbatim, whichever bound binds first.
+compaction_keep_recent_turns: 3
+
+# The share of the trigger that pinned content may occupy, so a pin cannot
+# force permanent compaction.
+pin_max_trigger_fraction: 0.5
+
+# Default fold strength: one of the keys of `compaction_target_ratios`.
+compaction_strength: 3
+
+# Attempts at one fold before it is abandoned.
+compaction_max_retries: 2
+
+# Strength -> the fraction of the original character count a fold aims
+# for. INTEGER keys, and they are the closed set a settings.json
+# `compaction.strength` is checked against.
+compaction_target_ratios:
+  1: 0.4
+  2: 0.25
+  3: 0.15
+  4: 0.1
+  5: 0.05
+
+# How far over target a fold may land before it is retried.
+compaction_ratio_tolerance: 0.5
+
+# Default strategy.
+#   chain    -- fold the previous summary together with the new span
+#   rederive -- re-summarise the whole thread from the archive
+compaction_strategy: chain
+
+# The closed vocabulary `compaction_strategy` and any settings.json
+# `compaction.strategy` are checked against.
+compaction_strategies:
+  - rederive
+  - chain
+
+# Memories injected into a prompt at once. 0 disables the `remember` tool
+# rather than injecting nothing.
+max_injected_memories: 50
+
+# ======================================================================
+# Catalog text
+# ======================================================================
+
+# Cap on a skill's or agent's `name` and `description` -- the two strings
+# that reach every run's system prompt from a .md file with no tool call
+# and no further consent. The newline collapse that comes with it matters
+# more than the number.
+max_catalog_text_chars: 300
+
+# ======================================================================
+# Summaries, references and the checklist
+# ======================================================================
+
+# The agent that does the summarising, for both folds and /summary.
+compactor_agent: compactor
+
+# How long a whole-thread summary may be, in characters. ABSOLUTE rather
+# than a ratio: this summary is injected into every turn of a REFERENCING
+# thread, where nothing it replaces bounds it.
+summary_target_chars: 2000
+
+# Referenced threads attachable to one thread at once. REFUSES rather than
+# dropping the oldest, because a reference is something a person named.
+max_injected_refs: 3
+
+# The checklist vocabulary, and the enum in todo_write's own schema. A
+# plain list rather than an enum so a list stored under an older
+# vocabulary reads back as data instead of raising.
+todo_statuses:
+  - pending
+  - in_progress
+  - completed
+
+# Checklist ceiling. REFUSES rather than truncating: a list silently cut
+# would leave the model believing it had recorded work it has forgotten.
+max_todo_items: 50
+
+# Research passes compact only this far from the model's actual context
+# window -- a safety net against a hard provider error mid-pipeline, not a
+# working-set policy.
+compaction_pipeline_backstop_tokens: 20000
+
+# ======================================================================
+# Context windows
+# ======================================================================
+
+# Model -> input window, in tokens. A FALLBACK now, not the only source:
+# core/client.py queries the provider where the SDK exposes it, and
+# core/model_windows.py holds the user's own `/window` answer, which
+# outranks both. A miss here warns once per model.
+model_context_windows:
+  claude-opus-5: 1000000
+  claude-sonnet-5: 1000000
+  claude-fable-5: 1000000
+  claude-opus-4-8: 1000000
+  claude-opus-4-7: 1000000
+  claude-opus-4-6: 1000000
+  claude-sonnet-4-6: 1000000
+  claude-haiku-4-5: 200000
+  gpt-5.1: 400000
+  gemini-2.5-pro: 1000000
+  qwen3.8-max-preview: 983616
+
+# For a model absent from the table above and unqueryable. Logged at
+# WARNING once per model, because a wrong window now decides when every
+# thread folds.
+default_context_window: 256000
+
+# ======================================================================
+# Tool permissions and approvals
+# ======================================================================
+
+# AUTHORITY -- whether each registered tool may be called AT ALL.
+# is_tool_allowed() reads this before any context or approval logic and a
+# tool context can never widen it, so a false here cannot be re-enabled at
+# runtime by an agent, a skill or a settings file -- only by editing this
+# file. read / write / edit / shell ship false for that reason, and so do
+# the five background-session tools after shell: a session is a shell
+# command that keeps running, and enabling one without the others is
+# allowed but rarely useful.
+# Every registered tool must appear in BOTH tables or the harness refuses
+# to start (D24).
+tool_permissions:
+  web_search: true
+  fetch_url: true
+  get_time: true
+  arxiv_search: true
+  symbolic_math: true
+  linear_algebra: true
+  probability_stats: true
+  discrete_math: true
+  logic: true
+  geometry: true
+  read: false
+  write: false
+  edit: false
+  shell: false
+  shell_background: false
+  shell_monitor: false
+  shell_interactive: false
+  shell_input: false
+  shell_sessions: false
+  shell_output: false
+  shell_kill: false
+  load_skill: true
+  spawn_subagent: true
+  pin: true
+  unpin: true
+  remember: true
+  read_project_doc: true
+  write_project_doc: true
+  ask_user: true
+  todo_write: true
+
+# AUTHORITY -- whether each tool needs a human yes before it runs. Approval ORs
+# across every layer, so a true here is a one-way ratchet that can only
+# add prompts. `shell`, `shell_background`, `shell_monitor` and
+# `shell_interactive` are deliberately absent: their approval is governed
+# solely by `shell_approval_mode` above -- there is no second switch, so
+# there is nothing here that can disagree with it. Listing, reading and
+# stopping a session ask nothing: they act only on this conversation's own
+# sessions. `shell_input` is here and ships false because approving the
+# shell approved what you type into it (SS29) -- set it true to be asked
+# about every line instead.
+# A tool gated here is not merely denied where nothing can ask -- it stops
+# being advertised at all, which is why ask_user, pin and todo_write are
+# ungated.
+tool_approvals:
+  web_search: false
+  fetch_url: false
+  get_time: false
+  arxiv_search: false
+  symbolic_math: false
+  linear_algebra: false
+  probability_stats: false
+  discrete_math: false
+  logic: false
+  geometry: false
+  read: false
+  write: false
+  edit: false
+  shell_input: false
+  shell_sessions: false
+  shell_output: false
+  shell_kill: false
+  load_skill: false
+  spawn_subagent: true
+  pin: false
+  unpin: false
+  remember: true
+  read_project_doc: false
+  write_project_doc: true
+  ask_user: false
+  todo_write: false

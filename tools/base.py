@@ -1,6 +1,8 @@
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import Callable, Iterable, Optional
+from typing import Optional
 
+from pydantic import ValidationError
 
 # ROADMAP_v2 §25 (R13). How far approving a tool BY NAME goes -- the
 # question asked before any call exists, by the §18 subagent sign-off and
@@ -15,6 +17,26 @@ GRANT_SIGNOFF_ONLY = "signoff_only"
 GRANT_NEVER = "never"
 
 GRANT_POLICIES = frozenset({GRANT_ANYWHERE, GRANT_SIGNOFF_ONLY, GRANT_NEVER})
+
+
+# ROADMAP_v2 §47, extended by ROADMAP_v3 §49 (SS14) and again by §55
+# (TR7). What a tool call's line in the transcript OPENS, as
+# `registry.opens()` answers it.
+#
+# Named here beside the flags they are derived from, so the two consumers
+# that carry the answer -- core/replay.py into a stored line, tui/ into a
+# live one -- compare against a constant rather than against a literal
+# each spelled in its own file.
+#
+# OPENS_CALL IS THE FALLBACK AND IS NOT DERIVED FROM A FLAG (§55, TR7).
+# The other two are declared per tool because only some tools start a run
+# or a session; EVERY call has itself, so there is nothing for a ToolSpec
+# to declare and no tool that can decline. That is why `registry.opens()`
+# no longer has an empty answer -- see its docstring for what replaced the
+# falsy-tuple contract.
+OPENS_THREAD = "thread"
+OPENS_SESSION = "session"
+OPENS_CALL = "call"
 
 
 # ROADMAP_v2 §31 (H1). What a call to this tool is allowed to COST, and
@@ -47,6 +69,89 @@ BUDGET_HUMAN = "human"
 BUDGETS = frozenset({BUDGET_COMPUTE, BUDGET_IO, BUDGET_HUMAN})
 
 
+# ===========================================================================
+# WHAT A CALLABLE REGISTERED BELOW MAY RAISE -- stated ONCE, here, because it
+# was stated six times elsewhere and all six copies were wrong (batch 146).
+#
+# NO PROVIDER VALIDATES TOOL INPUTS AGAINST THE SCHEMA. `params` is whatever
+# the model emitted: a key may be missing, misspelled, or present with a
+# value of the wrong type. `{"path": null}` is a well-formed JSON object, so
+# the arguments layer passes it and `params.get("path", "")` returns None
+# rather than the default -- the key IS there.
+#
+# A HANDLER'S exception is contained. tools/registry.py wraps the handler
+# call "on purpose", under a comment naming the failure that bought it ("a
+# raising tool used to take the whole run down with it"), and returns
+# `{"error": "<tool> failed: ..."}`. So a bare KeyError in a `run()` has not
+# ended a turn since that landed, and six comments in tools/builtin/ saying
+# it "escapes the loop's ToolCallDenied handler and aborts the whole turn"
+# were describing a tree that no longer existed. The practice they defend is
+# still right, for a reason that survives the containment: an error dict the
+# model can READ beats a generic wrapper it cannot act on, which is what the
+# unknown-name branch in load_skill already does two lines from its comment.
+#
+# A GATE'S exception is NOT contained, and that is the half nobody wrote
+# down. `approval_check` and `refusal_check` run ABOVE the handler boundary;
+# core/loop.py calls `approval_needed` and `refusal_reason` with no `try`,
+# and the `try` around `dispatch()` catches only ToolCallDenied. Sequentially
+# the exception leaves `_run` and ends the turn; in a research pass it
+# propagates into the pipeline handler that records a durable
+# `status='failed'`; in a PARALLEL batch the identical input becomes one
+# call's error result. So the same malformed argument kills a turn alone and
+# is recoverable beside siblings.
+#
+# THEREFORE: a gate must be TOTAL over any JSON object. shell.py has said so
+# at its own gate for a long time -- "Total, like everything else the gate
+# calls: `params['command']` is whatever the model emitted" -- and batch 146
+# found file_ops' two gates were the one exception in the tree, reaching
+# `os.path.join(WORKSPACE_ROOT, None)` before any prompt and any handler.
+#
+# AND A REFUSAL MUST NOT ECHO A VALUE. `invalid_params` below renders the
+# field and the problem and never the value, which is the shape
+# shell_sessions chose first.
+#
+# THE REASON CHANGED IN BATCH 156 AND THE RULE DID NOT. As first written
+# this said the refusal path "is the one result path that does NOT pass
+# through the output redactor", which was true and is the hole batch 156
+# closed in tools/registry.py -- measured, a `ghp_` token the model put in
+# an `agent_name` came back whole. So the sentence that made this rule
+# load-bearing is gone, and the rule stays, because the redactor it now
+# passes through is a PATTERN GUESS rather than a decision procedure:
+# register item 52 measured sixteen of twenty-two credential shapes
+# surviving it, and batch 156 re-confirmed five of those (`github_pat_`,
+# `gho_`, `sk-proj-`, `npm_`, a `Bearer` header) against a `ghp_` control
+# it does catch. A refusal that does not echo cannot leak what no pattern
+# knows; one that echoes is covered only for the shapes somebody thought
+# of. That is defence in depth rather than a belt the registry made
+# redundant -- and it is cheaper here than anywhere else, because the field
+# name is what makes a refusal actionable and the value never was.
+# ===========================================================================
+
+def invalid_params(tool_name: str, model, params) -> Optional[str]:
+    """Why `params` would not validate against `model`, in one line, or None.
+
+    For a `refusal_check`, which is what makes a mistyped argument a refusal
+    the model can correct instead of an exception above the containment. The
+    handler's own `model(**params)` stays where it is: this is the
+    pre-approval answer, and base.py's rule for the segment guards applies
+    here too -- the check above is not the enforcement.
+
+    `err['loc']` and `err['msg']` only. `str(e)` would carry `input_value`,
+    and the block above says why that matters: this string becomes the tool
+    result without passing the redactor.
+    """
+    if not isinstance(params, dict):
+        return f"Invalid arguments for {tool_name}: expected an object."
+    try:
+        model(**params)
+    except ValidationError as e:
+        problems = "; ".join(
+            f"{'.'.join(str(part) for part in err['loc']) or 'arguments'}: "
+            f"{err['msg']}" for err in e.errors())
+        return f"Invalid arguments for {tool_name}: {problems}."
+    return None
+
+
 @dataclass
 class ToolSpec:
     name: str  # Tool name
@@ -63,6 +168,10 @@ class ToolSpec:
     # invisible to config/context-level approval settings entirely, which
     # would have silently voided agent approval_overrides for read/write/
     # edit/shell -- the four tools where per-agent tightening matters most.
+    #
+    # TOTAL over any JSON object -- see "WHAT A CALLABLE REGISTERED BELOW MAY
+    # RAISE" at the top of this file. A predicate that cannot answer should
+    # answer True: ASKING is the fail-closed direction for this one.
     approval_check: Optional[Callable[[str, dict], bool]] = None
     # Optional "is this tool meaningful right now?" predicate, consulted by
     # registry.schemas() when deciding what to advertise to the model.
@@ -115,6 +224,11 @@ class ToolSpec:
     #
     # A property of the tool rather than a name hard-coded into the
     # loop, for exactly the reason grant_scope and request_kind are.
+    #
+    # TOTAL over any JSON object, like approval_check above it -- see "WHAT A
+    # CALLABLE REGISTERED BELOW MAY RAISE" at the top of this file, which is
+    # the one copy of why, and `invalid_params` beside it, which is the one
+    # copy of how.
     refusal_check: Optional[Callable[[dict, object], Optional[str]]] = None
     # Optional extra text shown in the approval prompt, above the params.
     # Signature: (params, context) -> str. Lets a tool explain what
@@ -143,6 +257,40 @@ class ToolSpec:
     # assert_grant_policy_declared() below makes omission fatal at import,
     # the same trade D24 made for permissions.
     grant_policy: Optional[str] = None
+    # ROADMAP_v2 §47. Whether a call to this tool creates a conversation
+    # thread of its own, which is what makes the line that called it
+    # something a reader can OPEN.
+    #
+    # DECLARED HERE rather than by naming `spawn_subagent` at each reader,
+    # for grant_policy's reason (R13): two consumers ask this -- core/replay.py
+    # and the TUI -- and a string in two places is how they come to
+    # disagree about which lines are openable. Defaulted to False, unlike
+    # grant_policy, because the safe answer here is "this line opens
+    # nothing" and a tool that forgot to say so simply is not clickable.
+    opens_thread: bool = False
+    # ROADMAP_v3 §49 (SS14). Whether a call to this tool starts a background
+    # SESSION, which is the other thing a tool-call line can open.
+    #
+    # A SECOND FLAG rather than a widened `opens_thread`, because the two
+    # answer different questions at press time: a thread is replayed from
+    # the archive and a session is read from the manager or rebuilt from
+    # the wake rows it wrote. `registry.opens()` is what consumers ask --
+    # one question, one answer, so no reader has to know that two flags
+    # exist. Defaulted False for `opens_thread`'s reason.
+    opens_session: bool = False
+    # ROADMAP_v2 §47 slice 8 (NA9). Whether several calls to this tool in
+    # ONE model response may run at the same time.
+    #
+    # DECLARED HERE for `opens_thread`'s reason, one question over: the
+    # loop partitions a response by asking, so no tool name appears in
+    # core/loop.py -- the same argument grant_scope and request_kind
+    # already make. Defaulted to False because the safe answer is "run
+    # this one at a time": a tool that has not been examined for thread
+    # safety must not be made concurrent by having forgotten to say so.
+    #
+    # `spawn_subagent` is the only tool that sets it, and NA9's partition
+    # keeps every other call strictly sequential in its original position.
+    parallel: bool = False
     # ROADMAP_v2 §31 (H1). One of BUDGET_COMPUTE / BUDGET_IO /
     # BUDGET_HUMAN, above.
     #

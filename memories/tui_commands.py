@@ -20,8 +20,9 @@ something the user relies on.
 
 from uuid import UUID
 
-from tui.commands import SlashCommand, registry as commands
 from memories.manager import manager
+from tui.commands import SlashCommand
+from tui.commands import registry as commands
 
 
 def _cmd_memories(app, args: str) -> None:
@@ -129,9 +130,9 @@ def _cmd_ref(app, args: str) -> None:
     steer another without their say-so. A model-callable `search_threads`
     stays possible later, on this same retrieval and behind D26's gate.
     """
+    import storage
     from core.loop import clear_refs
     from tui.screens import ThreadPickerScreen
-    import storage
 
     flag = args.strip().lower()
     if flag in ("--list", "list"):

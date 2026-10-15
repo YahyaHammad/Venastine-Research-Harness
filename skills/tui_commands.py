@@ -17,7 +17,8 @@ manager, which holds no state of its own (K3).
 
 from agents.manager import manager as agents
 from skills.manager import manager as skills
-from tui.commands import SlashCommand, registry as commands
+from tui.commands import SlashCommand
+from tui.commands import registry as commands
 
 
 def _current_context(app):

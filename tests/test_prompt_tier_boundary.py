@@ -14,19 +14,22 @@ and the project numbers its instances -- K6 (skill bodies, §19), M13
 "FOURTH instance" and as a deferral).
 
 Each of those four has a test. **The rule did not.** Appending the project's
-CONTEXT.md inside `with_catalogs()` -- six lines that read exactly like the
+HUB DOCUMENT inside `with_catalogs()` -- six lines that read exactly like the
 four sanctioned appends -- ran 1406 green, while a probe against a real
 trusted project showed it reaching 10 of 10 research passes.
 
 Three tiers were never numbered and had no test: `with_goal` (the FIRST of
 them, and the pattern the other three docstrings each cite as what they sit
-"beside"), the agent body, and the project's CONTEXT.md.
+"beside"), the agent body, and the project's hub document -- the root
+`AGENTS.md` since section 44, and `.venastine/CONTEXT.md` when this leak was
+found. NAMED BY ITS ROLE throughout this file, because the role is what the
+boundary is about and the filename has already moved once (batch 153).
 
-WHY CONTEXT.md IS THE WRONG ONE TO LEAVE UNPINNED. It is project-tier
+WHY THE PROJECT HUB IS THE WRONG ONE TO LEAVE UNPINNED. It is project-tier
 content under D17 -- free text that arrived with a directory you cloned,
 which is D17's stated premise and the reason D29 inverted tier precedence to
 harness > user > project. A chat session's skill is something the user
-activated deliberately, in this session. CONTEXT.md is content they
+activated deliberately, in this session. The hub is content they
 consented to once, for a repository, and a research run is ten unattended
 passes with no human reading each prompt. §25 R4 and §21b M17 reason exactly
 this way about spawn_subagent and remember: the objection is not that one
@@ -42,7 +45,7 @@ then varied.
 
 WHY THE STATE MUST REALLY BE POPULATED. `test_load_skill.py:87` already
 asserts `pass_prompt("Pass 1") == passes_prompts["Pass 1"]`, and it did not
-catch the CONTEXT.md leak -- because it runs against an EMPTY project, where
+catch the hub leak -- because it runs against an EMPTY project, where
 every tier's fragment is "" and any such assertion passes against a leaking
 `with_catalogs`. An empty session proves nothing here.
 """
@@ -55,7 +58,6 @@ import pytest
 import prompts.system_prompts as system_prompts
 from core import config_loader
 from core.loop import with_goal, with_memories, with_refs, with_todos
-
 
 CANARIES = {
     "goal": "CANARY-GOAL-a1",
@@ -105,7 +107,7 @@ def catalogued(monkeypatch, tmp_path):
 def populated(catalogued, monkeypatch, fake_storage):
     """Every tier a session accumulates, all carrying a canary.
 
-    CONTEXT.md is set through `config_loader._state`, which is what
+    The hub document is set through `config_loader._state`, which is what
     `initialize()` builds and `context_for_agent` reads -- i.e. the same
     module-global a one-line mistake inside `with_catalogs()` would reach.
     """
@@ -215,7 +217,7 @@ def test_an_active_skill_is_marked_in_the_catalog_but_never_expanded(populated):
 def test_the_populated_fixture_really_populates_every_tier(populated):
     """Without this, every assertion above passes vacuously the moment a
     fixture stops wiring one tier up -- which is precisely how the existing
-    byte-equality assertion in test_load_skill.py missed the CONTEXT.md leak
+    byte-equality assertion in test_load_skill.py missed the hub leak
     (it runs against an empty project, where every fragment is "").
 
     So: prove each tier's fragment function actually emits its canary before

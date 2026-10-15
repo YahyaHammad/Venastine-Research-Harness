@@ -29,13 +29,20 @@ WHAT WOULD MAKE THESE VACUOUS:
     spend_cap() itself reads.
 """
 
+from uuid import uuid4
+
 import pytest
 
 from core.events import LoopEvent
 from core.loop import RunAgentLoop, run_to_completion
-from tests.conftest import FakeMemory, make_model_response, \
-    make_stream_from_response, make_stream_sequence, pump, settle
-from uuid import uuid4
+from tests.conftest import (
+    FakeMemory,
+    make_model_response,
+    make_stream_from_response,
+    make_stream_sequence,
+    pump,
+    settle,
+)
 
 
 def _resp(inp, out, *, tool=False):
@@ -176,7 +183,6 @@ class TestUncappedByDefault:
         """None is a deliberate answer ('run uncapped'), not 'ask the
         settings'. Collapsing the two would make every existing explicit-
         None caller silently start obeying a cap they never saw."""
-        import core.config_loader as config_loader_module
 
         def _fake(memory, system_prompt, provider_name, model, context,
                   max_steps, max_total_tokens=None, **kw):
@@ -196,7 +202,6 @@ class TestUncappedByDefault:
 class TestConfiguredCap:
 
     def test_unset_argument_resolves_settings_at_call_time(self, mocker):
-        import core.config_loader as config_loader_module
 
         seen = {}
 
@@ -281,7 +286,6 @@ class TestCliEarlyStopLine:
     def test_the_early_stop_line_names_billed_this_turn(self, mocker,
                                                         capsys, fake_storage,
                                                         cli_stdin):
-        from uuid import uuid4
 
         import main
 
@@ -300,7 +304,6 @@ class TestCliEarlyStopLine:
     def test_a_complete_turn_prints_no_early_stop_line(self, mocker,
                                                        capsys, fake_storage,
                                                        cli_stdin):
-        from uuid import uuid4
 
         import main
 
@@ -364,7 +367,7 @@ class TestTheTuiUsageLine:
             app.refresh_usage_line()
             await pilot.pause()
             assert line.display
-            body = line.renderable.plain
+            body = line.content.plain
             assert "ctx 41k" in body and "billed 118k" in body
 
             # Same values again: the change-guard keeps it a no-op.
@@ -383,10 +386,9 @@ class TestTheTuiUsageLine:
         """Wired through on_loop_event_message, reading MEMORY -- so a
         test that only calls refresh_usage_line() by hand proves nothing
         about the wiring. This drives a real two-step turn."""
+        from tests.test_tui import type_into_prompt
         from tui.app import VenastineApp
         from tui.widgets import UsageLine
-
-        from tests.test_tui import type_into_prompt
 
         mocker.patch("core.loop.api_initialization", return_value=object())
         with_tool = make_model_response(
@@ -410,5 +412,89 @@ class TestTheTuiUsageLine:
 
             line = app.query_one("#usage-line", UsageLine)
             assert line.display, "a finished turn produced no usage line"
-            body = line.renderable.plain
+            body = line.content.plain
             assert "billed 70k" in body and "ctx 40k" in body, body
+
+    @pytest.mark.asyncio
+    async def test_the_denominator_is_the_window_and_the_trigger_is_named(
+            self):
+        """Batch 119. The scale used to be the compaction TRIGGER with the
+        window appearing nowhere in the TUI but `/window`, so the line read
+        `ctx 230k/223k` about a thread with 32k of window left. A
+        denominator is read as a LIMIT: an owner traced a stuck thread from
+        that line and concluded the harness treats the window and the
+        trigger as one value.
+
+        The WIRING is what is under test. tui/widgets.py could always
+        render whatever scale it was handed; tui/app.py handed it one
+        number, so no widget-only test could have caught this.
+        """
+        from types import SimpleNamespace
+
+        from core import compaction
+        from tui.app import VenastineApp
+        from tui.widgets import UsageLine
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pump(pilot, 2)
+            app._memory = SimpleNamespace(billed_tokens=118_000,
+                                          last_input_tokens=41_000)
+            app.refresh_usage_line()
+            await pilot.pause()
+
+            window = compaction.context_limit("test-model", "ANTHROPIC")
+            _, trigger = compaction.thresholds(
+                "test-model", provider_name="ANTHROPIC")
+            assert trigger < window, (
+                "this test cannot distinguish them if they are equal")
+
+            body = app.query_one("#usage-line", UsageLine).content.plain
+            assert f"/{round(window / 1000)}k" in body, body
+            assert f"fold {round(trigger / 1000)}k" in body, body
+
+    @pytest.mark.asyncio
+    async def test_a_session_trigger_is_marked_on_the_fold_figure(self):
+        """The `*` marks ephemeral state, M14's rule -- and it has to move
+        with the number it qualifies. Left on the denominator it would now
+        be claiming the WINDOW was overridden, which /window does and
+        /trigger does not."""
+        from types import SimpleNamespace
+
+        from core import session
+        from tui.app import VenastineApp
+        from tui.widgets import UsageLine
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pump(pilot, 2)
+            session.set_trigger("ANTHROPIC", "test-model", 90_000)
+            app._memory = SimpleNamespace(billed_tokens=118_000,
+                                          last_input_tokens=41_000)
+            app.refresh_usage_line()
+            await pilot.pause()
+
+            body = app.query_one("#usage-line", UsageLine).content.plain
+            assert "fold 90k*" in body, body
+
+    @pytest.mark.asyncio
+    async def test_an_unresolvable_window_keeps_the_old_shape(self):
+        """context_limit() always answers, so this is the contained path:
+        refresh_usage_line swallows a failure to resolve either figure and
+        a usage line must never be the reason a turn dies. The trigger
+        alone is still a better scale than none, so the pre-batch-119
+        shape is what the fallback renders rather than a bare count."""
+
+        from tui.app import VenastineApp
+        from tui.widgets import UsageLine
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pump(pilot, 2)
+            line = app.query_one("#usage-line", UsageLine)
+            line.update_usage(118_000, 41_000, 230_400, False, 0)
+            await pilot.pause()
+
+            body = line.content.plain
+            assert "ctx 41k/230k" in body, body
+            assert "fold" not in body, body

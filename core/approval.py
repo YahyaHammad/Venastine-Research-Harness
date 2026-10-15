@@ -34,6 +34,7 @@ main.py, tui/app.py and core/reasoning/ all depend on both; neither
 depends on them.
 """
 
+import threading
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
@@ -58,21 +59,42 @@ class GrantBudget:
     stops applying, so the call falls back to being ASKED. With a provider
     present the run continues under supervision; without one it is denied,
     which is what a headless run does with any gated tool anyway.
+
+    §47 slice 8: GUARDED, because the sentence above -- one instance
+    shared by reference -- is exactly what makes it a shared mutable under
+    threads. `take()` is a read-modify-write, so two children reading
+    `used` before either writes it both proceed, and the ceiling that is
+    the whole point of the class is exceeded. Guarded rather than copied
+    per child for the reason the sharing exists at all: a budget rebuilt
+    per branch multiplies the ceiling by the branch count while reading as
+    if it enforced one.
     """
 
     def __init__(self, limit: int) -> None:
         self.limit = limit
         self.used = 0
+        # Not an RLock: nothing under `take` re-enters this object, and a
+        # plain Lock is what makes that claim checkable.
+        self._lock = threading.Lock()
 
     def take(self) -> bool:
-        """Consume one unit. False when the ceiling is reached."""
-        if self.used >= self.limit:
-            return False
-        self.used += 1
-        return True
+        """Consume one unit. False when the ceiling is reached.
+
+        The test AND the increment are inside the lock. Guarding only the
+        increment would keep the overshoot -- the decision to spend is the
+        read, and a decision made on a stale read is the defect.
+        """
+        with self._lock:
+            if self.used >= self.limit:
+                return False
+            self.used += 1
+            return True
 
     @property
     def exhausted(self) -> bool:
+        # One read of one int, so no lock: the answer is a snapshot either
+        # way, and every CALLER that acts on it goes through take(), which
+        # re-decides under the lock. This property is for reporting.
         return self.used >= self.limit
 
 

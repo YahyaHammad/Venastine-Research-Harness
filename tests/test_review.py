@@ -26,11 +26,12 @@ carry an authorization bundle at all.
 import pytest
 
 from core import interaction
-from core.interaction import ResponseChannel
 from core.approval import (
-    GrantBudget, RunAuthorization,
+    GrantBudget,
+    RunAuthorization,
 )
 from core.events import LoopEvent
+from core.interaction import ResponseChannel
 from core.loop import RunAgentLoop
 from tests.conftest import make_model_response, pass_stream, run_pipeline
 
@@ -204,7 +205,7 @@ class TestReviewerAgentDefinition:
         assert unavailable == []
 
     def test_it_does_not_read_project_context_or_thread_memory(self, reviewer, make_stage):
-        """The reviewer judges one run's artifacts. Project CONTEXT.md is
+        """The reviewer judges one run's artifacts. The project hub is
         untrusted-by-default content (D17) and thread memory is another
         conversation -- neither is evidence about whether a claim is true,
         and both are places a steer could be planted."""
@@ -1448,6 +1449,7 @@ class TestOneStdinReaderPerProcess:
         shape the class docstring forbids -- under --attended --review the
         attended pump swallows the review walk's answers."""
         from types import SimpleNamespace
+
         import main
 
         mocker.patch.object(main.sys, "stdin",
@@ -1930,12 +1932,23 @@ class TestCatalogsFollowTheContext:
 
         mocker.patch.object(RunAgentLoop, "run_agent_conversation",
                             side_effect=_conv)
-        agent = config_loader.get_agent("grill-me")
+        # `general` rather than `grill-me`, for TWO reasons. A16 refuses a
+        # spawn of a non-spawnable agent, and `grill-me` is one -- but the
+        # sharper reason is that `grill-me` never declared
+        # `spawn_subagent` at all, so the assertion below could not
+        # discriminate: the name was absent from the child's prompt
+        # whether or not the parent's restriction did anything. `general`
+        # declares it and is the only spawnable branch, so the
+        # suppression this test is named for is now observable.
+        agent = config_loader.get_agent("general")
         assert agent is not None
-        # A parent restricted to read + web_search: whatever grill-me
+        assert "spawn_subagent" in (agent.allowed_tools or ()), (
+            "the agent this test spawns must DECLARE spawn_subagent, or "
+            "the assertion below passes for an agent that never had it")
+        # A parent restricted to read + web_search: whatever `general`
         # declares, the child cannot spawn.
         parent = ToolContext(allowed_tools={"read", "web_search"})
-        subagent_tool.run({"agent_name": "grill-me", "task": "t"},
+        subagent_tool.run({"agent_name": "general", "task": "t"},
                           parent_context=parent)
 
         assert "spawn_subagent" not in captured["system_prompt"]
@@ -1985,8 +1998,8 @@ class TestUnpinnedReviewProperties:
         """V5's re-target check (#86 item 4): a note about #3 must not
         silently redraft #7. This is the one mutating stage, so it is the
         one place unit 6's delete-the-guard rule applies."""
-        from core.reasoning import review as review_module
         from core import config_loader
+        from core.reasoning import review as review_module
 
         config_loader.initialize(str(real_harness_tier))
         run = _reviewed_run()

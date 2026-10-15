@@ -15,12 +15,13 @@ holes or as unfireable:
   M10 the ratio is measured by characters, and never compared to a token count
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 import config
 from core import compaction, config_loader
 from core.memory import ConversationMemory
-
 
 # ---------------------------------------------------------------------------
 # ---- Helpers ---------------------------------------------------------------
@@ -46,11 +47,12 @@ def _real_agents(real_harness_tier):
 
 @pytest.fixture(autouse=True)
 def _guard_released():
-    """The re-entrancy flag is module state. A test that leaves it set
-    would make every later one silently no-op, which is the failure mode
-    hardest to read from a test report."""
+    """The re-entrancy flag is per-thread state (batch 75; it was module
+    state until NA9 made two children of one response real). A test that
+    leaves it set on the test thread would make every later one silently
+    no-op, which is the failure mode hardest to read from a test report."""
     yield
-    compaction._compacting = False
+    compaction._set_compacting(False)
 
 
 @pytest.fixture(autouse=True)
@@ -58,10 +60,18 @@ def _forget_context_window_warnings():
     """Same reasoning as the guard above, for the once-per-model warning
     set. It is module state, and a test that warms it makes the
     fallback-warning test below pass or fail depending on WHICH TESTS RAN
-    FIRST -- the kind of order dependency that reads as a flake."""
+    FIRST -- the kind of order dependency that reads as a flake.
+
+    BOTH SETS. Batch 148 added `_floor_warned` for A24's small-window
+    warning, which is the same kind of state with the same exposure: a test
+    that primes a 4,096-token window warms it, and the test that asserts the
+    line is emitted would then pass or fail on test order.
+    """
     compaction._context_window_warned.clear()
+    compaction._floor_warned.clear()
     yield
     compaction._context_window_warned.clear()
+    compaction._floor_warned.clear()
 
 
 def _thread(memory, turns=6, body="x" * 200):
@@ -339,9 +349,53 @@ def test_the_reentrancy_guard_stops_the_compactor_compacting():
     """M3. The compactor is an agent, so compacting runs the loop, which
     evaluates the trigger, which could compact. `allowed_tools: []` stops
     it calling anything; this stops it recursing."""
-    compaction._compacting = True
+    compaction._set_compacting(True)
 
     assert compaction.should_compact(10_000_000, "claude-sonnet-5") == ""
+
+
+def test_the_guard_does_not_reach_across_threads():
+    """§47 NA9 MADE THIS REACHABLE, and it is the seventh member of slice
+    8's "six things that were correct only because nothing ran alongside
+    anything else".
+
+    Two children of one model response each evaluate the trigger on their
+    own thread. A module-level flag made the second one's compaction
+    silently skip while the first was folding, and made whichever finished
+    first clear the flag under the other -- reopening the recursion window
+    the guard exists to close. Neither is loud, which is why this is
+    asserted directly rather than through a behaviour.
+
+    The window is not raced here on purpose: what is under test is the
+    SCOPE of the flag, and a bool per thread has no window to widen.
+    """
+    import threading
+
+    compaction._set_compacting(True)
+    seen = {}
+
+    def sibling():
+        # A second run, on its own thread, mid-fold on the first.
+        seen["mid_fold"] = compaction._is_compacting()
+        seen["trigger"] = compaction.should_compact(
+            10_000_000, "claude-sonnet-5")
+        compaction._set_compacting(True)
+        compaction._set_compacting(False)
+
+    worker = threading.Thread(target=sibling)
+    worker.start()
+    worker.join(timeout=5)
+
+    assert seen["mid_fold"] is False, (
+        "a sibling saw its own thread as compacting because another one "
+        "was; its own compaction is then skipped for that step")
+    assert seen["trigger"] == "compact", (
+        "the trigger declined to fire for a run that needs a fold, because "
+        "an unrelated run was folding")
+    assert compaction._is_compacting() is True, (
+        "a sibling finishing cleared THIS thread's guard, which is the "
+        "recursion the guard is structural to prevent, reached from the "
+        "other side")
 
 
 # ---------------------------------------------------------------------------
@@ -418,15 +472,35 @@ def test_the_keep_tokens_floor_can_win_over_the_turn_floor(fake_storage):
 
 
 def test_a_fully_protected_thread_folds_nothing(fake_storage):
-    """A real state, not a failure: three enormous turns can be over the
-    trigger and entirely protected. compact() reports it rather than
-    silently doing nothing, because "context is full" and "context is full
-    and I can't help" are different things to be told."""
-    memory = ConversationMemory()
-    _thread(memory, turns=2)
+    """A real state, not a failure -- but a NARROWER one since batch 119.
 
+    This test used to assert that `keep_recent_turns=5` on a two-turn
+    thread folds nothing, and that was the defect rather than the contract:
+    a turn COUNT could hold a thread of any size, and the one reported
+    occurrence held 230k tokens behind `3 - 3 = 0`. The count yields now,
+    so what is left are the two states where the floors that CAN measure
+    themselves still protect everything.
+
+    Both are asserted here, because "nothing is foldable" has to stay
+    reachable -- compact() has a notice for it and the loop has a WARNING,
+    and an outcome no input can produce is an outcome nobody maintains.
+    """
+    # One turn: it is the only turn, so there is no COMPLETED turn to fold
+    # and no boundary that is not the start of the thread. Structural, and
+    # the case sub-turn folding exists to answer.
+    single = ConversationMemory()
+    _thread(single, turns=1)
     assert compaction.compactable_span(
-        memory, overrides={**OVERRIDES, "keep_recent_turns": 5}) is None
+        single, overrides={**OVERRIDES, "keep_recent_turns": 5}) is None
+
+    # And the token floor reaching turn 0 -- a thread smaller than the
+    # verbatim tail it is asked to keep. keep_recent_tokens is absolute
+    # BECAUSE it is a size: it holds what it says and no more, so it can
+    # never hold a thread that is over the trigger.
+    small = ConversationMemory()
+    _thread(small, turns=3)
+    assert compaction.compactable_span(
+        small, overrides={**OVERRIDES, "keep_recent_tokens": 999}) is None
 
 
 def test_an_empty_thread_folds_nothing(fake_storage):
@@ -597,8 +671,19 @@ def test_an_empty_summary_skips_compaction(fake_storage, summaries):
 
 
 def test_a_fully_protected_thread_says_so(fake_storage, summaries):
+    """Batch 119 moved this off the turn count onto the single-turn case,
+    for the reason in test_a_fully_protected_thread_folds_nothing, and
+    pins the WORDING as well as the kind.
+
+    The old line made two false claims -- "Context is full" where the
+    trigger is a fraction of the window, and "the most recent turns fill it
+    entirely" where a turn count was the cause -- and an owner tracing the
+    symptom from that line concluded the harness treats the window and the
+    trigger as one number. A notice that misdirects is worse than a bare
+    status, so the text is asserted, not just the kind.
+    """
     memory = ConversationMemory()
-    _thread(memory, turns=2)
+    _thread(memory, turns=1)
     summaries("unused")
 
     notice = compaction.compact(
@@ -606,6 +691,10 @@ def test_a_fully_protected_thread_says_so(fake_storage, summaries):
         overrides={**OVERRIDES, "keep_recent_turns": 5})
 
     assert notice["kind"] == "compaction_blocked"
+    assert notice["status"] == "blocked"
+    assert "full" not in notice["text"], (
+        "the trigger is a fraction of the window, so this is not 'full'")
+    assert "trigger" in notice["text"]
     assert fake_storage.latest_checkpoint(memory.thread_id) is None
 
 
@@ -658,7 +747,7 @@ def test_the_guard_is_released_after_a_compaction(fake_storage, summaries):
 
     compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC", overrides=OVERRIDES)
 
-    assert compaction._compacting is False
+    assert compaction._is_compacting() is False
 
 
 def test_the_guard_is_released_when_the_compactor_raises(
@@ -672,7 +761,7 @@ def test_the_guard_is_released_when_the_compactor_raises(
         compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC",
                            overrides=OVERRIDES)
 
-    assert compaction._compacting is False
+    assert compaction._is_compacting() is False
 
 
 def test_the_compactor_runs_with_no_tools(fake_storage, summaries):
@@ -897,7 +986,6 @@ def test_a_trigger_too_close_to_a_configured_cap_warns(caplog, mocker):
     spend cap lets a thread reach a size where the cap ends the turn after
     one response -- compaction would then only ever fire on the turn
     AFTER the one it should have saved."""
-    import core.config_loader as config_loader_module
 
     mocker.patch.object(config_loader, "get_settings",
                         return_value={"max_token_budget": 250_000})
@@ -913,7 +1001,6 @@ def test_an_uncapped_run_never_warns_no_matter_how_tight(caplog, mocker):
     Uncapped -- the default -- nothing competes with compaction, and a
     warning about a ceiling that does not exist is exactly how a real
     warning becomes one nobody reads."""
-    import core.config_loader as config_loader_module
 
     assert config_loader.spend_cap() is None
     with caplog.at_level("WARNING", logger="core.config_loader"):
@@ -939,7 +1026,6 @@ def test_the_headroom_advisory_is_silent_off_the_startup_path(caplog, mocker):
     configuration complaint dozens of times per conversation, which is how
     a real warning becomes one nobody reads. initialize() passes
     warn=True; nothing else does."""
-    import core.config_loader as config_loader_module
 
     mocker.patch.object(config_loader, "get_settings",
                         return_value={"max_token_budget": 250_000})
@@ -955,3 +1041,1121 @@ def test_validation_still_raises_off_the_startup_path():
     without warn=True."""
     with pytest.raises(ValueError, match="strength"):
         config_loader.effective_compaction({"strength": 9})
+
+def test_compaction_tells_the_compactor_whose_thread_it_is(fake_storage,
+                                                           mocker):
+    """§47. `_summarize` takes the parent thread as an argument, so a test
+    of _summarize can only say what it does with one -- this is where it
+    comes from, and the summary is OF this thread in the only sense that
+    matters."""
+    memory = ConversationMemory()
+    _thread(memory)
+
+    captured = {}
+    mocker.patch.object(
+        compaction, "_summarize",
+        side_effect=lambda *a, **kw: (captured.update(kw), "A summary.")[1])
+
+    compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC",
+                       overrides=OVERRIDES)
+
+    assert captured.get("parent_thread_id") == memory.thread_id, (
+        f"the compactor was told {captured.get('parent_thread_id')!r}; "
+        "nothing else records which conversation the summary is of")
+
+# ---------------------------------------------------------------------------
+# ---- Batch 119: the trigger is a CLAMPED HEADROOM -------------------------
+# ---------------------------------------------------------------------------
+
+class TestTheHeadroomIsWhatTheTriggerActuallyReserves:
+    """The fraction names the headroom, and the headroom is what the step
+    after the trigger has to fit inside. There is no context-overflow
+    handler in core/, so this number is the only protection a thread has
+    against a prompt the provider refuses.
+
+    Asserted as the three REGIMES rather than against a table of literals:
+    a test that restated the arithmetic would pass for any fraction.
+    """
+
+    def test_a_large_window_gets_the_fraction_exactly(self):
+        """Above the crossover the clamps must not bind at all -- the
+        owner asked for 0.90 and a 262k or 1M thread has to get 0.90, not
+        0.90-ish. Exactness matters because the off-by-one is invisible:
+        truncating the headroom down pushed the trigger one token UP."""
+        for window in (163_840, 200_000, 262_144, 1_000_000):
+            assert (window - compaction.headroom_for(window)
+                    == int(config.COMPACTION_TRIGGER_FRACTION * window)), window
+
+    def test_a_small_window_keeps_an_absolute_floor_of_headroom(self):
+        """The share is the wrong instrument at the bottom of the roster,
+        because what the headroom must contain does NOT scale with the
+        window: one `max_read_chars` result is 12,500 proxy tokens whether
+        the model holds 64k or a million. A bare 0.90 leaves a 64k window
+        6,553 tokens, which one ordinary file read overflows."""
+        headroom = compaction.headroom_for(65_536)
+
+        assert headroom == config.COMPACTION_MIN_HEADROOM_TOKENS
+        assert headroom > (1 - config.COMPACTION_TRIGGER_FRACTION) * 65_536
+        assert headroom // compaction.CHARS_PER_TOKEN * 4 >= 12_500, (
+            "the floor no longer covers one max_read_chars result")
+
+    def test_the_floor_cannot_eat_a_small_window_whole(self):
+        """The cap is the other clamp and it is load-bearing, not
+        decorative: 16k of a 32k window is half of it, and an unclamped
+        floor under a tiny window produces a trigger at or below zero --
+        or one under keep_recent_tokens, where effective_compaction()
+        raises on every evaluation.
+
+        THE LAST CLAUSE WAS A CLAIM THIS TEST CANNOT MAKE, and it is
+        TECHNICAL_DEBT 42. It asserted `trigger > 0` while naming
+        effective_compaction() raising, which are different claims, and of
+        the TWO dependent floors that function validates it named the one
+        that never bites first. 8,192 is in the list above and its raw
+        trigger is 6,144 -- under warning_margin_tokens (8,000), so
+        effective_compaction refused it for the whole life of this test.
+
+        The clause is now gone rather than asserted, because the cap
+        CANNOT deliver it: at 0.75*window the raw trigger clears 8,000
+        only from 10,667 up, so no clamp on headroom_for makes a small
+        window acceptable. That is derived_trigger's floor, and the claim
+        lives with it in
+        TestTheDerivedTriggerStaysAboveWhatTheValidatorsDemand below.
+        """
+        for window in (8_192, 16_384, 32_768):
+            headroom = compaction.headroom_for(window)
+            trigger = window - headroom
+
+            assert headroom <= config.COMPACTION_MAX_HEADROOM_FRACTION * window
+            assert headroom < window
+            assert trigger > 0
+
+    def test_the_headroom_never_shrinks_as_the_window_grows(self):
+        """Monotonicity across the clamps. Two piecewise rules meeting in
+        the middle is exactly where a non-monotonic step hides, and a
+        window that grows while its headroom shrinks would mean a bigger
+        model is LESS safe than a smaller one."""
+        windows = [4_096 * n for n in range(1, 120)]
+        headrooms = [compaction.headroom_for(w) for w in windows]
+
+        assert headrooms == sorted(headrooms)
+        assert all(w - h > 0 for w, h in zip(windows, headrooms))
+
+
+# ---------------------------------------------------------------------------
+# ---- Batch 127: TECHNICAL_DEBT 42, the trigger's dependent floor -----------
+# ---------------------------------------------------------------------------
+
+class TestTheDerivedTriggerStaysAboveWhatTheValidatorsDemand:
+    """effective_compaction() validates the trigger against TWO settings of
+    identical form, and the derivation could produce a value that fails one
+    of them. `should_compact()` runs at the top of every step and both
+    `_maybe_compact` call sites are bare `yield from`, so that was not a
+    mistimed fold -- it was every turn on the model dying before the first
+    model call.
+
+    MEASURED, not reasoned. The raw derivation is 0.75*window at the small
+    end, so it clears keep_recent_tokens (4,000) from a window of 5,334 up
+    and warning_margin_tokens (8,000) only from 10,667 up. Bisected against
+    the code: the largest window that raises is 10,666.
+
+    THE ROUTE MATTERS AND THE REGISTER NAMED THE WRONG ONE. /window refuses
+    anything at or below 20,000, which is stricter than 10,666, so the
+    command the entry blamed is the one route that was covered. The
+    unguarded source is what the PROVIDER reported -- and 8,192 is the
+    commonest real window a self-hosted or gateway endpoint returns.
+    """
+
+    def test_a_provider_reported_small_window_no_longer_kills_every_turn(self):
+        """THE TEST THAT WOULD HAVE CAUGHT IT, and it has to drive
+        should_compact rather than headroom_for: the defect was not in the
+        arithmetic, it was in what the arithmetic was then handed to. A
+        unit test on the derivation puts the needle inside its own
+        haystack.
+
+        8,192 primed into the window cache is source 1 of context_limit --
+        what the provider said -- which is the one source with no guard in
+        front of it."""
+        from core import client
+
+        client._context_window_cache[("probe-provider", "small-model")] = 8_192
+
+        # Before batch 127 this raised ValueError out of a function that
+        # runs at the top of every step.
+        action = compaction.should_compact(
+            5_000, "small-model", provider_name="probe-provider")
+
+        assert action in ("", "warn", "compact")
+
+    def test_the_raw_derivation_is_still_refused_and_the_floor_is_why(
+            self, mocker):
+        """The floor is doing the work, not a change in the arithmetic.
+        Asserted as BOTH halves so a later author cannot read the pass as
+        'the derivation got bigger': the raw value is still rejected by the
+        validator, and derived_trigger no longer returns it."""
+        mocker.patch.object(compaction, "context_limit", return_value=8_192)
+
+        raw = 8_192 - compaction.headroom_for(8_192)
+        assert raw == 6_144
+        with pytest.raises(ValueError, match="warning_margin_tokens"):
+            config_loader.effective_compaction({"trigger_tokens": raw})
+
+        trigger = compaction.derived_trigger("small-model")
+
+        assert trigger > raw
+        config_loader.effective_compaction({"trigger_tokens": trigger})
+
+    @pytest.mark.parametrize("window", [1, 4_096, 8_192, 10_666, 10_667,
+                                        16_384, 20_001, 32_768, 65_536])
+    def test_no_window_derives_a_trigger_the_validator_refuses(
+            self, window, mocker):
+        """The claim the old clamp test NAMED and could not make, now
+        asserted through effective_compaction itself rather than against
+        whichever of the two floors the author had in mind. Parametrized
+        across the boundary so a failure names the window."""
+        mocker.patch.object(compaction, "context_limit", return_value=window)
+
+        trigger = compaction.derived_trigger("any-model")
+
+        config_loader.effective_compaction({"trigger_tokens": trigger})
+
+    def test_the_boundary_between_derived_and_floored_is_exact(self, mocker):
+        """10,666 / 10,667, bisected against the code. Exactness matters
+        because this is where the value stops being a derivation: one side
+        honours the fraction and the other returns the floor, and a record
+        that names the wrong boundary is what this batch is about.
+
+        THE TWO CURVES MEET EXACTLY HERE, with no gap and no jump -- at
+        10,667 the derivation is 8,001, which IS the floor. That is not a
+        coincidence to be asserted loosely: the floor is margin + 1 and the
+        boundary is the first window whose 0.75 share reaches margin + 1,
+        so they are the same number by construction. Written as a
+        continuity check, because a floor that overlapped would hide a
+        range where the trigger moved without the window moving, and one
+        that left a gap would hide a window with no acceptable trigger at
+        all.
+
+        AND THE RAW CURVE IS FLAT IN PLACES, which is why the first window
+        strictly above the floor is 10,669 and not 10,668. headroom_for
+        truncates, so the raw trigger gains 3 tokens every 4 of window and
+        repeats a value at each step: 10,667 and 10,668 both derive 8,001.
+        Measured, not predicted -- the first draft of this test asserted
+        10,668 and was wrong twice."""
+        floor = compaction._dependent_floor()
+
+        def derived_for(window):
+            mocker.patch.object(compaction, "context_limit",
+                                return_value=window)
+            return compaction.derived_trigger("m")
+
+        def raw_for(window):
+            return max(1, window - compaction.headroom_for(window))
+
+        assert raw_for(10_666) == 8_000 < floor
+        assert derived_for(10_666) == floor
+
+        assert raw_for(10_667) == floor
+        assert derived_for(10_667) == floor
+
+        assert raw_for(10_668) == floor          # flat: the truncation
+        assert derived_for(10_668) == floor
+
+        assert raw_for(10_669) == 8_002 > floor
+        assert derived_for(10_669) == 8_002
+
+    def test_the_floor_is_read_from_the_settings_and_not_written_in(
+            self, mocker):
+        """8,001 would be correct today and wrong the moment someone edited
+        config.yaml:830. The floor must follow the validator it exists to
+        satisfy, so this MOVES the setting and re-derives rather than
+        asserting the shipped number."""
+        mocker.patch.object(
+            config_loader, "get_settings",
+            return_value={"compaction": {"warning_margin_tokens": 20_000}})
+        mocker.patch.object(compaction, "context_limit", return_value=8_192)
+
+        assert compaction._dependent_floor() == 20_001
+        assert compaction.derived_trigger("m") == 20_001
+
+    def test_the_floor_tracks_whichever_dependent_floor_is_larger(
+            self, mocker):
+        """BOTH validators, not the one that bites today. keep_recent_tokens
+        never bites first under the shipped numbers, which is exactly what
+        made checking only it read as covered -- so the floor is asserted
+        against the case where it is the larger of the two."""
+        mocker.patch.object(
+            config_loader, "get_settings",
+            return_value={"compaction": {"keep_recent_tokens": 30_000,
+                                         "warning_margin_tokens": 8_000}})
+        mocker.patch.object(compaction, "context_limit", return_value=8_192)
+
+        assert compaction._dependent_floor() == 30_001
+        config_loader.effective_compaction(
+            {"trigger_tokens": compaction.derived_trigger("m")})
+
+    def test_a_large_window_is_untouched_by_the_floor(self, mocker):
+        """The floor must not become a second trigger policy. Above the
+        boundary the fraction has to survive EXACTLY -- the owner asked for
+        0.90 and a 262k thread still gets 0.90, which is the property
+        test_a_large_window_gets_the_fraction_exactly guards for
+        headroom_for and this guards for the value callers actually read."""
+        for window in (163_840, 200_000, 262_144, 1_000_000):
+            mocker.patch.object(compaction, "context_limit",
+                                return_value=window)
+
+            assert (compaction.derived_trigger("m")
+                    == int(config.COMPACTION_TRIGGER_FRACTION * window)), window
+
+    def test_the_floor_falls_back_rather_than_becoming_the_blocker(
+            self, mocker):
+        """A floor that cannot be computed must never be the reason a
+        thread cannot compact. effective_compaction() cannot raise under
+        the shipped default, but a settings.json naming a small
+        trigger_tokens makes it raise on the way to reporting the margins,
+        and derived_trigger has callers outside thresholds()."""
+        mocker.patch.object(config_loader, "effective_compaction",
+                            side_effect=ValueError("settings are incoherent"))
+
+        assert compaction._dependent_floor() == max(
+            config.COMPACTION_WARNING_MARGIN_TOKENS,
+            config.COMPACTION_KEEP_RECENT_TOKENS) + 1
+
+
+# ---------------------------------------------------------------------------
+# ---- Batch 119: the turn COUNT yields rather than vetoes -------------------
+# ---------------------------------------------------------------------------
+
+class TestTheTurnCountFloorYieldsInsteadOfBlockingEveryFold:
+    """M5 as amended. Of its three floors only two can measure what they
+    hold: the current turn is structural and keep_recent_tokens is a size.
+    keep_recent_turns is a COUNT, so it cannot tell three small turns from
+    three enormous ones -- and on the thread that produced this batch it
+    held 230k tokens, through a model switch to a 1M window and through a
+    restart, with no way out from inside the app.
+    """
+
+    def test_a_three_turn_thread_is_foldable_under_a_three_turn_floor(
+            self, fake_storage):
+        """The owner's shape exactly: as many turns as the floor keeps.
+        `3 - 3 = 0` blocked every fold; the two size-aware floors allow
+        one, so one happens."""
+        memory = ConversationMemory()
+        _thread(memory, turns=3)
+        rows = fake_storage._messages_by_thread[memory.thread_id]
+
+        watermark = compaction.compactable_span(
+            memory, overrides={**OVERRIDES, "keep_recent_turns": 3})
+
+        assert watermark is not None, (
+            "a turn COUNT held a whole thread -- the batch-119 defect")
+        assert watermark in [row["id"] for row in rows]
+
+    def test_it_still_applies_when_it_leaves_something_foldable(
+            self, fake_storage):
+        """The preference is not deleted, and this is the half that proves
+        it: with room to spare the count still wins over the token floor,
+        exactly as M5 says. A fix that simply removed the floor would pass
+        every other test in this class."""
+        memory = ConversationMemory()
+        _thread(memory, turns=6)
+        rows = fake_storage._messages_by_thread[memory.thread_id]
+
+        strict = compaction.compactable_span(
+            memory, overrides={**OVERRIDES, "keep_recent_turns": 4})
+        lenient = compaction.compactable_span(
+            memory, overrides={**OVERRIDES, "keep_recent_turns": 1})
+
+        ids = [row["id"] for row in rows]
+        assert ids.index(strict) < ids.index(lenient), (
+            "keep_recent_turns stopped protecting anything at all")
+
+    def test_the_current_turn_stays_absolute_when_the_count_yields(
+            self, fake_storage):
+        """The floor that must NOT yield. Folding the current turn would
+        summarize the messages the model is reasoning about right now, and
+        that is a correctness rule rather than a quality preference -- so
+        a yielding count must not reach past it."""
+        memory = ConversationMemory()
+        _thread(memory, turns=4)
+        rows = fake_storage._messages_by_thread[memory.thread_id]
+
+        watermark = compaction.compactable_span(
+            memory, current_turn_start=1,
+            overrides={**OVERRIDES, "keep_recent_turns": 9})
+
+        # Turn 1 begins at row 2 (two rows per turn), so the only legal
+        # boundary is the row before it.
+        assert watermark == rows[1]["id"]
+
+    def test_the_token_floor_stays_absolute_when_the_count_yields(
+            self, fake_storage):
+        """The other floor that must not yield, and for a different
+        reason: it is a SIZE, so it protects exactly what it says and can
+        never be what holds a thread that is over the trigger."""
+        memory = ConversationMemory()
+        _thread(memory, turns=6)
+
+        reached = compaction.compactable_span(
+            memory, overrides={**OVERRIDES, "keep_recent_turns": 9,
+                               "keep_recent_tokens": 250})
+        unreached = compaction.compactable_span(
+            memory, overrides={**OVERRIDES, "keep_recent_turns": 9})
+
+        rows = fake_storage._messages_by_thread[memory.thread_id]
+        ids = [row["id"] for row in rows]
+        assert ids.index(reached) < ids.index(unreached), (
+            "keep_recent_tokens was ignored once the count yielded")
+
+    def test_yielding_goes_all_the_way_rather_than_one_turn_at_a_time(
+            self, fake_storage):
+        """NOT a walk-down from 3 to 2 to 1 taking the first count that
+        works. On the owner's thread `keep_recent_turns=2` yields a
+        boundary that folds 0.1% of it, writes a checkpoint, and then
+        answers no-progress forever -- a compaction that succeeds and
+        helps nothing, with advances() permanently satisfied. Yielding to
+        the size-aware floors is what makes the model call worth spending.
+        """
+        memory = ConversationMemory()
+        _thread(memory, turns=5)
+        rows = fake_storage._messages_by_thread[memory.thread_id]
+        ids = [row["id"] for row in rows]
+
+        yielded = compaction.compactable_span(
+            memory, overrides={**OVERRIDES, "keep_recent_turns": 5})
+        one_less = compaction.compactable_span(
+            memory, overrides={**OVERRIDES, "keep_recent_turns": 4})
+
+        assert ids.index(yielded) > ids.index(one_less), (
+            "the count was relaxed by one step instead of yielding")
+
+# ---------------------------------------------------------------------------
+# ---- Batch 120: a fold INSIDE one turn, when nothing else is legal ---------
+# ---------------------------------------------------------------------------
+
+def _stepped_turn(memory, steps=6, body="y" * 400, opening="the long task"):
+    """One user turn followed by `steps` complete steps.
+
+    The archive shape this produces is the one production writes --
+    `user, (assistant, tool)*` -- because D20 persists the assistant row
+    carrying its tool_use before dispatch and the answering row after it
+    returns. Measured against the reported thread: 47 assistant rows inside
+    one turn, 20 of its steps carrying between 2 and 5 tool rows.
+    """
+    memory.add_user_message(opening)
+    for index in range(steps):
+        # ToolCallRequest-SHAPED, as add_assistant_message's contract
+        # requires: it reads `tc.id`, so a dict dies on attribute access.
+        call = SimpleNamespace(id=f"c{index}", name="web_search",
+                               input={"q": str(index)})
+        memory.add_assistant_message(_Resp("", tool_calls=[call]))
+        memory.add_tool_result(f"c{index}", {"result": f"{index} {body}"})
+
+
+def _sides_of(rows, watermark):
+    """`(folded, kept)` row lists either side of a watermark."""
+    ids = [row["id"] for row in rows]
+    cut = ids.index(watermark) + 1
+    return rows[:cut], rows[cut:]
+
+
+def _unanswered(rows):
+    """Tool calls made in `rows` with no result in `rows`, and vice versa.
+
+    M4's rule, CHECKED. A `tool_result` with no preceding `tool_use` is an
+    HTTP 400 on Anthropic, so a boundary that splits a step is a wire error
+    on the next call rather than a quality problem -- and asserting a row
+    index would pin the arithmetic instead of the property.
+    """
+    import json
+
+    called, answered = set(), set()
+    for row in rows:
+        if row["role"] == "assistant":
+            payload = row["content"]
+            # FakeStorage holds already-decoded values because nothing
+            # serialises on its write path, where production reads the JSON
+            # string the column actually holds (see
+            # test_fake_storage_mirror.py's "the one difference that is not
+            # a divergence"). This helper runs against both.
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+            called |= {c["id"] for c in payload.get("tool_calls") or ()}
+        elif row["role"] == "tool":
+            answered.add(row["tool_call_id"])
+    return called - answered, answered - called
+
+
+class TestAFoldInsideOneTurnWhenNothingElseIsLegal:
+    """TECHNICAL_DEBT 40, the residue batch 119 left.
+
+    Batch 119 made the turn COUNT yield, which unsticks any thread with two
+    completed turns. A thread whose only turn is the one still running has
+    no turn-aligned boundary at all: the reported case was 142 rows and
+    168,311 proxy tokens inside ONE turn, and the best legal fold freed 253.
+
+    WHAT WOULD MAKE THIS CLASS VACUOUS: asserting that a boundary exists.
+    The boundary existing was never the hard part -- M4 holding at it is, so
+    every placement test below walks both sides for unanswered calls.
+    """
+
+    def test_a_long_turn_BEHIND_a_completed_one_still_folds_inside(
+            self, fake_storage):
+        """The gap this class's own vacuity note did not cover: every case
+        below it passes `current_turn_start=0`, so none of them has a
+        completed turn in front of the long one.
+
+        `completed_turns()` is `len(turn_start_ids) - 1`, so it is at least
+        1 for any thread with two user rows -- which put the sub-turn path
+        behind `cutoff < 1` out of reach on exactly the shape that is MORE
+        common than the single-turn thread batch 120 fixed. Measured before
+        the fix: one 40-step turn alone folded 90.0%, and the identical 40
+        steps behind one short exchange folded 0.0%, turn-aligned, and then
+        answered `no-progress` forever with no notice and nothing on screen.
+
+        NOT `OVERRIDES`: its `keep_recent_tokens` is 1, and the gate's floor
+        IS keep_recent_tokens, so a nine-token fold genuinely clears a floor
+        of one. The shipped default is 4000, against which the leading
+        exchange is nothing -- so the floor has to be meaningful relative to
+        the thread for this shape to be the one the defect was about.
+        """
+        overrides = dict(OVERRIDES, keep_recent_tokens=200)
+        memory = ConversationMemory()
+        memory.add_user_message("a one-line question")
+        memory.add_assistant_message(_Resp("a one-line answer"))
+        _stepped_turn(memory, steps=12)
+
+        rows = fake_storage._messages_by_thread[memory.thread_id]
+        starts = [i for i, row in enumerate(rows) if row["role"] == "user"]
+        assert len(starts) == 2, "the fixture is not the two-turn shape"
+
+        watermark = compaction.compactable_span(
+            memory, current_turn_start=1, overrides=overrides)
+        assert watermark is not None
+
+        ids = [row["id"] for row in rows]
+        cut = ids.index(watermark) + 1
+        assert cut not in starts, (
+            "the boundary is a turn start, so the fold is the 0.0% one "
+            "again -- a completed turn in front of the long one has put "
+            "the sub-turn path out of reach")
+
+        total = sum(len(row["content"]) for row in rows)
+        folded = sum(len(rows[i]["content"]) for i in range(cut))
+        assert folded > total // 2, (
+            f"the boundary freed {folded} of {total} characters, which is "
+            f"not worth a model call -- the point of the gate is that a "
+            f"legal fold and a useful one are different things")
+
+    def test_a_turn_aligned_fold_that_clears_the_floor_is_still_preferred(
+            self, fake_storage):
+        """The other side of the same gate, and the reason it is a FLOOR
+        rather than a comparison.
+
+        `test_a_turn_aligned_fold_is_preferred_when_one_exists` below pins
+        that sub-turn folding must not fire while a turn-aligned boundary
+        is available. That stays true -- but it would also stay true if the
+        gate simply took whichever candidate folded more, which is a
+        different rule with a different failure mode. This asserts the
+        boundary is a turn start when the turn-aligned fold clears
+        keep_recent_tokens, so "prefer turn-aligned" is what is tested and
+        not "prefer bigger".
+
+        Same floor as the case above, so the two differ only in the shape of
+        the thread and not in the setting being measured.
+        """
+        overrides = dict(OVERRIDES, keep_recent_tokens=200)
+        memory = ConversationMemory()
+        # Two substantial completed turns, then a short current one: the
+        # turn-aligned boundary clears the 200-token floor comfortably,
+        # while a sub-turn fold of three tiny steps would free almost
+        # nothing -- so "prefer bigger" and "prefer turn-aligned" give the
+        # same answer here only if the gate is the floor.
+        for index in range(2):
+            memory.add_user_message(f"question {index} " + "x" * 2000)
+            memory.add_assistant_message(_Resp(f"answer {index} " + "x" * 2000))
+        _stepped_turn(memory, steps=3, body="y" * 10)
+
+        rows = fake_storage._messages_by_thread[memory.thread_id]
+        starts = [i for i, row in enumerate(rows) if row["role"] == "user"]
+
+        watermark = compaction.compactable_span(
+            memory, current_turn_start=2, overrides=overrides)
+
+        ids = [row["id"] for row in rows]
+        cut = ids.index(watermark) + 1
+        assert cut in starts, (
+            "a turn-aligned boundary that clears keep_recent_tokens was "
+            "passed over for a sub-turn one, which inverts the last-resort "
+            "rule batch 120 established")
+
+    def test_a_single_turn_thread_can_now_be_folded(self, fake_storage):
+        memory = ConversationMemory()
+        _stepped_turn(memory, steps=6)
+
+        watermark = compaction.compactable_span(
+            memory, current_turn_start=0, overrides=OVERRIDES)
+
+        assert watermark is not None, (
+            "one turn of six steps is still entirely unfoldable")
+
+    def test_the_boundary_never_splits_a_step(self, fake_storage):
+        """M4 at the new boundary, checked on both sides rather than
+        asserted as an index. This is the claim that makes the batch safe:
+        the archive inside a turn is `user, (assistant, tool+)*`, so
+        cutting immediately before an assistant row leaves every earlier
+        call answered -- and a parallel dispatch writes several tool rows
+        for one assistant row, which is what a naive boundary splits."""
+        memory = ConversationMemory()
+        memory.add_user_message("the long task")
+        for index in range(5):
+            calls = [SimpleNamespace(id=f"c{index}_{n}", name="web_search",
+                                      input={"q": str(n)})
+                     for n in range(3)]
+            memory.add_assistant_message(_Resp("", tool_calls=calls))
+            for n in range(3):
+                memory.add_tool_result(f"c{index}_{n}",
+                                       {"result": "z" * 400})
+
+        watermark = compaction.compactable_span(
+            memory, current_turn_start=0, overrides=OVERRIDES)
+        assert watermark is not None
+
+        rows = fake_storage._messages_by_thread[memory.thread_id]
+        folded, kept = _sides_of(rows, watermark)
+
+        assert kept and kept[0]["role"] == "assistant", (
+            "the kept tail must open on a step, not mid-step")
+        for label, side in (("folded", folded), ("kept", kept)):
+            missing, orphaned = _unanswered(side)
+            assert not missing, f"{label} side has unanswered calls: {missing}"
+            assert not orphaned, f"{label} side has orphaned results: {orphaned}"
+
+    def test_the_turns_own_request_survives_the_fold(self, fake_storage):
+        """The whole of M5's objection, answered. Folding the current turn
+        would 'rewrite the question mid-answer' -- so the question is not
+        rewritten: it falls on the covered side and comes back verbatim
+        through the same mechanism M9 uses for pinned rows."""
+        memory = ConversationMemory()
+        _stepped_turn(memory, steps=6, opening="EXACT WORDING MATTERS HERE")
+
+        watermark = compaction.compactable_span(
+            memory, current_turn_start=0, overrides=OVERRIDES)
+        rows = fake_storage._messages_by_thread[memory.thread_id]
+        folded, _ = _sides_of(rows, watermark)
+
+        assert folded[0]["role"] == "user", "the request is on the folded side"
+        readded = fake_storage.pinned_through(memory.thread_id, watermark)
+        assert [r["role"] for r in readded] == ["user"]
+        assert readded[0]["content"] == "EXACT WORDING MATTERS HERE"
+
+    def test_a_turn_aligned_fold_is_preferred_when_one_exists(
+            self, fake_storage):
+        """LAST RESORT means last. A turn-aligned boundary needs no row
+        re-added and no amendment to M5 at all, so sub-turn folding must
+        not fire while one is available -- which is also what keeps every
+        pre-batch-120 thread folding exactly where it did."""
+        memory = ConversationMemory()
+        _thread(memory, turns=4)
+        rows = fake_storage._messages_by_thread[memory.thread_id]
+        starts = [i for i, row in enumerate(rows) if row["role"] == "user"]
+
+        watermark = compaction.compactable_span(
+            memory, current_turn_start=3, overrides=OVERRIDES)
+
+        ids = [row["id"] for row in rows]
+        cut = ids.index(watermark) + 1
+        assert cut in starts, (
+            "the boundary is not a turn start, so a sub-turn fold fired "
+            "while a turn-aligned one was available")
+
+    def test_a_turn_with_one_step_still_folds_nothing(self, fake_storage):
+        """One step cannot be folded without folding all of it, which
+        leaves the model the request and a summary of the only work it has
+        done -- and nothing to continue from."""
+        memory = ConversationMemory()
+        _stepped_turn(memory, steps=1)
+
+        assert compaction.compactable_span(
+            memory, current_turn_start=0, overrides=OVERRIDES) is None
+
+    def test_a_bare_request_with_no_steps_folds_nothing(self, fake_storage):
+        memory = ConversationMemory()
+        memory.add_user_message("just asked, nothing done yet")
+
+        assert compaction.compactable_span(
+            memory, current_turn_start=0, overrides=OVERRIDES) is None
+
+    def test_the_recent_steps_stay_verbatim(self, fake_storage):
+        """keep_recent_tokens, counted over STEPS instead of turns -- the
+        same floor and the same character proxy, so the two paths cannot
+        promise different amounts of verbatim tail."""
+        memory = ConversationMemory()
+        _stepped_turn(memory, steps=10, body="y" * 400)
+
+        generous = compaction.compactable_span(
+            memory, current_turn_start=0,
+            overrides={**OVERRIDES, "keep_recent_tokens": 900})
+        thrifty = compaction.compactable_span(
+            memory, current_turn_start=0,
+            overrides={**OVERRIDES, "keep_recent_tokens": 1})
+
+        rows = fake_storage._messages_by_thread[memory.thread_id]
+        ids = [row["id"] for row in rows]
+        assert ids.index(generous) < ids.index(thrifty), (
+            "a larger keep_recent_tokens did not hold back more steps")
+
+    def test_a_second_fold_of_the_same_turn_needs_the_turn_to_have_grown(
+            self, fake_storage):
+        """The watermark only ever moves forward, and compact() spends no
+        model call when it would not. A turn that has not advanced must
+        produce the same boundary, so advances() refuses and the outcome is
+        no-progress rather than a summary of a summary."""
+        memory = ConversationMemory()
+        _stepped_turn(memory, steps=8)
+
+        first = compaction.compactable_span(
+            memory, current_turn_start=0, overrides=OVERRIDES)
+        again = compaction.compactable_span(
+            memory, current_turn_start=0, overrides=OVERRIDES)
+        assert first == again
+
+        for index in range(8, 12):
+            call = SimpleNamespace(id=f"c{index}", name="web_search",
+                                   input={"q": str(index)})
+            memory.add_assistant_message(_Resp("", tool_calls=[call]))
+            memory.add_tool_result(f"c{index}", {"result": "y" * 400})
+
+        later = compaction.compactable_span(
+            memory, current_turn_start=0, overrides=OVERRIDES)
+        rows = fake_storage._messages_by_thread[memory.thread_id]
+        ids = [row["id"] for row in rows]
+        assert ids.index(later) > ids.index(first), (
+            "the boundary did not advance as the turn grew")
+
+    def test_the_stuck_thread_folds_and_the_view_can_be_sent(
+            self, fake_storage, summaries):
+        """THE CLAIM THE REST OF THIS CLASS DOES NOT MAKE. Every test above
+        is about where the boundary goes or what comes back; none of them
+        says the thread actually compacts, or that what the model is handed
+        afterwards is a legal request. That is the whole batch, so it runs
+        compact() for real and then reads the rebuilt view.
+
+        The three properties, and each would be a different bug:
+          * the outcome is `folded`, not `blocked` -- the reported state;
+          * the view opens with a summary and the request VERBATIM, so the
+            question was carried rather than paraphrased;
+          * no tool_result in the view is unanswered, which is M4 reaching
+            the derived view rather than just the watermark -- that is an
+            HTTP 400 on Anthropic, on a thread that was working a moment
+            ago.
+        """
+        from core.memory import SUMMARY_PREFIX
+
+        memory = ConversationMemory()
+        _stepped_turn(memory, steps=8, opening="THE ONE LONG REQUEST")
+        summaries("A summary of the folded work.")
+
+        outcome = compaction.compact(
+            memory, "claude-sonnet-5", "ANTHROPIC",
+            current_turn_start=0, overrides=OVERRIDES)
+
+        assert outcome["status"] == "folded", outcome
+        assert fake_storage.latest_checkpoint(memory.thread_id) is not None
+
+        view = memory.messages
+        assert view[0]["content"].startswith(SUMMARY_PREFIX)
+        assert view[1]["content"] == "THE ONE LONG REQUEST", (
+            "the turn's request was summarized away instead of carried")
+        assert len(view) < len(
+            fake_storage._messages_by_thread[memory.thread_id]), (
+            "the view is no smaller than the archive")
+
+        called = {c["id"] for m in view for c in (m.get("tool_calls") or ())}
+        answered = {m["tool_call_id"] for m in view if m["role"] == "tool"}
+        assert answered <= called, (
+            f"the view carries tool_results for calls it cannot see: "
+            f"{answered - called} -- an HTTP 400 on Anthropic")
+
+
+# ---------------------------------------------------------------------------
+# ---- Batch 148: the all-pinned door, the floor's loud half, the backstop's
+# ---- order, and the cap that stopped tracking the trigger -----------------
+# ---------------------------------------------------------------------------
+
+class TestTheAllPinnedDoorIsOpenToBothStrategies:
+    """S11-02. `if not segment and not chaining:` let the SHIPPED strategy
+    fall through the branch built for this state, into the exact harm the
+    no-progress guard twenty lines above names as its own reason.
+
+    MEASURED THROUGH REAL STORAGE FIRST, then written against the fake:
+    three pinned turns in a ten-turn thread on the real `compact()` handed
+    the compactor
+    "Summary of everything before this point:\n<previous summary>\n\n"
+    and nothing else, at a 379-character target, and the stored checkpoint
+    went from 2,489 characters to 23 -- reported as status="folded",
+    kind="compaction", "0 earlier messages compacted into a summary". That
+    matters because a fake agreeing with wrong production code is this
+    project's #35, and the fake's exclusion rule was checked against the
+    real one rather than assumed.
+    """
+
+    CHAIN = {**OVERRIDES, "strategy": "chain"}
+
+    def _chained_thread(self, memory, summaries):
+        """A thread with a checkpoint, then new turns that are ALL pinned."""
+        calls = summaries("PRIOR SUMMARY TEXT", "Second summary.")
+        _thread(memory, turns=6)
+        first = compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC",
+                                   overrides=self.CHAIN)
+        assert first["status"] == "folded", first
+        _thread(memory, turns=4)
+        memory.pin_last(8)
+        return calls
+
+    def test_a_chained_fold_with_nothing_unpinned_is_all_pinned(
+            self, fake_storage, summaries):
+        """The branch is reached on the SEGMENT, so the strategy no longer
+        decides whether the state has a name."""
+        memory = ConversationMemory()
+        calls = self._chained_thread(memory, summaries)
+        before = len(calls)
+
+        outcome = compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC",
+                                     overrides=self.CHAIN)
+
+        assert outcome["status"] == "all-pinned", outcome
+        assert outcome["kind"] == "compaction_blocked"
+        assert "/unpin" in outcome["text"]
+        assert len(calls) == before, (
+            "the compactor was called with nothing new to fold")
+
+    def test_the_premise_is_an_empty_segment_and_the_test_asserts_it(
+            self, fake_storage, summaries):
+        """Not decoration: a test whose shape silently stopped producing an
+        empty span would still pass the assertions above, because
+        `all-pinned` is also what a thread with no new rows at all reports.
+        This pins the thing the branch is about."""
+        import storage as storage_module
+
+        memory = ConversationMemory()
+        self._chained_thread(memory, summaries)
+        previous = fake_storage.latest_checkpoint(memory.thread_id)
+        # The same arguments compact() passes, overrides included: the keep
+        # floors come from them, and asking under the shipped ones would
+        # measure a thread this class never builds.
+        watermark = compaction.compactable_span(memory, None, self.CHAIN)
+
+        assert watermark is not None, "nothing was foldable at all"
+        # The REAL advances(), not a fake method: it reads `_ordered_rows`,
+        # which the fixture does fake, so the position arithmetic here is
+        # exercised rather than mocked (conftest says so where the symbol is
+        # deliberately left out of the redirect list).
+        assert storage_module.advances(
+            memory.thread_id, previous["covers_up_to_message_id"],
+            watermark), "the watermark did not move, so no-progress covers it"
+        assert fake_storage.history_through(
+            memory.thread_id, watermark,
+            after_message_id=previous["covers_up_to_message_id"]) == [], (
+            "the newly swept span is not empty, so this is an ordinary fold")
+
+    def test_the_previous_summary_is_never_handed_back_to_the_compactor(
+            self, fake_storage, summaries):
+        """The harm itself, stated as the absence it is. Chain prepends the
+        previous summary to the segment, so an empty segment makes the
+        compactor's whole input its own last answer -- 15% of it comes back,
+        and 15% of that on the next attempt."""
+        memory = ConversationMemory()
+        calls = self._chained_thread(memory, summaries)
+
+        compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC",
+                           overrides=self.CHAIN)
+
+        assert not any("PRIOR SUMMARY TEXT" in (call.get("user_goal") or "")
+                       for call in calls[1:]), (
+            "the compactor was asked to summarize its own previous summary")
+        live = fake_storage.latest_checkpoint(memory.thread_id)
+        assert live["summary_text"] == "PRIOR SUMMARY TEXT", (
+            "the stored summary was replaced by a shorter version of itself")
+
+    def test_an_ordinary_chained_fold_still_happens(self, fake_storage,
+                                                    summaries):
+        """THE CONTROL, and the one that matters: a branch reached on the
+        segment alone would also 'pass' the three tests above if it refused
+        every chained fold. New material, same strategy, same thread shape --
+        and it folds."""
+        memory = ConversationMemory()
+        calls = summaries("PRIOR SUMMARY TEXT", "Second summary.")
+        _thread(memory, turns=6)
+        compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC",
+                           overrides=self.CHAIN)
+        _thread(memory, turns=4)
+
+        outcome = compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC",
+                                     overrides=self.CHAIN)
+
+        assert outcome["status"] == "folded", outcome
+        assert "PRIOR SUMMARY TEXT" in calls[-1]["user_goal"], (
+            "chain stopped chaining")
+
+    def test_rederive_reaches_the_same_branch_as_before(self, fake_storage,
+                                                        summaries):
+        """The half that already worked, kept honest: this is the path the
+        strategy test used to cover, and it must answer exactly as it did."""
+        memory = ConversationMemory()
+        _thread(memory, turns=4)
+        memory.pin_last(4)
+        summaries("unused")
+
+        outcome = compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC",
+                                     overrides=OVERRIDES)
+
+        assert outcome["status"] == "all-pinned", outcome
+        assert fake_storage.latest_checkpoint(memory.thread_id) is None
+
+
+class TestASmallWindowSaysThatItCannotCompact:
+    """S11-03 / A24. The floor TECHNICAL_DEBT 42 raised is applied with no
+    reference to the window, so at or below 8,000 the trigger it produces is
+    above the window and `used` -- the provider's own count of what it was
+    sent -- can never reach it. Item 42's own fix section rejected exactly
+    this outcome ("compaction would then silently never run on that model");
+    it arrived from the other side, and the value is not the fix. The line
+    is.
+    """
+
+    def _window(self, mocker, window, model="small-model"):
+        mocker.patch.object(compaction, "context_limit",
+                            return_value=window)
+        return model
+
+    def test_a_4k_window_can_never_compact(self, mocker):
+        """Driven across every value the provider could report, rather than
+        at one probe point: `warn_at` collapses to 1 down here, so a test
+        asking only "does something fire" sees `warn` and reads as covered.
+        """
+        model = self._window(mocker, 4096)
+
+        answers = {compaction.should_compact(used, model,
+                                             provider_name="P")
+                   for used in range(1, 4098)}
+
+        assert answers == {"warn"}, answers
+
+    def test_and_says_so_once_naming_the_two_settings(self, mocker, caplog):
+        model = self._window(mocker, 4096)
+
+        with caplog.at_level("WARNING"):
+            compaction.derived_trigger(model, "P")
+            compaction.derived_trigger(model, "P")
+
+        lines = [r.getMessage() for r in caplog.records
+                 if r.levelname == "WARNING" and "NEVER" in r.getMessage()]
+        assert len(lines) == 1, lines
+        assert "4096" in lines[0]
+        assert "8001" in lines[0]
+        assert "warning_margin_tokens" in lines[0]
+        assert "keep_recent_tokens" in lines[0]
+
+    def test_a_window_just_above_the_floor_warns_about_its_headroom(
+            self, mocker, caplog):
+        """8,192 is the commonest real window a self-hosted or gateway
+        endpoint reports. Compaction CAN fire there -- with 191 tokens of
+        headroom, against about 12,500 for one bounded read -- so the
+        wording is the other one, and saying "can never" would be false."""
+        model = self._window(mocker, 8192)
+
+        with caplog.at_level("WARNING"):
+            compaction.derived_trigger(model, "P")
+
+        lines = [r.getMessage() for r in caplog.records
+                 if r.levelname == "WARNING"]
+        assert len(lines) == 1, lines
+        assert "191 tokens of headroom" in lines[0], lines[0]
+        assert "NEVER" not in lines[0]
+
+    @pytest.mark.parametrize("window", [16384, 32768, 64000, 200000, 1000000])
+    def test_a_window_the_floor_does_not_bind_says_nothing(self, mocker,
+                                                           caplog, window):
+        """THE CONTROL, and A24's ruling in a test. 16,384 and 32,768 leave
+        less headroom than one bounded read too, but the headroom CAP is
+        what bound them, the cap is deliberate, and the only remedy there is
+        a bigger model -- so a line naming two settings would name the wrong
+        thing. TECHNICAL_DEBT 96 records that case instead. A warning that
+        fired here would also be a warning on every stock install."""
+        model = self._window(mocker, window)
+
+        with caplog.at_level("WARNING"):
+            trigger = compaction.derived_trigger(model, "P")
+
+        assert trigger < window
+        assert [r.getMessage() for r in caplog.records
+                if r.levelname == "WARNING"] == []
+
+    def test_a_second_pair_is_still_reported(self, mocker, caplog):
+        """The dedup is keyed on (provider, model), not on the model alone:
+        the same model name behind a gateway and behind its own vendor can
+        report different windows, and the second one is news."""
+        model = self._window(mocker, 4096)
+
+        with caplog.at_level("WARNING"):
+            compaction.derived_trigger(model, "gateway")
+            compaction.derived_trigger(model, "vendor")
+
+        assert len([r for r in caplog.records
+                    if "NEVER" in r.getMessage()]) == 2
+
+
+class TestTheBackstopStaysAboveTheWorkingSetTrigger:
+    """S11-04. M6 says a pass compacts LATER than a chat turn, and the
+    backstop was a flat 20,000-token margin while batch 44 made the ordinary
+    trigger a clamped share -- so it fired EARLIER at every window below
+    200,000, and at or below 20,001 its old max(1, ...) clamped it to 1, so
+    every evaluation of every step of every pass asked compact().
+
+    THE SHIPPED TABLE IS WHY NOTHING CAUGHT IT: every entry is at or above
+    200,000, where the two were equal or already ordered. So the sweep below
+    includes the windows a provider REPORTS, which is the way in.
+    """
+
+    WINDOWS = [2048, 4096, 8192, 16384, 20001, 32768, 64000, 131072,
+               200000, 262144, 400000, 1000000]
+
+    @pytest.mark.parametrize("window", WINDOWS)
+    def test_the_order_holds_at_every_window(self, mocker, window):
+        mocker.patch.object(compaction, "context_limit", return_value=window)
+
+        backstop = compaction.thresholds("m", mode="backstop",
+                                         provider_name="P")[1]
+        working = compaction.derived_trigger("m", "P")
+
+        assert backstop > working, (
+            f"window {window}: the backstop fires {working - backstop} "
+            f"tokens before the trigger it is supposed to sit behind")
+
+    @pytest.mark.parametrize("window", [1024, 4096, 20000, 20001])
+    def test_the_clamp_to_one_is_gone(self, mocker, window):
+        """`max(1, window - 20_000)` meant "compact" for any used >= 1 --
+        /window's own refusal message describes this state ("not a window
+        anyone means to set") and guards the command rather than the number
+        a server asserts."""
+        mocker.patch.object(compaction, "context_limit", return_value=window)
+
+        assert compaction.should_compact(1, "m", mode="backstop",
+                                         provider_name="P") == ""
+
+    @pytest.mark.parametrize("window", [262144, 400000, 1000000])
+    def test_a_large_window_still_keeps_the_margin_it_always_kept(
+            self, mocker, window):
+        """THE CONTROL: above 200,000 the margin is what decides, and the
+        fix must not have quietly replaced the backstop with the trigger
+        plus one. The ordering expression only binds where the margin would
+        have broken the order."""
+        mocker.patch.object(compaction, "context_limit", return_value=window)
+
+        compact_at = compaction.thresholds("m", mode="backstop",
+                                           provider_name="P")[1]
+
+        assert compact_at == window - config.COMPACTION_PIPELINE_BACKSTOP_TOKENS
+
+    def test_the_shipped_roster_is_unmoved_except_at_the_boundary(self):
+        """What a reader of the register will want: the inversion was
+        invisible on the shipped table, so the fix is invisible there too --
+        except for the one entry that sat exactly at the crossover."""
+        moved = {}
+        for model, window in config.MODEL_CONTEXT_WINDOWS.items():
+            margin = window - config.COMPACTION_PIPELINE_BACKSTOP_TOKENS
+            compact_at = compaction.thresholds(model, mode="backstop")[1]
+            if compact_at != margin:
+                moved[model] = compact_at - margin
+
+        assert moved == {"claude-haiku-4-5": 1}, moved
+
+
+class TestThePinCapIsAFractionOfTheTriggerThatFires:
+    """S11-06. #89's cap is PIN_MAX_TRIGGER_FRACTION of the trigger, and
+    since batch 44 the trigger that decides when a thread folds is derived
+    per model -- while `pin_measurements` read the configured number bare,
+    making the cap 20,000 for every model. Both directions were wrong: 250%
+    of the trigger on an 8,192-token window, where one pin could floor the
+    thread permanently above it, and 8% on a 262,144-token one, where `pin`
+    refused what the policy allows.
+    """
+
+    def _thread_with_rows(self, memory):
+        _thread(memory, turns=3)
+        return memory.thread_id
+
+    @pytest.mark.parametrize("window", [8192, 16384, 32768, 64000, 131072,
+                                        262144, 1000000])
+    def test_the_cap_is_the_fraction_of_the_derived_trigger(
+            self, fake_storage, mocker, window):
+        mocker.patch.object(compaction, "context_limit", return_value=window)
+        memory = ConversationMemory()
+        thread_id = self._thread_with_rows(memory)
+
+        cap = compaction.pin_measurements(thread_id, 1, "m", "P")["max_tokens"]
+
+        expected = int(config.PIN_MAX_TRIGGER_FRACTION
+                       * compaction.derived_trigger("m", "P"))
+        assert cap == expected
+
+    @pytest.mark.parametrize("window", [2048, 8192, 16384, 20001, 25000])
+    def test_one_pin_can_no_longer_hold_more_than_the_whole_trigger(
+            self, fake_storage, mocker, window):
+        """The direction that is a defect rather than a conservatism: at or
+        below 25,000 the old flat cap was above half the trigger, and at or
+        below 20,001 above the whole of it -- which is the state #89 exists
+        to prevent, reached without anyone typing a number."""
+        mocker.patch.object(compaction, "context_limit", return_value=window)
+        memory = ConversationMemory()
+        thread_id = self._thread_with_rows(memory)
+
+        cap = compaction.pin_measurements(thread_id, 1, "m", "P")["max_tokens"]
+
+        assert cap < compaction.derived_trigger("m", "P")
+
+    def test_a_session_trigger_bound_to_the_pair_still_pulls_the_cap_down(
+            self, fake_storage, mocker):
+        """What the min() bought before, now bought by resolving the trigger
+        the way thresholds() does -- which also means the override has to be
+        bound to THIS pair, where the binding-free read could not tell."""
+        import core.session as session_overrides
+
+        mocker.patch.object(compaction, "context_limit", return_value=200000)
+        memory = ConversationMemory()
+        thread_id = self._thread_with_rows(memory)
+        session_overrides.set_trigger("P", "m", 12000)
+
+        cap = compaction.pin_measurements(thread_id, 1, "m", "P")["max_tokens"]
+
+        assert cap == int(config.PIN_MAX_TRIGGER_FRACTION * 12000)
+
+    def test_another_pairs_override_does_not_reach_this_cap(
+            self, fake_storage, mocker):
+        """THE CONTROL for the test above: `session.trigger_any()` answers
+        with whatever was set for ANY pair, so a test that only lowered one
+        override would pass against either implementation."""
+        import core.session as session_overrides
+
+        mocker.patch.object(compaction, "context_limit", return_value=200000)
+        memory = ConversationMemory()
+        thread_id = self._thread_with_rows(memory)
+        session_overrides.set_trigger("OTHER", "other-model", 12000)
+
+        cap = compaction.pin_measurements(thread_id, 1, "m", "P")["max_tokens"]
+
+        assert cap == int(config.PIN_MAX_TRIGGER_FRACTION
+                          * compaction.derived_trigger("m", "P"))
+
+    def test_with_no_pair_the_configured_trigger_is_still_the_answer(
+            self, fake_storage, mocker):
+        """The fallback is not a leftover: a call from outside a run has no
+        RunInfo, and the number it returns is the one every caller got
+        before #89's cap started depending on the model."""
+        mocker.patch.object(compaction, "context_limit", return_value=1000000)
+        memory = ConversationMemory()
+        thread_id = self._thread_with_rows(memory)
+
+        cap = compaction.pin_measurements(thread_id, 1)["max_tokens"]
+
+        assert cap == int(config.PIN_MAX_TRIGGER_FRACTION
+                          * config.COMPACTION_TRIGGER_TOKENS)

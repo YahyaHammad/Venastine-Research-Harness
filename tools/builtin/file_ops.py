@@ -20,7 +20,37 @@ SECURITY MODEL (ROADMAP §6, deviated per user decision):
   deny, and the exception to both rules above: any path -- inside or
   outside the workspace -- that resolves into `.venastine/` is refused
   by the refusal_check before approval and re-tested in all three
-  handlers, whatever the ToolApprovals booleans say.
+  handlers, whatever the ToolApprovals booleans say. Case-folded since
+  batch 146, because `realpath` only canonicalises a spelling for a
+  path that already EXISTS -- which is not the state a `write` is in.
+
+  WHAT THE DENY RESTS ON, AND THE ONE SHAPE IT CANNOT SEE. It rests on
+  `realpath`, so a symlink and a junction into `.venastine/` both arrive
+  as the real thing. A HARDLINK does not: it is not a link to anything,
+  it is the file, and `realpath` returns the path it was given. Batch 146
+  measured a `write` through a hardlinked name putting an mcpServers
+  object into a protected `settings.json` whose direct spelling is
+  refused. The write half is closed -- `json_store.write_text_atomic`
+  replaces the name rather than writing through it, so the link breaks
+  and the other name keeps its bytes -- and the READ half is not. A
+  `read` through a hardlink into `.venastine/` still serves the file,
+  and nothing available here can tell: enumerating a file's other names
+  is per-platform, and refusing every multiply-linked file would deny
+  ordinary ones. Filed in docs/TECHNICAL_DEBT.md rather than left to be
+  found, with the same answer the sandbox reached for a link it cannot
+  resolve.
+
+BYTES, NOT TEXT, ON THE WRITE PATHS (batch 146):
+  All three used to open with mode "w" and no `newline=`, so Python
+  translated every "\n" to os.linesep. On Windows `write` could not
+  reproduce a file it had just read, and `edit` replacing one span of an
+  LF file rewrote every line ending in it -- 2,910 of them in this
+  repository's own AGENTS.md. `edit` now reads with `newline=""` as well,
+  so the match runs against the file's real bytes, and retries an
+  LF-spelled `old_text` translated when the file is CRLF: the model
+  cannot see a file's endings through `read` (which joins with "\n"
+  whatever it found), so a span it spells from what it was shown has to
+  be able to match.
 
 READ TOOL PAGINATION (deviated from ROADMAP §6):
   The read tool accepts offset (lines to skip) and count (lines to
@@ -46,8 +76,9 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 import config
-
+from json_store import write_text_atomic
 from security.protected_paths import protected_segment
+from tools.base import invalid_params
 
 logger = logging.getLogger(__name__)
 
@@ -91,8 +122,25 @@ def _file_approval_check(tool_name: str, params: dict) -> bool:
     Outside workspace → always True (ask user).
     Within workspace  → defer to the matching ToolApprovals boolean
                         (False = auto-approved, True = still ask).
+
+    TOTAL over any JSON object, which it was not until batch 146: a
+    `{"path": null}` is well-formed, so `params.get("path", "")` returns
+    None rather than the default -- the key IS present -- and
+    `os.path.join(WORKSPACE_ROOT, None)` raised a TypeError out of a gate
+    that runs ABOVE dispatch()'s containment. tools/base.py carries the one
+    copy of what that costs; shell.py's gate has said "total, like
+    everything else the gate calls" for a long time, and these two were the
+    exception.
+
+    True for a path it cannot read, because ASKING is the fail-closed
+    direction for a predicate that can only tighten. In practice the
+    refusal_check answers first and the call never arrives here.
     """
+    if not isinstance(params, dict):
+        return True
     path = params.get("path", "")
+    if not isinstance(path, str):
+        return True
     if not _is_within_workspace(path):
         return True
     approvals = config.ToolApprovals()
@@ -131,7 +179,7 @@ def _protected_path_error(user_path: str) -> Optional[str]:
     )
 
 
-def _protected_refusal(params: dict, _context=None) -> Optional[str]:
+def _refusal_for(tool_name: str):
     """ToolSpec.refusal_check for read / write / edit (§32 A7's shape).
 
     dispatch() consults this BEFORE the approval gate and returns the
@@ -140,8 +188,32 @@ def _protected_refusal(params: dict, _context=None) -> Optional[str]:
     change the outcome. NOT the enforcement (base.py's own words): the
     three handlers re-test below, so a caller that reaches them
     directly is refused too.
+
+    ONE PER TOOL since batch 146, which is what makes it able to answer the
+    arguments as well as the path. The module already declared the three
+    pydantic models that say what each tool takes; they just ran inside the
+    handlers, after this check had been handed the raw dict and had already
+    raised. Validating here turns a mistyped parameter into a refusal the
+    model can read, which is what the sibling four session tools have always
+    done -- `shell_sessions._start_refusal` is this shape, one question over.
+
+    THE ORDER IS THE DENY FIRST, and two existing tests are what settled
+    it. Validating the whole model first made `write` with a protected path
+    and no `content` answer "content: Field required" -- which is the same
+    mistake §32 A7 exists to prevent, one layer over: supplying the content
+    would only earn the refusal on the next turn, so a correction that
+    cannot change the outcome is not the answer to give. The path's own type
+    has to be settled before that, because `_protected_path_error` resolves
+    it; everything else the model got wrong is answered after.
     """
-    return _protected_path_error(params.get("path", ""))
+    def refusal(params: dict, _context=None) -> Optional[str]:
+        model = _PARAM_MODELS[tool_name]
+        if isinstance(params, dict) and isinstance(params.get("path"), str):
+            refused = _protected_path_error(params["path"])
+            if refused is not None:
+                return refused
+        return invalid_params(tool_name, model, params)
+    return refusal
 
 
 # ===========================================================================
@@ -200,32 +272,81 @@ def _truncate_lines(
     offset: int,
     count: int,
 ) -> tuple[str, int, bool, Optional[str]]:
-    """Apply offset, clamp count, join, then char-truncate.
+    """Apply offset, clamp count, then cut at a LINE BOUNDARY.
 
-    Returns (content, lines_returned, truncated, message).
+    Returns (content, lines_returned, truncated, message), where
+    `lines_returned` counts the lines that are IN `content`.
+
+    THE CUT NOW HAPPENS BEFORE THE COUNT (batch 146). It used to be the
+    other way round: `lines_returned` was computed from the selection and
+    the character cut threw most of it away afterwards, so on any file
+    averaging over 100 characters a line the number the model resumes from
+    named a line far past the last one delivered. Measured on 800 lines of
+    160 characters: 500 reported, 313 delivered, and `offset=500` -- which
+    the clamp branch's own message tells the model to use -- skipped 187
+    lines and 29,920 characters that no call it could construct would ever
+    return.
+
+    Cutting at a line boundary rather than mid-line is what makes every
+    byte reachable, since `offset` and `count` are in LINES and the ceiling
+    is in characters. The sibling in this scope had already reached the
+    other half of this: "the continuation offset is IN the message, not
+    merely implied by the numbers. A model that has to compute where to
+    resume usually re-reads from zero and spends the budget twice"
+    (project_docs.read_run). One resume point, named once, for both
+    branches -- the clamp message used to carry its own and they disagreed.
     """
     clamped = count > config.MAX_READ_LINES
     effective_count = min(count, config.MAX_READ_LINES)
 
     selected = lines[offset:offset + effective_count]
-    lines_returned = len(selected)
-    content = "\n".join(selected)
 
-    truncated = False
+    kept: list[str] = []
+    used = 0
+    cut_inside_a_line = False
+    for line in selected:
+        extra = len(line) + (1 if kept else 0)   # the joining newline
+        if used + extra > config.MAX_READ_CHARS:
+            if not kept:
+                # A SINGLE LINE LONGER THAN THE WHOLE CEILING -- minified
+                # JavaScript, a one-line JSON document, a packed asset.
+                # Keeping whole lines only would deliver NOTHING here and
+                # the model would have nowhere to go, so this one line is
+                # cut and the message says so: `offset + 1` resumes at the
+                # next line, and the rest of this one is not reachable
+                # through a tool whose paging unit is a line.
+                kept.append(line[:config.MAX_READ_CHARS])
+                used = len(kept[0])
+                cut_inside_a_line = True
+            break
+        kept.append(line)
+        used += extra
+
+    content = "\n".join(kept)
+    lines_returned = len(kept)
+    char_cut = cut_inside_a_line or len(kept) < len(selected)
+    truncated = clamped or char_cut
+
     message_parts: list[str] = []
-
     if clamped:
-        truncated = True
         message_parts.append(
-            f"Requested {count} lines, returned {effective_count} (maximum). "
-            f"Use offset={offset + effective_count} to read further."
+            f"Requested {count} lines, returned at most {effective_count} "
+            f"(maximum)."
         )
-
-    if len(content) > config.MAX_READ_CHARS:
-        truncated = True
-        content = content[:config.MAX_READ_CHARS]
+    if char_cut:
         message_parts.append(
-            f"Content truncated at {config.MAX_READ_CHARS} characters."
+            f"Content truncated at {config.MAX_READ_CHARS} characters, on a "
+            f"line boundary."
+        )
+    if cut_inside_a_line:
+        message_parts.append(
+            f"Line {offset} is itself longer than "
+            f"{config.MAX_READ_CHARS} characters and was cut, so the rest of "
+            f"it is not reachable by offset."
+        )
+    if truncated:
+        message_parts.append(
+            f"Use offset={offset + lines_returned} to read further."
         )
 
     message = " ".join(message_parts) if message_parts else None
@@ -260,7 +381,7 @@ def read_run(params: dict) -> dict:
             raw_text = _read_rich(resolved)
             all_lines = raw_text.splitlines()
         else:
-            with open(resolved, "r", encoding="utf-8", errors="replace") as f:
+            with open(resolved, encoding="utf-8", errors="replace") as f:
                 all_lines = f.read().splitlines()
     except Exception as e:
         logger.exception("read tool failed on %s", parsed.path)
@@ -304,8 +425,11 @@ WRITE_TOOL_SCHEMA = {
 def write_run(params: dict) -> dict:
     parsed = WriteFileParams(**params)
 
-    # BEFORE the makedirs below: a refused write must not conjure the
-    # protected directory into existence on its way to being refused.
+    # BEFORE anything creates a directory: a refused write must not
+    # conjure the protected directory into existence on its way to being
+    # refused. The makedirs moved into `write_text_atomic` in batch 146 and
+    # the ordering it needs did not move with it, which is why this says
+    # what it protects rather than naming a line below.
     refused = _protected_path_error(parsed.path)
     if refused is not None:
         return {"error": refused}
@@ -320,11 +444,12 @@ def write_run(params: dict) -> dict:
         }
 
     resolved = resolve_path(parsed.path)
-    os.makedirs(os.path.dirname(resolved), exist_ok=True)
 
     try:
-        with open(resolved, "w", encoding="utf-8") as f:
-            f.write(parsed.content)
+        # newline="" and a replace rather than a truncating write -- the
+        # module docstring's BYTES section says what each buys, and
+        # `write_text_atomic` says why it owns both.
+        write_text_atomic(resolved, parsed.content)
     except Exception as e:
         logger.exception("write tool failed on %s", parsed.path)
         return {"error": f"Could not write file: {e}"}
@@ -383,13 +508,34 @@ def edit_run(params: dict) -> dict:
         }
 
     try:
-        with open(resolved, "r", encoding="utf-8") as f:
+        # newline="" so `content` holds the file's REAL line endings and the
+        # uniqueness contract is checked against the bytes on disk. With
+        # universal newlines a CRLF file arrived as LF, and writing that
+        # back converted the whole file -- which is the defect this fixes,
+        # pointing the other way.
+        with open(resolved, encoding="utf-8", newline="") as f:
             content = f.read()
     except Exception as e:
         logger.exception("edit tool read failed on %s", parsed.path)
         return {"error": f"Could not read file: {e}"}
 
-    match_count = content.count(parsed.old_text)
+    old_text, new_text = parsed.old_text, parsed.new_text
+    match_count = content.count(old_text)
+    if match_count == 0 and "\n" in old_text:
+        # TRANSLATED AND RETRIED, because the model cannot see what it
+        # would have to spell. `read` joins the lines it delivers with
+        # "\n" whatever the file held, so a span copied from what the
+        # model was shown is LF-spelled even for a CRLF file -- and a
+        # strict matcher would refuse every multi-line edit of one, with a
+        # message naming text the model has no way to produce. Both sides
+        # move together so the replacement carries the file's endings too.
+        crlf_old = old_text.replace("\n", "\r\n")
+        crlf_count = content.count(crlf_old)
+        if crlf_count:
+            old_text = crlf_old
+            new_text = new_text.replace("\n", "\r\n")
+            match_count = crlf_count
+
     if match_count == 0:
         return {"error": "old_text not found in file."}
     if match_count > 1:
@@ -400,13 +546,27 @@ def edit_run(params: dict) -> dict:
             ),
         }
 
-    content = content.replace(parsed.old_text, parsed.new_text)
+    content = content.replace(old_text, new_text)
 
     try:
-        with open(resolved, "w", encoding="utf-8") as f:
-            f.write(content)
+        write_text_atomic(resolved, content)
     except Exception as e:
         logger.exception("edit tool write failed on %s", parsed.path)
         return {"error": f"Could not write file: {e}"}
 
     return {"result": f"Replaced 1 occurrence in {parsed.path}"}
+
+
+# ===========================================================================
+# ---- What each tool takes -------------------------------------------------
+# ===========================================================================
+
+#: Read by `_refusal_for`, so the pre-approval check validates against the
+#: same model the handler does. At the BOTTOM because all three classes have
+#: to exist first, and looked up inside the closure rather than captured, so
+#: there is no import-order question to get wrong.
+_PARAM_MODELS = {
+    "read": ReadFileParams,
+    "write": WriteFileParams,
+    "edit": EditFileParams,
+}

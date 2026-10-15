@@ -52,13 +52,25 @@ right for `packages/foo/package.json` in a monorepo and wrong for
 source lives, and it is the one place these five are not this project's own
 statement about itself.
 
-THE RESIDUAL, STATED RATHER THAN LEFT TO BE FOUND: `check_output_policy`
-scans every value (#47), so `sk-ant-...`, `ghp_...`, `AKIA...` and a PEM
-header are redacted out of a result. A plaintext `<password>` element, a
-Gradle `password "..."` and a `user:token@host` URL are NOT, and those are
-the credential shapes that occur in exactly these five files. Filed against
-the redactor rather than fixed here, because a pattern added there redacts
-content out of every tool result in the harness, not only this one.
+THE RESIDUAL THAT WAS STATED HERE IS CLOSED, and what is left of the
+paragraph is the part that was always the point. `check_output_policy` scans
+every value (#47), so `sk-ant-...`, `ghp_...`, `AKIA...` and a PEM header
+are redacted out of a result. A plaintext `<password>` element, a Gradle
+`password "..."` and a `user:token@host` URL were NOT, and those are the
+credential shapes that occur in exactly these five files -- so they were
+filed against the REDACTOR rather than fixed here, because a pattern added
+there redacts content out of every tool result in the harness and one added
+here would serve one tool.
+
+That filing is #167, closed 2026-08-23: `safety/policy_enforcement.py` now
+carries `_URL_USERINFO_RE`, `_XML_PASSWORD_RE` and `_ASSIGNMENT_RE`, whose
+`[ \t]` alternative is there for Gradle's space form specifically. All
+three shapes are redacted out of a `read_project_doc` result today, driven
+on all four file types, with a credential-free document passing through
+byte-identical as the control. This paragraph went on claiming the leak for
+seven weeks after the leak was fixed, which is why it now names the issue
+and the patterns: a security residual that reads as OPEN costs every later
+reader what it cost the reader who re-measured it (batch 146).
 """
 
 from __future__ import annotations
@@ -69,6 +81,7 @@ from typing import Optional
 
 import config
 from core import config_loader, workspace_trust
+from json_store import write_text_atomic
 from security import protected_paths
 
 logger = logging.getLogger(__name__)
@@ -100,6 +113,13 @@ _ROOT_ONLY_FILENAMES = frozenset({
 _DENIED_SEGMENTS = (protected_paths.PROTECTED_SEGMENTS
                     | {".git", "node_modules", ".venv", "venv",
                        "__pycache__", ".pytest_cache"})
+
+#: And compared the way the FILESYSTEM will compare them (batch 146),
+#: through the one spelling of the fold that `protected_segment` uses. This
+#: set unioned the segment list in and then compared it case-sensitively,
+#: so the two consumers of one fact disagreed about the only thing left to
+#: disagree about. `.VENASTINE/agents/foo.md` was a readable `.md`.
+_DENIED_FOLDED = protected_paths.folded_segments(_DENIED_SEGMENTS)
 _DENIED_FILENAMES = frozenset({"providers.json"})
 
 #: Re-exported so callers name one constant. The name lives in
@@ -153,7 +173,7 @@ def _resolve_in_project(root: str, user_path: str) -> Optional[str]:
 def _is_readable_doc(root: str, resolved: str) -> bool:
     rel = os.path.relpath(resolved, root)
     parts = rel.split(os.sep)
-    if any(segment in _DENIED_SEGMENTS for segment in parts):
+    if any(segment.casefold() in _DENIED_FOLDED for segment in parts):
         return False
     name = os.path.basename(resolved).lower()
     if name in _DENIED_FILENAMES or name.startswith(".env"):
@@ -239,9 +259,12 @@ def _skip(handle, offset: int) -> None:
 
 
 def read_run(params: dict) -> dict:
-    # params.get throughout, not params[]: no provider validates tool inputs
-    # against the schema, and a bare KeyError escapes the loop's
-    # ToolCallDenied handler and aborts the whole turn (remember.py's note).
+    # params.get throughout, not params[]. tools/base.py carries the one
+    # copy of why, under "WHAT A CALLABLE REGISTERED BELOW MAY RAISE": a
+    # handler's exception IS contained, so the reason this is right is that
+    # an error dict the model can read beats the generic wrapper it would
+    # get -- not the turn-ending raise six comments in this directory used
+    # to claim (batch 146).
     root = _project_root()
     if root is None:
         return {"error": "read_project_doc: no project directory has been "
@@ -283,7 +306,7 @@ def read_run(params: dict) -> dict:
     # streams, so the offset is walked rather than jumped: correctness
     # over cleverness, and it still holds one chunk rather than the file.
     try:
-        with open(resolved, "r", encoding="utf-8", errors="replace") as f:
+        with open(resolved, encoding="utf-8", errors="replace") as f:
             _skip(f, offset)
             chunk = f.read(config.INIT_READ_CHARS)
             more = f.read(1) != ""
@@ -361,10 +384,22 @@ def approval_notice(params: dict, context) -> str:
     """
     root = _project_root()
     name = params.get("name") or HUB_FILENAME
-    where = doc_path(root, name) if root else name
     size = len(params.get("content") or "")
-    verb = "Overwrite" if root and os.path.exists(where) else "Create"
-    return f"{verb} {where} ({size} characters)."
+    if not root:
+        return f"Create {name} ({size} characters)."
+
+    # RESOLVED, so the consent can never name a file the bytes will not
+    # land on (batch 146). `_project_root()` is already a realpath, so for
+    # an ordinary document this is the same string the join produced and
+    # the prompt is unchanged; where it differs, the difference IS the
+    # thing the person needs to see.
+    resolved = _resolve_in_project(root, name)
+    if resolved is None:
+        return (f"REFUSE {doc_path(root, name)} ({size} characters): that "
+                f"name resolves outside the project, so write_project_doc "
+                f"will not write it.")
+    verb = "Overwrite" if os.path.exists(resolved) else "Create"
+    return f"{verb} {resolved} ({size} characters)."
 
 
 def write_run(params: dict) -> dict:
@@ -393,13 +428,37 @@ def write_run(params: dict) -> dict:
                          f"maximum writable size "
                          f"({config.MAX_FILE_SIZE_BYTES} bytes)."}
 
+    # RESOLVED BEFORE WRITING, which the read path has always done and this
+    # one did not (batch 146). The module's invariant is that the
+    # destination is derived from a name "so it cannot be aimed elsewhere",
+    # and a document name that is a LINK aims it elsewhere: a cloned project
+    # carrying `ARCHITECTURE.md -> ~/.bashrc` took the bytes to the link
+    # target, under a consent that named the in-project path. git stores
+    # symlinks natively, so the layout needs no privilege to arrive.
+    #
+    # An error rather than a coercion, in the sense the unknown-name branch
+    # above means: a name that leaves the project is not one of this
+    # project's documents.
     destination = doc_path(root, name)
-    try:
-        os.makedirs(os.path.dirname(destination), exist_ok=True)
-        with open(destination, "w", encoding="utf-8") as f:
-            f.write(content)
-    except OSError as e:
-        logger.warning("write_project_doc failed for %s: %s", destination, e)
-        return {"error": f"Could not write {destination}: {e}"}
+    resolved = _resolve_in_project(root, name)
+    if resolved is None:
+        logger.warning("write_project_doc refused %s: resolves outside the "
+                       "project", destination)
+        return {"error": f"write_project_doc: {name!r} resolves outside the "
+                         f"project directory, so it is not one of this "
+                         f"project's documents."}
 
-    return {"result": f"Wrote {len(content)} characters to {destination}"}
+    try:
+        # REPLACES THE NAME RATHER THAN WRITING THROUGH IT, which closes the
+        # half `realpath` cannot see: a hardlink is not a link to anything,
+        # so the resolution above admits one. And `newline=""`, so the bytes
+        # the model supplied are the bytes that land -- this tool is the one
+        # write path in the harness reachable with no config edit, and its
+        # whole purpose is to overwrite a document in place, under an
+        # approval that was shown a diff of the lines that changed.
+        write_text_atomic(resolved, content)
+    except OSError as e:
+        logger.warning("write_project_doc failed for %s: %s", resolved, e)
+        return {"error": f"Could not write {resolved}: {e}"}
+
+    return {"result": f"Wrote {len(content)} characters to {resolved}"}

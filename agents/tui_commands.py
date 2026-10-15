@@ -13,8 +13,9 @@ deliberately does NOT import tui.app, so app.py can import it without a
 cycle.
 """
 
-from tui.commands import SlashCommand, registry as commands
 from agents.manager import manager
+from tui.commands import SlashCommand
+from tui.commands import registry as commands
 
 
 def _cmd_agent(app, args: str) -> None:

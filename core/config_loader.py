@@ -32,7 +32,7 @@ from typing import Optional
 
 import yaml
 
-import config
+import config_schema
 from core import workspace_trust
 
 logger = logging.getLogger(__name__)
@@ -48,7 +48,6 @@ NUMBER_TYPES = (int, float)
 # way payload_validation does -- a second hand-written copy of a
 # vocabulary is a second thing to keep in step.
 from core.reasoning.base import GROUNDING_STATUSES  # noqa: E402
-
 
 _FRONTMATTER_DELIM = re.compile(r"^---\s*$", re.MULTILINE)
 
@@ -140,8 +139,8 @@ _KNOWN_TUI = {
     "todo_position": str,  # §23 slice 2: one of TODO_POSITIONS below
     # §38 (O6): render a turn's reasoning inline, or collapse it to an
     # animated one-line indicator. Defaults to True in tui/app.py rather
-    # than to a config.py constant, following `animations` above -- config.py
-    # holds no TUI values and is plain-values-only.
+    # than to a config.yaml key, following `animations` above -- config.yaml
+    # holds no TUI values.
     "show_thinking": bool,
 }
 
@@ -250,13 +249,50 @@ class AgentDef:
     # spawnable does not fail, it under-performs, and the parent has
     # no way to tell (which is #69's actual complaint).
     #
-    # Consulted by prompts.system_prompts.agent_catalog_text only.
-    # It is NOT a permission: C6 still caps a child's tools, and the
-    # depth limit still applies. This decides what the model is TOLD
-    # exists, which is D24's rule ("advertising an uncallable tool is
-    # not harmless: the model keeps choosing it") applied to the
-    # catalog's entries rather than to the tool itself.
+    # IT IS A PERMISSION SINCE A16 (ROADMAP_v3 section 62), and this
+    # comment said the opposite for as long as it was true. Consulted by
+    # prompts.system_prompts.agent_catalog_text AND by
+    # agents.subagent_tool.refusal_reason, which refuses a spawn of
+    # anything whose value is not True.
+    #
+    # WHY IT CHANGED. "Advertisement only" meant `spawn_subagent` would
+    # spawn any agent the loader had discovered, by name -- including one
+    # the asymmetry above had deliberately left off the catalog. So the
+    # measured consequence of a stranger's silence was INVISIBLE rather
+    # than unreachable: a project-tier agent omitting the field was absent
+    # from the prompt a user might read and callable by any text that named
+    # it. For the careless author the default was safe; for the adversarial
+    # one it was the quieter option, which inverts the ranking the SAFE
+    # answer above is reaching for. Its own sibling `spawn_targets` had
+    # already chosen refusal for the same class of problem.
+    #
+    # C6 still caps a child's tools and the depth limit still applies;
+    # those were never what this field was about. D24's rule
+    # ("advertising an uncallable tool is not harmless: the model keeps
+    # choosing it") still applies to the catalog's entries -- and now its
+    # mirror applies too: a catalog that hides a REACHABLE agent is the
+    # same defect read the other way.
     spawnable: Optional[bool] = None
+    # WHICH agents this one may spawn. `spawnable` above is the other
+    # half of the same question -- that one is about being spawned, this
+    # one about spawning -- and they are separate fields because an agent
+    # can be either, both or neither.
+    #
+    # None means NO OPINION: every spawnable agent, which is what every
+    # definition written before this field got and therefore what it has
+    # to keep meaning. A list restricts, and only ever restricts: it
+    # composes by intersection on ToolContext exactly as allowed_tools
+    # does, so it cannot be widened by nesting.
+    #
+    # It is a REFUSAL, unlike `spawnable`'s advertisement. C6 already
+    # narrows a child's tools to the parent's, which is the wrong answer
+    # when the parent should not be delegating that work at all: `plan`
+    # spawning `build` produced a build stripped of `write` and `edit`,
+    # degraded exactly the way A4 describes and invisible from both ends.
+    # Read by agents.subagent_tool.refusal_reason (the refusal) and by
+    # prompts.system_prompts.agent_catalog_text (D24: an agent that will
+    # be refused is not advertised in the first place).
+    spawn_targets: Optional[list] = None
 
 
 def _user_config_dir() -> str:
@@ -300,10 +336,11 @@ def _catalog_text(value) -> str:
     least visible -- so the shipped files are held to it too, and
     tests/test_catalog_text.py asserts they already comply.
     """
+    cap = config_schema.current().max_catalog_text_chars
     text = " ".join(str(value).split())
-    if len(text) <= config.MAX_CATALOG_TEXT_CHARS:
+    if len(text) <= cap:
         return text
-    return text[:config.MAX_CATALOG_TEXT_CHARS - 1].rstrip() + "\u2026"
+    return text[:cap - 1].rstrip() + "\u2026"
 
 
 def _parse_frontmatter(text: str) -> tuple[dict, str]:
@@ -340,7 +377,7 @@ def _parse_md_file(path: str, kind: str, tier: str, category: str = ""):
         # ^--- no longer sits at position 0 and the file is skipped with
         # the false diagnosis "does not begin with a YAML frontmatter
         # block". utf-8-sig strips a BOM and is a no-op without one.
-        with open(path, "r", encoding="utf-8-sig") as f:
+        with open(path, encoding="utf-8-sig") as f:
             text = f.read()
         fm, body = _parse_frontmatter(text)
     except (OSError, ValueError, yaml.YAMLError) as e:
@@ -389,9 +426,70 @@ def _parse_md_file(path: str, kind: str, tier: str, category: str = ""):
     if allowed is not None and not isinstance(allowed, list):
         logger.warning("Skipping agent file %s: allowed_tools is not a list", path)
         return None
+    # ELEMENT TYPES TOO, not just the container. This is the lesson the
+    # skills branch above already paid for with `additional_tools`: a
+    # non-string element parses cleanly here and fails at first
+    # consumption, layers away from the file that caused it. THIS FIELD IS
+    # THE ONE THE RULE WAS NEVER APPLIED TO (batch 155) -- it sat under
+    # the comment stating it, with the container checked and the elements
+    # not.
+    #
+    # Its two consumers fail in OPPOSITE directions, both measured. A
+    # hashable non-string (`[read, 123]`) survives `set()` and then
+    # matches nothing, so the whitelist silently holds one fewer entry
+    # than it reads as -- the whitelist-typo class
+    # tests/test_shipped_roster.py documents for misspelled strings. An
+    # unhashable one (`[read, [write]]`, `[read, {write: true}]`) raises
+    # `TypeError: unhashable type` out of `AgentManager.active_context`
+    # and `child_context`, which are the single place this `Optional[list]`
+    # becomes `ToolContext.allowed_tools`'s declared `Optional[set[str]]`.
+    #
+    # SKIP, NOT DROP THE ELEMENT, for the reason `approval_overrides`
+    # states below: half a whitelist is worse than no file at all for a
+    # field whose job is deciding what an agent may call.
+    if allowed is not None and not all(isinstance(t, str) for t in allowed):
+        logger.warning(
+            "Skipping agent file %s: allowed_tools is not a list of strings",
+            path)
+        return None
+    # The consumer here is a set membership test against an agent NAME, so
+    # a nested list or a mapping raises where that set is built and a
+    # hashable non-string sits inert and never matches -- the same pair
+    # measured one field up.
+    targets = fm.get("spawn_targets")
+    if targets is not None and not isinstance(targets, list):
+        logger.warning(
+            "Skipping agent file %s: spawn_targets is not a list", path)
+        return None
+    if targets is not None and not all(isinstance(t, str) for t in targets):
+        logger.warning(
+            "Skipping agent file %s: spawn_targets is not a list of strings",
+            path)
+        return None
     overrides = fm.get("approval_overrides") or {}
     if not isinstance(overrides, dict):
         logger.warning("Skipping agent file %s: approval_overrides is not a mapping", path)
+        return None
+    # THE VALUES TOO, not just the mapping (batch 150). The two scalar
+    # booleans below are validated for the reason stated there, and this
+    # field is the third one a restrictive agent definition uses to opt
+    # IN to prompting -- so stopping at the container left
+    # `web_search: "false"` parsing to the STRING, and
+    # requires_approval() returning 'false' from a function documented to
+    # return a bool. Measured: no value widens a gate, because approval
+    # ORs and every falsy value is already indistinguishable from the key
+    # being absent -- so this is the type boundary, not an escalation.
+    # Same warn-and-skip contract as every other typed field here; a
+    # per-key repair would leave half a policy, which is worse than no
+    # file at all for a field whose job is adding prompts.
+    if not all(isinstance(v, bool) for v in overrides.values()):
+        bad = sorted(k for k, v in overrides.items()
+                     if not isinstance(v, bool))
+        logger.warning(
+            "Skipping agent file %s: approval_overrides values must be "
+            "booleans; %s %s not.",
+            path, ", ".join(repr(k) for k in bad),
+            "is" if len(bad) == 1 else "are")
         return None
     max_steps = fm.get("max_steps")
     # REPAIR, NOT REJECT (#45, batch 16 -- explicit owner decision). This
@@ -420,7 +518,7 @@ def _parse_md_file(path: str, kind: str, tier: str, category: str = ""):
             logger.warning(
                 "Agent file %s: max_steps must be a positive integer, got "
                 "%r; defaulting to %s (config.MAX_ITERATIONS).",
-                path, max_steps, config.MAX_ITERATIONS)
+                path, max_steps, config_schema.current().max_iterations)
             max_steps = None
     # Booleans are VALIDATED, not coerced. bool("false") is True, so
     # `use_memory: "false"` would invert a deliberate opt-out with no
@@ -440,6 +538,35 @@ def _parse_md_file(path: str, kind: str, tier: str, category: str = ""):
         logger.warning(
             "Skipping agent file %s: spawnable is not a boolean", path)
         return None
+    # STRINGS OR ABSENT, and these are the other two fields the rule above
+    # was never applied to (batch 155). Both were read straight out of
+    # frontmatter and handed to code that has always assumed a string, so
+    # a well-typed-but-wrong-SHAPED value loaded clean here and failed
+    # layers away with nothing naming the file. Measured against the real
+    # resolvers, nothing monkeypatched: `provider: 123` reaches
+    # `client.api_initialization` and raises `ValueError: Unknown
+    # provider: 123`, which names the provider and not the file that
+    # supplied it; `model: [a, b]` reaches the effort cache's
+    # `(provider_name, model)` key and raises `TypeError: unhashable
+    # type: 'list'`, which names neither. Both arrive there through
+    # `agents/subagent_tool.py` and `tui/app.py`, which pass
+    # `agent.model or ...` through verbatim.
+    #
+    # SKIP RATHER THAN REPAIR TO None, which is where this parts company
+    # with `max_steps` above (#45). None is a REAL value for both fields
+    # and means "inherit the session's", so repairing would leave the
+    # agent available and running on a model nobody chose for it. A file
+    # names a model when being a DIFFERENT model is the point, and §11's
+    # critic rationale is the sharpest form of that -- "a model checking
+    # its own output for errors shares that model's blind spots". A bad
+    # `max_steps` has no honest reading, so repairing it invents nothing;
+    # an unreadable `model` has one, and it is the wrong one.
+    for key in ("model", "provider"):
+        value = fm.get(key)
+        if value is not None and not isinstance(value, str):
+            logger.warning(
+                "Skipping agent file %s: %s is not a string", path, key)
+            return None
     return AgentDef(
         name=name,
         description=_catalog_text(fm.get("description", "")),
@@ -450,6 +577,7 @@ def _parse_md_file(path: str, kind: str, tier: str, category: str = ""):
         use_project_context=flags["use_project_context"],
         use_memory=flags["use_memory"],
         spawnable=spawnable,
+        spawn_targets=targets,
         max_steps=max_steps,
         body=body,
         tier=tier,
@@ -643,8 +771,8 @@ def _validate_settings(data, source: str) -> None:
                 f"settings.json at {source}: ensemble_models is deliberately "
                 f"not supported -- a roster chooses which providers N research "
                 f"passes call, and a project's settings.json beats the "
-                f"user's. Set config.ENSEMBLE_MODELS in config.py instead "
-                f"(same posture as CRITIC_MODEL).")
+                f"user's. Set ensemble_models in config.yaml instead "
+                f"(same posture as critic_model).")
         if key == "shell_approval_mode":
             # ROADMAP_v2 §28 (G7), and the third application of R12's rule.
             # Rejected BY NAME for the reason the other two are: the
@@ -665,7 +793,7 @@ def _validate_settings(data, source: str) -> None:
                 f"deliberately not supported -- it decides whether shell "
                 f"commands are approved at all, and a project's "
                 f"settings.json beats the user's. Set "
-                f"config.SHELL_APPROVAL_MODE in config.py instead (same "
+                f"shell_approval_mode in config.yaml instead (same "
                 f"posture as ensemble_models and research.granted_tools).")
         if key in ("critic_model", "embedder_model"):
             # ROADMAP_v2 §45 (SQ7), and the fourth application of R12's
@@ -686,7 +814,7 @@ def _validate_settings(data, source: str) -> None:
                 f"supported -- it names a provider this harness sends "
                 f"research content to, and a project's settings.json beats "
                 f"the user's. Use /critic or /embedder, or set "
-                f"config.CRITIC_MODEL / config.EMBEDDER_MODEL in config.py "
+                f"critic_model / embedder_model in config.yaml "
                 f"(same posture as ensemble_models).")
         if key not in _KNOWN_SETTINGS:
             raise ValueError(f"settings.json at {source}: unknown key {key!r}")
@@ -749,21 +877,33 @@ def _validate_settings(data, source: str) -> None:
 # bad value is a startup error, and called again per compaction so a
 # per-invocation `/compact --strength 4` composes with the same rules.
 
+# settings.json key -> the `config.yaml` field it defaults from.
+#
+# THESE ARE SCHEMA FIELD NAMES, NOT STRINGS LOOKED UP ON A MODULE. This map
+# used to hold `"COMPACTION_TRIGGER_TOKENS"` and friends and reach them with
+# `getattr(config, attr)` -- no default, so renaming or dropping any one of
+# the seven turned `shipped_defaults()` into an AttributeError that surfaced
+# through `initialize()` at startup, and nothing but this dictionary tied the
+# two names together. `config_schema.HarnessConfig` is the source of truth
+# now, so a missing field is a validation error naming the key and a renamed
+# one is an AttributeError here at the same moment either way -- but the names
+# below are checked against the model by
+# `tests/test_config_loader.py::test_every_compaction_default_names_a_schema_field`.
 _COMPACTION_DEFAULTS = {
-    "trigger_tokens": "COMPACTION_TRIGGER_TOKENS",
-    "warning_margin_tokens": "COMPACTION_WARNING_MARGIN_TOKENS",
-    "keep_recent_tokens": "COMPACTION_KEEP_RECENT_TOKENS",
-    "keep_recent_turns": "COMPACTION_KEEP_RECENT_TURNS",
-    "strength": "COMPACTION_STRENGTH",
-    "max_retries": "COMPACTION_MAX_RETRIES",
-    "strategy": "COMPACTION_STRATEGY",
+    "trigger_tokens": "compaction_trigger_tokens",
+    "warning_margin_tokens": "compaction_warning_margin_tokens",
+    "keep_recent_tokens": "compaction_keep_recent_tokens",
+    "keep_recent_turns": "compaction_keep_recent_turns",
+    "strength": "compaction_strength",
+    "max_retries": "compaction_max_retries",
+    "strategy": "compaction_strategy",
 }
 
 
 def shipped_defaults() -> dict:
     """Every nested knob at the value it takes when no settings.json
     speaks. `{section: {key: default}}`, sections only -- the top-level
-    scalars are plain `config.py` constants and need no accessor.
+    scalars are plain `config.yaml` keys and need no accessor.
 
     EXISTS SO A TEMPLATE CANNOT QUOTE A STALE DEFAULT (§24 I15).
     `/init --config` writes a settings.json of defaults, and a settings
@@ -776,9 +916,10 @@ def shipped_defaults() -> dict:
     resolved at call time, which is why this can sit beside the compaction
     map it also reads.
     """
+    cfg = config_schema.current()
     return {
-        "compaction": {key: getattr(config, attr)
-                       for key, attr in _COMPACTION_DEFAULTS.items()},
+        "compaction": {key: getattr(cfg, field)
+                       for key, field in _COMPACTION_DEFAULTS.items()},
         "confidence": _confidence_defaults(),
         "source_scoring": _source_scoring_defaults(),
     }
@@ -788,13 +929,18 @@ def effective_compaction(overrides: Optional[dict] = None,
                          warn: bool = False) -> dict:
     """The compaction values actually in force.
 
-    A flat {key: value}. NOT where each came from -- see
-    TECHNICAL_DEBT.md item 12; the merge below overwrites without
-    recording which tier won, and D27's third implementation note asked
-    for provenance AND somewhere to show it. This sentence used to
-    promise both (audit #91).
+    A flat {key: value}, and DELIBERATELY STILL FLAT. Where each value
+    came from is `compaction_sources()` below, beside this rather than
+    inside it: twelve call sites subscript what this returns, so
+    `{key: (value, tier)}` breaks every one of them and a parallel dict
+    breaks none -- TECHNICAL_DEBT 12's first blocker, which is a decision
+    about shape and is unchanged by having built the second half.
 
-    config.py default -> user settings.json -> trusted project
+    This docstring used to open "and where they came from" and return a
+    flat dict, which is audit #91's finding; then it promised nothing and
+    pointed at the register. Now it points at the function that answers.
+
+    config.yaml default -> user settings.json -> trusted project
     settings.json -> `overrides` (a per-invocation `/compact --strength 4`,
     which applies to that one run and persists nothing). Nearest wins,
     which is the precedence the rest of the config system already uses.
@@ -813,21 +959,19 @@ def effective_compaction(overrides: Optional[dict] = None,
     compaction constantly, and every compaction is a real model call the
     user pays for.
     """
-    import config
+    cfg = config_schema.current()
 
-    values = shipped_defaults()["compaction"]
-    values.update(get_settings().get("compaction") or {})
-    values.update({k: v for k, v in (overrides or {}).items() if v is not None})
+    values, _ = _compaction_merge(overrides)
 
     strength = values["strength"]
-    if strength not in config.COMPACTION_TARGET_RATIOS:
+    if strength not in cfg.compaction_target_ratios:
         raise ValueError(
             f"compaction.strength must be one of "
-            f"{sorted(config.COMPACTION_TARGET_RATIOS)}, got {strength!r}")
-    if values["strategy"] not in config.COMPACTION_STRATEGIES:
+            f"{sorted(cfg.compaction_target_ratios)}, got {strength!r}")
+    if values["strategy"] not in cfg.compaction_strategies:
         raise ValueError(
             f"compaction.strategy must be one of "
-            f"{', '.join(config.COMPACTION_STRATEGIES)}, "
+            f"{', '.join(cfg.compaction_strategies)}, "
             f"got {values['strategy']!r}")
     if values["trigger_tokens"] < 1:
         raise ValueError(
@@ -883,12 +1027,63 @@ def effective_compaction(overrides: Optional[dict] = None,
     return values
 
 
+def _compaction_merge(overrides: Optional[dict] = None) -> tuple[dict, dict]:
+    """`(values, sources)` for the seven compaction keys -- ONE ladder.
+
+    TECHNICAL_DEBT 12, batch 111. Both halves come out of the same three
+    `update()` calls because the alternative is two ladders that have to
+    agree about precedence, and a provenance report that disagrees with
+    the value it describes is worse than no provenance: it is a confident
+    wrong answer to "why is this number what it is".
+
+    `sources` names a tier for every key, always -- `"config.yaml"` when
+    nothing outranks the file -- where `settings_sources()` records only
+    what a settings file set. The difference is deliberate: that one
+    answers "did anything override this", which absence can express, and
+    this one answers "where did this number come from", which it cannot.
+    """
+    values = shipped_defaults()["compaction"]
+    sources = dict.fromkeys(values, "config.yaml")
+
+    tiers = settings_sources()
+    for key, value in (get_settings().get("compaction") or {}).items():
+        values[key] = value
+        # The tier that WROTE it, not "settings.json": the merge upstream
+        # kept them apart precisely so this line can tell them apart.
+        sources[key] = tiers.get(f"compaction.{key}", "user")
+
+    for key, value in (overrides or {}).items():
+        if value is not None:
+            values[key] = value
+            sources[key] = "override"
+
+    return values, sources
+
+
+def compaction_sources(overrides: Optional[dict] = None) -> dict:
+    """`{key: tier}` for the seven compaction keys -- where each value in
+    force came from. TECHNICAL_DEBT 12, and D27's third implementation
+    note, whose whole argument was that "compaction feels too aggressive"
+    should be a one-line answer rather than a value three files away.
+
+    Tiers: `"config.yaml"`, `"user"`, `"project"`, `"override"` -- nearest
+    wins, the same ladder `effective_compaction` walks, walked once by the
+    function they share.
+
+    NO VALIDATION HERE, and that is not an oversight. This is a display
+    call on a process whose configuration was validated at startup by
+    `initialize()`; raising from a `/config` explanation would replace a
+    sentence about a number with a traceback about a number.
+    """
+    return _compaction_merge(overrides)[1]
+
+
 def _read_settings_file(path: str) -> dict:
     if not os.path.exists(path):
         return {}
     # utf-8-sig for the same reason as _parse_md_file: a BOM'd
     # settings.json makes json.load raise at the first character.
-    with open(path, "r", encoding="utf-8-sig") as f:
+    with open(path, encoding="utf-8-sig") as f:
         data = json.load(f)  # json.JSONError propagates as ValueError
     _validate_settings(data, path)
     return data
@@ -910,9 +1105,10 @@ def user_settings() -> dict:
         os.path.join(_user_config_dir(), "settings.json"))
 
 
-def _load_merged_settings(project_path: str, trusted: bool) -> dict:
-    """Resolution order: project (trusted) > user. Anything absent falls
-    through to config.py defaults at the consumer.
+def _load_merged_settings(project_path: str,
+                          trusted: bool) -> tuple[dict, dict]:
+    """`(values, sources)`. Resolution order: project (trusted) > user.
+    Anything absent falls through to config.yaml defaults at the consumer.
 
     Nested sections (`_NESTED_SETTINGS`) merge one level deeper than the
     rest. Every other setting is a scalar, so whole-value replacement IS
@@ -924,8 +1120,24 @@ def _load_merged_settings(project_path: str, trusted: bool) -> dict:
     Driven off _NESTED_SETTINGS rather than naming sections inline: §16
     added `tui` alongside `compaction`, and a second hardcoded section name
     here is exactly how the first one came to be missed.
+
+    `sources` MAPS EACH SETTING TO THE TIER THAT LAST WROTE IT, dotted for
+    a nested key: `{"compaction.strength": "project"}`. TECHNICAL_DEBT 12,
+    batch 111. It is built HERE, in the same pass as the merge, because
+    this is the only moment the two tiers are still distinguishable -- the
+    entry's own words for why provenance was missing were that it is "not
+    omitted, it is destroyed by the merge", and a second function
+    re-reading both files to work it out afterwards would be two
+    traversals that must agree, which is the shape this module's own
+    docstrings keep naming as how the first one drifts.
+
+    A value the user set and the project did not keeps `user`, which is
+    the whole point of recording it per key rather than per file: one
+    `settings.json` arriving with a cloned directory does not make every
+    compaction value the project's.
     """
     merged = user_settings()
+    sources = _tier_of(merged, "user")
     if trusted:
         project = _read_settings_file(os.path.join(
             workspace_trust.venastine_dir(project_path), "settings.json"))
@@ -934,10 +1146,29 @@ def _load_merged_settings(project_path: str, trusted: bool) -> dict:
             for section in _NESTED_SETTINGS
         }
         merged.update(project)
+        sources.update(_tier_of(project, "project"))
         for section, value in deep.items():
             if value:
                 merged[section] = value
-    return merged
+    return merged, sources
+
+
+def _tier_of(settings: dict, tier: str) -> dict:
+    """`{dotted key: tier}` for everything *settings* actually sets.
+
+    One level deep, for `_NESTED_SETTINGS`' reason and driven off the same
+    table: a section is the only kind of value whose keys are settings in
+    their own right, so a section is the only thing flattened. Its own
+    name is recorded too -- a consumer that reads a whole section, as
+    `tui` does, wants to know who supplied it.
+    """
+    flat = {}
+    for key, value in settings.items():
+        flat[key] = tier
+        if key in _NESTED_SETTINGS and isinstance(value, dict):
+            for leaf in value:
+                flat[f"{key}.{leaf}"] = tier
+    return flat
 
 
 _state: Optional[dict] = None
@@ -954,7 +1185,7 @@ def initialize(project_path: str) -> None:
             "content (agents, skills, settings, AGENTS.md) will not load.",
             project_path,
         )
-    settings = _load_merged_settings(project_path, trusted)
+    settings, settings_tiers = _load_merged_settings(project_path, trusted)
     context = None
     if trusted:
         # §44: the project ROOT, not .venastine/. The hub is an ordinary
@@ -972,7 +1203,7 @@ def initialize(project_path: str) -> None:
             # -- including plain chat, which never reads the file. Every
             # other malformed content file in this module warns and skips.
             try:
-                with open(context_path, "r", encoding="utf-8-sig") as f:
+                with open(context_path, encoding="utf-8-sig") as f:
                     context = f.read()
             except (OSError, UnicodeDecodeError) as e:
                 logger.warning(
@@ -984,6 +1215,10 @@ def initialize(project_path: str) -> None:
         "agents": _discover("agents", project_path, trusted),
         "skills": _discover("skills", project_path, trusted),
         "settings": settings,
+        # Beside the values rather than folded into them, because twelve
+        # call sites subscript that dict and `{key: (value, tier)}` breaks
+        # every one (TECHNICAL_DEBT 12's first blocker, unchanged).
+        "settings_sources": settings_tiers,
         "context": context,
     }
     # §32 A3. Before effective_compaction, because this one is about
@@ -1062,8 +1297,25 @@ def get_skills() -> dict:
 
 def get_settings() -> dict:
     if _state is None:
-        return {}  # pre-init consumers fall through to config.py defaults
+        return {}  # pre-init consumers fall through to config.yaml defaults
     return dict(_state["settings"])
+
+
+def settings_sources() -> dict:
+    """`{dotted setting: "user" | "project"}` for everything a settings
+    file actually set. TECHNICAL_DEBT 12.
+
+    A setting absent here was not set by either file, which means the
+    value in force came from `config.yaml` -- so the caller reads the
+    absence rather than needing a third tier name in the mapping.
+
+    Empty pre-init for `get_settings()`'s reason, and the consequence is
+    the same one: a caller that runs before `initialize()` is told nothing
+    outranks the file, which is true of that moment.
+    """
+    if _state is None:
+        return {}
+    return dict(_state["settings_sources"])
 
 
 def spend_cap() -> Optional[int]:
@@ -1217,21 +1469,95 @@ def _catalog_entries(root: str, files: list) -> list:
     return out
 
 
-#: How much of the project context document the trust prompt shows. Enough
-#: to recognise what the file is for, short enough that the prompt stays
+#: How much of any ONE section of the trust prompt is printed. Enough to
+#: recognise what a file is for, short enough that the prompt stays
 #: readable -- the whole thing is what a grant covers, not what it prints.
-_HUB_PREVIEW_LINES = 20
+_SECTION_LINES = 60
+_SECTION_CHARS = 6000
+
+
+def _bounded(source: list, prefix: str, what: str) -> list:
+    """`source`'s lines, prefixed and cut to BOTH bounds, with a marker
+    naming what was withheld.
+
+    THE CONSENT PROMPT IS THE ONE PLACE A PROJECT'S CONTENT IS SHOWN TO
+    SOMEONE WHO HAS NOT TRUSTED IT YET (D17), so how long it is must not
+    be the project's choice. Every section goes through here (A54) --
+    the file listing, the hub, the two JSON files and the catalog --
+    because capping some of them leaves the prompt exactly as floodable
+    and the cap stops being worth having.
+
+    TWO BOUNDS, NOT ONE, AND THE PAIR IS THE POINT. §44 gave the hub a
+    LINE bound alone, and measured against it: a 2 MB AGENTS.md written
+    as one line printed all 2 MB in four lines, and twenty 100 KB lines
+    printed 2 MB from inside the cap. A char bound alone fails the other
+    way -- 30,000 short lines are 2.4 MB of prompt. The two JSON files
+    had neither bound: 2 x 2.2 MB rendered as 4.5 MB in 30 lines, with
+    the `mcp.json` command the section exists to show sitting at
+    99.9994% of the way in.
+
+    THE NUMBERS ARE MEASURED AGAINST THE LARGEST LEGITIMATE SHAPES
+    rather than picked. A five-server pretty-printed `mcp.json` is 54
+    lines and 923 characters; a realistic `settings.json` is 14 and 264;
+    this project's own AGENTS.md is 4,033 characters in its first 60
+    lines. All three render whole, which is what keeps the marker
+    meaningful on the files where it does appear.
+
+    THE MARKER IS NOT A COURTESY. A cut nobody is told about turns a
+    bounded prompt into one that misrepresents what it covers, and the
+    grant is over the whole file either way -- which is why the sentence
+    says so rather than stopping at an ellipsis.
+    """
+    shown: list = []
+    used = 0
+    hidden_chars = 0
+    for line in source:
+        if len(shown) >= _SECTION_LINES or used >= _SECTION_CHARS:
+            hidden_chars += len(line)
+            continue
+        room = _SECTION_CHARS - used
+        if len(line) > room:
+            # CUT WITHIN THE LINE rather than dropping it whole. A file
+            # flooded on one enormous line has exactly one line, and it
+            # is the line the section exists to show.
+            shown.append(line[:room] + "…")
+            used += room
+            hidden_chars += len(line) - room
+            continue
+        shown.append(line)
+        used += len(line)
+    out = [prefix + line for line in shown]
+    hidden_lines = len(source) - len(shown)
+    if hidden_lines or hidden_chars:
+        # Always plural. The grammar is a blemish; a marker whose wording
+        # depends on the count is one a test can match by luck.
+        out.append(
+            f"{prefix}… {hidden_lines} more lines and {hidden_chars} more "
+            f"characters of {what} are not shown here. Trust covers the "
+            f"whole file, not the part printed.")
+    return out
 
 
 def describe_project_content(project_path: str) -> str:
     """Human-readable summary shown in the trust prompt, so approving
     trust is an informed decision -- a project's settings can choose the
     provider and multiply pipeline cost via ensemble_n, and an agent's
-    or a skill's description reaches every system prompt (#131)."""
+    or a skill's description reaches every system prompt (#131).
+
+    EVERY SECTION IS BOUNDED, through `_bounded` above (A54, batch 155).
+    Two of the four used to be pasted whole and the hub was bounded on
+    one axis of two, which let a cloned project decide how long its own
+    consent screen was."""
     root = workspace_trust.venastine_dir(project_path)
     files = workspace_trust.content_files(project_path)
     lines = [f"Project content ({os.path.realpath(project_path)}):"]
-    lines += [f"  - {rel}" for rel in files]
+    # THE LISTING ITSELF IS BOUNDED TOO. `content_files()` is unchanged
+    # and still returns every covered path -- the hash and
+    # workspace_trust's "the loader must read no file the trust listing
+    # omits" invariant are about that function, not about this rendering.
+    # What is bounded is what the PROMPT prints, and 20,000 padding files
+    # under .venastine/ were 20,001 lines of it.
+    lines += _bounded(files, "  - ", "the file listing")
 
     # §44. The hub is shown VERBATIM, and it is the strongest instance of
     # this function's own stated criterion -- "the ones whose contents
@@ -1245,21 +1571,19 @@ def describe_project_content(project_path: str) -> str:
                        workspace_trust.PROJECT_CONTEXT_FILENAME)
     if os.path.exists(hub):
         try:
-            with open(hub, "r", encoding="utf-8-sig") as f:
+            with open(hub, encoding="utf-8-sig") as f:
                 body = f.read()
         except (OSError, UnicodeDecodeError) as e:
             lines.append(
                 f"{workspace_trust.PROJECT_CONTEXT_FILENAME}: could not be "
                 f"read ({e})")
         else:
-            shown = body.splitlines()
             lines.append(
                 f"{workspace_trust.PROJECT_CONTEXT_FILENAME} would enter "
                 f"every opted-in agent's system prompt; it begins:")
-            lines += ["  | " + line for line in shown[:_HUB_PREVIEW_LINES]]
-            if len(shown) > _HUB_PREVIEW_LINES:
-                lines.append(
-                    f"  | … {len(shown) - _HUB_PREVIEW_LINES} more lines")
+            lines += _bounded(
+                body.splitlines(), "  | ",
+                workspace_trust.PROJECT_CONTEXT_FILENAME)
 
     # settings.json and mcp.json are shown VERBATIM, the rest by name.
     # These two are the ones whose contents change what runs: settings can
@@ -1274,7 +1598,7 @@ def describe_project_content(project_path: str) -> str:
         if not os.path.exists(path):
             continue
         try:
-            with open(path, "r", encoding="utf-8-sig") as f:
+            with open(path, encoding="utf-8-sig") as f:
                 body = f.read()
         except (OSError, UnicodeDecodeError) as e:
             # This function runs ONLY for untrusted projects, i.e. content
@@ -1286,7 +1610,7 @@ def describe_project_content(project_path: str) -> str:
             lines.append(f"{fname}: could not be read ({e})")
             continue
         lines.append(label)
-        lines += ["  | " + line for line in body.splitlines()]
+        lines += _bounded(body.splitlines(), "  | ", fname)
 
     # §32 A6. Shown AFTER the two config files rather than beside the
     # file list, because the list answers "what is here" and this
@@ -1296,8 +1620,13 @@ def describe_project_content(project_path: str) -> str:
     if entries:
         lines.append("these descriptions enter EVERY system prompt in "
                      "this project:")
-        for kind, name, description in entries:
-            lines.append(f"  | {kind[:-1]} {name}: {description}")
+        # A5 bounds each description at `max_catalog_text_chars` and
+        # nothing bounded the NUMBER of them: 3,000 project agents were
+        # 1 MB of prompt in 6,002 lines, every entry individually legal.
+        lines += _bounded(
+            [f"{kind[:-1]} {name}: {description}"
+             for kind, name, description in entries],
+            "  | ", "the agent and skill descriptions")
     return "\n".join(lines)
 
 
@@ -1326,11 +1655,11 @@ def describe_project_content(project_path: str) -> str:
 
 # key -> (module attribute it defaults from, validator)
 #
-# The defaults live BESIDE THE FORMULA rather than in config.py: the
+# The defaults live BESIDE THE FORMULA rather than in config.yaml: the
 # tunable-weights block at the top of confidence_scoring.py documents what
 # each number does and why it is that number, and a second copy here is a
 # second thing to keep in step. Imported lazily inside the resolver, the
-# same shape effective_compaction uses for `config`.
+# same shape effective_compaction uses for `config_schema`.
 _UNIT = ("a number between 0 and 1", lambda v: isinstance(v, NUMBER_TYPES)
          and not isinstance(v, bool) and 0.0 <= v <= 1.0)
 _POSITIVE_INT = ("a positive whole number",
@@ -1382,23 +1711,23 @@ def _confidence_defaults() -> dict:
 
 
 def _source_scoring_defaults() -> dict:
-    import config
     from core.reasoning import source_scoring as ss
 
+    cfg = config_schema.current()
     return {
         "similarity_floor": None,     # None means "use the per-model table"
         "similarity_ceiling": None,
-        "authority_adjustment_cap": config.AUTHORITY_ADJUSTMENT_CAP,
+        "authority_adjustment_cap": cfg.authority_adjustment_cap,
         "window_chars": ss.WINDOW_CHARS,
         "max_windows": ss.MAX_WINDOWS,
         "claim_min_chars": ss.CLAIM_MIN_CHARS,
         "top_k": ss.TOP_K,
-        "venue_weight": config.SCHOLAR_VENUE_WEIGHT,
-        "citation_weight": config.SCHOLAR_CITATION_WEIGHT,
-        "author_weight": config.SCHOLAR_AUTHOR_WEIGHT,
-        "h_saturation": config.SCHOLAR_H_SATURATION,
-        "min_cohort_size": config.SCHOLAR_MIN_COHORT_SIZE,
-        "min_citation_age_days": config.SCHOLAR_MIN_CITATION_AGE_DAYS,
+        "venue_weight": cfg.scholar_venue_weight,
+        "citation_weight": cfg.scholar_citation_weight,
+        "author_weight": cfg.scholar_author_weight,
+        "h_saturation": cfg.scholar_h_saturation,
+        "min_cohort_size": cfg.scholar_min_cohort_size,
+        "min_citation_age_days": cfg.scholar_min_citation_age_days,
         "domain_overrides": {},
     }
 

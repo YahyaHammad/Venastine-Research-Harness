@@ -11,11 +11,13 @@ definitions that only becomes checkable once there is more than one of
 them:
 
   A12  the roster itself -- three agents added for a harness whose two
-       modes are research and development.
-  A13  `plan`'s whitelist is a strict SUPERSET of the two spawnable
-       agents', because C6 intersects a child's tools with its parent's
-       and a silently narrowed child is A4's failure arriving through
-       the permission axis.
+       modes are research and development, plus four more after: build,
+       test and writer as spawnable C6 leaves, general as the only
+       spawnable branch.
+  A13  `plan`'s and `general`'s whitelists are strict SUPERSETS of every
+       spawnable leaf's, because C6 intersects a child's tools with its
+       parent's and a silently narrowed child is A4's failure arriving
+       through the permission axis.
   A15  `explore` and `review` are read-only by OMISSION rather than by
        gating. Asserted through the real policy layer for the writing
        tools global config ALLOWS, and against the declaration for the
@@ -29,6 +31,8 @@ it silently subtracts the tool the author meant to include. Same for a
 skill's `additional_tools`, one file over, where the consequence is an
 activation note that misses exactly the tools that will fail mid-turn.
 """
+import dataclasses
+
 import pytest
 
 import prompts.system_prompts as system_prompts
@@ -37,7 +41,6 @@ from core import config_loader
 from security.permissions import is_tool_allowed
 from tools.context import ToolContext
 from tools.registry import registry
-
 
 #: Writing tools that are ALLOWED by global config, so excluding them is
 #: this roster's own decision and `is_tool_allowed` can see it.
@@ -54,16 +57,52 @@ GLOBALLY_ALLOWED_WRITERS = ("write_project_doc", "remember",
 GLOBALLY_DENIED_WRITERS = ("write", "edit")
 
 #: What a STOCK install can actually call from these agents' sets. The
-#: rest of what they declare (`read`, `shell`) is globally denied and
-#: reaches them only where the operator has turned it on in config.py.
+#: rest of what they declare (`read`, `write`, `edit`, `shell`) is globally
+#: denied and reaches them only where the operator has turned it on in
+#: config.py.
 STOCK_TOOLS = {
     "explore": {"read_project_doc", "web_search", "fetch_url",
                 "arxiv_search", "load_skill"},
     "review": {"read_project_doc", "load_skill"},
+    "build": {"read_project_doc", "todo_write", "load_skill"},
+    "test": {"read_project_doc", "todo_write", "load_skill"},
+    "writer": {"read_project_doc", "web_search", "fetch_url",
+               "arxiv_search", "todo_write", "load_skill"},
+    "general": {"read_project_doc", "web_search", "fetch_url",
+                "arxiv_search", "load_skill", "todo_write", "ask_user",
+                "spawn_subagent"},
 }
 
 READ_ONLY_AGENTS = ("explore", "review")
 
+#: Spawnable leaves: task string in, answer out, no spawn_subagent of
+#: their own. `general` is the only spawnable branch and is covered
+#: separately — it declares `spawn_subagent` by design, so the read-only
+#: assertions below do not apply to it.
+SPAWNABLE_LEAVES = ("build", "test", "writer", "explore", "review")
+
+
+@pytest.fixture
+def signoff_candidate_tool():
+    """A tool the spawn sign-off COULD offer, registered the way an MCP
+    server's tools are: `mcp__*` so D28 allows it and gates it, and no
+    `approval_check` so R2 does not filter it out of the grant paths.
+
+    Without this the roster sweeps below assert an empty set against an
+    empty pool, which is the vacuity `tests/test_agents.py` records hitting
+    in the same place (`_mcp_tool` "is load-bearing: ... the exclusion below
+    was true of every string ever written").
+    """
+    from tools.base import GRANT_ANYWHERE, ToolSpec
+
+    name = "mcp__probe__signoff"
+    registry.register(ToolSpec(name, {"name": name},
+                               lambda params: {"result": "ok"},
+                               grant_policy=GRANT_ANYWHERE))
+    try:
+        yield name
+    finally:
+        registry.unregister(name)
 
 @pytest.fixture
 def roster(real_harness_tier):
@@ -232,40 +271,204 @@ class TestTheReadOnlyAgentsAreReadOnly:
 
 
 # ===========================================================================
+# ---- the four new agents: stock sets + deliberate declarations ------------
+# ===========================================================================
+
+class TestNewAgentsStockBehavior:
+
+    @pytest.mark.parametrize("name", ("build", "test", "writer", "general"))
+    def test_what_a_stock_install_can_actually_call(self, roster, name):
+        """Same line as the read-only control one class up: the whitelist
+        is the agent's intent, the global switch is the operator's.
+        `read`/`write`/`edit`/`shell` ship denied, so a stock install
+        sees these agents without them."""
+        child = manager.child_context(roster[name], ToolContext())
+        callable_now = {t for t in roster[name].allowed_tools
+                        if is_tool_allowed(t, child)}
+
+        assert callable_now == STOCK_TOOLS[name]
+
+    def test_build_declares_write_and_edit_deliberately(self, roster):
+        """The A15 shape, one tool over: `write`/`edit` are denied by
+        global config, so declaring them costs nothing on a stock
+        install and keeps `build` whole where the operator enabled
+        them. Asserted against the DECLARATION, since the policy layer
+        answers False either way -- the vacuity trap the class above
+        documents."""
+        declared = set(roster["build"].allowed_tools)
+
+        assert {"write", "edit"} <= declared
+
+    def test_only_general_reaches_spawn_subagent(self, roster):
+        """The branch/leaf split: `general` declares `spawn_subagent`
+        by design, and no spawnable leaf does. A leaf that could spawn
+        would compound one sign-off into unbounded delegated authority
+        (R4), and would need the spawning discipline `general` exists
+        to teach exactly once."""
+        assert "spawn_subagent" in (roster["general"].allowed_tools or ())
+
+        for name in SPAWNABLE_LEAVES:
+            assert "spawn_subagent" not in (
+                roster[name].allowed_tools or ()), (
+                f"{name} is a C6 leaf and must not declare spawn_subagent")
+
+    def test_signing_off_a_leaf_spawn_grants_it_nothing(self, roster):
+        """Like the read-only control: every leaf's gated surface is
+        per-call (`shell` carries an `approval_check`), so the sign-off
+        list is empty and one yes creates no standing authority."""
+        for name in ("build", "test"):
+            child = manager.child_context(roster[name], ToolContext())
+
+            assert manager.candidate_approvals(child) == []
+
+
+# ===========================================================================
 # ---- A13: delegation must not narrow the child ----------------------------
 # ===========================================================================
 
-class TestPlanCanDelegateWithoutNarrowingTheChild:
+def _can_spawn(agent) -> bool:
+    """Whether this definition can reach `spawn_subagent` at all.
 
-    def test_plan_holds_a_superset_of_both_spawnable_agents(self, roster):
+    `allowed_tools` unset counts. None means the layer expresses NO
+    opinion, not "no tools", so an agent that declares nothing runs under
+    global policy and `spawn_subagent` is in it -- `grill-me` is the
+    shipped case. A predicate that only looked for the name in a list
+    would call that agent a non-spawner and skip every check below for
+    the one definition whose spawning nothing else constrains either.
+    """
+    return (agent.allowed_tools is None
+            or "spawn_subagent" in agent.allowed_tools)
+
+
+def _may_spawn(agent, roster) -> set:
+    """The agents this one may actually spawn: `spawn_targets` where it
+    declares them, every spawnable agent where it does not."""
+    spawnable = {name for name, a in roster.items() if a.spawnable}
+    if agent.spawn_targets is None:
+        return spawnable
+    return spawnable & set(agent.spawn_targets)
+
+
+class TestDelegationDoesNotNarrowTheChild:
+    """A13, swept rather than named.
+
+    This class used to hardcode `plan` and `general` in four tests, and
+    that is exactly how batch 51's expansion broke it: `build` arrived
+    declaring `write`/`edit`, `plan` did not hold them, and the invariant
+    was restated in a comment above `plan`'s frontmatter while the
+    whitelist under it stayed as it was. The comment was the only thing
+    that changed, so the file CLAIMED the superset it did not have.
+
+    The sweep below asks the roster instead of the author. A twelfth
+    agent that can spawn is covered the day it lands, which is the
+    property the named version did not have.
+    """
+
+    def test_every_spawner_holds_a_superset_of_what_it_may_spawn(
+            self, roster):
         """C6 intersects a child's `allowed_tools` with its parent's, so
         a parent missing a tool the child declares REMOVES it from the
-        child. `plan` is the one shipped agent that can spawn, so its
-        whitelist has to cover both of the agents it can spawn or
-        delegation silently degrades them.
+        child. Every agent that can spawn therefore has to cover every
+        agent it may spawn, or delegation silently degrades them.
+
+        Scoped by `spawn_targets` since this batch, and that is the half
+        worth reading twice: `plan` satisfies this by NOT being able to
+        reach `build` rather than by holding `write`/`edit`. Widening it
+        would have satisfied the assertion and reversed the decision the
+        agent exists for -- the plan is the deliverable, and a person
+        reads it before anything is built.
         """
-        plan = set(roster["plan"].allowed_tools)
-        children = set()
-        for name in READ_ONLY_AGENTS:
-            children |= set(roster[name].allowed_tools)
+        assert roster, "no agents discovered, so this cannot discriminate"
 
-        assert not children - plan, (
-            f"plan cannot delegate without narrowing: {sorted(children - plan)} "
-            f"would be removed from a child that declares them")
+        offenders = []
+        for name, agent in sorted(roster.items()):
+            if not _can_spawn(agent) or agent.allowed_tools is None:
+                continue
+            held = set(agent.allowed_tools)
+            for child_name in sorted(_may_spawn(agent, roster)):
+                lost = set(roster[child_name].allowed_tools or ()) - held
+                if lost:
+                    offenders.append((name, child_name, sorted(lost)))
 
-    @pytest.mark.parametrize("child_name", READ_ONLY_AGENTS)
-    def test_a_spawn_under_plan_loses_nothing(self, roster, child_name):
-        """The invariant above, driven through the composition rather
+        assert not offenders, (
+            "an agent cannot delegate without narrowing its child:\n"
+            + "".join(f"  {parent} -> {child}: {lost} would be removed\n"
+                      for parent, child, lost in offenders)
+            + "Either widen the parent's whitelist or take the child out "
+              "of its spawn_targets. Widening is not automatically the "
+              "right answer -- see plan.md, where the narrowing was the "
+              "symptom of a delegation that should not happen at all.")
+
+    def test_a_spawn_loses_nothing_through_the_composition(self, roster):
+        """The invariant above, driven through `child_context()` rather
         than through the declaration -- so it fails on what a spawn
-        actually receives, which is the thing that matters."""
-        parent = manager.active_context(roster["plan"])
-        child = manager.child_context(roster[child_name], parent)
+        actually receives, which is the thing that matters.
 
-        declared = set(roster[child_name].allowed_tools)
+        The declaration version above cannot see a composition bug, and
+        this one cannot see a whitelist that is wrong in a way the
+        composition happens to mask. Both, for that reason.
+        """
+        offenders = []
+        for name, agent in sorted(roster.items()):
+            if not _can_spawn(agent):
+                continue
+            parent = manager.active_context(agent)
+            for child_name in sorted(_may_spawn(agent, roster)):
+                child = manager.child_context(roster[child_name], parent)
+                declared = set(roster[child_name].allowed_tools or ())
+                lost = declared - (child.allowed_tools or set())
+                if lost:
+                    offenders.append((name, child_name, sorted(lost)))
 
-        assert child.allowed_tools == declared, (
-            f"spawning {child_name} from plan removes "
-            f"{sorted(declared - (child.allowed_tools or set()))}")
+        assert not offenders, (
+            "".join(f"spawning {child} from {parent} removes {lost}\n"
+                    for parent, child, lost in offenders))
+
+    def test_every_declared_spawn_target_is_a_spawnable_agent(self, roster):
+        """The whitelist-typo class, one field over.
+
+        `spawn_targets` narrows by NAME, so a misspelled entry does not
+        warn and does not grant -- it silently removes an agent the
+        author meant to allow, and the parent discovers it as a refusal
+        mid-run. A name that exists but is not spawnable is the same
+        defect with an extra step: `spawn_subagent` could not have fed it
+        anyway, so listing it reads as permission and grants nothing.
+        """
+        spawnable = {name for name, a in roster.items() if a.spawnable}
+
+        offenders = {}
+        for name, agent in sorted(roster.items()):
+            if agent.spawn_targets is None:
+                continue
+            bad = [t for t in agent.spawn_targets if t not in spawnable]
+            if bad:
+                offenders[name] = bad
+
+        assert not offenders, (
+            f"shipped agents name spawn_targets that are not spawnable "
+            f"agents, which silently removes them from what the agent may "
+            f"delegate to: {offenders}")
+
+    def test_plan_cannot_reach_either_agent_that_writes(self, roster):
+        """The decision itself, pinned where reversing it fails.
+
+        Both halves matter and only together. `build` is the agent that
+        writes; `general` is the one that can spawn `build`, so leaving it
+        in would have made the restriction one hop deep and no more. The
+        superset sweep above passes for a `plan` that holds `write`/`edit`
+        and may spawn anything, which is the other way to make it green
+        and the one this forbids.
+        """
+        targets = _may_spawn(roster["plan"], roster)
+
+        assert "build" not in targets and "general" not in targets, (
+            f"plan may spawn {sorted(targets)}. The plan is the "
+            f"deliverable and a person reads it before anything is built; "
+            f"an agent that can hand the work to build has skipped the "
+            f"step it exists to create")
+        assert targets, (
+            "plan may spawn nothing at all, which is a different decision "
+            "from this one -- it still fans out investigation")
 
     def test_a_restricted_parent_still_narrows_it(self, roster):
         """The control, and C6 itself. The superset above is a property
@@ -319,7 +522,8 @@ class TestTheProjectContextTheyOptedInTo:
         workspace_trust.grant_trust(str(root))
         config_loader.initialize(str(root))
 
-    @pytest.mark.parametrize("name", ("plan", "explore", "review"))
+    @pytest.mark.parametrize("name", ("plan", "explore", "review", "build",
+                                       "test", "writer", "general"))
     def test_each_one_receives_the_projects_own_agents_md(
             self, real_harness_tier, name):
         """Through the assembled prompt, because that is what the run
@@ -368,7 +572,9 @@ class TestTheCatalogTheDefaultInstallNowCarries:
         prompt = system_prompts.with_catalogs("BASE")
 
         assert "## Available agents" in prompt
-        assert "- explore:" in prompt and "- review:" in prompt
+        for name in ("build", "explore", "general", "review", "test",
+                     "writer"):
+            assert f"- {name}:" in prompt
 
     def test_a_headless_run_is_still_told_about_no_agents(self, roster):
         """#68/A1: `spawn_subagent` is gated with no `approval_check`, so
@@ -399,3 +605,183 @@ class TestTheCatalogTheDefaultInstallNowCarries:
 
         assert config_loader.get_skill("software/code-review") is None
         assert config_loader.get_skill("code-review") is not None
+
+
+# ===========================================================================
+# ---- TECHNICAL_DEBT 83: the sign-off nothing on the roster can reach ------
+# ===========================================================================
+
+class TestTheSpawnSignoffIsUnreachableOnTheShippedRoster:
+    """`docs/TECHNICAL_DEBT.md` 83, found in batch 137 and filed in 138.
+
+    The two classes above already assert `candidate_approvals(child) == []`
+    for `explore`, `review`, `build` and `test`, and argue it as a design
+    property per agent: "the one yes that starts the spawn creates no
+    standing authority." That argument is sound and is not what this class
+    is about.
+
+    What nothing pinned is the GLOBAL claim. It holds for all SIX spawnable
+    agents, which means §18's spawn sign-off has no reachable configuration
+    on a stock install -- a consent mechanism the shipped roster cannot
+    reach. `writer` and `general` were the two nobody had measured, and
+    `writer` is the striking one: the agent whose name most suggests it
+    would hold `write_project_doc` declares no writing tool at all.
+
+    Before A16 (batch 137) the shipped sign-off fired only when a
+    NON-SPAWNABLE agent was spawned -- `grill-me`, which declares
+    `allowed_tools: None` and so inherited `write_project_doc` from global
+    policy. A16 closed that route, which is how the gap was noticed.
+
+    This class does not change behaviour. It pins the claim so that the day
+    a whitelist widens, the sweep goes red and item 83 is what the reader
+    comes back to -- it offers three answers and they are not equivalent.
+    """
+
+    def test_no_spawnable_shipped_agent_offers_a_signoff(self, roster):
+        """The sweep, over the roster rather than over a typed list.
+
+        A hand-written list of agent names is how this check would stop
+        covering the seventh agent, which is the shape item 79 files
+        against a doc gate.
+        """
+        spawnable = sorted(name for name, agent in roster.items()
+                           if agent.spawnable is True)
+
+        assert len(spawnable) >= 5, (
+            f"only {len(spawnable)} spawnable agents discovered, so this "
+            f"sweep cannot discriminate -- did the roster or the fixture "
+            f"move?")
+
+        offered = {name: manager.candidate_approvals(
+            manager.child_context(roster[name], ToolContext()))
+            for name in spawnable}
+        reachable = {name: tools for name, tools in offered.items() if tools}
+
+        assert not reachable, (
+            f"{reachable} -- a spawnable agent now offers a spawn sign-off. "
+            f"That is not a regression: it makes §18's sign-off reachable on "
+            f"a stock install for the first time. Read TECHNICAL_DEBT 83, "
+            f"which records why it was not and names the three ways to "
+            f"resolve it, then update or close the entry.")
+
+    def test_the_signoff_vocabulary_on_a_stock_install_is_one_tool(self):
+        """WHY the sweep above comes out empty, which the sweep alone does
+        not say.
+
+        `write_project_doc` is the only gated-and-grantable tool a stock
+        install has, and global policy ALLOWS it -- so the reason no agent
+        offers it is that no agent declares it, not that it is denied.
+        (The triage note for item 83 got this backwards, which is why the
+        mechanism is pinned here rather than described in prose.) The other
+        candidates never reach the list: `write`/`edit` are globally denied,
+        and `shell` plus the file tools carry a per-call `approval_check`,
+        which §25 R2 filters out of every grant path by name.
+        """
+        assert sorted(manager.candidate_approvals(ToolContext())) == [
+            "write_project_doc"]
+        assert is_tool_allowed("write_project_doc", ToolContext())
+
+    def test_a_spawnable_agent_declaring_it_would_offer_one(self, roster):
+        """The control that keeps the sweep from being vacuous.
+
+        If `candidate_approvals` ever answered `[]` unconditionally -- a
+        broken filter, a renamed declaration -- the sweep above would stay
+        green while measuring nothing. This drives the same helper through
+        a synthetic spawnable definition that declares the one grantable
+        tool, so the helper is shown able to come out the other way.
+        """
+        probe = dataclasses.replace(
+            roster["review"], name="signoff-probe",
+            allowed_tools=["read_project_doc", "write_project_doc"])
+
+        child = manager.child_context(probe, ToolContext())
+
+        assert manager.candidate_approvals(child) == ["write_project_doc"], (
+            "a spawnable agent declaring write_project_doc must offer it; "
+            "otherwise the sweep above is asserting about a helper that "
+            "cannot answer non-empty, and proves nothing")
+
+    def test_request_payload_offers_nothing_for_every_shipped_agent(
+            self, roster):
+        """The same claim at the PRODUCTION entry point.
+
+        `core/loop.py` does not call `candidate_approvals`; it asks the
+        registry for `request_payload`, which builds the sign-off question.
+        Everything above drives the helper, and a helper is not where this
+        defect could hide -- it hid because nothing drove the payload from
+        the real roster, so the picker branch was only ever tested with
+        arguments hand-written by its own tests.
+        """
+        from agents import subagent_tool
+
+        spawnable = sorted(name for name, agent in roster.items()
+                           if agent.spawnable is True)
+        assert len(spawnable) >= 5, "the sweep cannot discriminate"
+
+        payloads = {name: subagent_tool.request_payload(
+            {"agent_name": name}) for name in spawnable}
+
+        for name, payload in payloads.items():
+            assert payload["agent"] == name, (
+                f"the payload for {name} is about {payload.get('agent')!r}")
+            assert payload["candidates"] == [], (
+                f"{name} now carries candidates {payload['candidates']} into "
+                f"the sign-off, so SubagentSignoffScreen takes its PICKER "
+                f"branch for a shipped agent for the first time. Read "
+                f"TECHNICAL_DEBT 83.")
+
+    def test_the_picker_is_reachable_only_for_an_agent_that_declines_to_narrow(
+            self, roster, signoff_candidate_tool):
+        """The ruling, as a measurement (TECHNICAL_DEBT 83).
+
+        `AGENTS.md` records for the PIPELINE path that "`candidates()` is
+        empty on a default install, by design ... the population both grant
+        paths serve is MCP tools, which are allowed-but-gated by default and
+        carry no `approval_check`." For the SIGN-OFF path the property is
+        stronger, and this is what makes it so: the candidate set is
+        intersected with the CHILD's reachable tools, and every spawnable
+        shipped agent narrows `allowed_tools` to built-ins. An agent file
+        cannot name `mcp__server__tool` for a server that did not exist when
+        it was written.
+
+        So configuring an MCP server -- the one thing that populates the
+        candidate pool -- does not make the picker reachable for anything
+        this project ships. What does is an agent that declines to narrow,
+        or one that names a gated tool outright, and both are user- or
+        project-tier files. That is the operator-configured scope the
+        sign-off is for, measured here rather than asserted in prose.
+        """
+        import dataclasses
+
+        from agents.manager import manager
+
+        # The pool is populated: a wide-open context can see it.
+        assert signoff_candidate_tool in manager.candidate_approvals(
+            ToolContext()), (
+            "the fixture tool is not a candidate even globally, so nothing "
+            "below is a subtraction")
+
+        for name, agent in roster.items():
+            if agent.spawnable is not True:
+                continue
+            child = manager.child_context(agent, ToolContext())
+            assert manager.candidate_approvals(child) == [], (
+                f"{name} reaches {signoff_candidate_tool} despite narrowing")
+
+        # Declines to narrow at all -- which is the shape `grill-me` had, and
+        # the reason the sign-off ever fired before A16 refused it.
+        unnarrowed = dataclasses.replace(
+            roster["review"], name="unnarrowed", allowed_tools=None)
+        offered = manager.candidate_approvals(
+            manager.child_context(unnarrowed, ToolContext()))
+        assert signoff_candidate_tool in offered, (
+            f"an agent declaring no allowed_tools must inherit global policy; "
+            f"got {offered}")
+
+        # Or names the gated tool outright.
+        named = dataclasses.replace(
+            roster["review"], name="named",
+            allowed_tools=["read_project_doc", signoff_candidate_tool])
+        assert manager.candidate_approvals(
+            manager.child_context(named, ToolContext())) == [
+                signoff_candidate_tool]

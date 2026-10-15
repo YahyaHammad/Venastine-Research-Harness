@@ -23,18 +23,17 @@ thing that now performs the check would assert nothing about it.
 from unittest.mock import ANY
 
 from core.loop import RunAgentLoop, run_to_completion
-from tools.context import ToolContext
-from tests.conftest import make_model_response, make_stream_sequence
-
 
 # ---------------------------------------------------------------------------
 # ---- Fake memory + fake dispatch helpers --------------------------------
 # ---------------------------------------------------------------------------
-
 # ROADMAP_v2 §21 gave _run() three new things to call on a memory, and
 # this fake existed in three near-identical copies. One class, in
 # conftest -- see FakeMemory there for why.
 from tests.conftest import FakeMemory as _FakeMemory
+from tests.conftest import make_model_response, make_stream_sequence
+from tools.context import ToolContext
+
 
 def _make_run_kwargs(memory, max_steps=10, context=None):
     return dict(
@@ -98,7 +97,16 @@ def test_single_tool_call_dispatches_and_feeds_result_to_memory(mocker):
     dispatch_mock.assert_called_once_with(
         "web_search", {"query": "x"}, context=None, parent_run=ANY,
         approval_callback=None, response_channel=None, signoff=None,
-        memory=ANY, activity=None)
+        memory=ANY, activity=None,
+        # ROADMAP_v3 61 (CN7): the turn has no cancel token here, and
+        # the point of pinning None is that the parameter is PRESENT.
+        # A spawn that silently lost it would run on past a stop the
+        # user had already asked for.
+        cancel=None,
+        # §47: the MODEL'S own id for this call, not merely some
+        # value. ANY here would match None, which is the mutation
+        # a spawn needs to survive to lose its parent link.
+        call_id="t1")
 
 
 # ---------------------------------------------------------------------------
@@ -282,7 +290,16 @@ def test_context_none_passes_every_tool_through_to_dispatch(mocker):
     dispatch_mock.assert_called_once_with(
         "arbitrary_tool_name", {"x": 1}, context=None, parent_run=ANY,
         approval_callback=None, response_channel=None, signoff=None,
-        memory=ANY, activity=None)
+        memory=ANY, activity=None,
+        # ROADMAP_v3 61 (CN7): the turn has no cancel token here, and
+        # the point of pinning None is that the parameter is PRESENT.
+        # A spawn that silently lost it would run on past a stop the
+        # user had already asked for.
+        cancel=None,
+        # §47: the MODEL'S own id for this call, not merely some
+        # value. ANY here would match None, which is the mutation
+        # a spawn needs to survive to lose its parent link.
+        call_id="t1")
 
 
 def test_context_is_forwarded_to_dispatch_and_approval_needed(mocker):
@@ -320,4 +337,13 @@ def test_context_is_forwarded_to_dispatch_and_approval_needed(mocker):
     dispatch_mock.assert_called_once_with(
         "get_time", {}, context=context, parent_run=ANY,
         approval_callback=None, response_channel=None, signoff=None,
-        memory=ANY, activity=None)
+        memory=ANY, activity=None,
+        # ROADMAP_v3 61 (CN7): the turn has no cancel token here, and
+        # the point of pinning None is that the parameter is PRESENT.
+        # A spawn that silently lost it would run on past a stop the
+        # user had already asked for.
+        cancel=None,
+        # §47: the MODEL'S own id for this call, not merely some
+        # value. ANY here would match None, which is the mutation
+        # a spawn needs to survive to lose its parent link.
+        call_id="t1")

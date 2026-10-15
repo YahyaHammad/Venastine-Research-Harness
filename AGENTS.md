@@ -18,6 +18,13 @@ below. One copy, several filenames.
 # via `dynamic`, so there is one list, not two. markitdown and protobuf are in
 # the `documents` extra, not the default install (#144).
 pip install -r requirements.txt
+# The SUITE's packages are a separate file since batch 136 (S18-07): they were
+# in requirements.txt, which pyproject reads, so `pip install` of the
+# distribution resolved a test runner and the npm launcher put one in every
+# end user's venv. requirements.txt alone RUNS the harness; this is what makes
+# `pytest` work. (`pip install -e ".[test]"` is the same four packages for
+# anyone who never clones.)
+pip install -r requirements-test.txt
 
 python main.py                                    # chat mode, new thread
 python main.py --thread <uuid>                    # resume a thread
@@ -48,16 +55,34 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 4045 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 7214 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
-pytest -m integration                             # opt-in; spawns a real stdio MCP server (§17 AC8)
+pytest -m integration                             # opt-in, 4 tests; three spawn a real stdio MCP server (§17 AC8) and one the fallback shell (batch 130)
+
+# PARALLEL BY DEFAULT since batch 109 -- pytest.ini's addopts carries
+#   `-n auto --dist loadscope`, and nothing below needs typing normally.
+pytest -n0                                        # SERIAL. Debuggers, output parsing, the mutation harness
+pytest -n 4                                       # exactly four workers
+pytest -n logical                                 # every core -- and MEASURABLY NOT FASTER, see below
 ```
 
-Test dependencies (`pytest`, `pytest-mock`, `pytest-asyncio`) are now listed in `requirements.txt` — they had been missing since §14, which is why older docs warn about it.
+Test dependencies (`pytest`, `pytest-mock`, `pytest-asyncio` and `pytest-xdist`) are listed in `requirements-test.txt`, not `requirements.txt` — the comment above its `pip install` line says why. **`pytest-xdist` is not optional**: `pytest.ini` puts `-n auto` in `addopts`, so without it `pytest` fails at argument parsing rather than quietly running serially, which is the intended trade — a suite that silently takes eight times longer on a machine missing a package is worse than one that names the package.
 
-**A fresh clone needs `cp providers.json.example providers.json` before `pytest`.** The file is gitignored, and **12 tests across four files** fail with `ValueError: No providers configured: ...` without it — 7 in `test_loop_tool_dispatch`, 3 in `test_loop_stop_conditions`, 1 in `test_agents` and 1 in `test_thread_legibility` (measured by moving the file aside and running the suite; the note used to say 11 across three, missing the §27 test written after it — audit #128) — `api_initialization()` needs the provider ENTRY to exist, even though the key inside it stays empty. Since #24 the message names the file and its remedy instead of reporting an unknown provider, and `AGENT_PROVIDERS_FILE` redirects it like every sibling path. "Offline, no API keys" is true; "no config file" is not. Also note `python3 -m pytest`: a `pytest` on PATH from a separate tool install runs in its own environment and sees none of the project's dependencies.
+**`--dist loadscope` is a coverage decision, not a performance one, and it is the one thing here not to "optimise".** xdist's default `load` hands out individual tests, and three places depend on one test running immediately after another in the same process: `test_probe_isolation.py::TestWhatOneTestLeavesForTheNext` (two ordered pairs, and its docstring says so), `test_config_edit.py::TestTheLoaderCacheDoesNotLeakBetweenTests`, and `test_storage_e2e.py`'s module-scoped `real_storage` plus the tests that read what earlier ones wrote to its database. Split across workers **none of them fails** — the autouse fixtures in `tests/conftest.py` reinstall the clean state for every test, so "and the next one does not inherit it" passes whoever ran before it, and the file goes silently vacuous. `loadscope` keeps all three **structurally**: it groups by CLASS for a test inside one and by MODULE for a test that is not, and each of the three is a single class or a module of plain functions.
+
+**And a file is no longer one unit, which is the trap loadscope adds.** A file holding both module-level tests and a class is TWO groups, so a non-function-scoped fixture in it is set up twice on any worker that takes both — found by measuring, not by reading, when a `-n logical` run put `test_storage_e2e.py`'s two groups on one worker and the second `real_storage` raised `Table 'conversationthread' is already defined`. Five `-n auto` runs had been green, so it is a scheduling lottery. **If you add a module- or session-scoped fixture, its file must hold no test class** -- and nothing here states how many such fixtures exist, because a count written beside a rule that does not need one goes stale (A34). The rule is enforced for the file you are writing rather than described for the file that happens to hold the fixtures today: `test_every_file_with_a_module_scoped_fixture_declares_no_test_class` reads every test module's fixture DECORATORS and fails on any file that has both, and `test_this_file_declares_no_test_class` still pins the one file that has them now.
+
+**The suite was FLOOR-BOUND and is not any more, and batch 114 is why.** The slowest single GROUP sets the wall time whatever the worker count, and under loadscope that was `tests/test_tui.py`'s 183 module-level tests — one group, because a test outside a class is grouped by MODULE — at 292 node ids and about a fifth of the suite's measured time. They were cut into 41 classes along the section banners the file already had (TECHNICAL_DEBT 30) and are **72** now, which is the rule working rather than drifting. That number is read back out of this sentence by `test_agents_md_states_the_real_test_tui_class_count` (batch 128), so a batch that adds a class here also edits this digit. Measured properly: three runs a side, ALTERNATED on one box so drift cancels instead of landing on whichever side ran second — **2:17.9 / 2:07.9 / 2:28.6 before against 1:10.7 / 1:40.6 / 1:26.3 after, a mean of 138.1s against 85.9s, 1.61×**, and the two ranges do not overlap, which is the part that makes it a result rather than a pair of averages. Against a serial run that read 8:41 the same evening, 6.1× where it was 3.8×.
+
+**What is left as the floor is one PARAMETRISED function**, and it cannot be split by any class boundary: loadscope groups every node id of a parametrised test together, and `test_every_modal_keeps_its_decision_on_screen` is 3 sizes × 19 cases = **57** of them, pinned against the collected node ids by `test_agents_md_states_the_real_modal_parametrisation` (batch 128) because `_DECISION_CASES` is computed and cannot be counted by reading. Splitting it further was measured and declined — `-n auto` is 11 workers here and the serial suite is ~520s, so the ideal worker share is ~47s and that group already sits under it. Below a bound that has stopped binding there is nothing to win.
+
+**Two things not to re-derive from the above.** CI gains nothing: `-n auto` is 70% of the cores, so a 4-core runner takes 3 workers and its ideal share was already above the old floor — the payoff is on developer machines, which is where the suite runs many times a batch. And extra workers still buy nothing: alternated on the same commit, `-n auto` (11 workers) ran 2:09 / 2:10 and `-n logical` (16) ran 2:13 / 2:13 / 2:14, about 3% SLOWER, which is the same answer batch 109 got under loadfile.
+
+**A new test in `tests/test_tui.py` goes inside a class.** Pinned by `TestThisFileIsGroupedForLoadscope::test_every_test_here_is_inside_a_class`, which parses the file with `ast` and sits inside a class itself, because a module-level test there would be the thing it forbids. Without it the module group rebuilds one commit at a time and nothing says so until the floor is back. `tests/test_themes.py` is the larger remaining classless population — 319 node ids, no classes — and was left alone on a measurement: ~12.5s, far under the floor, so classing it would lower nothing.
+
+**A fresh clone needs `cp providers.json.example providers.json` before `pytest`.** The file is gitignored, and **12 tests across four files** fail with `ValueError: No providers configured: ...` without it — 7 in `test_loop_tool_dispatch`, 3 in `test_loop_stop_conditions`, 1 in `test_agents` and 1 in `test_thread_legibility` (measured by moving the file aside and running the suite) — `api_initialization()` needs the provider ENTRY to exist, even though the key inside it stays empty. Since #24 the message names the file and its remedy instead of reporting an unknown provider, and `AGENT_PROVIDERS_FILE` redirects it like every sibling path. "Offline, no API keys" is true; "no config file" is not. Also note `python3 -m pytest`: a `pytest` on PATH from a separate tool install runs in its own environment and sees none of the project's dependencies.
 
 MCP servers are a *third* config file again — `mcp.json`, user-level or `.venastine/`-level. Not `.env`, not `providers.json`, not `settings.json`.
 
@@ -72,6 +97,8 @@ cwd and stdio. The harness itself did not have to change to support this, becaus
 asset already resolves from `__file__` (`HARNESS_ROOT`, `_package_root()`, `prompts/system_prompts.py`)
 and every piece of state from cwd with an env override.
 
+**`npm update` replaces the package directory wholesale, `config.yaml` included** (batch 86, measured with `npm pack` and two installs into a scratch prefix). `config_update.py` is what makes that survivable: the launcher runs it before `main.py`, and it re-applies the user's own values onto the freshly shipped file from a pristine copy and a mirror kept in `~/.config/venastine/config-state/`. Two rules there are load-bearing rather than tidy. **The mirror is refreshed only after the version check** -- copying `config.yaml` over it first overwrites it with the file npm just replaced, and every other test still passes. Batch 87 moved the post-session copy out of this file for that reason: it was four lines of `fs.copyFileSync` guarded only by a version file EXISTING, so a merge that failed was followed at session end by the newly shipped file being copied over the mirror, and the user's settings were gone from every copy. The launcher now spawns `config_update.py --mirror` and owns no decision at all; the state is keyed per install, and the launcher READS `installs.json` rather than recomputing a path. **Nothing in that path may fail a launch**: the module always exits 0 and the launcher does not check its status, which is why the cheap path imports no first-party code at all (`import config_schema` alone costs 294ms of pydantic and ruamel, on a path that runs at every launch and does nothing on almost all of them).
+
 **The launcher must never set `PYTHONPATH` or `AGENT_WORKSPACE`** (test-pinned,
 `test_the_launcher_never_sets_the_two_variables_that_would_break_it`). `tools/isolation.py` builds
 its child's `PYTHONPATH` from the *parent's resolved `sys.path`* on purpose, so an injected value is
@@ -81,8 +108,14 @@ auto-approve writes there from every project. That second one is the trap: it is
 move after seeing `APP_DB_PATH` redirected two lines above, and it is wrong.
 
 **Since §44 it is also the PROJECT PATH, which makes that rule stricter rather than looser** (WS7).
-`main()` sets `project_path` to the resolved workspace when `AGENT_WORKSPACE` is *named*, so trust,
-`.venastine/`, `/init`'s destination and `UserMemory`'s project scope all follow it. PRESENCE, never
+`main()` sets `project_path` to the resolved workspace when the workspace is *named as the project*, so
+trust, `.venastine/`, `/init`'s destination and `UserMemory`'s project scope all follow it. **Two ways to
+name it since batch 111** (TECHNICAL_DEBT 28): the presence of `AGENT_WORKSPACE`, or `workspace_is_project:
+true` in `config.yaml`, OR'd inside `config_schema.derived_values(cfg)` so `main()` still reads one
+boolean. **And when NEITHER names it, `main()` falls back to `os.getcwd()`, which is refused if that is
+the install tree**
+(`protected_paths.check_project`, TECHNICAL_DEBT 26, batch 107) -- naming the harness was always
+refused, and until then the implicit route reached the same state by saying nothing. PRESENCE, never
 value: the default `./workspace` is a subdirectory of the launch directory, so a value test would
 move the project one level down for everyone who set nothing. An injected value from the launcher
 would now relocate a user's whole project, not merely widen a write boundary.
@@ -108,11 +141,11 @@ identical in a checkout, wrong everywhere else. It is `find_dotenv(usecwd=True)`
 `AGENT_ENV_FILE` as the override. Do not simplify it back.
 
 **Three lists exclude local secrets from three channels, and they must agree**: `.gitignore` for
-`git push`, `.gitattributes export-ignore` for `git archive` (H3/C2), and `files` in `package.json`
+`git push`, `.gitattributes export-ignore` for `git archive`, and `files` in `package.json`
 for npm. npm's is the one that fails *open* — with no `files` key it falls back to `.gitignore`, so
 `providers.json` would be excluded by accident rather than decision. It is an allowlist for that
 reason, and it needs its `!**/__pycache__` / `!**/*.pyc` / `!**/.ipynb_checkpoints` guards because a
-directory entry sweeps in whatever is inside it.
+directory entry sweeps in whatever is inside it. The three-channel rule itself is stated in `docs/PRIVACY.md` and recorded in `docs/DEVLOG.md`, and **it has no decision id** -- batch 128 removed a cited `H3/C2`, which named §31's `RLIMIT_CPU`/`RLIMIT_AS` decision and an id the record does not define at all.
 
 **Never vendor wheels into the tarball.** The package is first-party source and the launcher has
 zero npm dependencies, which is what lets `THIRD_PARTY_NOTICES.md` say the npm channel adds no
@@ -134,8 +167,19 @@ public and the secret is added deliberately, in that order.
 
 Read these before changing anything non-trivial — they carry design decisions that are locked, not defaults to re-derive.
 
-- **ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§46, all built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A15 from §32, W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 and EP1–EP8 from §46). Section and D-numbers are stable and cross-referenced everywhere.
+**The record lives in `docs/` and six documents stayed at the root, each for a reason that is not
+tidiness** (batch 89). `README.md` is the landing preview; `LICENSE` and `NOTICE` are what GitHub
+detects and what `pyproject.toml`'s `license-files` names; `CONFIG_ARCHITECTURE.md` ships in the npm
+tarball and `config.py` points at it. `AGENTS.md` is the load-bearing one: `core/config_loader.py`
+reads it through `workspace_trust.PROJECT_CONTEXT_FILENAME`, and WS9 puts the ROOT copy inside D17's
+trust content hash -- moving it would break a runtime path and silently change every project's hash.
+`CLAUDE.md` / `QWEN.md` follow it, since the whole point of them is that a harness looking for one
+filename finds it without searching. Nothing under `docs/` is read by production code, which is what
+made the move free: no import changed, and `tests/test_docs_consistency.py` is the only module that
+opens any of these files (its `DOCS` constant is where the path now comes from).
+
+- **docs/ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
+- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49–§52, §55, §61, §62, §63, §64, §65, §66, §67, §68, §69, §70, §71, §72, §73, §74 and §75 built; §53, §54 and §56–§60 recorded from the owner's requests in batches 122 and 123, specified and not yet designed) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A67 from §32 (A16 in ROADMAP_v3 §62, A17, A18 and A19 in §63, A20 and A21 in §64, A22, A23 and A24 in §65, A25, A26 and A27 in §66, A28, A29, A30, A31, A32 and A33 in §67, A34, A35, A36, A37, A38 and A39 in §68, A40, A41, A42, A43, A44 and A45 in §69, A46, A47, A48 and A49 in §70, A50, A51, A52 and A53 in §71, A54, A55, A56 and A57 in §72, A58, A59, A60, A61 and A62 in §73, A63, A64 and A65 in §74, A66 and A67 in §75), W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 SS1–SS72 from §49, NW1–NW5 from §50, PG1–PG9 from §51, RB1–RB7 from §52, IO1–IO7 from §53, AT1–AT8 from §54, TR1–TR15 from §55, JV1–JV10 from §56, SM1–SM4 from §57, PR1–PR5 from §58 UI1–UI4 from §59, UH1–UH12 from §60 and CN1–CN12 from §61). Section and D-numbers are stable and cross-referenced everywhere.
 
 **Six namespaces use the same `LETTER+NUMBER` shape, and only the first is the
 record.** An id that resolves to two places is a cross-reference that fails
@@ -146,7 +190,7 @@ fails on one that does not.
 
 | namespace | ids | written as | where defined |
 |---|---|---|---|
-| **design decisions** | the families above | bare — `D14 forbids widening` | `ROADMAP.md` / `ROADMAP_v2.md` |
+| **design decisions** | the families above | bare — `D14 forbids widening` | `docs/ROADMAP.md` / `docs/ROADMAP_v2.md` / `docs/ROADMAP_v3.md` |
 | pipeline gates | `D0`, `D1`, `D2` | `gate D0` | §4/§26 — pure-code routing between passes, no LLM call |
 | acceptance criteria | `AC1`… | `§21 AC6` — **section-scoped**, so the section is required | each section's *Acceptance criteria* block |
 | Rev. 1 open questions | `S11`, `S12`, `S16` | `Rev. 1 S12` | resolved inline in `ROADMAP_v2.md` |
@@ -157,7 +201,10 @@ fails on one that does not.
 so nothing can force the distinction mechanically — write `gate D1` when you mean
 the gate. A seventh use of `C1`–`C10` is the research pipeline's **claim ids**,
 which are run data rather than references; see the C table in `ROADMAP_v2.md`.
-- **DEVLOG.md** — per-section implementation notes: what was followed verbatim, what was deviated from (every deviation was an explicit user decision — do not silently override).
+- **CONFIG_ARCHITECTURE.md** — why every value in `config.yaml` is what it is. `config.py`'s 788 lines of rationale, carried over verbatim when the values moved into YAML, keyed by the YAML's own names. Read the entry for a key before changing it; several of these numbers have already been "corrected" back to a value they were deliberately moved away from.
+- **docs/DEVLOG.md** — per-section implementation notes: what was followed verbatim, what was deviated from (every deviation was an explicit user decision — do not silently override).
+- **docs/TECHNICAL_DEBT.md** — the register: what a review found and what was deliberately left, each item open or closed with the batch that closed it. Cite an item as `TECHNICAL_DEBT 42`, bare — one form, since three were in use. An entry is evidence, not instruction: batches 126 and 127 each found the ENTRY itself wrong about where its own defect came from, so measure the claim before building the fix it proposes.
+- **docs/REVIEW_MARATHON.md** — the pre-merge review marathon: 19 independent review scopes covering every production module, the finding format every report uses, and the rules of engagement for a read-only reviewer. **Open while it is open** — the run log at the bottom says which scopes have been reviewed. The per-scope reports are NOT in the repository: they go to a gitignored `review/`, because a tracked `.md` moves the gated readable-doc count and because `read_project_doc` would advertise a list of open defects to every run.
 - **tests/BREAKING_CHANGES.md** — what breaks each test when production code changes, the symptom, and the fix.
 - **CLAUDE.md / QWEN.md** — pointers to this file, nothing more. They exist so a harness that looks for one filename finds it without searching; the content has one copy.
 
@@ -173,7 +220,11 @@ That qualifier is load-bearing, not pedantry (audit #128). This file used to say
 
 | File | Owns | Does NOT own |
 |---|---|---|
-| `config.py` | Plain values only | Any logic, any `if`/`else`, any decision-making function |
+| `config.yaml` | Plain values only, harness tier, ONE location | Anything derived; a user or project tier; an override variable |
+| `config_schema.py` | The schema, the env-override table, the loader, `HARNESS_AUTHORITY_KEYS` | Any first-party import — that is a cycle back through `core/config_loader.py` |
+| `config_edit.py` | `/config`'s catalogue, the value grammar, the comment-preserving writer, `RestartRequest` | Anything about a terminal; applying a change to a running process |
+| `config_update.py` | The three-way merge that carries an edited `config.yaml` across an `npm update`; `bin/venastine.mjs` runs it before `main.py` | Anything at runtime; a user tier or a redirectable config path -- it puts values back into the ONE location, it does not add a second |
+| `config.py` | Publishing those values as plain mutable module globals | Any logic, any `if`/`else`, any `os.environ` read, any decision-making function |
 | `credentials.py` / `env_secrets.py` | LLM provider keys / misc tool keys | Each other's domain |
 | `database.py` | The engine/connection only | Table classes, CRUD, awareness of what data exists |
 | `storage.py` | Schema (table classes) + CRUD | Active conversation state, provider-specific shapes |
@@ -181,6 +232,7 @@ That qualifier is load-bearing, not pedantry (audit #128). This file used to say
 | `core/session.py` | The ephemeral `/trigger` override, and what clears it | Resolving that number; persisting anything, ever |
 | `core/model_windows.py` | The remembered context window per `(provider, model)` | Deciding whether a number is a sensible window |
 | `core/client.py` | One call + provider format translation | Looping, retry, tool dispatch, bookkeeping |
+| `core/provider_errors.py` | Which provider failures are transient, the retry backoff, the one-line description of a failure | The attempt itself (`core/loop.py`); importing any SDK |
 | `core/loop.py` | Call-dispatch-repeat control flow | Provider formats, tool policy, pipeline state |
 | `security/permissions.py` | Policy (`is_tool_allowed`, `requires_approval`) | Dispatch mechanics |
 | `safety/policy_enforcement.py` | Post-call content policy (secret redaction, blocked domains) | Access control |
@@ -202,6 +254,33 @@ Three stop conditions, all in `_run()`: no tool calls (`complete`), `max_steps` 
 
 **Persist before EMIT, too (#42).** `memory.add_tool_result()` runs *before* the `tool_result` event is yielded — the same rule §22 gives `_Progress.checkpoint()`, and for the same reason: a generator only advances while someone iterates it, so emitting first makes durability depend on a UI continuing to read. It shipped the other way round. Because D20 has already written the assistant turn carrying the `tool_use` block, an abandoned generator left a `tool_use` with no matching `tool_result` — M4's pairing broken from the other side, and a thread that cannot be resumed. The tool *ran*; only the record was lost. `tool_call_start` stays before its dispatch, correctly: nothing is persisted there.
 
+**A model call is retried, and since batch 113 the screen is no longer the boundary** (batch 91, amended by batch 113 / TECHNICAL_DEBT 25). The attempt loop in `_run_steps` re-sends one step's call when `core/provider_errors.is_transient` says the failure can pass: a connection error, a 408/409/429/5xx, or an error event inside a stream that opened with 200 — which both the openai and anthropic SDKs raise unretried, and which is how OpenRouter reports an overloaded upstream. Up to `model_call_max_retries` more attempts, `model_call_retry_base_delay_s` doubling with jitter; the SDKs' own pre-stream retries stay on inside each attempt. **One rule for every caller**: batch 91 split them, retrying a *drained* run whatever it had streamed and refusing a *drawn* one after its first delta, because a RichLog row could not be taken back. Batch 112 made one retractable, so the loop now yields `LoopEvent(retract=...)` before the backoff wait — only when the attempt had drawn something — and the shell deletes its own rows. **`drained` is gone**; do not reintroduce a two-speed retry, which `test_one_rule_for_every_caller` guards by reading the source. The loop sits below the wrappers that write the user row, so a retry never writes it twice, and above the accounting, so only the attempt that succeeded is billed or persisted (D20).
+
+**A quit STOPS the turn it says it stops** (batch 145, S14-06). `exit()` printed
+"the active work is abandoned at its next event" on any exit while `_busy`, and
+`_busy` covers a chat turn, a research run and `/compact` alike — but only the
+research path read the flag (`_forwarding` breaks at the next event, #105) and
+`_consume` is recorded in `tests/BREAKING_CHANGES.md` as deliberately untouched. So
+on a chat turn the sentence asserted an abandonment that did not happen while the
+worker went on draining the generator: up to `max_steps` further model calls and
+every tool call inside them, against an app that has gone. **The fix is SS61's
+cancel token, not a break in the drain**, and the difference is measured: a break
+lands on whatever event is next, and one of those is `tool_call_start`, where D20
+has already persisted the assistant turn carrying the `tool_use` and nothing has
+written the matching `tool_result` — M4's pairing broken and an unresumable thread.
+Driven on the real generator three ways, abandoning on `tool_result` orphaned
+nothing (that is what #42 fixed), abandoning on `tool_call_start` orphaned one, and
+the token orphaned nothing and ended the turn `cancelled`. The token is tested
+BETWEEN tool groups and `_finish_cancelled` writes a row for every call it will not
+run, which is "#42's lesson from the other side" in that function's own words. The
+flag is set BEFORE the cancel, so a worker that can see the stop can already see the
+teardown — `_wait_for_sessions` reads them in that order and the message it posts
+depends on which it finds.
+
+**A retraction is bounded by a MARK, not by the open span** (batch 113). `Transcript._retract_mark` is armed by the first delta of a span and cleared by `flush_stream`; `retract_to_mark(note)` truncates `_entries` back to it, clears both pending buffers, replays and writes the note. A second retraction keeps the first line for free, because `write_system` flushes — which clears the mark — and the next delta re-arms it after the note. Not the open span, because `_write_thinking_chunk` closes an open ANSWER before it draws — one attempt with interleaved reasoning is three entries with only the last open. Not taken at the flush either, though that was tried: every `write_*` opens with `flush_stream()`, so a line written mid-span moved the mark PAST the attempt's own text and the retraction then deleted the foreign line and kept the half-answer. `Transcript` is the only surface in this repository that draws model text — the research orchestrator translates a character COUNT and the CLI shell (`main.py`, never a `cli.py` -- there has never been one) ignores `retract` entirely, which `core/events.py` states is still correct about failures — so it is the only consumer of this event.
+
+**`_run` is a thin frame; the loop is `_run_steps`** (batch 91). On an `Exception` escaping it, the frame stores `redact_diagnostic_text(describe(e))` on the thread's newest user row (`redact_secrets` until batch 144, which is the vendor tokens alone -- and `API_URL` is user-supplied, so an httpx error names a URL that may carry userinfo, into the sink `docs/PRIVACY.md` says is deleted by wiping the database rather than one thread) (`MessageLog.error`, via `mark_turn_failed`) and re-raises unchanged — `core/events.py` still has no error variant. Not on `GeneratorExit`: an abandoned generator (#42) is not a failed run. **A column, not an `error` ROLE, is the decision:** provider translation and the compactor's `_as_text` read a user row's `content` alone, so the failure reaches `replay_entries` (an `error` entry right after its user entry) and nothing that sends or summarizes the conversation — a role would have been M8's mistake. `test_grants.py` walks `core.loop`'s AST for exactly one function named `_run` with no `authorized_call` in it; the frame satisfies both, so do not "simplify" it back into the body without re-reading that test.
+
 **"Headless" means unable to ask, not "not a TUI."** `_run()` hides approval-gated tools when there is neither a `permission_channel` nor an `approval_provider` (§25 broadened this from the channel alone). A research pass in attended mode can ask, so its gated tools are advertised.
 
 **Approval single source of truth:** `ToolRegistry.approval_needed(name, params, context)` — the tool's own `approval_check` **OR'd with** the config/context lookup (§15; it used to *replace* it, which made agent overrides inert for `read`/`write`/`edit`/`shell`). Both `dispatch()` and `_run()`'s permission bridge call it, so they cannot diverge. `_run()` checks reachability (`registry.is_allowed`) *before* asking, so a context-excluded tool reports the context denial instead of prompting and then being denied anyway. A tool already in `run_info.granted_tools` skips the prompt entirely — that is §18's per-turn subagent sign-off, keyed off `ToolSpec.grant_scope`, so no tool name appears in the loop. §15's spec sketch inlines this into `dispatch()` because it predates §13 — don't follow it there.
@@ -215,6 +294,8 @@ Three stop conditions, all in `_run()`: no tool calls (`complete`), `max_steps` 
 ### The TUI (`tui/`, §16)
 
 A **shell**, not a feature home. D12 makes the CLI a permanent fallback, so anything implemented in `tui/` is invisible to the CLI *and* the research pipeline — which is why the question tool, todo list, goal mode, `/init`, session summaries and cross-thread referencing are all specified in §18/§21/§23/§24 instead. `tui/commands.py` is a registry other sections register into.
+
+**`/config` is the exception that proves the rule** (batch 84). The command lives here; the catalogue, the value grammar and the comment-preserving writer live in `config_edit.py` at the root, so a command-line surface can be added over the same module without moving a line. What is in `tui/` is the two-stage completer, the authority confirmation and the queued restart -- drawing and asking, which is what a shell is for.
 
 §19 follows the same split: `skills/manager.py` holds **no session state** (K3), so the TUI owning `active_skills` is a call-site fact rather than a design one. §25 is the cautionary tale — the pipeline could not reach a whole capability, and undoing that was a section of work.
 
@@ -233,7 +314,10 @@ only, which no project can reach — following `trusted_projects.json` and
 unreadable. Since batch 45 the four stores share their MECHANICS through root
 `json_store.py` (atomic write, versioned fail-soft read) and nothing else: each keeps its
 own module, path, `STORE_VERSION` and failure posture, because those were decided
-separately. That extraction is also what made `known_mcp_servers.json` atomic — it was
+separately. **Batch 108 added the two that hold credentials** -- `credentials.py` and
+`security/secrets.py` -- which were the last stores in the project still writing `O_TRUNC`
+over the live file, so a crash mid-write destroyed every stored API key or secret; the
+helper's own docstring had argued that exact case since batch 45. That extraction is also what made `known_mcp_servers.json` atomic — it was
 the one of the four writing a CONSENT record through a bare `open(path, "w")`, while its
 three siblings each explained at length why that is unacceptable. `/effort` and `/thinking` are unchanged.
 
@@ -273,7 +357,9 @@ not optional hygiene: the mount path READS the store, so without it
 `test_theme_preference_from_settings_is_applied_at_mount` passes or fails depending on whether
 the person running the suite had ever typed `/theme`.
 
-**Logging and Textual cannot share the terminal.** `main.py` calls `configure_logging(stderr=False)` immediately before `run_tui()` — not at the top of `main()`, because pre-mount messages (db creation, the trust prompt, MCP connections) genuinely want stderr. `TranscriptLogHandler` routes WARNING+ into the transcript so dropping stderr does not just make warnings invisible; it is attached in `on_mount` and **removed in `on_unmount`**, or it keeps a dead app alive and stacks one handler per instance across the test suite. Anything written to stderr while Textual is up paints over the rendered screen and disappears on the next repaint.
+**Logging and Textual cannot share the terminal.** `main.py` calls `configure_logging(stderr=False)` immediately before `run_tui()` — not at the top of `main()`, because pre-mount messages (db creation, the trust prompt, MCP connections) genuinely want stderr. `TranscriptLogHandler` routes WARNING+ into the transcript so dropping stderr does not just make warnings invisible; it is attached in `on_mount` and **removed in `on_unmount`**, or it keeps a dead app alive and stacks one handler per instance across the test suite. **`on_unmount` is also where the permission channel is released and `_shutting_down` is set** (batch 145, S14-01): `exit()` is every DELIBERATE route out and not the involuntary one — textual's `_handle_exception` reaches `_fatal_error()` -> `_close_messages_no_wait()` and never calls `App.exit()` — so a crash tore the app down with a worker parked on `channel.get(timeout=600)`, on a non-daemon executor thread that holds `App.run()`. `exit()` keeps its own copy of both lines, because removing them would leave the window between a quit and the unmount with no flag set, and the release reads-and-clears so the second call is free. The ordering this rests on is pinned rather than assumed: `App._shutdown` dispatches `Unmount` THIRD, after `_close_all()` and `_close_messages()`, and measured on the installed textual neither waits for the thread workers — so the release at unmount is early enough for the parked worker to see it. Anything written to stderr while Textual is up paints over the rendered screen and disappears on the next repaint.
+
+**The routed line carries the exception's reason and is redacted** (batch 91). `emit` appends `describe(exc)` when a record has `exc_info` — `logger.exception("Tool %s raised; ...")` otherwise showed a failure with no cause — and passes the whole line through `redact_diagnostic_text`, the log file's rule. Before this the handler redacted nothing: the file had been redacted at its formatter since #132 while the screen got `record.getMessage()` raw. **And "the log file's rule" was two rules until batch 144** (S07-01): this line called `redact_secrets` with no value redaction at all, so the harness's OWN stored value -- the one thing SS61 calls unconditional -- was drawn on screen verbatim while app.log redacted it. All five diagnostic sinks now call one function.
 
 **The transcript renders progressively, and it computes its own line boundaries** (§38, O7).
 `Transcript.stream_delta` used to do nothing but `self._pending += delta`, so a plain answer
@@ -340,8 +426,7 @@ already takes.
 58). `tui/markdown.py` grew the rest of the grammar it was going to grow, curated rather than
 completed. What renders now: a table, a heading, `**strong**`, `` `code` ``, `*emphasis*`,
 `~~strike~~`, a list item with a hanging indent, and a bare URL. What does not, deliberately:
-block quotes (a bar down the left collides with the thinking span's own bar — `TECHNICAL_DEBT.md`
-17), horizontal rules (drawing one is inventing furniture nobody typed), heading LEVELS (`#` and
+block quotes (a bar down the left collides with the thinking span's own bar — TECHNICAL_DEBT 17), horizontal rules (drawing one is inventing furniture nobody typed), heading LEVELS (`#` and
 `######` still draw identically, because a ladder that reads as arbitrary is worse than none),
 setext headings, indented code as a *highlighted* block, nested marks composing, and anything at
 all inside a reasoning span. `rich.markdown.Markdown` is still the thing not to reach for, for
@@ -356,6 +441,28 @@ commit cap: a fragment committed without its marker could never be indented afte
 `wrap_display` is ONE pass over ONE `_cut_points` list, shared with `width_split` — calling
 `width_split` in a loop rescans from the start of the remainder each time, which is quadratic on
 a long line and paid again on every `/theme`.
+
+**The thinking bar is wrapped in `_write_thinking_lines`, so both paths get it** (batch 90). It used
+to be cut only by `thinking_delta`'s commit rule, so a replay — `rerender()`, a resumed thread, the
+thread viewer — handed a whole entry to one `Text` and Rich soft-wrapped it with the bar on the first
+row alone; the newline rule did the same live, whenever one delta carried a long line and its
+newline. `markdown.plain_wrap` is `plain_split`'s rule walked once over the line (the rule has one
+copy, `_plain_cut`, for `wrap_display`'s quadratic reason), and **an empty remainder after a cut at
+the very end of a line is not a row**: `plain_split` hands one back when a trailing space overflows
+the width by its own cell, Rich folds that space into the row it ends, and drawing the remainder put
+a bare bar under every chunk committed that way.
+
+**And the COMMIT side of that same shape is batch 112** (TECHNICAL_DEBT 24). `plain_wrap`
+refuses to DRAW the empty remainder; `_commit_ready` and `thinking_delta` now refuse to COMMIT a
+cut that keeps nothing back, which is the only way the width rule can drain the buffer -- a row
+that filled exactly, then a space that overflows by its own cell. Committing there buys nothing,
+and if the next delta opens with the newline, the newline rule commits a chunk that is only
+`"\n"` and both draw paths render it as a blank row the replay does not have (measured: 5 rows
+live against 4, and 7 against 6 for reasoning). Holding for one delta puts the newline in the
+same chunk, where it ends the line. It is deliberately NOT in `_split_committable`, and the
+`limit >= len(self._pending)` clause beside it is why: that function is handed the CAPPED prefix,
+so a drained prefix is not a drained buffer, and holding there would make a paragraph in front of
+a held table wait for the table to close.
 
 **`line_start=False` says a chunk begins mid-line, and it fixed a shipped bug.** With a prefix of
 exactly 77 characters the wrap boundary falls immediately before a `# ` token; the committed
@@ -380,8 +487,23 @@ lost four characters that were never markup) and it is STATELESS on purpose: GFM
 code from a nested list item by the surrounding list context, and tracking that would put state
 across the commit boundary. The price, named and tested: an item nested with four spaces renders
 flat, two-space nesting renders. `verbatim()` is asked in exactly three places — `_scan`,
-`_is_row`, `list_item` — and **fences are exempt**, which is `TECHNICAL_DEBT.md` 14 rather than a
+`_is_row`, `list_item` — and **fences are exempt**, which is TECHNICAL_DEBT 14 rather than a
 silence.
+
+**A terminal resize re-lays the transcript, and the route is `reflow()` rather than `rerender()`**
+(batch 112, closing TECHNICAL_DEBT 23 and 15). RichLog renders at write time and stores
+Strips, so nothing re-wraps itself and every row drawn before a drag kept the width it was drawn
+at. `rerender()` cannot be the handler: it opens with `flush_stream()`, which ENDS an open answer
+span, so a resize mid-turn would split the live answer into two entries under two `venastine ›`
+labels. `reflow()` hands the open span's half-drawn line back to `_pending`, moves `_entries[-1]`
+with it, replays, and then **commits again** at the new width — that last step because the
+handed-back line is usually the whole of an open span, so without it a half-written answer blanks
+until the next delta. `_render_entry(closed=False)` withholds the one piece of furniture a
+replayed open span must not draw, reasoning's `╰`. `on_resize` is keyed on `_wrap_width()`
+CHANGING — a height drag moves no wrap — and debounced on `REFLOW_DEBOUNCE_S`. **RichLog defers
+its auto-scroll to after the next refresh**, which is why the reflow turns `auto_scroll` off and
+restores the reader's place with `immediate=True`: a position set during the redraw was
+overwritten a frame later, and the reader landed at the bottom.
 
 **A URL is its own label, and that is the security rule as a data shape.** `[text](url)` is not a
 construct: a bare `http(s)://` URL is detected wherever it appears — catching the one inside the
@@ -396,7 +518,7 @@ outlives the text that made it. Textual dispatches on `style.meta`, not on Rich'
 was left off, since a terminal that honours it would double-open what we already handle.
 
 **A tool line arms its URLs too, and takes a DIFFERENT scanner** (batch 65, closing
-`TECHNICAL_DEBT.md` 16). `LINKED_ROLES` — `tool`, `pipeline_tool`, `tool_error` — go through
+TECHNICAL_DEBT 16). `LINKED_ROLES` — `tool`, `pipeline_tool`, `tool_error` — go through
 `markdown.link_spans`, which recognises URLs and nothing else. Not the prose grammar: a
 digest is a shell command or a JSON argument, and `inline_spans` does not merely
 over-decorate one, it **eats characters** — `# \`date\`` loses its backticks to a code span
@@ -414,6 +536,18 @@ exactly ONE candidate has the visible part as its prefix, and when the whole aut
 visible — a run cut off inside its host stays literal. Targets are stored in `_links`
 beside `_entries` (a rendering fact, not part of what was said), which is why `rerender()`
 and `reset()` both have to touch it, and why `ReplayEntry` grew a third element.
+
+**A value carrying a URL is capped at 200, not 60 (batch 96), because the mismatch was
+never ours to keep.** The resolution above works — measured end to end, the click opens the
+whole URL — but the drawn text `https://host/a/b…` minus its ellipsis is *itself* a valid
+URL, and a terminal's own link detector reads exactly that. So ctrl+click offered a
+**shorter address than the harness had resolved**, reported as the link going somewhere
+wrong. Nothing in the harness could fix it, since the terminal never sees `_links`: the fix
+is to stop producing a visible-text/target mismatch for ordinary URLs at all. `_DIGEST_URL_CHARS`
+and `_DIGEST_URL_TOTAL` move **together** — a value kept whole at 200 and then cut by the
+140-character *total* is the same mismatch one line down — and the total widens only for a
+digest that actually holds a URL, so a `write` digest keeps the width it always had. Past
+200 the batch 65 machinery above is unchanged and is still what arms the span.
 
 **A URL the harness REWROTE is not a link.** Two refusals added in batch 65, both found
 by measurement rather than by reasoning. `clickable` now rejects **userinfo**: 
@@ -498,8 +632,7 @@ competing with deltas is the one place animation costs responsiveness. Both are 
 together they leave the screen most static when the harness is busiest. The meter refills
 that spot; it does not reverse the pause.
 
-- **The subtitle, because `border_title` is already the placeholder** a `TextArea` has no
-  other way to carry, and because it costs ZERO ROWS against the 24-row floor. `RichLog`
+- **The subtitle, because `border_title` is already the placeholder** (deliberately, not for lack of options -- `TextArea`'s native in-box one drew the hint twice, so it is never assigned), and because it costs ZERO ROWS against the 24-row floor. `RichLog`
   cannot rewrite a drawn row, so the live half could never have lived in the transcript --
   only the finished figure goes there, under the answer, in the `system` role that is
   already in `META_ROLES` so `/copy conversation` keeps excluding it.
@@ -512,8 +645,8 @@ that spot; it does not reverse the pause.
   that forgets. A property rather than a rename for batch 54's reason: 89 references across
   11 test files, all plain reads and assignments.
 - **The rate is an ESTIMATE and says so with a tilde.** `StreamToken` carries no incremental
-  usage and only THREE of the nineteen configured providers set `supports_stream_usage`, so
-  an exact live figure would read `0 tok/s` forever on the other sixteen -- D21's own
+  usage and only THREE of the fifteen configured providers set `supports_stream_usage`, so
+  an exact live figure would read `0 tok/s` forever on the other twelve -- D21's own
   failure mode, correct-looking output, one layer up. The estimate also keeps MOVING during
   a table hold, because the deltas arrive whether or not the renderer draws them. The
   completion line carries the exact count from `turn_output_tokens` and makes NO TOKEN CLAIM
@@ -521,7 +654,7 @@ that spot; it does not reverse the pause.
 - **`turn_output_tokens` is a THIRD instrument, not a convenience.** `turn_billed_tokens` is
   a spend meter (the prompt is counted again every step) and `turn_new_tokens` a size meter
   (it adds the input deltas a tool-using turn brings in). Divide either by a duration and
-  the result looks like tok/s and is not -- which is TECHNICAL_DEBT item 9's misreading
+  the result looks like tok/s and is not -- which is TECHNICAL_DEBT 9's misreading
   exactly.
 - **Updates are EVENT-DRIVEN first and timed second**, which is what makes
   `tui.animations: false` cheap to honour: a token delta arrives per chunk even while the cap
@@ -550,8 +683,10 @@ nothing before them. `TextArea` is the only multi-line widget in the pinned text
 this is a swap rather than a setting; the layout needed nothing, because `#prompt` was
 already `dock: bottom` over a `1fr` transcript.
 
-Four things are decisions rather than defaults, all measured against the installed 1.0.0
-(D22) rather than read from docs.
+Four things are decisions rather than defaults, all measured against the installed
+package (D22's rule) rather than read from docs — and re-measured against `8.2.8`
+when the pin moved. Three of the four came back unchanged; the `shift+enter` one
+did not, and says so below.
 
 - **`priority=True` on the `enter` binding is load-bearing and reads like caution.**
   `TextArea._on_key` maps `enter` to a newline insert and calls `event.stop()` /
@@ -559,16 +694,28 @@ Four things are decisions rather than defaults, all measured against the install
   the flag `enter` inserts and never submits, so no turn in this shell would ever start.
   Dropping it fails three tests in `TestEnterSubmitsAndCtrlJDoesNot` and
   `TestThePromptBoxGrowsWithWhatIsTyped`.
-- **`ctrl+j` carries the newline; `shift+enter` is a courtesy that is unreachable here.**
-  Textual enables the kitty keyboard protocol in its LINUX drivers alone
-  (`drivers/linux_driver.py`, `linux_inline_driver.py`), so on the Windows driver a
-  terminal sends a bare CR for shift+enter and the parser yields plain `enter` — the box
-  would submit. `ctrl+j` is byte 0x0a, parses to its own key, is bound by neither `Input`,
-  `TextArea`, `App` nor `Footer`, and is exactly what iTerm2 / VS Code / Windows Terminal
-  emit once configured to send a newline on shift+enter. **`alt+enter` is the obvious third
-  guess and is a dead end**: fed `ESC CR` the parser yields no key at all, and a second one
-  behind it degrades to `escape`, `enter`.
-- **`value` is an alias over `.text`, and it is why this batch edited no tests.** Roughly
+- **`ctrl+j` carries the newline, and `shift+enter` is still not claimed — for a
+  different reason than it used to be.** Textual enabled the kitty keyboard protocol in
+  its LINUX drivers alone through 6.5, so on the Windows driver a terminal sent a bare
+  CR for shift+enter and the parser yielded plain `enter` — the box would submit.
+  **6.6.0 added the protocol to the Windows driver** (`drivers/windows_driver.py` writes
+  `\x1b[>1u`), so that reason expired, and **batch 81 went looking for what replaced
+  it**. Every half the CODE owns works: the driver asks for the protocol, the parser
+  turns `\x1b[13;2u` into `shift+enter`, and `PromptInput` already binds it. **The
+  obstacle is the TERMINAL now.** That driver reads console records and keeps only the
+  translated character, discarding the modifier state, so the escape encoding is the
+  only route a modified Enter has, and a terminal without the protocol still sends a
+  bare CR. Windows Terminal shipped support in Preview 1.25 and this is developed on
+  1.24, so the end-to-end press has never been observed here and the claim stays unmade.
+  `TestShiftEnterIsStillNotTheKey` pins those three dependency facts, so the next reason
+  cannot expire in silence the way this one did for twenty months. `ctrl+j` is byte
+  0x0a, parses to
+  its own key, is bound by neither `Input`, `TextArea`, `App` nor `Footer`, and is
+  exactly what iTerm2 / VS Code / Windows Terminal emit once configured to send a
+  newline on shift+enter. **`alt+enter` is the obvious third guess and is a dead
+  end**: fed `ESC CR` the parser yields no key at all, and a second one behind it
+  degrades to `escape`, `enter`.
+- **`value` is an alias over `.text`, and it is why batch 54 edited no tests.** Roughly
   sixty sites across five files say `app.query_one("#prompt").value = …`; none queries it
   by class. A one-line property is cheaper than sixty edits made to land a rendering
   change — see `tests/BREAKING_CHANGES.md` for what deleting it looks like.
@@ -581,7 +728,7 @@ Four things are decisions rather than defaults, all measured against the install
 `tab_behavior` stays at its `"focus"` default deliberately: under `"indent"`,
 `TextArea._on_key` also swallows `escape`. `ctrl+k` is still bound by the prompt (both
 widgets bind it), so §26's `ctrl+l` note above is unchanged. `ctrl+c` was ALREADY shadowed
-before this batch — `Input` and `TextArea` both bind it to `copy`, and measured, an app-level
+before batch 54 — `Input` and `TextArea` both bind it to `copy`, and measured, an app-level
 `ctrl+c → quit` fired under neither while the box had focus. Batch 57 is what fixed that; see
 **ctrl+c is one key with two bindings** below.
 
@@ -609,13 +756,13 @@ not_open_it` goes red first, before the four files that follow.
 
 **The suggestion panel owns the highlight because it owns the width** (batch 55). How many
 entries fit is a function of the rendered width — at 80 columns the main column is 54, most
-entries wrap to two rows, and a bare `/` therefore shows four of twenty-six under an eight-row
+entries wrap to two rows, and a bare `/` therefore shows four of twenty-seven under an eight-row
 budget. Split the selection from the budget and the prompt can highlight a sixth entry the
 panel had no room for: an invisible selection that `enter` would then complete. `SlashSuggest`
 exposes `chosen`, `move()` and `shown`, and that is the whole interface. The budget stops at
 the first entry that would overflow rather than skipping it, so the list stays contiguous and
 alphabetical, and the border title counts what was DRAWN against what MATCHED (`4 of 4` under
-`/c`, not `4 of 26`, which would claim candidates that do not exist).
+`/t`, not `4 of 27`, which would claim candidates that do not exist).
 
 **`up`/`down` are ordinary bindings on `TextArea`; `enter` is not** (batch 55). `enter` needs
 batch 54's `priority=True` because `TextArea._on_key` intercepts it. The arrows do not: they
@@ -645,6 +792,18 @@ stripped back to `"/copy"`, so the panel stayed open over a line that had alread
 its arguments, and `enter` would have completed `/copy` on top of itself rather than sending.
 Once a space is typed there is nothing left to complete, whichever end of the token it is on.
 The leading half stays tolerant, because `dispatch` tolerates it and `"  /help"` genuinely runs.
+
+**Past the first space, the command answers** (batch 84). `SlashCommand` grew an optional
+`complete(argument) -> [SlashCommand]`, and a command without one behaves exactly as every
+command did before the field existed — which is what keeps `"/copy last"` offering nothing.
+The rows a completer returns are named for the WHOLE line, so `/config max_tokens` draws and
+completes with no change to the panel at all. Two details are load-bearing. The split is on
+a SPACE and nothing else, because `dispatch` partitions on a space and nothing else — a line
+with a newline in it is not a command line there and must not look like one here. And
+`_complete` sets `_completing` rather than posting the new list itself: the assignment it just
+made queues a `TextArea.Changed`, so anything posted from inside `_complete` is handled
+BEFORE that Changed arrives and is then overwritten by the empty list its api-edit branch
+posts. Measured: the panel came back with 133 rows and was cleared a tick later.
 
 **The suggestion window is DERIVED from the selection, never stored beside it** (batch 56).
 Batch 55 wrapped the highlight at the last *drawn* entry, so a bare `/` matched twenty-six
@@ -684,7 +843,7 @@ with nowhere to go is noise, and the rule keeps every case shipped in batch 55 r
 as it did.
 
 **Prompt recall is on `ctrl+↑`/`ctrl+↓`, and the pair was chosen by elimination** (batch 63).
-Until this batch a submitted prompt existed nowhere a person could reach — `on_prompt_input_submitted`
+Until batch 63 a submitted prompt existed nowhere a person could reach — `on_prompt_input_submitted`
 cleared the box and that was that — so a misfire on a long `/research --attended --grant …` cost the
 typing. The keys were picked by enumerating `screen.active_bindings` with the prompt focused, which
 is App, Screen and `TextArea`'s forty-odd editing bindings in one list rather than a docs page.
@@ -692,8 +851,11 @@ is App, Screen and `TextArea`'s forty-odd editing bindings in one list rather th
 **`ctrl+p` is not available and must not be taken.** It is textual's `COMMAND_PALETTE_BINDING`,
 bound `priority=True`, and the palette is enabled here deliberately — `watch_theme` exists *because*
 it sets `App.theme` directly, bypassing `/theme`. The ClassVar is overridable, but `ctrl+shift+p` is
-indistinguishable from `ctrl+p` without the kitty protocol, which textual turns on in its Linux
-drivers alone, so relocating it would delete the palette on Windows. The plain arrows were the other
+indistinguishable from `ctrl+p` without the kitty protocol — which textual turned on in its Linux
+drivers alone until **6.6.0 added the Windows driver**. So relocating it would have deleted the
+palette on Windows outright, and now merely makes it depend on whether the terminal implements the
+protocol, which is a worse trade than leaving the binding where textual put it rather than a
+different one. The plain arrows were the other
 candidate and already mean two things — the cursor in a box batch 54 made multi-line, and the
 suggestion panel's highlight since batch 55 — so the shell convention (recall only when the cursor is
 already on line 1) would have been a third meaning gated on a position.
@@ -779,6 +941,23 @@ never quits, in either state, so no sequence of copies can end the session. `ctr
 textual's own priority binding and already quit from everywhere, modals included; it is
 untouched and now documented.
 
+**escape is the SECOND key with two app bindings, and it is also the key the prompt may want**
+(ROADMAP_v3 §61, CN8, batch 124). `close_thread_view` and `cancel_turn` share it, and the pair
+works exactly as the ctrl+c pair above does — including **`False`, never `None`**, for the reason
+spelled out there. What is different is the third claimant: `PromptInput` binds escape to
+dismissing its suggestion panel and gates that with `check_action`, whose own comment is the
+licence this took — *"with no panel open they are the keys they have always been: tab moves focus,
+escape reaches whoever wants it."* So **no `priority=True`**, which is the opposite of ctrl+c and
+for a reason that is not a preference: priority would reach past the prompt and break the panel
+instead of cooperating with it. Precedence is therefore suggestion panel, then thread view, then
+cancel, and it needed no arbitration written anywhere. The one-sentence rule §47 set for this key
+survives: escape means back to the conversation, and stopping a turn is that.
+
+`cancel_turn` is also the one binding here that **cannot show a footer entry**. Greying rather than
+reflowing needs `None` from `check_action`, `None` keeps the key slot, and keeping the slot would
+shadow `close_thread_view` — so `show=False` is forced, and a wrong label on a live key would be
+worse than no label.
+
 **An alias is a field on the command, and the LISTS stay canonical** (batch 57).
 `SlashCommand.aliases` plus a second index in the registry; `get()` falls back to it so
 `dispatch` needed no change. `all()` and `names()` are canonical, and `matching()` returns
@@ -793,7 +972,7 @@ directions, because `get()` prefers real names: the alias would otherwise just s
 silently.
 
 **Thinking has two forms and one closing path** (§38, O6/O8). `tui.show_thinking` (default
-`True`, defaulted in `tui/app.py` beside `animations` rather than in `config.py`) renders
+`True`, defaulted in `tui/app.py` beside `animations` rather than in `config.yaml`) renders
 reasoning inline as a bar-prefixed block; off, it collapses to `ThinkingIndicator`, a `Static`
 under the transcript with an animated ellipsis — an ellipsis cannot animate inside a `RichLog`.
 Both end through `VenastineApp._end_thinking()`, which every non-thinking event calls, so a
@@ -822,7 +1001,7 @@ that reflows a paragraph.
 
 Two things in `tui/app.py` are load-bearing and easy to break silently:
 - **`run_worker(..., exit_on_error=False)` + `on_worker_state_changed`.** Textual's default tears the whole app down on a transient worker exception.
-- **Every permission dismissal path must put a boolean on the channel.** The worker blocks inside `_run()` on `permission_channel.get()`; a dismissal carrying `None`, or one that puts nothing, hangs it forever. That is why the AC2 tests assert on the *dispatched tool*, not on the modal rendering.
+- **Every permission dismissal path must put a boolean on the channel.** The worker blocks inside `_run()` on `permission_channel.get()`; a dismissal carrying `None`, or one that puts nothing, hangs it forever. That is why §16's AC2 tests assert on the *dispatched tool*, not on the modal rendering.
 
 **A modal's LAYOUT is part of its contract, and asserting on its text is not testing it**
 (§46, EP1/EP3). This cost four consent surfaces at once. `#permission-dialog` had
@@ -870,35 +1049,77 @@ Three rules follow, and the first two are the ones a reasonable person gets wron
 
 An agent is a `.md` file with YAML frontmatter: a system prompt body plus a tool policy. `/agent
 <name>` makes one active for the rest of the session, `spawn_subagent` delegates one task to one,
-and `agents/manager.py` composes the scope for both. Four things a definition may say are
+and `agents/manager.py` composes the scope for both. Five things a definition may say are
 load-bearing, and only one of them can widen anything.
 
 - **`spawnable` is mandatory at the harness tier** (§32 A3). `assert_spawnable_declared` raises at
   discovery, naming every offender, if one of our own files omits it; a user's or a project's file
-  that omits it reads as `false`, because a stranger's silence must get the safe answer. It decides
-  what the model is TOLD exists and nothing else — `agent_catalog_text()` lists only spawnable
-  agents, `/agent` lists them all, and C6 still caps what any of them may do.
+  that omits it reads as `false`, because a stranger's silence must get the safe answer. **It is a
+  REFUSAL since A16** (`docs/ROADMAP_v3.md` §62), and this bullet said "what the model is TOLD
+  exists and nothing else" for as long as that was true: `refusal_reason` never read the field, so
+  `spawn_subagent` would spawn any agent the loader had discovered, by name — including one A3 had
+  deliberately left off the catalog. Silence therefore bought INVISIBILITY rather than
+  unreachability, which ranks an adversarial author above a careless one. Now
+  `agent_catalog_text()` and `refusal_reason` give the same answer: `agent_catalog_text()` lists
+  only spawnable agents, a spawn of anything else is refused, `/agent` still lists them all (it
+  goes through `manager.names()`, which consults neither), and C6 still caps what any of them may
+  do.
 - **It answers a question about the INPUT, not about trust** (§32 A4, #69). `spawn_subagent` passes
   exactly one thing: `params["task"]`, as the first message of a FRESH thread. An agent whose body
   opens "read the thread so far" cannot be fed that way, and spawning it does not fail — it returns
   a confident answer about the task description, and the parent has no way to tell. Degraded rather
   than broken is what makes it worth suppressing.
+- **`spawn_targets` names WHICH agents a definition may spawn**, and it is a REFUSAL rather than a
+  narrowing — which is the entire reason it exists, because C6 below already narrows and that is
+  the wrong answer here. A parent that should not be delegating a kind of work at all gets, under
+  C6 alone, a child that runs anyway with pieces missing: `plan` spawning `build` returned a
+  `build` that could not `write` or `edit`, degraded the way A4 describes and invisible from both
+  ends. Undeclared means no opinion (every spawnable agent), `[]` means none, and a declared list
+  composes by intersection like everything else here, so it cannot be widened by nesting. Read in
+  two places for one reason: `refusal_reason` refuses the spawn, and `agent_catalog_text()` leaves
+  the agent off the list in the first place, since advertising what will be refused is D24's defect.
 - **A child's tools are its own ∩ the parent's, never a union** (C6), and `approval_overrides` union
   the same way (decision S2). §18's spec sketch built the child's overrides from the agent definition
   alone, which drops the parent's and reopens the escalation C6 exists to prevent, one field over.
-  Only `True` entries carry, so unioning can only tighten.
+  Only `True` entries carry, so unioning can only tighten. **BOTH sides are filtered, and until batch
+  150 only one was** (A28): the parent's dict was filtered and the agent's merged raw, so a `False` in
+  a child's frontmatter overwrote the parent's `True` and this paragraph was false of the code it
+  describes. Three of the four quadrants had tests. The cost was wider than the gate --
+  `candidate_approvals` reads the same dict and is both the sign-off notice and the grant, so the
+  loosened tool left the candidate list and the user was neither asked nor told. `active_context`
+  composes nothing and keeps its unfiltered copy deliberately, pinned as a control: at depth 0 there
+  is no parent to overwrite and the next hop's filter drops a `False` anyway. **The VALUES are
+  validated at parse time too**, beside `use_memory` and `use_project_context`, for the reason stated
+  there -- the mapping was checked and its contents were not, so `web_search: "false"` parsed to the
+  string. No value ever widened a gate (approval ORs), so that half is a type boundary, not an
+  escalation.
 - **`max_steps` is the one frontmatter field that REPLACES rather than narrows.** Both call sites
   are `agent.max_steps or config.MAX_ITERATIONS` (`tui/app.py`, `agents/subagent_tool.py`) with no
   clamp, so a declaration above the ceiling RAISES it. Every other field in a definition can only
   tighten, which is exactly why this one is written down. An unusable value is repaired to `None`
   with a warning naming what it read (#45); a valid large one is honoured.
+- **`max_steps` is also the one frontmatter field that REPAIRS rather than skips** (A55, locked,
+  batch 155). Every other typed field in `_parse_md_file` warns and skips the whole file, including
+  the three the function's own "ELEMENT TYPES TOO, not just the container" comment was stated over
+  and never applied to: `model`, `provider` and the ELEMENTS of `allowed_tools`, which sat under
+  that comment with the container checked and the contents not. The asymmetry is deliberate and the
+  reason is which way `None` reads. `max_steps` has no honest reading for a bad value, so a repair
+  invents nothing; `model` and `provider` DO -- `None` means "inherit the session's" -- so repairing
+  one would leave the agent available and running on a model nobody chose for it, and an agent file
+  names a model when being a *different* model is the point (§11's critic rationale is the sharp
+  case). `allowed_tools` skips for `approval_overrides`' reason: half a whitelist is worse than no
+  file at all. Measured before the guard: `model: [a, b]` loaded clean and raised `TypeError:
+  unhashable type: 'list'` out of the effort cache's `(provider_name, model)` key; a hashable
+  non-string in `allowed_tools` survived `set()` and matched nothing, while an unhashable one raised
+  out of `AgentManager.active_context` and `child_context` -- the single place that `Optional[list]`
+  becomes `ToolContext.allowed_tools`'s declared `Optional[set[str]]`.
 - **`use_project_context` opts into the project's root `AGENTS.md`** (§44 moved that file out of
   `.venastine/`); **`use_memory` defaults to `True`** and is §21b's opt-out. Both are VALIDATED as
   booleans rather than coerced — `bool("false")` is `True`, and these are the two fields a
   restrictive definition uses to opt out, so a coerced string would invert a deliberate choice
   silently.
 
-**Seven ship, two of them spawnable** (§32 A12, batch 51).
+**Eleven ship, six of them spawnable** (§32 A12, batch 51; `build`/`test`/`writer`/`general` added after).
 
 | agent | reached by | what a spawn would have to carry |
 |---|---|---|
@@ -909,6 +1130,10 @@ load-bearing, and only one of them can widen anything.
 | `plan` | `/agent plan` | the conversation |
 | **`explore`** | **`spawn_subagent`**, `/agent` | — a task string IS its input |
 | **`review`** | **`spawn_subagent`**, `/agent` | — a task string IS its input |
+| **`build`** | **`spawn_subagent`**, `/agent` | — a task string IS its input |
+| **`test`** | **`spawn_subagent`**, `/agent` | — a task string IS its input |
+| **`writer`** | **`spawn_subagent`**, `/agent` | — a task string IS its input |
+| **`general`** | **`spawn_subagent`**, `/agent` | — a task string IS its input |
 
 Until batch 51 the spawnable column was empty, so `agent_catalog_text()` returned `""` and
 `## Available agents` had never appeared in a prompt this harness produced — while
@@ -918,22 +1143,61 @@ way: `spawn_subagent` is unreachable headless (R16), so `with_catalogs` suppress
 in all ten. The SKILL catalog is the opposite and deliberately so — `load_skill` is callable
 headless, so all fourteen skills ride every pass.
 
-**Two things about the new three that are decisions, not defaults.** `plan`'s whitelist is a
-strict SUPERSET of the other two (A13), because C6 intersects a child's tools with its parent's
-and a `plan` turn spawning `explore` would otherwise silently hand it an `explore` with no
-`web_search`. And `explore`/`review` name `read` and `shell` although
-`config.ToolPermissions` denies both to everything (A15) — on a stock install they are five
-callable tools and two. That is deliberate: `registry.schemas(context)` filters by the same
+**Leaves, one branch, and the superset that is now scoped rather than total.** `build`, `test`, `writer`, `explore` and `review` are C6 leaves with no `spawn_subagent` — the spawning discipline lives in `general`, the only spawnable branch, so it is taught once rather than repeated in every leaf. `plan` keeps its own `spawn_subagent` for interactive `/agent` use; it is not spawnable, so the two branches never compete for one route. A13 still holds — an agent's whitelist must be a strict SUPERSET of every agent it may spawn, because C6 intersects a child's tools with its parent's and a spawn of `build` without `write`/`edit` hands back a degraded agent with neither side able to tell — but **`plan` satisfies it by not being able to reach `build` at all**, not by holding the two tools. That is the decision and not a technicality: the plan is the deliverable, a person reads it and iterates before anything is built, and an agent that could pass the work straight to `build` has skipped the step it exists to create. So `plan` declares `spawn_targets: [explore, review, writer, test]` — investigation, which is what planning needs — and `general`, which holds `write`/`edit` for PASS-THROUGH rather than its own use, is off that list too, or the restriction would have been one hop deep. `general` itself declares no targets and is the superset of every leaf. The invariant is swept over the whole roster rather than asserted of two agents by name, which is how it broke: batch 51's expansion added `build`, and `plan`'s comment was updated to claim a superset the whitelist under it never gained. And the leaves name `read`/`write`/`edit`/`shell` although
+`config.ToolPermissions` denies all four to everything (A15) — on a stock install they work from `read_project_doc` (plus the network tools where declared) and become code agents only where the operator has enabled file access. That is deliberate: `registry.schemas(context)` filters by the same
 predicate, so nothing uncallable is advertised, while an agent that omitted them would stay
 crippled on an install where the operator had enabled them.
 
-**ONE AGENT RUNS AT A TIME. What nests is a STACK, and the panel that draws it carries
-LIFECYCLE ONLY** (batch 59). Measured rather than assumed, because the question comes up
-whenever someone reaches for concurrency: `core/loop.py` dispatches tool calls in a plain
-`for` loop, `spawn_subagent` BLOCKS on the child run, every TUI worker path is `_busy`-guarded,
-and even ensemble Pass 1 is a loop with a comment saying why. So the maximum simultaneously-live
-set is root + 2 subagents (`SUBAGENT_MAX_DEPTH`), each frame suspended inside the one below it.
-Two `spawn_subagent` blocks in one model turn run one *after* the other.
+**AGENTS RUN AS A TREE, AND THE PANEL THAT DRAWS IT STILL CARRIES LIFECYCLE ONLY**
+(batch 59, changed by §47 slice 8). This entry used to read "ONE AGENT RUNS AT A TIME. What
+nests is a STACK", and it was measured rather than assumed, because the question comes up
+whenever someone reaches for concurrency: `core/loop.py` dispatched tool calls in a plain
+`for` loop, `spawn_subagent` BLOCKED on the child run, every TUI worker path is `_busy`-guarded,
+and even ensemble Pass 1 is a loop with a comment saying why. Two `spawn_subagent` blocks in one
+model turn ran one *after* the other.
+
+NA9 changed the first clause and nothing else. `core/loop.py` now PARTITIONS a response:
+consecutive calls whose `ToolSpec` declares `parallel` run together in a pool bounded by
+`SUBAGENT_MAX_PARALLEL` (3), and every other call stays strictly sequential in its original
+position. So the maximum simultaneously-live set is root + `SUBAGENT_MAX_PARALLEL` peers, each
+still able to nest to `SUBAGENT_MAX_DEPTH`. **`_busy` is unchanged and still correct**: it guards
+the TUI's TURN, not the spawns inside it. **A response with nothing parallel in it takes the same
+path it always did**, and that is structural rather than incidental -- a group of one skips the
+pool and the gate entirely, which is what makes every pre-slice-8 test of that loop a test of the
+sequential branch.
+
+**SEVEN things were correct only because nothing ran alongside anything else**, and each is now
+guarded rather than lucky: `GrantBudget.take()` (a read-modify-write on an object shared by
+reference), §23's sign-off memo (a check-then-act window, not a racy dict), the loop's
+`authorized_call` (now a per-FUNCTION local, which is stronger than the per-iteration one it
+replaces), every shell's single pending-answer slot, `TuiActivity`'s stack, and the panel's row
+ORDER. The one that was measured and needed nothing is the busy timeout on SQLite; WAL was added
+anyway, because the ceiling is a tunable constant. See ROADMAP_v2 §47 NA9-NA18.
+
+The seventh is `core/compaction.py`'s re-entrancy flag, found by the review of §47 (batch 75) and
+worth the sentence because of HOW it was found: its own comment said "a thread-local would be more
+precise, but the loop is synchronous and a compaction runs to completion before its caller
+resumes", which was measured and true until NA9 removed the premise. A module flag then made a
+sibling's compaction skip silently and let whichever child finished first clear the guard under
+the other. **Per thread now, and still a flag rather than a lock** -- the property that comment
+argued for (impossible to be half-set) is the one that matters, and two conversations folding at
+once is correct rather than tolerated. The bare `_compacting` name is GONE rather than aliased:
+`if _compacting:` against a callable is always true, so a stale reader has to fail at import
+instead of quietly disabling every compaction in the process. **The lesson is the comment, not the
+flag** -- a justification that names the condition it depends on is what made this findable at
+all, and this file is full of them.
+
+**A batch's results are ordered by POSITION, never by the provider's call id** (NA11, corrected in
+batch 76). `_dispatch_parallel` collected outcomes into a dict keyed by `call.id` and rebuilt the
+list by looking each one back up -- and that id is the provider's, not ours. `core/client.py`'s
+v1-compatible branch starts a tool-call fragment's id at `""` and fills it only if some delta
+carries one, so a provider that streams parallel calls without ids produced two requests EQUAL on
+the key, and the dict then handed every call in the batch the last-finishing worker's outcome: one
+child's answer reported for another child's call, which is the guarantee NA11 exists to make. It is
+a list of `(call, outcome, failure)` in submission order now, so ordering is structural. **And the
+adapter defaults a missing id** the way its Google sibling always has, because the same id also
+pairs `app._spawn_threads` to a spawn line and `parent_call_id` to a stored thread. Two halves on
+purpose: the loop should not need a provider to keep a promise for its own bookkeeping to hold.
 
 `core/agent_activity.py` is how a shell sees that stack while it exists. Four things about it
 are decisions:
@@ -954,6 +1218,277 @@ are decisions:
 - **`activity=activity` on the child's `run_agent_conversation` is what makes depth 2 visible.**
   Drop that one argument and the panel reports exactly what `tool_call_start` already implied.
   Depth comes from `ToolContext.subagent_depth`, never a second count.
+- **§47 gave it an IDENTITY, and an identifier is not content.** A span carries `id` and
+  `parent_id` now, and `bind()` says which thread the run is writing. That does not reopen the
+  bullet above it: everything a shell then displays it reads back out of the ARCHIVE, through
+  `core/replay.py` — the same function and the same policy `/resume` uses. The channel gained
+  an address, not a payload.
+- **The parent comes from a `ContextVar`, and the reset lives in the SAME `finally` as `exit`.**
+  Five call sites open spans and none knows what is above it, so threading a parent through
+  them would put the answer in the hands of whoever remembers to pass it. A token that outlived
+  its frame is worse than absent lineage — the next sibling would be recorded as a child of a
+  run that has finished, which is wrong rather than missing. It is also the shape that survives
+  concurrency: a run submitted to an executor takes `contextvars.copy_context()` with it.
+- **`bind()` is a THIRD call, not a field on the span, because the thread does not exist yet
+  when the span opens.** The handler brackets the call and the thread is created inside it, so
+  the address arrives later — and it has to arrive DURING the run, or a sidebar row could only
+  be opened after the run it describes had finished. `core/loop.py` binds immediately after
+  `ConversationMemory` is constructed, the earliest moment the id exists. A no-op when no span
+  is open, so the call site needs no branch.
+
+**A panel row is armed with METADATA, never with arithmetic** (§47). `AgentPanel` rows
+carry the thread they stand for as a Rich style, and a click reads it back through
+`Static.get_style_at` — the mechanism batch 58 built for URLs. Computing a row index from
+the click's y would need a second copy of the widget's layout, and the two would be free
+to disagree: `#agent-panel` has `padding-top: 1`, so **the Nth content line is at y = N+1**,
+which a test scanning `renderable.plain.splitlines()` silently gets wrong. Scan
+`panel.region.height`. The root row is armed too, so "back to the main agent" is a click
+like any other rather than a special case someone has to remember.
+
+**`refresh_agent_panel` reads `self._memory`, never `self.memory`.** The property CREATES a
+thread on first use, and the panel is redrawn at mount and on every span — so the property
+would leave a phantom empty conversation in the picker for every launch. Same rule as
+`refresh_goal_banner` and `refresh_todo_panel`: painting a panel must not be what starts a
+conversation.
+
+**`TuiActivity.exit` removes by SPAN ID, and the case that proves it is not reachable
+through `span()`.** Nested spans always unwind innermost-first, so removing the last row
+matching `(name, depth)` happened to be right and the old code was never wrong in
+practice. It is wrong the moment two runs of one agent are open as PEERS and either may
+finish first — which slice 8 made ordinary. The test drives `enter`/`exit`
+directly, because a `with` block cannot express "the outer one ended first".
+
+**And all three of its mutators are LOCKED, with the stack posted as a SNAPSHOT** (NA16).
+This class's docstring used to finish "`self._stack` is read and written only here, under the
+worker's own serialisation", which was true until there were two workers. `exit` and `bind` are
+read-rebuild-assign, so two at once each filter the list they read and the second assignment
+RESURRECTS the row the first removed — a finished run left on screen for the session, which is
+what `span()`'s `finally` exists to prevent, reached from the other side. `enter`'s append races
+them the other way and is simply lost. The posted list is a copy because the UI thread stores and
+iterates it, and handing over the object the worker keeps appending to makes the worker a second
+writer of what the UI thread is reading.
+
+**The panel is ordered by LINEAGE, not by arrival** (NA17). Peers at one depth now legitimately
+share a column. What had to change is the order, because arrival order and lineage order are the
+same thing for a stack and are not for a tree: two children of one turn each spawning a
+grandchild can arrive A, B, A's child, B's child, and drawing that in order puts A's child one
+level in from B. The panel would be INVENTING a lineage, which is worse than omitting one.
+`lineage_rows` keys its cycle guard on row IDENTITY rather than on `span_id`, because `span_id`
+defaults to `""` — so a set of ids drops the second hand-built row, invisibly in the app and
+wrongly in every test that builds rows directly.
+
+**And the INDENT is the walk, not `AgentRow.depth`** (batch 75, review of §47). This entry used
+to say "rows still indent by depth", and that was one number doing two jobs. `depth` is
+`ToolContext.subagent_depth`, the number C3 bounds, about how many SPAWNS deep a run is — and a
+research pass adds a display level without adding a spawn level, because it opens its span at
+`context_depth + 1` and hands the same context down. So a pass and the subagent it spawned both
+reported depth 1 and the child drew level with its own parent; `/init`'s initializer is the same
+shape. `lineage_rows` returns `(row, level)` pairs and the level is the DEEPER of the walk's
+column and the row's own depth: each is a lower bound on nesting, and the second is what places a
+row whose parent is not in the stack (`parent_id` is None both for a top-level span and for a row
+that never recorded one, and a depth above 1 tells them apart). The alternative considered and
+refused was bumping the pass's context, which would have spent one level of what a pass may spawn
+on a rendering fix.
+
+**ctrl+g is the keyboard route to the sidebar's rows** (§47). The panel is deliberately not
+focusable, so making its rows clickable made navigation mouse-only; the picker mirrors ctrl+t and
+draws from the same two facts the panel does, **through the same `lineage_rows` walk** — it
+iterated the stack raw until batch 75, so it indented by a column in arrival order and drew A's
+child under B, which is NA17's defect in the surface NA17 did not touch. One walk is what makes
+"the two cannot come to offer different things" structural rather than intended. Below the live
+rows it lists the stored descendants the stack has already forgotten (muted): a finished run
+stays openable, and the picker answers what can be READ while the panel keeps saying what is
+RUNNING — the two differ on purpose past the live half.
+**The letter was chosen by elimination and the test MEASURES it** against
+`screen.active_bindings` with the prompt focused, which is the only state where the answer means
+anything: `TextArea` claims a/c/d/e/k/u/v/w/x/y/z, `App` claims ctrl+c and ctrl+q, textual claims
+ctrl+p, and this app already held ctrl+t, ctrl+l and ctrl+up/down. (That list said **f** as well
+until batch 97, which re-measured it across the whole MRO on the current pin: `ctrl+f` is not bound
+by `TextArea` on 8.2.8. The letter is still not worth taking — "find" is what a reader expects of
+it — but a list presented as a measurement should be one.)
+
+**ctrl+b stops a background session** (ROADMAP_v3 §49, SS2, batch 97), by the same elimination and
+re-measured the same way. What narrows it past the free letters is the TERMINAL rather than
+textual: ctrl+h/i/j/m ARE backspace, tab, LF and CR, and ctrl+s/ctrl+q are software flow control,
+which leaves b, n, o and r. It is the one control SS2 keeps usable while sessions are blocking
+input, which is why it is a key at all — `/kill` is typed into the prompt, and the prompt is where
+the block is felt — and why `check_action` returns **None** rather than False while nothing is
+running: False drops the footer entry and reflows, None greys it, and a control a blocked user
+needs has to stay visible.
+
+**ctrl+b stops the SESSIONS and escape stops the CONVERSATION** (ROADMAP_v3 §61, CN9, batch 124),
+and the two must not be collapsed. `_busy` is true through the post-turn session wait as well as
+through the turn, so a cancel binding reading `_busy` would arm escape in the one place ctrl+b
+already means something adjacent. It reads the live `CancelToken` instead — present only while
+there is a turn to stop. A cancel landing during the wait ends the WAIT and leaves the sessions
+running, with their results held for the user's next message (SS19), which is the suspension path
+arriving by a second route rather than a new behaviour.
+
+**The permission modal names the asking run, and the harness fact is written LAST.** A subagent's
+approvals have always surfaced on the parent's screen — the channel is inherited — and the modal
+said only which tool was asked for. It reads the open span through §47's ContextVar, says nothing
+at depth 0 (the asking run is then the conversation on screen), and uses `asking_agent` rather
+than `agent`, which `spawn_subagent`'s own `request_payload` already uses for the agent about to
+be SPAWNED. **It is written after `payload.update(request_payload)`**, so a tool cannot declare
+that key and overwrite it: an agent-supplied claim replacing a harness fact is the inversion §42's
+RA6 orders this screen to prevent. Nothing declares it today; the point is that nothing can.
+
+**All three surfaces that can be asked from inside a run, in BOTH shells.** §47 shipped the line on
+the permission modal alone; batch 75's review added the sign-off and the model's own question
+(`tui/screens.py`'s `asker_label` is one function and `#permission-asker` one id, because ids are
+per-screen and three copies drift), and batch 76's second round added all three to `main.py`. The
+CLI mattered for the reason its own handlers state: *a kind one shell renders and the other drops is
+D12's wired-up-but-invisible gap*, and the terminal is where an unattended-looking run is watched
+from. It is worth most on the **sign-off**, because that screen's subject is the run about to be
+SPAWNED -- three children of one response each spawning a grandchild produce three prompts that are
+otherwise identical. `ask_user` is the one that writes the keys itself rather than having them added
+by `_obtain_approval`: `core/interaction.py` is a stdlib-only leaf pinned by
+`tests/test_interaction.py`, so the tool is the producer and the channel stays a leaf.
+
+**A `spawn_subagent` line is armed with its CALL, and resolved at PRESS time** (§47). The line
+is drawn when the call starts, before the child has a thread, so a target baked in at draw time
+would have to be nothing. `app._spawn_threads` maps call id to thread id and has **three
+sources**, because the line outlives each of them: the agent stack while the child RUNS (its span
+carries the call, `bind` gave it a thread), the tool result once it finishes (`subagent_thread_id`,
+returned since §18 and never read until now), and `storage.child_threads()` on a resumed
+conversation, which is the only one that survives a restart. Only the agent's NAME is armed — the
+digest on a spawn line is the task, prose a reader wants rather than a control.
+
+**`opens_thread` is declared on the `ToolSpec`, not matched by name.** Two readers ask which calls
+open a run: `core/replay.py`, deciding what a stored tool line carries, and the TUI, deciding
+which live line to arm. A tool name written in both is how they come to disagree about which lines
+are clickable — R13's argument, one field over. Defaulted to False, unlike `grant_policy`, because
+the safe answer is "this line opens nothing".
+
+**A SESSION line is armed the same way, and the slot carries WHICH KIND** (ROADMAP_v3 §49, SS14,
+batch 98). `shell_background` and `shell_monitor` declare `opens_session`, and consumers ask one
+question — `registry.opens(name)` → `("thread",)`, `("session",)` or, since §55's TR7 in batch 125,
+`("call",)`. The fourth slot of a
+`ReplayEntry`, and the transcript's side table, carry `(kind, call id)` rather than a bare id, and
+that is load-bearing rather than tidy: a drawn line is text and metadata by the time anyone can
+click it, so the tool name that decided the kind is gone. Before batch 98 the slot was armed only
+for threads, which meant a `▸ shell_background` line could not be armed in a REPLAY at all — a
+session opened until you restarted and then went quiet with no error. **`app._session_calls` has
+ONE source**, not a spawn's three, and the asymmetry is the point: the tool result names the session
+in the same step the call was made (D20), so there is no window where the line exists and the target
+does not. It is an optimisation for the common case — the manager answers a live session and
+`core/session_view.stored_entries` rebuilds a finished one from the archive, both keyed by the call
+id the line already carries, so `open_session_call` works with the map empty.
+
+**`registry.opens()` HAS NO EMPTY ANSWER SINCE §55 (TR7, batch 125), AND THE GATE IS NOW THE CALL
+ID.** It returned `()` for a line that opened nothing, and both consumers paired that falsy tuple
+with an id as their test — `opens and call_id`. Every call now opens ITSELF: its whole command,
+un-collapsed, and the result that nothing rendered before. So an unarmed tool line is one whose call
+the archive cannot be asked about, never one whose tool declared nothing, and `core/replay.py`'s
+surviving `if opens` is a guard with nothing left to guard.
+
+Two things about that are deliberate and are the parts worth not re-deriving. **`OPENS_CALL` is
+answered without a registry lookup**, unlike its two siblings: `opens_thread` and `opens_session`
+are False for a tool this registry has never seen, which is what a runtime-registered MCP tool is
+and what a tool removed between a thread being written and being replayed is for ever — and neither
+is a reason to hide a stored result. The fallback is a property of the ARCHIVE, not of the registry.
+And **there is no exception list**, including the two `DIFFED_TOOLS`: §41's X4 kept `content` off the
+transcript line and the diff that replaced it shows the CHANGE rather than the call, so the pane is
+the only place the untruncated call can be read. The cost is stated rather than discovered — arming
+no longer means "this line started something".
+
+**Two side tables on the transcript, one rule.** `_links` (batch 65) and `_opens` (§47, renamed and
+widened in batch 98) are both keyed by entry index, both dropped by `reset()`, both replayed by
+`rerender()`. They stay separate because a link opens a BROWSER and a call opens a PANE, and the
+click handler tells them apart anyway — but a thread and a session share `_opens`, because they
+are one fact about a line and a third dict would be a third lifetime to keep in step. **Testing a `reset()` on either needs two things that are easy to get wrong**: the test
+has to REDRAW before asserting, because on the live path a write is handed its targets as an
+argument and a stale table is invisible; and the new thread's lines have to reach the same INDEX
+the old entry held, or the assertion passes against a `reset()` that clears nothing. Both mistakes
+have now been made once each, in batches 65 and 70.
+
+**The read-only thread view is a SWITCHER in `#main`, and the sidebar is why** (§47).
+`#sidebar` lives outside `#main`, so it stays visible, live and interactive while a stored run is
+on screen — which is what lets a reader move between runs without going back to the conversation
+first. A modal would have to compose its own copy of the agent list to offer that, and two
+independent writers of one piece of display state is the bug shape this project already fixed
+once. Both panes stay mounted; only `current` changes, so a running turn goes on writing to the
+live one with nothing to buffer and nothing to flush on the way back. **That last part is batch
+66's held transcript doing the work** — a per-access `query_one` would put the answer in the pane
+being read.
+
+**A hidden pane measures 0, so both panes write at the width of the one on screen.** The switcher
+hides with `display = False`, a hidden widget has no region, and RichLog floors a write to
+`min_width` (78) and stores the Strips it drew — so a turn that went on writing behind the viewer
+left its answer down the left half of the panel after escape, healed only by a restart's replay.
+The viewer is painted hidden as well, which is the same bug from the other side (663be29 patched
+that side alone with a width set before the paint and cleared after). `Transcript._region_width`
+borrows the on-screen sibling's width, measured per write, and the `write` funnel hands RichLog the
+width RichLog ITSELF would have chosen with that region. Two traps, both measured. Passing the
+borrowed region as `width=` is the obvious shortcut and switches off RichLog's shrink, so a code
+block under a syntax theme with a background paints edge to edge — no shipped theme has one, so it
+cannot be seen, which is why the pins run under monokai. And a pilot's `app.console` stays 80 wide
+whatever `run_test(size=)` says, which clamps a `width=None` write's measurement to where it cannot
+be told from the floor: set `app.console.size` in any width pin.
+
+**`_viewing` is the one fact; everything else is derived from it.** The switcher's `current`, the
+crumb's rows, the prompt's `disabled` flag and whether escape is bound all follow from it, so they
+cannot drift into disagreeing about whether the viewer is open.
+
+It **widened in batch 98** (ROADMAP_v3 §49, SS14) to hold a background session as well as a stored
+thread: a UUID is a thread, a tuple is a session. A second flag beside it was the alternative and is
+the failure the paragraph above describes, reached by ADDING a fact rather than by letting one go
+stale — two flags can both be true. `_viewing_thread` and `_viewing_live_session` are the two
+accessors, so nothing else type-sniffs, and the session gets its own pane (`#session-view`) in the
+same switcher: the thread poll repaints `#thread-view` from the archive, so a session drawn there
+would be wiped by the next tick of a timer meant for something else.
+
+**A session view polls the BUFFER, and by character count** (SS14). There is no archive to read: a
+session's output lives in memory and nowhere else. And the sink cannot stand in for the poll — it
+fires when a session MOVES (start, each monitor match, finish, the wake-limit suspension) and never
+when it prints, so a background session's view would sit frozen between its first line and its last.
+The comparison is the buffer's own `total`, not the length of the tail drawn: a session past the tail
+bound has a tail that stops changing LENGTH while its content goes on moving, so the drawn length
+freezes the view exactly when it gets interesting. The handler repaints once more when the session
+finishes, because the poll stops the tick it stops being live.
+
+**A rebuilt view is keyed by CALL id, and takes its command and rationale from the stored call**
+(SS18). Two measurements behind one sentence. A session id is a per-process counter (`s1`, `s2`), so
+looking one up across a restart draws a different session with complete confidence. And the saved
+wake record is `{id, call_id, shape}` — the row's text carries the command but never the rationale —
+so the tool CALL, which has the exact params the model sent, is the only honest source for both and
+nothing had to be duplicated into what is persisted. The same route covers a session pruned from
+memory in this process (SS12 keeps twenty), so `app._session_calls` is an optimisation rather than a
+dependency.
+
+**The trail is read from STORAGE, never from where the reader walked.** Open a sub-subagent
+directly and the crumb still says `chat › explore › review`, because the parent link is a column.
+A history-derived trail would record what the reader did rather than what spawned what. Every step
+but the last is armed; the last is where you already are. The walk carries a `seen` set, because a
+hand-edited database must not hang the UI — and note that the mutation removing it does not fail,
+it HANGS, so a mutation harness covering it needs a subprocess timeout.
+
+**The poll reads the archive, and only while the run is live.** A child's events are drained
+internally (§18/D6), so the only honest source for "what has it written since" is the store it is
+writing to. `on_agent_stack_changed` starts and stops the timer, because a span closing is the
+ONLY signal a shell gets that a child has finished. Redraws are gated on the entry count: a
+repaint every second would fight the reader's scroll position, and **a test comparing the pane's
+TEXT cannot see that** — identical entries repaint identically. Count `reset()` calls.
+
+**View-only is enforced by disabling the prompt, and that decides which paths can reach the
+viewer's teardown.** `/new` cannot: no slash command can be typed while the prompt is disabled, so
+`_cmd_new` has no close of its own. The thread picker can, because ctrl+t is an app binding, so
+`switch_to_thread` closes the view. One test pins that ctrl+t stays live, which is what keeps the
+first half of this from becoming untrue silently.
+
+**Escape means one thing: back to the conversation.** Going up one level is the crumb's job.
+`check_action` keeps the binding off at every other moment — `PromptInput` binds escape to
+dismissing the slash panel, and a live-but-inert app binding is exactly what would shadow it.
+
+**The child's thread records its parent; the tool result is not a link** (§47).
+`spawn_subagent` has always returned `subagent_thread_id` to the model, so the edge existed —
+as a repr inside a JSON blob in one message row, which nothing can query and replay skips
+outright (T4). It is stored on the CHILD's row now, in three nullable columns added the way
+`pinned` and `kind` were. **The call id is what makes the edge specific**: one turn can spawn
+`explore` three times, so the agent name identifies the roster entry and not the run.
+`"call_id"` joins `_INJECTABLE_PARAMS` rather than riding in params, twice over — params are
+the MODEL'S, and a model that could write its own call id could claim a line it did not make.
+
 
 **The tempting wrong source is the sign-off.** A depth-2 `SUBAGENT_SIGNOFF` request does reach
 the TUI naming the grandchild, and there is no matching completion signal — a row pushed from it
@@ -971,7 +1506,7 @@ would never clear.
 
 **The package is `mcp_client/`, never `mcp/`.** The project root is on `sys.path`, so a top-level `mcp/` shadows the installed SDK — the `logging.py` incident again. §17's spec sketches `mcp/client.py`; don't follow it there. Every SDK symbol lives inside this package so a version migration touches one directory.
 
-**Pinned to `mcp>=2.0,<3`.** v2 is not v1: fields are snake_case (`.content` / `.structured_content` / `.is_error`), `Tool.input_schema`, timeouts are `float`, the exception is `MCPError`, and `Client(server)` replaces `ClientSession` + a separate transport CM. Reading the v1 spellings against v2 doesn't crash — `getattr` returns `None` and every failed call silently looks successful.
+**Pinned to `mcp==2.0.0`, EXACTLY, and the range is what it was pinned away FROM.** `requirements.txt` carries the reason: under `>=2.0,<3` a minor release went red on main while every local run stayed green, so CI's result depended on WHEN it ran and CI was not testing what anyone runs locally. Moving it is deliberate: read 2.1.0's split first. v2 is not v1: fields are snake_case (`.content` / `.structured_content` / `.is_error`), `Tool.input_schema`, timeouts are `float`, the exception is `MCPError`, and `Client(server)` replaces `ClientSession` + a separate transport CM. Reading the v1 spellings against v2 doesn't crash — `getattr` returns `None` and every failed call silently looks successful.
 
 **The manager task is required.** `AsyncExitStack` cannot be entered in `connect_all()` and closed in `disconnect_all()`: anyio binds cancel scopes to the **task**, and `run_coroutine_threadsafe()` makes a new task per call, so the right *loop* is necessary but not sufficient. One long-lived `_manager()` task enters every context, signals ready, and parks until shutdown. If `RuntimeError: Attempted to exit cancel scope in a different task` appears, something moved an enter/exit across a task boundary.
 
@@ -985,7 +1520,15 @@ would never clear.
 
 **`mcp.json` accepts unknown keys** (unlike `settings.json`, which raises) so configs shared with Claude Desktop/Cursor work. Validation is by *connecting*; per-server failures are named and skipped, never fatal.
 
+**A flag that is not a JSON boolean is refused, and the two flags are refused DIFFERENTLY** (A29, batch 150). `bool("false")` is True, so `_flag` has never coerced -- but it used to answer `False` for both keys, and for `disabled` that means NOT disabled: `"disabled": "true"` connected the server and the consent line, which reads `self.disabled`, showed it as live. Neither constant is safe there, because `"disabled": "false"` is one hand edit away and wants the opposite answer. So `_flag` reports that it could not parse and each caller states its own direction: `autoApprove` falls to `False` (the safe answer either way, and pinned as a control), while an unparseable `disabled` makes the entry **UNUSABLE by name** -- transport `unknown`, `describe()` printing the reason on the acknowledgement screen, the server in `failures`. Nothing runs and nothing is silent, which is decision G's own remedy rather than an exception to it.
+
+**A composed tool name is validated and an invalid one is refused** (A30, batch 150). Both halves of `mcp__<server>__<tool>` come from outside this repo and the installed SDK constrains neither -- `Tool.model_fields["name"]` is a bare `str`. A dotted `mcp.json` key, a space or newline from a server, or two ordinary long words (70 characters) all used to register AND advertise, and `schemas()` is rebuilt every call (K7), so one such name made every provider request malformed for the rest of the session from a server that was working. Refused rather than mangled, because a renamed tool is one the model cannot name back and the prefix is not a parser. One warning per SERVER when the server half is at fault (it poisons every name, and the operator can rename it), one per TOOL otherwise. This is not the up-front schema validation decision G rules out: nothing in `register_all` reads `mcp.json`, and a named per-server failure is what G asks for.
+
+**A tool's description, title and input_schema are third-party text in every request, and all three are bounded at the producer** (A31, batch 150). A5's rule, which the other two sources of model-facing third-party text already followed: whitespace collapsed, capped at `registration.MAX_TOOL_DESCRIPTION_CHARS` (2000 -- NOT `MAX_CATALOG_TEXT_CHARS`, whose 300 is sized for a one-line bullet), applied after the `[MCP: ]` prefix and the server's `title` are composed in so one call covers all three strings. `input_schema` is bounded by a different mechanism because capping strings inside a schema turns a load-time failure into a call-time one: the serialised whole schema is capped at `MAX_TOOL_SCHEMA_CHARS` (16384) and an oversized tool is refused. The success path's `result` is still unbounded on purpose -- that is TECHNICAL_DEBT 48, ruled DEFER.
+
 **Redaction recurses now.** `check_output_policy()` used to scan top-level strings only; `structured_content` arrives under `result` as a dict, so third-party MCP output was the one unscanned path. Fixed in `safety/policy_enforcement.py`, not at the MCP boundary — any tool returning nested data had the same hole.
+
+**`_normalize` obeys that rule too, and until batch 150 it obeyed none of it** (A32). The non-text placeholder was guarded by `if not text and blocks`, so it fired only when NO text block produced anything: a result carrying text AND an image dropped the image with no placeholder and no log line, and "Chart generated:" with no chart is a result the model will answer from. The placeholder is now APPENDED to whatever text survived, the dropped kinds come from the blocks the join actually skipped (an empty text block has nothing to drop, and reporting it as non-text was the placeholder contradicting itself), and one WARNING names the tool -- which required making the tool name a PARAMETER, because `_normalize` took the result alone and the rule below was therefore unsatisfiable in the function it applies to. A structured error payload rides in the error STRING rather than a second key, because D23 promises one error shape.
 
 **Nothing an output-policy pass alters is silent, and the redaction has an off switch (#49/#167, batch 20).** Every altered dispatch result logs ONE WARNING naming the tool and what changed — before #49 the depth cap replaced a whole container with a sentence and logged nothing. Credential *shapes* (`password "…"`, `<password>…</password>`, `scheme://user:pass@host`) join the vendor tokens, applied to `param_digest` too (a credentialed URL had been printing its password into both transcripts since §26). The shapes are OUTPUT-ONLY by pinned decision: `_SECRET_PATTERNS` stay `_input_leaf`'s whole vocabulary, because refusing a write whose content is a build file breaks the call the user asked for. `VENASTINE_REDACT_OFF` / `config.REDACT_TOOL_OUTPUTS` disable pattern substitution — never input refusals, never the depth-cap sentinel, never logging_setup's formatter; deliberately not a settings.json key (G7's reason).
 
@@ -995,7 +1538,7 @@ would never clear.
 
 Anthropic's valid levels are **queried** (`capabilities.effort` on the Models API) so new Anthropic models need no table entry; everything else falls back to `config.MODEL_EFFORT_LEVELS`, where an unknown model ASSUMES `["low","medium","high"]` — optimistic, cached, and the reason the empty-list entries above matter. Google reports no levels at all on the pinned `google-genai==1.0.0`, which has no `thinking_budget` field, so effort drops there regardless of the default.
 
-The pipeline carries effort like authorization (#139): every pass, every JSON retry ("a retry is the same pass continuing"), §20's reviewer and its re-synthesis inherit it, and `effort_for` validating per RECEIVING model is what makes ensemble rosters and critic routing safe by construction.
+The pipeline carries effort like authorization (#139): every pass, every JSON retry ("a retry is the same pass continuing"), §20's reviewer and its re-synthesis inherit it, and `effort_for` validating per RECEIVING model is what makes ensemble rosters and critic routing safe by construction. **§47's `activity` sink is threaded the same way and along the same hops**, which is worth naming because two of them dropped it until batch 75: `json_retry.retry_until_json` and the review consent walk down to `_refine`. Both reach the model through `continue_conversation`, which drains its own loop — so on those two paths the sink is the ONLY way a subagent spawned inside them is visible at all, which is the reverse of how "just a retry" reads.
 
 `config.MAX_TOKENS` caps thinking **plus** response on current Anthropic models — that is why §16 raised it from 4096.
 
@@ -1010,7 +1553,7 @@ Current Anthropic models reject `temperature`/`top_p`/`top_k` (`config.MODELS_RE
 **Diversity comes from different MODELS, not different sampling** (E1). `config.ENSEMBLE_MODELS` is a roster of `{provider_name, model}`; Pass 1 runs once per entry, each on its own provider/model. §11's stated reason is the argument — "a model checking its own output for errors shares that model's blind spots" is the identical objection to self-consistency, since N samples of one model agree most confidently on that model's systematic errors. §10's own revisit note proposed *prompt-framing* variation; that was rejected, because framings partition what each candidate looks for, so an omission becomes a systematic bias rather than noise.
 
 - **No new plumbing was needed.** `_run()` calls `api_initialization(provider_name)` itself and `effort_for` validates against the receiving model, so a heterogeneous roster is correct by construction — the same way §11 already routes 3a/3b/6c to `critic_provider`/`critic_model`.
-- **`config.py` only** (E2), following `CRITIC_MODEL`. `ensemble_models` is rejected from `settings.json` **by name**, R12's rule applied to a second kind of authority: turning the mode on can only spend more of the provider the user already chose, but a *roster* chooses providers, and a project's `settings.json` beats the user's.
+- **`config.yaml` only** (E2), following `critic_model`. `ensemble_models` is rejected from `settings.json` **by name**, R12's rule applied to a second kind of authority: turning the mode on can only spend more of the provider the user already chose, but a *roster* chooses providers, and a project's `settings.json` beats the user's.
 - **N is `len(ENSEMBLE_MODELS)`** (E3). `ensemble_n` survives as a vestigial parameter and settings key with a WARNING — removing the key would make every existing `settings.json` that sets it raise.
 - **Fewer than two DISTINCT `(provider, model)` pairs is refused** (E5). Repeating one entry N times recreates the original defect through the new config: no sampling variation remains to make the candidates differ, so they arrive near-identical and every claim scores maximal consistency. Counting entries instead of distinct pairs is a pinned mutation.
 - **A failed candidate is named, traced and skipped** (E7) — §20's containment rule. One survivor **degrades to the single-candidate path** (`ensemble_n=0`), which is the correct formula when there is nothing to compare against, not a degraded one; scoring one candidate as an ensemble of one would report unanimous corroboration from a single source.
@@ -1030,7 +1573,7 @@ Anthropic, OpenAI-compatible (any `is_v1_compatible` provider), and Google are a
 
 **Thinking is captured, persisted, and echoed back to the model that wrote it** (§38 O1–O3, as amended by §44 WS3/WS4). `StreamToken`/`LoopEvent` still carry a `thinking_delta` beside `token_delta` for DISPLAY; the Anthropic branch iterates the `MessageStream` rather than `stream.text_stream` — the two share one underlying iterator, so a caller gets text or both, never text plus thinking — matching the SDK's synthetic `TextEvent`/`ThinkingEvent`, and the OpenAI-compatible branch reads `reasoning_content` **or** `reasoning`, because there is no standard name and `ChoiceDelta` is `extra="allow"`.
 
-**`display: "summarized"` is sent EXPLICITLY, and §38 shipped without it.** On Fable 5, Opus 5, Opus 4.8/4.7 and Sonnet 5 the default is `"omitted"`: thinking blocks still stream, with EMPTY text. So `ev.thinking` was `""`, `core/loop.py`'s `if token.thinking_delta` never fired, and §38 rendered nothing at all on Anthropic for its whole life — invisible because the OpenAI-compatible branch is unaffected and that is where it was being used. The raw chain of thought is never exposed on any model; `"summarized"` is the readable form.
+**`display: "summarized"` is sent EXPLICITLY, and §38 shipped without it.** On every Anthropic model from Opus 4.7 onward — the Fable, Opus 5.x and Sonnet 5.x lines and Haiku 5.5 included — the default is `"omitted"`: thinking blocks still stream, with EMPTY text. So `ev.thinking` was `""`, `core/loop.py`'s `if token.thinking_delta` never fired, and §38 rendered nothing at all on Anthropic for its whole life — invisible because the OpenAI-compatible branch is unaffected and that is where it was being used. The raw chain of thought is never exposed on any model; `"summarized"` is the readable form.
 
 **What is PERSISTED is the provider's own blocks, not the streamed prose** (WS3). `ModelResponse.thinking` is `{provider, model, blocks}`, read off `get_final_message()` and stored in a nullable `MessageLog.thinking` column (additive, the `pinned` precedent). An Anthropic block carries a `signature` the model verifies against its own state, so a record rebuilt from the deltas would be unsigned and useless. `_to_neutral` adds the key ONLY when a row carried reasoning, so every pre-§44 message reconstructs to exactly the shape it always did. `redacted_thinking` is stored and never rendered; `core/replay.py` pulls the prose back out by field name for the two shells.
 
@@ -1047,26 +1590,36 @@ Anthropic, OpenAI-compatible (any `is_v1_compatible` provider), and Google are a
 Invariants that look like simplification opportunities but are not:
 
 - **Each pass gets its own fresh thread.** Passes share distilled JSON, never raw history. Do not merge into one thread.
-- **Pass 5, D0, D1, D2, and Pass 6c make zero LLM calls.** Thresholds, routing, retry caps, dedup, and annotation are pure Python. Adding a model call to any of them is a rearchitecture, not a fix.
+- **Pass 5, the gates D0, D1 and D2, and Pass 6c make zero LLM calls.** Thresholds, routing, retry caps, dedup, and annotation are pure Python. Adding a model call to any of them is a rearchitecture, not a fix.
 - **The scoring formula caps before subtracting the assumption penalty**, not after. Cap-after was a real bug, caught by a test comparing a flagged and unflagged claim landing on the same tier.
 - **Pass 6b does not re-run Pass 4.** Assumption-flagged claims exhaust retries and fall to UNVERIFIED. Known design gap, not a bug.
+- **The payload boundary declares the type of a container's MEMBERS, not just the container** (§66, A25). `payload_validation.py` types `entities` and `asserted_by_candidates` as arrays AND their members as strings and numbers, and every `per_claim_flags` VALUE as an array, because the pure code downstream does not merely iterate what it is given: Pass 3a builds `sorted({e for c in factual_claims for e in c.entities})` and Pass 5 computes `len(set(claim.asserted_by_candidates))`, so `["madrid", 1947]` raises on the sort and `[["madrid"]]` on the hash. A container type alone left three of six measured crash shapes open. **A boolean is not a number here**: `isinstance(True, int)` is True, so `"severity": true` passed and Pass 5 scored `1.0 - True` = 0.0, the MAXIMUM critic penalty, with no trace and no retry. Do not extend this to members nothing reads -- flag STRINGS and Pass 3c's `gaps` members are deliberately untyped, because `len()` and a dict wrapper are all that touch them, and B4's rule is that a check earns its place by having a demonstrated consequence.
 - **The 6a/6b loop counts the ROUND, not the revision** (#74). `retry_count` is incremented for every claim still in `flagged` after Pass 6a returns; the per-revision write sets `revision_text` only. Incrementing inside the loop over 6a's response — which is how it shipped — makes D2's cap reachable only with the model's cooperation, and 6a is one batched call across every flagged claim, exactly the shape a model drops an item from. A claim it omits then never exhausts and `while flagged:` has no bound at all. Do not *add* a per-round increment beside the per-revision one; it must replace it, or a named claim counts twice. And because `flagged` only ever shrinks, every claim in it exhausts on the same round — which is what keeps a fallback from being undone by a later one.
-- **The loop's re-tiering is scoped to its own batch** (`run_confidence_tiering(..., claims=flagged)`). Pass 5 re-tiers everything; a retry round must not, or a claim already finished at D1 or D2 is recomputed from unchanged score data while `_apply_fallback`'s annotation stays — so it ships as LOW beside a note saying it could not be verified, and Pass 6c leaves both alone because `if claim.annotation is None` is false.
+- **The loop's re-tiering is scoped to its own batch** (`run_confidence_tiering(..., claims=flagged)`). Pass 5 re-tiers everything; a retry round must not, or a claim already finished at D1 or D2 is recomputed from unchanged score data while `_apply_fallback`'s annotation stays — so it ships as LOW beside a note saying it could not be verified, and Pass 6c leaves both alone because `if claim.annotation is None` is false. Reproduced in batch 149 while ruling against an unconditional global re-tier, which is the fix that suggests itself for the paragraph below.
+- **And so is everything else a 6b round does** (§66, A26). The narrow re-tier is only half a rule: 6b's payload used to be validated against every id in the run and applied over every claim in it, so an entry naming a finished claim changed its grounding and left its tier alone — a HIGH claim with `grounding_status='ungrounded'`, `sources=[]`, and a breakdown still recording `source_count: 1`. The ids, the apply and the RESCORING are all scoped to `flagged` now; the last one matters because `score_grounding_sources` rewrites every claim's sources by default and its `claims` argument had existed since §45 with no caller. An entry outside the batch is dropped and TRACED, which is `review.py`'s rule for the same shape. **Narrowing `claim_ids` alone does not fix it**: B5 makes a total id mismatch the error and a partial one deliberately not, so the batch-plus-one-extra payload a model actually sends passes either way.
 - **§20's review runs AFTER final synthesis, and the report it regenerates is NOT re-reviewed.** The regress is cut deliberately — reviewing the corrected report would need its own consent pass, and so on. Do not "fix" this. The stage is inside the pipeline's `try`, but a transient REVIEWER failure (provider error, unrecoverable JSON) is contained like the missing-agent branch: traced skip, run completes — an optional stage must not flip a finished ten-pass run to `status='failed'`. A failed re-synthesis after accepted corrections is contained the same way and for the same reason: the deferred commit restores the pre-review claims (so the record never carries corrected claims beside a stale report), the trace says the corrections did *not* land, and **the run still completes**. Only a failure that escapes the stage itself — a bug, not a transient provider error — reaches the pipeline's `except` and records `status='failed'`. Both halves are test-pinned; changing one without the other puts the code and this paragraph back into disagreement, which is what the §19–§20 review found here.
 - **`_synthesis_input` is a function, not a string built once.** §20 re-runs synthesis after an accepted correction; reusing the earlier string regenerates the report from the UNCORRECTED claims, so the report changes for no reason while the correction silently goes nowhere.
 - **`vars(c)` serializes `Claim` at every site** — find them with `grep -rn 'vars(c' --include='*.py' .`, not from a list. Adding a nested-dataclass field to `Claim` requires migrating *all* of them to `dataclasses.asdict(c)` in one change. This bullet used to enumerate three (orchestrator's passes, `pipeline_storage.update_pipeline_run`, `output_writer.write_run_artifacts`) and §26 added two more in `tui/app.py` that fell out of both this list and `base.py`'s (audit #108) — an enumeration that says *all* has to be complete to mean anything.
 - **§45's source scoring MULTIPLIES the grounding component; it is not a fourth weighted term.** `grounding_component = GROUNDING_WEIGHTS[status] * max(SOURCE_QUALITY_FLOOR, q_max)`, where `q` per source is `authority × similarity`. A fourth term is the exact shape §10 shipped for consistency and then reversed (E8): redistributing 0.5/0.35 to make room makes grounding count for less whenever the feature is on. Scaling an existing component leaves the unscored formula LITERALLY unchanged, which is what keeps the byte-for-byte regression guard true by construction.
 - **`sources_scored` is PASSED to `score_claim`, never inferred.** An empty source list means "the model claimed grounded and cited nothing" on a scored run and "this claim was built without a scoring stage" everywhere else — a test, a §20 correction, a resume. Reading 0.0 from the second re-tiers claims nothing measured. The `weights` parameter is the same shape and the same reason: it defaults to the module's own constants, so every pre-§45 caller scores exactly what it did.
 - **`AUTHORITY_FULL_CREDIT` is not redundant, and `SOURCE_QUALITY_FLOOR` is not 0.4.** The domain table is a RANKING and the formula needs an EVIDENTIAL scale; feeding authority in raw multiplies two rank-scales and collapses the tier — swept, Nature and a Pinterest pin both landed MEDIUM. And `0.5*0.4 + 0.35` IS the MEDIUM threshold, so a floor of 0.4 guarantees MEDIUM for every grounded claim however bad its sources. Both are pinned by a sweep in `test_confidence_scoring.py`; check the arithmetic against `TIER_THRESHOLDS` before moving either.
-- **`_ground_and_score` is the ONE seam both grounding sites cross**, and the only writer of `run.source_documents`. Pass 3a and Pass 6b both ground, and a source scored only on the first would carry a number computed for text that no longer exists. Deriving beside each call is what "fix at the producer" exists to prevent.
+- **`_ground_and_score` is the ONE seam both grounding sites cross**, and the only writer of `run.source_documents`. Pass 3a and Pass 6b both ground, and a source scored only on the first would carry a number computed for text that no longer exists. Deriving beside each call is what "fix at the producer" exists to prevent. Its `claims` argument narrows the apply AND the rescoring together, and only the 6b caller passes it (§66, A26): Pass 3a keeps the whole run, because it is the first grounding and every claim is in play. `run.source_documents` is refreshed either way — it is the evidence the RUN gathered, not a per-claim quantity.
 - **The source corpus is a SECOND SINK on `_translate`, not a change to it.** §26's rule — a successful tool result body never reaches the UI — is unchanged. Scoring is silent on a clean payload, which `test_pipeline_trace_contains_expected_lines_in_order` depends on; a Pass 3a fixture that drifts from `source_grounding.md` makes it talk, and that test then fails about trace ordering.
 - **`confidence` and `source_scoring` are TOP-LEVEL settings sections, and an out-of-range value warns rather than raising.** `_NESTED_SETTINGS` supports exactly one level, so `research.confidence` would silently fail to merge across tiers (review finding F2's defect). And the warn-vs-raise split from `effective_compaction` is argued in §45: a bad trigger burns model calls on every turn, a bad weight costs one number in one report. Unknown KEYS still raise.
+- **`fetch_url` pages from a HELD body, and the policy check runs anyway** (ROADMAP_v3 §51, PG5/PG6). `offset=0` always re-fetches and refreshes a 300 s per-URL entry; `offset>0` reads it, so every page of one document comes from one fetch. This is not an optimisation and reverting it to a re-fetch is not a simplification: measured, `news.ycombinator.com` changed inside page 1 across 45 seconds, so page 2 of a re-fetch is a splice of two documents that no key in the result can disclose. `is_url_permitted` runs on EVERY call including a cache hit -- a cache consulted before the blocklist is #54 one layer up, reached by a second call instead of a redirect. And `MAX_CONTENT_BYTES` is **not** a tuning knob: PG6 declined to raise it, so the last reachable page says the document was cut at the read limit rather than naming an offset that returns nothing.
+- **`fetch_url` REDACTS BEFORE IT CUTS, and that ordering is the whole of it** (§52, RB1). `redact_output_text` runs once on the decoded body, above both `_hold` and the slice, so the held copy and every page cut out of it are slices of already-clean text. Moving it below either line is not a refactor: measured end to end, a `ghp_` token at characters 4,980–5,020 came back clean in both pages, was rejoined by PG7's append, and reached `sources/<sha256>.txt` and the window sent to the embedding provider. The repo had locked this rule twice before — `param_digest` "redacts BEFORE truncating" and `tui/app.py`'s diff block runs on whole texts — and §51 is the first place it was applied in the wrong order. Two consequences follow and both are deliberate: the tool's `offset` and `chars_available` count REDACTED characters (RB3), and the tool logs its own one-line warning (RB2) because `check_output_policy` now finds nothing to alter and #49's no-silent-alteration rule would otherwise stop covering it.
+- **`TTLCache` sweeps on write and caps its entries at `MAX_ENTRIES = 128`** (§52, RB5/RB6). Expiry on READ is unchanged and still load-bearing — it is what makes a post-TTL query a real request again — but it bounded staleness and nothing bounded memory: measured, 100 fetches held 6.3 MB and released none of it, because nothing read those keys a second time. The cap is derived, not chosen: `MAX_ITERATIONS` is 50 and a redirect stores two keys for one body, so 100 is one pass's reach and the cap sits above it. Do not tighten it to "save memory" — an eviction inside a pass turns a page-2 request into a re-fetch, which is the spliced document PG5 exists to prevent. `set` pops before it assigns, so a refreshed entry is the newest rather than keeping its original position and being evicted next.
+- **The corpus CONCATENATES pages of one URL; it does not take the longest** (§51, PG7). `_store`'s `offset` parameter distinguishes `None` ("this tool does not page", the old behaviour exactly) from `0` ("page one of something that may have more"), and they must stay different values. `SourceDocument.next_offset` is in the SOURCE's character positions, never in held characters — `.strip()` and `MAX_DOCUMENT_CHARS` change how much is HELD and never where a page sat in the document it came from, and the two numbers coincide at offset 0, which is why a test starting there cannot tell them apart. Redaction used to be a third reason they differ and no longer is for `fetch_url`, which redacts at its producer since §52 (RB1); the entry-side pass here STAYS, because `arxiv_search` and `web_search` do not. Before this, page 2 was silently DROPPED (`5000 >= 5000`) and the grounding pass scored page 1 however far the model read.
+- **All three network tools' caches are cleared by an autouse fixture, and their keys carry the page** (§51, PG9). `arxiv._cache` and `web_search._cache` had been uncleared since they were written — `clear_scholar_cache` next door had the same problem and the same fix. A key without the page in it serves page 1 to every request for page 2, silently.
+- **A truncated abstract or snippet says so, and the caps do not move** (§51, PG8). `MAX_SUMMARY_CHARS` and `MAX_SNIPPET_CHARS` bound model-facing text from a source this project did not write (#131). The fix for "the model cannot tell a short abstract from a cut one" is the flag, not a larger cap and not a knob.
+- **"The caps do not move" forbids RAISING one; it never meant "add no more"** (batch 126, closing TECHNICAL_DEBT 41). #131 is the reason the caps exist, so it *requires* bounding model-facing third-party text wherever it is unbounded, and `arxiv_search` had three such fields plus an unbounded wire read while the abstract — the one field anyone had capped — was not the field that grew. Measured: `str(result)` of 223,191 characters for an ordinary physics query, **91.8% of it the author list**, one entry carrying 2,832 authors; everything the tool already bounded ceilinged near 16,900 at `max_results=20`, so the capped fields could never have accounted for the 116,996-char row the register recorded. `_MAX_AUTHORS = 25` takes PG8's full shape (flag, `author_count` with the REAL total, `full_authors_url`). `MAX_TITLE_CHARS = 300` and `MAX_CATEGORIES = 20` take the flag and **no route**, and that asymmetry is the decision: #49 says nothing is altered silently so the flag is owed, but PG4 exists so the model can reach what it *wanted*, and a title past 300 characters is a malformed feed rather than a long paper (measured: the longest of sixty real titles was 188). Do not "complete the pattern" by adding a route there.
+- **`MAX_FEED_BYTES` is `arxiv_search`'s half of §31 (H7), and it is not a tuning knob either** (batch 126). `_call_arxiv_api` was `httpx.get(...).text` — the last `httpx.get` in production code, and the exact shape `fetch_url.py`'s own comment calls out: httpx buffers the whole body before anything slices it, and a Content-Length check is not the fix because a hostile server can omit it or lie about it. Streamed now, dropped inside the `with` the moment the cap is passed. **2 MiB is derived and the first derivation was wrong** — it guessed ~100 KB per hyperauthorship entry; measured, the heaviest *legitimate* feed is 838,560 bytes (`max_results=20`, 13,859 `<author>` elements), so the bound clears the real worst case by 2.5x. That number is the one that matters: a cap under the largest real feed is a FALSE REFUSAL, the tool reporting it read nothing for a query arXiv answered correctly. An oversized feed is **refused and not retried** — a cut Atom document does not parse, so unlike `fetch_url` there is no degraded body to keep, and retrying reaches the same place twice more before reporting a network failure that is not there.
 - **`scholar.py`'s OpenAlex lookup is OFF by default and is the one network call outside the tool layer**, so it never appears in `granted_calls.json`. Its `fetch` is injectable because the suite runs offline, and its module-level cache is cleared by an autouse fixture — without it a test injecting a FAILING fetch is served a payload a passing test cached, and goes quiet rather than red.
 - **`update_pipeline_run(status=...)` defaults to `None`, not `"running"`** — so a data-only checkpoint can't reset a `complete`/`failed` row.
 - **The pipeline is a GENERATOR** (§22). `stream_deep_research_pipeline()` yields `PipelineEvent`s; `run_pipeline_to_completion()` drains. Same shape as `_run()` / `run_to_completion()`, for the same reason. **P3's third name is retired.** It kept a synchronous `run_deep_research_pipeline()` so §22 would change no caller — and then both shells moved to the generator anyway, to render progress, each with a comment saying it deliberately did not call the wrapper. What was left was a public function with no production caller, fifty call sites in `tests/`, and three docstrings still calling it the live entry point. The convenience is `tests/conftest.run_pipeline` now, which is what it had become. Its pass-level twin `run_deep_research_mode` retired with it and for the same reason; `tests/conftest.run_pass` is that one.
 - **`_Progress.checkpoint()` is the only place a trace line is recorded** (§22). It persists, then yields every line appended since it last ran — so §5's per-pass persistence and the events are DERIVED from `run.trace` rather than emitted beside it. This is what finally made "a checkpoint after every trace line" true: `review.py` writes fifteen lines and checkpointed after none, and `json_retry.py` appends straight to the list. Both are now carried without either module changing, which is also why a JSON-parse retry needs no event kind. Persist-before-emit is deliberate: a generator only advances while someone iterates it, so emitting first would make durability depend on a UI continuing to read.
 - **An abandoned pipeline generator leaves `status='running'`** (§22). `GeneratorExit` is not an `Exception`, so a consumer that stops iterating is recorded as abandoned rather than failed — and the persist-before-emit ordering is what keeps the checkpoints it already took.
-- **A pass's `LoopEvent`s are TRANSLATED, not propagated** (§22 P2 as amended by §26), and `PipelineEvent` is a separate, kind-discriminated type from `LoopEvent` (§22 P1) — adding §22's or §26's kinds to that flat bag is the thing the decision rejected, and `test_pipeline_events.py` fails if `LoopEvent` grows an EIGHTH field. (It has seven: six payload fields plus `stop_reason`. This paragraph said "six-field bag" and "a seventh field" in consecutive clauses — counting payloads once and fields once — which audit #128 caught as a wording defect with no gap behind it: the test asserts the exact seven-name set, so any addition goes red.) §22 kept a pass opaque on the premise that its internals were not worth seeing; the first real ten-pass run disproved that, so `_run_pass` now iterates `RunAgentLoop.stream_deep_research_mode()` and converts a chosen subset into pipeline kinds. A consumer still sees exactly one event type — that is what P1/P2 were protecting, and it still holds.
+- **A pass's `LoopEvent`s are TRANSLATED, not propagated** (§22 P2 as amended by §26), and `PipelineEvent` is a separate, kind-discriminated type from `LoopEvent` (§22 P1) — adding §22's or §26's kinds to that flat bag is the thing the decision rejected, and `test_pipeline_events.py` fails if `LoopEvent` grows a TENTH field. (It has nine: eight payload fields plus `stop_reason`. The test asserts the exact eight-name set, so any addition goes red, and a new field is argued for in that test the way `retract` and `thinking_delta` were.) §22 kept a pass opaque on the premise that its internals were not worth seeing; the first real ten-pass run disproved that, so `_run_pass` now iterates `RunAgentLoop.stream_deep_research_mode()` and converts a chosen subset into pipeline kinds. A consumer still sees exactly one event type — that is what P1/P2 were protecting, and it still holds.
 - **A truncated pass is detected AT the pass.** `_check_not_truncated()` reads
   `stop_reason`: truncated with text traces and continues, truncated with no text
   raises naming the pass and the reason. A stop condition returns the last
@@ -1091,8 +1644,9 @@ The pipeline could not call any approval-gated tool in any shell — the pass en
 
 - **A grant covers only tools with no `approval_check`** (R2, `registry.grantable`). A per-call gate was never consented to by name. This *narrowed* §18's shipped sign-off at the shared mechanism — a signed-off subagent calling `shell` now prompts its parent.
 - **`spawn_subagent` is excluded from *every* grant path** (R4, `grant_policy=GRANT_NEVER`): approving a spawn *is* the §18 sign-off, so pre-granting it compounds one yes into unbounded delegated authority. "Every" is R13's correction — the exclusion used to live in a frozenset in the pipeline's module, so the sign-off R4's argument is *about* went on offering it (#67).
-- **Grant policy is declared on the tool, and both callers read it** (R13). `GRANT_ANYWHERE` / `GRANT_SIGNOFF_ONLY` / `GRANT_NEVER`, required on every static registration and enforced at import by `assert_grant_policy_declared`. The pipeline accepts only `ANYWHERE`; the sign-off accepts anything but `NEVER`, so it is strictly looser and `write_project_doc` sits in the gap. A denylist defaulted an unknown tool to *grantable*, which is how `write_project_doc` became the entire `--grant` menu (#133).
+- **Grant policy is declared on the tool, and both callers read it** (R13). `GRANT_ANYWHERE` / `GRANT_SIGNOFF_ONLY` / `GRANT_NEVER`, required on every static registration and enforced at import by `assert_grant_policy_declared`. The pipeline accepts only `ANYWHERE`; the sign-off accepts anything but `NEVER`, so it is strictly looser and `write_project_doc` sits in the gap — **as a policy value with no shipped instance**, which is `docs/TECHNICAL_DEBT.md` 83: `GRANT_SIGNOFF_ONLY` has exactly one member in the registry, and no agent this project ships declares it. A denylist defaulted an unknown tool to *grantable*, which is how `write_project_doc` became the entire `--grant` menu (#133).
 - **`candidates()` is empty on a default install, by design.** Every built-in is ungated, param-dependent, or excluded by policy; the population both grant paths serve is MCP tools, which are allowed-but-gated by default and carry no `approval_check`. R1's "the description is the whole of informed consent" was written about exactly them.
+- **The SIGN-OFF path is empty on *every* install, for the shipped roster** (batch 139's owner ruling, measured; `docs/TECHNICAL_DEBT.md` 83). Same population, one extra filter: `candidate_approvals` intersects it with the CHILD's reachable tools, and all six spawnable shipped agents narrow `allowed_tools` to built-ins. Configuring an MCP server does not help, because an agent file cannot name `mcp__server__tool` for a server that did not exist when it was written. So `SubagentSignoffScreen`'s picker branch is reachable only for an agent that declines to narrow or names a gated tool outright — a user- or project-tier file. **The subset picker is for operator-configured installs; the shipped roster deliberately declares nothing to pick**, and every shipped spawn shows the "needs no approval-gated tools" branch instead.
 - **The ADVERTISEMENT filter reads the grant too** (R15, `schemas(…, granted=)` / `headless_hidden(…, granted=)` sharing `_answered_by_grant`). `headless = response_channel is None` asks "can anything ask?"; since §25 the question is "can anything *answer for this tool*?", because a grant is an answer given early. #156: `--grant-tools` without `--attended` sent the model byte-identical tools to an unflagged run while the CLI printed that it had authorised something — **§25's own founding defect, still standing on the path §25 was written for**, since `--attended` cleared `headless` and grant-only never did. The filter re-derives *both* `grantable()` and `grant_policy == GRANT_ANYWHERE` — `ANYWHERE`, not `!= NEVER`, because it is reached only when the run is headless, which is the unattended case `SIGNOFF_ONLY` excludes. **Three readers of `grant_policy` now, and they do not all want the same predicate:** `candidates()` and this filter ask *may an unattended run have this?* (`== ANYWHERE`); the loop's grant branch asks *does a name grant apply at all?* (`!= NEVER`, so a signed-off subagent keeps its `SIGNOFF_ONLY` tool). The branch must not apply the policy to a subject-keyed memo — `spawn_subagent` is `GRANT_NEVER`, so that stops §23's memo working; `recall_signoff` separates them by returning a subset for a memo and `None` for a name grant.
 - **`GrantBudget` exhaustion degrades to *asking*, not to failing.** One instance shared by reference across all ten passes; rebuilding per pass would multiply the ceiling by ten while reading as if it enforced one. It is deliberately **not** consulted when deciding what to advertise — R6's fallback is a *call-time* answer, and retracting a tool mid-run would read to the model as the tool ceasing to exist.
 - **A headless denial names its CAUSE** (#158). `callable_only` probes with empty params, so for a params-dependent tool it guarantees *some* call shape is callable, not this one — `write` is advertised in a pass and denied per out-of-workspace path. The denial therefore distinguishes *gated by name, nothing can ask* (stop) from *gated by these arguments* (vary them). The old wording told the model to retry with approval, which headless is the one thing it cannot get. No tool name and no notion of a path is in `core/loop.py` — `ToolSpec.grant_scope` and `request_kind` exist to keep it that way.
@@ -1111,6 +1665,7 @@ The research pipeline can now review its own finished output and correct it, one
 - **No consent route means nothing is applied** (V6). The review still runs and still records. Same rule §25 applies to gated tools: the inability to ask is not permission to proceed.
 - **The reviewer inherits the run's `RunAuthorization` unchanged** (V7) — same grants, same provider, same `GrantBudget` **instance**. No new security axis.
 - **A refinement re-enters the reviewer's own thread** (V5, via `continue_conversation`) and touches only its own finding. A note about #3 must not redraft #7.
+- **The reviewer opens a §47 span, like a pass** (batch 75). It forwarded the sink and opened nothing until then, and forwarding is not being visible: `run_agent_conversation` only ever calls `bind()`, which is a no-op with no span open. So the reviewer drew no sidebar row, was absent from ctrl+g, could not be opened while it ran, and asked for its gated tools with no "asked by" line — a nested run's question presented as the conversation's own. ONE span over the whole call, retries included, which is `compact()`'s rule for the same shape; the depth is derived from the context `run_review` already builds, never written as a 1. A refinement gets none: it continues a thread whose run has finished, in front of a reader who triggered it.
 - **Four consent outcomes, and only one of them can ever accept.** `reject_all` is the escape a long review needs precisely because it only declines; an accept-all shortcut is the affordance that must not exist, since an injected "correction" needs one reflexive yes.
 - **Every unclear answer is a rejection** — an unrecognised string, a callback that raises, a timeout, a TUI modal dismissed with the bare `False` its shutdown path puts. This is the fifth place the "every dismissal carries a value" invariant applies and the first where the unsafe failure is silently applying an edit rather than hanging a worker.
 
@@ -1118,7 +1673,7 @@ The research pipeline can now review its own finished output and correct it, one
 
 A long thread is now condensed rather than left to hit a wall. Compaction adds a
 `CompactionCheckpoint` row and **never edits the archive** — `storage.archive_history()`
-returns every message ever written however many times this has run (AC1), which is
+returns every message ever written however many times this has run (§21 AC1), which is
 what makes an early, frequent trigger safe.
 
 - **The trigger is a SHARE of the model's window** (WS5, reversing M1). M1 made it a
@@ -1126,16 +1681,61 @@ what makes an early, frequent trigger safe.
   thread never reaches" — arithmetic about `MAX_TOKEN_BUDGET`, then a default spend
   ceiling of 250k. **Batch 27 deleted that ceiling**, so nothing competes with a
   large trigger and the constant outlived its own argument: a 1M-window thread was
-  folding at 4% of its window. `compaction.derived_trigger()` is
-  `COMPACTION_TRIGGER_FRACTION` (0.85) × `context_limit()`. A FRACTION, not
-  `window - margin` — that shape is the BACKSTOP's and cannot be right at both ends
-  of the roster, since 40k below 1M is a rounding error and 40k below 64k leaves 24k.
+  folding at 4% of its window. Still not `window - margin` — that shape is the
+  BACKSTOP's and cannot be right at both ends of the roster, since 40k below 1M is a
+  rounding error and 40k below 64k leaves 24k.
+- **What the fraction NAMES is the headroom, and batch 119 clamped it at both ends**
+  (TECHNICAL_DEBT 39). `compaction.derived_trigger()` is now `context_limit()` minus
+  `headroom_for()`, where the headroom is `COMPACTION_TRIGGER_FRACTION` (0.90)
+  applied to the window, held at or above `COMPACTION_MIN_HEADROOM_TOKENS` (16,000)
+  and at or below `COMPACTION_MAX_HEADROOM_FRACTION` (0.25) of it. **Exactly the
+  fraction at every window at or above ~160k**, so a 262k or 1M thread gets what the
+  number says; a floor below that. The reason is the mirror image of batch 44's
+  against a flat margin: a bare SHARE holds the percentage constant while the thing
+  the headroom must contain does not scale with the window at all — one
+  `max_read_chars` result is 12,500 proxy tokens whether the model holds 64k or a
+  million, and one measured `arxiv_search` result was 29k. **There is no
+  context-overflow handler anywhere in `core/`** (grep for one): the provider raises,
+  the loop retries the identical oversized prompt three times, the turn dies. This
+  number is the only thing between a thread and that, which is why it is the thing
+  with the floor on it rather than the trigger.
   The derived value is a DEFAULT and sits LAST: an explicit `/compact` override, a
   session `/trigger` bound to its `(provider, model)`, and settings.json's
   `trigger_tokens` all outrank it, arriving at `thresholds()` through D27's existing
   per-invocation slot rather than as a fifth tier. `COMPACTION_TRIGGER_TOKENS`
-  survives as the trigger for the one caller with no model in scope,
-  `pin_measurements`, so #89's cap is unchanged.
+  survives as the trigger for a caller with no model in scope, which is
+  `pin_measurements` when nothing passed it a pair.
+  **AND THAT SENTENCE USED TO END "so #89's cap is unchanged", which was true
+  of the cap's VALUE and false of the property it bought** (batch 148,
+  S11-06). #89's cap is a fraction of the trigger, batch 44 moved the trigger
+  off this constant, and the cap kept reading the constant — so it was
+  20,000 for every model: 250% of the trigger that fires on an 8,192-token
+  window, where one pin could protect more than the whole trigger and floor
+  the thread permanently above it, and 8% of it on a 262,144-token one,
+  where `pin` refused what the policy allows. `pin_measurements` now takes an
+  optional `(model, provider_name)` and resolves the trigger the way
+  `thresholds()` does; `tools/builtin/pin.py` declares `parent_run`, which
+  already carried both. The bare read is the FALLBACK, for a call from
+  outside a run (A22).
+- **And there is a THIRD clamp, below the two above: the dependent floor**
+  (TECHNICAL_DEBT 42, batch 127). `effective_compaction()` validates the trigger
+  against two settings of identical form — `warning_margin_tokens` and
+  `keep_recent_tokens`, each of which must be STRICTLY below it — so
+  `derived_trigger()` floors at `max(margin, keep_recent) + 1`. Without it the cap
+  above held the trigger at `0.75*window` at the small end, which clears
+  `keep_recent_tokens` from a window of 5,334 up but `warning_margin_tokens` only
+  from **10,667** up: a provider reporting **8,192** derived 6,144, and
+  `should_compact()` raised `ValueError` at the top of every step with both
+  `_maybe_compact` call sites bare, so **every turn on that model died before the
+  first model call**. Reachable by what the PROVIDER reports, never by `/window`,
+  which refuses anything at or below 20,000.
+  **The floor is READ, through `effective_compaction()` itself, and a literal here is
+  a defect** — it must be the same resolution the validator uses or it drifts from the
+  number it exists to satisfy the moment someone edits `config.yaml`. **Below ~10,667
+  the returned value is the floor rather than the share, so the fraction stops
+  describing it**; that is stated rather than discovered. Do not "fix" this by
+  catching the `ValueError` at the call sites: compaction would then silently never
+  run on that model.
 - **`context_limit()` now decides when every thread folds, so its sources matter**
   (WS6, WS10). Order: a REMEMBERED window (`core/model_windows.py`, written by
   `/window`, kept per `(provider, model)` across launches) → the provider's own
@@ -1158,14 +1758,49 @@ what makes an early, frequent trigger safe.
   unpriced counts — plus the TUI usage line (billed-since-resume · ctx) and CLI
   early-stop figures. Do not read EITHER number as a price or the spend figure as
   a size.
-- **The fold boundary is always a turn start** (M4). A summary that swallows an
-  assistant message and leaves its `tool_result` rows is an HTTP 400 on Anthropic — a
-  hard wire error, not a degraded answer.
+- **The fold boundary never splits a step** (M4, as restated by batch 120). A summary
+  that swallows an assistant message and leaves its `tool_result` rows is an HTTP 400
+  on Anthropic — a hard wire error, not a degraded answer. This bullet said "always a
+  turn start" until batch 120, which was the IMPLEMENTATION rather than the rule: a
+  turn start satisfies M4, and so does the row before any **assistant** row inside a
+  turn, because the archive there is `user, (assistant, tool+)*` — D20 persists the
+  assistant row before dispatch and every answering row after it returns, a parallel
+  dispatch included. So the rule is unchanged and the set of positions satisfying it
+  grew. A turn-aligned boundary is still PREFERRED and a sub-turn one is reached only
+  when no turn-aligned fold exists at all; the second boundary `pinned_through()` has
+  always owned is the other place M4 reaches (#88).
 - **Three floors bound what may be folded, earliest wins** (M5): the current turn
   (structural — `_run()` records how many turns were complete when it began), the
   last 3 completed turns, and `keep_recent_tokens`. The current-turn floor is what
   makes the mid-turn valve safe by construction rather than by hoping the threshold
   is far enough away.
+- **AMENDED BY BATCH 119: the turn COUNT is a preference, the other two are
+  absolute** (TECHNICAL_DEBT 39). Only two of M5's floors can measure what they hold.
+  The current turn is structural. `keep_recent_tokens` is a SIZE, so it holds exactly
+  what it says and can never be what holds a thread that is over the trigger.
+  `keep_recent_turns` is a COUNT, and a count cannot tell three small turns from
+  three enormous ones — **measured at 230k tokens held behind `3 - 3 = 0` on a
+  thread 92.5% of which was foldable**, with no way out from inside the app: this
+  function takes no model, so a 1M-context model recomputes the same zero; it reads
+  the archive, so a restart re-reads the same rows; `/compact` parses only
+  `--strength`. So the count applies while it still leaves something foldable and
+  otherwise yields — ALL the way to the size-aware floors, not one turn at a time,
+  because one step of relaxation on that thread folds 253 tokens, writes a
+  checkpoint, and then answers `no-progress` forever with `advances()` satisfied
+  against a watermark that freed 0.1%. The guarantee is size-based now: the current
+  turn verbatim, plus at least `keep_recent_tokens` of completed turns verbatim.
+- **AMENDED AGAIN BY BATCH 120: the current turn's MIDDLE may fold** (TECHNICAL_DEBT
+  40). The structural floor was the one batch 119 left absolute, and a thread whose
+  only turn is the one still running then has no legal fold at all — the reported
+  thread was 142 rows and 168,311 proxy tokens inside ONE turn, where the best
+  turn-aligned boundary freed **253**. M5's reason is that folding the current turn
+  "would rewrite the question mid-answer", and that reason does not cover the whole
+  turn: after forty-six steps the model is not reasoning about step three's tool
+  output. So the request and `keep_recent_tokens` of recent steps stay VERBATIM and
+  the middle folds — the question is carried, not summarized. The request comes back
+  through `pinned_through()`, which already owned exactly this question, as ONE index
+  into its existing `keep` list so its existing sort places it. 97.2% of that thread
+  becomes foldable; measured, with M4 checked by walking both sides of the cut.
 - **Chain is the default; rederive survives as the fidelity option** (M2, as
   amended by batch 16 — an explicit owner decision recorded in DEVLOG). M2's
   original choice was rederive: exactly one summarization step always sits
@@ -1208,6 +1843,18 @@ what makes an early, frequent trigger safe.
 - **A research pass compacts only at a hard backstop** (M6), near the real context
   window. Routine compaction in an unattended pass would spend on a judgment call
   nobody is watching.
+  **"Only at a hard backstop" is an ORDERING claim, and until batch 148 the
+  arithmetic broke it** (S11-04): the backstop was a flat 20,000-token margin
+  while batch 44 made the ordinary trigger a clamped share, so the backstop
+  fired EARLIER than the trigger it sits behind at every window below
+  200,000 — 4,000 tokens earlier at 64,000, 11,808 at 32,768, and at or
+  below 20,001 its `max(1, ...)` clamped it to 1, so every evaluation of
+  every step of every pass asked `compact()`. It is now
+  `max(derived_trigger(...) + 1, window - margin)`, which makes the order
+  structural rather than arithmetical. The shipped table is why nothing
+  caught it: every entry is at or above 200,000, where the two numbers were
+  equal or already in the right order, and the way in is a window a provider
+  REPORTS.
 - **`context_limit()` warns once per MODEL, not once per call.** `thresholds()`
   calls it on every evaluation and `_maybe_compact` runs at the top of every step
   of every turn — so an unknown model produced a WARNING twice a step across ten
@@ -1260,13 +1907,13 @@ MessageLog writer so a message cannot persist without its thread moving to the t
 of an activity-ordered picker. `advances()` checks containment even when no
 checkpoint exists yet (#27): "first compaction" is exactly when nothing else catches
 a foreign watermark. The TUI picker caps at 200 and says so; `/resume <thread-id>`
-is the by-id path that keeps older conversations reachable (Q7/#30).
+is the by-id path that keeps older conversations reachable (#30).
 
 ### Durable memory (`memories/`, §21b)
 
 `remember(content, scope)` writes a row that outlives its thread; an opted-in run gets
-those rows injected as a third context tier beside `CONTEXT.md`. `use_memory` had been
-parsed since §14 with no consumer at all — this is its first.
+those rows injected as a third context tier beside the project hub. `use_memory` had
+been parsed since §14 with no consumer at all — this is its first.
 
 - **Turn counting's sibling trap: the fragment goes OUTSIDE `with_catalogs()`** (M13).
   That function feeds `pass_prompt()`, so a memory appended inside it lands in all ten
@@ -1279,10 +1926,17 @@ parsed since §14 with no consumer at all — this is its first.
   `config_loader.get_project_path()` is `None` exactly when `initialize()` has not run,
   and that is "there is no session". Same convention as `get_agents()`.
 - **`UserMemory.project_path` is M12's addition to §21's schema.** D25 keys project
-  memories to the resolved path; with only a `scope` string, AC6 is unwriteable.
+  memories to the resolved path; with only a `scope` string, §21's AC6 is unwriteable.
 - **Injection is capped and says so** (M14). `MAX_INJECTED_MEMORIES`, newest first,
   with "showing the 50 most recent of 73" in the fragment the model reads — not only
-  in a log, which reaches nobody mid-conversation.
+  in a log, which reaches nobody mid-conversation. **A cap of `0` is OFF, in both
+  halves, and off is silent** (A51, batch 154). `remember`'s `available_check` has
+  always hidden the tool at 0; `prompt_fragment` returned `""` for nobody, so
+  `rows[:0]` plus `total > cap` announced "showing the 0 most recent of 2" with a
+  WARNING behind it on every turn — telling the model that memories exist and are
+  being withheld, while the tool that could have earned them was not on the menu.
+  The two halves are asserted together, in one test, because the defect was that
+  they disagreed while each was separately defensible.
 - **`remember` declares `grant_policy=GRANT_NEVER`** (M17, carried by R13). It has no
   `approval_check`, so §25's R2 would make it grantable and one `--grant remember` would
   let ten unattended passes write durable memories — exactly what D26's consequence 1
@@ -1300,8 +1954,10 @@ parsed since §14 with no consumer at all — this is its first.
   `is_tool_allowed` reads `config.ToolPermissions()` directly and returns before any
   context or approval logic, D14 forbids widening, and `settings.json` has no
   `permissions` section. Its whole approval apparatus is unreachable by
-  construction, and so is `security/sandbox.py` plus `config.py`'s sandbox block,
-  until someone edits `config.py`.
+  construction, and so is `security/sandbox.py` plus `config.yaml`'s sandbox block,
+  until someone edits `config.yaml` — which is the harness's own file, has exactly
+  one location and no override variable, and is outside the workspace, so writing
+  it needs a human exactly as editing `config.py` did.
 
 ### §29 — the CLI shell (N1–N8)
 
@@ -1317,14 +1973,63 @@ Two methods, and the difference is a safety property rather than a preference:
   raises `EOFError` on Ctrl+D. Do not add a `drain=` flag; that puts the rule one keyword argument
   away from being switched off at an approval.
 
+**THE RULE IS "ONE READER AT A TIME", AND BATCH 121 IS WHAT IT COST TO LEARN THAT.** N1 above is
+scoped to **this module**, and the biggest reader of this process's stdin is not in it: Textual reads
+the same console from its own thread (`win32.EventMonitor` on Windows, a selector on fd 0 on POSIX).
+So the trust prompt — which fires whenever anything under `.venastine/`, or the root `AGENTS.md`,
+changes — left `_pump` parked in a blocking read, and the TUI that started two lines later lost every
+keystroke to it. Measured with the real app, one flag apart, and the same on both platforms:
+
+| state | the app's `on_key` | shutdown |
+|---|---|---|
+| a reader parked | never fired | **`App.run()` never returned**; the process had to be killed |
+| batch 121 | all five injected keys | exit 0 |
+
+The second column is why the owner's only way out was Alt+F4: `disable_input()` joins an input thread
+stuck in a read whose records the pump had already taken, so even a quit cannot complete. And Ctrl+C
+is no escape because `enable_application_mode` clears `ENABLE_PROCESSED_INPUT` — Ctrl+C is just
+another key event in the queue the wrong reader is draining.
+
+Two changes, and the first is the fix:
+
+- **`readline()` reads on the CALLING THREAD when no pump exists.** It has no deadline (N2), so there
+  is nothing a thread could be abandoned *for*. Once a pump exists the queue path is taken unchanged,
+  which is what keeps #100 fixed — the pump is authoritative the moment it exists, and before that
+  there is nothing to contend with. Type-ahead is unaffected: the **terminal** buffers an early line,
+  and always did; the queue only ever held what the pump had already taken out.
+- **`main.py` hands the terminal over, by name, immediately before `run_tui`.** `_release_terminal()`
+  latches the reader closed, so `_start()` refuses afterwards and every later read answers the way it
+  answers a closed stdin. It returns `False` if a pump is somehow still parked — nothing can produce
+  that today, and it is reported rather than asserted because the alternative symptom is a UI that
+  animates and ignores the keyboard with nothing anywhere saying why.
+
+`ask()` is untouched. A deadline cannot be imposed on a read that cannot be abandoned, which is the
+entire reason the thread exists.
+
+The same release covers `replace_process`: on Windows the waiter keeps this process alive with the
+console inherited, so a parked reader of ours would have read the **replacement's** keystrokes.
+
+**Pre-mount notices travel into the app** (`tui.app.run(startup_notices=...)`). Anything printed
+before Textual renders is erased by it and `TranscriptLogHandler` attaches only at mount — #138 and
+batch 87 each solved that once, by recomputing and by leaving a file. Neither works for a fact
+`main()` established and the app cannot rediscover, which is what these are. This is **not** batch
+44's `startup_warnings` returning: a provider finding is recomputable, and computing it in `main()`
+froze it against the config pair while the app restored a remembered one.
+
 **The deadline belongs to the channel, not the kind.** `build_attended_provider(timeout=…)` decides
 it: run-backed builders pass `ATTENDED_APPROVAL_TIMEOUT_S`, `--init` passes `None`. The default is a
 `_DEFAULT_TIMEOUT` sentinel resolved in the body — a `timeout=config.ATTENDED_APPROVAL_TIMEOUT_S`
 default is evaluated at import and silently defeats `conftest`'s `shrink_approval_timeout`.
 
-**Every kind in `interaction.SAFE_DEFAULTS` must have a handler in `_ASK_HANDLERS`**, and a test
-enforces that in both shells. A missing branch is not a missing feature — it falls through to the
-kind's declining default, silently, while looking wired up (#7).
+**Every kind in `interaction.SAFE_DEFAULTS` must have a handler in BOTH shells**, and a test
+enforces it. The CLI's is the `handlers` table at the end of `build_attended_provider`, published
+for that test as `channel.rendered_kinds`; the TUI's is the dispatch in
+`VenastineApp._ask_blocking`. `tests/test_cli.py::TestEveryKindIsRendered` is the enforcement: it
+holds the CLI's table against `SAFE_DEFAULTS`, drives every kind to see that a human was actually
+asked, and reads the TUI's source for the matching branch. A missing branch is not a missing
+feature — it falls through to the kind's declining default, silently, while looking wired up (#7). The name this
+sentence used to give the CLI's table existed nowhere in the tree, for 24 batches;
+`test_every_private_symbol_agents_md_names_exists_in_the_tree` is why the next one cannot.
 
 **Nothing runs before `parse_args()`** except building the parser. `--help` and a typo'd flag must
 leave the filesystem untouched (#101). `_classify_legacy_threads()` runs below the early-exit
@@ -1337,7 +2042,7 @@ assert what the user was asked and whether it carried a deadline.
 A mutation that strands a reader **hangs** the suite rather than failing it, since two read paths now
 have no deadline. The mutation harness reports HANG as its own outcome.
 
-### The shell gate (`§28`, G1–G7; routing and disclosure amended by `§46`, EP4–EP8)
+### The shell gate (`§28`, G1–G7; routing and disclosure amended by `§46`, EP4–EP8; what `tiered` approves amended by `§48`, CE1–CE7; the container runtime amended by ROADMAP_v3 `§49`, SS22–SS24; declared network added by ROADMAP_v3 `§50`, NW1–NW5; a third backend added by ROADMAP_v3 `§49` slice 3, SS35–SS45; a fourth by slice 4, SS46–SS55; the harness-held secret store and SSH credentials by slice 5a, SS56–SS64; root commands by slice 5b, SS65–SS72)
 
 Read §28's record before touching `security/sandbox.py`, `security/capability.py` or
 `_shell_approval_check`, and §46's before touching where a command RUNS. The four things most
@@ -1374,14 +2079,342 @@ likely to be re-derived wrongly:
   per process and containers carry `--label venastine.sandbox=1`. Digest-pinning was considered
   and deferred.
 
+And from §48, which amended what `tiered` approves (CE1–CE7):
+
+- **`tiered` asks about anything that may run code, contained or not** (CE1, amending G4). G4
+  approved every contained command without network, so `python -c`, a script the auto-approved
+  `write` tool had just made, `pytest` (a `conftest.py`) and `make` all ran unasked — and code read a
+  workspace's `.venastine/` straight past the token check, which three documents said could not
+  happen. The capability is `CommandProfile.runs_code` (CE7), True for every non-INERT profile.
+  **Do not add an interpreter list.** `"python"`, `pyth?n`, `python3.13`, `echo x | python` and
+  `find -exec` are the same call to a shell; a list is G2's parser whose misses auto-approve.
+- **`contained` is the old rule under its own name** (CE2), applied in `_shell_approval_check` as a
+  visible override below the protected-segment check, beside the fallback opt-in. Its constant is
+  `capability.CONTAINED_MODE`, **never `CONTAINED`** — that name is a *containment* value with the
+  same spelling, so a mode compared against it matches and reads as correct.
+- **The fallback opt-in is honoured under `tiered` and `contained`; `always` beats it** (CE5, CE6).
+  `unsafe_reasons()` has to follow the gate rather than the flags: under `always` the pair is not
+  "no ask", and the badge said it was. A test holds the badge against the gate in every mode.
+  `contained` itself is on the badge (CE4).
+
+And from §49 (`docs/ROADMAP_v3.md`), slice 0 -- Podman (SS22–SS24):
+
+- **The container route has two runtimes and one probe** (SS22). `security/sandbox._probe()` asks
+  `docker info` first and Podman only when Docker is missing or its daemon does not answer, once per
+  process under a lock. `is_docker_available`, `_run_docker`, `docker_available` and
+  `sandbox_docker_image` keep their names and now mean the container route: renaming the key would drop
+  a user's own value in `config_update.py`'s merge. **The CLI a route invokes is `known_runtime()`, which
+  never probes.** A test that patches availability gets Docker's CLI, and GitHub's runners ship Podman,
+  so a probing read would change the argv under CI.
+- **A Podman that cannot enforce the limits is not a runtime** (SS24). Rootless on cgroups other than
+  v2, or without cpu/memory/pids delegated, accepts `--memory` and ignores it.
+  `_why_podman_cannot_limit` reads `info --format {{json .}}` and fails CLOSED on anything unreadable. A
+  `docker` that is really Podman is recognised by `buildahVersion` in its `info` output and checked the
+  same way -- otherwise the podman-docker shim skips the check by name.
+- **The shipped image is fully qualified** (SS23). Podman resolves a short name through
+  `registries.conf`, and `python:3.13-slim` resolved on the machine it was measured on only because that
+  distro's `shortnames.conf` aliases `python`.
+
+And from §50 (batch 99) -- the agent declares that a command needs the network (NW1–NW5):
+
+- **`requires_network` is OR'd into the one `network` fact, never an override** (NW2). It can only ADD
+  egress, so a model cannot clear it on `curl` to dodge a prompt, and the single fact keeps its two
+  consumers -- the gate and the runner -- reading the same value. **Nothing new gates it** (NW3): the
+  existing ladder does the work, and `never`/`always` still decide for themselves.
+- **`security.sandbox.declared_network(params)` is THE coercion, and only literal `True` counts.** The
+  gate reads the model's tool-call input BEFORE Pydantic validates it, so the value can be any JSON at
+  all. The param models use `StrictBool`, so `"true"` is False at the gate and a `ValidationError` at run
+  time -- nothing executes, and the two readings never disagree. **Do not "helpfully" widen either half**:
+  a lenient runner with a strict gate is a command approved as no-network and executed with it, which is
+  #157's shape in the module written to close it.
+- **`contained` is the mode where the flag changes the approval answer** (measured). Under `tiered` a
+  non-inert command already asks because `runs_code` is true (CE1), so a test asserting the flag's effect
+  through `tiered` passes without the flag doing anything.
+- **The three tools share ONE description string** for the field (NW4, NW5): `shell.ShellParams`' is the
+  copy `shell_background` and `shell_monitor` read.
+
+And slice 2 (batch 100) -- an interactive shell the agent types into (SS25-SS34):
+
+- **The pty is made INSIDE the container**, by `script -qfec`, not by `docker run -t`. The client then
+  never needs a real terminal and docker never mangles the stream. `-i` keeps stdin a pipe, and
+  `_popen_session` takes its stdin rather than asserting `DEVNULL` -- N1's reason survives the constant,
+  because what it forbids is a child INHERITING THE CONSOLE and a pipe only the harness writes to is not
+  a second reader of anything.
+- **The echo is OFF and the pty is sized** (SS33). Measured: the pty is 0x0, so readline echoes a
+  200-character command back as `\r<xxxx`, its horizontal-scroll marker, which no honest rule could
+  strip. Turning the echo off makes the problem not exist at any length instead of parsing it back out.
+- **The prompt is a token this process minted** (SS34), so "the shell is ready" is READ rather than
+  inferred from silence. Its consequence is the thing to hold on to: with the echo off, NOTHING appears
+  on the stream when a command starts, so a prompt still standing from the last command is
+  indistinguishable from an idle shell. A send therefore waits for the NEXT prompt and requires it to
+  settle for the quiet interval. **Do not "optimise" that settle away** -- it is what stops a prompt
+  merely passed through on the way to a queued line being reported as the answer.
+- **`send` always returns** (SS26), on whichever of four comes first -- `ready`, `matched`, `quiet`,
+  `bound` -- and the result NAMES which, because only `ready` says a command finished. `quiet` never
+  pre-empts a `wait_for`: a caller that said what it was waiting for did not ask about silence.
+- **A line over 4000 bytes is REFUSED, not sent** (measured: a pty in canonical mode takes 4095 bytes on
+  one line and silently drops the rest, so the shell runs a truncated command and reports success). A
+  command a human approved must not be edited by a terminal driver on its way in.
+- **Opening is approved as a SESSION, not as its first line** (SS29, SS32). `shell_interactive` carries
+  `shell._interactive_approval_check`, not shell's own, and the profile that routes it is STATED
+  (`interactive_profile`: runs_code, writes, measured) rather than read off text. Reading the first line
+  would mean opening with `pwd` was auto-approved as a read and handed back a shell that can run
+  anything. `_SHELL_MODE_GATES` holds each exempt tool to ITS gate by identity.
+- **Two questions, one list** (SS25): the 4-live cap counts an interactive session, and the prompt block
+  does not. `_live_locked` takes the kinds, and `wait_for_wake` passes the blocking ones -- load bearing,
+  since that loop keeps a turn alive and an idle shell would hold it open exactly as a hung read would.
+- **Its end is HELD, never a wake** (SS31), whoever ended it.
+
+And slice 4 first, because it is the one with a rule the others do not have -- see below for
+slice 3.
+
+Slice 5b (batch 104) -- a command the harness runs as root (SS65-SS72):
+
+* **A root command ALWAYS asks**, above both opt-ins, in every mode but `never` (SS65). This is a
+  CORRECTION to the gate and not a restatement of it: measured, `sudo apt-get install` on
+  `backend: "wsl"` answered `asks=False` whenever `AUTO_APPROVE_SANDBOX_FALLBACK` was on, because WSL
+  is UNCONTAINED and that opt-in sits above the capability rule. The backend where root is most
+  reachable was the one where nothing asked.
+* **The step fires on the DECLARATION or on the command TEXT** (SS67). `needs_root` is
+  `declared_network`'s sibling -- literal `True` only -- and it is OR'd with a raw token check for
+  `sudo`, `doas`, `pkexec`, `su`. Without the OR a model steps around the step by typing `sudo` and
+  leaving the flag off, which is exactly the call the measurement found running unasked. It is a
+  token check and never a parser (G2); `echo sudo` asks, and that is the trade.
+* **The token half never ARMS anything.** A password is supplied for a DECLARED call and for nothing
+  else, so a spelling that slips past the check reaches a `sudo` with no password and fails. That
+  asymmetry is also why the no-secret REFUSAL reads `declared_root` and not the token check --
+  refusing an undeclared `sudo` for want of a stored password would break a passwordless setup that
+  works today.
+* **`-k` IS NOT WHAT KEEPS THE PASSWORD AWAY FROM THE COMMAND.** SS66 said it was and SS66 was wrong.
+  `sudo -S` reads stdin only when it must AUTHENTICATE; under a NOPASSWD rule it reads nothing and the
+  password becomes the command's own input. Measured on sudo-rs 0.2.13 AND classic Sudo 1.9.17p2,
+  **with `-k` and without it**. The control is SS72's `exec 0</dev/null; ` in front of the command.
+  `-k` stays for what it does do: one approval buys exactly one authentication.
+* **Sudo wraps the SHELL, not the first word** (SS69), so the whole command line is root -- otherwise
+  `sudo echo x > /etc/f` writes as the user and the approval notice is a lie. Argv mode is dropped on
+  this path and nothing is lost: argv mode exists for AUTO-APPROVED inert commands, and a root command
+  is never auto-approved.
+* **No stored password is a REFUSAL, not a prompt** (SS68), naming `wsl.<distro>.sudo` or
+  `ssh.<host>.sudo` and the `/secrets set` line. The store's contents ARE the opt-in -- there is no
+  `allow_root_commands` key, because a second switch over one decision is the ratchet G3 removed.
+  `sudo_refusal()` is the ONE copy, read by the gate, by `run_sandboxed` and by `start_sandboxed`.
+* **A WSL one-shot used to inherit this process's stdin** (SS70) -- measured, a command in the distro
+  read a string written to the harness's own. That is §29 N1's second reader on a route written before
+  the rule. It is DEVNULL now, or a PIPE carrying one line. The container, inert and host-fallback
+  one-shots have the same gap and are recorded, not changed.
+* **With `needs_root` false, both argvs are byte-identical to `9048427`'s**, WSL and SSH, proved
+  against the pre-patch module rather than against a literal typed twice.
+
+Slice 5a (batch 103) -- the harness-held secret store (SS56-SS64):
+
+* **`security/secrets.py` is the ONE place a plaintext lives.** scrypt -> AES-256-GCM at
+  `~/.config/venastine/secrets.json`, opened by a master passphrase the user types once a session.
+  `AGENT_SECRETS_FILE` is the test seam; the path resolves at CALL time, so redirecting HOME works.
+* **`Secret` has no `__str__`** (SS62). `str`, `repr` and `__format__` are all `[REDACTED]`, it is
+  unhashable, unpicklable, uncopyable and not JSON-serialisable, and `reveal()` is the only way to
+  the bytes -- so `grep -rn 'reveal()'` IS the audit. Cheapest control in the batch, largest class
+  of leak prevented, because every other control assumes the value stays where it was put.
+* **`maxmem` must be passed to `hashlib.scrypt`.** Measured: the DEFAULT limit refuses N=2**15 with
+  "memory limit exceeded". Without the argument this module raises on the first unlock on every
+  machine, in a message that reads as a bad parameter rather than a library default -- which is how
+  it gets "fixed" by lowering N. The floor in `_scrypt_maxmem` matters too: for a tiny `n` the
+  derived figure is BELOW OpenSSL's working set and produces the identical error.
+* **Everything that is not "still working normally" locks** (SS60), through one `lock()`: the
+  command, quit, `atexit`, an exception escaping `guarded()` (BaseException, so Ctrl+C counts), any
+  askpass refusal, and the store file changing on disk. A crash is a lock because the plaintext is
+  nowhere else -- which is only true because four tests say it is in no file, no environment, no
+  argv and no log. **A refused AUTHENTICATION does NOT lock**: that would cost the master passphrase
+  over a typo. It quarantines that host's credentials instead (SS63).
+* **Value redaction is UNCONDITIONAL** (SS61), above `redaction_enabled()` in `redact_output_text`
+  and first inside `redact_diagnostic_text`, which is the one composition all five diagnostic sinks
+  call since batch 144 -- the log formatter, the TUI's log handler and its tool-error line,
+  `mark_turn_failed`, and the orchestrator's pipeline event. `redact_tool_outputs` governs guesses
+  about other people's credentials; this is the harness leaking its own, and no switch asks for that.
+  The values never leave `security/secrets.py` -- the redactor calls IT rather than asking for a list.
+* **The order is live values, then vendor tokens, then shapes, in that order and one place**
+  (S07-05, batch 144). `redact_live_values` matches by exact substring, so a pattern pass that has
+  already rewritten part of a stored value leaves the remainder standing: measured, a stored value
+  containing a `ghp_` token came back as `PREFIX-[REDACTED]-SUFFIX` from the log's old order and
+  `[REDACTED]` from the other. Two sites composed the same two passes in opposite orders and nothing
+  could say which was right. Same rule as `fetch_url` redacting before it cuts, with a substitution
+  as the destroyer instead of a slice.
+* **A new §23 AC1 request kind needs a branch in BOTH shells** (SS59), and the parity test in `test_cli.py`
+  enforces it. The TUI got this project's first masked modal; the CLI got `readline_masked` on the
+  ONE stdin reader -- `getpass` is refused because it reads stdin itself, which is the second reader
+  audit #100 exists to prevent. `SAFE_DEFAULTS[SECRET]` is None, not `""`: an empty password is an
+  authentication ATTEMPT, and a dismissed modal must not make one.
+* **The askpass listener is NOT one-shot** (SS64), and that correction came from measuring: a wrong
+  password produces TWO asks despite `NumberOfPasswordPrompts=1`, because keyboard-interactive and
+  password are separate methods with separate budgets. It bounds serves instead.
+* **The prompt strings are measured, and both carry a trap.** OpenSSH TRUNCATES
+  `Enter passphrase for key '<path>': ` mid-path, so matching the identity file's path fails for
+  most paths -- match the prefix. And the password prompt has two forms, `user@host's password: `
+  and `(user@host) Password: `, of which a server offering both serves the SECOND.
+* **With nothing stored, the SSH argv is slice 4's, option for option and in order**, pinned
+  against the literal `84c886b` shipped. `BatchMode=yes` comes off only when this process actually
+  holds a credential for that host.
+
+And slice 4 (batch 102) -- SSH, a command on another machine (SS46-SS55):
+
+* `backend: "ssh"` on `shell`, `shell_background` and `shell_monitor` runs the command on the one
+  host configured in `config.yaml`, behind `allow_ssh_backend` (frozen posture, ships false).
+* **NOTHING on this route is auto-approved (SS48)** -- the one thing to remember about it. Every
+  other backend runs a read-only in-workspace command unasked; this one cannot, because `_within`
+  resolves against the LOCAL filesystem and would be answering about the wrong machine. SS45 is
+  what that costs: not a loud failure, a confident approval. It is ONE explicit step in
+  `_shell_approval_check`, above both opt-ins, because `auto_approve_fallback` and `contained`
+  each answer before the capability rule does.
+* The host key is PINNED (`ssh_host_key`, the `ssh-keyscan` line) and a changed key is refused.
+  No trust prompt: a first-use question cannot be answered in a headless run.
+* Auth is a key file or a running `ssh-agent`, and **this harness never holds a secret** (SS47).
+  `BatchMode=yes` is load-bearing -- measured, without it an encrypted key with no agent hangs
+  forever waiting to prompt on a terminal this process does not own.
+* There is NO argv mode (SS51): `ssh` joins its trailing argv with spaces and the remote LOGIN
+  SHELL re-parses, so `shlex.quote` owns the one boundary and `-F none` stops the local `ssh`
+  reading a user config this harness cannot even redirect.
+* **A kill does not reach the remote command** (SS53), measured. The in-guest `timeout -k` is the
+  bound. `-tt` would fix it and merge stderr into stdout and CRLF every line, so it is not used.
+* `uncontained_refusal` (renamed from `wsl_refusal` in batch 101) is the one funnel for the gate,
+  `run` and the session start handler, and now answers for both uncontained backends.
+
+And slice 3 (batch 101) -- WSL, a backend with no isolation at all (SS35-SS45):
+
+- **`_within` answers False for a link THIS platform cannot follow** (SS45), and this one is not
+  about WSL being a backend -- it was already open. A symlink the distro writes into the workspace
+  is an LX reparse point Windows does not understand: `os.path.exists` False, `os.path.islink`
+  False, and **`os.path.realpath` returns the path UNCHANGED** rather than following it or raising.
+  So `_within` vouched for `escape`, `cat escape` classified INERT and was auto-approved under the
+  shipped `tiered`, and in the distro it read the host's real `/etc/passwd` (measured). The rule is
+  the platform's own admission -- a component that `lexists` and does not `exist` is one whose
+  lstat succeeded and whose stat did not -- and it is deliberately **not** "is a reparse point",
+  because a OneDrive placeholder is one and its path means what it says. It applies on **every**
+  route: `_within` answers one question, and a predicate that answered it per backend would be the
+  drift it exists to prevent.
+- **The user enables the backend, the agent picks it per call** (SS35). `allow_wsl_backend` is a
+  frozen-posture key shipped `false`; `backend: "container" | "wsl"` is a field on `shell`,
+  `shell_background` and `shell_monitor`. **`shell_interactive` deliberately has no such field** --
+  its stream shape in WSL is unmeasured, and batch 100 is the evidence that measuring it is a batch
+  rather than a step in one. `security.sandbox.declared_backend` is THE coercion, `declared_network`'s
+  sibling and for its reason: only the exact string `"wsl"` selects WSL, and the `Literal` on the
+  param model refuses anything else at run time, so the gate and the runner never disagree.
+- **The WSL branch is FIRST in `_route` and in `containment_for`, above `HOST_READ`** (SS38). `cat
+  /etc/passwd` asked for on WSL classifies HOST_READ, and the old ladder would have run it through
+  `_run_inert` on **Windows** against `C:\etc\passwd` -- with whichever `cat` is first on the
+  user's PATH, which on this machine is a GnuWin32 one, so it would have run rather than failed. The
+  tier keeps its whole meaning; what it must not do is pick a machine the call did not ask for.
+- **A call that asked for WSL and cannot have it is REFUSED** (SS37), never served by the container
+  or the host, and `_unavailable_message` answers it about WSL alone -- a model told to install
+  Docker when it asked for WSL retries the same call.
+- **A protected segment is REFUSED on this route, not asked about** (SS40), and the gate returns
+  "do not ask" for it beside the `UNAVAILABLE` branch, for that branch's reason: a call that will be
+  refused must not spend a human decision first. In the container `.venastine/` is mounted `:ro`, so
+  a write fails with EROFS and a read is documented risk; here a write SUCCEEDS and D17's hash
+  notices at the next launch.
+- **The classifier learns NOTHING about WSL path forms** (SS39), measured rather than assumed: over a
+  generated corpus resolved both ways -- `_within` on Windows against `realpath -m` in the distro --
+  no token reads as inside the workspace on Windows and outside it in Linux. Every disagreement is
+  the safe way round and costs a prompt. **It rests on INERT running as a bare argv** (SS43): under a
+  shell, `~` and `$HOME` would expand after classification, and `_SHELL_METACHARACTERS` rejecting
+  both is the second lock rather than the first.
+- **`env=_scrubbed_env()` is load-bearing here, not hygiene** (SS42). Windows variables do not cross
+  into the distro by themselves, but the ones named in `WSLENV` do and `WSLENV` is itself inherited
+  -- measured, the unscrubbed run printed a probe secret inside the distro and the scrubbed one
+  printed nothing.
+- **The workspace goes through `wslpath`, never through `wsl.exe --cd`'s own translation** (SS44).
+  `--cd` with an untranslatable Windows path does not fail: it exits 0, warns on stderr, and runs in
+  the user's Linux home -- reporting success from the wrong directory. `wslpath` fails with an exit
+  code instead. **Do not "simplify" this back to passing the Windows path.**
+- **No resource limits, no process group, and both are facts rather than omissions** (SS44). The
+  limits belong to the whole WSL VM and a `ulimit` inside the shell is removable by the command it
+  bounds; killing the Windows process was measured to kill the Linux children, a backgrounded
+  grandchild included, so `WslSessionProcess` adds nothing to the base class and a test asserts the
+  absence.
+- **An enabled backend is on the badge** (SS41), through `unsafe_reasons()` like everything else
+  (UN3), and reported when it is ENABLED rather than when it is used -- a badge describes what the
+  process may do, and a user who reads it afterwards has read it too late.
+
+And slice 1's foundations (batch 94) -- the pieces under the session tools, not yet reachable from any tool:
+
+- **A wake is a harness-written USER row, marked by `MessageLog.harness`** (SS5). A column, never a role
+  (batch 91's rule): nothing that builds a request reads it, replay shows its first line as a `wake`
+  entry, and the compactor labels it `harness:`. **It must never carry a `tool_call_id`**:
+  `pinned_through` reads any kept row's id as an answered call, so a wake row carrying its session's
+  start call would hide the real result -- M4's HTTP 400. Consecutive user messages were already normal
+  on every compacted thread (M8's summary followed by the tail's first turn), so no merge was added.
+- **`re2` is imported by `core/line_pattern.py` and nothing else** (SS8, AST-pinned). `re` holds the GIL
+  for a whole backtracking match, and every thread froze (measured). That module refuses a `re2` from any
+  distribution but google-re2 and keeps RE2's compile errors off stderr, where they paint over Textual.
+- **`_route` is both `run_sandboxed`'s ladder and `start_sandboxed`'s**, held against `containment_for`
+  over every tier, runtime answer and fallback posture (EP6). **`_docker_argv` is the one container
+  argv**: a session adds only `--sig-proxy=false` and an in-container `timeout -k`, and every container
+  carries `venastine.process=<PROCESS_TOKEN>` so exit cleanup cannot touch another instance's. A session
+  process gets `stdin=DEVNULL` (§29 N1 -- a second stdin reader), merged stderr, and its own signal
+  group, so a console Ctrl+C reaches it only through `kill()`.
+- **The manager lives in `core/shell_sessions.py`** (D12) and refuses a start outside `consuming()`
+  (SS17): under `never` a research pass is offered shell tools, and would otherwise start a session no
+  shell ever reports. **The wake text is built in `core/session_wake.py` through the real
+  `check_output_policy`**, because that text never passes through dispatch — **and
+  before every cut, which is the other half** (batch 148, A23): a session's output is
+  cut by the producer at `max_read_chars`, by the wake's per-session division, by the
+  view's display budget and by `shell_output`'s paging, and the redactor ran after
+  each of them. A pattern only matches what it can see whole. The producer now
+  redacts what it STORES, which covers the wake, the rebuilt view and
+  `_kill_report` at once, and `OutputBuffer.page` takes an optional `clean` so the
+  model-facing routes page over redacted text while the monitor's own search still
+  matches on raw output. Measured before the fix, at every interior cut position:
+  the three credential shapes leak at each tail cut, and the PAGING route leaks all
+  seven — including the fixed-length vendor tokens — because the model asks for
+  the adjacent page itself and holds both halves.
+- **What a session's VIEW shows lives in `core/session_view.py`** (SS14, SS18, batch 98), for
+  `core/replay.py`'s reason: D12 makes the CLI a permanent fallback, so what may be shown is a policy
+  decision neither shell owns, and the entries are the same `(role, text)` shape a replay produces.
+  Both routes -- the manager's live row and the archive's rebuilt one -- go through the real
+  `check_output_policy` under the originating tool's name, which is the adopted default that the
+  session view is redacted for display. `live_entries` takes EVERYTHING the buffer
+  holds and applies `tail_chars()` after the redaction (A23); the rebuilt route draws
+  stored rows, which were redacted when they were written.
+- **`RunAgentLoop.wake_conversation` is a wrapper, not a second `_run`** (`test_grants.py` walks for
+  exactly one), and it shares `_conversation_prompt` with `run_agent_conversation`, so a wake turn cannot
+  run under a prompt missing the goal, the references or the checklist. It takes the run's
+  `authorization` too (batch 95), mutually exclusive with `granted_tools` like its sibling: a wake turn
+  without the route to a human would deny every gated call inside it for a reason about the harness
+  rather than about the request.
+
+And slice 1's tools, the sleeping subagent and the CLI (batch 95):
+
+- **The five session tools are `shell` with a lifetime** (SS11, SS16). `shell_background` and
+  `shell_monitor` are registered with `shell._shell_approval_check` ITSELF, and
+  `security/permissions.py`'s `APPROVAL_BY_SHELL_MODE` is the set exempt from `tool_approvals`;
+  `_assert_shell_mode_exemption` holds those two facts against each other at import, so the exemption
+  cannot outlive the gate that justifies it. Listing, reading and stopping need no approval -- they act
+  only on this conversation's own sessions, each already approved as a command.
+- **All five are hidden wherever nothing would wake the run** (SS17), through `available_check`, and a
+  start is refused there as well. Under `shell_approval_mode: never` the gate answers "no approval", so
+  a research pass would otherwise be offered a tool whose sessions nobody could ever report.
+- **The owning thread is the injected `memory`'s, never a parameter.** A model that could name a thread
+  could reach another conversation's sessions.
+- **A kill the AGENT makes is its own report and wakes nobody.** `SessionManager.kill` returns what the
+  wake would have said -- final state, the end of the output, matches nobody had taken yet -- because a
+  turn spent telling the agent about a session it just stopped is a model call nobody needed. The claim
+  belongs to the call that SET the reason, and is given back if the session outlives the wait, so a slow
+  death is reported the ordinary way rather than dropped.
+- **A subagent SLEEPS INSIDE ITS SPAWN** (SS9). `agents/subagent_tool.py` marks the child as a consumer,
+  runs it, then stays in `_sleep_for_sessions` until nothing is live: each batch is a wake turn in the
+  child's own thread under the SAME prompt, context, channel and grant. D6 is untouched -- one distilled
+  answer still crosses to the parent. Past the wake limit the remaining sessions are killed and one final
+  wake carries them (SS20), because a subagent has no user whose message could reset the count. A child
+  that RAISES has its sessions killed by SPAN id: a span is frozen and carries no thread, so a run that
+  failed before returning one is identifiable anyway.
+- **The CLI waits between turns** (`main._await_sessions`) and runs a wake turn per batch. Ctrl+C there is
+  aimed at the SESSIONS, not at the conversation: they are stopped and the prompt comes back, with their
+  results held for the next message (SS19). Held results are written into the thread before the turn that
+  answers that message, so the model reads them beside it. Quitting with sessions live confirms (SS6),
+  and nobody to ask counts as yes. `main._close_sessions` kills, records a row in each owning thread and
+  sweeps this process's containers -- before `teardown_mcp`, because that row needs the database.
+
 And the four from §28 itself:
 
-- **`SHELL_APPROVAL_MODE` is the gate; `ToolApprovals.shell` is the ratchet** (G3). The
-  field ships `False` and that does NOT mean "never ask". It cannot be the gate:
-  `approval_needed` ORs the tool's check with `requires_approval` and **both** read it,
-  so `True` there makes the tool's check unable to lower the answer — which is why a
-  tiered mode was unreachable dead code until §28 flipped it. Setting it `True` still
-  forces `always`, so D14's one-way ratchet is intact. **Do not "fix" the default back.**
+- **`SHELL_APPROVAL_MODE` is the gate, and the only one** (G3, ratchet removed). `tool_approvals` deliberately has no `shell` key: the field used to be the ratchet (`True` forced `always`), and every outcome it could produce is an outcome the mode already names -- so the second switch could only agree with the gate or surprise someone who set the two differently. The mode check reads the frozen posture; an agent's `approval_overrides` keeps its one-way tightening power through the context layer, so D14's ratchet is intact where it was never redundant. **Do not re-add the field.**
 - **The argument rule must never parse** (G2). Every token after the first is read as a
   path; a flag passes only because it is relative. `_is_inert` is sound *because* it
   rejects metacharacters rather than understanding them, and a classifier that learns
@@ -1398,7 +2431,7 @@ And the four from §28 itself:
   host read of an arbitrary file. **Removing a character from that class re-opens it**,
   and `TestTheTwoTokenisersCannotDisagree` is what says so.
 - **The security posture is bound ONCE, at import, and frozen** (UN1). `security/posture.py`
-  reads `config` and the environment exactly once; `config.py` is where a human writes
+  reads `config` and the environment exactly once; `config.yaml` is where a human writes
   the value and is no longer what is read when a decision is made. Before §40 every
   flag was read live, and `tools/builtin/shell.py` said so -- "a test or a runtime edit
   can change it after this line has run" -- which describes a test seam and an attack
@@ -1406,9 +2439,14 @@ And the four from §28 itself:
   `override_for_tests` from anything that ships.
 - **No module may read the posture at IMPORT time** (UN2). `apply_cli()` runs inside
   `main()`, after every import, so a module-level `posture.current()` binds it before
-  the command line exists and every launch dies in the ordering guard. `shell.py`'s
-  import-time mode validation reads `config` directly for that reason. Pinned by a
-  source scan in `test_posture.py`.
+  the command line exists. `shell.py`'s import-time mode validation reads `config`
+  directly for that reason. **Pinned by the source scan in `test_posture.py`, and by
+  nothing else** -- this bullet used to say "every launch dies in the ordering
+  guard", and S02-09 measured that it does not: `main.py` calls `apply_cli()` with no
+  overrides, so the guard has no change to detect and cannot fire on a shipped
+  launch. It goes live the day the first posture flag exists. The scan covers import
+  time only, so a posture read placed inside `main()` ABOVE the `apply_cli()` call is
+  caught by neither -- keep that call first among readers.
 - **`unsafe_reasons()` is the ONLY description of the posture** (UN3). Banner, launch
   WARNING and TUI badge all read it. A fourth surface that re-derives the question is
   the bug.
@@ -1528,7 +2566,11 @@ run rather than by reading the code.
 - **The param digest is redacted BEFORE truncation.** Tool arguments were the one
   unscanned path — `check_input_policy()` refuses a call rather than redacting one, and
   `check_output_policy` only ever saw results. Truncating first cuts a credential below
-  the 20 characters its pattern needs.
+  the 20 characters its pattern needs. **Three surfaces now hold this rule** — this one,
+  `tui/app.py`'s diff block (whole texts, because a secret is as readable across two
+  wrapped rows as on one), and `fetch_url`'s paging since §52 (RB1). The third was
+  written in the wrong order with the first two already in the record, so treat a new
+  place that CUTS model-facing text as owing this check rather than inheriting it.
 - **Streamed pass text never escapes, only its volume.** Seven of the ten passes emit raw
   JSON; `pass_activity` carries a throttled running character total instead.
 - **There is no step event, deliberately.** `_run()` has no step marker to read, so a
@@ -1543,17 +2585,21 @@ run rather than by reading the code.
   override a severity slot when its own panel tint would swallow the shared value,
   keeping the semantic hue family — each override carries its reason in `themes.py`,
   and the contrast floors (foreground ≥ 7:1, severity ≥ 4:1, identity ≥ 3.5 dark / 3.0
-  light) are pinned in `tests/test_themes.py`, over **our fourteen** — nine of textual's
-  twelve fail one of them, so integrity is checked for all twenty-six and quality for
-  ours. A widget with no running app renders
+  light) are pinned in `tests/test_themes.py`, over **our fourteen** — thirteen of
+  textual's twenty-one fail one of them and the two ANSI ones cannot be measured at
+  all, so integrity is checked for all thirty-five and quality for ours. A widget with
+  no running app renders
   **unstyled rather than raising** — `self.app` raises `NoActiveAppError`, and widgets
   are built bare throughout the suite.
 - **A `Theme` slot can be `None`, and `role_styles` must go through `_palette`**
   (batch 64). Every slot but `primary` is `Optional[str]` on textual's own `Theme`, and
-  the command palette offers **twenty-six** themes, not fourteen — textual registers its
-  twelve in `App.__init__`. Three of them break a naive read: `textual-dark` has no
-  `background`, `textual-light` no `foreground`, and `textual-ansi` fills every slot with
-  `ansi_*` names, which are **textual's vocabulary and not Rich's**. Selecting the first
+  the command palette offers **thirty-five** themes, not fourteen — textual registers
+  its twenty-one in `App.__init__`. Four of them break a naive read: `textual-dark` has
+  no `background`, `textual-light` no `foreground`, and `ansi-dark` / `ansi-light` fill
+  every slot with `ansi_*` names, which are **textual's vocabulary and not Rich's**.
+  (There was ONE such ANSI theme, `textual-ansi`, until 8.2.5 split it in two —
+  `SELECTABLE_THEMES` being DERIVED is what carried this across the pin move, and what
+  put the nine new built-ins under test on the run that noticed.) Selecting the first
   killed the harness *at mount*, and kept killing it, because `watch_theme` had already
   written the name to a user-tier store the installer cannot reach. A blank slot falls
   back to `theme.to_color_system().generate()` — textual's own derivation, so the colour
@@ -1566,13 +2612,33 @@ run rather than by reading the code.
 - **A bad style string is SILENT, which is why the test parses them** (batch 64). Rich's
   `Text.render` resolves a style through `console.get_style(style, default=Style.null())`,
   so an unparseable one renders plain and raises nothing — `textual-light` lost six roles
-  and `textual-ansi` twenty-five without a single test noticing. A test that merely draws
+  and the ANSI theme twenty-five without a single test noticing. A test that merely draws
   a transcript cannot see this; `Style.parse` can. Same shape as batch 41's `dim`, one
   layer along. `styles_for` also contains anything `role_styles` still manages to raise
   (§27) and warns **once per theme**, since it runs once per line.
 - **`Transcript._entries` serves the replay and `/copy`.** `RichLog` stores rendered
   segments, so `/theme` needs `rerender()`. Every write path must go through `_emit()`,
   or a line reaches the screen and neither the replay nor the copy.
+- **Nothing the transcript draws keeps a terminal control sequence** (batch 145,
+  S15-01). Every ingress stored and drew model- and third-party text byte-for-byte:
+  `core/ansi.py` existed and was called in exactly one place, the pty stream, and
+  nothing in `tui/` was it. Neither layer below removes the byte — Rich keeps it
+  through `export_text()`, and textual's `Content` strips only codepoints 7, 8, 11,
+  12 and 13, so ESC and the whole C1 range survived both the `RichLog` path and the
+  `as_content(Text(...))` one. **THREE chokepoints, not one**, because `_emit` is the
+  single write path for complete strings and the two delta entry points are not on
+  it: `_write_stream_chunk` and `_write_thinking_chunk` append to `_entries`
+  themselves. **THREE stripper objects**, and each count is measured: the delta
+  streams need one held ACROSS calls (a fresh one per delta turns `hi ESC [` +
+  `2Jthere` into `hi 2Jthere`, and one that flushes per delta emits the ESC
+  outright), and the answer and reasoning streams need separate ones because they
+  interleave — with one shared, a CSI left open by the answer terminated on the
+  reasoning chunk's first character and ate it. The strip also CORRECTS the wrap:
+  `display_len` read 10 for text six cells wide, so an escape counted as cells was a
+  row that broke early. Nothing is drawn in its place and the widget logs nothing —
+  `tui/app.py` reads a count at `on_turn_finished` and records one INFO line per
+  turn, because `Transcript.write*` doing no logging is what stops
+  `on_log_record_message` closing a loop.
 - **`/copy last` is READ from that log, never tracked beside it** (batch 48).
   `_last_response` was the second buffer, updated from whichever flush site kept
   `flush_stream()`'s return — and the one that mattered did not. `on_loop_event_message`
@@ -1632,7 +2698,7 @@ independent bugs, both found by using the app.
   §21a exists to serve. It is labelled `subagent` with `spawn_subagent` and §20's
   reviewer; the reviewer gets no kind of its own, since §20 already calls it a subagent.
 - **Classification is separate from `ensure_columns()`, and idempotent by construction**
-  (AC3). M7's migration is additive and never backfills, so the column arrives with
+  (§27 AC3). M7's migration is additive and never backfills, so the column arrives with
   every existing row defaulted to `chat`.
   `pipeline_storage.classify_legacy_pass_threads()` runs at every launch over a DBAPI
   connection (the `ensure_columns` seam) and works in TWO TIERS (#82): every thread id
@@ -1648,13 +2714,30 @@ independent bugs, both found by using the app.
   it. Under the old correlated subquery, dropping the `IS NOT NULL` guard was invisible
   to the whole suite (`x <= NULL` was already not true); as ordinary Python it now has
   teeth, and both tiers are pinned.
+  **Tier 1 compares UUIDs, not strings** (A50, batch 154), and that is locked. The two
+  sides are spelt differently — `pass_threads_json` carries `str(thread_id)` (dashed,
+  36 characters, also what `output_writer.py` ships and what an operator reads) and
+  `conversationthread.id` comes out of the raw DBAPI as the 32 hex characters sqlmodel
+  stores — so a literal `in` was False for every id there has ever been and the
+  authoritative tier had never relabelled one row. `_as_uuid_key` renders every RECORDED
+  id as hex and answers `None` for a value that is not a UUID, never the value itself.
+  **One side, and the other is pinned, not branched on** — the symmetric version was
+  written first and the controls found it unearned, since the column already holds hex;
+  `test_a_thread_id_is_stored_in_a_spelling_str_does_not_produce` asserts that against a
+  real database and fails naming the function if a library upgrade ever changes it.
+  A recorded id it cannot read costs that entry's membership and **must not** drop
+  its run to the window tier: a populated `pass_threads_json` is what "post-T2" means,
+  and consulting a modern run's clock is how the concurrent chat thread gets hidden.
+  Both halves have their own test in `TestTwoTierClassification`, whose ids are real
+  UUIDs spelt the two ways on purpose — they used to be one hand-written string on
+  both sides, which is why four tests passed against a dead tier.
 - **`param_digest` lives in `safety/policy_enforcement.py`**, beside `redact_secrets`,
   since §27's replay renderer is its second caller. It redacts BEFORE truncating, and
   a second copy is how that ordering regresses in one place and not the other.
 - **`/new` redraws, through the same reset** (§43, RM2). `switch_to_thread` cleared the
   transcript and the per-thread state; `_cmd_new` did neither, so a new thread inherited
   the previous conversation's screen, its `/copy all` and its `/claims` — §27's bug 1 and
-  AC4, surviving on the path §27 did not touch. The `_busy` refusal stays first, so a
+  §27's AC4, surviving on the path that section did not touch. The `_busy` refusal stays first, so a
   refused `/new` clears nothing, and the banner is REPRINTED (`_write_session_banner`)
   rather than replayed: a `/model` switch survives `/new`, so the launch pair would name a
   model the next turn will not call.
@@ -1676,9 +2759,35 @@ independent bugs, both found by using the app.
   query stays as the fallback for an app that was never mounted, which is most of the
   suite. **A line written under a modal now LANDS** rather than being dropped, which for
   a routed warning is the whole point of a handler that exists because the TUI detached
-  stderr. In a pilot test, holding the widget before opening a modal still works and is
-  still the clearer spelling; `#thinking-indicator` and `#prompt` are still queries, so
-  their `NoMatches` guards are still load-bearing.
+   stderr. In a pilot test, holding the widget before opening a modal still works and is
+   still the clearer spelling; `#thinking-indicator` and `#prompt` are still queries, so
+   their `NoMatches` guards are still load-bearing.
+- **The held set is twelve now, and the two that forced it were on the crash
+  path** (batch 76; §47's thread viewer added three more: the read-only
+  `Transcript`, the `ThreadCrumb` and the `#pane` switcher, and ROADMAP_v3
+  §49's SS14 two more in batch 98: the `#session-view` pane and the
+  `SessionPanel`. Both follow the same pattern and both have the occasion
+  this bullet is about -- the panel is redrawn from a sink called on the
+  session manager's own threads, which can speak while a modal is up.
+  ROADMAP_v3 §55's TR10 added the twelfth in batch 125, the `#call-view`
+  pane, which has NO such occasion -- nothing polls it and nothing writes
+  to it from another thread -- and is held anyway, because a pane that is
+  queried on one route and held on the three beside it is the asymmetry a
+  reader has to check rather than know).
+  A `permission_request` event is posted BEFORE the worker
+  pushes the modal it announces (`post_message` only enqueues for a later
+  pump; the push is a direct loop callback), so the first gated call of a
+  session was handled with a modal already active -- and died in
+  `refresh_usage_line` with `NoMatches`, taking the app down over a
+  usage-line repaint whose own docstring claimed containment. The
+  `permission_request` branch touches the raven three lines later through
+  the same unguarded query, so `UsageLine` and `RavenPanel` moved to
+  held-at-mount refs together; `GoalBanner`, `TodoPanel` and
+  `ResearchProgress` followed (notice events and pipeline events are
+  postable mid-modal too -- an attended review modal with passes still
+  reporting). Same preconditions as the transcript: unconditionally
+  composed (the checklist in exactly one of its three slots), never
+  remounted, query kept as the never-mounted fallback.
 - **Narration is best-effort; the ANSWER is not.** `_blocking_modal` returns the raw
   dismissal value, and `None` on timeout is what `interaction.decode` turns into the
   declining default. A failure while merely SAYING a request timed out used to escape as
@@ -1757,7 +2866,7 @@ worker, and how a malformed answer decodes.
 - **Both tools are UNGATED** (J12/J9), and for `ask_user` the deciding reason is
   not "asking is harmless" — it is that §13 stops *advertising* a gated tool
   where nothing can ask, so gated it would be invisible rather than deniable and
-  AC2's "an error result it can work around" would be unreachable.
+  §23's AC2 -- "an error result it can work around" -- would be unreachable.
 - **A tool result's `notice` is forwarded as a `LoopEvent` and STRIPPED** (J10),
   generically — the alternative was the loop recognising `todo_write` by name.
   This is also how P1's deferred event-shape decision was discharged with
@@ -1791,9 +2900,10 @@ them without a second copy of one meaning under a second filename. `CONTEXT.md`
 is gone outright, not kept as a fallback. `doc_path()` is one join now.
 
 - **`write` and `read` are globally denied and cannot be re-enabled at runtime.**
-  Not a default: `is_tool_allowed()` reads `config.ToolPermissions()` directly,
-  `settings.json` has no `permissions` section (and `_KNOWN_SETTINGS` *raises* on
-  an unknown key), and D14 forbids a `ToolContext` widening anything — the global
+  Not a default: `is_tool_allowed()` reads `config.ToolPermissions()` directly —
+  whose field defaults are `config.yaml`'s `tool_permissions` booleans, read once at
+  import — `settings.json` has no `permissions` section (and `_KNOWN_SETTINGS`
+  *raises* on an unknown key), and D14 forbids a `ToolContext` widening anything — the global
   check runs first and unconditionally. `dispatch("write", …)` therefore raises
   `ToolCallDenied` **before** the `approval_callback` is consulted. §24's spec
   preferred routing through `write`; that was not available.
@@ -1803,6 +2913,12 @@ is gone outright, not kept as a fallback. `doc_path()` is one join now.
   a fixed allowlist and has **no path parameter at all**, so the destination is
   derived and it cannot be aimed elsewhere. Flipping the globals would hand every
   agent and all ten research passes standing file access to serve one command.
+  **"Cannot be aimed elsewhere" needed the write path to RESOLVE, which it did not
+  until batch 146**: a document name that is a link aimed it elsewhere, and the read
+  path in the same module had resolved before deciding since the day it was written.
+  A hardlink is not caught by resolving anything -- it is a second name for the file,
+  not a link to it -- so the write also replaces the name instead of writing through
+  it (`json_store.write_text_atomic`).
 - **The readable set is documentation, not "text files", and that is
   load-bearing.** A registered tool with permission `True` is advertised to EVERY
   run — the initializer's `allowed_tools` narrows *that agent*, not plain chat or
@@ -1810,9 +2926,30 @@ is gone outright, not kept as a fallback. `doc_path()` is one join now.
   and source files are out of scope entirely — widening to those turns it into
   `read` with no gate. But the set is not small: the tool takes a PATH, resolves
   anywhere under the project, and admits `.md`/`.markdown`/`.rst`/`.txt` plus ten
-  named build files, which on this repository is **40 files and ~1.1 MB at depths
-  0-3**, including every agent and skill body under `agents/builtin/` and
-  `skills/builtin/`. ARCHITECTURE.md used to say the most a prompt-injected pass
+  named build files, which on a clean checkout of this repository is **62 files
+  and under 5 MB at depths 0-3**, including every agent and skill body under
+  `agents/builtin/` and `skills/builtin/` and the whole of `docs/`. The 61st is
+  `docs/REVIEW_MARATHON.md` (batch 129), and the per-scope review reports it
+  governs are deliberately NOT tracked, so they do not move this figure at
+  all -- that decision is recorded there and this is the number it was taken
+  against. **It said 40
+  files and ~1.1 MB until batch 128**, when it was re-measured through the
+  tool's own `is_readable_doc` at 60 files and 3.58 MB -- a 3.3x
+  understatement, and almost all of the growth is this record: `DEVLOG.md`
+  alone is 1.2 MB, and `BREAKING_CHANGES.md`, `ROADMAP_v2.md`,
+  `ARCHITECTURE.md` and this file are another 1.6 MB between them. Both
+  figures are read back out of this sentence by
+  `test_the_documented_doc_read_bound_is_not_understated`, which fails only in
+  the understating direction, because that is the direction the next sentence
+  says costs something. **The ceiling was 4 MB until batch 144**, when the
+  real figure reached 4.01 MB and this record was again almost all of it --
+  that batch's own DEVLOG entry is what crossed the line. Raised to 5 MB,
+  which is roughly thirty more batches at the measured rate (3.58 MB at batch
+  128, 4.01 MB at batch 144, so about 27 KB a batch), because the ceiling is
+  a ceiling on purpose: an equality would go red on the next commit and be
+  retyped without being read, and a round number going red is the moment
+  noticing is the correct outcome. The FILE COUNT is pinned exactly instead,
+  and it did not move. ARCHITECTURE.md used to say the most a prompt-injected pass
   gains is the README (audit #97); understating a security bound is the one
   direction that costs something.
 - **The hub is the map of the documents it links** (I9, as relocated by WS8). All
@@ -1824,11 +2961,11 @@ is gone outright, not kept as a fallback. `doc_path()` is one join now.
   files) and labelled documents `/init` had authored moments earlier as
   pre-existing work it had preserved. Which files a run left alone is a fact
   about that run; it belongs in its report, and is there.
-- **Stubs are templates; only `CONTEXT.md` is generated** (I10). A DEVLOG written
-  for a project with no history is confident fiction in a file that then gets
-  committed, linked from the hub and read as established. Stubs carry headings, a
-  what-belongs/what-does-not pair, and only facts the manifest established
-  deterministically.
+- **Stubs are templates; only the hub (`AGENTS.md`) is generated** (I10). A DEVLOG
+  written for a project with no history is confident fiction in a file that then
+  gets committed, linked from the hub and read as established. Stubs carry
+  headings, a what-belongs/what-does-not pair, and only facts the manifest
+  established deterministically.
 - **Discovery is a directory walk** — no model call, no tool call — so two runs on
   an unchanged project produce byte-identical input, which is what makes the
   output diffable. The manifest carries **sizes** because choosing what to read
@@ -1852,8 +2989,26 @@ is gone outright, not kept as a fallback. `doc_path()` is one join now.
   `AGENTS.md` inside the hash.
   In an untrusted project `.venastine/` may already hold agents, skills and an
   `mcp.json` that arrived with a cloned repo, and granting as a side effect of
-  `/init` would wave all of it through. `CONTEXT.md` is never special-cased out of
-  the hash — that is the same hole with a smaller mouth.
+  `/init` would wave all of it through. The root `AGENTS.md` is never
+  special-cased out of the hash — that is the same hole with a smaller mouth.
+  (It named `CONTEXT.md` until batch 153, which promised this about a file that
+  is not in the hash because it does not exist, and left the guarantee that
+  matters unstated. `test_the_file_agents_md_promises_is_inside_the_trust_hash`
+  reads the name out of this sentence and checks it against
+  `workspace_trust.content_files()`, so the promise cannot outlive the file
+  again.)
+  **Both trust calls are TOTAL** (A46, A47, batch 153), and that is locked
+  rather than defensive habit. `_trust_before` wraps the capture because it
+  READS every file the grant covers, so one file an editor holds open used
+  to kill `/init` before it wrote anything; an unanswerable question reads as
+  UNTRUSTED, which is this module's fail-closed posture and the only answer
+  that cannot launder a cloned `.venastine/` in. `_settle_trust` returns
+  `(note, settled_as_intended)` because `grant_trust` raises from both halves,
+  and it sat outside the handler on both paths — so a trust-store failure took
+  the success path's whole notice and the failure path's file list with it. A
+  re-grant that could not persist is **reported**, exit code unchanged, with
+  the warning FIRST; a settled run keeps the note last. Deleting either `try`
+  restores a defect, and `TestTheTrustSettleIsTotal` is where it fails.
 - **`/init` runs bounded** (I7). Its separate 1M budget died in batch 27 with the
   misreading that created it — the wrapper resolves the configured spend cap like
   every other path. `INIT_READ_CHARS` (well below `MAX_READ_CHARS`: each read is
@@ -1894,13 +3049,29 @@ is gone outright, not kept as a fallback. `doc_path()` is one join now.
 
 `core/config_loader.py` discovers `.md` agents/skills across three tiers — harness (`<root>/{agents,skills}/builtin/`) → project (`.venastine/`, trust-gated) → user (`~/.config/venastine/`) — parses line-anchored YAML frontmatter, and merges `settings.json` (unknown keys **raise**). `core/workspace_trust.py` owns only the D17 trust store (resolved path + sorted-walk content hash); `main.py` owns the prompting UX.
 
-**Trust is keyed to the PROJECT PATH, which is `AGENT_WORKSPACE` when one is named and `os.getcwd()` otherwise** (§44 WS7, reversing RM6). RM6 recorded the opposite and the report that reopened it is what the split looked like in use: the file tools confined to the workspace while `/init` scaffolded the harness.
+**THE PROJECT DOES NOT DECIDE HOW LONG ITS OWN CONSENT SCREEN IS** (A54, locked, batch 155). Every
+section of `describe_project_content()` goes through one `_bounded()` helper with a LINE bound and a
+CHAR bound — the file listing, the hub, `settings.json` + `mcp.json`, and the agent/skill catalog —
+and the marker names what was withheld in both currencies. **A bound on one axis is not a bound**,
+which is the whole reason §44's twenty-line hub cap was replaced rather than copied: twenty lines
+is no bound at all on a 2 MB `AGENTS.md` written as one line, or on twenty 100 KB lines from inside
+the cap. Measured before this: the two JSON files were pasted whole, so 2 × 2.2 MB rendered as
+**4.5 MB in 30 lines** with the `mcp.json` command the section exists to show at 99.9994% of the way
+in; the file listing had no bound (20,000 padding files = 20,001 lines); and the catalog bounded each
+description at `max_catalog_text_chars` and not the number of them (3,000 agents = 1 MB). The caps
+are sized from the largest LEGITIMATE shapes, not picked — a five-server pretty-printed `mcp.json`
+is 54 lines and 923 characters — because a cap that trims ordinary files turns its own marker into
+noise. **`content_files()` is NOT bounded and must not be**: the hash and this module's "the loader
+must read no file the trust listing omits" invariant are about that function, and what is bounded is
+only what the prompt PRINTS of its answer.
 
-**What a grant covers is `content_files()`, and that is now the root `AGENTS.md` plus everything under `.venastine/`** (WS9). The hub reaching a system prompt from outside the boundary would be D17's own stated threat arriving through the door WS8 opened, so the listing carries it — with PROJECT-relative paths, because `AGENTS.md` and `.venastine/AGENTS.md` are different files. `is_trusted()` asks that listing whether there is anything to trust rather than asking whether the directory exists, so a cloned repo shipping an `AGENTS.md` and no `.venastine/` now prompts, and a project with neither is silent as before. Every grant made before §44 re-prompts exactly once, because the set being consented to genuinely changed. `_content_hash()` iterates `content_files()` instead of walking a second time — the deeper fix this file used to list as still open, since two traversals that must agree by construction is how #18 drifted.
+**Trust is keyed to the PROJECT PATH, which is the workspace when something names it as the project -- `AGENT_WORKSPACE`, or `workspace_is_project` in `config.yaml` since batch 111 -- and `os.getcwd()` otherwise** (§44 WS7, reversing RM6; TECHNICAL_DEBT 28). RM6 recorded the opposite and the report that reopened it is what the split looked like in use: the file tools confined to the workspace while `/init` scaffolded the harness.
 
-Load-bearing: untrusted project content is **absent**, not loaded-and-disabled. Trust-store and user-config paths resolve at call time, not import time (tests redirect them). Provider/model precedence is CLI > `settings.json` > `config.py`, which only works because argparse defaults are `None` (`main.resolve_runtime_defaults`). Since §43 the TUI adds one tier of its own between the first two — a remembered `/model` pair, applied only when no flag spoke and only while `default_provider`/`default_model` still say what they said when it was chosen. The CLI is unchanged and does not read that store.
+**What a grant covers is `content_files()`, and that is now the root `AGENTS.md` plus everything under `.venastine/`** (WS9). The hub reaching a system prompt from outside the boundary would be D17's own stated threat arriving through the door WS8 opened, so the listing carries it — with PROJECT-relative paths, because `AGENTS.md` and `.venastine/AGENTS.md` are different files. `is_trusted()` asks that listing whether there is anything to trust rather than asking whether the directory exists, so a cloned repo shipping an `AGENTS.md` and no `.venastine/` now prompts, and a project with neither is silent as before. Every grant made before §44 re-prompts exactly once, because the set being consented to genuinely changed. `_content_hash()` iterates `content_files()` instead of walking a second time, because two traversals that must agree by construction is how #18 drifted.
 
-**A symlinked PROJECT tier root is treated as absent (#18).** `os.walk` follows the path handed to it as `top` but not symlinked subdirectories, and the two sides of the trust boundary start from different places: `workspace_trust` walks from `.venastine`, so `skills/` is a subdirectory it will not descend, while `_md_files` walks from `.venastine/skills`, so it *is* the top and gets followed. Directory names never enter the hash either, so the link contributed nothing — not even its own name. Behind it, definitions loaded as project tier while being absent from the trust prompt's listing **and** from the hash, so their bodies could be rewritten freely after one grant with `is_trusted()` still returning `True`. The payload is instructions, not data: a project-tier body becomes system-prompt content. Git stores symlinks natively, so this arrives on clone — D17's own stated threat. The guard is scoped to the **project** tier deliberately; nothing hashes the harness or user directories, and symlinking `~/.config/venastine/` into a dotfiles repo is legitimate. The invariant to keep however this is later refined: **the loader must read no file the trust listing omits** (`test_workspace_trust.py`). The deeper fix that used to be recorded here — making `content_files()` and `_content_hash()` one traversal rather than two that must agree — was done by WS9 and is described four paragraphs above; the sentence claiming it was still open outlived it by a batch.
+Load-bearing: untrusted project content is **absent**, not loaded-and-disabled. Trust-store and user-config paths resolve at call time, not import time (tests redirect them). Provider/model precedence is CLI > `settings.json` > `config.yaml`, which only works because argparse defaults are `None` (`main.resolve_runtime_defaults`). Since §43 the TUI adds one tier of its own between the first two — a remembered `/model` pair, applied only when no flag spoke and only while `default_provider`/`default_model` still say what they said when it was chosen. The CLI is unchanged and does not read that store.
+
+**A symlinked PROJECT tier root is treated as absent (#18).** `os.walk` follows the path handed to it as `top` but not symlinked subdirectories, and the two sides of the trust boundary start from different places: `workspace_trust` walks from `.venastine`, so `skills/` is a subdirectory it will not descend, while `_md_files` walks from `.venastine/skills`, so it *is* the top and gets followed. Directory names never enter the hash either, so the link contributed nothing — not even its own name. Behind it, definitions loaded as project tier while being absent from the trust prompt's listing **and** from the hash, so their bodies could be rewritten freely after one grant with `is_trusted()` still returning `True`. The payload is instructions, not data: a project-tier body becomes system-prompt content. Git stores symlinks natively, so this arrives on clone — D17's own stated threat. The guard is scoped to the **project** tier deliberately; nothing hashes the harness or user directories, and symlinking `~/.config/venastine/` into a dotfiles repo is legitimate. The invariant to keep however this is later refined: **the loader must read no file the trust listing omits** (`test_workspace_trust.py`).
 
 Progressive disclosure: system prompts list skills as name + one-line description only; full bodies enter context solely via the `load_skill` tool result. Assembly lives in one place — `prompts/system_prompts.py`'s `with_skill_catalog()` / `pass_prompt()` — so the catalog can't diverge between an attempt and its JSON retry.
 
@@ -1908,15 +3079,17 @@ Progressive disclosure: system prompts list skills as name + one-line descriptio
 
 **Ask before implementing.** Every built ROADMAP section followed the same cycle: read referenced files → verify claims against actual code → surface ambiguities as explicit questions with options and a recommendation *before* writing code → lock decisions → implement. New sections follow it too.
 
+**Closing a `docs/TECHNICAL_DEBT.md` item is a DEVLOG entry and NOT a new ROADMAP section.** Batches 115–121, 126 and 127 are the precedent, and the reason is mechanical rather than stylistic: a section needs a decision family in this file's map, an index row and a `(BUILT)` status marker, and all three are gated — `test_the_map_names_every_family_the_record_defines`, `test_the_roadmap_v3_index_covers_every_section` and `test_an_index_status_marker_agrees_with_its_own_section`. So a closure that adds no config key and moves no documented threshold is an APPLICATION of ids that already resolve, and inventing a family for it would put three gated claims in the record to describe a fix that needed none. **The register entry is evidence and not instruction**: batch 126 found the entry naming the wrong field, and 127 found one naming a route that was already covered and a fix shape that could not bound the function. Measure the entry's claim before building what it proposes, and correct the entry in the same batch.
+
 **Fix at the producer, not the consumer.** The project's canonical bug: `add_assistant_message()` persisted a redundant `"role"` key, was fixed with a read-side special case for `role == "assistant"`, and the identical bug in `add_tool_result()` survived because the fix lived one layer above where the divergence was produced. When you fix a shared root cause, grep every other call site sharing it. A per-case branch added to a normalizer/dispatcher usually means the fix belongs one layer down.
 
 **Verify against production code, not the test double.** `tests/conftest.py`'s `FakeStorage` is a simplified model of `storage.py`, not the real thing — its `save_checkpoint` has none of the real one's watermark-advance guard, so a test that arranged a backwards checkpoint through the fake would see it applied, and `latest_checkpoint` is a dict lookup there rather than "newest row wins by timestamp". A passing test proves the fake and the code agree — not that either is right. If you change `storage.py`'s reconstruction, change the fake identically.
 
-That example is deliberately a *current* divergence. This paragraph used to cite the `name`/`tool_call_id` reconstruction, which the two have agreed on for some time (audit #33) — and a rule whose only evidence is stale gets read as boilerplate. The checkpoint divergence costs nothing today, because the guard is pinned against real SQLite in `test_storage_e2e.py` and the fake's `save_checkpoint` is only ever used to *arrange* a compacted view; that is exactly the state the old example was in before it stopped being a divergence at all. `test_fake_storage_mirror.py` (#123) now compares the reconstruction halves directly.
+That example is deliberately a *current* divergence, because a rule whose only evidence is stale gets read as boilerplate. The checkpoint divergence costs nothing today, because the guard is pinned against real SQLite in `test_storage_e2e.py` and the fake's `save_checkpoint` is only ever used to *arrange* a compacted view. `test_fake_storage_mirror.py` (#123) now compares the reconstruction halves directly.
 
 **Never name a top-level file after a stdlib or installed package.** A root `logging.py` once silently shadowed stdlib `logging`; hence `logging_setup.py`.
 
-**Registering a tool is four steps**: import the module, `registry.register(ToolSpec(...))`, add a boolean to **both** `config.ToolPermissions` and `config.ToolApprovals`, and `assert_permissions_declared()` at the bottom of `tools/registry.py` enforces the third at import time (D24). Skipping the declaration used to fail silently — `fetch_url` was registered, documented as working, and denied on every call for its entire life, with the schema still advertised so the model kept choosing it. It now raises `RuntimeError` on import instead. `mcp__*` names are exempt (they get `_default_for_unknown_tool`'s named default).
+**Registering a tool is four steps**: import the module, `registry.register(ToolSpec(...))`, add a boolean to `config.ToolPermissions` and -- with one deliberate exception -- to `config.ToolApprovals`, and `assert_permissions_declared()` at the bottom of `tools/registry.py` enforces the third at import time (D24). The exception is `security/permissions.py`'s `APPROVAL_BY_SHELL_MODE` -- `shell` and the three session tools that START one -- whose approval lives solely in `shell_approval_mode`; a test pins that set as the sole exemption, and `_assert_shell_mode_exemption` requires each of them to carry THE GATE `_SHELL_MODE_GATES` NAMES FOR IT, by identity, so the hole cannot outlive the gate that justifies it (§49, SS16). Three of them carry `shell._shell_approval_check`; `shell_interactive` carries `shell._interactive_approval_check`, because its yes covers every line typed into the session afterwards and so cannot be a question about one command (batch 100, SS29/SS32). Skipping the declaration used to fail silently — `fetch_url` was registered, documented as working, and denied on every call for its entire life, with the schema still advertised so the model kept choosing it. It now raises `RuntimeError` on import instead. `mcp__*` names are exempt (they get `_default_for_unknown_tool`'s named default).
 
 **A raising tool must not kill the run.** `dispatch()` wraps the handler call and turns any exception into `{"error": ...}`, logged at ERROR with the traceback so a real bug stays findable. `ToolCallDenied` and the unknown-tool `ValueError` are raised *above* the handler and deliberately still propagate. The error result goes through `check_output_policy` like any other — an exception message often carries the request that produced it, and for an HTTP client that means a URL with an API key in it. This is a backstop: `web_search` and `arxiv_search` return their own error dicts after exhausting retries (`fetch_url` always did), so the model gets something specific. The bug that forced this: `arxiv_search` requested `http://export.arxiv.org`, arXiv now 301-redirects it, httpx does **not** follow redirects by default, `raise_for_status()` ignores 3xx, and `ET.fromstring("")` on the empty redirect body raised — three retries, then an exception that flipped a finished ten-pass research run to `status='failed'`.
 
@@ -1924,13 +3097,17 @@ A tool that should not always be *offered* (as opposed to not allowed) supplies 
 
 **Log detail must be in the message, not in `extra={}`.** The default formatter renders `%(message)s` only, so every field passed via `extra=` was silently dropped — fifteen consecutive `fetch_url failed` lines with no URL and no reason, and an `arxiv_search attempt failed` that hid a scheme change for three retries. Interpolate instead (`logger.warning("fetch_url failed for %s: %s", url, e)`). This matters more since the TUI routes WARNING+ into the transcript.
 
+**Debug breadcrumbs name things, never quote them (batch 78).** `on_loop_event_message` logs event-kind flags plus screen-stack depth, and `_blocking_modal` logs screen type plus outcome class — params, answers and notes stay out of the file. A breadcrumb quoting a value is one log rotation away from a durable secret beside the redacted sinks, and the ordering story never needs the content. `logger.isEnabledFor(logging.DEBUG)` guards each site so the per-token hot path pays one predicate; a test asserts silence at INFO.
+
 **Math tools** all share `_math_common.py`'s `safe_parse()`. Never use raw `eval`/`sympify` in a new one. Their tests assert **symbolic equivalence** (`sympy.simplify(actual - expected) == 0`), not string equality — SymPy's `str()` drifts across versions.
 
 **`safe_parse` is an ALLOWLIST at the token boundary, not a blanked namespace (#52).** This file used to say "`__builtins__` blanked, injection-tested"; both halves were false. Blanking cannot work — `_SAFE_GLOBALS` is built from `dir(sympy)`, so SymPy's own `sympify`/`parse_expr`/`var`/`S`/`lambdify` are in scope by construction, and `sympify`'s inner parse gets **real** builtins back because Python inserts them into any globals dict handed to `exec`/`eval` that lacks them; separately, `().__class__.__bases__[0].__subclasses__()` needs no name lookup at all, so no namespace pruning reaches it. And "injection-tested" was one payload that was blocked by `auto_symbol` Symbol-izing the bare name `__import__`, for a reason unrelated to the defence it was named for. **A token filter was the first fix and it was wrong.** It rejected dunder and non-allowlisted NAME tokens, and was bypassed within the hour by `f"{sympify('__import__(chr(111)+chr(115)).getpid()')}"` — on Python 3.11 an f-string is a **single `STRING` token** (PEP 701 split it up only in 3.12), so a NAME filter is structurally blind to it while the code inside evaluates with `_SAFE_GLOBALS` in scope. `str.format`'s mini-language reaches dunder attributes the same way. The general lesson: **a token stream is not the language**, and which constructs the tokenizer hides is a property of the Python version, not of this code.
 
-The guard is now `_validate_ast`: `parse_expr` is split into its two halves (`stringify_expr` → `eval_expr`) and the AST of **exactly the string that will be evaluated** is checked against a closed allowlist of ~39 node types out of Python's 118. **`ast.Attribute` is absent, and that is the load-bearing omission** — attribute traversal *is* mechanism 2, and it is also how `str.format`, `.mro()` and every bound-method route are reached; no transformation emits an attribute for a legitimate expression. `JoinedStr`, `Lambda`, the comprehensions, `NamedExpr`, `Starred` and `Dict`/`Set` are all absent too, by being unlisted rather than by being recognised. Names are checked against `_ALLOWED_NAMES` (231 of 927 exposed) or the caller's `symbols=`. Widening either list is a decision about a *kind* of thing; anything that parses, evaluates, compiles, renders or executes stays out, and no module object is ever permitted (`evalf` is a module, not the method — it was allowlisted by mistake once).
+The guard is now `_validate_ast`: `parse_expr` is split into its two halves (`stringify_expr` → `eval_expr`) and the AST of **exactly the string that will be evaluated** is checked against a closed allowlist of **39** node types out of the ~130 Python defines. **`ast.Attribute` is absent, and that is the load-bearing omission** — attribute traversal *is* mechanism 2, and it is also how `str.format`, `.mro()` and every bound-method route are reached; no transformation emits an attribute for a legitimate expression. `JoinedStr`, `Lambda`, the comprehensions, `NamedExpr`, `Starred` and `Dict`/`Set` are all absent too, by being unlisted rather than by being recognised. Names are checked against `_ALLOWED_NAMES` (**230** of the ~926 `sympy` exposes) or the caller's `symbols=`. Widening either list is a decision about a *kind* of thing; anything that parses, evaluates, compiles, renders or executes stays out, and no module object is ever permitted (`evalf` is a module, not the method — it was allowlisted by mistake once).
 
-**117 of the 213 allowlisted callables evaluate a string handed to them** — measured by blackbox probe, not by reading source, because 214 of them are C extensions with no retrievable source (the source audit could read 15). So the string-licensing rule is load-bearing rather than defence in depth, and `test_the_licensed_string_constructors_do_not_evaluate_their_argument` is the obligation it rests on. There is also one check on the OUTPUT: `_reject_escaped_value` refuses a result that is a module, a plain function/method, or a non-SymPy class, recursing through returned containers. It is a DENY of the escape signature rather than an allowlist of return types, deliberately — an allowlist can only catch escapes whose shape was already imagined, and four of this issue's five mechanisms were not. SymPy classes are values (`sin` is a `FunctionClass`); `Function('f')` is refused by the string rule, which is a recorded cost.
+**Both of those figures are gated, and the denominator is a tilde for a reason.** `test_agents_md_states_the_real_sympy_allowlist_sizes` reads 230 and 39 back out of this paragraph. The 926 is approximate because **`dir()` on a PACKAGE is not a fixed number**: `tools/builtin/probability_stats.py` imports `sympy.stats`, which binds `stats` onto the package, so the count moves by a name or two with import order and reads 926 or 927 in one checkout. **And `_SAFE_GLOBALS` is built from that same `dir()` at import time, which is how a module object gets into it** -- against the rule stated just above. Inert, and measured so: `stats` is not in `_ALLOWED_NAMES`, so the name is never resolved, the bare word splits into `a*s**2*t**2`, and `stats.Die` is refused with every other attribute. The NAME gate is what makes the globals dict's contents not matter.
+
+**117 of the 213 allowlisted callables evaluate a string handed to them** — measured by blackbox probe, not by reading source, because of the **229 allowlisted names that resolve** only 15 had retrievable source and the other 214 were C extensions. **The two figures count two different populations**, which is why 214 reads as larger than 213 and is not: 117/213 is over the CALLABLES, 15+214=229 is over the RESOLVABLE NAMES. Batch 128 named the populations rather than changing a number, having re-taken the measurement in WSL -- the probe needs `SIGALRM` and is skipped on Windows -- and got 117 of 213 back, with the control that proves the probe still detects a known evaluator run first. So the string-licensing rule is load-bearing rather than defence in depth, and `test_the_licensed_string_constructors_do_not_evaluate_their_argument` is the obligation it rests on. There is also one check on the OUTPUT: `_reject_escaped_value` refuses a result that is a module, a plain function/method, or a non-SymPy class, recursing through returned containers. It is a DENY of the escape signature rather than an allowlist of return types, deliberately — an allowlist can only catch escapes whose shape was already imagined, and four of this issue's five mechanisms were not. SymPy classes are values (`sin` is a `FunctionClass`); `Function('f')` is refused by the string rule, which is a recorded cost.
 
 **String literals are licensed, not filtered.** Auditing the allowlist's own source found that seven permitted functions — `factor`, `cancel`, `together`, `apart`, `roots`, `degree`, `nsolve` — call `sympify()` on their arguments, so handing one a string literal re-enters the parser with SymPy's default globals and real builtins: `factor(" __import__(chr(111)+chr(115)).getpid() ")` returned the pid. A dunder tripwire on the string did not help, because it matched prefix/suffix and one leading space walked past it — the same category of mistake as `chr(111)+chr(115)` defeating a search for `"os"`. `stringify_expr` emits a string argument in exactly two places (`Symbol('x')`, `Float('1.5')`), so `_STRING_ARG_CONSTRUCTORS` licenses those two positions and every other string literal is refused. That closes the class without needing to know which functions sympify — which is the difference between a closure and a filter.
 
@@ -1945,6 +3122,9 @@ All tests run offline: zero network, zero real API keys. The **root** `conftest.
 ### Before calling a change done
 
 - Did you run (or `py_compile`) every file you touched, and run `pytest`?
+- Did you run `ruff check .`, bandit with the CI job's own flags, and `gitleaks detect --source . --no-git -c .github/gitleaks.toml`? None of the three runs under `pytest` and all three gate every push, so a batch that skips them arrives red — which is how the push carrying batch 94 landed six lint errors and two new bandit findings, every one of them mechanical.
+- **The bandit baseline is in LINUX path form, so locally every entry misses and every baselined issue reads as new.** It is generated in CI, where filenames are `./x.py`; bandit on Windows reports `.\x.py`. Rewrite a THROWAWAY copy, changing only the leading `./`, and run against that — **never regenerate the committed file**, which would relocate the baseline onto one machine's paths and make CI the thing that disagrees. The regeneration command in `.github/workflows/bandit.yml` is for CI, not for a developer box. Second trap in the same command: piping bandit to `tail` makes `$?` TAIL's exit code, so a run with new findings reads as green — capture the output and read bandit's own status.
+- **Gitleaks is the one that can sit red for weeks, so run it even when the batch touched no production code.** Lint and bandit are caught the same day because something else usually runs them; gitleaks fires only `on: push`, so a branch held locally banks the surprise for as long as it stays there. `tests/test_session_tools.py`'s `SECRET` fixture was added 2026-09-17 and first went red 2026-10-01, twenty commits and several batches later (batch 115). **A new fake credential in a tracked test needs its fingerprint in `.gitleaksignore`; a real one needs rotation, never a fingerprint.** Scan a clean export rather than the worktree — `git archive HEAD` into a temp dir — or local untracked residue answers for CI, which checks out tracked files only. **`cd` into that export and scan `.`**: a `.gitleaksignore` fingerprint is `file:rule:line`, so an ABSOLUTE `--source` makes every one of them unmatchable and a clean tree reports all of its own deliberate test credentials as leaks (measured in batch 128: 7 findings absolute, 0 relative, same bytes).
 - Did you grep for every other call site sharing the root cause of what you just fixed?
 - Did you trace the fix against the real module, not the fake?
 - Does the new test fail if the fix is reverted, asserting the field/shape that was actually wrong?

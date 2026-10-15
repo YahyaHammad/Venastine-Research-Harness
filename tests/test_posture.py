@@ -17,8 +17,8 @@ draw the line where the line actually is, and do not pretend to more.
 
 import ast
 import dataclasses
-import io
 import os
+import re
 
 import pytest
 
@@ -46,12 +46,16 @@ PRODUCTION_FILES = ("main.py", "config.py", "logging_setup.py", "database.py",
                     "storage.py", "credentials.py")
 
 
+#: The repository root, for the two tests that read a source file.
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
 def _production_sources():
     """(relative path, source text) for everything that runs in a session."""
     for name in PRODUCTION_FILES:
         path = os.path.join(ROOT, name)
         if os.path.isfile(path):
-            yield name, io.open(path, encoding="utf-8").read()
+            yield name, open(path, encoding="utf-8").read()
     for directory in PRODUCTION_DIRS:
         base = os.path.join(ROOT, directory)
         for dirpath, _dirs, files in os.walk(base):
@@ -62,7 +66,7 @@ def _production_sources():
                     continue
                 path = os.path.join(dirpath, name)
                 yield (os.path.relpath(path, ROOT).replace(os.sep, "/"),
-                       io.open(path, encoding="utf-8").read())
+                       open(path, encoding="utf-8").read())
 
 
 def _import_time_nodes(node):
@@ -220,6 +224,67 @@ class TestApplyCliOrdering:
 # ===========================================================================
 
 
+class TestTheOrderingGuardIsDormantAndSaysSo:
+    """S02-09 (batch 142). The guard cannot fire on a shipped launch.
+
+    `apply_cli()` raises when folding in the command line would CHANGE
+    the posture after a read. `main.py` calls it with no arguments --
+    the only production call -- so `supplied` is {}, `candidate` equals
+    `_posture`, and the second half of the predicate is never true.
+    Three documents described it as a live protection, and a reader
+    creeping above that call produced nothing at all.
+
+    There is no live harm, and that is the same fact as the finding:
+    with nothing folded in, a premature reader reads the right value
+    anyway. The cost is a reviewer trap, which is what these tests are
+    against -- `CLAUDE.md` says these decisions "have already been
+    broken once by someone who reasoned from the code alone".
+    """
+
+    def test_no_production_call_supplies_an_override(self):
+        """THE GATE. The day a posture flag exists, this goes red -- and
+        the failure names the three places that describe the guard, so
+        the documents move with the feature rather than after it."""
+        tree = ast.parse(
+            open(os.path.join(_ROOT, "main.py"),
+                    encoding="utf-8").read())
+        calls = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if (isinstance(func, ast.Attribute)
+                    and func.attr == "apply_cli"):
+                calls.append(len(node.args) + len(node.keywords))
+        assert calls, (
+            "no `apply_cli` call found in main.py -- either the call moved, "
+            "and UN2's ordering has to be re-established wherever it went, "
+            "or this test is now measuring nothing.")
+        assert all(count == 0 for count in calls), (
+            "main.py now passes %r argument(s) to `apply_cli`, so the ordering guard CAN fire and is no longer dormant. Three places say it is: `security/posture.py`'s module docstring, the comment above the call in `main.py`, and AGENTS.md's UN2 bullet. Update all three -- this is the drift shape S02-09 was." % calls)
+
+    def test_the_shipped_call_shape_does_not_raise_after_a_read(self):
+        """The measurement, kept as a test: exactly what `main.py` does,
+        in the order a late reader would make it happen."""
+        posture.current()
+        assert posture.apply_cli() == posture.current()
+
+    def test_the_control_is_that_an_override_still_raises(self):
+        """So the guard is dormant, not broken -- which is why it is kept
+        rather than removed."""
+        posture.current()
+        with pytest.raises(RuntimeError, match="already been read"):
+            posture.apply_cli(shell_approval_mode="never")
+
+    def test_the_flag_the_docs_write_about_does_not_exist_yet(self):
+        """`--unsafe` is named in `posture.py` and in this file as though
+        it existed. It does not, and that is the reason the guard has
+        never fired -- recorded here so the next reader does not go
+        looking for a flag to pass."""
+        argv_text = open(
+            os.path.join(_ROOT, "main.py"), encoding="utf-8").read()
+        assert "--unsafe" not in argv_text
+
 class TestNothingReachableChangesIt:
     """The security claim, taken one surface at a time. Each of these is a
     route a rogue agent or a hostile repository actually has."""
@@ -249,7 +314,18 @@ class TestNothingReachableChangesIt:
     def test_no_slash_command_touches_the_posture(self):
         """A slash command is the one surface reachable AFTER untrusted
         content is already in the context window. There is deliberately no
-        posture command; adding one turns this red on purpose."""
+        command that moves the posture in a RUNNING session; adding one
+        turns this red on purpose.
+
+        Batch 84 narrowed what this claims, and the narrowing is worth
+        stating rather than leaving to be inferred from the name list.
+        `/config` can now WRITE a posture key into config.yaml -- behind a
+        confirmation that says what the key permits, and taking effect only
+        at the relaunch that follows, so nothing moves under a session that
+        has already read it. What stays forbidden is a command that flips
+        the posture where it stands, which is what every name below would
+        be. `test_the_config_command_gates_every_posture_key` is the other
+        half: it holds the gate itself."""
         from tui.app import register_builtin_commands
         from tui.commands import registry as command_registry
         register_builtin_commands()
@@ -268,6 +344,44 @@ class TestNothingReachableChangesIt:
         assert not (names & {"unsafe", "posture", "approval", "sandbox",
                              "yolo", "insecure"})
 
+    def test_the_config_command_gates_every_posture_key(self):
+        """Batch 84's compensating control, held where the posture is.
+
+        Letting `/config` write these is defensible only because the person
+        is told what they are turning on. A posture field with no sentence
+        is a posture field whose modal says nothing, so this asserts the
+        two things that make the gate real: every authority key resolves
+        through the gate, and every one of them has an effect sentence.
+
+        Over all eleven rather than over `Posture`'s own fields, because the
+        two do not share a spelling: the dataclass says
+        `allow_insecure_fallback` where `config.yaml` says
+        `allow_insecure_sandbox_fallback`, and `redact_off_env` is a fact
+        about the environment with no key at all. Which config keys make up
+        the posture is `test_the_authority_keys_name_every_unreachable_
+        value` a few lines down; this is the half that says each of them
+        arrives at a modal with something to read.
+        """
+        import config_edit
+        import config_schema
+
+        keys = config_schema.HARNESS_AUTHORITY_KEYS
+        assert len(keys) == 11
+        for key in keys:
+            assert config_edit.authority_key(key) == key, (
+                f"{key} does not resolve through the gate, so /config "
+                f"would write it with no confirmation at all")
+            assert config_edit.AUTHORITY_EFFECT.get(key, "").strip(), (
+                f"{key}'s confirmation would say nothing about what it "
+                f"permits, which is the only reason it may be written")
+        # And a LEAF of a gated table resolves to the table, so all 45
+        # tool booleans are covered by the two sentences above them.
+        assert config_edit.authority_key(
+            "tool_permissions.shell") == "tool_permissions"
+        assert config_edit.authority_key(
+            "tool_approvals.read") == "tool_approvals"
+        assert config_edit.authority_key("max_tokens") is None
+
     def test_writing_config_py_still_needs_a_human(self):
         """config.py is where a human writes the posture, so the route a
         rogue agent would take is to write it. It is outside the
@@ -276,6 +390,182 @@ class TestNothingReachableChangesIt:
         target = os.path.join(ROOT, "config.py")
         assert _file_approval_check("write", {"path": target}) is True
         assert _file_approval_check("edit", {"path": target}) is True
+
+    def test_writing_config_yaml_still_needs_a_human(self):
+        """The sibling of the test above, and the reason it exists.
+
+        The posture VALUES live in config.yaml now; config.py reads them.
+        So the route a rogue agent would take is to write the YAML, and the
+        guarantee has to be the same one -- which it is, for the same
+        reason: the file is outside the workspace, so
+        `_file_approval_check` hard-returns True, and `write`/`edit` are
+        globally denied on top of that.
+
+        This test is the whole answer to "is moving the posture into a data
+        file a weakening?". If it ever goes red, it is."""
+        from tools.builtin.file_ops import _file_approval_check
+        target = os.path.join(ROOT, "config.yaml")
+        assert os.path.isfile(target), (
+            "config.yaml is gone, so the values this file is about have "
+            "moved again and this guard is pointed at nothing")
+        assert _file_approval_check("write", {"path": target}) is True
+        assert _file_approval_check("edit", {"path": target}) is True
+
+    def test_config_yaml_resolves_to_exactly_one_place(self):
+        """No tier, no override variable -- which is what keeps the by-name
+        settings.json rejections honest.
+
+        Those rejections (R12, E2, G7, SQ7) all argue from the same fact: a
+        project's settings.json beats the user's and arrives with a
+        directory you cloned. A config file with one location inside the
+        harness carries none of that. An `AGENT_CONFIG_FILE` would hand it
+        straight back, and it would read as the obvious sibling of
+        AGENT_ENV_FILE and APP_DB_PATH -- so the absence is pinned here
+        rather than left as a thing everyone remembers."""
+        import config_schema
+
+        assert config_schema.CONFIG_PATH == os.path.join(
+            ROOT, "config.yaml")
+        # The path must not move with the environment. Every variable the
+        # config layer knows about is set to a decoy at once; the resolved
+        # path may not change.
+        source = open(os.path.join(ROOT, "config_schema.py"),
+                      encoding="utf-8").read()
+        tree = ast.parse(source)
+        reads = set()
+
+        def _is_environ(node):
+            return (
+                isinstance(node, ast.Attribute)
+                and node.attr == "environ"
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "os"
+            )
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                func = node.func
+                name = getattr(func, "attr", None)
+                if name in ("get", "getenv") and node.args:
+                    first = node.args[0]
+                    if isinstance(first, ast.Constant) and isinstance(
+                            first.value, str):
+                        reads.add(first.value)
+                continue
+            if isinstance(node, ast.Compare):
+                if not any(isinstance(op, (ast.In, ast.NotIn))
+                           for op in node.ops):
+                    continue
+                parts = [node.left] + list(node.comparators)
+                if not any(_is_environ(part) for part in parts):
+                    continue
+                for part in parts:
+                    if isinstance(part, ast.Constant) and isinstance(
+                            part.value, str):
+                        reads.add(part.value)
+                continue
+            if isinstance(node, ast.Subscript):
+                if not _is_environ(node.value):
+                    continue
+                sl = node.slice
+                if isinstance(sl, ast.Constant) and isinstance(sl.value, str):
+                    reads.add(sl.value)
+        unexpected = reads - set(config_schema.HARNESS_ENV_VARS)
+        assert not unexpected, (
+            "config_schema reads environment variables that are not in "
+            f"HARNESS_ENV_VARS: {sorted(unexpected)}. If one of them "
+            "redirects CONFIG_PATH, the posture just became settable by "
+            "the environment.")
+
+    def test_the_authority_keys_name_every_unreachable_value(self):
+        """`HARNESS_AUTHORITY_KEYS` is the list a future config editor will
+        refuse to write, so it has to cover both families it claims to:
+        every field of the frozen posture, and every key settings.json
+        rejects by name.
+
+        The positive half is below it -- without one, an over-broad set
+        would satisfy this and mean nothing."""
+        import config_schema
+
+        keys = config_schema.HARNESS_AUTHORITY_KEYS
+        posture_fields = {"shell_approval_mode",
+                          "allow_insecure_sandbox_fallback",
+                          "auto_approve_sandbox_fallback",
+                          "redact_tool_outputs"}
+        by_name = {"ensemble_models", "critic_model", "embedder_model"}
+        assert posture_fields <= keys
+        assert by_name <= keys
+        assert {"tool_permissions", "tool_approvals"} <= keys
+        # Every name in the set is a real config.yaml key, so the list
+        # cannot protect something that does not exist.
+        fields = set(config_schema.HarnessConfig.model_fields)
+        assert keys <= fields, sorted(keys - fields)
+        # And it is not simply everything: ensemble_mode is a MODE, is
+        # persistable in settings.json today, and the worst it can do is
+        # spend more of a provider the user already chose.
+        assert "ensemble_mode" not in keys
+        assert "max_tokens" not in keys
+
+    def test_no_authority_key_has_an_environment_override(self):
+        """The two sets are disjoint, and that is the whole meaning of the
+        word: an authority key is one NO UNATTENDED SURFACE reaches, and an
+        environment variable is an unattended surface.
+
+        WRITTEN DOWN IN BATCH 111 BECAUSE A DECISION RESTED ON IT.
+        `workspace_is_project` (TECHNICAL_DEBT 28) decides the project
+        path, which moves workspace trust, the `.venastine/` tier, /init's
+        destination and project-scoped memories -- authority-shaped at a
+        glance, and deliberately NOT in the set. The reason is here: the
+        identical effect is already reachable through `AGENT_WORKSPACE`, an
+        ordinary override, so gating the file key would have put the
+        confirmation on the louder of two routes and left the quieter one
+        open. An authority key that gained a variable would be the same
+        mistake in reverse, and this fails when either happens.
+        """
+        import config_schema
+
+        overridden = {name.lower() for name in config_schema.ENV_OVERRIDES}
+        collision = overridden & set(config_schema.HARNESS_AUTHORITY_KEYS)
+        assert not collision, (
+            f"these keys are gated behind a confirmation AND settable by an "
+            f"environment variable, which means they are not gated: "
+            f"{sorted(collision)}")
+        assert "workspace_is_project" not in config_schema.HARNESS_AUTHORITY_KEYS
+
+    def test_config_yaml_marks_every_authority_key_and_no_others(self):
+        """The comment a human reads and the set the code reads are two
+        copies of one list, so they are held against each other.
+
+        `config.yaml` marks these keys `AUTHORITY --` in the comment above
+        them, and that marker is the only warning anyone editing the file
+        by hand actually sees. `HARNESS_AUTHORITY_KEYS` is what a config
+        editor would refuse to write. Drift between them is silent in both
+        directions: an unmarked key reads as ordinary to a person, and an
+        unlisted one reads as ordinary to code."""
+        import config_schema
+
+        text = open(config_schema.CONFIG_PATH, encoding="utf-8").read()
+        lines = text.split("\n")
+        marked = set()
+        for index, line in enumerate(lines):
+            if not line.startswith("# AUTHORITY --"):
+                continue
+            # The key is the first top-level mapping key under the block.
+            for candidate in lines[index:]:
+                match = re.match(r"^([a-z_]+):", candidate)
+                if match:
+                    marked.add(match.group(1))
+                    break
+
+        assert marked, (
+            "no `AUTHORITY --` markers found in config.yaml, so this check "
+            "is asserting against nothing -- if the wording moved, point it "
+            "at the new one rather than deleting it")
+        assert marked == set(config_schema.HARNESS_AUTHORITY_KEYS), (
+            f"marked in config.yaml but not in HARNESS_AUTHORITY_KEYS: "
+            f"{sorted(marked - config_schema.HARNESS_AUTHORITY_KEYS)}; "
+            f"in the set but unmarked in the file: "
+            f"{sorted(config_schema.HARNESS_AUTHORITY_KEYS - marked)}")
 
     def test_the_publish_guard_is_wired_into_the_prepublish_check(self):
         """UN5. `scripts/prepublish-check.mjs` refuses to publish an
@@ -291,7 +581,7 @@ class TestNothingReachableChangesIt:
         caught by pytest any other way.
         """
         path = os.path.join(ROOT, "scripts", "prepublish-check.mjs")
-        src = io.open(path, encoding="utf-8").read()
+        src = open(path, encoding="utf-8").read()
         assert "function unsafeBranchProblems()" in src, \
             "the unsafe-mode publish guard is gone"
         # LIVE lines only. A substring check passes on
@@ -304,9 +594,15 @@ class TestNothingReachableChangesIt:
         assert any("problems.push(...unsafeBranchProblems());" in line
                    for line in live), \
             "the guard is defined but never called, so it refuses nothing"
-        # Both detectors, because either alone is one rename from silence.
+        # Every detector, because any one alone is a rename from silence.
         assert "UNSAFE_BRANCH" in src
         assert "UNSAFE_NO_" in src
+        # The posture values live in config.yaml now, so an unsafe-mode
+        # build declares them there. The config.py detector above cannot
+        # see that file and stayed green through the whole migration.
+        assert "unsafe_no_" in src, \
+            "the guard does not look at config.yaml, where the posture is"
+        assert "config.yaml" in src
 
     def test_the_test_seams_are_not_called_by_production_code(self):
         """`override_for_tests` is a mutation seam inside a module whose
@@ -327,41 +623,53 @@ class TestNothingReachableChangesIt:
 # ===========================================================================
 
 
+def _shipped(**overrides) -> Posture:
+    """The shipped posture, with named weakenings applied.
+
+    Every test below used to build a `Posture` from five positional
+    booleans, so adding `allow_wsl_backend` broke fourteen of them at once
+    and none of the breaks was about what the test asserted. One
+    constructor, and a new field costs this function and nothing else.
+    """
+    return Posture(**{"shell_approval_mode": "tiered",
+                      "allow_insecure_fallback": False,
+                      "auto_approve_fallback": False,
+                      "allow_wsl_backend": False,
+                      "allow_ssh_backend": False,
+                      "redact_tool_outputs": True,
+                      "redact_off_env": False,
+                      **overrides})
+
+
 class TestUnsafeReasons:
     """UN3. The banner, the launch WARNING and the TUI badge all read this
     one method, so they cannot describe the same state differently."""
 
     def test_the_shipped_posture_says_nothing(self):
-        shipped = Posture(shell_approval_mode="tiered",
-                          allow_insecure_fallback=False,
-                          auto_approve_fallback=False,
-                          redact_tool_outputs=True,
-                          redact_off_env=False)
-        assert shipped.unsafe_reasons() == []
+        assert _shipped().unsafe_reasons() == []
 
     @pytest.mark.parametrize("field,value", [
         ("shell_approval_mode", "never"),
+        ("shell_approval_mode", "contained"),
         ("allow_insecure_fallback", True),
         ("redact_tool_outputs", False),
         ("redact_off_env", True),
+        ("allow_wsl_backend", True),
+        ("allow_ssh_backend", True),
     ])
     def test_each_weakening_is_reported(self, field, value):
-        shipped = Posture(shell_approval_mode="tiered",
-                          allow_insecure_fallback=False,
-                          auto_approve_fallback=False,
-                          redact_tool_outputs=True,
-                          redact_off_env=False)
-        weakened = dataclasses.replace(shipped, **{field: value})
+        weakened = dataclasses.replace(_shipped(), **{field: value})
         assert weakened.unsafe_reasons(), f"{field}={value!r} reported nothing"
 
     def test_the_fallback_pair_reads_as_worse_than_either(self):
         """SECURITY.md singles this pair out: together they are unprompted
         arbitrary code on the host. The wording has to say so, because a
         user who reads only the badge should still learn the right thing."""
-        one = Posture("tiered", True, False, True, False).unsafe_reasons()
-        both = Posture("tiered", True, True, True, False).unsafe_reasons()
+        one = _shipped(allow_insecure_fallback=True).unsafe_reasons()
+        both = _shipped(allow_insecure_fallback=True,
+                        auto_approve_fallback=True).unsafe_reasons()
         assert len(one) == len(both) == 1
-        assert "if Docker is" in one[0][1]
+        assert "if no container runtime" in one[0][1]
         assert "unprompted" in both[0][1]
 
     def test_every_label_fits_the_sidebar(self):
@@ -369,7 +677,11 @@ class TestUnsafeReasons:
         twenty-column sidebar. `ALLOW_INSECURE_SANDBOX_FALLBACK` is 31
         characters, which is what forced the split -- so the width is part
         of the contract, not a coincidence to be rediscovered."""
-        weakened = Posture("never", True, True, False, True)
+        weakened = _shipped(shell_approval_mode="never",
+                            allow_insecure_fallback=True,
+                            auto_approve_fallback=True,
+                            allow_wsl_backend=True,
+                            redact_tool_outputs=False, redact_off_env=True)
         for label, detail in weakened.unsafe_reasons():
             assert len(label) + 2 <= 20, (label, len(label))
             assert len(detail) > len(label), \
@@ -380,7 +692,65 @@ class TestUnsafeReasons:
         cannot do anything -- `containment_for` never returns UNCONTAINED
         for a non-inert tier unless the fallback is on. Reporting it would
         be a warning a user cannot act on."""
-        assert Posture("tiered", False, True, True, False).unsafe_reasons() == []
+        assert _shipped(auto_approve_fallback=True).unsafe_reasons() == []
+
+    def test_contained_is_reported_and_says_what_still_asks(self):
+        """§48 (CE4). `contained` runs code in the container unasked, so it
+        is a weakening of the shipped posture -- but not of the network or
+        the host, and a badge that let a reader believe otherwise would be
+        the wrong-surface failure UN3 exists for."""
+        reasons = _shipped(shell_approval_mode="contained").unsafe_reasons()
+        assert [label for label, _ in reasons] == ["shell: contained"]
+        label, detail = reasons[0]
+        assert len(label) + 2 <= 20, (label, len(label))
+        assert "without asking" in detail
+        assert "code the agent wrote" in detail
+        assert "network commands still ask" in detail
+
+    def test_under_always_the_fallback_pair_is_not_no_ask(self):
+        """§48 (CE6). Measured before this was written: with both fallback
+        flags on and Docker down, `always` asks about every command -- the
+        mode check returns before the opt-in is read -- while the badge
+        said "host shell, no ask". Under `always` the pair is what the
+        fallback alone is."""
+        reasons = _shipped(shell_approval_mode="always",
+                           allow_insecure_fallback=True,
+                           auto_approve_fallback=True).unsafe_reasons()
+        assert [label for label, _ in reasons] == ["host shell fallback"]
+        assert "unprompted" not in reasons[0][1]
+        assert "if no container runtime" in reasons[0][1]
+
+    @pytest.mark.parametrize("mode", ["tiered", "contained", "never"])
+    def test_the_pair_is_no_ask_wherever_the_mode_honours_it(self, mode):
+        """The other side of CE6, so the exception cannot quietly widen to
+        every mode: CE5 honours the opt-in under `tiered` and `contained`,
+        and under `never` nothing asks anyway."""
+        labels = [label for label, _ in
+                  _shipped(shell_approval_mode=mode,
+                           allow_insecure_fallback=True,
+                           auto_approve_fallback=True).unsafe_reasons()]
+        assert "host shell, no ask" in labels
+
+    def test_the_wsl_backend_is_on_the_badge(self):
+        """SS41. Reported when it is ENABLED rather than when it is used:
+        a user who reads the badge after a WSL command has already run has
+        read it too late. Its own pair, not folded into the fallback's --
+        the fallback is the host when there is no container, and this is a
+        Linux userland the agent can ask for while one is running."""
+        reasons = _shipped(allow_wsl_backend=True).unsafe_reasons()
+        assert [label for label, _ in reasons] == ["wsl backend"]
+        label, detail = reasons[0]
+        assert len(label) + 2 <= 20, (label, len(label))
+        assert "not a sandbox" in detail
+        assert "read-only command inside the workspace" in detail
+
+    def test_the_wsl_pair_is_independent_of_the_fallback(self):
+        """Both on reports BOTH, because they are different weakenings and
+        a user who turned one on has not been told about the other."""
+        labels = [label for label, _ in
+                  _shipped(allow_wsl_backend=True,
+                           allow_insecure_fallback=True).unsafe_reasons()]
+        assert labels == ["host shell fallback", "wsl backend"]
 
 
 # ===========================================================================
@@ -392,10 +762,8 @@ class TestTheConsumersRead:
     """Without these, everything above could pass while the gate still read
     `config` -- the vacuity class this record keeps finding."""
 
-    def test_the_shell_gate_reads_the_posture(self, monkeypatch):
+    def test_the_shell_gate_reads_the_posture(self):
         from tools.builtin.shell import _shell_approval_check
-        monkeypatch.setattr(config, "ToolApprovals",
-                            lambda: type("A", (), {"shell": False})())
         with posture.override_for_tests(shell_approval_mode="never"):
             assert _shell_approval_check("shell", {"command": "rm -rf /"}) is False
         with posture.override_for_tests(shell_approval_mode="always"):
@@ -430,3 +798,48 @@ class TestTheConsumersRead:
                                         redact_off_env=False):
             from safety.policy_enforcement import redaction_enabled
             assert redaction_enabled() is False
+
+
+class TestWhatKeepsAToolCallOutOfConfigYaml:
+    """Batch 87. `config_edit.py` and CONFIG_ARCHITECTURE.md both claimed
+    "the file tools refuse the harness install tree" as half the argument
+    for letting `/config` write the nine AUTHORITY keys. They do not, and
+    the claim stood for three batches.
+
+    These pin what actually holds, so the corrected wording cannot rot the
+    next time the path rules move.
+    """
+
+    def test_the_file_tools_deny_only_the_venastine_segment(self):
+        """The measurement that found it. Both directions, because the
+        useful fact is the BOUNDARY, not that something is denied."""
+        import config_schema
+        from tools.builtin.file_ops import _protected_path_error
+
+        assert _protected_path_error(config_schema.CONFIG_PATH) is None
+        assert _protected_path_error(
+            os.path.join(config_schema.HARNESS_ROOT, "config.py")) is None
+        assert _protected_path_error(
+            os.path.join(os.getcwd(), ".venastine", "settings.json"))
+
+    def test_the_write_tools_ship_denied_and_cannot_be_widened(self):
+        """The first control that does hold. D14: `tool_permissions` is the
+        global floor, so nothing at runtime can turn these on."""
+        import config_schema
+
+        permissions = config_schema.current().tool_permissions
+        for tool in ("write", "edit"):
+            assert getattr(permissions, tool) is False, (
+                f"{tool} ships enabled -- the argument for /config writing "
+                f"an AUTHORITY key rests on it not being reachable "
+                f"unattended")
+
+    def test_a_workspace_overlapping_the_harness_is_refused(self):
+        """The second. It is what makes the install tree always OUTSIDE the
+        workspace, so a write there is approval-gated rather than
+        auto-approved by workspace membership."""
+        from security.protected_paths import check_workspace, harness_root
+
+        assert check_workspace(harness_root()) is not None
+        assert check_workspace(
+            os.path.join(harness_root(), "tools")) is not None

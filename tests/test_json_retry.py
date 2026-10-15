@@ -40,18 +40,19 @@ The seven tests below:
 """
 
 import json
+from uuid import uuid4
 
 import pytest
 
 import config
 from core.loop import RunAgentLoop
 from tests.conftest import (
-    drain, make_model_response, make_stream_from_response, pass_stream,
+    drain,
+    make_model_response,
+    make_stream_from_response,
+    pass_stream,
     well_shaped,
 )
-
-from uuid import uuid4
-
 
 # ---------------------------------------------------------------------------
 # ---- Shared helpers -------------------------------------------------------
@@ -267,8 +268,8 @@ def test_resumed_history_contains_failed_assistant_turn(mocker):
     passing that thread_id into a real `continue_conversation` call so
     both halves of the bug fix fire.
     """
-    from tests.conftest import FakeStorage
     from core.reasoning.orchestrator import _run_pass_with_json_retry
+    from tests.conftest import FakeStorage
 
     # Install a FakeStorage over core.memory's storage imports.
     fake_storage = FakeStorage()

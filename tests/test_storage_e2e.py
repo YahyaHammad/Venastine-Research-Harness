@@ -51,13 +51,32 @@ below swaps it back out, points `config.DB_PATH` at tmp_path, reloads
 reloaded module -- then puts all of it back.
 """
 
+import ast
 import contextlib
 import json
 import os
+import pathlib
+import sqlite3
 import sys
+import threading
+from datetime import UTC
+from types import SimpleNamespace
 
 import pytest
 
+# AT MODULE LEVEL, WHICH IS THE POINT. Collection happens before any
+# fixture runs, so these two bind against the root conftest's FAKE
+# sqlmodel like every other test module's imports do. Imported inside a
+# test instead, they would bind while `real_storage` has the REAL
+# sqlmodel installed -- registering PipelineRunRecord on the real
+# metadata and leaving `pipeline_storage` holding the real engine for
+# whichever module runs next in this worker.
+#
+# Neither needs the swap: classify_legacy_pass_threads() takes a DBAPI
+# connection (that is the seam), and _record_pass_thread() is a pure
+# function over a list.
+from core.reasoning.orchestrator import _record_pass_thread
+from core.reasoning.pipeline_storage import classify_legacy_pass_threads
 
 # ---------------------------------------------------------------------------
 # ---- Real sqlmodel, real sqlite --------------------------------------------
@@ -67,7 +86,43 @@ _SWAPPED = ("sqlmodel", "config", "database", "storage")
 
 
 @pytest.fixture(scope="module")
-def real_storage(tmp_path_factory):
+def _schema_cache_is_put_back():
+    """Batch 110. Asserts, AFTER `real_storage` has torn down, that the
+    schema cache is the object this module started with.
+
+    The ordering is the whole design and it is why `real_storage` requests
+    this rather than the other way round: a fixture is finalised in reverse
+    setup order, so being set up FIRST is what buys the last word. By the
+    time this runs, the last test's function-scoped fixtures have restored
+    their own "before" (which is the poisoned value -- see below) and
+    `real_storage` has put the real one back.
+
+    Nothing inside a module can otherwise watch its own module-scoped
+    teardown, and the leak this guards is invisible from inside the module
+    anyway: it costs the NEXT file in the process, not this one. The
+    reproduction, for anyone who wants to see it fail rather than read
+    about it, is `pytest tests/test_storage_e2e.py
+    tests/test_config_edit.py` with the restore in `real_storage` removed
+    -- four failures, none of them here.
+    """
+    import config_schema
+
+    before = config_schema._cached
+    yield
+    assert config_schema._cached is before, (
+        "real_storage left config_schema._cached holding a different "
+        "document. It re-imports `config` under APP_DB_PATH, which runs "
+        "`config_schema.load(force=True)` and refills the cache with a "
+        "db_path in a tmp directory -- so every later test in this process "
+        "compares config.yaml against a database that does not exist. "
+        "`restore_config_schema_cache` in tests/conftest.py cannot catch "
+        "this: it is function-scoped, so the 'before' it captures is taken "
+        "AFTER this module's setup has already poisoned the value."
+    )
+
+
+@pytest.fixture(scope="module")
+def real_storage(tmp_path_factory, _schema_cache_is_put_back):
     """`storage` and `database` running on real SQLModel against a
     throwaway database, with core.memory rebound to them.
 
@@ -88,12 +143,36 @@ def real_storage(tmp_path_factory):
     conftest's docstring claims per-test fixtures already do this swap; that
     claim was stale, and no test doing it is part of why the defect this
     file exists for survived.
+
+    `config_schema._cached` IS PART OF "EVERYTHING", and until batch 110 it
+    was the one thing left out. Re-importing `config` runs
+    `config_schema.load(force=True)` -- deliberately, and `config.py`'s own
+    comment names this fixture as the reason -- so the schema's cache comes
+    back holding `db_path = <tmp>/e2e.db`. `config_schema` is not in
+    `_SWAPPED` and cannot be, so restoring `sys.modules` puts the old
+    `config` module object back without re-reading anything, and the cache
+    keeps the throwaway path for the rest of the process.
+
+    MEASURED, not hypothetical, and not an xdist problem:
+    `pytest tests/test_storage_e2e.py tests/test_config_edit.py` failed FOUR
+    tests before this line existed -- including
+    `TestTheLoaderCacheDoesNotLeakBetweenTests`, which exists to catch
+    exactly this, and `test_the_shipped_file_is_untouched`, whose message
+    accuses the run of writing the real `config.yaml` when nothing had. The
+    full suite passed only because collection is alphabetical and
+    `test_config_edit` sorts before `test_storage_e2e` -- the same sentence
+    `restore_config_schema_cache` in `tests/conftest.py` already uses about
+    a different pair, which is why that fixture cannot help here: it is
+    function-scoped, so it captures its "before" AFTER this module-scoped
+    setup has already run, and faithfully restores the poisoned value.
     """
+    import config_schema
     import core.memory as memory_mod
     from tests.conftest import MEMORY_STORAGE_SYMBOLS
 
     saved_modules = {name: sys.modules.get(name) for name in _SWAPPED}
     saved_db_path = os.environ.get("APP_DB_PATH")
+    saved_schema_cache = config_schema._cached
     saved_symbols = {name: getattr(memory_mod, name)
                      for name in MEMORY_STORAGE_SYMBOLS}
 
@@ -122,8 +201,136 @@ def real_storage(tmp_path_factory):
         os.environ.pop("APP_DB_PATH", None)
     else:
         os.environ["APP_DB_PATH"] = saved_db_path
+    # Beside the variable it was derived from, because they are one fact:
+    # the cache was re-read under that variable and has to go back with it.
+    config_schema._cached = saved_schema_cache
     for name, value in saved_symbols.items():
         setattr(memory_mod, name, value)
+
+
+def test_this_file_declares_no_test_class():
+    """Batch 110. "One file, because there can be only one swap" -- and
+    under `--dist loadscope` that sentence also means ONE GROUP.
+
+    loadscope groups a test by its CLASS where it has one and by its MODULE
+    where it does not. So a `Test*` class in this file is a SECOND group,
+    asking for a second `real_storage`, and pytest tears a module-scoped
+    fixture down when the worker leaves the module -- so the second setup
+    re-imports `storage` against a `SQLModel.metadata` that already has the
+    tables and raises `Table 'conversationthread' is already defined`,
+    which is exactly what this module's docstring has always predicted.
+
+    FOUND BY MEASURING, and it is a scheduling LOTTERY rather than a
+    deterministic break, which is the worst shape for something to be left
+    as a comment: five full runs at `-n auto` (11 workers) put the two
+    groups on different workers and were green, and a run at `-n logical`
+    (16) put both on gw6 and errored the pair. `TestConcurrentWriters` was
+    flattened to module level for this reason; the tests are unchanged.
+    """
+    import ast
+
+    with open(__file__, encoding="utf-8") as handle:
+        tree = ast.parse(handle.read())
+
+    classes = [node.name for node in tree.body
+               if isinstance(node, ast.ClassDef)
+               and node.name.startswith("Test")]
+
+    assert not classes, (
+        f"{classes} would be collected as separate --dist loadscope "
+        f"group(s), each wanting its own `real_storage`. Two of them on "
+        f"one worker raises \"Table 'conversationthread' is already "
+        f"defined\". Write the tests at module level; the helper classes "
+        f"in this file are fine because pytest collects `Test*` only."
+    )
+
+
+#: The scopes that outlive a single test, and so outlive nothing a loadscope
+#: group guarantees. "function" is the default and is the safe one.
+_LONG_SCOPES = ("module", "session", "class", "package")
+
+
+def _long_scoped_fixtures(tree) -> list:
+    """The names in `tree` decorated as a fixture of more than one test.
+
+    Reads the DECORATOR rather than grepping `scope="module"`, so
+    `@pytest.fixture(autouse=True, scope="session")` is found and a string
+    in a docstring is not. A positional scope is not a form pytest accepts,
+    so there is no positional case to handle.
+    """
+    found = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for decorator in node.decorator_list:
+            if not isinstance(decorator, ast.Call):
+                continue
+            target = decorator.func
+            name = getattr(target, "attr", None) or getattr(target, "id", None)
+            if name != "fixture":
+                continue
+            for keyword in decorator.keywords:
+                if (keyword.arg == "scope"
+                        and isinstance(keyword.value, ast.Constant)
+                        and keyword.value.value in _LONG_SCOPES):
+                    found.append(f"{node.name} (scope={keyword.value.value})")
+    return found
+
+
+def test_every_file_with_a_module_scoped_fixture_declares_no_test_class():
+    """The rule above, for every file in the suite rather than this one.
+
+    THE GENERAL FORM, BECAUSE THE COUNT COULD NOT BE KEPT TRUE (batch 151,
+    S19-01). Four sentences in this tree said `real_storage` was the
+    suite's only non-function-scoped fixture, which stopped being true in
+    batch 110 when `_schema_cache_is_put_back` arrived beside it; batch 128
+    corrected two of six copies and missed four, because it grepped the
+    SENTENCE and the four phrase it differently. A reader who adds a third
+    such fixture and greps for whether that is allowed should get the rule,
+    and the rule should be enforced for the file they are writing -- not
+    for the one that happened to have the fixtures in 2026.
+
+    `AGENTS.md` states the rule and this is its mechanism:
+    "If you add a module- or session-scoped fixture, its file must hold no
+    test class."
+
+    The domain is asserted in both directions, which is S19-04's finding in
+    this same batch: a walk that finds no files and a walk that finds no
+    fixtures both pass an `assert not offenders` while checking nothing.
+    """
+    tests_dir = pathlib.Path(__file__).resolve().parent
+    paths = sorted(tests_dir.glob("test_*.py"))
+    assert len(paths) > 20, (
+        f"the scan found {len(paths)} test modules under {tests_dir}, so it "
+        f"is looking in the wrong place and would pass whatever this suite "
+        f"contains")
+
+    owners, offenders = {}, {}
+    for path in paths:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        fixtures = _long_scoped_fixtures(tree)
+        if not fixtures:
+            continue
+        owners[path.name] = fixtures
+        classes = [node.name for node in tree.body
+                   if isinstance(node, ast.ClassDef)
+                   and node.name.startswith("Test")]
+        if classes:
+            offenders[path.name] = (fixtures, classes)
+
+    assert owners, (
+        "no file in the suite declares a module- or session-scoped fixture, "
+        "which has not been true since batch 110 -- the decorator shape "
+        "changed and this gate is now checking nothing")
+
+    assert not offenders, (
+        f"these files hold a fixture that outlives one test AND a `Test*` "
+        f"class, so --dist loadscope makes the class a second group and a "
+        f"worker that takes both sets the fixture up twice: {offenders}. "
+        f"Write those tests at module level, as this file does, or move "
+        f"the fixture to a conftest. The failure is a scheduling LOTTERY "
+        f"rather than a certainty, which is why it is checked here instead "
+        f"of being left to a run that puts the two groups on one worker.")
 
 
 class _Resp:
@@ -376,8 +583,81 @@ def test_the_migration_runs_against_a_real_database(real_storage):
         connection.close()
 
     assert "pinned" in columns
+    # Batch 91. The failure column, added to existing databases the same way.
+    assert "error" in columns
+    # ROADMAP_v3 §49 (SS5). The harness-written mark, the same way again.
+    assert "harness" in columns
     assert database.ensure_columns(
         database.engine.raw_connection(), database._declared_columns()) == []
+
+
+def test_a_harness_row_survives_a_write_and_a_read(real_storage):
+    """ROADMAP_v3 §49 (SS5), on real SQLite, because the claim is about a
+    COLUMN. A background session's result reaches the model as a user-role
+    row the HARNESS wrote: it must come back marked, carry no tool_call_id
+    (pinned_through reads one as an answered call), resume into the same
+    shape a live memory holds, and count as a turn -- it starts one."""
+    import storage
+    from core.memory import ConversationMemory, append_harness_row
+
+    wake = {"kind": "session_wake",
+            "sessions": [{"id": "s1", "call_id": "call_9", "shape": "exited"}]}
+    killed = {"kind": "session_killed_at_quit",
+              "sessions": [{"id": "s2", "call_id": "call_10",
+                            "shape": "killed"}]}
+    memory = ConversationMemory()
+    memory.add_user_message("run the suite in the background")
+    memory.add_harness_message("[harness] s1 exited with code 0.", wake)
+    append_harness_row(memory.thread_id, "[harness] s2 was killed at quit.",
+                       killed)
+
+    history = storage.archive_history(memory.thread_id)
+    assert history == [
+        {"role": "user", "content": "run the suite in the background"},
+        {"role": "user", "content": "[harness] s1 exited with code 0.",
+         "harness": wake},
+        {"role": "user", "content": "[harness] s2 was killed at quit.",
+         "harness": killed},
+    ]
+    resumed = ConversationMemory(thread_id=memory.thread_id)
+    assert resumed.messages == history
+    assert resumed.completed_turns() == 2
+
+
+def test_a_failed_run_is_recorded_on_the_user_row_that_started_it(
+        real_storage):
+    """Batch 91, on real SQLite: the claim is about a COLUMN, which is what
+    this file is for.
+
+    The NEWEST user row, because every entry point writes the message that
+    starts a run before the loop begins. Present in the neutral shape only
+    on that row, so every other message reconstructs exactly as it did --
+    and a resumed memory carries it the way a live one does."""
+    import storage
+    from core.memory import ConversationMemory
+
+    failure = "APIError: The service is temporarily unavailable."
+    memory = ConversationMemory()
+    memory.add_user_message("first")
+    memory.add_user_message("second")
+    memory.mark_turn_failed(failure)
+
+    history = storage.archive_history(memory.thread_id)
+    assert history == [
+        {"role": "user", "content": "first"},
+        {"role": "user", "content": "second", "error": failure},
+    ]
+    assert memory.messages[-1]["error"] == failure
+    resumed = ConversationMemory(thread_id=memory.thread_id)
+    assert resumed.messages == history
+
+
+def test_marking_a_thread_with_no_user_row_changes_nothing(real_storage):
+    from uuid import uuid4
+
+    import storage
+
+    assert storage.mark_turn_failed(uuid4(), "x") is False
 
 
 def test_a_migrated_column_matches_the_fresh_schema_exactly(real_storage,
@@ -978,9 +1258,9 @@ def test_replaying_a_compacted_thread_shows_the_original_first_message(
     """
     import importlib
 
-    from core import compaction
-    from core.memory import ConversationMemory, SUMMARY_PREFIX
     import core.replay as replay_module
+    from core import compaction
+    from core.memory import SUMMARY_PREFIX, ConversationMemory
 
     # core/replay.py bound archive_history at import, against the fake
     # storage every other module was rebound away from.
@@ -1000,7 +1280,7 @@ def test_replaying_a_compacted_thread_shows_the_original_first_message(
 
     assert entries[0][0] == "user"
     assert "THE ORIGINAL FIRST QUESTION" in entries[0][1]
-    assert not any(SUMMARY_PREFIX in text for _r, text, _l in entries), \
+    assert not any(SUMMARY_PREFIX in text for _r, text, _l, _c in entries), \
         "a replay must never render the summary as something the user said"
 
 
@@ -1022,9 +1302,9 @@ def test_a_thread_summary_does_not_compact_the_thread(real_storage, compactor):
     """
     import importlib
 
+    import core.replay as replay_module
     from core import compaction
     from core.memory import ConversationMemory
-    import core.replay as replay_module
 
     importlib.reload(replay_module)
 
@@ -1171,3 +1451,398 @@ def test_a_thread_with_no_messages_sorts_by_creation(real_storage):
 def _thread_activity(real_storage, thread_id):
     row = real_storage.get_thread(thread_id)
     return row["last_activity_at"]
+
+# ---------------------------------------------------------------------------
+# ---- §47: the lineage columns, and the query that walks them --------------
+# ---------------------------------------------------------------------------
+
+def test_a_child_thread_records_who_spawned_it(real_storage):
+    """The three columns end to end. Before them the only trace of the
+    edge was the child's uuid stringified into the parent's tool-result
+    row -- a repr inside a JSON blob, which nothing can query and replay
+    skips outright (T4)."""
+    import storage
+
+    parent = storage.create_thread()
+    child = storage.create_thread(
+        storage.THREAD_KIND_SUBAGENT, parent_thread_id=parent,
+        parent_call_id="call_7", agent_name="explore")
+
+    row = storage.get_thread(child)
+    assert row["parent_thread_id"] == parent
+    assert row["parent_call_id"] == "call_7"
+    assert row["agent_name"] == "explore"
+    assert storage.get_thread(parent)["parent_thread_id"] is None
+
+
+def test_child_threads_returns_this_parents_children_oldest_first(real_storage):
+    """Oldest first because that is the order the calls happened in, so a
+    reader comparing this against the transcript walks both the same way."""
+    import storage
+
+    parent = storage.create_thread()
+    other = storage.create_thread()
+    first = storage.create_thread(
+        storage.THREAD_KIND_SUBAGENT, parent_thread_id=parent,
+        parent_call_id="call_1", agent_name="explore")
+    second = storage.create_thread(
+        storage.THREAD_KIND_SUBAGENT, parent_thread_id=parent,
+        parent_call_id="call_2", agent_name="review")
+    storage.create_thread(
+        storage.THREAD_KIND_SUBAGENT, parent_thread_id=other,
+        parent_call_id="call_3", agent_name="explore")
+
+    kids = storage.child_threads(parent)
+
+    assert [k["id"] for k in kids] == [first, second], (
+        "child_threads returned the wrong set or the wrong order")
+    assert [k["parent_call_id"] for k in kids] == ["call_1", "call_2"]
+    assert [k["agent_name"] for k in kids] == ["explore", "review"]
+
+
+def test_children_written_on_one_tick_still_come_back_in_a_fixed_order(
+        real_storage):
+    """`_ordered_rows`' rule, at the one query that can actually tie.
+
+    That rule reads: timestamps have microsecond resolution so ties are
+    unlikely, but "unlikely" is not an ordering guarantee. Four other
+    queries in storage.py carry `(created_at, id)` because of it; this one
+    was added with `created_at` alone -- and §47's NA9 is what makes three
+    `create_thread` calls land from three threads at once, so this is where
+    a tie stopped being merely unlikely.
+
+    The clock is FROZEN rather than raced, because what is under test is
+    the ORDER BY, and a test that hoped for a collision would pass on a
+    machine whose clock is coarse and prove nothing anywhere else.
+    """
+    from datetime import datetime
+    from uuid import UUID
+
+    import storage
+
+    parent = storage.create_thread()
+    one_tick = datetime(2026, 9, 10, 12, 0, 0, tzinfo=UTC)
+    # Ids chosen, and written in DESCENDING order, so insertion order and id
+    # order disagree. Left to uuid4 they would agree one time in six and the
+    # test would pass against the unfixed query on those runs.
+    ids = [UUID(f"0000000{n}-0000-4000-8000-000000000000") for n in (3, 2, 1)]
+    with storage.Session(storage.engine) as session:
+        for n, tid in enumerate(ids):
+            session.add(storage.ConversationThread(
+                id=tid, created_at=one_tick,
+                kind=storage.THREAD_KIND_SUBAGENT, parent_thread_id=parent,
+                parent_call_id=f"call_{n}", agent_name="explore"))
+        session.commit()
+
+    kids = [k["id"] for k in storage.child_threads(parent)]
+
+    assert kids == sorted(ids, key=str), (
+        f"child_threads returned {kids}; with the timestamps tied, the id "
+        "is what has to decide, and it has to decide the same way twice")
+    assert kids == [k["id"] for k in storage.child_threads(parent)], (
+        "two reads of one parent's children disagreed about their order")
+
+
+def test_two_spawns_of_one_agent_are_told_apart_by_their_call(real_storage):
+    """THE reason the call id is stored at all. A goal turn can spawn
+    `explore` twice, so the agent name identifies the roster entry and
+    not the run -- only the call id ties one child to one line."""
+    import storage
+
+    parent = storage.create_thread()
+    first = storage.create_thread(
+        storage.THREAD_KIND_SUBAGENT, parent_thread_id=parent,
+        parent_call_id="call_1", agent_name="explore")
+    second = storage.create_thread(
+        storage.THREAD_KIND_SUBAGENT, parent_thread_id=parent,
+        parent_call_id="call_2", agent_name="explore")
+
+    by_call = {k["parent_call_id"]: k["id"] for k in
+               storage.child_threads(parent)}
+
+    assert by_call == {"call_1": first, "call_2": second}
+
+
+def test_a_grandchild_hangs_off_its_own_parent(real_storage):
+    """Depth 2 is reachable (SUBAGENT_MAX_DEPTH), so the edge has to be a
+    tree rather than one level of children."""
+    import storage
+
+    root = storage.create_thread()
+    child = storage.create_thread(
+        storage.THREAD_KIND_SUBAGENT, parent_thread_id=root,
+        parent_call_id="call_1", agent_name="explore")
+    grandchild = storage.create_thread(
+        storage.THREAD_KIND_SUBAGENT, parent_thread_id=child,
+        parent_call_id="call_9", agent_name="review")
+
+    assert [k["id"] for k in storage.child_threads(root)] == [child]
+    assert [k["id"] for k in storage.child_threads(child)] == [grandchild]
+
+
+def test_a_thread_that_spawned_nothing_has_no_children(real_storage):
+    """Most threads. Empty rather than an error, matching replay_entries'
+    rule for a thread with no messages."""
+    import storage
+
+    assert storage.child_threads(storage.create_thread()) == []
+
+
+def test_child_threads_does_not_filter_by_kind(real_storage):
+    """Deliberate. Which kinds exist is §27's question, and a filter here
+    would need widening the moment a sixth source appears -- which is
+    exactly how §27's own picker missed the compactor."""
+    import storage
+
+    parent = storage.create_thread()
+    subagent = storage.create_thread(
+        storage.THREAD_KIND_SUBAGENT, parent_thread_id=parent,
+        parent_call_id="call_1", agent_name="explore")
+    a_pass = storage.create_thread(
+        storage.THREAD_KIND_RESEARCH_PASS, parent_thread_id=parent,
+        parent_call_id=None, agent_name=None)
+
+    assert {k["id"] for k in storage.child_threads(parent)} == {subagent, a_pass}
+
+
+def test_the_lineage_columns_migrate_onto_a_database_that_predates_them(
+        real_storage, tmp_path):
+    """M7's contract for the three §47 columns: additive, nullable, and
+    never backfilled -- so every thread written before them reads as one
+    nothing spawned, which is what it was."""
+    import sqlite3
+
+    import database
+
+    old = tmp_path / "predates.db"
+    connection = sqlite3.connect(str(old))
+    connection.execute(
+        "CREATE TABLE conversationthread (id VARCHAR PRIMARY KEY, "
+        "created_at DATETIME, extra_data JSON, kind VARCHAR)")
+    connection.execute(
+        "INSERT INTO conversationthread VALUES "
+        "('11111111-1111-1111-1111-111111111111', '2026-01-01', '{}', 'chat')")
+    connection.commit()
+
+    added = database.ensure_columns(connection, database._declared_columns())
+
+    columns = {row[1] for row in
+               connection.execute("PRAGMA table_info(conversationthread)")}
+    existing = connection.execute(
+        "SELECT parent_thread_id, parent_call_id, agent_name "
+        "FROM conversationthread").fetchone()
+    connection.close()
+
+    for name in ("parent_thread_id", "parent_call_id", "agent_name"):
+        assert f"conversationthread.{name}" in added, (
+            f"{name} was not added to a database that predates it")
+        assert name in columns
+    assert existing == (None, None, None), (
+        "the migration backfilled a value onto a row nothing spawned")
+
+
+# ---------------------------------------------------------------------------
+# ---- Concurrent writers (ROADMAP_v2 §47 slice 8, hazard 7) ----------------
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# ---- NA9: several subagents writing at once -------------------------------
+# ---------------------------------------------------------------------------
+#
+# NA9 lets several subagents run at once, and each writes its own thread.
+# SQLite allows one writer at a time, so the question is whether the
+# engine's configuration turns that into waiting or into failing.
+#
+# HERE, because this is the only file in the suite that meets a real
+# database -- the root conftest fakes `sqlmodel` before collection, and
+# there can be only one swap. A FakeStorage version of these tests could
+# not fail: the defect is in SQLite's locking, which the fake does not
+# have.
+#
+# EIGHT WRITERS, NOT THREE, and that is the whole discriminating choice.
+# Measured on the shipped engine: at three -- SUBAGENT_MAX_PARALLEL -- a
+# rollback-journal database does NOT lock, so a test at the real ceiling
+# passes with or without the fix and proves nothing. Eight is where the
+# unfixed configuration produced "database is locked", so it is where a
+# test can tell the two apart. The gap between them is also the reason WAL
+# is on at all: the ceiling is a tunable constant, and the failure it walks
+# into when raised is a lost message rather than a slow one.
+#
+# NOT A CLASS, since batch 110, and the reason is the whole file's: one
+# swap per process. `--dist loadscope` groups by CLASS where there is one
+# and by MODULE where there is not, so a class in this file is a SECOND
+# group wanting a second `real_storage` -- and the two landing on one
+# worker raises "Table 'conversationthread' is already defined" from the
+# re-import. Pinned below by
+# `test_this_file_declares_no_test_class`.
+
+def test_the_engine_is_configured_for_them(real_storage):
+    """The two pragmas, asked of a live connection rather than of the
+    source. `journal_mode` is persistent in the FILE, so reading it back
+    is the only way to know the listener actually reached the database
+    this process opened."""
+    from sqlalchemy import text
+
+    import database
+
+    with database.engine.connect() as conn:
+        assert conn.execute(
+            text("PRAGMA journal_mode")).scalar().lower() == "wal", (
+            "the database is not in WAL mode; concurrent subagent "
+            "writes will contend on a rollback journal")
+        assert conn.execute(
+            text("PRAGMA busy_timeout")).scalar() >= 5000, (
+            "the busy timeout is below the 5000ms the concurrency "
+            "measurements were taken at")
+
+def test_eight_concurrent_writers_all_land(real_storage):
+    """Each writer does what a child run does: create its own thread,
+    then append messages to it. A barrier starts them together, so the
+    contention is real rather than incidental.
+
+    Asserts the ROWS, not merely the absence of an exception. A writer
+    that swallowed a failure would leave a short thread, and "no
+    exception reached the test" is not the same claim as "every message
+    the model was told about is in the archive".
+    """
+    import storage
+
+    writers, rows = 8, 60
+    barrier = threading.Barrier(writers, timeout=30)
+    failures, made = [], {}
+    guard = threading.Lock()
+
+    def writer(n):
+        try:
+            barrier.wait()
+            thread_id = storage.create_thread(
+                kind=storage.THREAD_KIND_SUBAGENT)
+            for i in range(rows):
+                # role "user", so the archive's assistant decoder is
+                # not handed a bare string. The claim here is about
+                # concurrent WRITES; the payload shape is another
+                # test's subject.
+                storage.save_message(
+                    thread_id, "user", "w%d r%d" % (n, i))
+            with guard:
+                made[n] = thread_id
+        except Exception as e:            # noqa: BLE001 -- the measurement
+            with guard:
+                failures.append((n, repr(e)))
+
+    threads = [threading.Thread(target=writer, args=(n,))
+               for n in range(writers)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(60)
+
+    assert failures == [], (
+        f"{len(failures)} of {writers} concurrent writers failed: "
+        f"{failures[:3]}")
+    assert len(made) == writers
+
+    for n, thread_id in made.items():
+        archived = storage.archive_history(thread_id)
+        assert len(archived) == rows, (
+            f"writer {n} wrote {len(archived)} of {rows} rows; a "
+            "message the model was told about is missing from the "
+            "archive")
+
+
+# ---------------------------------------------------------------------------
+# ---- S09-01: the two spellings of one thread id ---------------------------
+# ---------------------------------------------------------------------------
+
+def test_a_thread_id_is_stored_in_a_spelling_str_does_not_produce(
+        real_storage):
+    """The premise the whole of tier 1 rests on, and the one claim in it
+    that only a real database can answer.
+
+    `ConversationThread.id` is a `UUID`, and sqlmodel 0.0.39 over
+    SQLAlchemy 2.0.51 stores it as 32 hex characters with no dashes --
+    while `str(thread_id)`, which is what every producer and artifact in
+    this project writes, is the dashed 36-character form. Nothing in the
+    suite's fake sqlmodel has a storage format, so this asymmetry was
+    invisible to all 44 tests in test_thread_legibility.py, which
+    hand-wrote one string on both sides of the comparison.
+
+    THIS IS A PIN, NOT A CURIOSITY. `classify_legacy_pass_threads`
+    normalises the recorded ids to hex and leaves the row ids alone, so
+    this sentence is the half of that comparison which is not expressed
+    in code. A library upgrade that changes the stored spelling fails
+    HERE, with the function named, rather than silently emptying tier 1
+    again.
+    """
+    thread_id = real_storage.create_thread()
+
+    connection = sqlite3.connect(os.environ["APP_DB_PATH"])
+    try:
+        stored = {row[0] for row in
+                  connection.execute("SELECT id FROM conversationthread")}
+    finally:
+        connection.close()
+
+    assert thread_id.hex in stored, (
+        "the database no longer holds the hex spelling. "
+        "classify_legacy_pass_threads normalises the RECORDED ids to hex "
+        "and compares the row ids as they come, which is correct only "
+        "while this holds -- it is pinned here instead of being branched "
+        "on, because no build of this project has written anything else "
+        "(sqlmodel==0.0.39 since the pin was introduced)")
+    assert str(thread_id) not in stored, (
+        "the database holds the dashed spelling too -- which would make "
+        "the literal comparison tier 1 used until batch 154 correct")
+
+
+def test_a_recorded_pass_thread_is_relabelled_with_both_sides_real(
+        real_storage):
+    """S09-01 end to end: the thread id comes from `create_thread` on
+    real SQLite, the recorded id comes from the real
+    `_record_pass_thread`, and the classification is the real one. Before
+    batch 154 this relabelled 0 rows -- `'a-b' in {'ab'}` -- and the
+    thread stayed in the picker.
+
+    The run row is inserted with raw SQL rather than through
+    `create_pipeline_run`: `core.reasoning.pipeline_storage` is not in
+    `_SWAPPED` (it binds `database.engine` at import, against the fake),
+    and nothing is gained by putting it there. The two spellings are what
+    this test is about, and both of those come from the real producers.
+
+    AN ANCIENT WINDOW, deliberately. The database is module-scoped and
+    shared, so a window around "now" would sweep every other test's chat
+    threads into the research_pass kind through TIER 2 and prove nothing
+    about tier 1.
+    """
+    thread_id = real_storage.create_thread()
+    recorded = []
+    _record_pass_thread("Pass 1", SimpleNamespace(thread_id=thread_id),
+                        recorded)
+    assert recorded == [{"pass": "Pass 1", "thread_id": str(thread_id)}]
+
+    connection = sqlite3.connect(os.environ["APP_DB_PATH"])
+    try:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS pipelinerunrecord ("
+            " id VARCHAR PRIMARY KEY, started_at DATETIME,"
+            " finished_at DATETIME, pass_threads_json TEXT)")
+        connection.execute(
+            "INSERT INTO pipelinerunrecord"
+            " (id, started_at, finished_at, pass_threads_json)"
+            " VALUES ('s09-01', '1999-01-01 00:00:00.000000',"
+            " '1999-01-01 00:00:30.000000', ?)",
+            (json.dumps(recorded),))
+        connection.commit()
+
+        relabelled = classify_legacy_pass_threads(connection)
+
+        kind = connection.execute(
+            "SELECT kind FROM conversationthread WHERE id = ?",
+            (thread_id.hex,)).fetchone()[0]
+    finally:
+        connection.close()
+
+    assert relabelled == 1, (
+        f"tier 1 relabelled {relabelled} rows: the run recorded "
+        f"{str(thread_id)!r} and the database holds {thread_id.hex!r}")
+    assert kind == "research_pass"

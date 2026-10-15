@@ -47,10 +47,15 @@ class AgentManager:
             set(agent.allowed_tools)
             if agent.allowed_tools is not None else None
         )
+        targets = (
+            set(agent.spawn_targets)
+            if agent.spawn_targets is not None else None
+        )
         return ToolContext(
             allowed_tools=allowed,
             approval_overrides=dict(agent.approval_overrides),
             subagent_depth=0,
+            spawn_targets=targets,
         )
 
     @staticmethod
@@ -76,7 +81,31 @@ class AgentManager:
 
         Union rather than replace. Only True entries carry -- a False is
         indistinguishable from absent under D14's OR, so unioning can
-        only ever tighten, which is what makes it safe to do silently."""
+        only ever tighten, which is what makes it safe to do silently.
+
+        BOTH SIDES ARE FILTERED, and batch 150 is why. The parent's dict
+        was filtered and the agent's was merged over it raw, so a `False`
+        in the child's frontmatter OVERWROTE the parent's `True` and the
+        sentence above was false of the line below it: a parent that
+        prompts on every search spawned a child that did not, which is
+        the exact escalation the paragraph before this one describes.
+        It did not heal one hop further out either -- the next `if v`
+        dropped the False rather than restoring the True, so the
+        tightening was gone permanently rather than suspended for one
+        run. Three of the four quadrants had tests; the one the code got
+        wrong was the one with none.
+
+        The cost is not only the gate. `candidate_approvals` reads this
+        same dict, and it is BOTH the sign-off notice and the grant the
+        child receives -- measured, the loosened tool left the candidate
+        list entirely, so the user was neither asked at call time nor
+        told at sign-off time.
+
+        `active_context` needs no filter and deliberately has none: at
+        depth 0 there is no parent to overwrite, a False is inert under
+        D14's OR, and the next hop's filter drops it. Measured both
+        ways rather than reasoned about, because "the other composer
+        looks similar" is how a fix grows past its finding."""
         parent = parent_context or ToolContext()
         if agent.allowed_tools is not None:
             own = set(agent.allowed_tools)
@@ -90,11 +119,32 @@ class AgentManager:
                 if parent.allowed_tools is not None else None
             )
         overrides = {k: v for k, v in parent.approval_overrides.items() if v}
-        overrides.update(agent.approval_overrides)
+        overrides.update(
+            {k: v for k, v in agent.approval_overrides.items() if v})
+        # SPAWN TARGETS COMPOSE THE SAME WAY, for C6's own reason one
+        # field further out. The refusal that reads this field is checked
+        # against the context a run holds, so a field that applied only at
+        # depth 0 would be escapable by nesting: an agent forbidden to
+        # reach `build` could spawn something that was not, and have that
+        # one spawn it. Intersection makes the restriction survive the
+        # hop, and an agent declaring none inherits its parent's roster
+        # unchanged rather than widening back to everything.
+        if agent.spawn_targets is not None:
+            own_targets = set(agent.spawn_targets)
+            child_targets = own_targets & (
+                parent.spawn_targets if parent.spawn_targets is not None
+                else own_targets
+            )
+        else:
+            child_targets = (
+                set(parent.spawn_targets)
+                if parent.spawn_targets is not None else None
+            )
         return ToolContext(
             allowed_tools=child_allowed,
             approval_overrides=overrides,
             subagent_depth=parent.subagent_depth + 1,
+            spawn_targets=child_targets,
         )
 
     @staticmethod
@@ -128,6 +178,19 @@ class AgentManager:
         `spawn_subagent` and `remember`, the two tools R4 and M17 exist to
         keep out of a grant, and R4's argument is ABOUT this sign-off.
         Now both read one per-tool declaration.
+
+        EMPTY FOR EVERY SHIPPED AGENT, on every install, and that is a
+        ruled scope rather than a gap (TECHNICAL_DEBT 83, batch 139).
+        The pool this returns from is the gated-with-no-approval_check
+        set -- the MCP tools plus `write_project_doc` -- and the
+        intersection with `child_context` is what empties it: all six
+        spawnable shipped agents narrow `allowed_tools` to built-ins,
+        and an agent file cannot name `mcp__server__tool` for a server
+        that did not exist when it was written. So the sign-off's
+        PICKER branch belongs to an agent that declines to narrow, or
+        one naming a gated tool outright, which is a user- or
+        project-tier file. A shipped spawn gets the no-candidates
+        branch, which `tui/screens.py` builds deliberately.
 
         The LOOSE half of the pair: GRANT_SIGNOFF_ONLY passes here and is
         refused by the pipeline. A human answering in the moment, about

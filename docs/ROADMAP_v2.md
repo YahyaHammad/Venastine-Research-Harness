@@ -166,11 +166,16 @@ the namespace list in `AGENTS.md`.
 - **§36. Compaction's boundaries — trigger, notice, pin, summarizer input** — BUILT (#43, #44, #45, #89, #90, #92, #172; closes units 4 and 11)
 - **§37. MCP's edges — disclosure, SSE, teardown, catalogue** — BUILT (#60, #61, #62, #63, #64, #65; closes unit 7)
 - **§38. Live output — progressive rendering and visible thinking** — BUILT (the transcript buffered a whole turn; thinking was never captured at all)
+- **§39. The last tokeniser disagreement, and the first word of a compound command** — BUILT (the classifier and the executor tokenised differently, so a quoted host path auto-approved)
+- **§40. The security posture — bound once, and said out loud** — BUILT (every flag was read live, so a test could move the posture after the decision was made)
 - **§41. The transcript's vocabulary — colour, markers, and what an edit looks like** — BUILT (three kinds of line shared one grey; the `warning` role was unreachable; `write`/`edit` showed 60 characters of payload instead of a change)
 - **§42. The consent surface — what a modal shows, and what the agent says it is doing** — BUILT (the permission modal parsed console markup out of the payload it exists to show; `shell` gained a display-only `rationale`)
 - **§43. Who is speaking, and what the session remembers** — BUILT (the `venastine ›` label rendered after a turn's reasoning; `/new` left the previous conversation on screen; a `/model` switch was forgotten at exit; workspace trust was reported broken and is not)
 - **§44. The provider it is on, the reasoning it kept, and the project it is in** — BUILT (a remembered `/model` pair left the launch key warning naming the wrong provider; reasoning was never persisted, never echoed, and — measured here — never rendered at all on Anthropic; `/init` scaffolded the harness instead of the workspace; the compaction trigger was a flat 40k on every window)
 - **§45. What a source is worth, and how close it actually is** — **(BUILT: both slices)** (the two scores per cited source were model self-reports that nothing checked and nothing consumed; no source text survived the pass, so nothing could have)
+- **§46. Where a command runs, and whether anyone can see it** — BUILT (the INERT tier executed on the host against its own definition, and the model was never told where anything ran)
+- **§47. Navigable agents — the subagent thread you can open** — BUILT (a child's output drained internally where no shell could see it; parallel spawns raced the panel)
+- **§48. Code in the sandbox — what `tiered` approves, and the mode that keeps the old answer** — BUILT (G4 auto-approved any contained command without network, so `python -c`, scripts, `pytest` and `make` ran unasked, and code read `.venastine/` past the token check)
 - **Open Questions — None Remaining** (Rev. 3 — all decisions locked; verification items only)
 - **Why these calls, not just what they are** (Rev. 3 — the reasoning patterns behind several decisions above)
 
@@ -1640,6 +1645,8 @@ Open question to settle at build time: whether the list is thread-scoped state i
 
 **Slice 1 status:** AC1 ✓ (one mechanism, three consumers — approval, review, sign-off — plus §24's two). AC1b ✓ (`SubagentSignoffScreen`, the subset intersected with the offered candidates, and S1's scope amended per J8).
 
+**The SCOPE of AC1b, settled by owner ruling in batch 139 and measured (`docs/TECHNICAL_DEBT.md` 83).** The subset picker is for **operator-configured installs**, and no agent this project ships reaches it. `candidate_approvals` intersects the candidate pool with the CHILD's reachable tools, and all six spawnable shipped agents narrow `allowed_tools` to built-ins — so `SubagentSignoffScreen` takes its no-candidates branch ("Run `{agent}`?" plus "needs no approval-gated tools") for every spawn the shipped roster can produce. Measured: with every tool globally enabled, and again with an MCP server configured, all six still offer nothing; what reaches the picker is an agent that declines to narrow (`allowed_tools` absent, which is the shape `grill-me` had) or one naming a gated tool outright, and both are user- or project-tier files. The population the picker was built for is the MCP tools — and an agent file cannot name `mcp__server__tool` for a server that did not exist when it was written, which is the whole mechanism in one sentence. AC1b is met as built; it is the shipped ROSTER that declares nothing to pick, and that is a deliberate scope rather than a gap. Pinned by `test_request_payload_offers_nothing_for_every_shipped_agent` and `test_the_picker_is_reachable_only_for_an_agent_that_declines_to_narrow`.
+
 **Slice 2 status:** ACs 2–4 ✓. `ask_user` and `todo_write`, a new `QUESTION` kind whose answer is three-way (an option set / free text, a deferral, or nothing), and a TUI panel fed by a `notice` kind. **P1's deferred `LoopEvent`-vs-tagged-union decision is settled by J10 and needed neither option:** `notice` is already kind-discriminated, so the todo event added no field and no type, and `test_loop_event_did_not_grow_a_seventh_field` is untouched.
 
 **Out of slice 2, recorded rather than dropped:** the CLI slash-command layer §21c's M21 deferred here (no AC, no decisions record, and neither tool needs it — the CLI reaches both through `build_attended_provider`), and the convergence of the four `with_*` prompt tiers (J11).
@@ -1940,7 +1947,7 @@ sharing the policy.**
 | G1 | What a classification produces | A capability **set** (`CommandProfile`), not a trust level. `tier` survives only as a label for the prompt and the record; policy branches on capabilities and never on the tier name | Linear tiers order harms that are not comparable — `rm -rf /workspace` (writes, no network) and `curl https://x` (no writes, network) are different harms, not more and less of one thing. Ranking them answers a question nobody asked, and a new dimension later renumbers every tier. A set lets policy read exactly the dimension it cares about. If you find yourself writing `if profile.tier == …` in policy, the field you actually wanted is missing. |
 | G2 | How arguments are checked | Every token after the first is read as a path and required to resolve inside the workspace; for a token containing `=`, the tail after the first `=` as well. **Nothing parses.** | `_is_inert` is sound *because* it never parses — it rejects every metacharacter rather than understanding one. A classifier that starts interpreting shell syntax is a shell parser, and a parser that is wrong auto-approves. So the rule does not know a flag from an operand: `-la` passes only because it is relative and therefore lands inside the workspace. False positives are the designed error direction — `grep /etc/passwd notes.txt` searches for a string that looks like a path and costs one prompt. The `=` clause is the single exception, because `--file=/etc/x` reads as inside the workspace taken whole while the path it names is not. |
 | G3 | Which setting is the gate | `SHELL_APPROVAL_MODE` (`always` / `tiered` / `never`), shipping **`tiered`**, with `ToolApprovals.shell` flipped to `False` and kept as the **ratchet** — `True` still forces `always` | These move together or neither means anything. `approval_needed` ORs the tool's own check with `requires_approval`, and **both** read `ToolApprovals.shell`, so while it was `True` the check could never lower the answer and `tiered` was unreachable dead code. The field stays because D24 requires it and because D14's one-way ratchet needs somewhere to live: config or an agent override can still only tighten. Exactly one thing gets looser than the pre-§28 default — read-only commands whose every argument is inside the workspace — and `ToolApprovals.read` is already `False`, so `read` on a workspace file was unprompted while `cat` on the same file prompted. That inconsistency goes away; everything else is unchanged or tighter. |
-| G4 | What `tiered` auto-approves | INERT (read-only, workspace-scoped) and CONTAINED (Docker confirmed up, no network). HOST_READ, CONTAINED_NET and UNKNOWN ask | CONTAINED's damage ceiling is "corrupt the workspace", which `write` and `edit` already have unprompted (`ToolApprovals.write = False`), capped at 1 CPU / 1 GB / 200 pids / 60 s / no network / no host filesystem. Auto-approving only INERT would make `tiered` behave like `always` for real work, so users would set `never` and lose the whole benefit. Auto-approving CONTAINED_NET would be hole 2 renamed rather than closed — `_needs_network` matches the first word only, so `curl … \| sh` qualifies. |
+| G4 | What `tiered` auto-approves *(amended by §48 CE1: `tiered` now approves INERT alone, and the rule below is the `contained` mode, CE2)* | INERT (read-only, workspace-scoped) and CONTAINED (Docker confirmed up, no network). HOST_READ, CONTAINED_NET and UNKNOWN ask | CONTAINED's damage ceiling is "corrupt the workspace", which `write` and `edit` already have unprompted (`ToolApprovals.write = False`), capped at 1 CPU / 1 GB / 200 pids / 60 s / no network / no host filesystem. Auto-approving only INERT would make `tiered` behave like `always` for real work, so users would set `never` and lose the whole benefit. Auto-approving CONTAINED_NET would be hole 2 renamed rather than closed — `_needs_network` matches the first word only, so `curl … \| sh` qualifies. |
 | G5 | Where "we could not tell" lands | A separate `measured` field on the profile, gating all three containment branches | The `tier` label was standing in for this and could not carry it. Without the field, a call the classifier could not characterise is auto-approved *by the containment argument*, because every capability test passes vacuously on a profile that knows nothing — the exact vacuity class this audit keeps finding. It is also where batch 9's "the model is not sure" has to land, somewhere containment cannot argue it away. |
 | G6 | Protecting `.venastine/` | A nested `:ro` bind mount, conditional on `.venastine` resolving **inside** the workspace **and** already existing | Both halves are load-bearing and both were measured. `.venastine/` resolves from the project path while the sandbox mounts `AGENT_WORKSPACE` (default `./workspace`), so in the default layout they are siblings and Docker cannot reach it at all — the mount matters only when someone points the workspace at a directory containing one. And Docker **creates** a missing bind source as a root-owned directory on the host: an empty `.venastine/` flips `is_trusted()` from `True` to `False` by itself, so an unconditional mount would conjure a directory and then make the harness prompt the user to trust it. Verified in a real container: `/workspace` writable, the subtree `EROFS`, `rm` and `mv` on the mountpoint refused with `EROFS` and `EBUSY`, reads unaffected. **Known limits:** writes on the Docker path only — not reads, not the subprocess fallback (which mounts nothing), not `agents/builtin` when the workspace is the harness repo. |
 | G7 | `settings.json` | `shell_approval_mode` is rejected **by name**, with an explanatory message | R12's rule applied to a third kind of key, for R12's reason: the generic "unknown key" message reads as an oversight someone should fix by adding support. A project's `settings.json` beats the user's (D29) and arrives with a directory you cloned; this key decides whether shell commands are asked about at all. D17's trust prompt is not a substitute — the same prompt covers a README-shaped `CONTEXT.md`, and nobody reading it is deciding about their shell gate. Every value is rejected, including the tightening ones: the key is refused for where it can come from, not for what it says. |
@@ -2298,9 +2305,9 @@ that no size limit would have caught.
 | **H1** | **Every tool declares its cost class, and omission is fatal at import.** `ToolSpec.budget` ∈ {`BUDGET_COMPUTE`, `BUDGET_IO`, `BUDGET_HUMAN`}, with `assert_budget_declared()` beside R13's assert in `registry.py`. | R13's argument one question over, and its own words: *"None means UNDECLARED, not a default. Omission has to be a detectable mistake rather than an inherited answer — this field exists because the previous shape was a denylist in ONE consumer's module."* A per-parameter `le` list is that denylist again. |
 | **H2** | **A `BUDGET_COMPUTE` tool runs in a killable subprocess, at `dispatch` only.** `module.run(params)` stays an ordinary in-process call. | A thread has no interruption point inside `sympy.binomial` to cancel at, so a watchdog over one reports a timeout while the core stays busy — the class of mechanism this project keeps refusing. Isolating at dispatch rather than in the six tools is what keeps `test_math_tools.py`'s 131 tests measuring the maths instead of the transport. |
 | **H3** | **On Unix the child also carries `RLIMIT_CPU` and `RLIMIT_AS`, and both bounds report the same sentence.** Windows runs on the clock alone, recorded rather than hidden. | mcp_client's documented two-layer shape: an inner bound that stops the work, an outer one for when the inner never fires. **Not** `sandbox._unix_resource_limits` verbatim — that spends `SANDBOX_CPU_SECONDS` (30), which is *above* this budget, so reusing it would install a limit that can never fire while reading as though the inner layer were present. |
-| **H4** | **No maximum on any math parameter.** | `combinations n=10**7 r=10**6` hangs on a pair where neither value alone looks unreasonable — cost is joint, so no per-parameter ceiling expresses it. And any number is a guess: `series order=100` is 0.34s, `order=1000` is 3.44s. |
+| **H4** | **No maximum on any math parameter.** | `combinations n=10**7 r=10**6` hangs on a pair where neither value alone looks unreasonable — cost is joint, so no per-parameter ceiling expresses it. And any number is a guess: `series order=100` and `order=1000` are an order of magnitude apart. **Still held in batch 143, and its rationale narrowed there** — *“cost is joint” was true of `combinations` and false of `permutations` as it was written, whose cost was in `n` alone because it was two factorials of `n`; the fix was the falling factorial, an algorithm rather than a ceiling. The timings this row quoted (0.34s / 3.44s) re-measure as 0.51s / 9.92s on another machine and sympy, so they are stated as a ratio now. |
 | **H5** | **`modular_exponent` requires its modulus.** | `pow(b, e, None)` is plain exponentiation. Measured on one exponent: **0.000s** with a modulus, **3.3s and 125 MB** without. Refused at the boundary rather than left to H2's clock, because paying a full budget to learn that is the wrong answer to a one-word fix. Not a separate `power` operation either — that advertises the unbounded path instead of closing it. |
-| **H6** | **A result the tool cannot serialise is the tool's own error.** `str(result)` moves inside `run()`'s `try`. | It sat outside, so a correct answer merely too large to print left the handler as a bare `ValueError` and was `logger.exception`'d with a traceback as though it were a bug. `factorial n=100000` reaches this on ordinary input. dispatch's containment is the backstop for real bugs; filling it with routine outcomes is how a real one stops being noticed. |
+| **H6** | **A result the tool cannot serialise is the tool's own error.** `str(result)` moves inside `run()`'s `try`. **Reached one of four tools until batch 143**, which moved the guard into the `serialize` the other three share. | It sat outside, so a correct answer merely too large to print left the handler as a bare `ValueError` and was `logger.exception`'d with a traceback as though it were a bug. `factorial n=100000` reaches this on ordinary input. dispatch's containment is the backstop for real bugs; filling it with routine outcomes is how a real one stops being noticed. |
 | **H7** | **An io tool must already carry its own bound — no outer watchdog — and #55 is what makes three declarations true.** | An outer clock over a blocking read can only stop *waiting*; mcp_client is honest that this is all its backstop does. Converting "add a watchdog" into "prove every tool declares a bound" removes the abandonment entirely, and turns #55 from a companion issue into the missing half of the io class. |
 | **H8** | **A human tool's bound is the meter that already exists.** `ask_user` → `ATTENDED_APPROVAL_TIMEOUT_S`; `spawn_subagent` → the child's `max_steps` and the token budget. | Nothing new is built. The declaration turns an incidental fact into a stated one, which is the value of the field: today the reason `ask_user` may block ten minutes is knowable only by reading three files. |
 | **H9** | **One config constant**, `TOOL_COMPUTE_TIMEOUT_S = 15`, beside `SANDBOX_TIMEOUT_SECONDS`. | The slowest *legitimate* call measured is `series order=1000` at 3.44s, so ~4× headroom; ten passes each burning a full budget is 150s rather than forever. One number to defend, next to the constant a reader compares it against. |
@@ -2381,6 +2388,15 @@ from returning. The same root as #57, an in-flight thread nothing can interrupt,
 truth table should be refused before it is attempted is a separate question, and H4's reasoning
 applies to it unchanged.
 
+> **Answered in batch 143, and it was the OUTPUT that settled it.** H2's clock bounds the cost and
+> nothing bounded the result, so a 14-symbol truth table — 27 characters of input, 1.36s, well
+> inside the budget — returned 3,440,679 characters to the model under a 4 MB *transport* limit.
+> So: yes, refused before it is attempted, at 8 columns, because 2ⁿ rows are predictable from the
+> input and that is the one math operation where they are. H4 is untouched — a free-symbol count is
+> not a parameter — and the other five tools got the output cap instead, in `serialize`, at
+> `config.MAX_READ_CHARS`. The guess H4 refused to make was a guess about COST; this is a bound on
+> SIZE, and the size has one right answer already written down.
+
 **A warm subprocess pool.** 0.34s per call did not justify it, and a pool holds interpreters a killed
 call would have to replace anyway — the state a pooled worker accumulates is exactly what a bound
 exists to discard.
@@ -2440,7 +2456,7 @@ headless filter — which is the axis the pipeline **always** runs on.
 | **A10** | **A pre-flight refusal is RETURNED, not raised.** `ToolCallDenied` means policy blocked you, which is a different fact the model should be able to tell apart |
 | **A11** | **The "our own files comply" check is a test, not a runtime assert.** H1's shape would abort startup on a USER's machine for a mistake in OUR repository |
 | **A12** | **Three agents added (batch 51), and only `explore` and `review` are spawnable.** A4's field had only ever excluded: every agent §32 shipped with needs an input a task string cannot carry, so `agent_catalog_text()` returned `""` for this project's whole life and the string `## Available agents` had never appeared in a prompt this harness produced — while `spawn_subagent` was registered, advertised in every attended run, and told the model to name an agent "exactly as listed in the Available agents catalog". `explore` and `review` take a task string as their entire input, which is the only question the field asks. `plan` does not: its subject is the conversation, so it takes `/agent`'s route, which is grill-me's shape for grill-me's reason |
-| **A13** | **`plan`'s whitelist is a strict SUPERSET of every agent it can spawn**, and this is load-bearing rather than tidy. C6 intersects a child's `allowed_tools` with its parent's, so a `plan` turn spawning `explore` would otherwise hand it an `explore` with no `web_search` — A4's failure (degraded, and the parent cannot tell) arriving through the PERMISSION axis instead of the input axis. Pinned by a test driven through `child_context()` rather than by a comment beside the frontmatter, because the composition is what a spawn actually receives |
+| **A13** | **`plan`'s whitelist is a strict SUPERSET of every agent it can spawn**, and this is load-bearing rather than tidy. C6 intersects a child's `allowed_tools` with its parent's, so a `plan` turn spawning `explore` would otherwise hand it an `explore` with no `web_search` — A4's failure (degraded, and the parent cannot tell) arriving through the PERMISSION axis instead of the input axis. Pinned by a test driven through `child_context()` rather than by a comment beside the frontmatter, because the composition is what a spawn actually receives. **AMENDED after the roster expansion, and the amendment is the scope rather than the rule.** "Every agent it can spawn" became a larger set when `build` arrived declaring `write`/`edit`, and the two ways to satisfy it are not equivalent: widening `plan` to hold them would have reversed what `plan` is for, since the plan is the deliverable and a person iterates on it before anything is built. So `spawn_targets` says which agents a definition may spawn, `plan` names the four that investigate, and `build`/`general` are REFUSED rather than narrowed — C6 alone would have returned a `build` that could not write, which is this same criterion's failure mode wearing the fix's clothes. The test is now a sweep over every agent that can spawn, because the named two-agent version is exactly what the expansion broke: `plan`'s comment was updated to claim a superset the whitelist under it never gained, and only CI could tell |
 | **A14** | **`use_project_context: true` on all three**, where every agent before them set it false. Those four each had a reason — the compactor summarises a transcript, the initializer is WRITING the file, the pipeline-reviewer reviews a research run, grill-me reads the live thread. These three read a codebase in order to answer a question about it, which is what a project's root `AGENTS.md` exists for. It stays opt-in per agent, so nothing else changes |
 | **A15** | **Read-only by OMISSION, and the global switch stays the operator's.** `explore` and `review` name no `write`, `edit`, `write_project_doc` or `remember`: absent from the whitelist rather than present and gated, so there is no configuration in which one becomes reachable. They DO name `read` and `shell`, which `config.ToolPermissions` denies to everything and D14 denies unconditionally — so on a stock install `explore` is five callable tools and `review` is two. Declaring them anyway is D24 read the other way round: `registry.schemas(context)` filters by the same predicate, so nothing uncallable is ever advertised, while an agent that OMITTED them would stay crippled on an install where the operator had turned them on. The whitelist is the agent's intent; the global switch is the operator's |
 
@@ -3875,3 +3891,159 @@ filters, attaches to or reuses a container. `_run_docker` always creates a fresh
   twenty-row box as a twenty-five-line one. Bounding what each block REPORTS keeps both.
 - **Filling the columns with the Allow/Deny pair** (batch 49). It is symmetric, and it makes the
   permissive answer a target half the width of the modal. Centring the pair is symmetric too.
+
+## §47. Navigable agents -- the subagent thread you can open
+
+**Added after batch 59's sidebar was used.** The `AgentPanel` draws who is running and how deep,
+and that is all it does: no row can be clicked, and a row vanishes the moment its run returns.
+Meanwhile every spawn already writes its whole conversation to its own `ConversationThread`
+(`kind="subagent"`), and `core/replay.py` already turns any thread id into display entries. So the
+work is not capturing subagent output. It is **indexing and navigating what the database already
+holds**.
+
+**What D6 does and does not forbid.** §18/D6 keeps a child's raw history out of its PARENT's
+context, and `core/agent_activity.py` carries lifecycle only for that reason. Nothing here changes
+that. The channel gains an **identifier**; every byte a viewer shows is read back from the archive
+through the same function `/resume` uses. An address is not a payload.
+
+### Decisions
+
+| # | Decision |
+|---|---|
+| **NA1** | **Lineage is PERSISTED on the thread row**, in three nullable columns added by `ensure_columns()` exactly as `pinned`, `kind`, `last_activity_at` and `thinking` were. In-session memory would leave a resumed conversation drawing spawn lines that look identical and quietly refuse to open -- the divergence §44 and batch 65 each removed once |
+| **NA2** | **The call id is what makes the edge specific.** One turn can spawn `explore` three times, so the agent name identifies the roster entry and not the run. `MessageLog.tool_call_id` already stores that id on the parent's side, so the two halves meet without inventing a key |
+| **NA3** | **`call_id` is INJECTED, never a param.** Params are the model's, parsed from its tool call; a model that could write its own call id could claim a line it did not make |
+| **NA4** | **The parent comes from a `ContextVar`**, set and reset inside the same context manager whose `finally` already makes `exit` unforgettable. Not a parameter: five call sites open spans and none knows what is above it. It is also the shape that survives NA8 |
+| **NA5** | **`bind()` is a third sink call**, because the span opens before the run creates its thread. It fires immediately after `ConversationMemory` is constructed -- the earliest moment the id exists -- which is what makes a RUNNING child openable rather than only a finished one |
+| **NA6** | **The spawn line is armed and opened by ctrl+click, resolved at PRESS time.** A line drawn before its child existed still opens it: live from the session map the bind fills, replayed from `child_threads()` matched on `parent_call_id` |
+| **NA7** | **The viewer is a switcher inside `#main`, not a modal.** The sidebar lives outside it and stays live, so moving between runs needs no second copy of the agent list -- two independent writers of one piece of display state being the bug shape this project has already fixed once |
+| **NA8** | **Parallel spawns are designed now and built LAST.** The blockers are correctness, not speed: a single-slot permission channel, a non-atomic `GrantBudget.take()`, a per-iteration authorization id, a synchronous generator with no yield point inside `dispatch()`, and one pooled SQLite connection |
+| **NA9** | **Parallelise within ONE model response**, not across turns. The loop partitions a response's tool calls: consecutive ones whose `ToolSpec` declares `parallel` go together, everything else stays strictly sequential in its original position. Declared on the tool and asked of the registry, so `core/loop.py` names no tool -- `grant_scope`, `request_kind` and `opens_thread`'s trade, one question over. CONSECUTIVE is the decision rather than a detail: grouping two spawns either side of a `shell` would move the shell relative to them |
+| **NA10** | **Threads, not asyncio.** `_run()` is a synchronous generator and everything under it is blocking I/O, so coroutines would be a rewrite of every layer while a bounded pool fits what is here. `concurrent.futures.ThreadPoolExecutor` capped by a new `config.SUBAGENT_MAX_PARALLEL` (3), each future submitted through `contextvars.copy_context().run` so the child's span sees its real parent -- which is part of why NA4 chose a ContextVar over a parameter |
+| **NA11** | **Results are added to memory in the model's original call order**, whatever order the batch finished in. `add_tool_result` pairs each result to its `tool_use` by id (M4/D20), and a reordered turn is a thread that will not resume. Everything touching `memory` or the turn's shared lists therefore happens on the generator's own thread, in `_settle_one`, rather than in a worker |
+| **NA12** | **One question on screen at a time, and it takes TWO locks because there are two invariants.** `core/interaction.ask` is already the one entry point every question goes through, so the lock that serialises CONSENT SURFACES lives there -- which covers `main.py`'s single `_StdinReader` as well as the TUI's single `_permission_channel`, and is this project's fix-at-the-producer rule. That does not close §23's sign-off memo, which is a check-then-act across `recall_signoff` -> ask -> `remember_signoff`: guarding the dict would not help, because the WINDOW is what races. So `core/loop.py` holds a second, module-level lock across that window, released before dispatch. Order is always gate then ask |
+| **NA13** | **A sibling's failure is that sibling's result.** The others finish, and the model is already told, because every result from one response goes back in the same turn -- a failed child's error sits beside its siblings' answers with no new shape |
+| **NA14** | **A raising child becomes that call's error result rather than propagating**, and ONLY inside a parallel batch. Sequentially an exception out of a tool ends the turn and §16 AC3 pins that it must not kill the app; a lone call keeps exactly that. In a batch it would discard finished siblings' work, so the raise is converted. A backstop rather than the usual path: `dispatch()` already contains a handler's exception, so what reaches this is the narrower set above it |
+| **NA15** | **A parallel batch narrates through a conduit, live.** NA8's fifth blocker -- "a synchronous generator with no yield point inside `dispatch()`" -- and the largest single piece of the slice. A worker cannot yield, so it puts its events on an unbounded queue that the driving frame, still inside `_run` and still able to yield, drains as they arrive. The ask itself needs no conduit: it goes down `response_channel`, which any thread may call. This forwards the PARENT'S own events about its own calls, never a child's stream, so D6 is untouched. Pinned live by a test, because a version that collected and yielded at the end would satisfy every other assertion |
+| **NA16** | **The activity sink is guarded, and its stack is posted as a SNAPSHOT.** Found while building rather than in the design: `TuiActivity.exit` and `bind` are read-rebuild-assign, so two at once each filter the list they read and the second assignment RESURRECTS the row the first removed -- a finished run left on screen for the session, which is what `span()`'s `finally` is structural to prevent, reached from the other side. `enter`'s append races them the other way and is lost. The docstring's "under the worker's own serialisation" was measured and true until NA9 |
+| **NA17** | **The panel is ordered by LINEAGE, not by arrival.** Slice 2 built the data model as a tree on purpose, and rendering already indented by depth, so peers sharing a column needed no change. What did: arrival order and lineage order are the same thing for a stack and are not for a tree -- A, B, A's child, B's child drawn in arrival order puts A's child under B, a lineage the panel INVENTED. `AgentRow` gains the `parent_id` the span has carried since NA1 |
+| **NA18** | **WAL, because the ceiling is tunable.** MEASURED at the real engine: at `SUBAGENT_MAX_PARALLEL` = 3 the shipped rollback-journal configuration does not lock, and at 8 it does. WAL removes that and is a little over twice as fast at 3. The busy timeout was ALREADY 5000ms, from SQLAlchemy's pysqlite default -- restated explicitly rather than left implicit, because the measurements rest on it |
+
+Plus, settled with the owner at design time: plain click on sidebar rows (no text selection there
+to dodge); a key-bound picker as the keyboard route, so the sidebar stays unfocusable; polling the
+archive while a viewed run is still open; escape exits the viewer and a clickable lineage trail
+goes up one level; the permission modal names the agent and its depth; and all five
+subagent-thread sources before research passes.
+
+### Slices
+
+1. **Identity and lineage** -- `AgentSpan.id`/`parent_id`, the ContextVar, `bind()`, the three
+   columns, `child_threads()`, `call_id` injection. **BUILT, batch 67.**
+2. **The sink and the panel learn identity**; `exit` removes by id, and every row carries
+   the thread it stands for. **BUILT, batch 68.**
+3. **The viewer**: the switcher, the crumb, the extracted paint loop, the poll, and both
+   clicks. **BUILT, batch 69.**
+4. **The inline anchor**, and `ReplayEntry`'s fourth element. **BUILT, batch 70.**
+5. **The picker, and the permission modal naming who is asking.** **BUILT, batch 71.**
+6. **The initializer gets batch 59's deferred span**, and the compactor records whose
+   conversation it summarised. **BUILT, batch 72.** *The REVIEWER moved to slice 7: it
+   runs from the orchestrator, which carries no sink at all, and that is the same
+   plumbing the passes need.*
+7. **Research passes -- and the reviewer**, which shares their plumbing. **BUILT, batch 73.**
+8. **Parallel spawns** -- the partition, the executor, the conduit, and
+   the six things that were correct only because nothing ran alongside
+   anything else. **BUILT, batch 74.**
+
+### Reviewed afterwards (batch 75)
+
+The eight slices were reviewed as a whole once they were all in, and nine repairs came out of it.
+They are recorded in `DEVLOG.md` rather than as decisions, because none of them changed one: the
+sink reaches the reviewer and two retry hops now, the viewer learns the children of the run it is
+showing, the panel and the picker share one lineage walk, `core/compaction.py`'s re-entrancy guard
+is per thread, the asker is named on all three modals that can be raised from inside a run, and
+`child_threads` carries `_ordered_rows`' id tiebreaker.
+
+**A second round (batch 76)** re-read those eleven commits against the code and found four more,
+again none of them a decision. Two are worth naming here: the asker line reaches the CLI now as well
+as the TUI, and a parallel batch's results are ordered by POSITION rather than by the provider's call
+id. NA11's guarantee had been resting on an id that `core/client.py`'s v1-compatible branch does not
+always have, which makes it the one finding of either round that could report a wrong ANSWER to the
+model rather than draw a wrong picture.
+
+**The one thing that IS a decision** is which number the panel indents by, and the owner settled it:
+the walk's column rather than `AgentRow.depth`, because a research pass adds a display level without
+adding a spawn level. Bumping the pass's context so the two numbers agree would have spent one level
+of `SUBAGENT_MAX_DEPTH` on a rendering fix. NA17 is amended to that extent and nothing else.
+
+## §48. Code in the sandbox -- what `tiered` approves, and the mode that keeps the old answer
+
+**Added in batch 92, from the owner reading the gate against how an agent actually works.**
+`python -c`, `bash -c`, and a script written a moment earlier with the auto-approved `write` tool
+all ran without a prompt under the shipped `tiered` mode. The owner asked for those two cases to be
+closed and generalised across languages. Measured through the real `_shell_approval_check`, Docker
+up, before anything changed -- and the gap was G4 itself rather than a missing flag:
+
+```
+command                                        tier           net    asked?
+python -c "print(1)"                           SANDBOXED      False  False
+bash -c "echo hi"                              SANDBOXED      False  False
+sh run.sh  |  ./run.sh  |  node run.js         SANDBOXED      False  False
+python run.py                                  SANDBOXED      False  False
+pytest  |  make  |  rm -rf data                SANDBOXED      False  False
+ls -la && cat notes.txt                        SANDBOXED      False  False
+bash -c "curl https://x"                       SANDBOXED      False  False   (runs --network none)
+cat .ven*/settings.json; true                  SANDBOXED      False  False
+python -c "print(open('.venastine/...').read())"  SANDBOXED   False  False
+curl https://x                                 SANDBOXED_NET  True   True
+cat /etc/passwd                                HOST_READ      False  True
+ls                                             INERT          False  False
+```
+
+**What the container already bounded, and still does.** `network` is one fact with two consumers
+(Q2), so a network call hidden inside code is given `--network none`, not egress -- a script cannot
+reach the network without a network command on its line, and that asks. The read-only binds (G6,
+`security/protected_paths.py`) stop a write to a protected path.
+
+**What it did not bound.** Code reads whatever the workspace holds, a `.venastine/` directory
+included when the workspace contains one -- the owner's configured workspace did. The token check
+that forces a prompt for that segment cannot see a glob or a string inside a program, while
+`SECURITY.md`, `protected_paths.py` and `_command_touches_protected` all said such a spelling was
+"asked about anyway". And code is where an attempt on the container boundary starts, which `cat`
+is not.
+
+**Why not a list of interpreters.** The first design anyone reaches for, and G2 already says why
+not. `pytest` runs a `conftest.py`, `make` runs a Makefile, `find -exec` runs anything, and
+`"python"`, `pyth?n`, `python3.13` and `echo x | python` are the same call to a shell. A list is a
+parser whose misses auto-approve.
+
+### Decisions
+
+| # | Decision |
+|---|---|
+| **CE1** | **`tiered` auto-approves INERT alone**, plus the unchanged Docker-down host path for INERT. Every other command asks, contained or not -- compound shell, quoted arguments and file operations included. Nothing enumerates a language, so an interpreter nobody listed is covered the day it is installed. **Amends G4**, whose argument ("CONTAINED's damage ceiling is corrupt the workspace") priced writes and never priced code |
+| **CE2** | **`contained` is G4's rule under its own name**: a command the container confines runs unasked unless it gets network. Host reads, network commands and a literal protected-segment token still ask. Applied in `_shell_approval_check` as a visible override below the protected-segment check, beside the fallback opt-in, rather than as a flag passed into `auto_approved`. Its constant is `CONTAINED_MODE`, because `CONTAINED` is already a containment value with the same spelling. Without it the only step down from CE1 is `never`, which also stops asking about host reads -- #157 |
+| **CE3** | **`tiered` stays the shipped default**, with CE1's rule |
+| **CE4** | **`contained` is on the badge.** `unsafe_reasons()` reports it -- banner, launch WARNING and TUI badge -- and the detail says what still asks, so a reader of the badge alone does not conclude that the network is open |
+| **CE5** | **`auto_approve_sandbox_fallback` is honoured under `tiered` and `contained`.** It is written on purpose, already flagged, and would do nothing under the default mode otherwise. It is the one documented exception to "code asks" under `tiered` |
+| **CE6** | **`always` beats the fallback opt-in.** Behaviour unchanged -- the mode check returns before the opt-in is read -- and now stated. MEASURED alongside it: the badge said "host shell, no ask" under `always` with both flags on, while every command asked. Under `always` the pair now reports as the fallback alone, and a test holds the badge against the gate for every mode |
+| **CE7** | **The capability is its own field, `CommandProfile.runs_code`**, required with no default. For every shell profile today it equals `writes`; it is kept apart because G1 says a missing dimension is a missing field, and changing a file and running a program are different harms -- a future `write`/`edit` profile changes a file and runs nothing |
+
+### Rejected
+
+- **A blocklist of interpreters, `-c`/`-e` flags and script paths.** Fewest prompts, and bypassable
+  by every spelling in the paragraph above. It would also contradict G2 in the module written to
+  keep it.
+- **INERT plus a curated list of file operations** (`mkdir`, `touch`, `cp`, `mv`, `rm`, `rmdir`).
+  Fewer prompts for housekeeping, but each entry is a promise that the program cannot run code, and
+  everyday tools break that promise (GNU `sort --compress-program`, `tar --to-command`). `write` and
+  `edit` already create and change files without a shell.
+- **Telling users who accept code in the container to set `never`.** It removes the host-read
+  prompt as well, which is the harm §28 was written for. CE2 exists so that is not the only step.
+
+### What it costs, stated
+
+Under `tiered` every compound command, quoted argument and file operation asks -- including a
+subagent's, whose prompt reaches its parent. `test_a_legitimate_quoted_workspace_path_still_works`
+records that price where it was first measured as free. Research passes are unaffected: a per-call
+gate was never grantable (R2), and a headless run's empty probe classifies UNKNOWN and hides `shell`
+exactly as before.

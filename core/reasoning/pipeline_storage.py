@@ -12,9 +12,9 @@ for inspection and debugging.
 Schema deliberately mirrors the codebase convention established by
 storage.py's MessageLog: semantically distinct data lives in separate
 typed columns (claims_json / trace_json / coverage_gaps_json /
-final_report), NOT one catch-all blob. The *_json columns hold
-json.dumps'd strings (same pattern as MessageLog.content); final_report
-is plain text. This keeps a serialization problem in one field from
+pass_threads_json / candidates_json / final_report), NOT one catch-all
+blob. The *_json columns hold json.dumps'd strings (same pattern as
+MessageLog.content); final_report is plain text. This keeps a serialization problem in one field from
 corrupting the others -- a persistence layer built for crash-resilience
 shouldn't itself be a single point of failure.
 
@@ -27,13 +27,14 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Optional
 from uuid import UUID, uuid4
 
 from sqlmodel import Field, Session, SQLModel
 
 from database import engine
+
 # §27: the thread-kind vocabulary lives beside the table that stores it.
 # This import direction is the only one that exists -- storage.py knows
 # nothing about pipeline runs, and classify_legacy_pass_threads() below is
@@ -46,10 +47,16 @@ logger = logging.getLogger(__name__)
 class PipelineRunRecord(SQLModel, table=True):
     """One row per stream_deep_research_pipeline() invocation. `status` is
     'running' from creation until the wrapping try/except in the
-    orchestrator flips it to 'complete' or 'failed'. The four data
-    columns carry the run's structured output (or the partial state
-    available at failure time) so an operator can inspect what happened
-    without a separate trace log."""
+    orchestrator flips it to 'complete' or 'failed'. The SIX data columns
+    carry the run's structured output (or the partial state available at
+    failure time) so an operator can inspect what happened without a
+    separate trace log.
+
+    SIX, not the four this paragraph said until batch 154: T2 added
+    pass_threads_json and E13 added candidates_json, and neither batch
+    found the enumerations written about them. The count is pinned by
+    test_the_documented_record_shape_matches_what_load_returns, which
+    reads it out of the prose rather than out of a second list here."""
 
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     user_query: str = Field(index=True)
@@ -75,7 +82,7 @@ class PipelineRunRecord(SQLModel, table=True):
     # what it had reached.
     candidates_json: str = "[]"
     final_report: str = ""
-    started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     finished_at: Optional[datetime] = None
 
 
@@ -101,9 +108,9 @@ def update_pipeline_run(
     status: Optional[str] = None,
 ) -> None:
     """Updates an existing row's data columns (claims / trace /
-    coverage_gaps / final_report) from the live PipelineRun, and -- only
-    when `status` is given -- flips status and sets finished_at on a
-    terminal transition. Raises ValueError if run_id doesn't exist (the
+    coverage_gaps / pass_threads / candidates / final_report) from the
+    live PipelineRun, and -- only when `status` is given -- flips status
+    and sets finished_at on a terminal transition. Raises ValueError if run_id doesn't exist (the
     record was never created or was deleted), which is a real bug, not an
     expected path.
 
@@ -128,7 +135,7 @@ def update_pipeline_run(
         if status is not None:
             record.status = status
             if status in ("complete", "failed"):
-                record.finished_at = datetime.now(timezone.utc)
+                record.finished_at = datetime.now(UTC)
         record.claims_json = json.dumps([vars(c) for c in run.claims])
         record.trace_json = json.dumps(run.trace)
         record.coverage_gaps_json = json.dumps(run.coverage_gaps)
@@ -195,6 +202,47 @@ def load_pipeline_run(run_id: UUID) -> dict:
 # ---- One-time classification of pre-§27 threads ---------------------------
 # ---------------------------------------------------------------------------
 
+def _as_uuid_key(value) -> Optional[str]:
+    """One id's single spelling, or None for anything that is not a UUID.
+
+    THE TWO SIDES OF TIER 1 ARE SPELT DIFFERENTLY, and until batch 154
+    they were compared literally. `pass_threads_json` carries
+    `str(thread_id)` -- the dashed 36-character form, which is also what
+    output_writer.py ships as an artifact and what an operator reads --
+    while `conversationthread.id` comes back from the raw DBAPI as the
+    32-character hex sqlmodel stores. `'a-b' in {'ab'}` is False for
+    every id there has ever been, so the tier #82 calls authoritative
+    matched nothing, ever. Measured end to end on real SQLite (the
+    suite's fake sqlmodel cannot show a storage format): recorded
+    'acb451c5-9c50-...', stored 'acb451c59c50...', relabelled 0.
+
+    NONE RATHER THAN THE STRING ITSELF for a value that does not parse. A
+    thread id IS a UUID (`ConversationThread.id`), so a record holding
+    something else is not an id this function can speak about, and
+    deciding that two unparseable strings denote one thread is the
+    over-classifying direction -- the one that hides a real conversation.
+    The caller treats None as "no tier-1 answer", which is how an entry
+    with no usable thread_id has always been treated.
+
+    ONE SIDE, NOT TWO, AND THE OTHER SIDE IS PINNED. This normalises the
+    RECORDED ids only; the row ids are compared as the database hands
+    them over. Normalising both was written first and control C1 found it
+    unearned -- removing the row-side call left every test green, because
+    `conversationthread.id` is hex and so is this. The remaining
+    assumption is that the column holds hex, which is a fact about
+    sqlmodel's UUID type rather than about this project, so it is
+    ASSERTED where it can be:
+    `test_a_thread_id_is_stored_in_a_spelling_str_does_not_produce` in
+    tests/test_storage_e2e.py fails naming this function if the library
+    ever starts storing the dashed form. A pinned dependency beats a
+    branch for a spelling nothing here has ever written.
+    """
+    try:
+        return UUID(value).hex
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
 def classify_legacy_pass_threads(connection) -> int:
     """Label pass threads that predate ConversationThread.kind. Returns the
     number of rows relabelled.
@@ -219,7 +267,9 @@ def classify_legacy_pass_threads(connection) -> int:
       * TIER 1 (exact): every thread id named in a populated
         `pass_threads_json` is a pass thread, whatever its timestamp says
         and whether or not the run ever finished. Membership was recorded
-        at run time; there is nothing to infer.
+        at run time; there is nothing to infer. COMPARED AS UUIDS, NOT AS
+        STRINGS -- the two sides are spelt differently and `_as_uuid_key`
+        below is where they are made one thing (batch 154).
       * TIER 2 (window): only runs whose `pass_threads_json` is absent,
         NULL, empty, or unusable fall back to the time-window heuristic --
         "created between started_at and finished_at". That set is the
@@ -308,8 +358,17 @@ def classify_legacy_pass_threads(connection) -> int:
                     for entry in entries:
                         if (isinstance(entry, dict)
                                 and isinstance(entry.get("thread_id"), str)):
-                            exact_ids.add(entry["thread_id"])
+                            # POPULATED is what puts this run in tier 1,
+                            # whatever its ids turn out to parse as. An id
+                            # this function cannot read contributes no
+                            # membership, but it must not drop the run to
+                            # the window either: that would consult a
+                            # modern run's clock and hide the concurrent
+                            # chat thread #82's headline is about.
                             usable = True
+                            key = _as_uuid_key(entry["thread_id"])
+                            if key is not None:
+                                exact_ids.add(key)
         # raw None/"" (or a missing column) falls through with usable=False:
         # the legitimate pre-T2 shape, i.e. window tier -- not corruption.
         if corrupted:
@@ -336,6 +395,9 @@ def classify_legacy_pass_threads(connection) -> int:
 
     to_relabel = []
     for thread_id, created_at in chat_rows:
+        # `exact_ids` holds hex, which is the spelling this column is in.
+        # ONE normalisation, on the recorded side, and the assumption on
+        # this side is PINNED rather than branched on -- see _as_uuid_key.
         if thread_id in exact_ids:
             to_relabel.append(thread_id)
         elif created_at is not None and any(

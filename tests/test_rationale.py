@@ -30,7 +30,6 @@ import pytest
 
 import config
 
-
 # ===========================================================================
 # ---- The schema: asked for, tolerated when absent (RA4) -------------------
 # ===========================================================================
@@ -44,7 +43,11 @@ def test_the_schema_asks_for_a_rationale():
 
     schema = registry._tools["shell"].schema["input_schema"]
     assert "rationale" in schema["properties"]
-    assert schema["required"] == ["command", "rationale"]
+    # `requires_network` joined the list in batch 99 (ROADMAP_v3 §50,
+    # NW1: the flag sits "beside rationale"), advertised required and
+    # tolerated when absent -- §42/RA4, the same rule as rationale.
+    assert schema["required"] == [
+        "command", "rationale", "requires_network"]
 
 
 def test_the_schema_description_asks_for_a_reason_not_a_restatement():
@@ -118,8 +121,8 @@ def test_the_rationale_cannot_change_the_decision(rationale, monkeypatch,
     The rationales above are the ones an attacker would write. They are
     here to be ignored, and the assertion is that they were not looked at.
     """
-    from tools.builtin import shell
     from security import capability
+    from tools.builtin import shell
 
     monkeypatch.setattr(config, "SHELL_APPROVAL_MODE", "tiered")
     monkeypatch.setattr(capability, "validate_mode",
@@ -128,9 +131,13 @@ def test_the_rationale_cannot_change_the_decision(rationale, monkeypatch,
     seen = []
     real = shell.classify_command
 
-    def spy(command, workspace):
+    def spy(command, workspace, **kwargs):
+        # **kwargs so the spy keeps matching `classify_command` as it
+        # grows: §50 added `requires_network`, and a spy that pins the
+        # signature fails on the next argument for a reason that has
+        # nothing to do with what this test asserts.
         seen.append(command)
-        return real(command, workspace)
+        return real(command, workspace, **kwargs)
 
     monkeypatch.setattr(shell, "classify_command", spy)
 
@@ -311,10 +318,10 @@ def test_the_loop_carries_the_reason_to_whoever_is_asked(mocker):
     have to carry it.
     """
     import queue  # noqa: F401 -- parity with the loop harness
+
     from core.interaction import ResponseChannel
     from core.loop import RunAgentLoop
-    from tests.conftest import (FakeMemory, make_model_response,
-                                make_stream_sequence)
+    from tests.conftest import FakeMemory, make_model_response, make_stream_sequence
     from tools.registry import registry
 
     call = {"id": "t1", "name": "shell",
@@ -378,7 +385,7 @@ async def test_the_modal_shows_the_reason_below_the_computed_notice():
         await pilot.pause()
         await pilot.pause()
         body = app.screen.query_one("#permission-params")
-        text = body.visual._renderable.plain
+        text = body.visual.plain
         app.screen.dismiss(False)
         await pilot.pause()
 
@@ -407,7 +414,7 @@ async def test_the_modal_says_so_when_no_reason_was_given():
         await pilot.pause()
         await pilot.pause()
         text = (app.screen.query_one("#permission-params")
-                .visual._renderable.plain)
+                .visual.plain)
         app.screen.dismiss(False)
         await pilot.pause()
 
@@ -420,8 +427,8 @@ def test_the_cli_prompt_shows_it_too(capsys):
     watched from, so it gets the same three-part prompt."""
     import unittest.mock as mock
 
-    from core import interaction
     import main as main_module
+    from core import interaction
     from tests.conftest import FakeStdinReader
 
     reader = FakeStdinReader(["n"])
@@ -447,8 +454,8 @@ def test_the_cli_prompt_shows_it_too(capsys):
 def test_the_cli_prompt_says_so_when_no_reason_was_given(capsys):
     import unittest.mock as mock
 
-    from core import interaction
     import main as main_module
+    from core import interaction
     from tests.conftest import FakeStdinReader
 
     reader = FakeStdinReader(["n"])

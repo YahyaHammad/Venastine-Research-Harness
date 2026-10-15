@@ -23,17 +23,14 @@ the permanent fallback entry point.
 import argparse
 import logging
 import os
+import signal
 import sys
 from uuid import UUID
 
 import config
-from core import config_loader, workspace_trust
-from core.loop import RunAgentLoop, DEFAULT_PROVIDER
-from core.reasoning.authorization import GRANT_PICKER
-from core.replay import replay_entries
-from database import create_db_and_tables, engine
-from logging_setup import configure_logging
-from security import posture, protected_paths
+import config_edit
+import config_update
+import core.reasoning.pipeline_storage  # noqa: F401 -- registers PipelineRunRecord
 
 # Importing these for their SIDE EFFECT, and the side effect is load-bearing:
 # a SQLModel table class registers on SQLModel.metadata when its module is
@@ -47,9 +44,63 @@ from security import posture, protected_paths
 # already run, so a FRESH database never got a pipelinerunrecord table and the
 # first research run died on "no such table". Do not "tidy" these away.
 import storage  # noqa: F401 -- registers ConversationThread, MessageLog
-import core.reasoning.pipeline_storage  # noqa: F401 -- registers PipelineRunRecord
+from core import ansi, config_loader, shell_sessions, workspace_trust
+from core.cancel import CancelToken
+from core.loop import DEFAULT_PROVIDER, RunAgentLoop
+from core.reasoning.authorization import GRANT_PICKER
+from core.replay import replay_entries
+from database import create_db_and_tables, engine
+from logging_setup import configure_logging
+from security import posture, protected_paths
 
 logger = logging.getLogger(__name__)
+
+
+class _Visible:
+    """Every untrusted string one prompt prints, and whether any of them
+    tried to redraw it (batch 152).
+
+    THE CLI PRINTS MODEL TEXT TO A TERMINAL, which is the one thing
+    `core/ansi.py` exists to make safe, and until this batch only the pty
+    and the TUI transcript went through it. The params block was already
+    safe -- `_render_params` runs `json.dumps`, which emits an escape as
+    `\\u001b` -- and the three lines the user actually decides on were
+    plain f-strings. Measured through the real channel: an approval
+    headline carrying CSI `2K` reached stdout with the introducer intact,
+    and CSI `2K` erases the row the approved command was drawn on.
+
+    ONE OBJECT PER PROMPT rather than one call per string, because the
+    count belongs to the QUESTION and not to any one field: the user is
+    told once that something in this call tried to redraw the prompt, not
+    once per field that did. `tui/widgets.py` keeps the same count for the
+    same reason and `tui/app.py` reads it, which is the layer that knows
+    whose text it was; here that layer is the handler.
+
+    SAID OUT LOUD, not swallowed. A silent strip leaves the display honest
+    and the user ignorant of the attempt, and the attempt is information
+    they are entitled to while deciding -- nothing a tool legitimately
+    needs to do involves moving the cursor inside a consent prompt. On the
+    paths where nothing is being decided (a replayed thread, a research
+    pass's progress lines) the strip is silent, because there is no
+    decision for the warning to inform.
+    """
+
+    def __init__(self) -> None:
+        self.controls = 0
+
+    def __call__(self, text) -> str:
+        clean, removed = ansi.for_display_counted(text)
+        self.controls += removed
+        return clean
+
+    def warn(self) -> None:
+        """One line, immediately above the question, or nothing."""
+        if not self.controls:
+            return
+        plural = "" if self.controls == 1 else "s"
+        print(f"  [!] {self.controls} terminal control sequence{plural} "
+              f"removed from the text above: something in this call tried "
+              f"to redraw this prompt")
 
 
 def _uuid_type(value: str) -> UUID:
@@ -83,21 +134,33 @@ def _print_replay(thread_id: UUID) -> None:
     except Exception as e:  # noqa: BLE001 -- a display failure must not
         # stop the session: the thread is loaded and usable either way.
         logger.warning("Could not replay thread %s: %s", thread_id, e)
-        print(f"[could not replay this thread's history: {e}]")
+        print("[could not replay this thread's history: "
+              f"{ansi.for_display(e)}]")
         return
     if not entries:
         print("(this thread has no messages yet)")
         return
     print()
     # `links` is the TUI's -- a ctrl+click target for a truncated URL
-    # (batch 65). This shell prints, so it drops them.
-    for role, text, _links in entries:
+    # (batch 65) -- and `_call` is §47's, the id of the spawn that made
+    # this line, which the TUI turns into an openable run. This shell
+    # prints, so it drops both.
+    # Every row here is text somebody else wrote -- the model, a tool,
+    # or a wake the harness composed around a tool's result -- replayed
+    # into a terminal, which is `core/ansi.for_display`'s whole subject
+    # (batch 152). Silent, because a replay decides nothing.
+    for role, text, _links, _call in entries:
+        text = ansi.for_display(text)
         if role == "user":
             print(f"You: {text}")
         elif role == "assistant":
             print(f"\nAgent: {text}\n")
         elif role == "thinking":
             print(f"\nThinking: {text}")
+        elif role == "wake":
+            # ROADMAP_v3 §49 (SS5): written by the harness, not the person,
+            # so it does not take the "You:" label the TUI also withholds.
+            print(f"Harness: {text}")
         else:
             print(f"     {text}")
     noun = "entry" if len(entries) == 1 else "entries"
@@ -130,6 +193,195 @@ def _announce_posture() -> None:
         logger.warning("Reduced security posture: %s", detail)
         print(f"   - {detail}", file=sys.stderr)
     print("", file=sys.stderr)
+
+
+# ROADMAP_v3 §49 (SS2, SS5, SS6, SS19). The CLI's half of background
+# sessions. D12 keeps this shell a permanent fallback, so waiting on a
+# session, running the turn its result starts, stopping one and confirming
+# a quit all have to work here and not only in the TUI -- a session the CLI
+# could start and never report would be exactly the wired-up-but-invisible
+# gap D12 exists to prevent.
+sessions = shell_sessions.sessions
+"""The process's one session manager, bound once at import.
+
+A module-level name rather than a lookup per call, because in production it
+is a singleton that never changes. The consequence, named rather than
+discovered: a test that replaces the manager has to patch THIS name as well
+as `core.shell_sessions.sessions`.
+"""
+
+
+def _quit_confirmed() -> bool:
+    """SS6: quitting with sessions still running confirms first.
+
+    They are killed on the way out and their output is not kept, so leaving
+    is a decision rather than a default. NOBODY TO ASK COUNTS AS YES --
+    Ctrl+D, a piped run, a closed terminal -- because a harness that cannot
+    be exited is the worse failure, and `ask` returns None on exactly those.
+    """
+    live = len(sessions.live_rows())
+    if not live:
+        return True
+    answer = _stdin_reader().ask(
+        f"{live} background session(s) are still running and will be "
+        f"stopped. Quit? [y/N]: ")
+    return answer is None or answer.strip().lower().startswith("y")
+
+
+def _deliver_held(thread_id) -> None:
+    """Results held for the user's next message (SS2, SS19).
+
+    Written into the thread as a harness row BEFORE the turn that answers
+    the message, so the model reads them beside what the user just typed
+    rather than as a turn of their own -- which is the whole point of
+    holding them: a kill the user made is not worth a model call on its own.
+    """
+    from core.memory import append_harness_row
+    from core.session_wake import build_held
+
+    held = sessions.take_held(thread_id)
+    if not held:
+        return
+    text, record = build_held(held)
+    append_harness_row(thread_id, text, record)
+    print(f"— {ansi.for_display(text.splitlines()[0])} —")
+
+
+def _await_sessions(thread_id, *, model, provider_name, effort,
+                    authorization) -> None:
+    """Between turns, wait on this conversation's live sessions and run a
+    wake turn for each batch (SS2, SS5).
+
+    Ctrl+C here stops the SESSIONS and returns to the prompt: the interrupt
+    is aimed at what is running, not at the conversation. Their results are
+    then held for the next message (SS19), so nothing is printed about them
+    beyond the count.
+
+    THAT SENTENCE OUTLIVED ITS PREMISE, and ROADMAP_v3 §64's A21 is the
+    answer. Once SS5 made a wake a full model TURN with tool dispatch, "what
+    is running" during one IS the conversation -- `wake_conversation`'s own
+    docstring says "it IS that run continuing" -- and the per-turn SIGINT
+    handler CN10 installs is restored in `run_chat`'s `finally` before this
+    function is ever called. So the default handler was live here, and a
+    Ctrl+C during a wake raised `KeyboardInterrupt` from wherever it landed:
+    `_run`'s frame catches `Exception`, not `BaseException`, so it passed
+    straight through, and if it landed between the `tool_use` D20 has
+    already persisted and the `tool_result` that pairs with it, the thread
+    was left unresumable -- the very damage CN10 exists to prevent, in the
+    one place CN10 did not reach.
+
+    THE KEY STILL MEANS WHAT THE BANNER SAYS. It is not bound to stopping
+    the turn, deliberately: a press aimed at copying or pasting must not be
+    able to end a model turn, which is the measurement behind the TUI's
+    batch-57 rule ("ctrl+c copies when there is something to copy, and
+    starts a quit when there is not"). What changed is only the mechanism --
+    for the duration of each wake turn a handler of this function's own
+    DEFERS the interrupt: the sessions stop once the turn has finished and
+    written the rows it owes, which is CN10's own "the current step finishes
+    first" pointed at the sessions instead of the turn.
+
+    The wake turn carries the run's own `authorization`, because it is that
+    run continuing -- without it every gated call inside a wake would be
+    denied for a reason about the harness rather than the request.
+    """
+    from core.session_wake import build_wake
+
+    if thread_id is None:
+        return
+    announced = False
+    # §64 A21. Set by the handler below instead of an unwind; read after the
+    # wake turn has finished. A list rather than a `nonlocal` because the
+    # handler is a closure over this frame either way and a one-element list
+    # cannot be rebound by accident.
+    interrupted = []
+
+    def _stop_sessions_after_this_turn(_signum, _frame):
+        # Installed only while a wake turn runs, and restored in a
+        # `finally`, so Ctrl+C while merely WAITING still takes the
+        # `except KeyboardInterrupt` below -- there is no turn to protect
+        # there, and nothing to defer for. `signal.signal` is main-thread
+        # only, which is where the CLI's chat loop and therefore this runs.
+        if not interrupted:
+            interrupted.append(True)
+            print("\n[stopping the background sessions - this turn "
+                  "finishes first]", flush=True)
+
+    try:
+        while True:
+            live = sessions.live_for(thread_id)
+            if not live and not sessions.pending(thread_id):
+                return
+            if not announced:
+                print(f"[waiting on {live} background session(s) — "
+                      f"Ctrl+C stops them]")
+                announced = True
+            batch = sessions.wait_for_wake(thread_id, timeout=1.0)
+            if batch is None:
+                if sessions.suspended(thread_id):
+                    print("[no further automatic replies until you say "
+                          "something — results will arrive with your next "
+                          "message]")
+                    return
+                continue
+            text, record = build_wake(batch)
+            previous_sigint = signal.signal(
+                signal.SIGINT, _stop_sessions_after_this_turn)
+            try:
+                # A wake turn may start sessions of its own, and something
+                # is still here to report them: this loop.
+                with shell_sessions.consuming():
+                    response = RunAgentLoop.wake_conversation(
+                        thread_id=thread_id, text=text, harness=record,
+                        model=model, provider_name=provider_name,
+                        effort=effort, authorization=authorization)
+            except Exception as e:
+                logger.exception("Wake turn failed")
+                print(f"\n[Error: {ansi.for_display(e)}]")
+                return
+            finally:
+                # Before anything else can be printed or read, and on the
+                # error path too: outside a wake turn the interrupt belongs
+                # to the sessions and takes the handler below.
+                signal.signal(signal.SIGINT, previous_sigint)
+            for notice in getattr(response, "notices", ()):
+                print(f"— {ansi.for_display(notice['text'])} —")
+            print(f"\nAgent: {ansi.for_display(response.text)}\n")
+            if interrupted:
+                # The turn finished and wrote its rows; now the key does
+                # what it said. Returning to the prompt rather than waiting
+                # on the next batch, because the press was a request to
+                # stop waiting -- SS19 holds whatever arrives after this
+                # for the next message either way.
+                killed = sessions.kill_owned(thread_id,
+                                             shell_sessions.KILL_USER)
+                print(f"\n[stopped {len(killed)} background session(s)]")
+                return
+    except KeyboardInterrupt:
+        killed = sessions.kill_owned(thread_id, shell_sessions.KILL_USER)
+        print(f"\n[stopped {len(killed)} background session(s)]")
+
+
+def _close_sessions() -> None:
+    """Kill every live session on the way out and record what became of
+    them (SS6), then sweep any container this process left behind.
+
+    Contained on both halves: this runs while the process is already
+    leaving, and a failure to tidy up must not replace whatever the user
+    was actually told.
+    """
+    from core.session_wake import record_killed_at_quit
+    from security.sandbox import kill_labelled_containers
+
+    try:
+        closed = sessions.close()
+        if closed:
+            record_killed_at_quit(closed)
+    except Exception:              # noqa: BLE001 -- on the way out
+        logger.exception("Could not close background sessions cleanly")
+    try:
+        kill_labelled_containers()
+    except Exception:              # noqa: BLE001 -- on the way out
+        logger.exception("Could not clean up this process's containers")
 
 
 def run_chat(
@@ -169,7 +421,12 @@ def run_chat(
         _print_replay(current_thread_id)
     else:
         print("Starting a new conversation thread.")
-    print("Ctrl+C or Ctrl+D to exit.\n")
+    # ROADMAP_v3 §61 (CN10). The key did only one thing before and now
+    # does two, so the banner says which is which. A control whose
+    # meaning depends on state and does not announce it is the thing
+    # this project keeps closing.
+    print("Ctrl+C stops the current turn; Ctrl+C or Ctrl+D at the "
+          "prompt exits.\n")
 
     while True:
         if first_message is not None:
@@ -184,25 +441,78 @@ def run_chat(
                 # readline() raises it on Ctrl+D exactly as input() did.
                 user_input = _stdin_reader().readline("You: ").strip()
             except (KeyboardInterrupt, EOFError):
+                # ROADMAP_v3 §49 (SS6). Quitting with sessions still
+                # running confirms first -- they are killed on the way out
+                # and their output is not kept, so leaving is a decision.
+                # Nobody to ask (Ctrl+D, a piped run) counts as yes: a
+                # harness that cannot be exited is the worse failure.
+                if not _quit_confirmed():
+                    continue
                 print("\nExiting.")
                 break
 
         if not user_input:
             continue
 
+        if current_thread_id is not None:
+            # SS2/SS19: what was held because nothing was waking this
+            # conversation arrives WITH the user's next message, in the
+            # same thread, before the turn that answers them both.
+            _deliver_held(current_thread_id)
+            sessions.note_user_input(current_thread_id)
+
+        # ROADMAP_v3 §61 (CN10). A HANDLER rather than an `except
+        # KeyboardInterrupt`, and the difference is what the thread
+        # looks like afterwards. An interrupt unwinds from wherever it
+        # lands -- which can be between a `tool_use` D20 has persisted
+        # and the `tool_result` that pairs with it, leaving a thread the
+        # provider will refuse to continue (#42, M4). The token lets the
+        # loop stop at a boundary it chose and write every row it owes.
+        #
+        # Installed per turn and restored in the `finally`, so Ctrl+C at
+        # the prompt still exits and Ctrl+C during the session wait
+        # still stops the SESSIONS.
+        #
+        # The aim of the key there was always right; the MECHANISM was
+        # not, and batch 147 fixed that end rather than this one. Because
+        # this handler is restored before `_await_sessions` is called, a
+        # Ctrl+C during a WAKE turn met the default handler and unwound
+        # the turn from wherever it landed -- so `_await_sessions` now
+        # installs a handler of its own for the duration of each wake,
+        # which defers the interrupt instead of raising it. See §64 A21.
+        #
+        # `signal.signal` is main-thread only, which is where this runs.
+        # The CLI drains through run_to_completion, so nothing else is
+        # writing to stdout during a turn and the one line below cannot
+        # interleave with streamed output.
+        cancel = CancelToken()
+
+        def _stop_this_turn(_signum, _frame, _token=cancel):
+            if _token.cancel():
+                print("\n[stopping — the current step finishes first]",
+                      flush=True)
+
+        previous_sigint = signal.signal(signal.SIGINT, _stop_this_turn)
         try:
-            response = RunAgentLoop.run_agent_conversation(
-                user_goal=user_input,
-                model=model,
-                provider_name=provider_name,
-                thread_id=current_thread_id,
-                authorization=authorization,
-                effort=effort,
-            )
+            # SS17. The CLI chat turn is a wake consumer: a session started
+            # here is reported by the loop below, which is what makes
+            # starting one allowed at all.
+            with shell_sessions.consuming():
+                response = RunAgentLoop.run_agent_conversation(
+                    user_goal=user_input,
+                    model=model,
+                    provider_name=provider_name,
+                    thread_id=current_thread_id,
+                    authorization=authorization,
+                    effort=effort,
+                    cancel=cancel,
+                )
         except Exception as e:
             logger.exception("Chat turn failed")
-            print(f"\n[Error: {e}]")
+            print(f"\n[Error: {ansi.for_display(e)}]")
             continue
+        finally:
+            signal.signal(signal.SIGINT, previous_sigint)
 
         current_thread_id = response.thread_id
 
@@ -216,9 +526,9 @@ def run_chat(
         # LoopEvents. Printed BEFORE the answer, because that is when they
         # happened.
         for notice in getattr(response, "notices", ()):
-            print(f"— {notice['text']} —")
+            print(f"— {ansi.for_display(notice['text'])} —")
 
-        print(f"\nAgent: {response.text}")
+        print(f"\nAgent: {ansi.for_display(response.text)}")
         if response.stop_reason != "complete":
             # #4: name the figures, not just the reason. A user who sees
             # "token_budget_exceeded" reads it as a size problem -- the
@@ -234,8 +544,23 @@ def run_chat(
                     "last_input_tokens") or 0)
             figures = f" — billed {billed:,} this turn · ctx ~{ctx:,}" \
                 if billed is not None else ""
-            print(f"[stopped early: {response.stop_reason}{figures}]")
+            # ROADMAP_v3 §61 (CN5). An empty usage dict means the loop
+            # synthesised this response because the stream was cut, so
+            # the step that was interrupted reported no usage at all and
+            # `billed` is short by it. Stated, because a figure that is
+            # quietly incomplete is worse than one that admits it.
+            if response.stop_reason == "cancelled" and not response.usage:
+                figures += " (the stopped step is not counted)"
+            print(f"[stopped early: {ansi.for_display(response.stop_reason)}"
+                  f"{figures}]")
         print()
+
+        # SS2/SS5. The turn is over, but this conversation may not be: a
+        # session it started reports later, and that report starts a turn
+        # of its own. Nothing is read from the user until they are done.
+        _await_sessions(current_thread_id, model=model,
+                        provider_name=provider_name, effort=effort,
+                        authorization=authorization)
 
 
 def build_research_authorization(grant_spec, attended: bool = False):
@@ -253,7 +578,10 @@ def build_research_authorization(grant_spec, attended: bool = False):
     """
     from core.approval import GrantBudget, RunAuthorization
     from core.reasoning.authorization import (
-        NOTHING_TO_GRANT, candidates, parse_grant_spec, GrantSpecError,
+        NOTHING_TO_GRANT,
+        GrantSpecError,
+        candidates,
+        parse_grant_spec,
     )
 
     if grant_spec is None and not attended:
@@ -286,7 +614,7 @@ def build_research_authorization(grant_spec, attended: bool = False):
                   "picker; pass the names explicitly to grant them in a "
                   "script. Skipping:", file=sys.stderr)
             for name, description in offered:
-                print(f"  - {name}", file=sys.stderr)
+                print(f"  - {ansi.for_display(name)}", file=sys.stderr)
             return _attended_only(provider)
         granted = _pick_tools_to_grant(offered)
     else:
@@ -374,6 +702,23 @@ class _StdinReader:
     immediately. A `drain=` flag would put that safety rule one keyword
     argument away from being switched off at an approval prompt, which
     is why these are two methods and not one.
+
+    BATCH 121 AMENDS THE RULE TO "ONE READER AT A TIME", which is what it
+    always meant. N1 is scoped to this MODULE, and the biggest reader of
+    this process's stdin is not in it: Textual's win32.EventMonitor reads
+    the same console from its own thread. A pump parked in a blocking read
+    when the TUI starts therefore takes every keystroke -- the owner's
+    report is a TUI that animates and accepts no input at all, mouse and
+    Ctrl keys included, after the trust prompt. Measured in a console of
+    its own: an EventMonitor-shaped loop saw 0 of 5 injected characters
+    with the pump parked, and 5 of 5 without it.
+
+    So the pump is no longer started for a read that needs no thread.
+    readline() reads INLINE when none exists, which leaves nothing parked
+    for a one-shot startup prompt, and release_terminal() is the named
+    point where this process stops being stdin's reader at all. ask()
+    still starts one: a deadline cannot be imposed on a read that cannot
+    be abandoned, and that is the whole reason the thread exists.
     """
 
     # N3. The end of stdin is invisible to a queue consumer: input()
@@ -390,6 +735,11 @@ class _StdinReader:
         self._lines = queue.Queue()
         self._thread = None
         self._eof = threading.Event()
+        # Batch 121. Set once this process has handed the terminal to
+        # something else, which today means Textual. Separate from _eof
+        # because the reasons differ -- stdin ENDED versus stdin is no
+        # longer ours to read -- even though both answers are the same.
+        self._released = False
 
     def _pump(self):
         try:
@@ -410,10 +760,44 @@ class _StdinReader:
             self._lines.put(self._EOF)
 
     def _start(self) -> None:
+        """Start the pump, unless the terminal is no longer ours.
+
+        Batch 121: the refusal is the half that makes release_terminal()
+        a handover rather than a note. Starting a pump after the TUI has
+        the console is the defect itself, one call site later.
+        """
+        if self._released:
+            return
         if self._thread is None:
             import threading
             self._thread = threading.Thread(target=self._pump, daemon=True)
             self._thread.start()
+
+    def release_terminal(self) -> bool:
+        """Stop being this terminal's reader. Returns whether that is true.
+
+        Batch 121. Called once, immediately before Textual takes the
+        console. Every later read answers the way it answers a closed
+        stdin, because a terminal this process no longer owns is exactly
+        a stdin nobody can type at -- EOFError out of readline() and None
+        out of ask(), both of which already route to a declining default.
+
+        FALSE MEANS A PUMP IS STILL PARKED IN A READ, which cannot be
+        interrupted on any platform this runs on. Nothing can produce
+        that today: the only two prompts that run before the TUI go
+        through readline(), which no longer starts one. It is reported
+        rather than asserted because the symptom it would otherwise
+        produce is a UI that animates and ignores the keyboard, with
+        nothing anywhere saying why.
+        """
+        self._released = True
+        # The latch and the sentinel, for the same reason N3 published
+        # both: anyone already waiting on the queue has to be woken, and
+        # ask()'s drain would swallow a lone sentinel.
+        self._eof.set()
+        self._lines.put(self._EOF)
+        thread = self._thread
+        return thread is None or not thread.is_alive()
 
     def _ended(self) -> bool:
         """stdin is closed AND nothing typed before it closed is left."""
@@ -429,6 +813,12 @@ class _StdinReader:
         """
         import queue as _queue
 
+        if self._released:
+            # Batch 121. Nobody can answer a prompt at a terminal this
+            # process has handed over, and None is this method's existing
+            # word for that -- interaction.decode turns it into the
+            # kind's declining default.
+            return None
         self._start()
         while True:                      # drop anything typed too late
             try:
@@ -458,15 +848,172 @@ class _StdinReader:
         keeps whatever was typed ahead, strips the trailing newline, and
         raises EOFError on Ctrl+D so run_chat's existing handler and
         _ask's default-No path are unchanged.
+
+        BATCH 121: READS ON THE CALLING THREAD WHEN NO PUMP EXISTS. This
+        method needs no thread -- it has no deadline (N2), so there is
+        nothing to abandon a blocked read FOR -- and starting one anyway
+        is what left the trust prompt's pump parked in a read for the
+        life of the process. The TUI then shared the console with it and
+        lost every keystroke.
+
+        Once a pump exists the queue path is taken unchanged, which is
+        what keeps #100 fixed: the chat prompt must never read stdin
+        directly while the approval pump owns it. So the invariant is
+        "one reader at a time", and the branch is how it is kept rather
+        than a special case -- the pump is authoritative the moment it
+        exists, and before that there is nothing to contend with.
+
+        Type-ahead survives the inline path for free: a line typed early
+        is held by the TERMINAL's own buffer, and a read issued later
+        returns it immediately. That was always what buffered it; the
+        queue only ever held what the pump had already taken out.
         """
-        self._start()
+        if self._released:
+            # The terminal belongs to something else now. Same answer as
+            # a closed stdin, and _ask's caller already handles it.
+            raise EOFError
         print(prompt, end="", flush=True)
+        # NO _start() HERE, and that absence is the fix. This method has no
+        # deadline (N2), so there is nothing a thread could be abandoned
+        # FOR -- while starting one leaves a read parked on the terminal
+        # for the life of the process. A pump that already exists is
+        # authoritative, because then it IS the one reader.
+        if self._thread is None:
+            return self._read_inline()
         if self._ended():
             raise EOFError
         line = self._lines.get()
         if line is self._EOF:
             raise EOFError
         return line.rstrip("\r\n")
+
+    def _read_inline(self) -> str:
+        """One line, on this thread, leaving no reader behind.
+
+        A stdin that cannot be READ is a stdin that has ENDED, which is
+        _pump's own wording for the same case and the same reason: under
+        pytest's capture the read raises, and the callers of this have
+        one handler for "nobody answered" rather than two.
+        """
+        try:
+            line = sys.stdin.readline()
+        except Exception as e:
+            logger.debug("stdin could not be read: %s", e)
+            self._eof.set()
+            raise EOFError
+        if not line:
+            self._eof.set()
+            raise EOFError
+        return line.rstrip("\r\n")
+
+    def readline_masked(self, prompt: str):
+        """`readline`, with the terminal not echoing (ROADMAP_v3 §49,
+        slice 5a, SS59).
+
+        Returns the typed line, or None when there is no terminal to
+        type it on, the terminal cannot hide it, or stdin ended.
+
+        WHY NOT `getpass.getpass`: it reads stdin ITSELF -- character
+        by character through `msvcrt` on Windows -- which would be a
+        SECOND reader of the one stdin this class exists to be the only
+        reader of. Audit #100 is what that costs, and a password prompt
+        is the worst place to reintroduce it: the pump would take the
+        passphrase and `getpass` would wait for a line nobody is going
+        to type.
+
+        So the READ is the ordinary one and only the ECHO changes,
+        which is a property of the terminal rather than of whoever is
+        reading. The pump still delivers the line; the console simply
+        does not draw it on the way past.
+
+        NOT A TTY MEANS NO ANSWER, deliberately. A redirected stdin has
+        no echo to turn off, so a passphrase typed into one would land
+        in the pipe, the scrollback and any log capturing the run.
+        None routes that to `interaction.decode`'s declining default,
+        which is a refusal the user can see rather than a secret they
+        cannot take back.
+        """
+        try:
+            if not sys.stdin.isatty():
+                return None
+        except (AttributeError, ValueError):
+            return None
+        self._start()
+        print(prompt, end="", flush=True)
+        if self._ended():
+            print()
+            return None
+        restore = _echo_off()
+        if restore is None:
+            print()
+            print("  [this terminal cannot hide what you type; "
+                  "nothing was read]")
+            return None
+        try:
+            line = self._lines.get()
+        finally:
+            restore()
+            # The newline the terminal did not echo on Enter.
+            print()
+        if line is self._EOF:
+            return None
+        return line.rstrip("\r\n")
+
+
+def _echo_off():
+    """Turn the terminal's echo off; return a callable restoring it, or
+    None when this terminal cannot do it.
+
+    Two implementations because there is no portable one, and each is
+    the platform's own mechanism rather than a library that would read
+    stdin on our behalf -- which is the whole point of doing it here.
+    """
+    if os.name == "nt":
+        try:
+            import ctypes
+            from ctypes import wintypes
+        except ImportError:                          # pragma: no cover
+            return None
+        try:
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.GetStdHandle(-10)      # STD_INPUT_HANDLE
+            mode = wintypes.DWORD()
+            if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                return None
+            enable_echo_input = 0x0004
+            if not kernel32.SetConsoleMode(
+                    handle, mode.value & ~enable_echo_input):
+                return None
+        except (AttributeError, OSError):             # pragma: no cover
+            return None
+
+        def restore():
+            kernel32.SetConsoleMode(handle, mode.value)
+
+        return restore
+    try:
+        import termios
+    except ImportError:                              # pragma: no cover
+        return None
+    try:
+        fd = sys.stdin.fileno()
+        before = termios.tcgetattr(fd)
+    except (ValueError, OSError, termios.error):
+        return None
+    after = list(before)
+    after[3] = after[3] & ~termios.ECHO              # lflags
+    try:
+        termios.tcsetattr(fd, termios.TCSADRAIN, after)
+    except (OSError, termios.error):
+        return None
+
+    def restore():
+        try:
+            termios.tcsetattr(fd, termios.TCSADRAIN, before)
+        except (OSError, termios.error):
+            pass
+
+    return restore
 
 
 _STDIN_READER: "_StdinReader | None" = None
@@ -482,6 +1029,19 @@ def _stdin_reader() -> _StdinReader:
     if _STDIN_READER is None:
         _STDIN_READER = _StdinReader()
     return _STDIN_READER
+
+
+def _release_terminal() -> bool:
+    """Hand stdin over, for a reader that may never have been built.
+
+    Batch 121. Reads the global rather than going through _stdin_reader(),
+    because that function CREATES one -- and a launch with no startup
+    prompt has nothing to release. Returns whether the terminal is
+    genuinely free; see _StdinReader.release_terminal.
+    """
+    if _STDIN_READER is None:
+        return True
+    return _STDIN_READER.release_terminal()
 
 
 def build_attended_provider(honour_run_scope: bool = False,
@@ -531,8 +1091,43 @@ def build_attended_provider(honour_run_scope: bool = False,
         for line in rendered.splitlines():
             print(f"  {line}")
 
+    def _asker(payload: dict, visible) -> None:
+        """Name the run that raised this, when it is not the conversation.
+
+        §47 put `asking_agent` / `asking_depth` on every payload that can
+        be raised from inside a run -- core/loop.py writes them onto an
+        approval, and the `ask_user` tool onto a question -- and rendered
+        them in the TUI only. This shell dropped all three, which is the
+        gap `_approval` below names in its own comment: a kind one shell
+        renders and the other drops looks perfectly wired up (D12). Found
+        by the second round of reviewing §47, batch 76.
+
+        It matters most where the subject of the question is a NAME. NA9
+        means three children of one response can each be spawning a
+        grandchild, and their three sign-offs name the grandchild and
+        nothing else -- three identical prompts on the one stdin reader.
+
+        DIRECTLY UNDER THE BRACKETED HEADER, above the candidates or the
+        payload, at every site: one placement rule rather than three, and
+        the same position relative to the header that the modal gives it.
+
+        Silent at depth 0, which is SCOPE rather than a gap -- the asking
+        run is then the conversation being watched.
+        """
+        asked_by = payload.get("asking_agent")
+        if asked_by:
+            print(f"  asked by {visible(asked_by)} "
+                  f"(depth {payload.get('asking_depth') or 0})")
+
     def _approval(request) -> bool:
-        print(f"\n[approval] {request.payload.get('tool_name')}")
+        # Every untrusted field below goes through one `visible`
+        # (batch 152), and `visible.warn()` is what tells the user that
+        # something did.
+        visible = _Visible()
+        print(f"\n[approval] {visible(request.payload.get('tool_name'))}")
+        # Under the header, above everything the agent wrote -- see
+        # `_asker`, which is the one placement rule for the three kinds.
+        _asker(request.payload, visible)
         # §46 (EP1). The subject of the question, first. The TUI pins it
         # because a modal has a bottom edge; a terminal does not, so
         # here it is placement rather than rescue -- but a kind one
@@ -541,10 +1136,15 @@ def build_attended_provider(honour_run_scope: bool = False,
         # both. None for every tool that declares no headline.
         headline = request.payload.get("headline")
         if headline:
+            # `splitlines()` splits on a carriage return as well as a
+            # newline, so a CR in a headline became a second $-prefixed
+            # line rather than an overwrite even before this batch --
+            # measured, and the doubled prefix is what showed it. The
+            # escape is what did the damage.
             for line in str(headline).splitlines():
-                print(f"  $ {line}")
+                print(f"  $ {visible(line)}")
         if request.notice:
-            print(f"  {request.notice}")
+            print(f"  {visible(request.notice)}")
         # §42 (RA6). Same order as the modal -- the computed notice,
         # then the agent's own claim, then the payload. Shown here as
         # well as in the TUI because a kind one shell renders and the
@@ -552,8 +1152,10 @@ def build_attended_provider(honour_run_scope: bool = False,
         # and the CLI is where an unattended-looking run is watched
         # from.
         reason = request.payload.get("rationale")
-        print(f"  reason (the agent's own words, unverified): {reason or '(none given)'}")
+        print("  reason (the agent's own words, unverified): "
+              f"{visible(reason) if reason else '(none given)'}")
         _render_params(request.payload.get("params") or {})
+        visible.warn()
         answer = reader.ask(f"  Allow? [y/N]{clock}: ", timeout)
         if answer is None:
             print("  [no answer — denied; the run continues]")
@@ -579,9 +1181,16 @@ def build_attended_provider(honour_run_scope: bool = False,
         multi = bool(payload.get("multi_select"))
         allow_text = payload.get("allow_text", True) is not False
 
-        print(f"\n[question] {payload.get('question', '')}")
+        visible = _Visible()
+        print(f"\n[question] {visible(payload.get('question', ''))}")
+        # The one site where the header already carries the model's own
+        # words, so the label follows them rather than preceding them --
+        # the same order `_approval` keeps for its headline, and for the
+        # reason its comment gives: a terminal has no bottom edge, so
+        # this is placement rather than rescue.
+        _asker(payload, visible)
         for index, option in enumerate(options, start=1):
-            print(f"  {index}. {option}")
+            print(f"  {index}. {visible(option)}")
         how = []
         if options:
             how.append("numbers separated by spaces" if multi else "a number")
@@ -590,6 +1199,7 @@ def build_attended_provider(honour_run_scope: bool = False,
         how.append("'d' to discuss it instead")
         prompt = f"  {', or '.join(how)} (blank to skip): "
 
+        visible.warn()
         answer = reader.ask(prompt, timeout)
         if answer is None:
             print("  [no answer — the model will be told nobody replied]")
@@ -626,18 +1236,28 @@ def build_attended_provider(honour_run_scope: bool = False,
         so out loud beats leaving the user to infer it from a spawn that
         quietly did not happen.
         """
+        visible = _Visible()
         agent = request.payload.get("agent", "the subagent")
         candidates = list(request.payload.get("candidates") or [])
         if not candidates:
-            print(f"\n[subagent] {agent} needs no approval-gated tools.")
+            print(f"\n[subagent] {visible(agent)} needs no approval-gated "
+                  "tools.")
+            # BOTH branches, as the modal splices it into both of its own:
+            # a nested spawn of an agent with no gated tools reaches this
+            # one, and `agent` here is the run about to be SPAWNED.
+            _asker(request.payload, visible)
+            visible.warn()
             answer = reader.ask(f"  Run it? [y/N]{clock}: ", timeout)
             if answer and answer.strip().lower() in ("y", "yes"):
                 return set()
             print("  [the spawn was refused]")
             return None
-        print(f"\n[subagent] {agent} may be granted, for this turn only:")
+        print(f"\n[subagent] {visible(agent)} may be granted, for this "
+              "turn only:")
+        _asker(request.payload, visible)
         for index, name in enumerate(candidates, 1):
-            print(f"  {index}. {name}")
+            print(f"  {index}. {visible(name)}")
+        visible.warn()
         answer = reader.ask(
             "  Grant which? [numbers / 'all' / 'none' / blank to refuse]"
             f"{clock}: ", timeout)
@@ -657,6 +1277,18 @@ def build_attended_provider(honour_run_scope: bool = False,
                 chosen.add(candidates[int(piece) - 1])
             else:
                 print(f"  [ignoring {piece!r} — not one of the numbers above]")
+        if not chosen:
+            # NOTHING IN THAT LINE NAMED A TOOL (batch 152), and the
+            # empty set is already taken: it is the explicit `none`, which
+            # returned
+            # above, and `core/loop.py` spawns on "not None". So returning
+            # `chosen` here turned a mistyped refusal into an
+            # authorisation to spawn -- measured, `xyz` and `0 99` both
+            # spawned. This is the docstring's own "None for anything
+            # unparsed is belt-and-braces", which the code did for a blank
+            # line and not for a line it could not read.
+            print("  [nothing there named a tool — the spawn was refused]")
+            return None
         return chosen
 
     def _confirm(request):
@@ -667,12 +1299,14 @@ def build_attended_provider(honour_run_scope: bool = False,
         shell how to render: an approval is a gated tool call with params,
         this is prose someone wants signed off.
         """
+        visible = _Visible()
         payload = request.payload
         body = payload.get("body", "")
         if body:
-            print(f"\n{body}")
-        answer = reader.ask(
-            f"  {payload.get('title', 'Proceed?')} [y/N]{clock}: ", timeout)
+            print(f"\n{visible(body)}")
+        title = visible(payload.get("title", "Proceed?"))
+        visible.warn()
+        answer = reader.ask(f"  {title} [y/N]{clock}: ", timeout)
         if answer is None:
             print("  [no answer — nothing was done]")
             return False
@@ -688,16 +1322,24 @@ def build_attended_provider(honour_run_scope: bool = False,
         makes `s` mean software without anything hard-coding it), or a
         bare Enter to take the suggestion.
         """
+        visible = _Visible()
         payload = request.payload
         options = [str(o) for o in (payload.get("options") or ())]
         proposal = payload.get("proposal")
         if payload.get("blank"):
             print("\nThis folder is empty, so there is nothing to go on.")
         elif proposal:
-            print(f"\nThis looks like a {proposal} project — "
-                  f"{payload.get('reason', 'no reason given')}.")
-        labels = " or ".join(f"[{o[:1]}]{o[1:]}" for o in options)
+            print(f"\nThis looks like a {visible(proposal)} project — "
+                  f"{visible(payload.get('reason', 'no reason given'))}.")
+        # The LABELS are scrubbed and the returned value is not: what this
+        # kind answers with has to be the option as it was offered, since
+        # decode validates the answer against that list (and a scrubbed
+        # answer would fail that check for the one reason that is not the
+        # user's fault).
+        labels = " or ".join(f"[{o[:1]}]{o[1:]}" for o in
+                             (visible(o) for o in options))
         accepts = " (enter accepts the suggestion)" if proposal else ""
+        visible.warn()
         answer = reader.ask(f"  {labels}?{accepts}{clock}: ", timeout)
         if answer is None:
             print("  [no answer — nothing was chosen]")
@@ -713,7 +1355,11 @@ def build_attended_provider(honour_run_scope: bool = False,
                    if o.lower().startswith(cleaned.lower())]
         if len(matched) == 1:
             return matched[0]
-        print(f"  [{cleaned!r} is not one of: {', '.join(options)}]")
+        # The SECOND rendering of the same list, and the one a reader
+        # does not think of as display -- found by the relation test
+        # rather than by reading this function (batch 152).
+        print(f"  [{cleaned!r} is not one of: "
+              f"{', '.join(visible(o) for o in options)}]")
         return None
 
     def _review(request):
@@ -732,8 +1378,33 @@ def build_attended_provider(honour_run_scope: bool = False,
     # perfectly wired up. CONFIRM and CHOICE sat in that state through two
     # sections. A runtime warning would only fire once someone reached the
     # branch, which is exactly the condition nobody noticed.
+    def _secret(request):
+        """SS59 on the CLI. Masked, and it names nothing it reads.
+
+        A missing branch here is audit #7's shape -- the kind falls
+        through to None, decode turns that into the declining default,
+        and the feature reports "nobody answered" on every CLI run
+        while looking perfectly wired up. The parity test against
+        `interaction.SAFE_DEFAULTS` is what makes adding a kind
+        without this a FAILURE rather than a later discovery.
+        """
+        visible = _Visible()
+        payload = request.payload
+        print()
+        print(visible(payload.get("title", "Enter a secret")))
+        body = payload.get("body", "")
+        if body:
+            print(visible(body))
+        visible.warn()
+        answer = reader.readline_masked("  (not shown as you type): ")
+        if answer is None:
+            print("  [nothing was entered]")
+            return None
+        return answer
+
     handlers = {
         interaction.APPROVAL: _approval,
+        interaction.SECRET: _secret,
         interaction.SUBAGENT_SIGNOFF: _signoff,
         interaction.QUESTION: _question,
         interaction.REVIEW: _review,
@@ -756,6 +1427,151 @@ def build_attended_provider(honour_run_scope: bool = False,
     # Read by the parity test; nothing in production branches on it.
     channel.rendered_kinds = frozenset(handlers)
     return channel
+
+
+def run_secrets_command(args) -> int:
+    """`--secrets ...`, ROADMAP_v3 §49 slice 5a (SS56-SS62).
+
+    Runs no model, touches no thread, and exits -- beside --memories for
+    that reason.
+
+    EVERY VALUE IS READ AT A MASKED PROMPT AND NONE IS TAKEN FROM ARGV.
+    That is not a convenience: on every platform this runs on, another
+    process can read this one's command line, and on a shell it also lands
+    in the history file. A `--secrets set name VALUE` spelling would have
+    been shorter and would have leaked the secret to disk before the store
+    ever encrypted it.
+
+    Prints names, counts and outcomes. Never a value (SS62).
+    """
+    from security import secrets
+
+    parts = list(args.secrets)
+    verb = parts[0].lower()
+    rest = parts[1:]
+    reader = _stdin_reader()
+
+    def ask(prompt: str):
+        value = reader.readline_masked(prompt)
+        if value is None:
+            print("  [nothing was entered]")
+        return value
+
+    def unlocked() -> bool:
+        if secrets.is_unlocked():
+            return True
+        if not secrets.exists():
+            print(f"No secrets store. --secrets set <name> creates one at "
+                  f"{secrets.store_path()}.")
+            return False
+        answer = ask("Master passphrase (not shown as you type): ")
+        if not answer:
+            return False
+        try:
+            secrets.unlock(answer)
+        except secrets.StoreUnreadable as exc:
+            # ABOVE the SecretsError arm, and it cannot be otherwise: a
+            # subclass has to be caught first or the base arm takes it.
+            # That ordering is not what makes this safe, though -- the TYPE
+            # is. `WrongPassphrase` is deliberately NOT a StoreUnreadable,
+            # so the recovery text cannot reach someone who simply typed
+            # their passphrase wrong (batch 108).
+            print(f"[error] {exc}")
+            print(secrets.recovery_hint())
+            return False
+        except secrets.SecretsError as exc:
+            print(f"[error] {exc}")
+            return False
+        return True
+
+    if verb == "status":
+        if not secrets.exists():
+            print(f"No secrets store. It would live at "
+                  f"{secrets.store_path()}.")
+        else:
+            print(f"Secrets store present at {secrets.store_path()}.")
+        return 0
+
+    if verb == "list":
+        if not unlocked():
+            return 1
+        entries = secrets.names()
+        if not entries:
+            print("No secrets stored.")
+        else:
+            print("Stored secrets (names only):")
+            for name in entries:
+                print(f"  {name}")
+        return 0
+
+    if verb == "delete":
+        if not rest:
+            print("Usage: --secrets delete <name>")
+            return 2
+        if not unlocked():
+            return 1
+        if secrets.delete(rest[0]):
+            print(f"Deleted {rest[0]}.")
+            return 0
+        print(f"No secret named {rest[0]}.")
+        return 1
+
+    if verb == "set":
+        if not rest:
+            print("Usage: --secrets set <name>")
+            return 2
+        name = rest[0]
+        if not secrets.exists():
+            print("Creating a new secrets store. There is no recovery for "
+                  "a forgotten passphrase: delete the file and start again.")
+            first = ask("Choose a master passphrase: ")
+            if not first:
+                return 1
+            try:
+                secrets.create(first)
+            except secrets.SecretsError as exc:
+                print(f"[error] {exc}")
+                return 1
+        elif not unlocked():
+            return 1
+        value = ask(f"Value for {name}: ")
+        if not value:
+            return 1
+        try:
+            secrets.put(name, value)
+        except secrets.SecretsError as exc:
+            print(f"[error] {exc}")
+            return 1
+        print(f"Saved {name}.")
+        # SS58's reuse offer, in the CLI's own idiom.
+        twin = _secret_twin_name(name)
+        if twin:
+            answer = _ask(f"Also save the same value as {twin}? [y/N]: ")
+            if answer.strip().lower().startswith("y"):
+                try:
+                    secrets.put(twin, value)
+                except secrets.SecretsError as exc:
+                    print(f"[error] {exc}")
+                    return 1
+                print(f"Saved {twin}.")
+        return 0
+
+    print("Usage: --secrets status | list | set <name> | delete <name>")
+    return 2
+
+
+def _secret_twin_name(name: str):
+    """`ssh.<host>.login` <-> `ssh.<host>.sudo` (SS58).
+
+    Mirrors `tui/app.py`'s `_secret_twin` rather than importing it: main.py
+    does not import the TUI module at all, and doing so to share nine lines
+    would pull Textual into every CLI run. `tests/test_secrets.py` holds
+    the two against each other, so drift is a failure rather than a hole.
+    """
+    for left, right in (("login", "sudo"), ("sudo", "login")):
+        if name.endswith("." + left):
+            return name[: -len(left)] + right
+    return None
 
 
 def run_memory_command(args) -> int:
@@ -789,7 +1605,8 @@ def run_memory_command(args) -> int:
     for row in rows:
         marker = "global " if row["scope"] == "global" else "project"
         category = f" [{row['category']}]" if row.get("category") else ""
-        print(f"{row['id']}  {marker}{category}  {row['content']}")
+        print(f"{row['id']}  {marker}{category}  "
+              f"{ansi.for_display(row['content'])}")
     return 0
 
 
@@ -897,9 +1714,9 @@ def run_init_command(args, provider_name: str, model: str) -> int:
             scaffold_config=args.project_config,
         )
     except InitError as e:
-        print(f"\n{e}")
+        print(f"\n{ansi.for_display(e)}")
         return 1
-    print(f"\n{notice['text']}")
+    print(f"\n{ansi.for_display(notice['text'])}")
     return 0
 
 
@@ -933,7 +1750,8 @@ def attach_cli_refs(thread_id, specs, provider_name: str, model: str) -> None:
         except Exception as e:  # noqa: BLE001 -- a failed reference must not
             # stop the session from starting.
             logger.warning("Could not summarise thread %s: %s", source, e)
-            print(f"[--ref: could not summarise {source}: {e}]")
+            print(f"[--ref: could not summarise {source}: "
+                  f"{ansi.for_display(e)}]")
             continue
         if notice is None:
             print(f"[--ref: nothing to summarise in {source}]")
@@ -991,10 +1809,17 @@ def _pick_tools_to_grant(offered) -> set:
     print("Granting one authorises it for THIS RUN ONLY. Nothing is saved.\n")
     granted = set()
     for name, description in offered:
-        print(f"  {name}")
+        # ONE SCRUBBER PER TOOL, because each tool is its own question.
+        # Both strings are third-party: `candidates()` exists for MCP
+        # tools, and its own docstring says the description IS the whole
+        # of informed consent here -- which is what makes an escape in it
+        # worse than an escape in an approval headline, not better.
+        visible = _Visible()
+        print(f"  {visible(name)}")
         if description:
-            print(f"      {description}")
-        if _ask(f"  Grant {name} for this run? [y/N]: ").strip().lower() in ("y", "yes"):
+            print(f"      {visible(description)}")
+        visible.warn()
+        if _ask(f"  Grant {visible(name)} for this run? [y/N]: ").strip().lower() in ("y", "yes"):
             granted.add(name)
         print()
     return granted
@@ -1050,8 +1875,13 @@ def run_research(
             # capability visible only in the TUI is the split this
             # project keeps warning about -- and it is the CLI that goes
             # silent for minutes inside a tool-heavy pass.
+            # Every field of an event that carries TEXT carries a
+            # model's or a tool's (batch 152): a pass id is composed
+            # here, a tool name can be a server's, and `event.text` is a
+            # trace
+            # line, a tool argument digest or a tool's own error.
             if event.kind == "pass_start":
-                print(f"-> {event.pass_id}", flush=True)
+                print(f"-> {ansi.for_display(event.pass_id)}", flush=True)
             elif event.kind == "pass_complete" and event.ok is False:
                 # E14/#115, L6's both-shells rule. Deliberately prints
                 # nothing: the CLI's narrative for this failure is the
@@ -1066,15 +1896,18 @@ def run_research(
                 # made no model call is done the moment it is announced,
                 # so an arrow promising something is starting would be
                 # wrong.
-                print(f".. {event.pass_id}", flush=True)
+                print(f".. {ansi.for_display(event.pass_id)}", flush=True)
             elif event.kind == "tool_call":
-                detail = f"  {event.text}" if event.text else ""
-                print(f"     > {event.tool}{detail}", flush=True)
+                detail = (f"  {ansi.for_display(event.text)}"
+                          if event.text else "")
+                print(f"     > {ansi.for_display(event.tool)}{detail}",
+                      flush=True)
             elif event.kind == "tool_result" and not event.ok:
                 # Successful results print nothing: one line per call is
                 # already the volume, and "it worked" is what the absence
                 # of a failure line says.
-                print(f"     x {event.tool}  {event.text}", flush=True)
+                print(f"     x {ansi.for_display(event.tool)}  "
+                      f"{ansi.for_display(event.text)}", flush=True)
             elif event.kind == "pass_activity":
                 # For the passes that call no tools at all -- Pass 1 and
                 # final synthesis -- this is the only sign of life
@@ -1082,7 +1915,7 @@ def run_research(
                 # the two longest passes in the run.
                 print(f"     .. {event.chars // 1000}k chars", flush=True)
             elif event.kind == "trace_line":
-                print(f"- {event.text}", flush=True)
+                print(f"- {ansi.for_display(event.text)}", flush=True)
             elif event.kind == "run_complete":
                 run = event.run
         if run is None:
@@ -1094,7 +1927,7 @@ def run_research(
                 "run_complete event")
     except Exception as e:
         logger.exception("Research pipeline failed")
-        print(f"\nPipeline failed: {e}")
+        print(f"\nPipeline failed: {ansi.for_display(e)}")
         print("If any partial results were persisted, they can be "
               "inspected via the database.")
         raise SystemExit(1)
@@ -1104,13 +1937,14 @@ def run_research(
         output_dir = write_run_artifacts(run)
     except Exception as e:
         logger.exception("Could not write artifacts")
-        print(f"\n[Warning: could not write artifacts: {e}]")
+        print("\n[Warning: could not write artifacts: "
+              f"{ansi.for_display(e)}]")
 
     # §22: no "--- Trace ---" block here any more. Every line was printed
     # as it happened, above; reprinting them would show the whole run
     # twice, with the second copy looking like a different artifact.
     print("\n--- Report ---")
-    print(run.final_report)
+    print(ansi.for_display(run.final_report))
 
     if run.run_id:
         print(f"\n[run id: {run.run_id}]")
@@ -1142,6 +1976,21 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="UUID",
         help="Resume an existing conversation thread by its UUID.",
+    )
+    # ROADMAP_v3 §49 slice 5a. A flag rather than a subcommand, matching
+    # --memories/--forget, which are the other data-only commands that run
+    # no model call: this parser has no subparsers at the top level and
+    # adding one for this would reshape every existing invocation.
+    parser.add_argument(
+        "--secrets",
+        nargs="+",
+        default=None,
+        metavar="ARG",
+        help="Manage the harness-held secret store and exit: "
+             "status | list | set <name> | delete <name>. Values are "
+             "typed at a masked prompt, never given on the command line "
+             "-- an argv is visible to every process on the machine and "
+             "lands in your shell history.",
     )
     parser.add_argument(
         "--mode",
@@ -1408,16 +2257,19 @@ def _prompt_review_decision(reader, finding, round_index,
     """
     if timeout is _DEFAULT_TIMEOUT:
         timeout = config.ATTENDED_APPROVAL_TIMEOUT_S
-    kind = finding.get("kind")
-    target = finding.get("claim_id") or "the report"
+    # Every field here is the reviewing model's own text (batch 152).
+    visible = _Visible()
+    kind = visible(finding.get("kind"))
+    target = visible(finding.get("claim_id") or "the report")
     print(f"\n[review] {kind} correction to {target} "
-          f"(severity: {finding.get('severity', 'unknown')})")
-    print(f"  why: {finding.get('reason', '(no reason given)')}")
-    print(f"  proposed: {finding.get('proposed')}")
+          f"(severity: {visible(finding.get('severity', 'unknown'))})")
+    print(f"  why: {visible(finding.get('reason', '(no reason given)'))}")
+    print(f"  proposed: {visible(finding.get('proposed'))}")
     if round_index:
         print(f"  (refinement {round_index} of "
               f"{config.MAX_REVIEW_REFINEMENTS})")
     clock = f" ({timeout}s)" if timeout else ""
+    visible.warn()
     answer = reader.ask(
         "  [a]ccept / [r]eject / [f] refine <note> / [!] reject the "
         f"rest{clock}: ", timeout)
@@ -1583,10 +2435,14 @@ def _confirm_user_level_servers(configs: dict) -> dict:
 
     for cfg in pending:
         if not interactive:
-            print(f"  - {cfg.describe()}", file=sys.stderr)
+            print(f"  - {ansi.for_display(cfg.describe())}",
+                  file=sys.stderr)
             approved.pop(cfg.name, None)
             continue
-        print(f"\nNew MCP server in your user config:\n  {cfg.describe()}")
+        visible = _Visible()
+        print("\nNew MCP server in your user config:\n  "
+              f"{visible(cfg.describe())}")
+        visible.warn()
         answer = _ask("Connect to it? [y/N]: ")
         if answer.strip().lower() in ("y", "yes"):
             mcp_config.remember_server(cfg)
@@ -1594,6 +2450,24 @@ def _confirm_user_level_servers(configs: dict) -> dict:
             print(f"Skipping {cfg.name}.")
             approved.pop(cfg.name, None)
     return approved
+
+
+def _ensure_user_mcp_config():
+    """Create the user-level mcp.json when there isn't one. Owner request.
+
+    Returns the path it created, or None. The file is EMPTY -- no example
+    server, no commented-out entry -- because mcp.json is JSON and cannot
+    carry a comment, and a disabled example in a file whose whole purpose
+    is naming a local command to execute is a worse kind of help.
+
+    Here rather than inside setup_mcp() so the created path can become a
+    startup notice: setup_mcp returns the client, and its one except
+    clause reports "setup failed, continuing without MCP", which a file
+    that could not be created is not.
+    """
+    from mcp_client import config as mcp_config
+
+    return mcp_config.ensure_user_config()
 
 
 def setup_mcp(project_path: str):
@@ -1627,11 +2501,13 @@ def setup_mcp(project_path: str):
             print(f"[mcp] {len(names)} tool(s) from "
                   f"{len(client.clients)} server(s).")
         for name, why in client.failures.items():
-            print(f"[mcp] server {name!r} unavailable: {why}", file=sys.stderr)
+            print(f"[mcp] server {name!r} unavailable: "
+                  f"{ansi.for_display(why)}", file=sys.stderr)
         return client
     except Exception as e:
         logger.debug("MCP setup failed", exc_info=True)
-        print(f"[mcp] setup failed, continuing without MCP: {e}", file=sys.stderr)
+        print("[mcp] setup failed, continuing without MCP: "
+              f"{ansi.for_display(e)}", file=sys.stderr)
         # Returning None here without unwinding is how spawned stdio
         # servers become orphans: teardown_mcp(None) is a no-op, so a
         # failure AFTER connect_all() (registration raising, a partial
@@ -1695,6 +2571,94 @@ def _classify_legacy_threads() -> None:
         connection.close()
 
 
+def _drop_flag(args: list, flag: str) -> list:
+    """`args` without `flag` and its value, in either spelling.
+
+    argparse accepts `--thread X` and `--thread=X` alike, so a relaunch
+    that handled only the first would pass the old thread AND the new one,
+    and argparse would keep the last -- which happens to be right, and
+    would stop being right the day the order changed.
+    """
+    out, skip = [], False
+    for item in args:
+        if skip:
+            skip = False
+            continue
+        if item == flag:
+            skip = True
+            continue
+        if item.startswith(f"{flag}="):
+            continue
+        out.append(item)
+    return out
+
+
+def relaunch_argv(request, argv=None) -> list:
+    """The command line that relaunches this harness where it left off.
+
+    THIS LAUNCH'S ARGUMENTS, with three replaced. Everything else is
+    carried verbatim because the user typed it and a restart is not a
+    chance to reinterpret it.
+
+      * `--thread` becomes the conversation that was open, so the restart
+        reopens where it was rather than starting an empty thread beside
+        it. Replaced rather than appended, since this launch may have had
+        one and `/new` or `/resume` may have moved on from it.
+      * `--provider` / `--model` are named only when THIS launch pinned
+        them, which is the fact `request` carries. Unpinned, the
+        remembered pair in tui/preferences.py answers at the next launch
+        exactly as it did at this one, and writing a flag the user never
+        typed would outrank it.
+
+    Pure, and separate from the exec for that reason: what a relaunch
+    should consist of is worth asserting without replacing the test
+    process to find out.
+    """
+    argv = list(sys.argv if argv is None else argv)
+    rest = argv[1:]
+    for flag in ("--thread", "--provider", "--model"):
+        rest = _drop_flag(rest, flag)
+    if request.thread_id:
+        rest += ["--thread", request.thread_id]
+    if request.provider:
+        rest += ["--provider", request.provider]
+    if request.model:
+        rest += ["--model", request.model]
+    return [sys.executable, argv[0], *rest]
+
+
+def replace_process(command: list) -> int:
+    """Become `command`. Returns only on Windows, and only when it exits.
+
+    POSIX REPLACES THE PROCESS. `execv` keeps the pid, the terminal and
+    the parent's wait, so `bin/venastine.mjs` -- which runs this under
+    `spawnSync` with inherited stdio -- is none the wiser.
+
+    WINDOWS HAS NO EXEC. The C runtime emulates `execv` by starting a new
+    process and exiting, which gives the replacement a DIFFERENT pid: the
+    launcher's wait on this one would return, and the shell prompt would
+    come back over a terminal the replacement is still drawing in. So this
+    process stays, as a waiter around the new one, and passes its exit
+    code up. One extra idle process per restart is the price, and it is
+    the only arrangement that keeps the terminal single-owner.
+
+    The teardown has already run by the time this is called -- see the
+    call site -- so nothing is held open across it either way.
+
+    BATCH 121 NAMES WHAT "SINGLE-OWNER" COSTS ON THIS PATH. The waiter
+    keeps THIS process alive with the console inherited, so anything of
+    ours still reading stdin reads the replacement's keystrokes. The
+    handover before run_tui() is what makes that safe -- it is the same
+    defect as the trust prompt's, one process boundary further along, and
+    it is covered by the same release rather than by a second guard.
+    """
+    if os.name == "nt":
+        import subprocess
+        return subprocess.call(command)
+    os.execv(command[0], command)
+    raise AssertionError("execv returned")  # pragma: no cover
+
+
 def main(argv=None) -> int:
     """The CLI, as a function (ROADMAP_v2 §29, N7). Returns an exit code.
 
@@ -1733,12 +2697,18 @@ def main(argv=None) -> int:
     # behind -- the same argument audit #101 makes one line down.
     # §40 (UN2). ABOVE check_workspace, and that ordering is not
     # cosmetic: the posture is what a later batch lets decide whether the
-    # workspace guard runs at all, and `apply_cli` RAISES if anything has
-    # already read the posture -- so a reader creeping above this line is
-    # a loud startup failure rather than a run that quietly used the
-    # config-only value. Below parse_args because the command line feeds
-    # it; below configure_logging so the warnings below have somewhere to
-    # go.
+    # workspace guard runs at all. Below parse_args because the command
+    # line feeds it; below configure_logging so the warnings below have
+    # somewhere to go.
+    #
+    # THE ORDERING IS NOT ENFORCED AT RUN TIME TODAY (batch 142),
+    # and the sentence that used to be here said it was. `apply_cli` does
+    # raise on a posture CHANGE after a read -- but this call passes no
+    # overrides, so there is no change to detect and a reader creeping
+    # above this line produces nothing at all. What catches it is the
+    # source scan in `test_posture.py`, which covers IMPORT time; a read
+    # placed inside `main()` above this line is covered by neither. Keep
+    # this call here, and keep it FIRST among posture readers.
     posture.apply_cli()
     _announce_posture()
 
@@ -1746,6 +2716,61 @@ def main(argv=None) -> int:
     if workspace_refusal:
         logger.error("%s", workspace_refusal)
         print(f"[error] {workspace_refusal}", file=sys.stderr)
+        return 2
+
+    # THE PROJECT IS THE WORKSPACE WHEN ONE WAS NAMED (batch 44, reversing
+    # RM6). Everything downstream follows from this one line, because
+    # config_loader.get_project_path() is the single resolver: /init's
+    # destination (project_init.generator and, decisively,
+    # write_project_doc's own _project_root), D17 workspace trust, the
+    # `.venastine/` config tier, and UserMemory's project scope (D25/M12).
+    #
+    # RM6 said the opposite -- trust keys off cwd, AGENT_WORKSPACE is a
+    # permission boundary and "deliberately not a project path" -- and the
+    # report that reopened it is what that split actually looks like in
+    # use: with AGENT_WORKSPACE set, read/write/edit/shell were correctly
+    # confined to the project while /init scaffolded documentation into
+    # the HARNESS. One session, two different ideas of where the work was.
+    #
+    # MOVED UP HERE IN BATCH 107, from below create_db_and_tables, so the
+    # refusal underneath it can sit where it has to. Nothing between the
+    # two positions read it; it depends only on config and the cwd.
+    #
+    # UNCHANGED IN BATCH 111, and deliberately: WORKSPACE_DIR_EXPLICIT now
+    # answers to `workspace_is_project` as well as to AGENT_WORKSPACE
+    # (TECHNICAL_DEBT 28), and the whole point of putting the OR inside
+    # config_schema.derived_values is that this line never learns there are
+    # two routes. One question, asked once, answered in the config layer.
+    project_path = (os.path.realpath(config.WORKSPACE_DIR)
+                    if config.WORKSPACE_DIR_EXPLICIT else os.getcwd())
+
+    # TECHNICAL_DEBT 26. The other half of the guard six lines up, and it
+    # exists because that one only ever saw a workspace someone NAMED.
+    # With nothing naming one the line above falls back to os.getcwd(),
+    # so launching from the install tree made the harness its own project
+    # -- the same state check_workspace refuses, reached by saying nothing.
+    # Measured from an owner report (batch 96) and reproduced before the
+    # fix (batch 107): the trust prompt listed the harness's own AGENTS.md.
+    #
+    # THIS POSITION IS AS MUCH THE FIX AS THE COMPARISON IS. Above
+    # create_db_and_tables, so a refused launch leaves no database behind
+    # -- audit #101's argument for moving that call, and it applies to the
+    # second refusal exactly as it did to the first. And above
+    # load_project_config, because the reported SYMPTOM is produced inside
+    # it, by _ensure_workspace_trust: a refusal printed after that prompt
+    # would be a refusal after the damage.
+    #
+    # Above the early-exit commands too, so --memories, --forget,
+    # --summary, --init and --secrets are all refused. One rule with no
+    # exceptions (owner decision, batch 107). Four of the five are
+    # project-scoped and refusing them is the point -- --memories here
+    # would list the HARNESS's memories. --secrets is the one that is not,
+    # and it is refused anyway, because a guard with one exception is a
+    # guard someone has to remember.
+    project_refusal = protected_paths.check_project(project_path)
+    if project_refusal:
+        logger.error("%s", project_refusal)
+        print(f"[error] {project_refusal}", file=sys.stderr)
         return 2
 
     # §29 (N6), audit #101. BELOW parse_args, which is where --help and a
@@ -1765,27 +2790,12 @@ def main(argv=None) -> int:
     # path can forget to call.
     create_db_and_tables()
 
-    # THE PROJECT IS THE WORKSPACE WHEN ONE WAS NAMED (batch 44, reversing
-    # RM6). Everything downstream follows from this one line, because
-    # config_loader.get_project_path() is the single resolver: /init's
-    # destination (project_init.generator and, decisively,
-    # write_project_doc's own _project_root), D17 workspace trust, the
-    # `.venastine/` config tier, and UserMemory's project scope (D25/M12).
-    #
-    # RM6 said the opposite -- trust keys off cwd, AGENT_WORKSPACE is a
-    # permission boundary and "deliberately not a project path" -- and the
-    # report that reopened it is what that split actually looks like in
-    # use: with AGENT_WORKSPACE set, read/write/edit/shell were correctly
-    # confined to the project while /init scaffolded documentation into
-    # the HARNESS. One session, two different ideas of where the work was.
-    #
-    # SAFE BY AN ORDERING THAT ALREADY EXISTED: check_workspace() ran a
-    # few lines above and refuses a workspace that is, or sits inside, the
-    # harness install tree. So the project can never become the harness by
-    # this route -- and that guard is now load-bearing for a second
-    # reason, which is why the launcher must still never set the variable.
-    project_path = (os.path.realpath(config.WORKSPACE_DIR)
-                    if config.WORKSPACE_DIR_EXPLICIT else os.getcwd())
+    # SAFE BY TWO ORDERINGS, ONE OF WHICH ALREADY EXISTED: check_workspace()
+    # refuses a workspace that is, or sits inside, the harness install
+    # tree, and since batch 107 check_project() refuses the implicit route
+    # to the same place. So the project can never become the harness --
+    # and both guards are load-bearing for a second reason, which is why
+    # the launcher must still never set the variable.
     settings = load_project_config(project_path, args.trust_project)
     provider, model = resolve_runtime_defaults(args, settings)
     effort = resolve_effort(args, settings)
@@ -1806,16 +2816,23 @@ def main(argv=None) -> int:
     # named the restored one. The app computes its own against the pair it
     # will actually call. Fixed at the producer: the check was right and
     # its input was wrong.
-    if not (args.memories or args.forget or args.tui):
+    if not (args.memories or args.forget or args.secrets or args.tui):
         from credentials import provider_startup_issues
         for warning in provider_startup_issues(provider):
-            print(f"[warning] {warning}")
+            print(f"[warning] {ansi.for_display(warning)}")
 
     # §21b M15. AFTER load_project_config, because scoping needs the
     # resolved project path -- and before any MCP setup, since neither
     # command runs a model or needs a tool.
     if args.memories or args.forget:
         return run_memory_command(args)
+
+    # ROADMAP_v3 §49 slice 5a. Beside the memory commands: no model call,
+    # no MCP server, no thread. ABOVE them in importance only in that it
+    # must run before anything could need a secret, which nothing here
+    # does -- so the ordering is alphabetical rather than load-bearing.
+    if args.secrets:
+        return run_secrets_command(args)
 
     # §21c (M21). Beside the memory commands and for the same reasons: it
     # needs the resolved project path for nothing, but it DOES need the
@@ -1883,7 +2900,39 @@ def main(argv=None) -> int:
     # it reads.
     _classify_legacy_threads()
 
+    # Batch 121. Pre-mount facts a user has to be told, carried rather
+    # than printed: on the TUI path a print here is erased by Textual the
+    # moment it renders (#138), and the non-TUI branch below prints them
+    # to a stdout nothing erases.
+    startup_notices = []
+
+    # The user tier has TWO plausible homes -- the harness root and
+    # ~/.config/venastine -- and nothing in a running session says which
+    # is real, so an edit goes into a file the harness never reads. Owner
+    # request: create the real one, empty, and name it. The skeleton is
+    # §24's own render_mcp(), not a second copy of it.
+    created = _ensure_user_mcp_config()
+    if created:
+        startup_notices.append(
+            f'[mcp] created {created} -- your own MCP servers go in this '
+            f'file, under "mcpServers". Project servers stay in '
+            f'.venastine/mcp.json, where the trust prompt covers them.')
+
     mcp = setup_mcp(project_path)
+    # Batch 84. Set only by a `/config` write the user chose to apply. The
+    # relaunch happens AFTER the teardown below, never from inside the TUI:
+    # the MCP servers are subprocesses of this one and the database is open,
+    # and a process replaced from in there would never reach that `finally`.
+    restart = None
+    if not args.tui:
+        for line in startup_notices:
+            print(line)
+        # The CLI shells print to a stdout nothing erases, so the launcher's
+        # own print of the config merge report already reached the user on
+        # this path. Marking it seen here stops a later TUI session replaying
+        # a report they have read; the TUI branch below marks it at mount
+        # instead, after writing it into the transcript where it survives.
+        config_update.mark_report_seen()
     try:
         if args.tui:
             # Detach the stderr handler before Textual takes the screen.
@@ -1911,9 +2960,30 @@ def main(argv=None) -> int:
             # apply. Computed from args rather than by comparing the
             # resolved pair against settings.json, which would read a
             # flag that happens to match the configured value as absent.
-            run_tui(provider, model, settings,
-                    cli_pinned=args.provider is not None
-                    or args.model is not None)
+            # BATCH 121, AND IT MUST BE THE LAST THING BEFORE THE APP.
+            # Textual reads this console from its own thread
+            # (win32.EventMonitor, or the selector on POSIX), so a reader
+            # left parked here is a SECOND reader on one terminal and the
+            # parked read wins: measured, an EventMonitor-shaped loop saw
+            # 0 of 5 injected characters with the trust prompt's pump
+            # alive and 5 of 5 without it. That is the owner's report --
+            # a UI that animates and ignores the keyboard, Ctrl included,
+            # because `enable_application_mode` clears
+            # ENABLE_PROCESSED_INPUT and Ctrl+C is just another key event
+            # in the queue the wrong reader is draining.
+            #
+            # Nothing can refuse today -- both pre-TUI prompts go through
+            # readline(), which starts no pump -- and the warning exists
+            # because the alternative symptom is silence.
+            if not _release_terminal():
+                startup_notices.append(
+                    "[warning] something else is still reading this "
+                    "terminal, so keyboard input may be lost. Restart "
+                    "the harness in a fresh terminal.")
+            restart = run_tui(provider, model, settings,
+                              cli_pinned=args.provider is not None
+                              or args.model is not None,
+                              startup_notices=startup_notices)
         elif args.mode == "research":
             # AFTER setup_mcp: the tools a grant can cover are named at
             # connection time, so asking any earlier would offer a list
@@ -1952,10 +3022,30 @@ def main(argv=None) -> int:
         # finally, not "at the end": run_research raises SystemExit(1) on a
         # failed pipeline, and Ctrl+C reaches here as KeyboardInterrupt.
         # Both are ordinary exits that must still reap child processes.
+        #
+        # ROADMAP_v3 §49 (SS6). Sessions first: killing them writes a row
+        # into each owning thread saying what became of them, and that
+        # write needs the database this process has not closed yet.
+        _close_sessions()
         from tools.registry import registry
         teardown_mcp(mcp, registry)
+    if isinstance(restart, config_edit.RestartRequest):
+        # Everything this process held is closed. `replace_process` does
+        # not return on POSIX.
+        print(f"[restarting to apply {restart.key}]")
+        return replace_process(relaunch_argv(restart))
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        # THE WINDOWS RESTART WAITER NEEDS THIS. `replace_process` keeps this
+        # process alive around `subprocess.call` because Windows has no exec,
+        # and the console delivers CTRL_C_EVENT to every process attached to
+        # it -- so a Ctrl+C aimed at the RELAUNCHED TUI also lands here, and
+        # an unhandled one prints a traceback over the child's live screen.
+        # `bin/venastine.mjs` ignores SIGINT for the same reason, in its own
+        # words: let the child own the terminal's interrupt.
+        raise SystemExit(130) from None

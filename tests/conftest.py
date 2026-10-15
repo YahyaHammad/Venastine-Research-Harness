@@ -9,18 +9,16 @@ This file provides helpers and per-test isolation, not import-time
 behavior.
 """
 
-import importlib
 import itertools
 import os
-import sys
 import time
 import types
+from datetime import UTC
 from uuid import uuid4
 
 import pytest
 
-from core.client import ModelResponse, ToolCallRequest, StreamToken
-
+from core.client import ModelResponse, StreamToken, ToolCallRequest
 
 # ---------------------------------------------------------------------------
 # ---- Generator draining (ROADMAP_v2 §22) ---------------------------------
@@ -73,8 +71,7 @@ def pass_stream(source, events=()):
 
 
 def _with_events(response, events):
-    for event in events:
-        yield event
+    yield from events
     return response
 
 
@@ -97,7 +94,9 @@ def run_pipeline(*args, **kwargs):
     deleted wrapper made.
     """
     from core.reasoning.orchestrator import (
-        run_pipeline_to_completion, stream_deep_research_pipeline)
+        run_pipeline_to_completion,
+        stream_deep_research_pipeline,
+    )
     return run_pipeline_to_completion(
         stream_deep_research_pipeline(*args, **kwargs))
 
@@ -248,7 +247,17 @@ async def settle(pilot, predicate, timeout: float = 10.0) -> bool:
        process-wide CPU heuristic (`process_time()` deltas), floored at
        20ms and capped at 1000ms. Measured: 21ms per pause with nothing
        burning CPU in-process, 1021ms with one busy sibling thread -- a
-       46x swing. So `tries=120` was worth anywhere from 2.5s to 122s,
+       46x swing.
+
+       THAT CAP IS THE IDLE HALF ONLY, AND READING IT AS THE WHOLE PAUSE
+       COST TWO CI FAILURES (batch 116). `Pilot.pause()` awaits
+       `self._wait_for_screen()` FIRST, whose own timeout is 30.0s and
+       which raises `WaitForScreenTimeout` rather than returning, and only
+       then `wait_for_idle(0)`. So one pause is bounded at ~31s, not at
+       1.0s, and nothing here should be read as a budget for one. Batch
+       116 set two ceilings from "capped at 1000ms" as though it were the
+       whole operation; `test_pilot_wait.py` measures a real pause now and
+       reads the cap off textual's signature instead of restating it. So `tries=120` was worth anywhere from 2.5s to 122s,
        set by something entirely unrelated to what was being waited for.
        Instrumenting a clean full run found the real need: 44 calls, max
        0.304s, median 45ms. The default below is ~33x the observed
@@ -319,6 +328,24 @@ async def pump(pilot, times: int = 20) -> None:
         await pilot.pause()
 
 
+def whole_line_style(content):
+    """The style a one-span `Content` was built with, as it was written.
+
+    A widget that styles its WHOLE line hands `Static.update` a Rich `Text`
+    carrying a `style=`, and `tui.widgets.as_content` converts that with
+    `Content.from_rich_text`, which keeps a whole-text style as the LITERAL
+    STRING on one span covering everything. So this is the same claim
+    `Text.style` used to make, read one layer down.
+
+    Only the whole-line case stays a string: a style passed to `append` is
+    resolved into a `textual.style.Style` instead, and reads back as
+    `rgb(154,109,16) bold` rather than as what was typed. That asymmetry is
+    why this is a named helper and not an inline attribute chain.
+    """
+    span, = content.spans
+    return span.style
+
+
 # ---------------------------------------------------------------------------
 # ---- Per-test isolation --------------------------------------------------
 # ---------------------------------------------------------------------------
@@ -371,6 +398,7 @@ class FakeStdinReader:
         self.lines = list(lines)
         self.prompts = []
         self.timeouts = []
+        self.masked_prompts = []
 
     def _next(self):
         if not self.lines:
@@ -394,6 +422,29 @@ class FakeStdinReader:
         except EOFError:
             # ask() answers "nobody answered" rather than raising: EOF at
             # a gated prompt is not consent.
+            return None
+
+    def readline_masked(self, prompt):
+        """ROADMAP_v3 §49 slice 5a (SS59). The masked read.
+
+        Records the prompt like its siblings, so the #7 test -- "a kind
+        that reached nobody" -- sees a SECRET ask the same way it sees
+        every other. EOF answers None rather than raising, matching `ask`
+        and for its reason one step further along: the real method returns
+        None on a stdin that ended, on a terminal that is not a tty, and
+        on one whose echo cannot be turned off, and every one of those has
+        to decode as "nobody answered" rather than as an empty passphrase.
+
+        `masked_prompts` is separate so a test can assert that a secret was
+        asked for THROUGH THIS METHOD -- a handler that called `readline`
+        instead would still fill `prompts`, and would echo the passphrase
+        on a real terminal while every plumbing test stayed green.
+        """
+        self.prompts.append(prompt)
+        self.masked_prompts.append(prompt)
+        try:
+            return self._next()
+        except EOFError:
             return None
 
 
@@ -431,6 +482,67 @@ def clear_client_cache():
     core.client._context_window_cache.clear()
     core.client._context_window_failures.clear()
     core.session.clear()
+
+
+@pytest.fixture(autouse=True)
+def restore_the_root_log_level():
+    """The root logger's LEVEL is global state, and `configure_logging()`
+    sets it.
+
+    Batch 148, measured rather than reasoned: `test_logging_setup.py` and
+    `tests/test_tui.py` landed on the same xdist worker for the first time
+    when this batch added 105 tests, and
+    `test_the_count_does_not_carry_into_the_next_turn` failed. Reproduced
+    with the two files alone in 3.5 seconds, so it is an order dependency
+    and not item 85's unreproduced race.
+
+    `configure_logging(level=None)` resolves to INFO and calls
+    `root.setLevel`, and that file's `_clean_root` restores the HANDLERS
+    only -- one word short of its own rule, "handlers are global state;
+    leaving one attached leaks into every later test in the session". The
+    root level decides whether an INFO record reaches pytest's capturing
+    handler at all, so what the leak reaches is every later assertion of
+    the form "nothing was logged": they pass or fail on which file ran
+    first in the same process.
+
+    Restored rather than pinned to a value, for `clear_client_cache`'s
+    reason: a test that MEANS to configure logging must still be able to,
+    and what must not survive it is the next test's view of what was
+    logged.
+    """
+    import logging
+
+    root = logging.getLogger()
+    previous = root.level
+    yield
+    root.setLevel(previous)
+
+
+@pytest.fixture(autouse=True)
+def restore_config_schema_cache():
+    """`config_schema._cached` is the document this process is running on,
+    and a test that calls `load(force=True)` under a patched environment
+    leaves the override in it after monkeypatch has torn the variable down.
+
+    MEASURED, not hypothetical: `pytest tests/test_config_loader.py
+    tests/test_config_edit.py` failed two of batch 85's tests, because
+    `test_a_candidate_file_is_judged_without_the_environment` re-read the
+    live document with `APP_DB_PATH` set and the cache then disagreed with
+    both the file and the environment -- so `db_path` read as a change
+    somebody had made and was waiting to restart for. The full suite passed
+    only because collection is alphabetical and `test_config_edit` runs
+    first, which is the worst way for an ordering bug to hide.
+
+    Restoring the OBJECT, and only between tests: `load()`'s own docstring
+    notes that a cache outliving a re-import of `config` is a technique the
+    suite uses WITHIN a test, and that still works.
+    `TestTheLoaderCacheDoesNotLeakBetweenTests` is the pair of tests that
+    fails if this fixture is removed.
+    """
+    import config_schema
+    cached = config_schema._cached
+    yield
+    config_schema._cached = cached
 
 
 @pytest.fixture(autouse=True)
@@ -483,7 +595,7 @@ def isolate_ui_preferences(tmp_path_factory, monkeypatch):
     """
     from tui import preferences
 
-    name = "ui-prefs-{}.json".format(next(_ui_prefs_counter))
+    name = f"ui-prefs-{next(_ui_prefs_counter)}.json"
     path = tmp_path_factory.getbasetemp() / name
     monkeypatch.setattr(preferences, "store_path", lambda: str(path))
     return path
@@ -506,8 +618,7 @@ def isolate_model_windows(tmp_path_factory, monkeypatch):
     """
     from core import model_windows
 
-    path = tmp_path_factory.getbasetemp() / "model-windows-{}.json".format(
-        next(_ui_prefs_counter))
+    path = tmp_path_factory.getbasetemp() / f"model-windows-{next(_ui_prefs_counter)}.json"
     monkeypatch.setattr(model_windows, "store_path", lambda: str(path))
     return path
 
@@ -531,6 +642,168 @@ def clear_scholar_cache():
 
 
 @pytest.fixture(autouse=True)
+def clear_network_tool_caches():
+    """Drop the three built-in network tools' caches between tests.
+
+    Same reason as `clear_scholar_cache` above, and it should have been
+    here with it: `arxiv._cache` and `web_search._cache` have been
+    module-level and uncleared since they were written, so a test that
+    stubs a FAILING provider could be served a payload an earlier test
+    cached and pass against a fake it never called. Nothing had tripped on
+    it because no two tests in one process had used the same query.
+
+    ROADMAP_v3 §51 made it load-bearing rather than latent: `fetch_url`
+    gained a body cache (PG5), paging tests turn on what is and is not
+    held, and the cache keys now carry a page (PG9) -- so a leaked entry
+    would make a paging assertion pass for the wrong reason, which is the
+    one failure a paging test cannot tolerate.
+    """
+    from tools.builtin import arxiv, fetch_url, web_search
+
+    def drop():
+        arxiv._cache.clear()
+        web_search._cache.clear()
+        fetch_url._body_cache.clear()
+
+    drop()
+    yield
+    drop()
+
+
+def _sandbox_probe_defaults():
+    """The answer every test gets from the three sandbox probes.
+
+    NOT A NEUTRAL CHOICE AND NOT A GUESS -- measured, batch 107, by running
+    the affected files under each candidate. A working Docker is what this
+    suite has always been written against: with `RuntimeProbe("docker")`
+    those files are 1026 passed, and with "no runtime available" four fail
+    (`test_declared_network` x3 and `test_wsl_backend`'s container notice),
+    because `_shell_approval_check` returns False at
+    `if containment == UNAVAILABLE` and a call that should ask reads as
+    auto-approved. `known_runtime()` returning "docker" rather than
+    "podman" is the other half: `test_session_backends`' argv asserts the
+    CLI by name.
+
+    WSL and SSH go the other way for the same reason -- off by default in
+    `config.yaml`, so "nothing configured" is the state the suite assumes.
+    Their reason strings are the ones the real probes compose for an empty
+    machine, so a message built from one still reads correctly.
+    """
+    from security import sandbox
+
+    return types.SimpleNamespace(
+        runtime=sandbox.RuntimeProbe("docker"),
+        wsl=sandbox.WslProbe(
+            None,
+            "`wsl.exe -l -q` did not answer, so WSL is not installed or "
+            "its service is not running"),
+        ssh=sandbox.SshProbe(
+            None,
+            reason="no host is configured. Set `ssh_host` (and `ssh_user`) "
+                   "in config.yaml"),
+    )
+
+
+@pytest.fixture
+def sandbox_probe_defaults():
+    """The constants `isolate_sandbox_probes` installs, for the tests that
+    assert them. Not autouse: only `test_probe_isolation.py` needs the
+    values, and every other test only needs them to be the same ones."""
+    return _sandbox_probe_defaults()
+
+
+@pytest.fixture(autouse=True)
+def isolate_sandbox_probes():
+    """Give every test the same answer from the three sandbox probes.
+
+    `security/sandbox.py` memoises three LIVE subprocess probes in module
+    globals -- `_runtime_probe`, `_wsl_probe` and `_ssh_probe` -- each set
+    once per process and never reset. Until this fixture nothing here reset
+    any of them: the only resets were fixtures scoped to single classes in
+    the files that test the probes themselves, whose docstring gives the
+    general reason ("otherwise the first test's answer would be the only
+    one any of them measured") with nothing applying it generally.
+
+    AND TWO QUARANTINES SINCE BATCH 142 (S02-10). Slices 5a and 5b added
+    `_ssh_auth_rejected` and `_sudo_rejected`, with the same process
+    lifetime and the same reach into behaviour, and this fixture did not
+    know about them -- the resets were an autouse fixture inside
+    `test_sudo.py` and two opt-in fixtures in `test_ssh_backend.py`, whose
+    docstring reasons in FILE scope about state that is global to the
+    process. `ssh_available()` reads `_ssh_auth_rejected` before it looks
+    at the posture or the probe, so one left behind defeats the fixed
+    answer installed below, and `--dist loadscope` puts many files in one
+    worker. Latent at the time it was found -- tripping the SSH one needs
+    a stored credential, which only that file arranges, and it clears on
+    teardown -- which is exactly why the enumeration test in
+    `test_probe_isolation.py` comes with this: the list is maintained by
+    hand against a module that keeps gaining state, and nobody edited the
+    fixture, which is why nothing surfaced it.
+
+    SO THE SUITE'S RESULT DEPENDED ON A DAEMON. Measured in batch 106
+    across four full WSL runs: which tests fail there is decided by
+    COLLECTION ORDER, because collection order decides which test runs the
+    one live probe and therefore what the ~5,900 after it inherit; adding
+    a test file moved the cohort. Measured again in batch 107, and the
+    Windows half was the part nobody had seen -- a full run at HEAD failed
+    four tests purely because Docker Desktop was not running that morning,
+    where the same commit had been green the day before. This was never a
+    WSL quirk. It is the suite asking a live daemon what to assert.
+
+    AND IT READS AS A REAL DEFECT WHEN IT IS NOT, which is why this is
+    worth the words. `_shell_approval_check` returns False at
+    `if containment == UNAVAILABLE`, so a test asserting "this call asks
+    for approval" sees "auto-approved" -- an approval-gate failure with
+    nothing whatever to do with approval.
+
+    A FIXED ANSWER rather than a reset to None, and the difference is the
+    point. Resetting would make every incidental caller re-probe, at up to
+    three `info` calls of ten seconds each, and would still leave the
+    answer decided by whether a daemon replied on a loaded machine.
+    Measured: one full Windows run performed two live container probes,
+    both from incidental callers; every other probe call in it came from
+    the classes that patch `subprocess.run` and measure their own mocks.
+    Nothing exercises a live probe on purpose, so a constant costs no
+    coverage -- `TestDockerAvailable` and `TestTheContainerRuntime` call
+    `_reset_*` themselves and still drive the real detector.
+
+    THE `_reset_*` HELPERS RUN FIRST rather than the globals being assigned
+    directly, because two of them own more than a memo: `_reset_wsl_probe`
+    also clears `_wsl_workspace_memo`'s lru_cache, whose entries name the
+    distro that resolved them, and `_reset_ssh_probe` also unlinks the
+    known_hosts file the probe wrote.
+
+    SETUP ONLY, where `clear_network_tool_caches` above does both ends, and
+    the asymmetry is forced rather than casual. `monkeypatch` is created by
+    an earlier autouse fixture in this file, so it is undone AFTER this one
+    tears down -- and `test_wsl_backend.py`'s `wsl_on` replaces
+    `_wsl_workspace` with a plain lambda. That one stopped mattering in
+    batch 142, when the cache moved to `_wsl_workspace_memo` so a FAILED
+    translation could not enter it, but the asymmetry stands on the
+    general argument: softening a reset to a `getattr` to suit a fixture
+    is exactly what `ARCHITECTURE.md` warns against, and a teardown buys
+    nothing here anyway, since the next test's setup installs the answer
+    before it can read one.
+    """
+    from security import sandbox
+
+    def install():
+        sandbox._reset_runtime_probe()
+        sandbox._reset_wsl_probe()
+        sandbox._reset_ssh_probe()
+        # The two quarantines, through their own helpers for the
+        # reason the three above go through theirs.
+        sandbox._reset_ssh_auth_quarantine()
+        sandbox._reset_sudo_quarantine()
+        defaults = _sandbox_probe_defaults()
+        sandbox._runtime_probe = defaults.runtime
+        sandbox._wsl_probe = defaults.wsl
+        sandbox._ssh_probe = defaults.ssh
+
+    install()
+
+
+@pytest.fixture(autouse=True)
 def isolate_pipeline_models(tmp_path_factory, monkeypatch):
     """Point the remembered critic/embedder store somewhere disposable.
 
@@ -548,8 +821,7 @@ def isolate_pipeline_models(tmp_path_factory, monkeypatch):
     """
     from core import pipeline_models
 
-    path = tmp_path_factory.getbasetemp() / "pipeline-models-{}.json".format(
-        next(_ui_prefs_counter))
+    path = tmp_path_factory.getbasetemp() / f"pipeline-models-{next(_ui_prefs_counter)}.json"
     monkeypatch.setattr(pipeline_models, "store_path", lambda: str(path))
     return path
 
@@ -589,8 +861,7 @@ def isolate_provider_check(tmp_path_factory, monkeypatch):
         if isinstance(entry, dict) and not entry.get("API_KEY"):
             entry["API_KEY"] = "test-key-not-a-real-credential"
 
-    path = tmp_path_factory.getbasetemp() / "providers-{}.json".format(
-        next(_ui_prefs_counter))
+    path = tmp_path_factory.getbasetemp() / f"providers-{next(_ui_prefs_counter)}.json"
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f)
     monkeypatch.setattr(credentials, "LLM_PROVIDERS_FILE", str(path))
@@ -624,7 +895,6 @@ def real_harness_tier(tmp_path, monkeypatch):
     because several of them initialize at a specific moment relative to
     writing files.
     """
-    from core import config_loader
 
     home = tmp_path / "home"
     monkeypatch.setenv("USERPROFILE", str(home))
@@ -726,12 +996,18 @@ class FakeMemory:
     the FakeStorage patch list drift in the same section.
     """
 
-    def __init__(self, thread_id=None, kind="chat"):
+    def __init__(self, thread_id=None, kind="chat", **lineage):
         # §27: accepts ConversationMemory's real signature, because
         # stream_deep_research_mode() now constructs one WITH a kind and a
         # doubled class that refuses the kwarg fails inside the loop rather
         # than in the test that installed it. Recorded rather than ignored
         # so a test can assert what a code path created.
+        #
+        # §47's three lineage kwargs are SWALLOWED rather than
+        # enumerated, for registry.dispatch()'s stub reason: a double
+        # that lists every argument breaks on each one added, and what
+        # this class is for is the add_* path the loop took.
+        self.lineage = lineage
         self.user_messages = []
         self.assistant_messages = []
         self.tool_results = []  # list of (tool_call_id, result)
@@ -749,9 +1025,14 @@ class FakeMemory:
         # persisted), so growth tests can assert the thread total.
         self.billed_tokens = 0
         self.checkpoints_applied = 0
+        # Batch 91. What the loop recorded as this run's failure, in order.
+        self.failures = []
 
     def add_user_message(self, text):
         self.user_messages.append(text)
+
+    def mark_turn_failed(self, error):
+        self.failures.append(error)
 
     def add_assistant_message(self, response):
         self.assistant_messages.append(response)
@@ -807,19 +1088,25 @@ class FakeStorage:
         self._thread_created_at = {}  # thread_id -> datetime
         self._thread_last_activity = {}  # thread_id -> datetime or None (#32)
         self._thread_kind = {}    # thread_id -> "chat" / "research_pass" / "subagent" (§27)
+        # §47: thread_id -> (parent_thread_id, parent_call_id, agent_name),
+        # mirroring the three nullable columns. Recorded for the same
+        # reason `kind` is: a test asserting WHO spawned a run should not
+        # need a database to see it.
+        self._thread_lineage = {}
         self._messages_by_thread = {}  # thread_id -> list of neutral-shape dicts
         self._thread_extra = {}   # thread_id -> dict (extra_data mirror)
         self._checkpoints = {}    # thread_id -> the latest CompactionCheckpoint (§21)
         self._thread_summaries = {}  # thread_id -> the latest ThreadSummary (§21c)
         self._memories = []       # UserMemory rows, oldest first (§21b)
 
-    def create_thread(self, kind="chat"):
-        from datetime import datetime, timezone
+    def create_thread(self, kind="chat", *, parent_thread_id=None,
+                      parent_call_id=None, agent_name=None):
+        from datetime import datetime
         from uuid import uuid4
         thread_id = uuid4()
         self.created_threads.append(thread_id)
         self._threads[thread_id] = True
-        self._thread_created_at[thread_id] = datetime.now(timezone.utc)
+        self._thread_created_at[thread_id] = datetime.now(UTC)
         # §27: recorded, so a test can assert WHAT a code path created
         # without a real database. Mirrors production's column default.
         self._thread_kind[thread_id] = kind
@@ -828,6 +1115,11 @@ class FakeStorage:
         self._thread_last_activity[thread_id] = None
         self._messages_by_thread[thread_id] = []
         self._thread_extra[thread_id] = {}
+        # §47, keyword-only in production for the same reason it is here:
+        # a caller that does not know it is creating a child must not be
+        # able to say it is by filling a positional slot.
+        self._thread_lineage[thread_id] = (
+            parent_thread_id, parent_call_id, agent_name)
         return thread_id
 
     def thread_kind(self, thread_id):
@@ -849,7 +1141,40 @@ class FakeStorage:
             "extra_data": dict(self._thread_extra.get(thread_id, {})),
             "kind": self._thread_kind.get(thread_id, "chat"),
             "last_activity_at": self._thread_last_activity.get(thread_id),
+            "parent_thread_id": self._lineage(thread_id)[0],
+            "parent_call_id": self._lineage(thread_id)[1],
+            "agent_name": self._lineage(thread_id)[2],
         }
+
+    def _lineage(self, thread_id):
+        """(parent_thread_id, parent_call_id, agent_name), all None by
+        default -- which is what every thread nothing spawned reads as,
+        and what every row predating the columns reads as in production
+        since the additive migration never backfills."""
+        return self._thread_lineage.get(thread_id, (None, None, None))
+
+    def child_threads(self, parent_thread_id):
+        """Mirrors storage.child_threads(): the threads this one spawned,
+        oldest first, with no filter by kind (§47).
+
+        The id is the tiebreaker, as it is in the real query -- three
+        `create_thread` calls from three threads can land on one
+        microsecond, and `_ordered_rows`' rule is that "unlikely" is not
+        an ordering guarantee.
+        """
+        kids = [tid for tid, row in self._thread_lineage.items()
+                if row[0] == parent_thread_id]
+        kids.sort(key=lambda tid: (self._thread_created_at[tid], tid))
+        return [
+            {
+                "id": tid,
+                "created_at": self._thread_created_at[tid],
+                "kind": self._thread_kind.get(tid, "chat"),
+                "parent_call_id": self._lineage(tid)[1],
+                "agent_name": self._lineage(tid)[2],
+            }
+            for tid in kids
+        ]
 
     def get_thread_extra(self, thread_id):
         if thread_id not in self._threads:
@@ -907,7 +1232,7 @@ class FakeStorage:
         return self._first_user_message(thread_id)
 
     def save_message(self, thread_id, role, content, name=None,
-                     tool_call_id=None, thinking=None):
+                     tool_call_id=None, thinking=None, harness=None):
         # Stores content exactly as given -- production's save_message
         # json.dumps'es it and get_session_history json.loads'es it back,
         # and round-trip is identity for any JSON-encodable value, so the
@@ -915,7 +1240,7 @@ class FakeStorage:
         # RECONSTRUCTION logic below, though, has to mirror storage.py's
         # for real -- that part isn't just a serialization round trip,
         # it's role-specific shape-building that has to match production.
-        from datetime import datetime, timezone
+        from datetime import datetime
         self.saved_messages.append((thread_id, role, content, name, tool_call_id))
         self._messages_by_thread.setdefault(thread_id, []).append({
             "id": uuid4(),
@@ -930,12 +1255,18 @@ class FakeStorage:
             # round trip is identity, and what has to mirror production
             # for real is the RECONSTRUCTION below.
             "thinking": thinking,
+            # Batch 91. Set later, by mark_turn_failed, never at save time.
+            "error": None,
+            # ROADMAP_v3 §49 (SS5). The dict, as `thinking` holds its dict:
+            # the round trip is identity, and the reconstruction is what
+            # has to mirror production.
+            "harness": harness,
         })
         # (#32) Mirrors production: any archived row stamps the thread,
         # in the same write.
         if thread_id in self._threads:
             self._thread_last_activity[thread_id] = \
-                datetime.now(timezone.utc)
+                datetime.now(UTC)
 
     # -- ROADMAP_v2 §21 reads ---------------------------------------------
     #
@@ -975,10 +1306,12 @@ class FakeStorage:
 
     def pinned_through(self, thread_id, message_id):
         """Mirrors real storage.py's pinned_through, INCLUDING the
-        tool-result re-inclusion that makes the pinned span whole (#88).
-        A fake that returns the pinned rows alone cannot represent the
-        orphaned tool_use that fix exists to prevent, and a test passing
-        against it would prove only that the fake and the code agree."""
+        tool-result re-inclusion that makes the pinned span whole (#88)
+        and batch 120's turn opener. A fake that returns the pinned rows
+        alone cannot represent the orphaned tool_use that fix exists to
+        prevent, nor the request a sub-turn fold would summarize away, and
+        a test passing against it would prove only that the fake and the
+        code agree."""
         rows = self._messages_by_thread.get(thread_id, [])
         span = rows[:self._split_at(rows, message_id)]
         neutral = self._reconstruct(span)
@@ -991,8 +1324,22 @@ class FakeStorage:
         keep += [i for i, r in enumerate(span)
                  if not r["pinned"] and r["role"] == "tool"
                  and neutral[i].get("tool_call_id") in need]
+        keep += self._turn_opener_index(rows, span)
 
         return [neutral[i] for i in sorted(set(keep))]
+
+    def _turn_opener_index(self, rows, span):
+        """Mirrors storage._turn_opener_index (batch 120): the user row
+        opening the turn a MID-TURN watermark cut into, identified by the
+        first KEPT row not being a `user` row."""
+        if not span or len(span) >= len(rows):
+            return []
+        if rows[len(span)]["role"] == "user":
+            return []
+        for index in range(len(span) - 1, -1, -1):
+            if span[index]["role"] == "user":
+                return [index]
+        return []
 
     def history_through(self, thread_id, message_id, after_message_id=None):
         rows = self._messages_by_thread.get(thread_id, [])
@@ -1022,18 +1369,27 @@ class FakeStorage:
                     changed += 1
         return changed
 
+    def mark_turn_failed(self, thread_id, error):
+        """Mirrors storage.mark_turn_failed (batch 91): the thread's NEWEST
+        user row, and False when it has none."""
+        for row in reversed(self._messages_by_thread.get(thread_id, [])):
+            if row["role"] == "user":
+                row["error"] = error
+                return True
+        return False
+
     # -- ROADMAP_v2 §21b durable memory ------------------------------------
 
     def save_memory(self, content, source_thread_id, scope="project",
                     category=None, project_path=None):
+        from datetime import datetime
         from uuid import uuid4 as _u
-        from datetime import datetime, timezone
         row = {
             "id": _u(), "content": content, "category": category,
             "scope": scope,
             "project_path": project_path if scope == "project" else None,
             "source_thread_id": source_thread_id,
-            "created_at": datetime.now(timezone.utc),
+            "created_at": datetime.now(UTC),
         }
         self._memories.append(row)
         return row["id"]
@@ -1067,14 +1423,14 @@ class FakeStorage:
 
     def save_checkpoint(self, thread_id, summary_text,
                         covers_up_to_message_id, strategy="rederive"):
-        from datetime import datetime, timezone
+        from datetime import datetime
         # A plain dict, mirroring production's latest_checkpoint (#31):
         # callers subscript rather than dot-access.
         checkpoint = {
             "id": uuid4(), "thread_id": thread_id,
             "summary_text": summary_text,
             "covers_up_to_message_id": covers_up_to_message_id,
-            "strategy": strategy, "created_at": datetime.now(timezone.utc),
+            "strategy": strategy, "created_at": datetime.now(UTC),
         }
         self._checkpoints[thread_id] = checkpoint
         return checkpoint["id"]
@@ -1095,13 +1451,13 @@ class FakeStorage:
 
     def save_thread_summary(self, thread_id, summary_text,
                             covers_up_to_message_id):
-        from datetime import datetime, timezone
+        from datetime import datetime
         # A plain dict, mirroring production's latest_thread_summary (#31).
         summary = {
             "id": uuid4(), "thread_id": thread_id,
             "summary_text": summary_text,
             "covers_up_to_message_id": covers_up_to_message_id,
-            "created_at": datetime.now(timezone.utc),
+            "created_at": datetime.now(UTC),
         }
         self._thread_summaries[thread_id] = summary
         return summary["id"]
@@ -1133,6 +1489,16 @@ class FakeStorage:
                 payload = {"role": role, "content": content}
                 if row.get("tool_call_id"):
                     payload["tool_call_id"] = row["tool_call_id"]
+                # Batch 91, mirroring storage._to_neutral: present only when
+                # the row records a failed run.
+                if row.get("error"):
+                    payload["error"] = row["error"]
+                # ROADMAP_v3 §49 (SS5), mirroring storage._decode_harness
+                # against the dict this fake holds: present only for a
+                # readable record, one that names its kind.
+                harness = row.get("harness")
+                if isinstance(harness, dict) and harness.get("kind"):
+                    payload["harness"] = harness
 
             if row.get("name"):
                 payload["name"] = row["name"]
@@ -1159,6 +1525,8 @@ MEMORY_STORAGE_SYMBOLS = (
     # ROADMAP_v2 §21
     "latest_checkpoint", "pinned_through", "turn_start_ids",
     "message_ids_from", "set_pinned",
+    # Batch 91.
+    "mark_turn_failed",
 )
 
 # Everything FakeStorage stands in for, including the reads only
@@ -1281,6 +1649,171 @@ def http(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# ---- Background sessions (ROADMAP_v3 §49) ---------------------------------
+
+
+NEWLINE_BYTE = chr(10).encode()
+
+
+class FakeSessionStdin:
+    """The write end of an interactive session's stdin (§49, slice 2).
+
+    Records what the harness typed, so a test can assert on the BYTES
+    that reached the pty rather than on the call that produced them --
+    the newline a send appends, and the control character a `control`
+    sends instead of text, are only visible here.
+    """
+
+    def __init__(self, on_write=None):
+        self.chunks = []
+        self.broken = False
+        # What the far end does when a line arrives. A real shell answers
+        # a completed line with a prompt; a fake that never did would make
+        # every send in every test wait out its bound.
+        self.on_write = on_write
+
+    def write(self, data):
+        if self.broken:
+            raise OSError("broken pipe")
+        self.chunks.append(data)
+        if self.on_write is not None:
+            self.on_write(data)
+
+    def flush(self):
+        pass
+
+    @property
+    def sent(self):
+        return b"".join(self.chunks).decode("utf-8", "replace")
+
+
+class FakeSessionProcess:
+    """Stands in for security.sandbox.SessionProcess: a background session's
+    process, driven by the test instead of by a container.
+
+    `write()` feeds output the reader thread will see, `exit()` ends it, and
+    `kill()` records the kill and ends it with 137 the way a container does.
+    `stdout.read1` blocks until there is output or the process has exited,
+    which is what the real pipe does -- a fake that returned b"" early would
+    let a reader finish before the program had said anything.
+    """
+
+    def __init__(self, *, ran_on="container", tier="SANDBOXED",
+                 prompt_token=""):
+        import queue
+        import threading as _threading
+        self.ran_on = ran_on
+        self.tier = tier
+        self.pid = 4242
+        self.kills = 0
+        self._chunks = queue.Queue()
+        self._exited = _threading.Event()
+        self._code = None
+        self.stdout = self
+        # Slice 2. An interactive session has a write end and a prompt;
+        # every other kind has neither, and gets a recorder nothing
+        # writes to rather than a second class to keep in step.
+        self.stdin = FakeSessionStdin()
+        self.prompt_token = prompt_token
+
+    def prompt(self):
+        """What a shell does when it finishes a command and wants the
+        next one: print the prompt this session was opened with."""
+        self.write(self.prompt_token)
+
+    def write(self, data):
+        self._chunks.put(data.encode("utf-8") if isinstance(data, str) else data)
+
+    def exit(self, code=0):
+        if not self._exited.is_set():
+            self._code = code
+            self._exited.set()
+            self._chunks.put(None)
+
+    def read1(self, _size=-1):
+        item = self._chunks.get()
+        if item is None:
+            self._chunks.put(None)
+            return b""
+        return item
+
+    def wait(self, timeout=None):
+        return self._code if self._exited.wait(timeout) else None
+
+    def poll(self):
+        return self._code if self._exited.is_set() else None
+
+    @property
+    def returncode(self):
+        return self.poll()
+
+    def kill(self):
+        self.kills += 1
+        self.exit(137)
+
+
+@pytest.fixture
+def session_starter():
+    """A starter for core.shell_sessions.SessionManager that hands back a
+    FakeSessionProcess and records what it was asked to start."""
+    started = []
+
+    def starter(command, workspace_dir, *, profile, docker_available,
+                timeout_s, shell_binary=None, **extra):
+        # `**extra` so the double can SEE what the manager only passes
+        # sometimes -- `backend` since slice 3, `needs_root` since slice 5b,
+        # both of which it adds to the call only when they are not the
+        # default. A double with a fixed signature cannot be asked whether
+        # a flag arrived; it just raises TypeError, or worse, does not,
+        # because the manager dropped the flag on the way. Recorded rather
+        # than swallowed, so "did this reach the backend" is an assertion.
+        process = FakeSessionProcess(tier=getattr(profile, "tier", "SANDBOXED"))
+        started.append({"command": command, "timeout_s": timeout_s,
+                        "docker_available": docker_available,
+                        "process": process, **extra})
+        return process
+
+    starter.started = started
+    return starter
+
+
+@pytest.fixture
+def interactive_starter():
+    """`session_starter`'s twin for an INTERACTIVE session (§49, slice 2).
+
+    Separate because the manager passes `prompt_token` only for that kind,
+    and because the shell has to reach its first prompt before `start`
+    will type anything -- so the fake prints one as it comes up, exactly
+    where a real shell does. `prompt_on_start = False` withholds it, which
+    is the only way to test a shell that never comes up.
+    """
+    started = []
+
+    def starter(command, workspace_dir, *, profile, docker_available,
+                timeout_s, prompt_token="", shell_binary=None):
+        process = FakeSessionProcess(
+            tier=getattr(profile, "tier", "SANDBOXED"),
+            prompt_token=prompt_token)
+        started.append({"command": command, "timeout_s": timeout_s,
+                        "workspace_dir": workspace_dir,
+                        "docker_available": docker_available,
+                        "prompt_token": prompt_token,
+                        "process": process})
+        if starter.prompt_on_start and prompt_token:
+            process.prompt()
+        if starter.auto_prompt:
+            def answer(data, p=process):
+                if data.endswith(NEWLINE_BYTE):
+                    p.prompt()
+            process.stdin.on_write = answer
+        return process
+
+    starter.started = started
+    starter.prompt_on_start = True
+    starter.auto_prompt = True
+    return starter
+
+
 # ---- Security posture (ROADMAP_v2 §40) ------------------------------------
 # ---------------------------------------------------------------------------
 
@@ -1300,6 +1833,7 @@ def set_posture(monkeypatch, **fields):
     each other, matching the two-line `setattr` pairs this replaced.
     """
     import dataclasses
+
     from security import posture
     monkeypatch.setattr(
         posture, "_posture",
@@ -1320,3 +1854,79 @@ def rebind_posture(monkeypatch):
     """
     from security import posture
     monkeypatch.setattr(posture, "_posture", posture._from_config())
+
+
+# ---- The redaction case list (S07-01, S07-09) ----------------------------
+#
+# EVERY PATTERN AND EVERY SHAPE, in one place, read by
+# `test_logging_setup.py` and `test_policy_enforcement.py`. Two readers and
+# a check rather than a hope: `test_every_pattern_and_every_shape_has_a_case`
+# holds this list against `safety/policy_enforcement`'s own regexes in both
+# directions, so a pattern added there without a case here goes red, and a
+# case here that nothing matches goes red too.
+#
+# It exists because of what a SINGLE case could not discriminate.
+# `test_logging_setup.py` had three secret tests and one value between them,
+# `sk-ant-...`, which `redact_secrets` matches on its own -- so every
+# assertion in that file passed against a formatter applying the vendor
+# tokens alone, which is exactly what it was doing while three credential
+# SHAPES reached `logs/app.log` in cleartext (S07-01). The first of the
+# protocol's four vacuity shapes: input that cannot discriminate.
+#
+# The last three rows are the discriminating ones, and
+# `test_the_three_shapes_are_what_discriminates` asserts that they are --
+# that `redact_secrets` alone leaves them standing -- so this list cannot
+# quietly lose its teeth by having the shapes dropped from it.
+#
+# Each row is (label, the text a sink is handed, the substring whose
+# survival IS the leak). The needle differs from the text for the shapes
+# because their whole point is to preserve the surrounding structure: a
+# redacted `<password>` element still has its tags.
+REDACTION_CASES = [
+    ("openai key",
+     "401 from https://api.example/v1?key=sk-a1b2c3d4a1b2c3d4a1b2c3",
+     "sk-a1b2c3d4a1b2c3d4a1b2c3"),
+    ("anthropic key",
+     "401 from https://api.example/v1?key="
+     "sk-ant-a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2",
+     "sk-ant-a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2"),
+    # BUILT, not written out, and this is the one row that needs saying.
+    # A contiguous `ghp_` + 36 characters is what gitleaks' `github-pat`
+    # rule matches, and a fabricated fixture is not worth a line-pinned
+    # `.gitleaksignore` entry that every later edit above it re-fires --
+    # which is exactly what six names added to one import block did to the
+    # five already in that file (batch 144). The value is identical at
+    # runtime, which is all the derivation gate and the sinks ever see.
+    ("github pat",
+     "clone failed for ghp_" + "a1b2c3d4" * 4 + "a1b2",
+     "ghp_" + "a1b2c3d4" * 4 + "a1b2"),
+    ("aws access key id",
+     "signing with AKIAA1B2C3D4A1B2C3D4 failed",
+     "AKIAA1B2C3D4A1B2C3D4"),
+    ("google api key",
+     "maps lookup with AIzaa1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4abc failed",
+     "AIzaa1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4abc"),
+    ("slack token",
+     "post to #general failed: xoxb-1234567890-abcdefghij",
+     "xoxb-1234567890-abcdefghij"),
+    ("pem private key header",
+     "could not parse -----BEGIN RSA PRIVATE KEY----- from the identity file",
+     "-----BEGIN RSA PRIVATE KEY-----"),
+    # --- The three shapes (#167), which is where the two vocabularies
+    # --- differed. A vendor prefix is not involved in any of them.
+    ("url userinfo",
+     "fetch_url failed for https://bob:s3cr3t-in-a-url@gems.example/v1",
+     "s3cr3t-in-a-url"),
+    ("xml password element",
+     "<server><password>s3cr3t-in-an-element</password></server>",
+     "s3cr3t-in-an-element"),
+    ("quoted password assignment",
+     'systemProp.gradle.password = "s3cr3t-in-an-assignment"',
+     "s3cr3t-in-an-assignment"),
+]
+
+#: The rows whose needle has no vendor prefix, so `redact_secrets` cannot
+#: see them. Named rather than sliced by index, because an index is a
+#: second fact about the order of the list above.
+SHAPE_CASE_LABELS = frozenset({
+    "url userinfo", "xml password element", "quoted password assignment"})

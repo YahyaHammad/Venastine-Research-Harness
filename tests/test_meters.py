@@ -17,7 +17,6 @@ import pytest
 from tui import meters
 from tui.meters import TurnMeter
 
-
 # ---------------------------------------------------------------------------
 # ---- Formatting -----------------------------------------------------------
 # ---------------------------------------------------------------------------
@@ -255,7 +254,7 @@ class TestTheSubtitleSaysOnlyWhatItKnows:
 class TestTheCompletionLineNeverInventsACount:
 
     def test_the_time_alone_when_the_provider_reports_no_usage(self):
-        """Sixteen of the nineteen configured providers report no usage on
+        """Twelve of the fifteen configured providers report no usage on
         a streaming call (D21). A zero there would say the model wrote
         nothing, which is a claim, not an absence."""
         assert TurnMeter().completion(12.4, None) == "took 12.4s"
@@ -281,3 +280,153 @@ class TestTheCompletionLineNeverInventsACount:
         provider's own count over the measured time, not characters over a
         constant."""
         assert "~" not in TurnMeter().completion(12.0, 418)
+
+# ---------------------------------------------------------------------------
+# ---- TECHNICAL_DEBT 38 (batch 118): the rate's denominator ----------------
+# ---------------------------------------------------------------------------
+
+class TestAToolRunningIsNotTheModelWriting:
+    """`~0 tok/s` needs only fewer than two characters per active second,
+    and before batch 118 the whole turn was active: a tool taking two
+    minutes counted in full while generating nothing.
+
+    `elapsed` still counts it, deliberately -- the transcript line says
+    `took`, and a two-minute tool is part of how long the turn took. Only
+    the rate subtracts it.
+    """
+
+    def test_the_rate_excludes_a_running_tool(self):
+        m = TurnMeter()
+        m.begin_session(0.0)
+        m.start(0.0)
+        m.add_output_chars(400)             # 100 tokens
+        m.set_tool_running(1, 10.0)
+        m.set_tool_running(-1, 70.0)        # a sixty-second tool
+        # Ten generating seconds, not seventy.
+        assert m.rate(70.0) == pytest.approx(10.0)
+
+    def test_elapsed_still_counts_it(self):
+        """The two clocks answer different questions, and this is the one
+        that must NOT change: a user who waited seventy seconds is told
+        seventy seconds."""
+        m = TurnMeter()
+        m.begin_session(0.0)
+        m.start(0.0)
+        m.set_tool_running(1, 10.0)
+        m.set_tool_running(-1, 70.0)
+        assert m.elapsed(70.0) == pytest.approx(70.0)
+        assert m.generating(70.0) == pytest.approx(10.0)
+
+    def test_a_tool_still_running_is_excluded_as_it_runs(self):
+        """The figure is read on a tick, so the open window has to count
+        before its result arrives -- otherwise the rate collapses live and
+        then recovers, which reads as a bug."""
+        m = TurnMeter()
+        m.begin_session(0.0)
+        m.start(0.0)
+        m.add_output_chars(400)
+        m.set_tool_running(1, 10.0)
+        assert m.rate(70.0) == pytest.approx(10.0)
+
+    def test_the_zero_case_itself(self):
+        """The reported symptom, as arithmetic. A hundred characters over
+        sixty seconds of which fifty were a tool: `~0 tok/s` before, and a
+        number that means something now."""
+        m = TurnMeter()
+        m.begin_session(0.0)
+        m.start(0.0)
+        m.add_output_chars(100)             # 25 tokens
+        m.set_tool_running(1, 5.0)
+        m.set_tool_running(-1, 55.0)        # fifty seconds of tool
+        assert round(m.elapsed(60.0)) == 60
+        assert round(25 / m.elapsed(60.0)) == 0        # what it showed
+        assert round(m.rate(60.0)) == 2                # what it shows now
+
+    def test_parallel_tools_are_depth_counted(self):
+        """`_dispatch_parallel` runs a response's tool calls together, so a
+        boolean would un-pause on the FIRST result while two were still
+        running -- and the rate would count their remaining time as
+        generation."""
+        m = TurnMeter()
+        m.begin_session(0.0)
+        m.start(0.0)
+        m.add_output_chars(400)
+        m.set_tool_running(1, 10.0)
+        m.set_tool_running(1, 11.0)
+        m.set_tool_running(1, 12.0)
+        m.set_tool_running(-1, 30.0)        # one finishes
+        m.set_tool_running(-1, 40.0)        # another
+        assert m.generating(50.0) == pytest.approx(10.0)
+        m.set_tool_running(-1, 70.0)        # the last one
+        assert m.generating(70.0) == pytest.approx(10.0)
+
+    def test_an_unbalanced_result_cannot_drive_the_depth_negative(self):
+        """A `tool_result` with no start -- a replayed event, a turn that
+        began mid-call -- must not leave the depth at -1, where the next
+        start would fail to pause anything."""
+        m = TurnMeter()
+        m.begin_session(0.0)
+        m.start(0.0)
+        m.add_output_chars(400)
+        m.set_tool_running(-1, 5.0)
+        m.set_tool_running(1, 10.0)
+        m.set_tool_running(-1, 70.0)
+        assert m.generating(70.0) == pytest.approx(10.0)
+
+    def test_an_approval_inside_a_tool_window_is_subtracted_once(self):
+        """THE OVERLAP CASE. Approval is asked for from inside a tool call,
+        so a human wait sits inside a tool window. `elapsed` already
+        removes the human wait; subtracting the tool window across it as
+        well would take the same seconds twice and could drive the
+        denominator negative.
+        """
+        m = TurnMeter()
+        m.begin_session(0.0)
+        m.start(0.0)
+        m.add_output_chars(400)
+        m.set_tool_running(1, 10.0)
+        m.set_blocked(True, 20.0)           # the modal goes up
+        m.set_blocked(False, 320.0)         # five minutes of human
+        m.set_tool_running(-1, 330.0)       # the tool finishes
+        # Wall 330, minus 300 human = 30 elapsed. Of that, the tool held
+        # 10->20 and 320->330, so 20 seconds. Ten left to generate in.
+        assert m.elapsed(330.0) == pytest.approx(30.0)
+        assert m.generating(330.0) == pytest.approx(10.0)
+        assert m.rate(330.0) == pytest.approx(10.0)
+
+    def test_the_denominator_never_goes_negative(self):
+        """The clamp earns its place: if the two pauses ever stopped being
+        disjoint this is what would show, and a negative denominator turns
+        a rate into a nonsense figure rather than a missing one."""
+        m = TurnMeter()
+        m.begin_session(0.0)
+        m.start(0.0)
+        m.add_output_chars(400)
+        m.set_tool_running(1, 0.0)
+        m.set_blocked(True, 0.0)
+        m.set_blocked(False, 100.0)
+        assert m.generating(100.0) >= 0.0
+        assert m.rate(100.0) is None        # below the floor, not negative
+
+    def test_a_new_turn_forgets_the_previous_tool_time(self):
+        m = TurnMeter()
+        m.begin_session(0.0)
+        m.start(0.0)
+        m.set_tool_running(1, 1.0)
+        m.set_tool_running(-1, 50.0)
+        m.stop(60.0)
+
+        m.start(100.0)
+        m.add_output_chars(400)
+        assert m.generating(110.0) == pytest.approx(10.0)
+        assert m.rate(110.0) == pytest.approx(10.0)
+
+    def test_tool_state_outside_a_turn_is_ignored(self):
+        """`set_tool_running` is driven from an event handler, which can
+        see a result for a turn this meter never started."""
+        m = TurnMeter()
+        m.begin_session(0.0)
+        m.set_tool_running(1, 1.0)
+        m.start(10.0)
+        m.add_output_chars(400)
+        assert m.generating(20.0) == pytest.approx(10.0)

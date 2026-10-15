@@ -24,12 +24,19 @@ submodule needs its package context. The mechanism is the one
 fake out of `sys.modules`, let the import machinery find the installed
 package, restore afterwards.
 
-WHAT THIS FILE DELIBERATELY DOES NOT DO. It makes no API call and asserts
-nothing about behaviour. Every check is a question about a TYPE the pinned
-package defines, which is what `_google_supports_thinking_budget` already
-does at runtime for one field. Presence-level checking finds nothing here --
-no fake invents a symbol the real package lacks -- so every check is at
-field level, which is where the divergences are.
+WHAT THIS FILE DELIBERATELY DOES NOT DO. It makes no API call -- no
+credentials, no network, no live request on any path. Presence-level checking
+finds nothing here either (no fake invents a symbol the real package lacks),
+so every check is at field level, which is where the divergences are.
+
+It used to say it asserted nothing about BEHAVIOUR, and that line outlived
+itself twice. Batch 132 added the Google schema reduction, which is a claim
+about what the translation produces; batch 147 added the usage read, which
+drives a provider branch of `call_model_stream` with real chunks and a
+hand-rolled client. Both are here rather than in the behaviour files for one
+reason: the behaviour in question is only wrong when the type is real, and
+the rest of the suite runs against the root conftest's fakes. A check that
+needs the real package belongs here; one that does not, does not.
 """
 
 import ast
@@ -126,6 +133,137 @@ def test_every_genai_keyword_is_a_field_on_the_pinned_class():
                     f"{cls_name}: {sorted(unknown)} are not fields "
                     f"(it has {sorted(fields)})")
     assert not problems, "; ".join(problems)
+
+
+def test_every_advertised_SCHEMA_constructs_against_the_REAL_pinned_types():
+    """The assertion the GOOGLE branch never had, and the reason it could
+    ship broken: no model call on GOOGLE could be built AT ALL.
+
+    `_tools_for_provider` handed each tool's `input_schema` dict straight
+    to `FunctionDeclaration(parameters=...)`. On the pinned
+    `google-genai==1.0.0` that field is a `types.Schema` whose
+    `model_config` is `extra="forbid"`, and this repository's own
+    `probability_stats` renders its `Optional[dict[str, float]]` as
+    `{"anyOf": [{"additionalProperties": ..., "type": "object"},
+    {"type": "null"}]}`. `additionalProperties` is not a field, so
+    construction raised -- and because the translation is one list
+    comprehension over every schema, the refusal of one entry took all 15
+    with it. `python main.py --provider GOOGLE` raised on its first turn
+    and a research run recorded `status='failed'` inside pass 1.
+
+    THE KEYWORD TEST ABOVE CANNOT SEE THIS. It compares the keyword NAMES
+    `core/client.py` passes against the pinned classes' fields, which is a
+    different question from whether the VALUES validate; and the rest of
+    the Google coverage runs against the conftest's fake `genai`, whose
+    declaration type accepts anything. So this drives the real registry
+    through the real translation against the real pinned types, which is
+    the only arrangement in which the defect is visible.
+    """
+    with real_package("google"):
+        import core.client as client
+        from tools.registry import registry
+
+        schemas = registry.schemas(None)
+        # Vacuity guard, same shape as the one above: an empty or tiny
+        # advertised set would make every assertion below pass for free.
+        assert len(schemas) >= 10, (
+            f"registry.schemas(None) advertised only {len(schemas)} tools; "
+            f"this test is quantifying over almost nothing and needs "
+            f"repointing, not deleting")
+
+        # The whole set at once -- which is how production calls it, and
+        # therefore the only way to catch one entry taking the rest down.
+        tools = client._tools_for_provider("GOOGLE", schemas)
+        assert tools and len(tools[0].function_declarations) == len(schemas)
+
+        # And per tool, so a failure names the entry rather than the batch.
+        for schema in schemas:
+            try:
+                client._tools_for_provider("GOOGLE", [schema])
+            except Exception as exc:  # pragma: no cover - the point is it does not
+                raise AssertionError(
+                    "%s does not translate for GOOGLE against the pinned "
+                    "types: %s" % (schema["name"], exc)) from exc
+
+
+def test_the_google_reduction_keeps_the_shape_it_is_allowed_to_keep():
+    """The reduction has to be narrow, or it would "fix" GOOGLE by sending
+    an empty schema and nothing would notice.
+
+    Three claims: an ordinary field is untouched, `Optional[X]` becomes X
+    plus `nullable` rather than disappearing, and the key that cannot be
+    carried is the only thing lost. `additionalProperties` is a real loss
+    -- the pinned `Schema` cannot express "a dict whose values are
+    numbers" at all -- so it is recorded here rather than papered over.
+    """
+    with real_package("google"):
+        from google.genai import types as genai_types
+
+        import core.client as client
+        from tools.builtin.probability_stats import ProbabilityStatsParams
+
+        accepted = client._google_schema_keys(genai_types)
+        assert "anyOf" in accepted and "any_of" in accepted, (
+            "the accepted-key set is read off the SDK and must carry both "
+            "the field names and their camelCase aliases, since JSON Schema "
+            "spells it anyOf and the model declares any_of")
+        assert "additionalProperties" not in accepted
+
+        raw = ProbabilityStatsParams.model_json_schema()
+        reduced = client._reduce_for_google(raw, accepted)
+
+        # Optional[dict[str, float]] -> object + nullable, description kept.
+        params = reduced["properties"]["distribution_params"]
+        assert params["type"] == "object"
+        assert params["nullable"] is True
+        assert "anyOf" not in params
+        assert "additionalProperties" not in params
+        assert params["description"].startswith("Parameters for the chosen")
+
+        # An ordinary field is passed through unchanged, so the reduction is
+        # not simply stripping everything it does not recognise.
+        before = raw["properties"]["evaluate"]
+        assert reduced["properties"]["evaluate"] == before
+
+        # And the null member is GONE rather than carried: the pinned SDK
+        # coerces {"type": "null"} with `UserWarning: null is not a valid
+        # Type` and continues, so leaving it in would put a type that does
+        # not exist on the wire.
+        assert genai_types.Schema(**params).nullable is True
+
+
+def test_the_FAKE_schema_carries_the_same_keys_as_the_REAL_one():
+    """The fake `types.Schema` in the root `conftest.py` exists so that
+    `_google_schema_keys` has a field set to read during the offline suite.
+    A fake whose key set drifts from the real one stops describing
+    anything -- and it fails in the quiet direction: a key missing from the
+    fake is a key the reduction strips in tests and keeps in production, so
+    `tests/test_client_translation.py` would be asserting about schemas
+    that are not the ones sent.
+
+    This is the project's own rule applied to the double it depends on:
+    anything a test patches, some other test has to assert for real.
+    """
+    def keyset(schema_cls):
+        keys = set(schema_cls.model_fields)
+        for field in schema_cls.model_fields.values():
+            alias = getattr(field, "alias", None)
+            if alias:
+                keys.add(alias)
+        return keys
+
+    from google.genai import types as fake_types
+    fake = keyset(fake_types.Schema)
+
+    with real_package("google"):
+        from google.genai import types as real_types
+        real = keyset(real_types.Schema)
+
+    assert fake == real, (
+        "the fake types.Schema's key set has drifted from the pinned "
+        "google-genai. Missing from the fake: %s. Extra in the fake: %s. "
+        "Update _FakeSchema._NAMES in the root conftest.py."
+        % (sorted(real - fake), sorted(fake - real)))
 
 
 def test_the_thinking_budget_guard_still_describes_the_pin():
@@ -386,14 +524,30 @@ def test_httpx_get_does_not_follow_redirects_by_default():
     suite can hold this. If the default flips, `fetch_url`'s pre-flight
     blocklist check (#53) and arxiv's explicit `follow_redirects` both need
     rereading against the new behaviour.
+
+    BOTH ENTRY POINTS ARE CHECKED SINCE BATCH 126, because by then this
+    test was guarding an API the project no longer calls. `fetch_url` moved
+    to `httpx.stream` for §31 (H7), and batch 126 moved `arxiv.py` for the
+    same reason -- it held the LAST `httpx.get` in production code. A
+    conformance check whose subject nothing imports is an instrument
+    reporting on something it is not pointed at, which is the shape batches
+    118 and 119 each paid for once.
+
+    `get` is kept rather than replaced: it is still the default a reader
+    reaches for, the two functions share httpx's redirect handling, and a
+    divergence between them is itself worth failing on.
     """
     with real_package("httpx"):
         import httpx
-        default = inspect.signature(httpx.get).parameters["follow_redirects"].default
-    assert default is False, (
-        "httpx.get now follows redirects by default. Re-read #53 "
+        defaults = {
+            name: inspect.signature(fn).parameters["follow_redirects"].default
+            for name, fn in (("get", httpx.get), ("stream", httpx.stream))
+        }
+    assert defaults == {"get": False, "stream": False}, (
+        "httpx now follows redirects by default somewhere: %r. Re-read #53 "
         "(fetch_url checks the blocklist pre-flight only) and arxiv's "
-        "explicit follow_redirects against the new default.")
+        "explicit follow_redirects against the new default. `stream` is the "
+        "one BOTH network tools actually call." % (defaults,))
 
 
 # ===========================================================================
@@ -457,7 +611,7 @@ def test_the_anthropic_thinking_block_still_carries_a_signature():
     whole lesson.
     """
     with real_package("anthropic", "httpx"):
-        from anthropic.types import ThinkingBlock, RedactedThinkingBlock
+        from anthropic.types import RedactedThinkingBlock, ThinkingBlock
 
         assert "signature" in ThinkingBlock.model_fields, (
             "anthropic's ThinkingBlock no longer carries .signature -- the "
@@ -497,3 +651,147 @@ def test_the_openai_delta_keeps_unmodelled_reasoning_fields():
         parsed = ChoiceDelta.model_validate(
             {"content": None, "reasoning_content": "why"})
         assert getattr(parsed, "reasoning_content", None) == "why"
+
+
+# ---- Token usage, which every branch reports and no branch can trust -------
+# Batch 147 (S10-04, S10-07). `core/client.py`'s `_token_count` makes three
+# claims about three pinned SDKs, and a comment that is wrong about a
+# dependency is how #35 survived. These are those claims, asked of the
+# packages.
+
+def test_the_google_usage_fields_are_all_nullable():
+    """The reason the GOOGLE branch's `getattr(obj, field, 0)` never fired
+    its default: the attribute exists and holds None."""
+    with real_package("google"):
+        from google.genai import types as types_mod
+
+        fields = types_mod.GenerateContentResponseUsageMetadata.model_fields
+        for name in ("prompt_token_count", "candidates_token_count"):
+            assert name in fields, (
+                f"google-genai no longer carries {name}; the GOOGLE usage "
+                f"read in core/client.py names it")
+            assert fields[name].default is None, (
+                f"{name} is no longer defaulted to None on the pinned "
+                f"google-genai; _token_count's docstring says it is")
+
+        # And the half that makes `if usage_meta:` useless as a guard.
+        assert bool(types_mod.GenerateContentResponseUsageMetadata()) is True, (
+            "a bare usage object is no longer truthy on the pinned "
+            "google-genai -- the Google branch's old guard passed BECAUSE "
+            "it was, and then read None out of every field")
+
+
+def test_a_required_int_is_not_a_runtime_guarantee_on_either_other_SDK():
+    """The claim that makes the fix one reader for three branches.
+
+    `anthropic.types.Usage.input_tokens` and
+    `openai.types.CompletionUsage.prompt_tokens` are both annotated `int`
+    and REQUIRED, which reads like a guarantee and is not one: both SDKs
+    parse wire JSON through pydantic's `construct`, which skips validation.
+    So a server that omits the field produces an object that HAS it,
+    holding None, against an annotation that says that cannot happen.
+
+    The strict-validation half is asserted too, because it is what makes
+    the first half a statement about the SDK's PARSE PATH rather than about
+    pydantic: the same payload through the validating constructor raises.
+    """
+    with real_package("anthropic", "httpx"):
+        from anthropic._models import construct_type
+        from anthropic.types import Usage
+
+        assert Usage.model_fields["input_tokens"].annotation is int
+        parsed = construct_type(value={"output_tokens": 7}, type_=Usage)
+        assert getattr(parsed, "input_tokens", "absent") is None, (
+            "anthropic's construct path no longer admits a missing "
+            "input_tokens; _token_count's docstring says it does")
+        with pytest.raises(Exception):
+            Usage(output_tokens=7)
+
+    with real_package("openai", "httpx"):
+        from openai._models import construct_type
+        from openai.types import CompletionUsage
+
+        assert CompletionUsage.model_fields["prompt_tokens"].annotation is int
+        parsed = construct_type(value={"completion_tokens": 7},
+                                type_=CompletionUsage)
+        assert getattr(parsed, "prompt_tokens", "absent") is None
+        with pytest.raises(Exception):
+            CompletionUsage(completion_tokens=7)
+
+
+def test_the_anthropic_accumulator_treats_its_own_int_field_as_nullable():
+    """The SDK's own source agrees, which is the strongest form this claim
+    takes: `accumulate_event` writes `input_tokens` onto the snapshot only
+    `if event.usage.input_tokens is not None` -- a None guard on a field it
+    declares `int` -- while assigning `output_tokens` unconditionally. So
+    `get_final_message().usage.output_tokens` can be None, which is the
+    value the ANTHROPIC branch used to hand the loop."""
+    with real_package("anthropic", "httpx"):
+        import inspect
+
+        from anthropic.lib.streaming import _messages
+        from anthropic.types import MessageDeltaUsage
+
+        source = inspect.getsource(_messages.accumulate_event)
+        assert "if event.usage.input_tokens is not None" in source, (
+            "anthropic's stream accumulator no longer guards input_tokens "
+            "against None; _token_count's docstring cites that guard as "
+            "evidence that the `int` annotation is not enforced")
+        assert (MessageDeltaUsage.model_fields["output_tokens"].annotation
+                is int)
+
+
+def test_the_GOOGLE_usage_read_against_a_REAL_nullable_usage_object(
+        monkeypatch):
+    """The arrangement in which S10-04 was visible, and in which the fix is
+    visible too: the real pinned types, driven through the real branch.
+
+    Behaviour, in this file, for the reason the docstring now gives -- the
+    read is only wrong when `usage_metadata` is a real
+    GenerateContentResponseUsageMetadata. Every D21 case in
+    test_client_streaming.py omits the usage object, which is the one shape
+    for which the old `getattr(..., 0)` default actually fired.
+    """
+    monkeypatch.setattr("core.client.load_provider_data",
+                        lambda: {"GOOGLE": {"supports_stream_usage": True}})
+    with real_package("google"):
+        from google.genai import types as gt
+
+        import core.client as client
+
+        def chunk(usage_metadata):
+            return gt.GenerateContentResponse(
+                candidates=[gt.Candidate(content=gt.Content(
+                    role="model", parts=[gt.Part(text="hi")]))],
+                usage_metadata=usage_metadata)
+
+        class FakeClient:
+            def __init__(self, chunks):
+                self.models = _SimpleNamespace(
+                    generate_content_stream=lambda **kw: iter(chunks))
+
+        def drain(chunks):
+            final = None
+            for token in client.call_model_stream(
+                    FakeClient(chunks), "GOOGLE", "m", [], "sys", []):
+                if token.final_response is not None:
+                    final = token.final_response
+            return final
+
+        # CONTROL: both counts reported, so this test can see a correct
+        # read and the raises below are about the nullable field.
+        both = gt.GenerateContentResponseUsageMetadata(
+            prompt_token_count=11, candidates_token_count=7)
+        assert drain([chunk(both)]).usage == {"input_tokens": 11,
+                                              "output_tokens": 7}
+
+        # One count absent -- the shape a response with no candidate
+        # tokens produces. D21 refuses it under the flag (§64 A20).
+        partial = gt.GenerateContentResponseUsageMetadata(
+            prompt_token_count=11)
+        with pytest.raises(RuntimeError, match="output_tokens"):
+            drain([chunk(partial)])
+
+        # And a bare one, which is TRUTHY and reads None from every field.
+        with pytest.raises(RuntimeError, match="without usage data"):
+            drain([chunk(gt.GenerateContentResponseUsageMetadata())])

@@ -39,12 +39,49 @@ Deliberately a leaf module with no project imports, matching core/approval.py
 it depends on none of them.
 """
 
-from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
-
 import logging
+import threading
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
+
+# ROADMAP_v2 §47 slice 8 (NA12). ONE QUESTION ON SCREEN AT A TIME, and it
+# lives here because this module is already the one entry point every
+# question goes through.
+#
+# Until slice 8 nothing could ask twice at once, so no shell needed to cope
+# with it and none does. Both of ours break in the same way and for the
+# same reason -- a single slot for the pending answer. `tui/app.py` keeps
+# one `_permission_channel` so shutdown can release a parked worker: a
+# second ask overwrites the field and orphans the first, and the first ask
+# to FINISH nulls it in its `finally`, so a still-open question becomes
+# unreleasable. `main.py` has one `_StdinReader`, and two readers of one
+# stdin is the defect §29's N1 exists to prevent, arrived at from the other
+# direction. Two consent surfaces at once is also what §42 refuses on its
+# own terms.
+#
+# HERE RATHER THAN IN EACH SHELL, which is this project's canonical rule --
+# fix at the producer. A lock around `tui/app.py`'s `_blocking_modal` would
+# leave the CLI unprotected and would have to be written again for the
+# third shell.
+#
+# NO TIMEOUT, deliberately. Every waiter is bounded by the holder's own
+# deadline: the TUI parks for at most ATTENDED_APPROVAL_TIMEOUT_S and a
+# run-backed CLI prompt carries the same, so the queue drains on its own.
+# A deadline here would need this leaf module to know a number that
+# belongs to config.py, and the failure it would prevent is one no shell
+# can currently produce. Shutdown does not wait either: the TUI's release
+# unblocks the holder, and every queued worker then finds `_shutting_down`
+# already true and returns its declining default without pushing a screen.
+#
+# NOT FIFO, and nothing here claims it is -- a Lock makes no ordering
+# promise, so which of two simultaneous questions is put first is
+# undefined. What IS guaranteed is that each answer reaches the asker that
+# holds it, because the request travels with the caller and never through
+# this module's state.
+_ask_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -66,6 +103,16 @@ CHOICE = "choice"
 # four affordances the spec asks for by name, and a shape CHOICE's decoder
 # cannot express without becoming two decoders wearing one name.
 QUESTION = "question"
+# ROADMAP_v3 §49 slice 5a (SS59). One value, typed by a human, that the
+# caller needs and this module must never see printed.
+#
+# Its own kind rather than a QUESTION with a flag, because the KIND is what
+# tells a shell how to RENDER -- and the rendering is the whole point here:
+# the field is masked, the answer is not echoed, and it does not reach the
+# transcript, the log or the scrollback. A flag on an existing kind would
+# make a shell that ignored the flag look wired up while showing the
+# passphrase in clear.
+SECRET = "secret"
 
 # Review decisions, moved here from core/reasoning/review.py so the decoder
 # and the pipeline cannot disagree about what a valid answer is.
@@ -105,6 +152,14 @@ SAFE_DEFAULTS = {
     # answer carrying defer=True, because a user who says that has told the
     # model something, and a user who closed the modal has not.
     QUESTION: None,
+    # None, for CHOICE's reason and one more that is specific to this kind:
+    # the empty string is a value a user could legitimately mean to type,
+    # and it is also what a torn-down modal and a shell with no branch for
+    # SECRET both produce. Defaulting to "" would hand `sudo` an empty
+    # password -- an authentication ATTEMPT made on nobody's behalf, which
+    # on a remote account is a step towards a lockout. None is not a
+    # password, so every consumer has to notice.
+    SECRET: None,
 }
 
 
@@ -190,6 +245,21 @@ def decode(request: "Request", raw: Any) -> Any:
         # decision the user made -- unlike the shapes below, there is no
         # third state to confuse it with.
         return bool(raw)
+
+    if kind == SECRET:
+        # A string, or nothing. NOT `str(raw)`: a shell that returned a
+        # widget, a dict or a bool would be coerced into a "password" that
+        # is really a repr, and it would then be TRIED against a real
+        # account. And not `raw or None` either -- an empty string is the
+        # shape a dismissed modal produces, and it must decode as "nobody
+        # answered" rather than as a password of length zero.
+        #
+        # The value is returned raw and is NOT logged, here or anywhere on
+        # this path. This is the one decode branch whose input must not
+        # appear in a warning about its own shape.
+        if not isinstance(raw, str) or raw == "":
+            return None
+        return raw
 
     if kind == CHOICE:
         # Valid ONLY against what was offered. A shell returning something
@@ -314,7 +384,12 @@ def ask(channel: Optional[ResponseChannel], request: Request) -> Any:
     if channel is None:
         return decode(request, None)
     try:
-        raw = channel.ask(request)
+        # NA12. Serialised, so a shell that can only hold one pending
+        # answer is never handed two. The lock covers the shell's call and
+        # nothing else: `decode` is pure, and holding a lock across it
+        # would make one shell's slowness another's wait for no reason.
+        with _ask_lock:
+            raw = channel.ask(request)
     except Exception:  # noqa: BLE001 -- a shell's failure is not the run's
         # Logged with the traceback, because a shell raising here is a real
         # bug worth finding, and at ERROR because the user's answer was

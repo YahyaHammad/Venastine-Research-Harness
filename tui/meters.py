@@ -29,17 +29,32 @@ WHAT THIS OWNS
 
   - `start` / `stop`      -- turn boundaries, and the elapsed time between.
   - `set_blocked`         -- the pause while a modal is waiting on a human.
+  - `set_tool_running`    -- the pause while a TOOL is running (rate only).
   - `add_output_chars`    -- the live estimate's numerator.
   - `subtitle`            -- the three live figures as one string, or None.
   - `completion`          -- the line written under the finished answer.
 
+TWO CLOCKS, AND THEY ANSWER DIFFERENT QUESTIONS (batch 118). `elapsed` is
+wall clock minus the human wait, because what it answers is "how long did I
+wait for this turn", and a tool taking two minutes is part of that. The RATE
+divides by elapsed minus TOOL time, because what it answers is "how fast is
+the model writing", and a tool running is not the model writing.
+
+Until batch 118 there was one clock and the rate used it, so the live figure
+read `~0 tok/s` on exactly the turns it exists for: it needs only fewer than
+two characters per active second to round to zero, and a turn that thinks for
+a minute and then runs a two-minute tool produces a handful of characters
+across three minutes. The numerator was wrong in the same direction --
+thinking and tool-call arguments are generated output and neither was
+counted -- so both sides were fixed together or neither was.
+
 TWO INSTRUMENTS, AND THEY ARE NOT THE SAME ONE. The live rate is an
 ESTIMATE from characters, because `StreamToken` carries no incremental
-usage and only three of the nineteen configured providers report usage on
+usage and only three of the fifteen configured providers report usage on
 a streaming call at all (D21: OpenAI-compatible streaming returns none
 unless `stream_options` is sent, and Mistral rejects that parameter
 outright). An exact live rate would therefore read `0 tok/s` forever on
-sixteen providers, which is D21's own failure mode -- correct-looking
+twelve providers, which is D21's own failure mode -- correct-looking
 output -- one layer up in the UI. The estimate also keeps MOVING during a
 table hold, because the deltas are still arriving; it is the renderer that
 is withholding, not the stream. That is the whole point of the feature, so
@@ -121,6 +136,13 @@ class TurnMeter:
         # how much blocked time this turn has already accumulated.
         self._blocked_at = None
         self._blocked_total = 0.0
+        # The tool pause, same shape as the modal one, plus a DEPTH --
+        # `_dispatch_parallel` can have several tools outstanding at once,
+        # so a boolean would un-pause on the first result while two were
+        # still running.
+        self._tool_at = None
+        self._tool_total = 0.0
+        self._tool_depth = 0
         self._chars = 0
 
     # -- session ------------------------------------------------------------
@@ -151,6 +173,9 @@ class TurnMeter:
         self._turn_at = now
         self._blocked_at = None
         self._blocked_total = 0.0
+        self._tool_at = None
+        self._tool_total = 0.0
+        self._tool_depth = 0
         self._chars = 0
 
     def stop(self, now: float):
@@ -168,6 +193,8 @@ class TurnMeter:
         elapsed = self.elapsed(now)
         self._turn_at = None
         self._blocked_at = None
+        self._tool_at = None
+        self._tool_depth = 0
         return elapsed
 
     def set_blocked(self, blocked: bool, now: float) -> None:
@@ -185,18 +212,68 @@ class TurnMeter:
         if blocked:
             if self._blocked_at is None:
                 self._blocked_at = now
+                # The two pauses MUST NOT OVERLAP, and this is the half
+                # that keeps them apart. Approval is asked for from inside
+                # a tool call, so a human wait sits inside a tool window;
+                # `elapsed` already removes the human wait, so letting the
+                # tool clock keep running across it would subtract the same
+                # seconds twice and could drive the rate's denominator
+                # negative. The tool clock is closed here and reopened when
+                # the modal goes away, which is `set_blocked(False)` below.
+                self._close_tool_window(now)
             return
         if self._blocked_at is not None:
             self._blocked_total += max(0.0, now - self._blocked_at)
             self._blocked_at = None
+            if self._tool_depth > 0:
+                self._tool_at = now
+
+    def set_tool_running(self, delta: int, now: float) -> None:
+        """A tool started (+1) or finished (-1).
+
+        DEPTH, NOT A BOOLEAN: `core/loop.py`'s `_dispatch_parallel` runs a
+        response's tool calls together, so several `tool_call_start` events
+        can be outstanding before the first `tool_result` arrives. The clock
+        is paused while the depth is above zero.
+
+        This leaves `elapsed` alone, deliberately. A tool taking two minutes
+        IS part of how long the turn took, and the transcript line says
+        `took`. It is not part of how fast the model writes, which is what
+        the rate claims to be -- so only the rate subtracts it.
+        """
+        if self._turn_at is None:
+            return
+        previous = self._tool_depth
+        self._tool_depth = max(0, previous + int(delta))
+        if self._tool_depth and previous == 0:
+            # Not while a modal is up: see set_blocked.
+            if self._blocked_at is None:
+                self._tool_at = now
+        elif not self._tool_depth and previous:
+            self._close_tool_window(now)
+
+    def _close_tool_window(self, now: float) -> None:
+        """Bank an open tool window, if there is one. Idempotent."""
+        if self._tool_at is not None:
+            self._tool_total += max(0.0, now - self._tool_at)
+            self._tool_at = None
 
     def add_output_chars(self, count: int) -> None:
-        """Characters of answer received. The live rate's numerator.
+        """Characters the MODEL GENERATED. The live rate's numerator.
 
         Called per token delta, INCLUDING the ones being withheld by the
         commit cap -- which is the point. The deltas arrive whether or not
-        the renderer is drawing them, so this is what keeps a figure
-        moving through a table hold.
+        the renderer is drawing them, so this is what keeps a figure moving
+        through a table hold.
+
+        AND INCLUDING THINKING, AND TOOL-CALL ARGUMENTS (batch 118). Both
+        are output the provider counts and bills, and neither reached here
+        before: thinking arrives as its own `LoopEvent` field, and tool-call
+        arguments never stream as a delta at all -- `StreamToken` carries
+        text, thinking, or the final response, so the arguments land whole
+        in the last one. Counting only the visible answer made the live
+        figure read `~0 tok/s` on a turn that was thinking and calling tools,
+        which is the turn it was built to describe.
         """
         if self._turn_at is not None:
             self._chars += max(0, int(count or 0))
@@ -218,11 +295,30 @@ class TurnMeter:
             blocked += max(0.0, now - self._blocked_at)
         return max(0.0, (now - self._turn_at) - blocked)
 
+    def generating(self, now: float) -> float:
+        """Active seconds with a tool NOT running: the rate's denominator.
+
+        `elapsed` minus tool time. See the module docstring for why these
+        are two numbers rather than one -- briefly, a tool running is part
+        of how long the turn took and no part of how fast the model writes.
+
+        Clamped, and the clamp is doing real work rather than being
+        defensive: the two pauses are kept disjoint by `set_blocked`, and
+        if that ever stopped being true this would go negative rather than
+        merely wrong.
+        """
+        if self._turn_at is None:
+            return 0.0
+        tool = self._tool_total
+        if self._tool_at is not None:
+            tool += max(0.0, now - self._tool_at)
+        return max(0.0, self.elapsed(now) - tool)
+
     def rate(self, now: float):
         """Estimated tokens per second, or None when it would be noise."""
         if self._turn_at is None or not self._chars:
             return None
-        active = self.elapsed(now)
+        active = self.generating(now)
         if active < RATE_FLOOR_S:
             return None
         return (self._chars / CHARS_PER_TOKEN) / active
@@ -253,7 +349,7 @@ class TurnMeter:
         `output_tokens` is the provider's own count for the turn, or None
         where the provider reports none. NO TOKEN CLAIM is made in that
         case -- not a zero, which would say the model wrote nothing on
-        sixteen of the nineteen configured providers.
+        twelve of the fifteen configured providers.
 
         The rate here carries no tilde. It is not the same instrument as
         the live figure: that one divides characters by a constant, this

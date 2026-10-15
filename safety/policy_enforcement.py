@@ -31,17 +31,16 @@ from __future__ import annotations
 import ipaddress
 import json
 import logging
-import os
 import re
 import socket
 from urllib.parse import urlparse
 
-import config
 # safety -> security, and never the reverse. `security.posture` imports
 # `config` and the stdlib only, so this adds no cycle -- which is exactly
 # why batch 37 kept `logging_setup` OUT of `security/`: that one pulls in
 # this module, and the edge only stays acyclic while it runs one way.
 from security import posture
+from security import secrets as harness_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -353,13 +352,83 @@ def redaction_enabled() -> bool:
 
     What this does NOT govern, whichever way it reads: input refusals
     (_input_leaf -- a denial is legible, not destructive), the depth-cap
-    substitution (fail-closed structural bound), and logging_setup's
-    formatter redaction (the second sink guards app.log regardless).
+    substitution (fail-closed structural bound), and `redact_diagnostic_text`
+    -- the harness's own diagnostics, which guard app.log, the transcript,
+    `MessageLog.error` and a pipeline record regardless of this answer. That
+    last clause used to name `logging_setup` alone and to be true only about
+    the moment of reading: the formatter did run regardless, with a strictly
+    SMALLER vocabulary than this function's, which is the gap batch 144
+    closed. The two now differ in one respect and it is the one named here.
     """
     active = posture.current()
     if not active.redact_tool_outputs:
         return False
     return not active.redact_off_env
+
+
+def redact_diagnostic_text(text: str) -> str:
+    """The one redaction path the HARNESS'S OWN DIAGNOSTICS take.
+
+    THE SAME VOCABULARY AS TOOL OUTPUT, which it was not until batch 144
+    (batch 144). `redact_secrets` is the seven vendor-token patterns and
+    nothing else. `_redact_credential_shapes` is the only thing in this
+    project that matches a credential with NO vendor prefix -- a URL's
+    userinfo, a `<password>` element, a quoted `password =` assignment --
+    and it had exactly one caller, `redact_output_text`. So one string took
+    two different vocabularies depending on which sink it reached. Driven
+    through the real `configure_logging` with nothing monkeypatched, on
+    issue #167's own seven cases:
+
+        case                   app.log      transcript   tool output
+        anthropic key          redacted     redacted     redacted
+        openai key             redacted     redacted     redacted
+        github pat             redacted     redacted     redacted
+        aws access key id      redacted     redacted     redacted
+        gradle password        LEAKED       LEAKED       redacted
+        maven server password  LEAKED       LEAKED       redacted
+        gem source url         LEAKED       LEAKED       redacted
+
+    The four vendor rows are the control: they prove the formatter was
+    attached and firing, so the three LEAKED rows were the vocabulary and
+    not a probe that had stopped working. It needed no contrivance to
+    reach: `fetch_url` logs the URL it failed on BY DESIGN and says so in
+    a comment naming this redaction as the guard, and `core/loop.py` puts
+    the same description in `MessageLog.error`, where it persists in
+    `app.db` -- which `docs/PRIVACY.md` says is deleted by wiping the
+    database rather than one thread.
+
+    FIVE CALLERS, and the one-caller shape is what made the gap
+    survivable: `logging_setup`'s formatter, `tui/app.py`'s
+    `TranscriptLogHandler.emit` and its tool-error line, `core/loop.py`'s
+    `mark_turn_failed`, and the orchestrator's pipeline event. Adding a
+    pattern or a shape now reaches all five, and
+    `tests/test_logging_setup.py`'s parity test is what fails if a sixth
+    sink composes its own.
+
+    UNCONDITIONAL, all three passes, and that is not an extension of the
+    switch's reach but the removal of a difference. `redaction_enabled()`
+    governs what the MODEL is shown, which a user may reasonably choose to
+    see raw for one run; it has never governed what `app.log` keeps across
+    runs, and the switch's own docstring already said so.
+
+    LIVE VALUES FIRST, which is the finding rather than a preference
+    (batch 144). `redact_live_values` matches a stored value by exact
+    substring, so a pattern pass that has already rewritten part of one
+    leaves the remainder standing. Measured, with a stored value that
+    properly contains a vendor token: the log's old order returned
+    `PREFIX-[REDACTED]-SUFFIX` and this one returns `[REDACTED]`. The repo
+    has locked the general rule three times -- `fetch_url` redacts before
+    it cuts, `param_digest` redacts before truncating, the diff block runs
+    on whole texts -- and this is the same rule where the destroyer is a
+    substitution rather than a cut.
+
+    The cost is measured and is per log RECORD: 6.7 us -> 9.4 us on Linux,
+    +40%, for three more regex passes over a line that already takes
+    seven. Invisible at INFO, and under a millisecond per thousand records
+    at DEBUG.
+    """
+    return _redact_credential_shapes(
+        redact_secrets(harness_secrets.redact_live_values(text)))
 
 
 def redact_output_text(text: str) -> str:
@@ -379,10 +448,30 @@ def redact_output_text(text: str) -> str:
     redacted LESS than the line it replaced -- the vendor tokens but not
     the credential shapes -- which is a regression dressed as a feature.
     The docstring above already called this "the one path"; it now is one
-    for both consumers."""
+    for both consumers.
+
+    AND IT IS NOW `redact_diagnostic_text` UNDER THE SWITCH (batch 144),
+    rather than its own copy of the same three passes. The two had drifted
+    into different vocabularies AND different orders while reading as
+    siblings, which is why the difference that is deliberate is now the
+    only one there is."""
+    # SS61: THE HARNESS'S OWN SECRETS COME OUT FIRST, AND UNCONDITIONALLY.
+    # Above the switch on purpose, and still first inside the shared
+    # composition below. `redact_tool_outputs` governs pattern GUESSES
+    # about other people's credentials, and a user who turns it off has
+    # chosen to see those raw. A value this harness put into a subprocess,
+    # coming back out of one, is a different thing: passing it to the model
+    # is the harness leaking its OWN secret, and no switch asks for that.
+    # It sits beside the depth cap, which this module already keeps
+    # fail-closed for the same shape of reason -- it is structure and
+    # self-inflicted leakage, not content judgment.
+    #
+    # The VALUES never come here: security/secrets.py does the substitution
+    # itself, so exactly one module holds plaintext and the redactor is not
+    # it (fix at the producer).
     if not redaction_enabled():
-        return text
-    return _redact_credential_shapes(redact_secrets(text))
+        return harness_secrets.redact_live_values(text)
+    return redact_diagnostic_text(text)
 
 
 
@@ -392,6 +481,28 @@ def redact_output_text(text: str) -> str:
 # call.
 _DIGEST_VALUE_CHARS = 60
 _DIGEST_CHARS = 140
+
+# A VALUE CARRYING A URL GETS ITS OWN, WIDER CAP, and the digest a wider
+# total to hold one (batch 96).
+#
+# Batch 65 made a truncated URL clickable by carrying the whole one
+# alongside the line, so the click has always opened the right page. What
+# it could not fix is the TERMINAL: `https://host/a/b…` minus the ellipsis
+# is itself a syntactically valid URL, so a terminal's own link detector
+# sees a shorter address than the harness resolved and ctrl+click opens
+# THAT -- measured, and reported as the click going somewhere wrong.
+#
+# The honest fix is to stop producing the mismatch: draw the whole URL, so
+# the visible text is the target again and the two layers cannot disagree.
+# `markdown.link_spans`' elision stays for anything past this cap, where
+# the invariant is still "the visible text tells you the origin".
+#
+# BOTH CAPS MOVE OR NEITHER DOES. A 200-character value cut at a
+# 140-character TOTAL is the same mismatch one line further down, which is
+# why the total is raised only for a digest that actually holds a URL --
+# every other digest keeps the width it has always had.
+_DIGEST_URL_CHARS = 200
+_DIGEST_URL_TOTAL = 240
 
 
 def param_digest(params, omit=()) -> str:
@@ -437,6 +548,7 @@ def param_digest(params, omit=()) -> str:
     if not isinstance(params, dict) or not params:
         return ""
     parts = []
+    widened = False
     for key, value in params.items():
         if key in omit:
             continue
@@ -448,12 +560,34 @@ def param_digest(params, omit=()) -> str:
         # like every other pattern substitution; it stays display-only
         # and never logs, whatever the switch reads.
         text = redact_output_text(text)
-        if len(text) > _DIGEST_VALUE_CHARS:
-            text = text[:_DIGEST_VALUE_CHARS - 1] + "…"
+        # ONE LINE, and the collapse happens BEFORE the truncation so that
+        # sixty characters means sixty VISIBLE ones (batch 96). A digest is
+        # drawn as a single row -- `▸ shell  <digest>` -- and nothing
+        # downstream re-flows it, so a multi-line command (a heredoc, an
+        # inline `python3 - <<EOF`) drew its remaining lines at column 0
+        # underneath, outside the indent and outside the tool's line. The
+        # transcript, `core/replay.py` and the research pass trace all read
+        # this one producer, so all three drew it.
+        #
+        # AFTER the redaction, which is the ordering this function exists
+        # to hold: the redactor works on whole strings, and collapsing
+        # first would not change what it matches, but doing it after keeps
+        # the rule "redact, THEN shorten" true of every step below it.
+        text = " ".join(text.split())
+        # `http` is a FILTER, not a grammar: which substrings are URLs is
+        # `tui/markdown.py`'s question, asked there against one definition.
+        # This only declines to widen a value that cannot contain one --
+        # the same test, and the same reasoning, as `redacted_values`.
+        has_url = "http" in text
+        widened = widened or has_url
+        cap = _DIGEST_URL_CHARS if has_url else _DIGEST_VALUE_CHARS
+        if len(text) > cap:
+            text = text[:cap - 1] + "…"
         parts.append(text)
     digest = "  ".join(p for p in parts if p)
-    if len(digest) > _DIGEST_CHARS:
-        digest = digest[:_DIGEST_CHARS - 1] + "…"
+    total = _DIGEST_URL_TOTAL if widened else _DIGEST_CHARS
+    if len(digest) > total:
+        digest = digest[:total - 1] + "…"
     return digest
 
 

@@ -34,10 +34,220 @@
     "prepublishOnly": "node scripts/prepublish-check.mjs",
     "check-pack": "node scripts/prepublish-check.mjs"
   },
+  "neverDistribute": [
+    {
+      "label": "provider credentials",
+      "match": "exact",
+      "value": [
+        "providers.json"
+      ],
+      "channels": [
+        "git",
+        "archive",
+        "npm"
+      ],
+      "samples": [
+        "providers.json"
+      ]
+    },
+    {
+      "label": "tool secrets",
+      "match": "basename",
+      "value": [
+        ".env"
+      ],
+      "channels": [
+        "git",
+        "archive",
+        "npm"
+      ],
+      "samples": [
+        ".env",
+        "sub/.env"
+      ]
+    },
+    {
+      "label": "the harness-held secret store",
+      "match": "exact",
+      "value": [
+        "secrets.json"
+      ],
+      "channels": [
+        "git",
+        "archive",
+        "npm"
+      ],
+      "samples": [
+        "secrets.json"
+      ]
+    },
+    {
+      "label": "local databases and their WAL sidecars",
+      "match": "suffix",
+      "value": [
+        ".db",
+        ".db-wal",
+        ".db-shm"
+      ],
+      "channels": [
+        "git",
+        "archive",
+        "npm"
+      ],
+      "samples": [
+        "app.db",
+        "app.db-wal",
+        "app.db-shm"
+      ]
+    },
+    {
+      "label": "logs",
+      "match": "dir",
+      "value": [
+        "logs"
+      ],
+      "channels": [
+        "git",
+        "archive",
+        "npm"
+      ],
+      "samples": [
+        "logs/app.log"
+      ]
+    },
+    {
+      "label": "research output",
+      "match": "dir",
+      "value": [
+        "output"
+      ],
+      "channels": [
+        "git",
+        "archive",
+        "npm"
+      ],
+      "samples": [
+        "output/run-1/report.md"
+      ]
+    },
+    {
+      "label": "compiled python",
+      "match": "suffix-or-segment",
+      "value": [
+        ".pyc",
+        "__pycache__"
+      ],
+      "channels": [
+        "git",
+        "npm"
+      ],
+      "samples": [
+        "x.pyc",
+        "__pycache__/README.txt"
+      ],
+      "note": "No archive row by decision (S18-08): `git archive` ships only TRACKED content, so export-ignore on a gitignored path is belt and braces. The row that mattered there was .venastine/."
+    },
+    {
+      "label": "notebook checkpoints",
+      "match": "segment",
+      "value": [
+        ".ipynb_checkpoints"
+      ],
+      "channels": [
+        "git",
+        "archive",
+        "npm"
+      ],
+      "samples": [
+        ".ipynb_checkpoints/system.md"
+      ]
+    },
+    {
+      "label": "security scan artifacts",
+      "match": "prefix",
+      "value": [
+        "CLAUDE-SECURITY"
+      ],
+      "channels": [
+        "git",
+        "archive",
+        "npm"
+      ],
+      "samples": [
+        "CLAUDE-SECURITY-2026-01-01/report.md"
+      ]
+    },
+    {
+      "label": "atomic-write debris",
+      "match": "suffix",
+      "value": [
+        ".tmp"
+      ],
+      "channels": [
+        "git",
+        "archive",
+        "npm"
+      ],
+      "samples": [
+        "providers.json.a1b2c3d4.tmp",
+        "secrets.json.a1b2c3d4.tmp"
+      ]
+    },
+    {
+      "label": "the unsafe-mode branch marker",
+      "match": "exact",
+      "value": [
+        "UNSAFE_BRANCH"
+      ],
+      "channels": [
+        "npm"
+      ],
+      "samples": [
+        "UNSAFE_BRANCH"
+      ],
+      "note": "npm only, deliberately. UN5 keeps this marker OUT of the tarball while the unsafe branch must be able to track it, so gitignoring it would break the thing it exists to mark."
+    },
+    {
+      "label": "project MCP server configuration",
+      "match": "exact",
+      "value": [
+        ".venastine/mcp.json"
+      ],
+      "channels": [
+        "git",
+        "archive",
+        "npm"
+      ],
+      "samples": [
+        ".venastine/mcp.json"
+      ],
+      "note": "S18-01. `env` and `headers` are live fields and README names `Authorization` as where a hosted server's credential rides. The directory is NOT excluded wholesale: .venastine/agents and .venastine/skills are project content meant to travel with the repo, which is what D17's trust prompt exists for."
+    },
+    {
+      "label": "project settings",
+      "match": "exact",
+      "value": [
+        ".venastine/settings.json"
+      ],
+      "channels": [
+        "git",
+        "archive",
+        "npm"
+      ],
+      "samples": [
+        ".venastine/settings.json"
+      ],
+      "note": "The sibling `/init --config` writes in the same call as mcp.json, so it travels with it."
+    }
+  ],
   "files": [
     "bin/",
     "main.py",
     "config.py",
+    "config.yaml",
+    "config_schema.py",
+    "config_edit.py",
+    "config_update.py",
     "storage.py",
     "database.py",
     "credentials.py",
@@ -60,9 +270,10 @@
     "README.md",
     "LICENSE",
     "NOTICE",
-    "THIRD_PARTY_NOTICES.md",
-    "SECURITY.md",
-    "PRIVACY.md",
+    "docs/THIRD_PARTY_NOTICES.md",
+    "CONFIG_ARCHITECTURE.md",
+    "docs/SECURITY.md",
+    "docs/PRIVACY.md",
     "providers.json.example",
     ".env.example",
     "!**/__pycache__",

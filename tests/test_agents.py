@@ -34,10 +34,10 @@ from core.events import LoopEvent
 from core.interaction import ResponseChannel
 from core.loop import RunAgentLoop
 from security.permissions import is_tool_allowed, requires_approval
-from tools.base import ToolSpec
-from tools.context import ToolContext, RunInfo
-from tools.registry import registry
 from tests.conftest import make_model_response
+from tools.base import ToolSpec
+from tools.context import RunInfo, ToolContext
+from tools.registry import registry
 
 
 @pytest.fixture
@@ -519,6 +519,201 @@ def test_s2_child_own_overrides_still_apply(_roots):
     assert child.approval_overrides.get("get_time") is True
 
 
+class TestTheFourthQuadrant:
+    """parent True / agent False -- the one combination the three tests
+    above do not cover, and the one the code got wrong (S13-02, A28).
+
+    The three `test_s2_*` functions take parent-True/agent-silent,
+    parent-False/agent-silent and parent-silent/agent-True. All three
+    were green. The merge filtered the PARENT's dict and applied the
+    agent's raw, so the quadrant with no test is the quadrant where a
+    `False` in a child's frontmatter overwrote the parent's `True` -- and
+    `child_context`'s own docstring says the opposite: "Only True entries
+    carry ... so unioning can only ever tighten, which is what makes it
+    safe to do silently."
+
+    Reaching it needs two custom agent definitions -- no shipped agent
+    declares approval_overrides at all -- which is why it is S3 and not
+    S2.
+    """
+
+    def test_a_child_cannot_turn_off_a_gate_its_parent_set(self, _roots):
+        """The defect, through the real policy function. The global
+        ToolApprovals().web_search is False, so the parent's context
+        entry is the ONLY thing requiring approval -- which is the exact
+        configuration child_context's docstring describes as the
+        escalation it closes."""
+        _write_harness_agent(_roots, "loosener",
+                             ["approval_overrides: {web_search: false}"])
+        config_loader.initialize(str(_roots["project"]))
+        agent = manager.get("loosener")
+
+        parent = ToolContext(approval_overrides={"web_search": True})
+        child = manager.child_context(agent, parent)
+
+        assert child.approval_overrides.get("web_search") is True
+        assert requires_approval("web_search", {}, child) is True
+
+    def test_the_tightening_survives_the_next_hop_too(self, _roots):
+        """It did not heal one hop further out: the next `if v` filter
+        dropped the False rather than restoring the True, so a grandchild
+        came back with {} and the gate was gone permanently rather than
+        suspended for one run."""
+        _write_harness_agent(_roots, "loosener",
+                             ["approval_overrides: {web_search: false}"])
+        _write_harness_agent(_roots, "quiet2")
+        config_loader.initialize(str(_roots["project"]))
+
+        parent = ToolContext(approval_overrides={"web_search": True})
+        child = manager.child_context(manager.get("loosener"), parent)
+        grandchild = manager.child_context(manager.get("quiet2"), child)
+
+        assert grandchild.approval_overrides.get("web_search") is True
+        assert requires_approval("web_search", {}, grandchild) is True
+
+    def test_the_signoff_notice_and_the_grant_name_the_tool_too(
+            self, _roots):
+        """The half the finding does not state, and the sharper cost.
+        candidate_approvals reads the same dict and is BOTH the sign-off
+        notice the user reads AND the grant the child receives -- its
+        docstring calls keeping them one "the whole substance of a
+        sign-off". So the loosened tool did not merely run ungated: it
+        left the candidate list, and the user was neither asked at call
+        time nor told at sign-off time.
+
+        A gated tool with no approval_check is the population this helper
+        draws from, which is what an MCP tool is."""
+        registry.register(ToolSpec(
+            name="mcp__q4__search",
+            schema={"name": "mcp__q4__search", "description": "d",
+                    "input_schema": {"type": "object", "properties": {}}},
+            handler=lambda params: {"content": "ok"},
+        ))
+        try:
+            _write_harness_agent(
+                _roots, "loosener",
+                ["approval_overrides: {mcp__q4__search: false}"])
+            config_loader.initialize(str(_roots["project"]))
+
+            parent = ToolContext(
+                approval_overrides={"mcp__q4__search": True})
+            child = manager.child_context(manager.get("loosener"), parent)
+
+            assert "mcp__q4__search" in manager.candidate_approvals(child)
+        finally:
+            registry.unregister("mcp__q4__search")
+
+    def test_an_agent_can_still_ADD_a_gate(self, _roots):
+        """Control one: the filter must not drop what the agent declares.
+        test_s2_child_own_overrides_still_apply asserts this from the
+        other side; stated here too because it is the property the fix
+        could most easily break -- filtering both sides is one character
+        away from filtering the wrong thing."""
+        _write_harness_agent(_roots, "strict2",
+                             ["approval_overrides: {get_time: true}"])
+        config_loader.initialize(str(_roots["project"]))
+
+        child = manager.child_context(manager.get("strict2"),
+                                      ToolContext())
+
+        assert child.approval_overrides.get("get_time") is True
+        assert requires_approval("get_time", {}, child) is True
+
+    def test_active_context_keeps_its_unfiltered_copy(self, _roots):
+        """Control two, and a SCOPE claim rather than a behaviour one.
+        active_context() composes nothing -- at depth 0 there is no
+        parent to overwrite -- so it keeps `dict(agent.approval_overrides)`
+        and a False may sit in it inertly: approval ORs, so a False is
+        indistinguishable from absent, and the next hop's filter drops it.
+
+        Pinned because "the other composer looks similar" is how a fix
+        grows past its finding. If someone ever makes this one filter
+        too, this test asks them to say why."""
+        _write_harness_agent(_roots, "loosener",
+                             ["approval_overrides: {web_search: false}"])
+        config_loader.initialize(str(_roots["project"]))
+
+        active = manager.active_context(manager.get("loosener"))
+
+        assert active.approval_overrides == {"web_search": False}
+        assert requires_approval("web_search", {}, active) is False
+        # and it cannot widen anything one hop down either
+        child = manager.child_context(manager.get("loosener"), active)
+        assert child.approval_overrides == {}
+
+
+# ---------------------------------------------------------------------------
+# ---- C6 on the third axis: spawn_targets ----------------------------------
+# ---------------------------------------------------------------------------
+#
+# The field that says WHICH agents a definition may spawn narrows the same
+# way `allowed_tools` does, and it has to, or it is escapable by nesting:
+# an agent forbidden to reach `build` could otherwise spawn something that
+# was not forbidden, and have that one spawn it.
+
+
+def test_spawn_targets_intersect_with_the_parents(_roots):
+    _write_harness_agent(_roots, "wide",
+                         ["spawn_targets: [alpha, beta]"])
+    config_loader.initialize(str(_roots["project"]))
+    agent = manager.get("wide")
+
+    parent = ToolContext(spawn_targets={"beta", "gamma"})
+    child = manager.child_context(agent, parent)
+
+    assert child.spawn_targets == {"beta"}
+
+
+def test_a_child_cannot_widen_the_parents_spawn_targets(_roots):
+    """The escape C6 exists to close, on this axis. A child declaring a
+    roster its parent does not hold must not acquire it by being spawned
+    -- otherwise one hop launders the restriction."""
+    _write_harness_agent(_roots, "greedy",
+                         ["spawn_targets: [alpha, beta, gamma]"])
+    config_loader.initialize(str(_roots["project"]))
+    agent = manager.get("greedy")
+
+    child = manager.child_context(agent, ToolContext(spawn_targets={"alpha"}))
+
+    assert child.spawn_targets == {"alpha"}
+
+
+def test_declaring_none_inherits_the_parents_roster(_roots):
+    """An agent with no opinion gets its parent's, unchanged. Widening
+    back to "everything" here is the same laundering as above, reached by
+    saying nothing instead of by saying too much."""
+    _write_harness_agent(_roots, "silent")
+    config_loader.initialize(str(_roots["project"]))
+    agent = manager.get("silent")
+
+    child = manager.child_context(agent, ToolContext(spawn_targets={"alpha"}))
+
+    assert child.spawn_targets == {"alpha"}
+
+
+def test_no_opinion_anywhere_stays_no_opinion(_roots):
+    """The control, and the compatibility claim. None means "every
+    spawnable agent", which is what every definition written before this
+    field meant and has to go on meaning."""
+    _write_harness_agent(_roots, "silent")
+    config_loader.initialize(str(_roots["project"]))
+    agent = manager.get("silent")
+
+    assert manager.child_context(agent, ToolContext()).spawn_targets is None
+    assert manager.active_context(agent).spawn_targets is None
+
+
+def test_an_active_agent_carries_its_own_roster(_roots):
+    """Depth 0, the `/agent plan` route. There is no parent to intersect
+    with, and the restriction still has to apply -- it is the route the
+    shipped case actually uses."""
+    _write_harness_agent(_roots, "picky", ["spawn_targets: [alpha]"])
+    config_loader.initialize(str(_roots["project"]))
+
+    assert manager.active_context(manager.get("picky")).spawn_targets == {
+        "alpha"}
+
+
 def test_candidate_approvals_is_the_list_the_prompt_shows(_roots, _mcp_tool):
     """One helper, two callers. If the notice and the grant computed the
     list separately they could drift, and the drift IS the defect: the
@@ -557,10 +752,10 @@ def test_candidate_approvals_omits_tools_the_grant_cannot_cover(
     exclusion below was true of every string ever written. That predates
     R13 -- it is the same vacuity class, found by sweeping for it. The
     positive assertion is what makes the negative one mean something."""
+    from tests.conftest import set_posture
     monkeypatch.setattr(config, "ToolPermissions",
                         lambda: type("P", (), {"shell": True})())
-    monkeypatch.setattr(config, "ToolApprovals",
-                        lambda: type("A", (), {"shell": True})())
+    set_posture(monkeypatch, shell_approval_mode="always")
 
     _write_harness_agent(_roots, "worker")
     config_loader.initialize(str(_roots["project"]))
@@ -746,22 +941,73 @@ def test_spawn_grants_nothing_when_there_is_no_channel(_roots, _mcp_tool,
 # r3-1 through configuration rather than through the missing parameter, with
 # nothing in the suite failing. Both halves are now tested.
 
-def test_a_headless_run_is_never_offered_spawn_subagent():
+# BATCH 110: the three below now STATE the roster they depend on. Since
+# TECHNICAL_DEBT 13 the tool declares an available_check, so "no spawnable
+# agent discovered" is a fourth reason it can be absent from the schema list
+# -- and these tests are about the other three. Their own control
+# (`test_a_run_that_can_ask_IS_offered_spawn_subagent`, which exists so the
+# negative assertions cannot pass against a registry that stopped
+# advertising the tool anywhere) is what caught the change, which is the
+# best argument for writing controls like that one.
+
+def test_a_headless_run_is_never_offered_spawn_subagent(_roots):
     """The invariant. r3-1's fix (forwarding the channel) is only half of
     why a spawned child keeps its gated tools; this is the other half."""
+    _write_harness_agent(_roots, "worker")
+    config_loader.initialize(str(_roots["project"]))
+
     headless = {s["name"] for s in registry.schemas(None, callable_only=True)}
     assert "spawn_subagent" not in headless
     assert "spawn_subagent" in registry.headless_hidden(None)
 
 
-def test_a_run_that_can_ask_IS_offered_spawn_subagent():
+def test_a_run_that_can_ask_IS_offered_spawn_subagent(_roots):
     """Control. Without it the assertion above also passes against a
     registry that stopped advertising spawn_subagent anywhere, which would
     disable delegation entirely rather than confine it."""
+    _write_harness_agent(_roots, "worker")
+    config_loader.initialize(str(_roots["project"]))
+
     assert "spawn_subagent" in {s["name"] for s in registry.schemas(None)}
 
 
-def test_a_grant_cannot_smuggle_spawn_subagent_into_a_headless_run():
+def test_with_no_spawnable_agent_it_is_not_advertised_at_all(_roots):
+    """TECHNICAL_DEBT 13, batch 110. The asymmetry `load_skill` did not
+    have: its schema tells the model to name an agent "exactly as listed in
+    the Available agents catalog", and with no catalog the only possible
+    answer is `Unknown agent` -- a turn spent learning the tool cannot be
+    used, which is the fetch_url damage class D24 names.
+
+    Batch 51 shipped two spawnable agents, so the live instance went away
+    and only the asymmetry stayed. A user whose agents are all
+    non-spawnable, or who deletes the shipped pair, is back in it.
+
+    Both directions in one test, because the interesting property is that
+    the answer TRACKS the roster rather than that it is False once."""
+    config_loader.initialize(str(_roots["project"]))          # no agents
+    assert "spawn_subagent" not in {s["name"] for s in registry.schemas(None)}
+    assert "spawn_subagent" not in registry.headless_hidden(None)
+
+    _write_harness_agent(_roots, "worker")
+    config_loader.initialize(str(_roots["project"]))
+    assert "spawn_subagent" in {s["name"] for s in registry.schemas(None)}
+
+
+def test_a_non_spawnable_agent_does_not_advertise_the_tool(_roots):
+    """The roster is not the catalog, and `has_agents` reads the catalog.
+
+    An agent declared `spawnable: false` is selectable by a human through
+    `/agent` and cannot be spawned (#69), so a roster of nothing but those
+    is the no-catalog case -- and reading `get_agents()` directly here
+    instead of `agent_catalog_text()` would get it wrong."""
+    _write_harness_agent(_roots, "handheld", ["spawnable: false"])
+    config_loader.initialize(str(_roots["project"]))
+
+    assert config_loader.get_agents()
+    assert "spawn_subagent" not in {s["name"] for s in registry.schemas(None)}
+
+
+def test_a_grant_cannot_smuggle_spawn_subagent_into_a_headless_run(_roots):
     """R15 opened one door and R13 keeps this one shut. spawn_subagent has
     no approval_check, so grantable() says True and the new grant-aware
     filter would advertise it -- except that _answered_by_grant also reads
@@ -772,6 +1018,9 @@ def test_a_grant_cannot_smuggle_spawn_subagent_into_a_headless_run():
     hand-built RunInfo. Advertising it would produce a tool the model can
     see and R14 then refuses -- advertised and uncallable, the damage class
     the rest of this batch removes."""
+    _write_harness_agent(_roots, "worker")
+    config_loader.initialize(str(_roots["project"]))
+
     smuggled = registry.schemas(None, callable_only=True,
                                 granted={"spawn_subagent"})
     assert "spawn_subagent" not in {s["name"] for s in smuggled}

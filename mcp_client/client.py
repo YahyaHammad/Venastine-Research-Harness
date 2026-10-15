@@ -40,19 +40,22 @@ loop"; it is "do it inside _manager".
 
 import asyncio
 import contextlib
+import json
 import logging
 import threading
 import time
 from typing import Optional
 
-import config as _harness_config
 from mcp import Client
 from mcp.client.sse import sse_client
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import (
-    create_mcp_http_client, streamable_http_client,
+    create_mcp_http_client,
+    streamable_http_client,
 )
 from mcp.shared.exceptions import MCPError
+
+import config as _harness_config
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +72,21 @@ SHUTDOWN_TIMEOUT_S = 15.0
 # re-export here keeps it beside its sibling timeouts and gives tests a
 # single name to shrink.
 TEARDOWN_BUDGET_S = _harness_config.TEARDOWN_BUDGET_S
+
+# How much of a structured error payload rides in the error STRING.
+# D23 promises call_tool() returns one error shape, so a server's
+# structured_content on a failure belongs inside that string rather than
+# in a second key every consumer of a dispatch error would have to learn
+# (A32). Bounded because the payload is third-party and the string reaches
+# a model: 500 is room for the {code, retry_after, message} an error
+# payload actually carries, and the cut is visible for the reason
+# _catalog_text's is.
+#
+# The SUCCESS path's `result` is deliberately not bounded here -- an
+# unbounded tool RESULT is TECHNICAL_DEBT 48, which the review marathon
+# measured and which is ruled DEFER; capping it in passing would close a
+# filed item halfway and in the wrong module.
+MAX_ERROR_DETAIL_CHARS = 500
 
 # Per-server, inside the manager. CONNECT_TIMEOUT_S is the caller-side
 # budget for ALL servers together; without a per-server bound one hung
@@ -154,7 +172,25 @@ def _shutdown_loop(join_timeout: float = SHUTDOWN_TIMEOUT_S) -> None:
         _thread = None
 
 
-def _normalize(result) -> dict:
+def _detail(structured) -> str:
+    """A structured payload as one bounded line, for the error string.
+
+    default=str so a payload holding something JSON cannot carry is still
+    reported rather than raising inside the error path -- D23's promise
+    that this module returns one error shape has to mean always, which is
+    the same argument the broad except in call_tool() makes.
+    """
+    try:
+        rendered = json.dumps(structured, default=str, sort_keys=True)
+    except Exception:
+        rendered = repr(structured)
+    rendered = " ".join(rendered.split())
+    if len(rendered) <= MAX_ERROR_DETAIL_CHARS:
+        return rendered
+    return rendered[:MAX_ERROR_DETAIL_CHARS - 1].rstrip() + "\u2026"
+
+
+def _normalize(result, tool_name: str = "") -> dict:
     """CallToolResult -> the plain dict shape every other tool handler
     returns (D23).
 
@@ -189,22 +225,65 @@ def _normalize(result) -> dict:
     silently see is_error as always-False against v2.
     """
     blocks = getattr(result, "content", None) or []
-    text = "\n".join(
-        b.text for b in blocks
-        if getattr(b, "type", None) == "text" and getattr(b, "text", None)
-    )
-    if not text and blocks:
-        # Non-text blocks (images, embedded resources) are dropped to a
-        # placeholder: the harness has no multimodal tool-result path, and
-        # inventing one here is scope the rest of the design can't carry.
-        kinds = sorted({getattr(b, "type", "unknown") for b in blocks})
-        text = f"[non-text MCP content: {', '.join(kinds)}]"
+    kept, dropped = [], []
+    for block in blocks:
+        kind = getattr(block, "type", None) or "unknown"
+        if kind == "text":
+            value = getattr(block, "text", None)
+            if value:
+                kept.append(value)
+            # AN EMPTY TEXT BLOCK HAS NOTHING TO DROP. It is filtered out
+            # of the join either way, but counting it as dropped content
+            # made the placeholder contradict itself -- `text("")` came
+            # back as "[non-text MCP content: text]", reporting the kind
+            # as non-text when the kind is text.
+            continue
+        dropped.append(kind)
 
+    text = "\n".join(kept)
+    if dropped:
+        # APPENDED, NOT SUBSTITUTED (A32). Non-text blocks (images,
+        # embedded resources) are still dropped -- the harness has no
+        # multimodal tool-result path, and inventing one here is scope the
+        # rest of the design can't carry. What changed is WHEN the
+        # disclosure happens: the placeholder used to fire only when NO
+        # text survived, so a result carrying text AND non-text dropped
+        # the non-text silently, and "Chart generated:" with no chart and
+        # no note is a result the model will answer from. CallToolResult.
+        # content is a REQUIRED list of mixed block types on the installed
+        # SDK, so that shape is first-class in the protocol rather than
+        # hypothetical.
+        kinds = ", ".join(sorted(set(dropped)))
+        note = f"[non-text MCP content: {kinds}]"
+        text = f"{text}\n{note}" if text else note
+        # ONE WARNING NAMING THE TOOL AND WHAT CHANGED, which is the rule
+        # #49 was filed to establish and which this function broke on all
+        # three of its dropping paths. The tool name is a PARAMETER
+        # because this function could not name the tool -- it took the
+        # result alone, so the rule was unsatisfiable here as written.
+        logger.warning(
+            "MCP tool %s returned %d non-text block(s) (%s); this harness "
+            "has no multimodal tool-result path, so they were dropped and "
+            "the result says so in band.",
+            tool_name or "<unknown>", len(dropped), kinds)
+
+    structured = getattr(result, "structured_content", None)
     if getattr(result, "is_error", False):
-        return {"error": text or "MCP tool call failed"}
+        message = text or "MCP tool call failed"
+        if structured is not None:
+            # D23's ONE error shape, not a second key (A32): a server
+            # reporting {code: 429, retry_after: 30} used to lose it
+            # entirely, so the one thing that would have explained the
+            # failure was the one thing dropped.
+            detail = _detail(structured)
+            message = f"{message} (server detail: {detail})"
+            logger.warning(
+                "MCP tool %s failed with a structured payload; it is "
+                "folded into the error string: %s",
+                tool_name or "<unknown>", detail)
+        return {"error": message}
 
     out = {"content": text}
-    structured = getattr(result, "structured_content", None)
     if structured is not None:
         out["result"] = structured
     return out
@@ -275,6 +354,29 @@ class MCPClient:
             )
         raise ValueError(cfg.error or "unusable server configuration")
 
+    @staticmethod
+    def _reason(e: BaseException, budget: Optional[float] = None) -> str:
+        """Why a server is unusable, in one string for BOTH consumers.
+
+        Batch 121, from the owner's log: `MCP server 'joplin' failed to
+        connect: ` and nothing after the colon. The per-server
+        asyncio.timeout raises TimeoutError, whose str() is "" -- so the
+        %s below rendered nothing, and the one message that explains a
+        silent MCP named no cause at all.
+
+        It was also TWO strings: `failures` carried the exception type and
+        the log line did not, so the better of the two never reached the
+        place a user looks first. One copy now, and the timeout names its
+        budget because "it timed out" without a duration leaves the
+        reader unable to tell a dead server from a slow one.
+        """
+        text = str(e)
+        if text:
+            return f"{type(e).__name__}: {text}"
+        if isinstance(e, TimeoutError) and budget is not None:
+            return f"{type(e).__name__} (no handshake within {budget}s)"
+        return type(e).__name__
+
     async def _manager(self):
         """Owns the AsyncExitStack for the whole process lifetime, in ONE
         task. See the module docstring -- this shape is required, not
@@ -313,9 +415,10 @@ class MCPClient:
                         # others, or a single stale entry makes the whole
                         # harness unusable. §17's sketch had no try/except
                         # here at all.
-                        self.failures[name] = f"{type(e).__name__}: {e}"
+                        why = self._reason(e, SERVER_CONNECT_TIMEOUT_S)
+                        self.failures[name] = why
                         logger.warning("MCP server %r failed to connect: %s",
-                                       name, e)
+                                       name, why)
                 self._ready.set()
                 await self._shutdown.wait()
         except Exception:
@@ -340,8 +443,9 @@ class MCPClient:
             self._task = loop.create_task(self._manager())
             await self._ready.wait()
 
+        started = asyncio.run_coroutine_threadsafe(_start(), loop)
         try:
-            asyncio.run_coroutine_threadsafe(_start(), loop).result(timeout=timeout)
+            started.result(timeout=timeout)
         except Exception:
             # A timeout here used to abandon the manager permanently. It
             # would still be parked mid-connect holding every child process
@@ -350,6 +454,19 @@ class MCPClient:
             # server orphaned every other server's subprocess -- the exact
             # inversion of this file's "one unreachable server must never
             # take down the others" invariant.
+            #
+            # `started` IS RELEASED TOO (A33), and it is a different object
+            # from the manager: _start() is still awaiting _ready when the
+            # caller's budget runs out, and the two lines below stop the
+            # loop out from under it. Left pending, asyncio reports "Task
+            # was destroyed but it is pending!" through its own logger at
+            # whatever moment the GC gets to it -- and the TUI's
+            # TranscriptLogHandler is on the ROOT logger, so that line can
+            # surface in a user's transcript naming nothing and
+            # attributable to nothing. Cancelled FIRST, while the loop is
+            # still running to deliver it; _cancel_manager() needs the
+            # same loop alive and _shutdown_loop() is what ends it.
+            started.cancel()
             self._cancel_manager()
             self.clients.clear()
             self._catalogs.clear()
@@ -392,7 +509,7 @@ class MCPClient:
                                read_timeout_seconds=protocol_timeout)
         future = asyncio.run_coroutine_threadsafe(coro, loop)
         try:
-            return _normalize(future.result(timeout=timeout))
+            return _normalize(future.result(timeout=timeout), tool_name)
         except MCPError as e:
             # v2 raises for protocol-level failures -- including timeout,
             # which is code -32001 -- where v1 reported everything in

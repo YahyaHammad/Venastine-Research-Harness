@@ -23,14 +23,15 @@ and has to say so, or it fills the picker with threads nobody will resume.
 """
 
 import os
+import subprocess  # nosec B404 - the link helper below shells out to `mklink`, a cmd builtin with no executable of its own
 from types import SimpleNamespace
 
 import pytest
 
-from tests.conftest import settle
 import config
 from core import config_loader, workspace_trust
 from project_init import doc_sets, generator, manifest
+from tests.conftest import settle
 from tools.builtin import project_docs
 
 
@@ -119,24 +120,88 @@ def _hand_back_reversed(monkeypatch, project):
 def _fail_write_of(monkeypatch, filename):
     """Make one write fail the way a real one does (#95).
 
-    Patched at `open` rather than at `write_run` or `dispatch`, so the
+    Patched at the OPEN rather than at `write_run` or `dispatch`, so the
     whole chain runs: OSError -> write_run's error dict -> _write's
     InitError. Patching higher up would test the handler against a failure
     shape the handler was already written for.
+
+    BOTH OPENS, since batch 146. `write_project_doc` writes through
+    `json_store.write_text_atomic` now -- for the hardlink, which a
+    resolved path cannot see -- so the bytes go through `os.open` into
+    `<name>.<hex>.tmp` and are renamed onto the document, and a hook on
+    `builtins.open` alone stopped firing. Five tests here went green
+    because the failure they inject no longer happened, which is the
+    reason this covers the temp name and keeps the old arm: a helper that
+    fires only at the one call the implementation happens to make today
+    has an expiry date nobody can see.
     """
     import builtins
 
     real_open = builtins.open
+    real_os_open = os.open
+
+    def _is_the_target(path) -> bool:
+        if not isinstance(path, (str, os.PathLike)):
+            return False
+        base = os.path.basename(os.fspath(path))
+        return base == filename or (base.startswith(filename + ".")
+                                    and base.endswith(".tmp"))
 
     def _open(path, *args, **kwargs):
         mode = args[0] if args else kwargs.get("mode", "r")
-        if (isinstance(path, (str, os.PathLike))
-                and os.path.basename(os.fspath(path)) == filename
-                and "w" in mode):
+        if _is_the_target(path) and "w" in mode:
             raise OSError(28, "No space left on device")
         return real_open(path, *args, **kwargs)
 
+    def _os_open(path, flags, *args, **kwargs):
+        if _is_the_target(path) and flags & (os.O_WRONLY | os.O_RDWR):
+            raise OSError(28, "No space left on device")
+        return real_os_open(path, flags, *args, **kwargs)
+
     monkeypatch.setattr(builtins, "open", _open)
+    monkeypatch.setattr(os, "open", _os_open)
+
+
+def _fail_read_of(monkeypatch, filename):
+    """Make one file unreadable the way a locked one is (S17-02).
+
+    THE SIBLING OF `_fail_write_of`, and needed for the same reason: the
+    trust capture `/init` takes before it writes hashes every file
+    `content_files()` lists, so the failure that reaches it is a READ
+    failure on somebody else's file -- one an editor holds open, one a
+    sync client is mid-write on, one whose mode the user changed. Patched
+    at both opens for the same reason that helper states: a hook on
+    `builtins.open` alone stopped firing once a caller moved to `os.open`,
+    and five tests went green against a failure that no longer happened.
+
+    `.tmp` siblings are NOT matched here. A write poison has to follow the
+    bytes through the temp file they are really written to; a read poison
+    has no such path, and matching them would make this fire on a
+    half-written file nobody is reading.
+    """
+    import builtins
+
+    real_open = builtins.open
+    real_os_open = os.open
+
+    def _is_the_target(path) -> bool:
+        if not isinstance(path, (str, os.PathLike)):
+            return False
+        return os.path.basename(os.fspath(path)) == filename
+
+    def _open(path, *args, **kwargs):
+        mode = args[0] if args else kwargs.get("mode", "r")
+        if _is_the_target(path) and "w" not in mode and "a" not in mode:
+            raise PermissionError(13, "Permission denied")
+        return real_open(path, *args, **kwargs)
+
+    def _os_open(path, flags, *args, **kwargs):
+        if _is_the_target(path) and not flags & (os.O_WRONLY | os.O_RDWR):
+            raise PermissionError(13, "Permission denied")
+        return real_os_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", _open)
+    monkeypatch.setattr(os, "open", _os_open)
 
 
 def _generate(**overrides):
@@ -384,6 +449,247 @@ class TestWhereItWrites:
         assert doc_path(_project_root(), "AGENTS.md").startswith(
             os.path.realpath(str(project)))
 
+
+class TestTheWriteResolvesBeforeItWrites:
+    """Batch 146. The write path had no realpath containment while the read
+    path in the same module did.
+
+    The module's invariant, quoted from its own docstring: the destination
+    is derived from a NAME, "so it cannot be aimed elsewhere", and
+    ARCHITECTURE.md calls that "structural rather than validated". A
+    document name that is a LINK aims it elsewhere. Concrete trigger: a
+    cloned project carrying `ARCHITECTURE.md -> ~/.bashrc`, which git
+    stores natively, a user running /init, and one consent naming the
+    in-project path.
+
+    TWO MECHANISMS, because they need two different fixes and only one of
+    them is a resolution problem:
+
+      a link POINTING OUT is caught by resolving the destination, which is
+      what `read_run` has always done;
+
+      a HARDLINK is not caught by any resolution -- `realpath` returns the
+      path it was given and `islink` is False -- and is caught by writing
+      through a temp file and replacing the name, which is the house
+      pattern `json_store` already documents as "replaces rather than
+      follows".
+    """
+
+    def _link_out(self, project, name, target):
+        """A doc name that points outside the project, by whichever
+        mechanism this machine allows. The symlink arm runs under WSL and
+        on POSIX CI; the junction arm runs here.
+        """
+        destination = os.path.join(str(project), name)
+        try:
+            os.symlink(target, destination)
+            return "symlink"
+        except (OSError, NotImplementedError, AttributeError):
+            pass
+        if os.path.isdir(target) and os.name == "nt":
+            # ARGV, not a shell string: `os.system` with a format string is
+            # the shape bandit flags B605 HIGH on, and it was right to --
+            # these are tmp_path names here, but a test helper is the last
+            # place worth arguing that from. The absolute COMSPEC keeps it
+            # off B607 as well, and `mklink` is a cmd BUILTIN so it needs
+            # the interpreter rather than an executable of its own.
+            comspec = os.environ.get("COMSPEC")
+            if comspec and os.path.isabs(comspec):
+                done = subprocess.run(  # nosec B603 - fixed argv through an absolute COMSPEC, with tmp_path names
+                    [comspec, "/c", "mklink", "/J", destination, target],
+                    capture_output=True, check=False)
+                if done.returncode == 0:
+                    return "junction"
+        pytest.skip("no link mechanism available for this user")
+
+    def test_a_name_that_leaves_the_project_is_not_one_of_its_documents(
+            self, project, tmp_path):
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "kept.txt").write_text("ORIGINAL\n", encoding="utf-8")
+        kind = self._link_out(project, "FINDINGS.md", str(outside))
+
+        result = project_docs.write_run(
+            {"name": "FINDINGS.md", "content": "# landed\n"})
+
+        assert "error" in result, f"({kind}) {result}"
+        assert "outside the project" in result["error"]
+        assert (outside / "kept.txt").read_text(encoding="utf-8") == (
+            "ORIGINAL\n")
+
+    def test_the_consent_says_it_will_refuse_rather_than_naming_a_path(
+            self, project, tmp_path):
+        """The approval is where this defect became visible: the notice
+        rendered the unresolved join, so the consent named a file the bytes
+        would not land on. It now says the write will not happen, which is
+        the only honest thing to put in front of a person for a call that
+        cannot succeed.
+        """
+        outside = tmp_path / "outside2"
+        outside.mkdir()
+        self._link_out(project, "SOURCES.md", str(outside))
+
+        notice = project_docs.approval_notice(
+            {"name": "SOURCES.md", "content": "x"}, None)
+        assert "REFUSE" in notice, notice
+        assert "resolves outside the project" in notice, notice
+
+    def test_the_notice_is_unchanged_for_an_ordinary_document(self, project):
+        """The control. `_project_root()` is already a realpath, so for a
+        name that is not a link the resolved path IS the join and the
+        prompt reads exactly as it did -- which is what keeps this fix from
+        being a change to every approval anyone sees.
+        """
+        notice = project_docs.approval_notice(
+            {"name": "AGENTS.md", "content": "12345"}, None)
+        assert notice == (
+            "Create %s (5 characters)." % project_docs.doc_path(
+                os.path.realpath(str(project)), "AGENTS.md"))
+
+        project_docs.write_run({"name": "AGENTS.md", "content": "hello"})
+        again = project_docs.approval_notice(
+            {"name": "AGENTS.md", "content": "12345"}, None)
+        assert again.startswith("Overwrite "), again
+
+    def test_a_hardlinked_document_name_is_replaced_not_followed(
+            self, project, tmp_path):
+        """The half no resolution can answer, and the measurement that
+        settled the fix: the report's suggested shape -- resolve the
+        destination -- ADMITS this write, because `_resolve_in_project`
+        says the hardlink is inside the project, which it is. The other
+        name is a second name for the same bytes, and replacing rather
+        than truncating is what spares it.
+        """
+        outside = tmp_path / "outside3.md"
+        outside.write_text("ORIGINAL\n", encoding="utf-8")
+        destination = os.path.join(str(project), "METHODOLOGY.md")
+        try:
+            os.link(str(outside), destination)
+        except OSError:                                   # pragma: no cover
+            pytest.skip("hardlinks unavailable here")
+
+        # The containment test cannot see it -- stated as an assertion so
+        # that nobody reads the pass below as the resolution working.
+        assert project_docs._resolve_in_project(
+            os.path.realpath(str(project)), "METHODOLOGY.md") is not None
+
+        result = project_docs.write_run(
+            {"name": "METHODOLOGY.md", "content": "# landed\n"})
+
+        assert "result" in result, result
+        assert outside.read_text(encoding="utf-8") == "ORIGINAL\n", (
+            "the write followed the hardlink out of the project")
+        with open(destination, "rb") as fh:
+            assert fh.read() == b"# landed\n"
+
+
+class TestTheDocumentGetsTheBytesItWasGiven:
+    """Batch 146. `write_project_doc` opened with mode "w" and no
+    `newline=`, so on Windows every "\\n" became "\\r\\n".
+
+    Why this is the severity it is: the diff the user approves is built
+    from text read with universal newlines and compared against the model's
+    "\\n" body, so it shows the one line that changed -- and then the write
+    moved every line ending in the file. Measured on a six-line LF
+    document: one line changed, five of six lines' bytes changed. This
+    repository's own AGENTS.md is 2,988 LF lines.
+    """
+
+    def test_an_lf_document_stays_an_lf_document(self, project):
+        body = "# Title\n\nOne line.\nAnother line.\n"
+        result = project_docs.write_run({"name": "AGENTS.md",
+                                         "content": body})
+        assert "result" in result, result
+        with open(os.path.join(str(project), "AGENTS.md"), "rb") as fh:
+            raw = fh.read()
+        assert raw == body.encode("utf-8"), raw
+        assert b"\r\n" not in raw
+
+    def test_a_crlf_body_is_written_as_crlf(self, project):
+        """The other direction, which is what makes the first assertion
+        about TRANSLATION rather than about a platform: the tool writes
+        what it was handed either way.
+        """
+        body = "# Title\r\n\r\nWindows body.\r\n"
+        project_docs.write_run({"name": "AGENTS.md", "content": body})
+        with open(os.path.join(str(project), "AGENTS.md"), "rb") as fh:
+            assert fh.read() == body.encode("utf-8")
+
+    def test_the_approved_diff_is_the_bytes_that_land(self, project):
+        """The property, rather than the mechanism. Rewrite one line of a
+        multi-line LF document and assert that exactly one line's bytes
+        differ -- which is what the person who approved a one-line diff
+        was promised.
+        """
+        before = "alpha\nbravo\ncharlie\ndelta\n"
+        path = os.path.join(str(project), "ARCHITECTURE.md")
+        with open(path, "wb") as fh:
+            fh.write(before.encode("utf-8"))
+
+        after = before.replace("charlie", "CHARLIE")
+        project_docs.write_run({"name": "ARCHITECTURE.md", "content": after})
+
+        with open(path, "rb") as fh:
+            landed = fh.read()
+        changed = [i for i, (a, b) in enumerate(
+            zip(before.encode().split(b"\n"), landed.split(b"\n")))
+            if a != b]
+        assert changed == [2], (
+            f"lines whose bytes changed: {changed} -- the approval was "
+            f"shown one")
+
+
+class TestTheReadDenylistFoldsCaseToo:
+    """Batch 146. `_DENIED_SEGMENTS` unions `PROTECTED_SEGMENTS` in -- "so
+    the one fact cannot drift between its three consumers" -- and then
+    compared it with no case folding, which is the only thing left for two
+    consumers of one fact to disagree about.
+
+    `read_project_doc` is enabled by DEFAULT, so this is the half of the
+    fold that needs no config edit to reach: in a project whose directory
+    was created under a non-canonical case, `.VENASTINE/agents/foo.md` was
+    a readable `.md`.
+    """
+
+    @pytest.mark.parametrize("path", [
+        ".VENASTINE/notes.md",
+        ".VeNaStInE/agents/worker.md",
+        ".GIT/COMMIT_EDITMSG.txt",
+        "NODE_MODULES/pkg/README.md",
+        "__PYCACHE__/notes.md",
+    ])
+    def test_a_case_spelled_denied_segment_is_still_denied(self, project,
+                                                           path):
+        result = project_docs.read_run({"path": path})
+        assert "error" in result, result
+        assert "not a readable project document" in result["error"]
+
+    def test_the_canonical_spellings_are_denied_as_they_always_were(
+            self, project):
+        """The control: the fold widened the comparison and did not replace
+        it.
+        """
+        for path in (".venastine/notes.md", ".git/x.txt",
+                     "node_modules/pkg/README.md"):
+            assert "error" in project_docs.read_run({"path": path})
+
+    def test_an_ordinary_document_is_still_readable(self, project):
+        """And the control that matters most: folding case must not have
+        turned the denylist into a denylist of everything.
+        """
+        result = project_docs.read_run({"path": "README.md"})
+        assert "content" in result, result
+
+    def test_the_public_test_agrees_with_the_private_one(self, project):
+        """`is_readable_doc` is what /init's manifest prints, and the
+        module's own docstring says the point of exporting it is that the
+        listing and the tool cannot disagree. A fold applied in one and not
+        the other would re-open that seam.
+        """
+        root = os.path.realpath(str(project))
+        for path in (".VENASTINE/notes.md", "NODE_MODULES/pkg/README.md"):
+            assert project_docs.is_readable_doc(root, path) is False
+        assert project_docs.is_readable_doc(root, "README.md") is True
 
 class TestTheDocumentSets:
 
@@ -684,7 +990,6 @@ class TestTheConfigTemplates:
         adding it on purpose.
         """
         import credentials
-
         from project_init import config_files
         from tui import preferences
         from tui.app import VenastineApp
@@ -1478,8 +1783,8 @@ class TestWorkspaceTrust:
         assert not workspace_trust.is_trusted(str(project))
         assert "not trusted" in notice["text"]
 
-    def test_context_md_still_counts_towards_the_hash(self, project,
-                                                      fake_agent):
+    def test_the_hub_still_counts_towards_the_hash(self, project,
+                                                   fake_agent):
         """The other half of I6: no special-casing. If AGENTS.md were
         excluded from the hash, /init would need no re-grant at all — and
         D17 would have a hole shaped exactly like this command."""
@@ -1491,6 +1796,290 @@ class TestWorkspaceTrust:
         _generate()
 
         assert workspace_trust._content_hash(str(project)) != before
+
+
+class TestTheTrustSettleIsTotal:
+    """S17-02. #95 put the trust settle on BOTH paths; the settle itself
+    could raise, and sat outside every handler on both of them.
+
+    `grant_trust` raises from either half -- `_content_hash` re-reads every
+    file the grant covers, `_save_trust_store` writes the store -- so a
+    full disk, a read-only HOME or a file an editor holds took a raw
+    `OSError` out of `generate()`. Driven before the fix, through the real
+    function with the failure injected at the `open` boundary: both config
+    files on disk, `is_trusted` True -> False, the notice GONE, and on the
+    CLI (`except InitError` only) a traceback. On the failure path it was
+    worse -- the `OSError` replaced the report, discarding exactly the
+    "wrote N files before that" accounting #95 existed to add.
+
+    THE REPORT'S OWN RECIPE NO LONGER REPRODUCES, which is worth recording
+    beside the fix: it planted a directory at `<store>.tmp`, and batch 144
+    gave `_replace_through_temp` a unique `<path>.<hex>.tmp` name, so that
+    poison is now ignored. The defect was identical; only the arrangement
+    had expired.
+
+    The pre-write capture is the same shape from the other end, and the
+    precedent for degrading rather than dying is three functions up in the
+    module under repair: `_read_existing_context` catches `OSError` on the
+    SAME file for the SAME reason.
+    """
+
+    TRUST_STORE = "trusted_projects.json"
+
+    def _trusted(self, project):
+        """A project with content to trust, trusted. Both halves matter:
+        `is_trusted()` short-circuits True for a project with nothing in
+        it, so without the agent file there is no question to ask."""
+        agents = project / ".venastine" / "agents"
+        agents.mkdir(parents=True)
+        (agents / "arrived_with_the_repo.md").write_text(
+            "---\nname: x\n---\nbody\n", encoding="utf-8")
+        root = os.path.realpath(str(project))
+        workspace_trust.grant_trust(root)
+        assert workspace_trust.is_trusted(root) is True, (
+            "the arrangement is the test: an untrusted project never "
+            "reaches the re-grant at all")
+        return root
+
+    def _config_run(self, project, **overrides):
+        """`--config` alone: no kind question, no model call, and the
+        trust settle still happens -- which is why this is the cheap way
+        to drive it."""
+        kwargs = {
+            "project_path": str(project),
+            "confirm": lambda _summary: True,
+            "notify": lambda _text: None,
+            "scaffold_docs": False,
+            "scaffold_config": True,
+        }
+        kwargs.update(overrides)
+        return generator.generate(**kwargs)
+
+    # ---- the success path ------------------------------------------------
+
+    def test_a_store_that_cannot_be_written_still_reports_the_files(
+            self, project, monkeypatch):
+        """The headline. The files are written and the user is told so --
+        where before, the whole notice was replaced by a traceback."""
+        from project_init import config_files
+
+        self._trusted(project)
+        _fail_write_of(monkeypatch, self.TRUST_STORE)
+
+        notice = self._config_run(project)
+
+        venastine = project / ".venastine"
+        assert (venastine / config_files.SETTINGS_FILENAME).is_file()
+        assert (venastine / config_files.MCP_FILENAME).is_file()
+        assert "settings.json" in notice["text"]
+        assert "mcp.json" in notice["text"]
+
+    def test_it_says_the_re_grant_did_not_happen(self, project,
+                                                 monkeypatch):
+        """And says what it costs, in the only terms the user can act on:
+        the next launch asks again. `json_store` argues that a trust grant
+        which silently did not persist is worse than a crash, and that
+        argument is about SILENCE -- this is the end of the silence, not a
+        softening of the policy."""
+        self._trusted(project)
+        _fail_write_of(monkeypatch, self.TRUST_STORE)
+
+        text = self._config_run(project)["text"]
+
+        assert "could NOT be re-granted" in text
+        assert "ask about this project" in text
+
+    def test_the_warning_leads_the_report(self, project, monkeypatch):
+        """A46. The files are on disk and the user can see them; what they
+        cannot see is the trust state, so the half that did not happen
+        goes first."""
+        self._trusted(project)
+        _fail_write_of(monkeypatch, self.TRUST_STORE)
+
+        first = self._config_run(project)["text"].splitlines()[0]
+
+        assert "could NOT be re-granted" in first, (
+            f"the warning must lead; the first line was {first!r}")
+
+    def test_a_settled_run_keeps_the_note_last(self, project):
+        """The control for the line above, and the half that pins the
+        ordering in both directions: a run whose trust settled as intended
+        keeps the note where it has always been, as the footnote it is. A
+        fix that moved every trust line to the top would pass the test
+        above and change the receipt of every successful /init."""
+        self._trusted(project)
+
+        lines = self._config_run(project)["text"].splitlines()
+
+        assert "re-granted for the updated" in lines[-1], (
+            f"the note belongs last on a settled run; got {lines!r}")
+        assert "Wrote" in lines[0]
+
+    def test_no_OSError_leaves_generate(self, project, monkeypatch):
+        """Said separately from the assertions above because the TYPE is
+        the defect: `main.run_init_command` catches `InitError` only, so
+        an `OSError` is the one shape that reaches the user as a
+        traceback. A later refactor that raised `InitError` from the
+        settle would keep every test above green and still be wrong about
+        the success path -- so this one names the class, and the test
+        below names the exit code."""
+        self._trusted(project)
+        _fail_write_of(monkeypatch, self.TRUST_STORE)
+
+        try:
+            self._config_run(project)
+        except OSError as e:          # pragma: no cover -- the regression
+            pytest.fail(f"an OSError escaped generate(): {e!r}")
+        except generator.InitError as e:   # pragma: no cover
+            pytest.fail(f"the success path raised instead of reporting: {e}")
+
+    # ---- the failure path -----------------------------------------------
+
+    def test_a_failed_re_grant_does_not_discard_the_failure_report(
+            self, project, monkeypatch):
+        """Both failures at once, which is the realistic arrangement: a
+        disk that cannot take the config file cannot take the trust store
+        either. The settle ran AFTER `failure` was captured and before it
+        was reported, so its exception threw the report away -- including
+        the file list that is the only way to tell "nothing happened" from
+        "most of it did"."""
+        from project_init import config_files
+
+        self._trusted(project)
+        _fail_write_of(monkeypatch, config_files.MCP_FILENAME)
+        _fail_write_of(monkeypatch, self.TRUST_STORE)
+
+        with pytest.raises(generator.InitError) as exc:
+            self._config_run(project)
+
+        message = str(exc.value)
+        assert "mcp.json" in message
+        assert "Wrote 1 file before that" in message
+        assert ".venastine/settings.json" in message
+        assert "could NOT be re-granted" in message
+
+    def test_a_write_failure_alone_still_reports_a_good_settle(
+            self, project, monkeypatch):
+        """The control: the trust note on the failure path must still be
+        the real one when the store wrote fine. #95's own test asserts
+        this; it is repeated here because the two poisons above are one
+        edit away from making it vacuous."""
+        from project_init import config_files
+
+        root = self._trusted(project)
+        _fail_write_of(monkeypatch, config_files.MCP_FILENAME)
+
+        with pytest.raises(generator.InitError) as exc:
+            self._config_run(project)
+
+        assert "re-granted for the updated" in str(exc.value)
+        assert workspace_trust.is_trusted(root) is True
+
+    # ---- the pre-write capture ------------------------------------------
+
+    def test_an_unreadable_trust_state_does_not_stop_the_run(
+            self, project, monkeypatch):
+        """The other end of the same sentence (A47). The capture reads
+        every file the grant covers, that read sat before the `try`, and
+        one unreadable file killed `/init` before it wrote anything -- as
+        a raw `PermissionError`, which on the CLI is a traceback.
+
+        `_read_existing_context`, three functions up in the same module,
+        catches `OSError` on the SAME file for the SAME reason and says
+        "Degrade like config_loader does". One function answering one
+        error two ways is what this closes."""
+        from project_init import config_files
+
+        self._trusted(project)
+        _fail_read_of(monkeypatch, "arrived_with_the_repo.md")
+
+        notice = self._config_run(project)
+
+        venastine = project / ".venastine"
+        assert (venastine / config_files.SETTINGS_FILENAME).is_file()
+        assert "could not be read" in notice["text"]
+        assert notice["text"].splitlines()[0].startswith(
+            "This project's trust state"), (
+            "the warning leads here too: this run did something the user "
+            "did not ask for -- it proceeded as untrusted")
+
+    def test_an_unreadable_trust_state_attempts_no_re_grant(
+            self, project, monkeypatch):
+        """I6's hole, from the new direction. An unanswerable trust
+        question reads as UNTRUSTED -- `core/workspace_trust.py`'s own
+        posture, where `_load_trust_store` returns `{}` for anything
+        unreadable and says it fails CLOSED in both senses. Reading it as
+        trusted would launder a cloned `.venastine/` in through a door
+        opened by one unreadable file, which is a worse answer than
+        asking again on the next launch."""
+        self._trusted(project)
+        granted = []
+        monkeypatch.setattr(workspace_trust, "grant_trust",
+                            lambda path: granted.append(path))
+        _fail_read_of(monkeypatch, "arrived_with_the_repo.md")
+
+        self._config_run(project)
+
+        assert granted == [], (
+            "trust was re-granted for a project whose trust state could "
+            "not be read")
+
+    def test_an_unanswerable_trust_question_reads_as_untrusted(
+            self, project, monkeypatch):
+        """A47's `False`, asserted where it is decided rather than only
+        through its consequence.
+
+        THE CONTROL FOUND THIS ONE. The end-to-end test above passed with
+        `_trust_before` returning True, because `_settle_trust` checks
+        `problem` before it looks at `was_trusted` and returns early --
+        so the belt and the braces hold the same trousers and neither was
+        pinned on its own. Both are worth having and both are pinned now:
+        this test is the capture's answer, and the one above is what
+        happens if the settle ever reads `was_trusted` first.
+        """
+        self._trusted(project)
+        _fail_read_of(monkeypatch, "arrived_with_the_repo.md")
+
+        was_trusted, problem = generator._trust_before(
+            os.path.realpath(str(project)))
+
+        assert was_trusted is False, (
+            "an unanswerable trust question must read as UNTRUSTED -- "
+            "reading it as trusted launders a cloned .venastine/ in "
+            "through a door opened by one locked file")
+        assert "could not be read" in problem, (
+            "and the reason has to reach the user, or the next launch's "
+            "trust prompt is the only evidence they get")
+
+    # ---- through the shell ----------------------------------------------
+
+    def test_the_cli_reports_a_failed_re_grant_and_exits_zero(
+            self, project, monkeypatch, capsys):
+        """A46 through the shell that had the traceback. The exit code is
+        the half a script sees, and the ruling is that files on disk are a
+        finished `/init`: the trust bookkeeping is reported, not promoted
+        to a failure. Driven through `run_init_command` rather than
+        asserted of it, because the handler set is the defect -- `except
+        InitError` is still all it catches."""
+        import main
+        from tests.conftest import FakeStdinReader
+
+        self._trusted(project)
+        _fail_write_of(monkeypatch, self.TRUST_STORE)
+
+        reader = FakeStdinReader(["y"])
+        monkeypatch.setattr(main, "_stdin_reader", lambda: reader)
+        monkeypatch.setattr(main.sys.stdin, "isatty", lambda: True)
+        args = main.build_parser().parse_args(["--init", "--project-config"])
+
+        code = main.run_init_command(args, "ANTHROPIC", "m")
+
+        out = capsys.readouterr().out
+        assert code == 0, (
+            "the CLI reported a failure for a run that wrote every "
+            "file it was asked to")
+        assert "could NOT be re-granted" in out
+        assert "settings.json" in out
 
 
 # ---------------------------------------------------------------------------
@@ -1507,9 +2096,9 @@ class TestWorkspaceTrust:
 @pytest.mark.asyncio
 async def test_the_tui_asks_the_kind_then_confirms_then_writes(
         project, fake_agent, monkeypatch):
+    from project_init.tui_commands import _cmd_init
     from tui.app import VenastineApp
     from tui.screens import ConfirmScreen, ProjectKindScreen
-    from project_init.tui_commands import _cmd_init
 
     app = VenastineApp("ANTHROPIC", "test-model", {})
     async with app.run_test() as pilot:
@@ -1537,9 +2126,9 @@ async def test_dismissing_the_tui_confirmation_writes_nothing(
         project, fake_agent):
     """Escape on the confirmation must decline, not hang. The worker is
     parked on a queue; a dismissal carrying no value never unblocks it."""
+    from project_init.tui_commands import _cmd_init
     from tui.app import VenastineApp
     from tui.screens import ConfirmScreen, ProjectKindScreen
-    from project_init.tui_commands import _cmd_init
 
     app = VenastineApp("ANTHROPIC", "test-model", {})
     async with app.run_test() as pilot:
@@ -1559,9 +2148,9 @@ async def test_dismissing_the_tui_confirmation_writes_nothing(
 @pytest.mark.asyncio
 async def test_cancelling_the_kind_modal_never_reaches_the_confirmation(
         project, fake_agent):
+    from project_init.tui_commands import _cmd_init
     from tui.app import VenastineApp
     from tui.screens import ConfirmScreen, ProjectKindScreen
-    from project_init.tui_commands import _cmd_init
 
     app = VenastineApp("ANTHROPIC", "test-model", {})
     async with app.run_test() as pilot:
@@ -1582,9 +2171,9 @@ async def test_the_kind_modal_is_told_what_was_proposed(project, fake_agent):
     a key now silently shows an empty modal instead of failing at a
     signature. The pilot above only dismisses the screen; this asserts the
     screen was given something to render."""
+    from project_init.tui_commands import _cmd_init
     from tui.app import VenastineApp
     from tui.screens import ProjectKindScreen
-    from project_init.tui_commands import _cmd_init
 
     app = VenastineApp("ANTHROPIC", "test-model", {})
     async with app.run_test() as pilot:
@@ -1610,9 +2199,9 @@ async def test_the_kind_modal_is_told_what_was_proposed(project, fake_agent):
 async def test_the_confirmation_is_told_what_it_is_confirming(project,
                                                               fake_agent):
     """The other half: the diff summary travels in the payload too."""
+    from project_init.tui_commands import _cmd_init
     from tui.app import VenastineApp
     from tui.screens import ConfirmScreen
-    from project_init.tui_commands import _cmd_init
 
     app = VenastineApp("ANTHROPIC", "test-model", {})
     async with app.run_test() as pilot:
@@ -1629,9 +2218,9 @@ async def test_the_confirmation_is_told_what_it_is_confirming(project,
 
 @pytest.mark.asyncio
 async def test_an_explicit_flag_skips_the_kind_modal(project, fake_agent):
+    from project_init.tui_commands import _cmd_init
     from tui.app import VenastineApp
     from tui.screens import ConfirmScreen
-    from project_init.tui_commands import _cmd_init
 
     app = VenastineApp("ANTHROPIC", "test-model", {})
     async with app.run_test() as pilot:
@@ -1935,10 +2524,10 @@ async def test_config_only_goes_straight_to_one_confirmation(project,
     answering with a fixture.
     """
     from core.loop import RunAgentLoop
+    from project_init import config_files
+    from project_init.tui_commands import _cmd_init
     from tui.app import VenastineApp
     from tui.screens import ConfirmScreen
-    from project_init.tui_commands import _cmd_init
-    from project_init import config_files
 
     def _explode(**_kwargs):
         raise AssertionError("/init --config made a model call")
@@ -2000,9 +2589,9 @@ async def test_an_unrecognised_kind_answer_cancels(project, fake_agent):
     dismissal path added later must cancel rather than scaffold a document
     set nobody chose.
     """
+    from project_init.tui_commands import _cmd_init
     from tui.app import VenastineApp
     from tui.screens import ConfirmScreen, ProjectKindScreen
-    from project_init.tui_commands import _cmd_init
 
     app = VenastineApp("ANTHROPIC", "test-model", {})
     async with app.run_test() as pilot:

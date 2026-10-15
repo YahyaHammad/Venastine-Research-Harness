@@ -80,7 +80,7 @@ def pass_label(pass_id: str) -> str:
 # prompts is not something to do as a side effect of a chat fix.
 _UNTRUSTED_CONTENT_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "untrusted_content")
-with open(_UNTRUSTED_CONTENT_PATH, "r", encoding="utf-8") as _f:
+with open(_UNTRUSTED_CONTENT_PATH, encoding="utf-8") as _f:
     UNTRUSTED_CONTENT_CORE = _f.read().strip()
 
 PIPELINE_INSTRUCTION_SOURCE = (
@@ -114,14 +114,14 @@ def get_system_prompts() -> dict:
     current_dir = os.path.dirname(os.path.abspath(__file__))
 
     universal_path = os.path.join(current_dir, "universal_system_prompt")
-    with open(universal_path, "r", encoding="utf-8") as file:
+    with open(universal_path, encoding="utf-8") as file:
         universal_preamble = (
             file.read().strip() + "\n\n"
             + untrusted_content_paragraph(PIPELINE_INSTRUCTION_SOURCE))
 
     for pass_id, pass_filename in passes_source_files.items():
         md_file_path = os.path.join(current_dir, pass_filename)
-        with open(md_file_path, "r", encoding="utf-8") as file:
+        with open(md_file_path, encoding="utf-8") as file:
             pass_specific = file.read().strip()
         passes_prompts[pass_id] = f"{universal_preamble}\n\n---\n\n{pass_specific}"
     return passes_prompts
@@ -149,7 +149,7 @@ def with_skill_catalog(base_prompt: str, active=None) -> str:
     return f"{base_prompt}\n\n{catalog}"
 
 
-def agent_catalog_text() -> str:
+def agent_catalog_text(targets=None) -> str:
     """Frontmatter-only catalog of SPAWNABLE agents (§18, §32 A4).
 
     Mirrors skill_catalog_text(): the model learns which agents exist
@@ -161,19 +161,41 @@ def agent_catalog_text() -> str:
     be spawned with the spawn_subagent tool" -- and spawn_subagent
     passes exactly one thing: params["task"], as the first message of
     a FRESH thread. An agent whose body opens "Read the thread so far"
-    cannot be fed that way. Spawning it does not fail; it produces a
-    confident review of the task description, and the parent has no
-    way to tell. Degraded rather than broken is exactly what makes it
-    worth suppressing.
+    cannot be fed that way. It produces a confident review of the task
+    description, and the parent has no way to tell. Degraded rather
+    than broken is exactly what makes it worth suppressing.
+
+    THIS PARAGRAPH SAID "spawning it does not fail" UNTIL A16
+    (ROADMAP_v3 §62), which is no longer true: `refusal_reason` now
+    refuses a spawn of anything whose `spawnable` is not True, so the
+    filter here and that refusal give the same answer instead of the
+    catalog merely hiding what the tool would still do. The suppression
+    argument above is unchanged -- it is why the field exists -- but
+    the failure mode it describes is now the one A16 prevents rather
+    than the one it tolerated.
 
     THE TUI'S /agent IS UNAFFECTED -- it lists manager.names(), not
     this. A non-spawnable agent is still selectable by a human, who
     supplies the thread the agent needs by being in one.
+
+    `targets` is the running context's `spawn_targets`: the agents this
+    run may actually spawn, or None for no restriction. Filtering here
+    is the SAME rule the paragraph above applies to `spawnable`, read
+    from the caller's side instead of the callee's -- listing an agent
+    that `refusal_reason` will refuse is D24's defect exactly ("the
+    model keeps choosing it and burning a turn per attempt"), and here
+    it would be worse than a denied tool, because the prose around the
+    list is an instruction to go and spawn one of them.
+
+    A filter that empties the list returns "" and appends nothing, which
+    is the same no-op the no-spawnable-agents case already produces.
     """
     from core import config_loader
 
     agents = {name: a for name, a in config_loader.get_agents().items()
               if a.spawnable}
+    if targets is not None:
+        agents = {name: a for name, a in agents.items() if name in targets}
     if not agents:
         return ""
     lines = [
@@ -242,7 +264,12 @@ def with_catalogs(base_prompt: str, active_skills=None, context=None,
     if registry.is_advertised("load_skill", context, callable_only,
                               granted):
         prompt = with_skill_catalog(prompt, active_skills)
-    catalog = agent_catalog_text()
+    # The context decides WHETHER this section appears (is_advertised,
+    # below) and now also WHO is in it. Both are the same question asked
+    # of the same object, which is why the roster is read here rather
+    # than passed down by each caller as a second source of truth.
+    catalog = agent_catalog_text(
+        context.spawn_targets if context is not None else None)
     if catalog and registry.is_advertised("spawn_subagent", context,
                                           callable_only, granted):
         prompt = f"{prompt}\n\n{catalog}"

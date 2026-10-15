@@ -45,9 +45,18 @@ from typing import Optional
 from uuid import UUID
 
 from storage import (
-    create_thread, get_thread, save_message, get_session_history,
-    update_thread_extra, latest_checkpoint, pinned_through,
-    message_ids_from, set_pinned, turn_start_ids, THREAD_KIND_CHAT,
+    THREAD_KIND_CHAT,
+    create_thread,
+    get_session_history,
+    get_thread,
+    latest_checkpoint,
+    mark_turn_failed,
+    message_ids_from,
+    pinned_through,
+    save_message,
+    set_pinned,
+    turn_start_ids,
+    update_thread_extra,
 )
 
 # ROADMAP_v2 §21 (M8). How a compaction summary is introduced to the model.
@@ -70,9 +79,32 @@ SUMMARY_PREFIX = (
 )
 
 
+def _require_harness_record(harness) -> None:
+    if not isinstance(harness, dict) or not harness.get("kind"):
+        raise ValueError(
+            "a harness message needs its record -- a dict with a `kind` -- "
+            "or it is indistinguishable from something the person wrote")
+
+
+def append_harness_row(thread_id: UUID, text: str, harness: dict) -> None:
+    """ROADMAP_v3 §49 (SS6). The same row `add_harness_message` writes, for a
+    thread no ConversationMemory in this process holds.
+
+    The quit path needs it: a session belongs to the thread that STARTED it,
+    which need not be the one on screen, and building a ConversationMemory
+    just to append one row would load and derive that thread's whole view to
+    throw it away. Like every writer here, it knows no SQL.
+    """
+    _require_harness_record(harness)
+    save_message(thread_id, role="user", content=text, harness=harness)
+
+
 class ConversationMemory:
     def __init__(self, thread_id: Optional[UUID] = None,
-                 kind: str = THREAD_KIND_CHAT) -> None:
+                 kind: str = THREAD_KIND_CHAT, *,
+                 parent_thread_id: Optional[UUID] = None,
+                 parent_call_id: Optional[str] = None,
+                 agent_name: Optional[str] = None) -> None:
         """`kind` (§27 T1) says what a NEW thread is, and is forwarded to
         storage.create_thread and nowhere else.
 
@@ -81,13 +113,21 @@ class ConversationMemory:
         data exists -- that boundary is storage.py's. Ignored when
         `thread_id` is given, because resuming does not reclassify: a
         thread's kind was decided when it was created.
+
+        The three lineage arguments (§47) are forwarded the same way and
+        are ignored on a resume for the same reason: who spawned a thread
+        was settled when it was created, and reopening it settles nothing.
+        Keyword-only, so a caller that does not know it is creating a
+        child cannot say it is by filling a positional slot.
         """
         # Session-scoped billing (#4): zero on EVERY construction, fresh or
         # resumed -- see record_billed for why this one is deliberately not
         # extra_data like its neighbour.
         self.billed_tokens = 0
         if thread_id is None:
-            self.thread_id = create_thread(kind=kind)
+            self.thread_id = create_thread(
+                kind=kind, parent_thread_id=parent_thread_id,
+                parent_call_id=parent_call_id, agent_name=agent_name)
             self._messages: list[dict] = []
             self._extra: dict = {}
             self._kind = kind
@@ -305,10 +345,48 @@ class ConversationMemory:
         else:
             self._extra[key] = value
 
+    def mark_turn_failed(self, error: str) -> None:
+        """Batch 91. Record that the run this thread's newest user message
+        started FAILED, and why -- write-through, like every add_* method.
+
+        On the user row because that is what names the turn; see
+        storage.MessageLog.error for why it is a column and not a row. The
+        in-memory entry carries it too, for §44's reason on `thinking`: a
+        live turn and a resumed one must hand every reader the same shape,
+        and a resumed thread gets the key from storage._to_neutral. Nothing
+        that builds a request reads it -- _messages_for_provider takes a user
+        row's `content` alone.
+        """
+        mark_turn_failed(self.thread_id, error)
+        for entry in reversed(self._messages):
+            if entry.get("role") == "user":
+                entry["error"] = error
+                break
+
     def add_user_message(self, text: str) -> None:
         entry = {"role": "user", "content": text}
         self._messages.append(entry)
         save_message(self.thread_id, role="user", content=text)
+
+    def add_harness_message(self, text: str, harness: dict) -> None:
+        """ROADMAP_v3 §49 (SS5). A message the HARNESS wrote to start a turn --
+        a background session's result, or the record that one was killed --
+        write-through like every add_* method.
+
+        A user-role entry, because that is the only shape the model can be
+        handed between turns (storage.MessageLog.harness says why), marked so
+        replay and the compactor can tell it from the person. Nothing that
+        builds a request reads the mark, and it never carries a tool_call_id.
+
+        The record is REQUIRED. A harness message without one would be a
+        user message the harness wrote and nobody could tell apart -- the
+        exact confusion M8 names for the compaction summary.
+        """
+        _require_harness_record(harness)
+        entry = {"role": "user", "content": text, "harness": harness}
+        self._messages.append(entry)
+        save_message(self.thread_id, role="user", content=text,
+                     harness=harness)
 
     def add_assistant_message(self, response) -> None:
         """

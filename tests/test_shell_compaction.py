@@ -16,15 +16,11 @@ CAPABILITY is not TUI-only: the automatic trigger runs inside _run(), so
 every shell gets it. That distinction is what §25 was about.
 """
 
-import io
-from unittest.mock import ANY
 
 import pytest
 
 from tests.conftest import settle
-from core import config_loader
 from tui.app import VenastineApp, _cmd_compact, _parse_compact_args
-
 
 # ---------------------------------------------------------------------------
 # ---- The CLI route ---------------------------------------------------------

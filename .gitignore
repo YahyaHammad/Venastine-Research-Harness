@@ -1,12 +1,71 @@
 .ipynb_checkpoints/
 .env
 *.pyc
+# The DIRECTORY too, not only the compiled files inside it (batch 157, A65).
+# `package.json`'s `neverDistribute` claims `__pycache__` for this channel
+# and for npm; npm excludes it wholesale through `files`' `!**/__pycache__`
+# guard, and this file covered only `*.pyc`. So anything in there that is
+# NOT a .pyc was staged by an `add -A` from the root: CPython writes its
+# byte-compile temp as `<target>.<pid>` beside the target, inside this very
+# directory, and `*.pyc` does not match a name ending in digits. An
+# interrupted compile leaves one behind.
+__pycache__/
 logs/
 *.log
 *.db
+# SQLite's WAL sidecars, which §47 slice 8 made permanent fixtures of a
+# running harness (NA18). `*.db` does not match them -- they end `-wal`
+# and `-shm` -- and a `-wal` file holds recently written message rows, so
+# without these an `add -A` from the repo root stages conversation
+# content. Both are listed rather than `app.db*`, so a database named
+# something else is still covered.
+*.db-wal
+*.db-shm
+# S07-02 (batch 144). `json_store.write_json_atomic` writes `<store>.<hex>
+# .tmp` beside its destination and renames it into place, and until this
+# batch the rename sat outside the handler that sweeps -- so a failed
+# rename, which on Windows needs nothing more than another process READING
+# the destination, left a complete copy of the file behind. For
+# `providers.json` that is every stored provider key in cleartext, at a
+# name no line below covered. Broad like `*.log` and `*.db` above, and for
+# the same reason: this covers all nine of that helper's call sites rather
+# than the two that hold credentials.
+*.tmp
 providers.json
+# ROADMAP_v3 §49 slice 5a. The harness-held secret store's DEFAULT name, in
+# case anyone points AGENT_SECRETS_FILE at a checkout. It lives in
+# ~/.config/venastine and so is normally nowhere near a repository; this is
+# belt and braces, and it costs one line. The file is encrypted either way
+# -- that is the actual protection (SS56) -- but a committed ciphertext is
+# still an offline guessing target nobody meant to publish.
+secrets.json
+# S18-01 (batch 140). `/init --config` scaffolds BOTH of these into the
+# user's project, and `mcp.json` is where MCP servers are configured --
+# README's own entry table names `headers` as where a hosted server's
+# `Authorization` credential rides, and the harness's acknowledgement
+# screen shows those names and deliberately NEVER their values. So the
+# harness writes a credential-bearing file into a checkout and, until
+# this, `git add -A` from the project root staged it -- the same threat
+# model the WAL lines above are listed under.
+#
+# THE TWO FILES RATHER THAN `.venastine/`: the directory also holds
+# project-tier agents/ and skills/, which are meant to travel with the
+# repository (config_loader discovers them with it, and D17's trust
+# prompt exists for exactly that). Excluding it wholesale would make
+# that feature dead on arrival. package.json's `neverDistribute` is the
+# one list all three channels read; this is its `git` half.
+.venastine/mcp.json
+.venastine/settings.json
 .qwen/
 .zcode/
+# docs/REVIEW_MARATHON.md's per-scope reports. Untracked for two measured
+# reasons, both in that file: a tracked .md at depths 0-3 is counted EXACTLY
+# by test_the_documented_doc_read_bound_is_not_understated, so a reviewer
+# adding a report would turn the suite red for every other reviewer; and
+# read_project_doc is permission True, so a tracked file is advertised to
+# every run -- and a prioritised list of this harness's open defects is the
+# worst possible document to put inside that reach while they are open.
+review/
 output/
 CLAUDE-SECURITY-*/
 .pytest_cache/

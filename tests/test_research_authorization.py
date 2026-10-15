@@ -29,16 +29,25 @@ callers read it; what is asserted here is that they agree, and how they
 are allowed to differ.
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 from core.approval import RunAuthorization
 from core.reasoning.authorization import (
-    GRANT_PICKER, NOTHING_TO_GRANT, GrantSpecError, candidates,
+    GRANT_PICKER,
+    NOTHING_TO_GRANT,
+    GrantSpecError,
+    candidates,
     parse_grant_spec,
 )
 from tests.conftest import drain, pass_stream, run_pass, well_shaped
 from tools.base import (
-    GRANT_ANYWHERE, GRANT_NEVER, GRANT_POLICIES, GRANT_SIGNOFF_ONLY, ToolSpec,
+    GRANT_ANYWHERE,
+    GRANT_NEVER,
+    GRANT_POLICIES,
+    GRANT_SIGNOFF_ONLY,
+    ToolSpec,
     assert_grant_policy_declared,
 )
 from tools.registry import registry
@@ -75,6 +84,27 @@ def offered_tools():
         registry.unregister("mcp__lib__percall")
 
 
+@pytest.fixture
+def a_spawnable_agent(monkeypatch):
+    """A roster with one spawnable agent in it.
+
+    Batch 110: `spawn_subagent` declares an `available_check` now
+    (TECHNICAL_DEBT 13), so with no spawnable agent discovered it is absent
+    from `schemas()` and from `headless_hidden()` for a reason that has
+    nothing to do with R4. This file is about grant POLICY, so it states
+    the roster rather than inheriting whatever discovery last ran.
+
+    A stub rather than an `AgentDef`: `agent_catalog_text` reads exactly
+    `.spawnable` and `.description`, and a full dataclass here would need
+    editing every time that class gains a field.
+    """
+    from core import config_loader
+
+    agent = SimpleNamespace(spawnable=True, description="desc for worker")
+    monkeypatch.setattr(config_loader, "get_agents",
+                        lambda: {"worker": agent})
+
+
 # ===========================================================================
 # ---- R1/R2/R4: what may be offered ----------------------------------------
 # ===========================================================================
@@ -102,7 +132,8 @@ class TestCandidates:
             "is vacuously true"
         )
 
-    def test_spawn_subagent_is_never_offered(self, offered_tools):
+    def test_spawn_subagent_is_never_offered(self, offered_tools,
+                                             a_spawnable_agent):
         """R4. It IS grantable in the ordinary sense -- no approval_check,
         so approving the name is meaningful consent. It is excluded for
         what that consent then authorises: approving a spawn IS the §18
@@ -121,9 +152,10 @@ class TestCandidates:
 
         write_project_doc resolves 15 document names to paths and
         overwrites them with no diff and no second question. One of them
-        is .venastine/CONTEXT.md, which config_loader injects into every
-        agent that opts in -- so a pipeline grant reaches M17's own
-        justification for excluding `remember` through a different tool.
+        is the project hub -- the root `AGENTS.md` -- which config_loader
+        injects into every agent that opts in, so a pipeline grant reaches
+        M17's own justification for excluding `remember` through a
+        different tool.
 
         It stays in the §18 sign-off, where a human answers about one
         named agent for one turn and the tool's notice names the

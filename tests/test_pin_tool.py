@@ -132,10 +132,73 @@ def test_the_live_memory_is_injected(mocker):
 def test_a_tool_without_the_parameter_is_not_given_one(mocker):
     """The injection is opt-in by signature, so the tools that predate it
     are called with params only. Asserting this keeps a future injectable
-    from quietly changing every handler's call shape."""
-    assert registry._injectable["pin"] == ("memory",)
-    assert registry._injectable["unpin"] == ("memory",)
+    from quietly changing every handler's call shape.
+
+    `parent_run` ARRIVED IN BATCH 148, for #89's cap: the cap is a fraction
+    of the trigger THIS model folds at (S11-06), and the pair that resolves
+    it was already one declared parameter away. The order is
+    _INJECTABLE_PARAMS' order, which is where `parent_run` sits ahead of
+    `memory`.
+    """
+    assert registry._injectable["pin"] == ("parent_run", "memory")
+    assert registry._injectable["unpin"] == ("parent_run", "memory")
     assert registry._injectable["get_time"] == ()
+
+
+def test_the_cap_is_measured_against_the_pair_the_run_carries(mocker):
+    """The wiring S11-06's fix depends on, asserted at the seam rather than
+    assumed: a declared parameter that nothing passes would leave the cap
+    reading the configured trigger forever, and every unit test of
+    pin_measurements would still pass.
+
+    EVERY call, not the last one. A successful pin measures TWICE -- once
+    for the cap it checks and once for the share its result sentence states
+    -- and the mutation pass caught this test asserting on whichever call
+    happened to be last, so removing the pair from the FIRST one left it
+    green. Asserting both is also the real claim: a refusal and a result
+    that named different caps would be worse than either.
+    """
+    from tools.context import RunInfo
+
+    memory = _Memory()
+    calls = []
+
+    def _measured(thread_id, last_n, model=None, provider_name=None):
+        calls.append((model, provider_name))
+        return {"requested_tokens": 100, "pinned_tokens": 0,
+                "max_tokens": 20_000}
+
+    mocker.patch("core.compaction.pin_measurements", side_effect=_measured)
+    mocker.patch("core.config_loader.get_agents",
+                 return_value={config.COMPACTOR_AGENT: object()})
+
+    registry.dispatch("pin", {"last_n": 2}, memory=memory,
+                      parent_run=RunInfo(model="claude-sonnet-5",
+                                         provider_name="ANTHROPIC"))
+
+    assert len(calls) == 2, calls
+    assert calls == [("claude-sonnet-5", "ANTHROPIC")] * 2
+
+
+def test_no_run_in_scope_is_not_an_error(mocker):
+    """`pin` is callable from places that have no RunInfo, and the fallback
+    is what every caller got before the cap started depending on the model.
+    A None pair must reach pin_measurements as None rather than raising on
+    the way."""
+    memory = _Memory()
+    seen = {}
+
+    def _measured(thread_id, last_n, model=None, provider_name=None):
+        seen.update(model=model, provider_name=provider_name)
+        return {"requested_tokens": 100, "pinned_tokens": 0,
+                "max_tokens": 20_000}
+
+    mocker.patch("core.compaction.pin_measurements", side_effect=_measured)
+
+    result = pin.run({"last_n": 1}, memory=memory, parent_run=None)
+
+    assert seen == {"model": None, "provider_name": None}
+    assert "error" not in result
 
 
 # ---------------------------------------------------------------------------

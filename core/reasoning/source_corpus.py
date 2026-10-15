@@ -28,6 +28,17 @@ boundary -- nothing is stored by this module unredacted -- beats depending
 on a guarantee made two layers away that a later refactor could quietly
 drop. The second pass is a no-op on already-clean text.
 
+AND IT IS NOT WHERE §52's SPLIT-CREDENTIAL FIX WENT, deliberately (RB4).
+§51 made this module the one place where two pages of a document become
+adjacent, so a credential straddling a page boundary was rejoined HERE --
+reproduced end to end in batch 106, into `artifact_entries()` and therefore
+into `sources/<sha256>.txt` and the window sent to the embedding provider.
+The register's proposed fix was to re-redact the whole merged text on every
+append. It was declined: `fetch_url` redacts before it cuts now, so the
+halves never exist, and re-scanning up to 20,000 characters per page would
+buy nothing this module can see -- while leaving unfixed the model's own two
+tool results, which the producer-side fix does close.
+
 THIS MODULE OWNS URL IDENTITY for the pipeline. Two spellings of one arXiv
 paper are one source, and a model that cites `/abs/2005.14165v3` after
 fetching `/abs/2005.14165` must not be told its own citation has no text.
@@ -43,7 +54,7 @@ import hashlib
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from urllib.parse import urlsplit, urlunsplit
 
 from safety.policy_enforcement import redact_output_text
@@ -99,6 +110,26 @@ class SourceDocument:
     tool: str = ""
     retrieved_at: str = ""
 
+    #: ROADMAP_v3 §51 (PG7). How far into the SOURCE document the held text
+    #: reaches, in the source's own character positions -- which is what
+    #: `fetch_url` pages by, and not the same as `len(text)`. 0 for a
+    #: document no paging tool produced.
+    #:
+    #: §52 (RB1) removed ONE of the two reasons those numbers differ.
+    #: Redaction used to happen here, on each page, so a page's held length
+    #: could be shorter than the span it covered; `fetch_url` now redacts
+    #: before it cuts, so its pages arrive clean and that gap is gone. What
+    #: still separates the two is `.strip()` and `MAX_DOCUMENT_CHARS`, both
+    #: of which change how much is HELD and neither of which moves where a
+    #: page sat in the document it came from.
+    #:
+    #: It is what stops a page being absorbed twice. Without it, a model
+    #: that re-reads page 2 -- which it will, because re-reading is how a
+    #: model checks itself -- would append it again and the corpus would
+    #: hold the same paragraph twice, which a similarity score then counts
+    #: twice.
+    next_offset: int = 0
+
     @property
     def sha256(self) -> str:
         return hashlib.sha256(self.text.encode("utf-8")).hexdigest()
@@ -116,7 +147,7 @@ class SourceDocument:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def arxiv_id_from_url(url: str) -> str | None:
@@ -224,11 +255,19 @@ class SourceCorpus:
         # `url` is the URL that ANSWERED, after redirects -- which is what
         # fetch_url.py:89-95 says the grounding pass attributes the text
         # to, and therefore what the model will cite.
+        #
+        # `offset` is ROADMAP_v3 §51 (PG7). A result without one is a
+        # pre-§51 shape or a hand-built fixture, and 0 is the right reading
+        # of both: a whole document starting at the beginning.
+        offset = result.get("offset")
+        if not isinstance(offset, int) or offset < 0:
+            offset = 0
         return self._store(
             url=result.get("url"),
             text=result.get("content"),
             title="",
             tool="fetch_url",
+            offset=offset,
         )
 
     def _add_arxiv(self, result: dict) -> int:
@@ -270,19 +309,81 @@ class SourceCorpus:
             )
         return added
 
-    def _store(self, url, text, title: str, tool: str) -> int:
+    def _store(self, url, text, title: str, tool: str, offset=None) -> int:
+        """Absorb one document, or one PAGE of one (ROADMAP_v3 §51, PG7).
+
+        `offset` is the source position this text starts at, or None from a
+        tool that does not page. None and 0 are NOT the same thing here:
+        None means "this is the whole of what that tool returns", 0 means
+        "this is the first page of something that may have more".
+
+        WHY THE PAGED CASE CANNOT USE LONGEST-WINS. Measured, batch 105,
+        before any of this was written: a corpus given page 1 and then page
+        2 of one URL returned 1 then **0** -- `len(existing.text) >=
+        len(cleaned)` is 5000 >= 5000, so page 2 was DROPPED and the held
+        text stayed page 1. Paging would then have made the model better
+        informed and the grounding pass no better, and the divergence is
+        invisible from both sides: the model reads four pages and the score
+        is computed against the first. The near miss is worse than the
+        miss -- a page 2 one character longer REPLACED page 1 outright,
+        leaving the corpus holding the middle of a document and attributing
+        it to the whole URL.
+        """
         if not isinstance(url, str) or not isinstance(text, str):
             return 0
         key = normalize_url(url)
         if not key:
             return 0
 
+        existing = self.documents.get(key)
+
+        # A continuation extends what is held; anything else competes on
+        # length exactly as it did before §51.
+        continuing = (
+            offset is not None
+            and offset > 0
+            and existing is not None
+            and existing.tool == tool
+        )
+
+        if continuing:
+            # How much of this page is already held. Covers all three
+            # shapes with one subtraction: an exact continuation overlaps
+            # by nothing, a re-read of the same page overlaps entirely and
+            # contributes the empty string, and a page that starts inside
+            # what is held contributes only its tail. A page starting
+            # BEYOND the held text leaves a gap -- appended anyway, because
+            # the text is real and the alternative is losing it, and an
+            # incomplete document is what this corpus already holds for
+            # every source the byte cap cut.
+            #
+            # There is deliberately NO `if overlap >= len(text): return 0`
+            # above this. One was written, and a mutation pass showed it
+            # could be deleted with no test failing anywhere -- because the
+            # slice already yields "" in exactly the cases it guarded, and
+            # the empty-addition check below catches them. Batch 103's
+            # lesson applies to a guard that cannot fire as much as to one
+            # that fires in the wrong place: it reads as the thing
+            # protecting you.
+            overlap = existing.next_offset - offset
+            addition = redact_output_text(text[max(0, overlap):])
+            if not addition.strip():
+                return 0
+            merged = (existing.text + addition)[:MAX_DOCUMENT_CHARS]
+            if merged == existing.text:
+                return 0
+            self.documents[key] = SourceDocument(
+                url=key, text=merged, title=existing.title,
+                tool=tool, retrieved_at=_now(),
+                next_offset=max(existing.next_offset, offset + len(text)),
+            )
+            return 1
+
         cleaned = redact_output_text(text).strip()
         if len(cleaned) < MIN_DOCUMENT_CHARS:
             return 0
         cleaned = cleaned[:MAX_DOCUMENT_CHARS]
 
-        existing = self.documents.get(key)
         if existing is not None and len(existing.text) >= len(cleaned):
             return 0
         if existing is None and len(self.documents) >= MAX_DOCUMENTS:
@@ -295,6 +396,11 @@ class SourceCorpus:
         self.documents[key] = SourceDocument(
             url=key, text=cleaned, title=title or (existing.title if existing else ""),
             tool=tool, retrieved_at=_now(),
+            # In the SOURCE's positions, so the next page's offset can be
+            # compared against it. `len(text)` and not `len(cleaned)`:
+            # redaction and stripping change how much is HELD, never where
+            # the page sat in the document it came from.
+            next_offset=(offset + len(text)) if offset is not None else 0,
         )
         return 1
 

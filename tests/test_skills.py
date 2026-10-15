@@ -470,11 +470,11 @@ class TestPromptAssembly:
         that calls prompt_fragment directly passes no matter what the app
         does with it (review §19-20 f13). Drive the real method and
         capture the system prompt the loop receives."""
-        from tui.app import VenastineApp
+        from core.events import LoopEvent
         from core.loop import RunAgentLoop
         from core.memory import ConversationMemory
-        from core.events import LoopEvent
         from tests.conftest import make_model_response
+        from tui.app import VenastineApp
 
         loaded(_skill("alpha", body="ALPHA-METHODOLOGY"))
 
@@ -526,10 +526,11 @@ class TestPromptAssembly:
         the grill turn's prompt."""
         from types import SimpleNamespace
         from uuid import uuid4
-        from tui.app import VenastineApp
-        from core.loop import RunAgentLoop
+
         from core.config_loader import AgentDef
+        from core.loop import RunAgentLoop
         from tests.conftest import make_model_response
+        from tui.app import VenastineApp
 
         loaded(_skill("alpha", body="ALPHA-METHODOLOGY"))
 

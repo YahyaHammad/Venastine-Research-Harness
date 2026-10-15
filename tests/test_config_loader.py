@@ -3,7 +3,7 @@ test_config_loader.py
 
 ROADMAP_v2 §14 loader behavior: frontmatter parsing (AC4), three-tier
 discovery with D18/D8 precedence, settings.json merge with loud unknown
-key rejection, CONTEXT.md opt-in (AC5), and the frontmatter-only skill
+key rejection, project-hub opt-in (AC5), and the frontmatter-only skill
 catalog.
 
 All discovery roots are redirected into tmp_path: the user tier via
@@ -253,6 +253,156 @@ def test_get_settings_before_initialize_is_empty():
 
 
 # ---------------------------------------------------------------------------
+# ---- Which tier a setting came from (TECHNICAL_DEBT 12) ---------------------
+# ---------------------------------------------------------------------------
+
+class TestWhereASettingCameFrom:
+    """`settings_sources()` and `compaction_sources()`, batch 111.
+
+    D27's third implementation note, whose argument was that "compaction
+    feels too aggressive" should be a one-line answer rather than a value
+    three files away. The merge knew which tier won and threw it away, one
+    `update()` at a time.
+
+    WHAT WOULD MAKE THIS CLASS VACUOUS: testing only the case where one
+    file speaks. The whole difficulty is telling the tiers apart, so every
+    test below has BOTH files present wherever that is meaningful, and the
+    interesting assertion is always about the key the other one did not
+    set -- a per-file answer would get that one wrong and still pass a
+    single-file test.
+    """
+
+    def test_a_user_key_the_project_did_not_touch_stays_the_users(
+            self, _redirect_roots):
+        _write_settings(_redirect_roots["user"],
+                        {"compaction": {"strength": 5, "max_retries": 2}})
+        _write_settings(_redirect_roots["project"] / ".venastine",
+                        {"compaction": {"strength": 1}})
+        workspace_trust.grant_trust(str(_redirect_roots["project"]))
+
+        config_loader.initialize(str(_redirect_roots["project"]))
+        sources = config_loader.compaction_sources()
+
+        assert sources["strength"] == "project"
+        assert sources["max_retries"] == "user", (
+            "attributing per FILE rather than per KEY would call this one "
+            "the project's, because the project file is what won overall")
+        assert config_loader.effective_compaction()["max_retries"] == 2
+
+    def test_a_key_no_settings_file_sets_comes_from_the_yaml(
+            self, _redirect_roots):
+        _write_settings(_redirect_roots["user"],
+                        {"compaction": {"strength": 5}})
+
+        config_loader.initialize(str(_redirect_roots["project"]))
+        sources = config_loader.compaction_sources()
+
+        assert sources["strength"] == "user"
+        assert sources["trigger_tokens"] == "config.yaml"
+        assert set(sources) == set(config_loader._COMPACTION_DEFAULTS), (
+            "every key answers, so a caller never has to know whether "
+            "silence means the file or means nobody looked")
+
+    def test_an_override_outranks_whatever_wrote_the_value(
+            self, _redirect_roots):
+        _write_settings(_redirect_roots["user"],
+                        {"compaction": {"strength": 5}})
+
+        config_loader.initialize(str(_redirect_roots["project"]))
+        sources = config_loader.compaction_sources({"strength": 3})
+
+        assert sources["strength"] == "override"
+        assert config_loader.compaction_sources()["strength"] == "user", (
+            "a per-invocation override must not be remembered; /compact "
+            "--strength persists nothing and neither does this")
+
+    def test_a_none_in_the_overrides_is_not_an_override(
+            self, _redirect_roots):
+        """`effective_compaction` skips a None override, so this must too
+        or the two disagree about the value's origin while agreeing about
+        the value -- which is the confident wrong answer the shared ladder
+        exists to make impossible."""
+        _write_settings(_redirect_roots["user"],
+                        {"compaction": {"strength": 5}})
+
+        config_loader.initialize(str(_redirect_roots["project"]))
+
+        assert config_loader.compaction_sources(
+            {"strength": None})["strength"] == "user"
+
+    def test_an_untrusted_project_supplies_no_provenance_either(
+            self, _redirect_roots):
+        """D17: untrusted project content is ABSENT, not loaded-and-
+        disabled. The negative case, and the one where a provenance bug is
+        silent -- reporting `project` here would be a report that the
+        untrusted file had an effect it did not have."""
+        _write_settings(_redirect_roots["user"],
+                        {"compaction": {"strength": 5}})
+        _write_settings(_redirect_roots["project"] / ".venastine",
+                        {"compaction": {"strength": 1}})
+
+        config_loader.initialize(str(_redirect_roots["project"]))
+
+        assert config_loader.effective_compaction()["strength"] == 5
+        assert config_loader.compaction_sources()["strength"] == "user"
+        assert "compaction.strength" in config_loader.settings_sources()
+        assert config_loader.settings_sources()[
+            "compaction.strength"] == "user"
+
+    def test_the_sources_cover_flat_keys_and_section_names_too(
+            self, _redirect_roots):
+        """Not only compaction. `settings_sources()` records everything
+        the merge merged, because `_SETTINGS_OVERRIDES` maps ten other
+        `config.yaml` rows onto settings paths and `/config` explains all
+        of them from the same lookup."""
+        _write_settings(_redirect_roots["user"],
+                        {"default_model": "user-model",
+                         "compaction": {"strength": 5}})
+        _write_settings(_redirect_roots["project"] / ".venastine",
+                        {"research": {"subagent_review": True}})
+        workspace_trust.grant_trust(str(_redirect_roots["project"]))
+
+        config_loader.initialize(str(_redirect_roots["project"]))
+        sources = config_loader.settings_sources()
+
+        assert sources["default_model"] == "user"
+        assert sources["compaction.strength"] == "user"
+        assert sources["compaction"] == "user"
+        assert sources["research.subagent_review"] == "project"
+        assert "trigger_tokens" not in sources, (
+            "a key nothing set is absent here, which is how a caller "
+            "reads 'config.yaml won' without a fourth tier name")
+
+    def test_sources_before_initialize_are_empty(self):
+        assert config_loader.settings_sources() == {}
+
+    def test_the_two_reports_walk_the_same_ladder(self, _redirect_roots):
+        """The property that makes provenance worth printing: every key
+        whose source is a settings tier really does hold that tier's
+        value, and every key sourced to the file really does hold the
+        file's. Two ladders could pass each test above and still disagree
+        here."""
+        _write_settings(_redirect_roots["user"],
+                        {"compaction": {"strength": 5, "max_retries": 2}})
+        _write_settings(_redirect_roots["project"] / ".venastine",
+                        {"compaction": {"keep_recent_turns": 7}})
+        workspace_trust.grant_trust(str(_redirect_roots["project"]))
+
+        config_loader.initialize(str(_redirect_roots["project"]))
+        values = config_loader.effective_compaction()
+        sources = config_loader.compaction_sources()
+        merged = config_loader.get_settings()["compaction"]
+        shipped = config_loader.shipped_defaults()["compaction"]
+
+        for key, tier in sources.items():
+            if tier == "config.yaml":
+                assert values[key] == shipped[key], key
+                assert key not in merged, key
+            else:
+                assert values[key] == merged[key], key
+
+
+# ---------------------------------------------------------------------------
 # ---- AGENTS.md opt-in (AC5) -------------------------------------------------
 # ---------------------------------------------------------------------------
 
@@ -314,6 +464,169 @@ def test_agent_fields_parsed(_redirect_roots):
     assert agent.max_steps == 7
     assert agent.use_memory is True  # default on, opt-out per field
     assert agent.use_project_context is False
+    assert agent.spawn_targets is None  # undeclared is "no opinion"
+
+
+def test_spawn_targets_parsed(_redirect_roots):
+    _write_agent(_redirect_roots["user"], "picky",
+                 ("spawn_targets: [explore, review]",))
+
+    config_loader.initialize(str(_redirect_roots["project"]))
+
+    assert config_loader.get_agents()["picky"].spawn_targets == [
+        "explore", "review"]
+
+
+def test_non_list_spawn_targets_skips_the_file(_redirect_roots):
+    _write_agent(_redirect_roots["user"], "bad", ("spawn_targets: explore",))
+
+    config_loader.initialize(str(_redirect_roots["project"]))
+
+    assert "bad" not in config_loader.get_agents()
+
+
+def test_non_string_spawn_targets_skips_the_file(_redirect_roots):
+    """The element-type check, and the lesson `additional_tools` already
+    paid for one field over. The consumer is a set membership test against
+    an agent NAME, so a non-string element parses clean here and then
+    never matches -- the agent would simply be unable to spawn, with no
+    warning and nothing to grep for."""
+    _write_agent(_redirect_roots["user"], "bad", ("spawn_targets: [123]",))
+
+    config_loader.initialize(str(_redirect_roots["project"]))
+
+    assert "bad" not in config_loader.get_agents()
+
+
+def test_an_empty_spawn_targets_list_is_not_no_opinion(_redirect_roots):
+    """`[]` says "this agent delegates to nobody" and must not collapse
+    into None, which says the opposite. A truthiness test in the parser
+    is how a deliberate lockdown becomes a permission."""
+    _write_agent(_redirect_roots["user"], "lonely", ("spawn_targets: []",))
+
+    config_loader.initialize(str(_redirect_roots["project"]))
+
+    assert config_loader.get_agents()["lonely"].spawn_targets == []
+
+
+# ---------------------------------------------------------------------------
+# ---- S08-01 (batch 155): the three fields the element rule missed ---------
+# ---------------------------------------------------------------------------
+#
+# `_parse_md_file` states the rule in a comment of its own -- "ELEMENT
+# TYPES TOO, not just the container" -- and `additional_tools` and
+# `spawn_targets` paid for it. `model`, `provider` and `allowed_tools`
+# elements sat UNDER that comment unchecked, so a well-typed-but-wrong-
+# SHAPED value loaded clean and failed layers away with nothing naming
+# the file it came from.
+#
+# EVERY TEST HERE WRITES A GOOD AGENT BESIDE THE BAD ONE. "bad is absent"
+# passes five times over against a fixture that loaded nothing at all,
+# and the paired assertion is the control the review's own probe used.
+
+
+def test_a_non_string_model_skips_the_file(_redirect_roots, caplog):
+    """`model: [a, b]` loaded as `AgentDef.model == ['a', 'b']` and then
+    raised `TypeError: unhashable type: 'list'` out of the effort cache's
+    `(provider_name, model)` key -- in a subagent spawn, or in an
+    `/agent` turn, naming neither the field nor the file.
+
+    SKIPPED, NOT REPAIRED TO None, which is what this assertion
+    distinguishes: a repair would leave `bad` in the roster with
+    `model=None` and run it on whatever model the session has. An agent
+    file names a model when being a DIFFERENT model is the point, and
+    §11's critic rationale is the sharpest case of that. `max_steps` one
+    field up repairs instead, because its unusable values have no honest
+    reading and None here has one -- the wrong one.
+    """
+    _write_agent(_redirect_roots["user"], "bad", ("model: [a, b]",))
+    _write_agent(_redirect_roots["user"], "good", ("model: m1",))
+
+    with caplog.at_level("WARNING", logger="core.config_loader"):
+        config_loader.initialize(str(_redirect_roots["project"]))
+
+    agents = config_loader.get_agents()
+    assert "bad" not in agents
+    assert agents["good"].model == "m1"
+    assert any("bad.md" in record.message and "model" in record.message
+               for record in caplog.records), (
+        "nothing in the log names the file that caused it, which is the "
+        "whole complaint about the old behaviour")
+
+
+def test_a_non_string_provider_skips_the_file(_redirect_roots, caplog):
+    """`provider: 123` reached `client.api_initialization` and raised
+    `ValueError: Unknown provider: 123`. That message names the provider
+    and not the agent file that supplied it, so the warning here has to."""
+    _write_agent(_redirect_roots["user"], "bad", ("provider: 123",))
+    _write_agent(_redirect_roots["user"], "good", ("provider: ANTHROPIC",))
+
+    with caplog.at_level("WARNING", logger="core.config_loader"):
+        config_loader.initialize(str(_redirect_roots["project"]))
+
+    agents = config_loader.get_agents()
+    assert "bad" not in agents
+    assert agents["good"].provider == "ANTHROPIC"
+    assert any("bad.md" in record.message and "provider" in record.message
+               for record in caplog.records)
+
+
+def test_a_non_string_allowed_tools_element_skips_the_file(_redirect_roots):
+    """The quiet half. `['read', 123]` survives `set()`, so every
+    consumer's membership test simply never matches it and the whitelist
+    holds one fewer entry than it reads as -- no warning, nothing to
+    grep for. That is the whitelist-typo class
+    `tests/test_shipped_roster.py` documents for misspelled strings, one
+    field over and just as silent."""
+    _write_agent(_redirect_roots["user"], "bad",
+                 ("allowed_tools: [read, 123]",))
+    _write_agent(_redirect_roots["user"], "good",
+                 ("allowed_tools: [read, write]",))
+
+    config_loader.initialize(str(_redirect_roots["project"]))
+
+    agents = config_loader.get_agents()
+    assert "bad" not in agents
+    assert agents["good"].allowed_tools == ["read", "write"]
+
+
+def test_an_unhashable_allowed_tools_element_skips_the_file(_redirect_roots):
+    """The LOUD half, which the finding called silent and measurement did
+    not. `AgentManager.active_context` and `child_context` are the single
+    place this `Optional[list]` becomes `ToolContext.allowed_tools`'s
+    declared `Optional[set[str]]`, and both do it with
+    `set(agent.allowed_tools)` -- which raises `TypeError: unhashable
+    type: 'list'` on a nested list and `'dict'` on a mapping. Driven
+    through the real AgentManager both ways before this guard existed."""
+    _write_agent(_redirect_roots["user"], "nested",
+                 ("allowed_tools: [read, [write]]",))
+    _write_agent(_redirect_roots["user"], "mapping",
+                 ("allowed_tools: [read, {write: true}]",))
+    _write_agent(_redirect_roots["user"], "good", ("allowed_tools: [read]",))
+
+    config_loader.initialize(str(_redirect_roots["project"]))
+
+    agents = config_loader.get_agents()
+    assert "nested" not in agents
+    assert "mapping" not in agents
+    assert agents["good"].allowed_tools == ["read"]
+
+
+def test_a_yaml_boolean_in_allowed_tools_skips_the_file(_redirect_roots):
+    """`allowed_tools: [read, on]` -- YAML reads `on`, `yes` and `true`
+    as booleans, so this is a typo nobody has to type anything
+    non-string-looking to make. `isinstance(True, str)` is False so the
+    check catches it; `isinstance(True, int)` is True, which is the trap
+    the `max_steps` guard one field up had to spell out."""
+    _write_agent(_redirect_roots["user"], "bad",
+                 ("allowed_tools: [read, on]",))
+    _write_agent(_redirect_roots["user"], "good", ("allowed_tools: [read]",))
+
+    config_loader.initialize(str(_redirect_roots["project"]))
+
+    agents = config_loader.get_agents()
+    assert "bad" not in agents
+    assert agents["good"].allowed_tools == ["read"]
 
 
 # ---------------------------------------------------------------------------
@@ -581,6 +894,86 @@ def test_real_booleans_still_load_with_their_value(_redirect_roots):
     assert agent.use_project_context is True
 
 
+class TestApprovalOverrideValuesAreTypedToo:
+    """The mapping was validated and its VALUES were not (batch 150).
+
+    The two tests above state this file's rule for its scalar booleans:
+    validated, not coerced, because those are the fields a restrictive
+    agent definition uses to opt OUT. `approval_overrides` is the third
+    such field -- it opts IN to prompting -- and the check stopped at the
+    container, so `web_search: "false"` parsed to the STRING and
+    security.permissions.requires_approval returned 'false' from a
+    function documented to return a bool.
+
+    MEASURED, NOT ASSUMED: no value widens a gate. Approval ORs across
+    layers, so every falsy value is already indistinguishable from the
+    key being absent and every truthy one tightens. This is the type
+    boundary, which is why it is a batch-150 addition rather than part of
+    S13-02's escalation.
+    """
+
+    @pytest.mark.parametrize("value", ['"false"', '"no"', "0", "[]"])
+    def test_a_non_boolean_value_skips_the_file(self, _redirect_roots,
+                                                value, caplog):
+        _write_agent(_redirect_roots["user"], "stringy_override",
+                     ("approval_overrides:", f"  web_search: {value}"))
+
+        with caplog.at_level("WARNING", logger="core.config_loader"):
+            config_loader.initialize(str(_redirect_roots["project"]))
+
+        assert config_loader.get_agent("stringy_override") is None
+        assert any("approval_overrides" in r.getMessage()
+                   and "web_search" in r.getMessage()
+                   for r in caplog.records), [
+            r.getMessage() for r in caplog.records]
+
+    def test_the_warning_names_every_offending_key(self, _redirect_roots,
+                                                   caplog):
+        """Every key, not the first one: a definition with three bad
+        values should take one pass to fix, not three."""
+        _write_agent(_redirect_roots["user"], "several",
+                     ("approval_overrides:",
+                      '  web_search: "false"',
+                      "  get_time: true",
+                      '  fetch_url: "no"'))
+
+        with caplog.at_level("WARNING", logger="core.config_loader"):
+            config_loader.initialize(str(_redirect_roots["project"]))
+
+        messages = [r.getMessage() for r in caplog.records]
+        named = [m for m in messages if "approval_overrides" in m]
+        assert named, messages
+        assert "'fetch_url'" in named[0] and "'web_search'" in named[0]
+        assert "get_time" not in named[0], (
+            "the good key is named as if it were the problem")
+
+    def test_real_booleans_still_load(self, _redirect_roots):
+        """Control. Both directions, because a False is legal to WRITE --
+        it is merely inert once written (D14), and refusing it here would
+        be the three-state override tests/BREAKING_CHANGES.md forbids by
+        name."""
+        _write_agent(_redirect_roots["user"], "typed",
+                     ("approval_overrides:",
+                      "  web_search: true",
+                      "  get_time: false"))
+        config_loader.initialize(str(_redirect_roots["project"]))
+
+        agent = config_loader.get_agent("typed")
+        assert agent is not None
+        assert agent.approval_overrides == {"web_search": True,
+                                            "get_time": False}
+
+    def test_an_empty_mapping_is_not_an_error(self, _redirect_roots):
+        """Control: `all()` over nothing is True, and an author who
+        writes the key and no entries has written nothing wrong."""
+        _write_agent(_redirect_roots["user"], "blank",
+                     ("approval_overrides: {}",))
+        config_loader.initialize(str(_redirect_roots["project"]))
+
+        agent = config_loader.get_agent("blank")
+        assert agent is not None and agent.approval_overrides == {}
+
+
 # ---------------------------------------------------------------------------
 # ---- Undecodable content degrades, it does not abort (f3, r2-2) ----------
 # ---------------------------------------------------------------------------
@@ -604,7 +997,7 @@ def test_undecodable_settings_in_untrusted_project_does_not_break_the_prompt(
     assert "could not be read" in summary
 
 
-def test_undecodable_context_md_in_trusted_project_degrades(
+def test_an_undecodable_hub_in_a_trusted_project_degrades(
         _redirect_roots, caplog):
     """A trusted project's AGENTS.md is content the USER wrote, and this
     module's policy for malformed content everywhere else is warn-and-
@@ -627,7 +1020,7 @@ def test_undecodable_context_md_in_trusted_project_degrades(
     assert any("AGENTS.md" in r.getMessage() for r in caplog.records)
 
 
-def test_readable_context_md_still_loads(_redirect_roots):
+def test_a_readable_hub_still_loads(_redirect_roots):
     """Control: the degradation must not swallow the working case."""
     venastine = _redirect_roots["project"] / ".venastine"
     venastine.mkdir(parents=True, exist_ok=True)
@@ -1035,3 +1428,505 @@ def test_settings_top_level_effort_wrong_type_raises(_redirect_roots):
     _write_settings(_redirect_roots["user"], {"effort": 3})
     with pytest.raises(ValueError, match="must be str"):
         config_loader.initialize(str(_redirect_roots["project"]))
+
+
+# ---------------------------------------------------------------------------
+# ---- The config.yaml coupling (batch 82) ----------------------------------
+# ---------------------------------------------------------------------------
+#
+# `shipped_defaults()` used to reach its seven compaction defaults with
+# `getattr(config, "COMPACTION_TRIGGER_TOKENS")` -- no default argument, so a
+# rename turned it into an AttributeError surfacing through `initialize()` at
+# startup, and nothing but that one dictionary tied the two names together.
+# The map holds SCHEMA FIELD NAMES now, which is checkable, so it is checked.
+
+
+def test_every_compaction_default_names_a_schema_field():
+    """The map is still stringly-typed; it is just typed against something
+    that can answer. Without this, a renamed field is a startup crash for
+    whoever launches next rather than a red test now."""
+    import config_schema
+
+    fields = set(config_schema.HarnessConfig.model_fields)
+    unknown = {key: field
+               for key, field in config_loader._COMPACTION_DEFAULTS.items()
+               if field not in fields}
+    assert not unknown, (
+        f"_COMPACTION_DEFAULTS names config.yaml fields that do not exist: "
+        f"{unknown}. shipped_defaults() raises AttributeError on each, which "
+        f"reaches the user as a failed startup.")
+
+
+def test_the_shipped_compaction_defaults_come_from_the_yaml():
+    """The positive half. Without it the check above passes on an empty map,
+    and `shipped_defaults()` could be returning anything."""
+    import config_schema
+
+    cfg = config_schema.current()
+    shipped = config_loader.shipped_defaults()["compaction"]
+    assert set(shipped) == set(config_loader._COMPACTION_DEFAULTS)
+    for key, field in config_loader._COMPACTION_DEFAULTS.items():
+        assert shipped[key] == getattr(cfg, field)
+
+
+def test_the_shipped_config_yaml_covers_the_whole_schema():
+    """Every schema field has a key in the shipped file, and the file has no
+    key the schema does not know.
+
+    Both directions are already enforced at import -- fields are required and
+    unknown keys are forbidden -- so this looks redundant and is not: it names
+    the two failures separately and reports EVERY missing key at once, where
+    an import error is one traceback at whatever moment someone next starts
+    the harness."""
+    import config_schema
+
+    document = config_schema.read_document()
+    fields = set(config_schema.HarnessConfig.model_fields)
+    keys = set(document)
+    assert not fields - keys, (
+        f"config.yaml is missing keys the schema requires: "
+        f"{sorted(fields - keys)}")
+    assert not keys - fields, (
+        f"config.yaml carries keys the schema does not know: "
+        f"{sorted(keys - fields)}")
+    # The two derived values must NOT be in the file -- they are computed and
+    # a key of their own would change what they mean. `workspace_is_project`
+    # is an ORDINARY key that one of them reads, not a key FOR it.
+    assert not keys & {"output_dir", "workspace_dir_explicit"}
+    assert "workspace_is_project" in keys
+    for name in config_schema.DERIVED_VALUES:
+        assert name.lower() not in keys
+
+
+class TestWhichWorkspaceIsAlsoTheProject:
+    """`WORKSPACE_DIR_EXPLICIT`, which decides the PROJECT PATH and since
+    batch 111 has two inputs (TECHNICAL_DEBT 28).
+
+    WHY BOTH, rather than one of them. The environment variable cannot be a
+    key: it is read by PRESENCE, and the shipped `workspace_dir` is
+    `./workspace`, so a value test would move the project one level down for
+    every install that set nothing. The key cannot be a variable either --
+    it is the only route a person editing `config.yaml` has, and before it
+    they got the workspace they asked for, a project of `os.getcwd()`, and
+    (launched from the install tree) a refusal telling them to set a
+    variable they believed they had just set.
+
+    THE TABLE IS THE TEST. There are exactly four states and the answer is
+    an OR, so anything less than all four leaves a mutation alive: dropping
+    either operand still passes three of them.
+    """
+
+    @staticmethod
+    def _cfg(declared):
+        import config_schema
+
+        return config_schema.current().model_copy(
+            update={"workspace_is_project": declared})
+
+    @pytest.mark.parametrize("declared,variable,expected", [
+        (False, False, False),
+        (False, True, True),
+        (True, False, True),
+        (True, True, True),
+    ], ids=["neither", "variable-only", "key-only", "both"])
+    def test_either_route_names_the_workspace_as_the_project(
+            self, monkeypatch, declared, variable, expected):
+        import config_schema
+
+        if variable:
+            monkeypatch.setenv("AGENT_WORKSPACE", "/somewhere")
+        else:
+            monkeypatch.delenv("AGENT_WORKSPACE", raising=False)
+
+        derived = config_schema.derived_values(self._cfg(declared))
+        assert derived["WORKSPACE_DIR_EXPLICIT"] is expected
+
+    def test_the_shipped_file_still_leaves_the_project_where_it_was(
+            self, monkeypatch):
+        """The key is shipped `false`, so no existing install moves.
+
+        The half of a behaviour change that is easy to forget to assert:
+        this one is a pure addition only while the default stays where it
+        is, and a flipped default would move the project for everyone who
+        never edited the file -- which is exactly what ruled out the
+        register's own "any value in the file counts" option.
+        """
+        import config_schema
+
+        monkeypatch.delenv("AGENT_WORKSPACE", raising=False)
+        document = config_schema.read_document()
+
+        assert document["workspace_is_project"] is False
+        assert config_schema.derived_values(
+            config_schema.current())["WORKSPACE_DIR_EXPLICIT"] is False
+
+    def test_the_value_main_reads_is_the_one_the_file_produced(
+            self, monkeypatch):
+        """The whole route from document to global, in one assertion.
+
+        The truth table above tests the OR and `test_project_path_guard.py`
+        tests what `main()` does with the answer; neither sees the join.
+        `as_module_namespace` is where the derived values are folded in, and
+        it is the only caller `derived_values` has -- so a signature that
+        stopped being passed `cfg` would fail HERE and nowhere else.
+        """
+        import config_schema
+
+        monkeypatch.delenv("AGENT_WORKSPACE", raising=False)
+        namespace = config_schema.as_module_namespace(self._cfg(True))
+
+        assert namespace["WORKSPACE_DIR_EXPLICIT"] is True
+        # And the key itself is published too, because every field is.
+        assert namespace["WORKSPACE_IS_PROJECT"] is True
+
+
+def test_the_two_permission_tables_declare_the_same_tools():
+    """The tables agree, up to the one deliberate asymmetry: the
+    shell-mode tools need a permissions field like every tool, but their
+    approval lives solely in `shell_approval_mode`, so `tool_approvals`
+    has no key for them. Checked against the SHIPPED file rather than
+    against the registry, so a key added to one table and forgotten in the
+    other is caught without importing the tool layer."""
+    import config_schema
+    from security.permissions import APPROVAL_BY_SHELL_MODE
+
+    document = config_schema.read_document()
+    permissions = set(document["tool_permissions"])
+    approvals = set(document["tool_approvals"])
+    assert permissions - approvals == set(APPROVAL_BY_SHELL_MODE), (
+        f"only in tool_permissions: {sorted(permissions - approvals)}; "
+        f"only in tool_approvals: {sorted(approvals - permissions)}")
+    assert approvals - permissions == set()
+    assert permissions == set(config_schema.ToolPermissionsModel.model_fields)
+
+
+def test_the_environment_reaches_the_model_and_not_only_the_globals(monkeypatch):
+    """`config_schema.current()` and `config.<NAME>` must agree.
+
+    The environment is folded into the raw document BEFORE validation, so
+    there is one model with the overrides already in it. Applied afterwards
+    instead, an override would live only in the namespace `config.py`
+    publishes -- and `core/config_loader.py` reads five values off
+    `current()`, so the first override added to a key it happens to read
+    would diverge silently.
+
+    Written against a REBUILT model rather than the imported one, because
+    `config.py` bound its globals at import and nothing re-reads the file in
+    a live process (UN1). That is the property under test on the other side:
+    `posture` relies on it.
+    """
+    import config
+    import config_schema
+
+    monkeypatch.setenv("AGENT_MODEL", "a-model-nothing-ships")
+    monkeypatch.setenv("APP_DB_PATH", "somewhere-else.db")
+    rebuilt = config_schema.load(force=True)
+    try:
+        assert rebuilt.model_name == "a-model-nothing-ships"
+        assert rebuilt.db_path == "somewhere-else.db"
+        namespace = config_schema.as_module_namespace(rebuilt)
+        for name in config_schema.ENV_OVERRIDES:
+            assert namespace[name] == getattr(rebuilt, name.lower()), name
+        # And the live module is UNMOVED, which is the half that matters:
+        # setting the variable after import changes nothing in this process.
+        assert config.MODEL_NAME != "a-model-nothing-ships"
+    finally:
+        monkeypatch.undo()
+        config_schema.load(force=True)
+
+
+def test_re_importing_config_re_reads_the_file(tmp_path):
+    """Popping `config` out of `sys.modules` under a changed environment
+    must produce a `config` that sees the change.
+
+    NOT a hypothetical. `tests/test_storage_e2e.py`'s `real_storage` fixture
+    pops `sqlmodel`, `config`, `database` and `storage`, sets `APP_DB_PATH`
+    to a throwaway file, and imports them again to get real SQLite instead of
+    the root conftest's fake. `config_schema` is not in that list -- the
+    fixture predates it -- so a cached model that outlived the re-import
+    handed the fresh `config` the PREVIOUS `db_path` and pointed the engine
+    at the developer's own `app.db`. It showed up as
+    `test_a_migrated_column_matches_the_fresh_schema_exactly` comparing a
+    migrated column against a database full of migrations.
+
+    `config.py` passes `force=True` for this reason. Run in a SUBPROCESS
+    because the thing under test is module-table surgery, and doing it in
+    this process would hand every later test a `config` this one imported.
+    """
+    import os
+    import subprocess
+    import sys
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    target = tmp_path / "re-imported.db"
+    program = (
+        "import os, sys\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "import config\n"
+        "first = config.DB_PATH\n"
+        "for name in ('sqlmodel', 'config', 'database', 'storage'):\n"
+        "    sys.modules.pop(name, None)\n"
+        "os.environ['APP_DB_PATH'] = sys.argv[2]\n"
+        "import config as fresh\n"
+        "import config_schema\n"
+        "print(first)\n"
+        "print(fresh.DB_PATH)\n"
+        "print(config_schema.current().db_path)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", program, root, str(target)],
+        capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr[-2000:]
+    first, reimported, from_schema = result.stdout.split()[:3]
+
+    assert first != str(target), (
+        "the first import already saw the redirected path, so this test "
+        "cannot tell a re-read from a cache hit")
+    assert reimported == str(target), (
+        f"a re-imported config kept the old db_path ({reimported!r}); "
+        f"config_schema's cache outlived the re-import")
+    assert from_schema == str(target), (
+        f"config_schema.current() says {from_schema!r} while the config "
+        f"module says {reimported!r} -- the loader and the module disagree")
+
+
+def test_a_duplicated_key_in_config_yaml_is_a_startup_error(tmp_path):
+    """A second `model_name` must not silently win.
+
+    `ruamel.yaml` with `typ=\"safe\"` raises `DuplicateKeyError`, which
+    `config_schema.read_document()` wraps as `ValueError` naming the file.
+    Without that, YAML's last-one-wins would let a duplicated
+    `shell_approval_mode` decide the posture by position. Checked by hand
+    in batch 82; pinned here so a parser change cannot go quiet.
+    """
+    import config_schema
+
+    dup = tmp_path / "dup.yaml"
+    dup.write_text("model_name: a\nmodel_name: b\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="could not be read"):
+        config_schema.read_document(str(dup))
+
+
+# ---------------------------------------------------------------------------
+# ---- The cross-field invariants (batch 83) --------------------------------
+# ---------------------------------------------------------------------------
+#
+# Every case below was ACCEPTED before `_check_cross_field_defaults` grew, and
+# each failed somewhere later: a KeyError inside a research run, a ValueError
+# on the compaction path, or -- for NaN -- nothing at all, ever.
+#
+# Parametrised on (edit, the key the message must name). The message matters
+# as much as the refusal: a startup error that does not say which key is wrong
+# leaves the reader diffing an 845-line file.
+
+def _edited_document(**edits):
+    """The shipped document with `edits` applied, as a plain dict."""
+    import copy
+
+    import config_schema
+
+    data = copy.deepcopy(config_schema.read_document())
+    data.update(edits)
+    return data
+
+
+#: (label, edit callable, the key the error message must name)
+_INCOHERENT = [
+    ("strategy absent from its own roster",
+     lambda d: d.update(compaction_strategies=["chain"],
+                        compaction_strategy="rederive"),
+     "compaction_strategy"),
+    ("a strategy nobody implements",
+     lambda d: d.update(compaction_strategies=["rederive", "chain", "hybrid"]),
+     "compaction_strategies"),
+    ("an empty strategy roster",
+     lambda d: d.update(compaction_strategies=[]),
+     "compaction_strategies"),
+    ("an empty checklist vocabulary",
+     lambda d: d.update(todo_statuses=[]),
+     "todo_statuses"),
+    ("venue credit without its unknown fallback",
+     lambda d: d["scholar_venue_credit"].pop("unknown"),
+     "scholar_venue_credit"),
+    ("venue credit without repository",
+     lambda d: d["scholar_venue_credit"].pop("repository"),
+     "scholar_venue_credit"),
+    ("authority classes without restricted_registry",
+     lambda d: d["domain_authority_classes"].pop("restricted_registry"),
+     "domain_authority_classes"),
+    ("a host suffix naming a class that does not exist",
+     lambda d: d["domain_authority_suffixes"].update(gov="no_such_class"),
+     "domain_authority_suffixes"),
+    ("a calibration band with no ceiling",
+     lambda d: d.update(default_similarity_calibration={"floor": 0.1}),
+     "default_similarity_calibration"),
+    ("a calibration band inverted",
+     lambda d: d.update(
+         default_similarity_calibration={"floor": 0.9, "ceiling": 0.2}),
+     "default_similarity_calibration"),
+    ("a negative output ceiling", lambda d: d.update(max_tokens=-5),
+     "max_tokens"),
+    ("a step ceiling of zero", lambda d: d.update(max_iterations=0),
+     "max_iterations"),
+    ("a fraction above one",
+     lambda d: d.update(compaction_trigger_fraction=5.0),
+     "compaction_trigger_fraction"),
+    ("a fraction of NaN",
+     lambda d: d.update(compaction_trigger_fraction=float("nan")),
+     "compaction_trigger_fraction"),
+    ("a weight above one", lambda d: d.update(scholar_venue_weight=1.5),
+     "scholar_venue_weight"),
+    ("a context window of zero",
+     lambda d: d.update(default_context_window=0), "default_context_window"),
+]
+
+
+@pytest.mark.parametrize("label,edit,key", _INCOHERENT,
+                         ids=[case[0] for case in _INCOHERENT])
+def test_an_incoherent_config_yaml_is_refused_by_name(label, edit, key):
+    """Each of these booted before, and failed a long way from the edit.
+
+    The NaN case is the one worth reading twice: NaN makes every `<` and `>`
+    comparison False, so compaction simply never fired and no error was
+    ever raised.
+    """
+    import config_schema
+
+    data = _edited_document()
+    edit(data)
+    with pytest.raises(ValueError) as exc:
+        config_schema.validate(data, source="test-config.yaml")
+    assert key in str(exc.value), (
+        f"{label} was refused, but the message does not name {key!r}, so the "
+        f"reader is left diffing the whole file:\n{exc.value}")
+
+
+def test_the_shipped_config_yaml_satisfies_every_invariant():
+    """The positive half, and the check that catches an over-tight bound.
+
+    Without it the parametrisation above would pass on a schema that refuses
+    everything, including what the harness ships.
+    """
+    import config_schema
+
+    cfg = config_schema.validate(config_schema.read_document(),
+                                 source="shipped")
+    assert cfg.compaction_strategy in cfg.compaction_strategies
+    assert cfg.compaction_strength in cfg.compaction_target_ratios
+    assert cfg.default_effort in cfg.default_effort_levels
+
+
+# ---------------------------------------------------------------------------
+# ---- The loader's own contract --------------------------------------------
+# ---------------------------------------------------------------------------
+
+def test_a_candidate_file_is_judged_without_the_environment(tmp_path,
+                                                            monkeypatch):
+    """`load(path=...)` must not let the editing shell's environment vouch
+    for a file the next launch will read on its own.
+
+    With the overlay applied to a candidate, a draft missing `db_path` was
+    ACCEPTED whenever `APP_DB_PATH` happened to be set, and then refused at
+    the startup it was supposed to be certifying. The live path keeps the
+    overlay; only the candidate path loses it.
+    """
+    from ruamel.yaml import YAML
+
+    import config_schema
+
+    monkeypatch.setenv("APP_DB_PATH", "from-the-shell.db")
+    data = _edited_document()
+    del data["db_path"]
+    draft = tmp_path / "draft.yaml"
+    with open(draft, "w", encoding="utf-8", newline="\n") as handle:
+        YAML().dump(data, handle)
+
+    with pytest.raises(ValueError, match="db_path"):
+        config_schema.load(path=str(draft))
+
+    # The positive half: the LIVE document still takes the override, so this
+    # is a difference between the two paths rather than a lost feature.
+    assert config_schema.load(force=True).db_path == "from-the-shell.db"
+
+
+def test_a_candidate_never_becomes_the_live_document(tmp_path):
+    """The cache is the process's answer; a candidate is only a question."""
+    from ruamel.yaml import YAML
+
+    import config_schema
+
+    data = _edited_document(model_name="a-model-nothing-ships")
+    draft = tmp_path / "draft.yaml"
+    with open(draft, "w", encoding="utf-8", newline="\n") as handle:
+        YAML().dump(data, handle)
+
+    before = config_schema.current().model_name
+    assert config_schema.load(
+        path=str(draft)).model_name == "a-model-nothing-ships"
+    assert config_schema.current().model_name == before
+
+
+def test_path_and_force_together_are_refused():
+    """They ask for two different things, and the flag used to be dropped in
+    silence -- so a caller reaching for "definitely re-read this file" got a
+    candidate validation and no cache write.
+    """
+    import config_schema
+
+    with pytest.raises(TypeError, match="two different things"):
+        config_schema.load(path=config_schema.CONFIG_PATH, force=True)
+
+
+def test_a_key_that_is_not_a_setting_name_is_reported_as_one():
+    """De-indenting a nested block to column 0 yields a mapping with a
+    non-string key, which passed the mapping guard and then raised a bare
+    `TypeError: keywords must be strings` out of `HarnessConfig(**data)` --
+    before pydantic, so `except ValidationError` never saw it.
+    """
+    import config_schema
+
+    with pytest.raises(ValueError, match="not a setting name"):
+        config_schema.validate({1: 0.4}, source="test-config.yaml")
+
+
+def test_a_file_that_is_not_utf_8_says_so(tmp_path):
+    """`UnicodeDecodeError` is a `ValueError` and NOT an `OSError`, so it
+    escaped the wrapper and arrived naming neither the file nor the remedy.
+    On Windows the way to produce one is an editor's ANSI or UTF-16 save.
+    """
+    import config_schema
+
+    bad = tmp_path / "ansi.yaml"
+    bad.write_bytes("model_name: caf\xe9\n".encode("latin-1"))
+    with pytest.raises(ValueError, match="UTF-8"):
+        config_schema.read_document(str(bad))
+
+
+def test_the_permission_dataclasses_survive_a_process_boundary():
+    """`make_dataclass` sets `__module__` from the calling frame, so pickle
+    looks the class up in `config_schema` -- where it was never bound. The
+    original `@dataclass` in `config.py` pickled fine, so this was a silent
+    shape regression nothing would notice until one of these crossed a
+    process boundary.
+    """
+    import pickle
+
+    import config
+
+    for name in ("ToolPermissions", "ToolApprovals"):
+        klass = getattr(config, name)
+        revived = pickle.loads(pickle.dumps(klass()))
+        assert revived == klass(), (
+            f"{name} does not survive a pickle round trip as an equal value")
+
+
+def test_the_dataclass_factories_are_idempotent():
+    """Dataclass `__eq__` compares `other.__class__ is self.__class__`, so a
+    second class built from the same values produced instances that compared
+    unequal to the harness's own.
+    """
+    import config
+    import config_schema
+
+    assert config_schema.tool_permissions_dataclass() is config.ToolPermissions
+    assert config_schema.tool_approvals_dataclass() is config.ToolApprovals

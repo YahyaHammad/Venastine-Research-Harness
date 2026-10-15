@@ -32,8 +32,10 @@ import json
 import logging
 import os
 import queue
-from time import monotonic
+import threading
+from dataclasses import replace
 from pathlib import Path
+from time import monotonic, time
 from uuid import UUID
 
 from textual.app import App, ComposeResult
@@ -41,50 +43,95 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.message import Message
-from textual.widgets import Footer, Header
+from textual.widgets import ContentSwitcher, Footer, Header
 from textual.worker import Worker, WorkerState
 
 import config
+import config_edit
+import config_schema
+import config_update
 import storage
 from agents.manager import manager
 from agents.tui_commands import register_agent_commands
-from skills.manager import manager as skills
-from memories.tui_commands import register_memory_commands
-from project_init.tui_commands import register_init_commands
-from skills.tui_commands import register_skill_commands
-from core import config_loader
+from core import config_loader, session_wake, shell_sessions
 from core.agent_activity import AgentActivity
 from core.approval import RunAuthorization
+from core.call_view import call_entries
+from core.cancel import CancelToken
 from core.client import api_initialization, effort_levels_for_model
 from core.loop import (
-    DEFAULT_PROVIDER, DEFAULT_SYSTEM_PROMPT, RunAgentLoop, advertisement_facts,
-    with_goal, with_refs, with_memories, with_todos,
+    DEFAULT_PROVIDER,
+    DEFAULT_SYSTEM_PROMPT,
+    RunAgentLoop,
+    advertisement_facts,
+    with_goal,
+    with_memories,
+    with_refs,
+    with_todos,
 )
 from core.memory import ConversationMemory
-from core.replay import replay_entries
+
 # Module scope, not inside _cmd_research: _split_research_flags needs the
 # sentinel too, and two shells comparing against two different object()
 # instances would look identical and behave differently.
+from core.provider_errors import describe
 from core.reasoning.authorization import GRANT_PICKER, NOTHING_TO_GRANT
+from core.replay import replay_entries
+from core.session_view import live_entries, stored_entries
+from memories.tui_commands import register_memory_commands
+from project_init.tui_commands import register_init_commands
 from prompts import system_prompts
 from safety.policy_enforcement import (
-    redact_output_text, redact_secrets)
-
+    check_output_policy,
+    redact_diagnostic_text,
+    redact_output_text,
+)
+from security import posture
+from skills.manager import manager as skills
+from skills.tui_commands import register_skill_commands
+from tools.base import OPENS_SESSION, OPENS_THREAD
 from tools.builtin import file_ops
 from tools.registry import registry as tool_registry
 from tui import diffs, history, meters, preferences, ravens, themes
-from tui.commands import SlashCommand, registry as commands
+from tui.commands import SlashCommand
+from tui.commands import registry as commands
 from tui.screens import (
-    ClaimsScreen, ConfirmScreen, GrantPickerScreen, PermissionScreen,
-    ProjectKindScreen, QuestionScreen, ReviewScreen, SubagentSignoffScreen,
+    AgentPickerScreen,
+    ClaimsScreen,
+    ConfirmScreen,
+    GrantPickerScreen,
+    PermissionScreen,
+    ProjectKindScreen,
+    QuestionScreen,
+    ReviewScreen,
+    SecretScreen,
+    SessionKillScreen,
+    SubagentSignoffScreen,
     ThreadPickerScreen,
 )
-from security import posture
 from tui.widgets import (
-    AgentPanel, ANIMATION_INTERVAL,
-    CONVERSATION_ROLES, EffortRaven, GoalBanner, PostureBadge, PromptInput,
-    RavenPanel, ResearchProgress, SlashSuggest, ThinkingIndicator, TodoPanel,
-    Transcript, UsageLine,
+    ANIMATION_INTERVAL,
+    CONVERSATION_ROLES,
+    THREAD_VIEW_POLL_S,
+    AgentPanel,
+    AgentRow,
+    CallSelected,
+    EffortRaven,
+    GoalBanner,
+    PostureBadge,
+    PromptInput,
+    RavenPanel,
+    ResearchProgress,
+    SessionPanel,
+    SessionSelected,
+    SlashSuggest,
+    ThinkingIndicator,
+    ThreadCrumb,
+    ThreadSelected,
+    TodoPanel,
+    Transcript,
+    UsageLine,
+    lineage_rows,
 )
 
 logger = logging.getLogger(__name__)
@@ -94,6 +141,22 @@ logger = logging.getLogger(__name__)
 #: `read` is deliberately absent: it changes nothing, so there is no diff
 #: to draw, and its one-line `▸ read  path` already says what happened.
 DIFFED_TOOLS = ("write", "edit")
+
+#: ROADMAP_v3 §49 (SS14). Which of the two session views `_viewing` is
+#: holding. A live one is read from the manager and re-read on a timer;
+#: a stored one is rebuilt once from the archive and never changes
+#: again, so the tag is what keeps the poll off it.
+_VIEW_LIVE = "live"
+_VIEW_STORED = "stored"
+
+#: ROADMAP_v3 §55 (TR10/TR11). The third tag `_viewing` can carry: one
+#: tool call, rebuilt from the archive and never re-read. It joins the
+#: tagged tuples rather than becoming a second flag beside `_viewing`,
+#: for the reason that attribute's own comment gives -- two facts about
+#: which pane is open can be true at once, and one of them gets stale.
+#: `_viewing_live_session` already answers None for it, which is what
+#: keeps the poll off a view that has nothing to re-read (TR11).
+_VIEW_CALL = "call"
 
 #: How much of a file the TUI will hold in order to diff it. NOT
 #: `config.MAX_FILE_SIZE_BYTES`, which is 25 MB -- that is the bound on
@@ -171,8 +234,34 @@ class TranscriptLogHandler(logging.Handler):
             # getMessage(), not self.format(): the file handler owns
             # timestamps and logger names, and repeating them eats a
             # narrow transcript for no gain.
+            text = f"[{record.levelname.lower()}] {record.getMessage()}"
+            # Batch 91. The REASON, when the record carries an exception.
+            # `logger.exception("Tool %s raised; ...")` puts the cause in
+            # exc_info alone, so the transcript said a spawn had failed
+            # and never why -- the why was "The service is temporarily
+            # unavailable", which would have answered the question at once.
+            # One line, not the traceback: the log file keeps that.
+            failure = record.exc_info[1] if record.exc_info else None
+            if failure is not None:
+                text = f"{text} ({describe(failure)})"
+            # Redacted, which this line never was: the log FILE has been
+            # redacted at its formatter since #132, and this handler posted
+            # the raw message beside it -- a warning interpolating a URL or
+            # an exception reached the screen with its key intact. The same
+            # rule as the file (owner decision), so the two places the
+            # harness's own diagnostics go cannot disagree about a secret.
+            #
+            # AND THEY NO LONGER DO (batch 144). That last sentence
+            # was false for forty-six days in two separate ways: this line
+            # applied `redact_secrets` alone, which is the seven vendor
+            # tokens, so a quoted password assignment reached the screen --
+            # and it applied no value redaction at all, so the harness's
+            # OWN stored value, the one thing SS61 calls unconditional,
+            # was drawn here verbatim while app.log redacted it. One name
+            # now, and `redact_diagnostic_text` is where the order and the
+            # vocabulary are decided for all five sinks.
             self._app.post_message(LogRecordMessage(
-                f"[{record.levelname.lower()}] {record.getMessage()}",
+                redact_diagnostic_text(text),
                 "error" if record.levelno >= logging.ERROR else "warning",
             ))
         except Exception:  # noqa: BLE001 -- see the docstring
@@ -224,6 +313,22 @@ class TurnFinished(Message):
 
     def __init__(self, error: BaseException | None = None) -> None:
         self.error = error
+        super().__init__()
+
+
+class SessionNote(Message):
+    """A line the background-session wait loop needs written (§49, SS5).
+
+    The loop runs on the turn worker, so it owns no widget; this is the
+    same post-rather-than-touch split `TuiActivity` keeps. It carries a
+    palette role rather than a rendered line because the two it writes
+    are different voices: `wake` is the harness opening a turn, and
+    `system` is the shell explaining that it has stopped waking.
+    """
+
+    def __init__(self, role: str, text: str) -> None:
+        self.role = role
+        self.text = text
         super().__init__()
 
 
@@ -301,7 +406,61 @@ class AgentStackChanged(Message):
 
     def __init__(self, stack) -> None:
         super().__init__()
+        # AgentRow records since §47, not (name, depth) tuples: a row
+        # has to name a RUN for a click on it to mean anything.
         self.stack = list(stack)
+
+
+class SessionRowsChanged(Message):
+    """The set of background sessions moved (§49, SS14).
+
+    Carries every row, live and finished, exactly as the manager posted
+    them -- `AgentStackChanged`'s snapshot rule, and for its reason: the
+    sink runs on the manager's threads and the handler on the UI thread,
+    so a delta would have the panel reassembling an order it never saw.
+
+    FILTERED ON THE UI SIDE, not here. The panel shows live sessions
+    only (SS14), and doing that in the handler keeps this message a
+    faithful copy of what the manager said rather than a view of it --
+    which is what lets a second reader be added without the first one's
+    filter being in the way.
+    """
+
+    def __init__(self, rows) -> None:
+        super().__init__()
+        self.rows = list(rows)
+
+
+class TuiSessions(shell_sessions.SessionActivity):
+    """core/shell_sessions.py's sink, wired to the sidebar (§49, SS14).
+
+    CALLED ON THE MANAGER'S OWN THREADS -- a supervisor thread finishing
+    a session, a reader thread matching a line, the turn worker starting
+    one -- so it touches no widget and posts instead, exactly as
+    `TuiActivity` above and `_consume` do. `post_message` is the
+    thread-safe half of the API.
+
+    HOLDS NOTHING. `TuiActivity` keeps a stack because it is told about
+    enter and exit separately and has to assemble the answer; the
+    session manager hands over the whole set every time, so keeping a
+    copy here would be a second writer of something already authoritative
+    somewhere else.
+
+    A RAISE HERE IS ALREADY CONTAINED by the manager (`_post` logs and
+    carries on), which is why this can be plain: display machinery must
+    not fail the session it describes.
+    """
+
+    def __init__(self, app) -> None:
+        self._app = app
+
+    def changed(self, rows) -> None:
+        self._app.post_message(SessionRowsChanged(rows))
+
+    def wake_ready(self, thread_id: str) -> None:
+        """Nothing to draw. The turn worker's own `wait_for_wake` is what
+        answers a ready batch (batch 97), and a panel that redrew here
+        would be redrawing what `changed` already said."""
 
 
 class TuiActivity(AgentActivity):
@@ -311,8 +470,29 @@ class TuiActivity(AgentActivity):
     registry.dispatch(), which is inside the loop generator this app
     drains in run_worker(thread=True). So this touches no widget and
     posts instead, exactly as _consume does; post_message is the
-    thread-safe half of the API and `self._stack` below is read and
-    written only here, under the worker's own serialisation.
+    thread-safe half of the API.
+
+    CALLED ON SEVERAL WORKER THREADS SINCE §47 SLICE 8, and this docstring
+    used to finish the paragraph above with "`self._stack` is read and
+    written only here, under the worker's own serialisation". That was
+    true and measured for as long as one agent ran at a time. NA9 makes
+    two children of one response peers, so both halves of the claim went:
+    still only here, no longer serialised.
+
+    ALL THREE MUTATORS REBUILD OR APPEND, WHICH IS WHAT MAKES A LOCK THE
+    FIX rather than a nicety. `exit` and `bind` are read-rebuild-assign,
+    so two of them at once each filter the list they read and the second
+    assignment wins -- resurrecting the row the first removed. That is a
+    row describing a finished run left on screen for the session, which is
+    exactly the failure `span()`'s `finally` is structural to prevent,
+    reached from the other side. `enter`'s append races them the opposite
+    way: appended to the list the rebuild already copied, and lost.
+
+    THE POSTED STACK IS A SNAPSHOT, never the live list. The UI thread
+    stores `message.stack` and iterates it; handing it the object this
+    object goes on appending to makes the worker a second writer of what
+    the UI thread is reading. Cheap -- these lists hold at most root plus
+    SUBAGENT_MAX_DEPTH times SUBAGENT_MAX_PARALLEL rows.
 
     The stack is kept HERE rather than on the app because the enter/exit
     pairing is this object's business: the app holds what it was last
@@ -323,25 +503,131 @@ class TuiActivity(AgentActivity):
     def __init__(self, app) -> None:
         self._app = app
         self._stack: list = []
+        # Guards the three mutators against each other. Plain Lock, not
+        # RLock: none of them calls another, and `_post` is deliberately
+        # outside the held region.
+        self._lock = threading.Lock()
 
     def enter(self, span) -> None:
-        self._stack.append((span.name, span.depth))
-        self._post()
+        with self._lock:
+            self._stack.append(
+                AgentRow(span.name, span.depth, span.id,
+                         call_id=span.call_id,
+                         # Slice 8. The panel orders by lineage now, so
+                         # the row has to carry one. Already on the span
+                         # since batch 67; this is the one hop that was
+                         # missing between the two.
+                         parent_id=span.parent_id))
+            snapshot = list(self._stack)
+        self._post(snapshot)
 
     def exit(self, span) -> None:
-        # Remove the LAST matching entry, not the first: two spans can
-        # legitimately share a name and a depth across one turn (a goal
-        # turn spawning `explore` twice), and popping the wrong one would
-        # leave the panel one row off for the rest of the run.
-        entry = (span.name, span.depth)
-        for i in range(len(self._stack) - 1, -1, -1):
-            if self._stack[i] == entry:
-                del self._stack[i]
-                break
-        self._post()
+        # BY ID since §47, and that retires a workaround rather than
+        # changing a policy. This used to remove the LAST entry matching
+        # (name, depth), because two spans can legitimately share both
+        # across one turn -- a goal turn spawning `explore` twice -- and
+        # the sink had no way to tell them apart. Removing the wrong one
+        # left the panel one row off for the rest of the run, and now
+        # there is no wrong one to remove.
+        #
+        # Slice 8 is what makes the by-id removal load-bearing rather than
+        # merely correct: two runs of one agent open as PEERS, either able
+        # to finish first, is the ordinary case now.
+        with self._lock:
+            self._stack = [row for row in self._stack
+                           if row.span_id != span.id]
+            snapshot = list(self._stack)
+        self._post(snapshot)
 
-    def _post(self) -> None:
-        self._app.post_message(AgentStackChanged(self._stack))
+    def bind(self, span_id, thread_id) -> None:
+        """That run's thread exists; give its row an address (§47).
+
+        Rebuilt rather than mutated because AgentRow is frozen, for
+        AgentSpan's reason: these records are posted to the UI thread
+        and read there, so a mutable one would be a second writer of
+        the stack.
+
+        Silently does nothing for a span that has already exited, which
+        is reachable: a run whose thread is created as the app is being
+        torn down. A row that is gone needs no address.
+        """
+        with self._lock:
+            self._stack = [
+                replace(row, thread_id=thread_id) if row.span_id == span_id
+                else row
+                for row in self._stack
+            ]
+            snapshot = list(self._stack)
+        self._post(snapshot)
+
+    def _post(self, snapshot: list) -> None:
+        """Hand the UI thread one snapshot. Called outside the lock.
+
+        Outside deliberately: `post_message` reaches Textual's own
+        machinery, and holding this object's lock across another
+        subsystem's call is how a lock ordering nobody wrote down comes
+        into existence.
+        """
+        self._app.post_message(AgentStackChanged(snapshot))
+
+
+def _redacted_command(row) -> str:
+    """One session's command, through the real output policy (§49).
+
+    REDACTED THROUGH THE REAL POLICY, named for the tool that started the
+    session, exactly as core/session_wake.py renders the same command for
+    the model. A modal and a sidebar are display surfaces like any other,
+    and a command carrying a secret does not become safe by being shown
+    to the person who typed it.
+
+    ONE PRODUCER for the picker and the panel, because they draw the same
+    command at two widths and a second call site is how one of them comes
+    to skip the policy.
+    """
+    tool = session_wake.TOOL_FOR_KIND.get(row.kind, "shell_background")
+    return check_output_policy(tool, {"command": row.command})["command"]
+
+
+def _panel_rows(rows) -> list[dict]:
+    """`SessionRow`s as the session panel's `{id, label}` pairs (SS14).
+
+    EIGHTEEN COLUMNS, so the label is the id and as much of the command
+    as fits -- the widget elides, and what it elides from has to be the
+    part that identifies the session rather than a prefix of `docker`.
+    A monitor's match count rides along when there is one, because "it
+    has matched something" is the whole reason a monitor is on screen.
+
+    Module-level beside `_kill_rows`, for its reason.
+    """
+    out = []
+    for row in rows:
+        matches = (f" {row.match_count}✓"
+                   if row.kind == "monitor" and row.match_count else "")
+        out.append({"id": row.id,
+                    "label": f"{row.id}{matches} {_redacted_command(row)}"})
+    return out
+
+
+def _kill_rows(rows) -> list[dict]:
+    """`SessionRow`s as the kill picker's `{id, label}` pairs (§49, SS2).
+
+    Module-level so a test can build the labels without an app, and so the
+    screen stays a screen: tui/screens.py imports no core module, and
+    teaching it to redact would be the first.
+    """
+    out = []
+    for row in rows:
+        command = _redacted_command(row)
+        elapsed = max(0, int(time() - row.started_wall))
+        out.append({
+            "id": row.id,
+            # The id leads: it is what `/kill <id>` and the model's own
+            # `shell_kill` both take, so the picker teaches the name of
+            # the thing it is stopping.
+            "label": f"{row.id}  {row.kind}  {elapsed}s  {command}",
+        })
+    return out
+
 
 class VenastineApp(App):
     """Chat + research shell."""
@@ -375,16 +661,70 @@ class VenastineApp(App):
         # silently delete the rest of the typed line instead. Still true
         # after batch 54 swapped Input for TextArea: BOTH bind ctrl+k,
         # and neither binds ctrl+l, which App and Footer also leave free
-        # (D22: verified against the installed version, not assumed).
+        # (D22: verified against the installed version, not assumed --
+        # re-verified when the pin moved to 8.2.8, unchanged).
         ("ctrl+l", "show_claims", "Claims"),
+        # §47. The keyboard route to what the sidebar offers on a
+        # click, because the sidebar is deliberately not focusable
+        # (batch 59 refused a tab stop and refused to take the arrows).
+        #
+        # ctrl+g, and the letter was chosen by ELIMINATION rather than
+        # by taste. `TextArea` claims a/c/d/e/f/k/u/v/w/x/y/z and the
+        # prompt holds focus almost always; `App` claims ctrl+c and
+        # ctrl+q; textual claims ctrl+p for the palette; and this app
+        # already holds ctrl+t, ctrl+l and ctrl+up/down. Measured off
+        # the installed version, not assumed (D22).
+        ("ctrl+g", "pick_agent", "Runs"),
+        # §49 (SS2). The one control that stays usable while background
+        # sessions are blocking input, so it has to be a KEY rather than
+        # only a command: `/kill` is typed into the prompt, and the prompt
+        # is where the block is felt.
+        #
+        # ctrl+b, chosen by ELIMINATION like ctrl+g and ctrl+l before it,
+        # measured against the installed textual (8.2.8, D22) rather than
+        # assumed. `TextArea` claims a/c/d/e/k/u/v/w/x/y/z and the prompt
+        # holds focus almost always; `App` claims ctrl+c and ctrl+q;
+        # textual claims ctrl+p for the palette; `PromptInput` claims
+        # ctrl+j for its newline; this app already holds ctrl+t, ctrl+l,
+        # ctrl+g and ctrl+up/down. Of what is left, ctrl+h/i/j/m ARE
+        # backspace, tab, LF and CR at the terminal and can never be
+        # bound, and ctrl+s/ctrl+q are software flow control. That leaves
+        # b, n, o and r -- and b is the only one that also says what it
+        # does.
+        ("ctrl+b", "kill_session", "Stop"),
+        # §47. Escape leaves the read-only thread view, and check_action
+        # keeps it OFF at every other moment -- the prompt binds escape
+        # to dismissing the slash panel, and a live app binding would
+        # shadow it. One rule, and it never surprises: escape always
+        # means "back to the conversation", never "up one level", which
+        # is what the crumb's clickable segments are for.
+        Binding("escape", "close_thread_view", "Back", show=False),
+        # ROADMAP_v3 §61 (CN8). The SECOND app-level binding on escape,
+        # and the pair works the way the ctrl+c pair does: whichever
+        # `check_action` refuses with False gives up the slot, so one
+        # key reaches two actions without either shadowing the other.
+        #
+        # NOT priority=True. The prompt binds escape to dismissing its
+        # suggestion panel and gates that with check_action -- "with no
+        # panel open they are the keys they have always been: tab moves
+        # focus, escape reaches whoever wants it" -- so this IS whoever
+        # wants it, and taking priority would break the panel instead.
+        #
+        # The resulting rule is still one sentence: escape means back to
+        # the conversation. Closing a read-only view and stopping a turn
+        # that is running are both that.
+        Binding("escape", "cancel_turn", "Stop", show=False),
         # Batch 63. ctrl+UP/DOWN, and the pair was chosen by
         # elimination rather than by taste. ctrl+p is textual's
         # COMMAND_PALETTE_BINDING, bound priority=True, and the
         # palette is enabled on purpose here -- `watch_theme` exists
         # because it sets App.theme directly. Relocating it to
-        # ctrl+shift+p would delete it on Windows: that chord is
-        # indistinguishable from ctrl+p without the kitty protocol,
-        # which textual turns on in its LINUX drivers alone.
+        # ctrl+shift+p is still wrong, though the reason narrowed
+        # when the pin moved: that chord is indistinguishable from
+        # ctrl+p without the kitty protocol, which textual turned on
+        # in its LINUX drivers alone until 6.6.0 added the Windows
+        # one. It would have deleted the palette on Windows; it now
+        # makes it depend on the terminal, which is not better.
         #
         # The plain arrows were the other candidate and are already
         # spoken for twice -- cursor movement in a box batch 54 made
@@ -414,6 +754,19 @@ class VenastineApp(App):
     _quit_armed = False
     _quit_timer = None
 
+    # §49 (SS6). Whether the "stop what is running?" prompt is already up,
+    # so a second confirm-quit goes rather than stacking another copy of
+    # it. A CLASS attribute for the reason the two above are: bare-built
+    # apps across the suite reach `quit_with_sessions` without __init__
+    # having run the way a mounted app's does.
+    _quit_asking = False
+
+    # Batch 84. The config key whose write is waiting for this turn to end
+    # before the harness relaunches, or None. A CLASS attribute for
+    # `_shutting_down`'s reason -- the `_busy` setter reads it, and that
+    # setter runs on bare-built apps across the suite.
+    _pending_restart = None
+
     # Batch 61. CLASS-level defaults, so an app built with __new__ and
     # no __init__ -- four tests do exactly that, to exercise one method
     # against a handful of injected attributes -- can assign `_busy`
@@ -428,11 +781,28 @@ class VenastineApp(App):
     _last_turn_elapsed = None
     _turn_output_tokens = None
     _history = None
+    # ROADMAP_v3 §61 (CN9). The live turn's CancelToken, or None between
+    # turns. A CLASS attribute for `_pending_restart`'s reason: the
+    # binding's check_action reads it, and that runs on bare-built apps
+    # across the suite.
+    #
+    # THIS, not `_busy`, is what the binding asks. `_busy` is also true
+    # through the post-turn session wait, where SS2 keeps ctrl+b
+    # reachable precisely so the user can stop what is running there --
+    # a second key meaning something adjacent would make neither clear.
+    _cancel = None
 
     def __init__(self, provider_name: str = DEFAULT_PROVIDER,
                  model: str = None, settings: dict | None = None,
-                 cli_pinned: bool = False):
+                 cli_pinned: bool = False,
+                 startup_notices: "list[str] | None" = None):
         super().__init__()
+        # Batch 121. Lines main() established before this screen existed
+        # and that the app cannot recompute -- a file it created, a
+        # terminal it could not free. COPIED, because the caller's list is
+        # still being appended to right up to the run() call and a shared
+        # reference would read whatever it ended as.
+        self._startup_notices = list(startup_notices or ())
         self.provider_name = provider_name
         self.model = model or config.MODEL_NAME
         self._settings = settings or {}
@@ -521,7 +891,97 @@ class VenastineApp(App):
         # The transcript, held rather than re-queried. See the `_transcript`
         # property and on_mount; None until mounted, which is the state
         # every test that builds this app without a pilot is in.
-        self._transcript_widget: "Transcript | None" = None
+        self._transcript_widget: Transcript | None = None
+        # §47's viewer. Held for the same reason the transcript is (batch
+        # 66): the poll below writes from a timer callback, which can
+        # fire while a modal is up, and `query_one` searches the ACTIVE
+        # screen. None until mounted.
+        self._thread_view_widget: Transcript | None = None
+        self._session_view_widget: Transcript | None = None
+        self._call_view_widget: Transcript | None = None
+        self._crumb_widget: ThreadCrumb | None = None
+        self._pane_widget = None
+        # The sidebar usage line and the raven, held for the transcript's
+        # reason (batch 66): on_loop_event_message touches both on EVERY
+        # event, and a permission_request event is handled after the worker
+        # has already pushed the modal it announces (post_message only
+        # enqueues; the push is a direct loop callback), so the very first
+        # gated call of a session died in refresh_usage_line with
+        # NoMatches. None until mounted, like the four above.
+        self._usage_widget: UsageLine | None = None
+        self._raven_widget: RavenPanel | None = None
+        # Goal banner, checklist and research progress, held for the same
+        # reason: refresh_goal_banner/refresh_todo_panel run off notice
+        # events (postable mid-modal), and on_pipeline_event_message
+        # touches the progress widget while an attended-review modal can
+        # be open. None until mounted, like the five above.
+        self._goal_widget: GoalBanner | None = None
+        self._todo_widget: TodoPanel | None = None
+        self._progress_widget: ResearchProgress | None = None
+        # What the viewer is showing, or None when it is closed.
+        # THE ONE FACT that says whether the viewer is open; everything
+        # else -- the switcher's `current`, the crumb's rows, the
+        # prompt's disabled flag, whether escape is bound -- is derived
+        # from it, so they cannot drift into disagreeing.
+        #
+        # §49 (SS14) WIDENED IT to hold a background session as well as
+        # a stored thread, which is what the roadmap's adopted default
+        # said to do and is worth saying why: a second flag beside it
+        # would be a second answer to "is the viewer open", and the two
+        # could be true at once -- the exact drift the paragraph above
+        # exists to prevent, reached by adding a fact rather than by
+        # letting one get stale. A UUID is a thread; a tuple is a
+        # session, `(_VIEW_LIVE, session id)` while this process still
+        # holds it and `(_VIEW_STORED, call id)` when it is rebuilt from
+        # the archive. `_viewing_thread` and `_viewing_live_session` are
+        # the two accessors that ask, so nothing else type-sniffs.
+        #
+        # §55 (TR10) ADDS A THIRD TAG, `(_VIEW_CALL, call id)`, for one
+        # tool call. It needed no new accessor: `_viewing_thread` is
+        # already None for any tuple and `_viewing_live_session` already
+        # tests the tag, so the poll stays off it by the rule that was
+        # written for a rebuilt session (TR11).
+        self._viewing = None
+        self._view_timer = None
+        # How many ARCHIVE entries the viewer last drew, which is what the
+        # poll compares against. Not the pane's own entry count: the two
+        # differ whenever the paint drops something (a reasoning span with
+        # /thinking off) or adds something (the empty-run placeholder), and
+        # a repaint on every tick fights the reader's scroll position.
+        self._viewed_entries = 0
+        # §47. Spawn call id -> the thread that call created, as TEXT
+        # both sides, because it arrives from style metadata.
+        #
+        # ONE map, THREE sources, and they are three because a spawn
+        # line outlives every one of them individually:
+        #
+        #   the agent stack   while the child RUNS -- its span carries
+        #                     the call and its bound thread, so the
+        #                     line opens before the result comes back.
+        #   the tool result   after it finishes, which is when the span
+        #                     is gone and the row with it.
+        #   child_threads()   on a REPLAY, where neither ever happened
+        #                     in this process.
+        #
+        # Per-thread state: `reset()`'s list, since the keys are call
+        # ids of one conversation's calls.
+        self._spawn_threads: dict = {}
+        # §49 (SS14). Start-call id -> the session that call created, as
+        # TEXT both sides, for `_spawn_threads`' reason.
+        #
+        # ONE SOURCE, not three, and the asymmetry is the point: the
+        # tool result names the session in the same step the call was
+        # made (D20), so there is no window like a spawn's where the
+        # line exists and the target does not. What a spawn needs the
+        # other two sources for -- a run still going, and a replay --
+        # a session answers differently: the manager holds the live one
+        # and the archive rebuilds the finished one, both keyed by the
+        # call id the LINE already carries. So this map is an
+        # optimisation for the common case, never the only route, and
+        # `open_session_call` works with it empty.
+        #
+        # Per-thread state: `reset()`'s list, beside `_spawn_threads`.
+        self._session_calls: dict = {}
         self._permission_channel: queue.Queue | None = None
         # Batch 61. BEFORE the `_busy` assignment below, which is a
         # property setter now and drives this object.
@@ -536,7 +996,7 @@ class VenastineApp(App):
         self._last_turn_elapsed = None
         #: The finished turn's OUTPUT tokens, off the terminal
         #: response. None where the provider reports no usage, which
-        #: is sixteen of the nineteen configured ones -- and None is
+        #: is twelve of the fifteen configured ones -- and None is
         #: why the completion line can decline to claim a count
         #: instead of printing a zero.
         self._turn_output_tokens = None
@@ -586,6 +1046,14 @@ class VenastineApp(App):
         # keeps its own copy on the worker side. One writer each.
         self._agent_stack: list = []
         self._activity = TuiActivity(self)
+        # §49 (SS14). The session manager's sink. Registered at
+        # mount and dropped at unmount, because it is PROCESS-wide
+        # state (`shell_sessions.sessions` is a module singleton)
+        # while this object is one app: a sink left behind would
+        # post into a dead app, which is what the suite does every
+        # time it mounts a second one.
+        self._session_sink = TuiSessions(self)
+        self._session_panel_widget: SessionPanel | None = None
 
     # -- layout --------------------------------------------------------------
 
@@ -602,7 +1070,43 @@ class VenastineApp(App):
                 # mid-session is machinery with no user.
                 if self._todo_position == "top":
                     yield TodoPanel(id="todo-panel")
-                yield Transcript(id="transcript")
+                # §47. The trail, above whichever pane is showing.
+                # Hidden until the viewer opens, GoalBanner-style.
+                yield ThreadCrumb(id="thread-crumb")
+                # §47. A SWITCHER rather than a modal, and the sidebar
+                # is why: it lives outside #main, so it stays live and
+                # interactive while a stored thread is on screen. A
+                # modal would have to compose its own copy of the agent
+                # list to offer the same thing, which is two independent
+                # writers of one piece of display state -- the bug shape
+                # this project has already found and fixed once.
+                #
+                # BOTH panes stay mounted; only `current` changes. That
+                # is what lets a running turn go on writing to the live
+                # transcript while you read something else, with no
+                # buffering and nothing to flush on the way back. A hidden
+                # pane measures 0, so each one writes at the width of the
+                # pane on screen (`Transcript._region_width`) -- or what
+                # the turn wrote behind the viewer came back wrapped at 78.
+                with ContentSwitcher(initial="transcript", id="pane"):
+                    yield Transcript(id="transcript")
+                    yield Transcript(id="thread-view")
+                    # ROADMAP_v3 §49 (SS14). A third child of the same
+                    # switcher: a session is read the way a stored run
+                    # is, so it belongs beside it rather than in a
+                    # modal that would hide the sidebar saying what
+                    # else is running.
+                    yield Transcript(id="session-view")
+                    # ROADMAP_v3 §55 (TR10). A FOURTH child, and the
+                    # reason is not the one the third had. `#session-view`
+                    # exists separately because the thread poll would
+                    # wipe anything drawn into `#thread-view`; this view
+                    # is never polled, so that argument does not apply.
+                    # What applies is that a pane named for sessions
+                    # holding a tool call is a name that lies, and
+                    # `close_thread_view` resetting every pane stays a
+                    # statement rather than a hope.
+                    yield Transcript(id="call-view")
                 # §38. Between the transcript and the prompt, so the
                 # collapsed thinking line reads as the bottom of the
                 # conversation. Hidden until a span starts, TodoPanel-style,
@@ -635,6 +1139,13 @@ class VenastineApp(App):
                 # rather than among the figures. Hidden until there is an
                 # agent or a spawn, PostureBadge-style.
                 yield AgentPanel(id="agent-panel")
+                # ROADMAP_v3 §49 (SS14). Directly under the agent
+                # panel, because the two answer one question between
+                # them -- who is working, and what is running for
+                # them -- and a session almost always belongs to the
+                # run named above it. Hidden until something is live,
+                # AgentPanel-style.
+                yield SessionPanel(id="session-panel")
                 # #4: billed-since-resume and current context size, one
                 # line. Hidden until a turn produces figures.
                 yield UsageLine(id="usage-line")
@@ -650,6 +1161,30 @@ class VenastineApp(App):
         # on top. See the `_transcript` property for why holding it is
         # what makes that survivable.
         self._transcript_widget = self.query_one("#transcript", Transcript)
+        self._usage_widget = self.query_one("#usage-line", UsageLine)
+        self._raven_widget = self.query_one("#raven", RavenPanel)
+        self._goal_widget = self.query_one("#goal-banner", GoalBanner)
+        self._todo_widget = self.query_one("#todo-panel", TodoPanel)
+        self._progress_widget = self.query_one(
+            "#research-progress", ResearchProgress)
+        self._thread_view_widget = self.query_one("#thread-view", Transcript)
+        self._session_view_widget = self.query_one(
+            "#session-view", Transcript)
+        self._call_view_widget = self.query_one("#call-view", Transcript)
+        self._crumb_widget = self.query_one("#thread-crumb", ThreadCrumb)
+        self._pane_widget = self.query_one("#pane", ContentSwitcher)
+        self._session_panel_widget = self.query_one(
+            "#session-panel", SessionPanel)
+        # §49 (SS14). Registered here rather than at construction
+        # because the first thing the sink does is post, and a
+        # message posted before the widgets exist is a message
+        # whose handler queries a panel that is not there yet.
+        shell_sessions.sessions.set_sink(self._session_sink)
+        # What is already running, for a shell that mounted while
+        # sessions were live -- the sink only speaks on a CHANGE,
+        # so without this the panel would stay blank until the
+        # next one moved.
+        self.refresh_session_panel(shell_sessions.sessions.rows())
         # Attached before anything else can log. Removed in on_unmount --
         # the handler holds a reference to this app, so leaving it on the
         # root logger would keep a dead app alive and, in the test suite,
@@ -688,6 +1223,20 @@ class VenastineApp(App):
         # provider or a missing key is the same fact at both moments.
         for warning in self._startup_warnings:
             self._transcript.write_error(warning)
+        # Batch 121. Beside batch 87's for the same reason, and ABOVE it
+        # because these are facts about this launch rather than about the
+        # install: "I created your user-level mcp.json" is the first thing
+        # to read if you are about to go looking for it.
+        for line in self._startup_notices:
+            self._transcript.write_system(line)
+        # Batch 87. Same rule, one batch later and a different source: an
+        # `npm update` replaces config.yaml, config_update.py merges the
+        # user's values back in and PRINTS what it kept and dropped -- to a
+        # stdout this screen is about to erase. The file it also leaves is
+        # what survives that, and this is where a person reads it.
+        for line in config_update.unseen_report():
+            self._transcript.write_system(line)
+        config_update.mark_report_seen()
         self._transcript.write_system("Type /help for commands.")
         prompt = self.query_one("#prompt", PromptInput)
         # Batch 55. Handed over once, here, rather than looked up per
@@ -714,7 +1263,7 @@ class VenastineApp(App):
         Three fallbacks to the configured theme, and the third is the one
         that is easy to miss. App.theme VALIDATES against
         available_themes and raises InvalidThemeError on a name it does
-        not know (verified against the pinned textual 1.0.0, per D22), so
+        not know (verified against the installed textual, per D22), so
         a store written by a build with a theme this one has retired --
         or by a future build with more of them -- would be a crash at
         mount rather than a preference nobody could honour. themes.resolve
@@ -819,10 +1368,38 @@ class VenastineApp(App):
             theme, self._settings_theme)
 
     def on_unmount(self) -> None:
+        # BATCH 145. The release used to live only in `exit()`,
+        # which is every DELIBERATE route out and not the involuntary one:
+        # textual's `_handle_exception` goes to `_fatal_error()` ->
+        # `_close_messages_no_wait()` and never calls `App.exit()`. So an
+        # unhandled UI error tore the app down with a worker still parked
+        # in `channel.get(timeout=ATTENDED_APPROVAL_TIMEOUT_S)` -- 600s as
+        # shipped, on a NON-daemon executor thread that holds `App.run()`,
+        # which presents as a hang rather than an error.
+        #
+        # Measured, against a real App subclass mirroring this exit funnel:
+        # a deliberate quit reached exit() and this handler; an unhandled
+        # exception reached ONLY this handler. So this is the funnel both
+        # paths share, which is the property `exit()` was chosen for and
+        # does not have.
+        #
+        # `exit()` keeps its own copy of these two lines. The release
+        # reads-and-clears, so it is idempotent, and setting the flag
+        # twice costs nothing -- while removing it from `exit()` would
+        # make the window between a quit and the unmount a window with no
+        # flag set, which is precisely what the seven `ask_*_blocking`
+        # guards are for.
+        self._shutting_down = True
+        self._release_permission_channel()
         handler = getattr(self, "_log_handler", None)
         if handler is not None:
             logging.getLogger().removeHandler(handler)
             self._log_handler = None
+        # §49 (SS14), beside the log handler and for its reason:
+        # both are process-wide registrations this app made, and
+        # one left behind outlives the widgets it posts to.
+        if shell_sessions.sessions.sink is self._session_sink:
+            shell_sessions.sessions.set_sink(None)
 
     def on_log_record_message(self, message: LogRecordMessage) -> None:
         """Render a routed log record in the role the handler chose.
@@ -897,6 +1474,15 @@ class VenastineApp(App):
             # Idempotent. `_busy = True` is assigned twice on at least
             # one path, and the second must not restart the clock.
             return
+        if not value and self._pending_restart is not None:
+            # Batch 84. A turn just ended and a `/config` write is waiting
+            # on it. Deferred to the message pump rather than exiting from
+            # inside this setter: the assignment happens in the middle of
+            # on_turn_finished, which still has a transcript to write and a
+            # meter to stop after it returns. Below the bare-app guard for
+            # the same reason everything else here is -- an app with no
+            # screen has no pump to defer onto.
+            self.call_after_refresh(self._fire_pending_restart)
         now = monotonic()
         if value:
             self._meter.start(now)
@@ -904,6 +1490,57 @@ class VenastineApp(App):
             self._last_turn_elapsed = self._meter.stop(now)
         self._sync_meter_timer()
         self._refresh_meter()
+
+    # -- what is occupying the shell (ROADMAP_v3 §49, SS2) ------------------
+
+    @property
+    def _session_thread(self):
+        """The thread the session manager knows this shell by, or None.
+
+        `_memory`, NEVER `memory`: the public property constructs a
+        ConversationMemory and writes a ConversationThread row on first
+        touch, and asking "is anything running?" must not be what creates
+        a conversation. A shell with no thread yet owns no sessions, which
+        is what None means to every caller here.
+        """
+        return getattr(self._memory, "thread_id", None)
+
+    def refuse_if_occupied(self, action: str) -> bool:
+        """Whether `action` must be refused right now, saying why.
+
+        SS2 gives the shell a SECOND way to be occupied. Before this, one
+        condition (`_busy`) was checked at eight sites with the same three
+        lines copied between them; live background sessions add a
+        condition that blocks the same set of actions for a different
+        reason and with a different remedy. Eight sites growing a second
+        clause each is how the two halves of one question drift apart --
+        the ratchet G3 removed, reached from the other side -- so the
+        question is asked in one place and the sites ask it.
+
+        SESSIONS FIRST, because that message is the actionable one. While
+        the wake loop runs, `_busy` is True *because* sessions are live, so
+        "Still working" would be true and useless: it names no way out.
+        The session message names the key that ends the wait. Once nothing
+        is live, `_busy` answers for an ordinary turn as it always did.
+
+        Deliberately NOT a gate on the prompt widget. The box stays
+        editable (`_set_prompt_enabled` is the viewer's affordance, not
+        this one) because the commands SS2 keeps usable -- `/kill`, quit --
+        are typed into it.
+        """
+        thread_id = self._session_thread
+        if thread_id is not None and shell_sessions.sessions.blocks(thread_id):
+            live = shell_sessions.sessions.live_for(thread_id)
+            plural = "" if live == 1 else "s"
+            self._transcript.write_error(
+                f"{live} background session{plural} still running — "
+                f"{action} once they finish, or press ctrl+b to stop them.")
+            return True
+        if self._busy:
+            self._transcript.write_error(
+                "Still working — wait for this turn to finish.")
+            return True
+        return False
 
     def _sync_meter_timer(self) -> None:
         """Tick only while a turn is running (ThinkingIndicator's rule).
@@ -974,7 +1611,7 @@ class VenastineApp(App):
 
         The exact token count is the provider's own, and where a
         provider reports none NO TOKEN CLAIM IS MADE -- a zero would
-        say the model wrote nothing on sixteen of the nineteen
+        say the model wrote nothing on twelve of the fifteen
         configured providers (D21: OpenAI-compatible streaming reports
         no usage unless stream_options is sent, which Mistral rejects
         outright)."""
@@ -1140,15 +1777,42 @@ class VenastineApp(App):
         # until that thread's first turn rather than keeping the previous
         # thread's totals. Pre-mount setter calls have no widget yet.
         try:
-            self.query_one("#usage-line", UsageLine)._reset()
+            self._usage_line._reset()
         except Exception:  # noqa: BLE001 -- not mounted; nothing to reset
             pass
+
+    @property
+    def _goal_banner(self) -> GoalBanner:
+        """The objective banner, HELD rather than queried per access.
+
+        Same reason as `_usage_line`: refresh_goal_banner() runs off
+        notice events and resume paths, both reachable with a modal on
+        top. Nothing ever remounts it; the query remains as the fallback
+        for an app that was constructed but never mounted.
+        """
+        if self._goal_widget is not None:
+            return self._goal_widget
+        return self.query_one("#goal-banner", GoalBanner)
+
+    @property
+    def _todo_panel(self) -> TodoPanel:
+        """The checklist, HELD rather than queried per access.
+
+        Same reason as `_goal_banner` beside it: refresh_todo_panel()
+        runs off the `todo_changed` notice, which a worker can post
+        while a modal is open. Nothing ever remounts it (its slot is
+        chosen once at mount); the query remains as the fallback for
+        an app that was constructed but never mounted.
+        """
+        if self._todo_widget is not None:
+            return self._todo_widget
+        return self.query_one("#todo-panel", TodoPanel)
 
     def refresh_goal_banner(self) -> None:
         # self._memory, NOT self.memory: reading the banner must not be
         # what creates the thread this property exists to defer.
         goal = self._memory.extra.get("goal") if self._memory else None
-        self.query_one("#goal-banner", GoalBanner).goal = goal
+        self._goal_banner.goal = goal
 
     def refresh_todo_panel(self) -> None:
         """Re-read the checklist from thread state and repaint.
@@ -1162,7 +1826,7 @@ class VenastineApp(App):
         painting a panel must not be what creates a thread.
         """
         todos = self._memory.extra.get("todos") if self._memory else None
-        self.query_one("#todo-panel", TodoPanel).todos = todos
+        self._todo_panel.todos = todos
 
     @property
     def _transcript(self) -> Transcript:
@@ -1201,11 +1865,848 @@ class VenastineApp(App):
         return self.query_one("#transcript", Transcript)
 
     @property
+    def _usage_line(self) -> UsageLine:
+        """The sidebar usage line, HELD rather than queried per access.
+
+        Same reason as `_transcript` above: on_loop_event_message calls
+        refresh_usage_line() on EVERY event, and an event posted before
+        its modal is pushed is handled after -- at which point a query
+        for anything on the main screen raises NoMatches out of the
+        handler and takes the app down. Nothing ever remounts this
+        widget, so the reference cannot go stale; the query remains as
+        the fallback for an app that was constructed but never mounted.
+        """
+        if self._usage_widget is not None:
+            return self._usage_widget
+        return self.query_one("#usage-line", UsageLine)
+
+    # -- §47, the read-only thread view ----------------------------------
+
+    def _stored_run_tree(self, root_id) -> list:
+        """Finished runs under `root_id`, oldest-first, depth-indented.
+
+        The picker reads the live stack, which forgets a run the moment
+        it ends; storage remembers it through the parent link slice 1
+        put in a column -- the same source ctrl+click already resolves
+        against, so the two routes cannot offer different histories.
+        One query per thread WITH children (child_threads is one query
+        per parent, not per spawn line), which is cheap for a modal that
+        opens on a keypress and never on the hot path. `seen` guards a
+        hand-edited cycle, the crumb's rule for the crumb's reason.
+        Live threads are EXCLUDED here: the caller owns the live half
+        and this half must never list a run twice however the two
+        overlap. Each row carries `live: False`; see the screen for why
+        that key exists rather than a second list.
+        """
+        try:
+            root = UUID(str(root_id))
+        except (ValueError, AttributeError, TypeError):
+            return []
+        live = {str(row.thread_id) for row in self._agent_stack
+                if row.thread_id is not None}
+        live.add(str(root_id))
+        found, seen, fringe = [], {str(root_id)}, []
+        try:
+            fringe = [(child, 1) for child in storage.child_threads(root)]
+        except Exception:                                   # noqa: BLE001
+            logger.exception("Could not read this thread's spawned runs.")
+            return []
+        while fringe:
+            child, level = fringe.pop(0)
+            cid = str(child["id"])
+            if cid in seen:
+                continue
+            seen.add(cid)
+            if cid not in live:
+                name = child.get("agent_name") or f"subagent {cid[:8]}"
+                found.append({"label": name, "level": level,
+                              "thread_id": cid, "live": False})
+            try:
+                grandchildren = storage.child_threads(child["id"])
+            except Exception:                               # noqa: BLE001
+                logger.exception(
+                    "Could not read a spawned run's children.")
+                continue
+            fringe = [(g, level + 1) for g in grandchildren] + fringe
+        return found
+
+    def action_kill_session(self) -> None:
+        """ctrl+b: stop a background session (§49, SS2).
+
+        PROCESS-WIDE, not this thread's. SS11 scopes the *tools* to the
+        caller's own thread, because an agent has no business naming a
+        session it did not start -- but this is the user's kill, and the
+        thing blocking their input may be owned by a subagent's thread
+        rather than their own (SS9: a subagent with live sessions sleeps
+        inside its spawn, and its parent's turn is what stalls). A picker
+        that hid those would offer no way out of the block they cause.
+        `SessionManager.kill` says the same thing from its side: an
+        `owner_thread` of None is the user's kill and may name any
+        session.
+        """
+        rows = shell_sessions.sessions.live_rows()
+        if not rows:
+            # Reachable despite check_action: the last session can finish
+            # between the footer's repaint and the press.
+            self._visible_transcript.write_system(
+                "Nothing is running in the background.")
+            return
+
+        def _stopped(session_id) -> None:
+            if session_id:
+                self._kill_session(str(session_id))
+
+        self.push_screen(SessionKillScreen(_kill_rows(rows)), _stopped)
+
+    def _kill_session(self, session_id: str) -> None:
+        """Stop one session, off the UI thread.
+
+        ON A WORKER, and that is not caution: `SessionManager.kill` waits
+        up to `_KILL_SETTLE_S` (15 s) for the process to actually die, so
+        killing from the message pump would freeze the shell for as long
+        as the thing being killed took to notice.
+
+        Nothing is reported here beyond the request. The kill produces a
+        `killed` event like any other, which either wakes the turn that
+        started it or is held for the user's next message (SS19) -- and
+        the result of what they stopped is worth more than an
+        acknowledgement that they stopped it.
+        """
+        def _work() -> None:
+            # ANY_OWNER: the person at the keyboard may stop anything they
+            # can see, including a subagent's session in another thread.
+            # Said out loud since batch 110, when the same authority was
+            # spelled `None` and reached three other call sites by default.
+            shell_sessions.sessions.kill(
+                session_id, owner_thread=shell_sessions.ANY_OWNER,
+                reason=shell_sessions.KILL_USER)
+
+        self._visible_transcript.write_system(f"Stopping {session_id}…")
+        self.run_worker(_work, thread=True, exit_on_error=False,
+                        name=f"kill-{session_id}")
+
+    def action_pick_agent(self) -> None:
+        """ctrl+g: choose a run to read, from the keyboard (§47).
+
+        Live rows are the SAME list the sidebar draws, through the SAME
+        ordering (`lineage_rows`) -- which is what keeps the two from
+        disagreeing about what is running. Below them, the stored
+        descendants the stack has already forgotten: a finished run
+        stays openable, so a picker that omitted it lied by omission
+        while ctrl+click on the same call opened it. The sidebar keeps
+        its narrower contract (who is running); the picker answers the
+        wider one (what can I read), and the two differ on purpose.
+        This iterated `_agent_stack` raw, so it drew arrival order under
+        depth indentation: two peers each spawning a grandchild arrive A,
+        B, A's child, B's child, and the picker put A's child under B --
+        NA17's own defect, in the surface NA17 did not touch.
+
+        Runs with no thread yet are left out. A row that cannot be
+        opened would be a control that does nothing, which is the rule
+        the sidebar's unbound rows already follow.
+
+        `self._memory`, not `self.memory`: opening a picker must not be
+        what creates a conversation (refresh_agent_panel's rule).
+        """
+        runs = []
+        root = getattr(self._memory, "thread_id", None)
+        if root is not None:
+            runs.append({
+                "label": (self.active_agent.name if self.active_agent
+                          else "this conversation"),
+                "level": 0, "thread_id": str(root), "live": True})
+        for row, level in lineage_rows(self._agent_stack):
+            if row.thread_id is not None:
+                runs.append({"label": row.name,
+                              # `level`, and the key is named for what it
+                              # holds: the walk's column, exactly as the
+                              # panel indents by it. It was called `depth`
+                              # for one batch after it stopped being one
+                              # (see `lineage_rows` for the difference),
+                              # which is the drift storage.py's `getattr`
+                              # comments were repaired for. A row whose
+                              # parent has no thread still keeps its own
+                              # column, because the column is about lineage
+                              # and being openable is not.
+                              "level": level,
+                              "thread_id": str(row.thread_id), "live": True})
+        if root is not None:
+            # History the stack has forgotten, from the conversation root
+            # rather than the viewed thread: one stable list wherever the
+            # key is pressed, and the in-viewer facet needs no second
+            # rule. Live first, then stored, each half in lineage order;
+            # the stored half skips anything still live, so no run
+            # appears twice however the two overlap.
+            runs.extend(self._stored_run_tree(root))
+
+        def chosen(thread_id) -> None:
+            if thread_id:
+                self.open_agent_thread(thread_id)
+
+        self.push_screen(AgentPickerScreen(runs), chosen)
+
+    def on_thread_selected(self, message: ThreadSelected) -> None:
+        """A panel row or a crumb segment was clicked."""
+        self.open_agent_thread(message.thread_id)
+
+    def on_call_selected(self, message: CallSelected) -> None:
+        """A tool line in the transcript was ctrl+clicked (§47, widened
+        by §49 SS14 and again by §55 TR7/TR12).
+
+        RESOLVED HERE, at press time, which is the whole reason the
+        line carries a call id rather than a thread or a session: it is
+        drawn before either exists, and a target baked in at draw time
+        would have to be nothing.
+
+        ONE HANDLER, branching on the kind the line carried, rather than
+        a message type per kind. What a click does is this app's
+        question either way, and the three answers differ only in which
+        pane they open.
+
+        A SPAWN WITH NO THREAD NOW FALLS BACK TO ITS CALL (TR12) rather
+        than to the sentence that used to end this method. That state is
+        real -- a spawn refused for an unknown agent, or a depth limit
+        that never made one -- and the call's own `{"error": ...}` result
+        is precisely what a reader is asking for when they click it. The
+        old refusal said "it was refused" and then showed nothing of the
+        refusal. A line carries exactly ONE kind, so without this
+        fallback the three tools that open a thread or a session would
+        have had no route to their own params and results at all.
+        """
+        call_id = str(message.call_id)
+        if message.kind == OPENS_SESSION:
+            self.open_session_call(call_id)
+            return
+        if message.kind == OPENS_THREAD:
+            thread_id = self._spawn_threads.get(call_id)
+            if thread_id:
+                self.open_agent_thread(thread_id)
+                return
+        # `OPENS_CALL` lands here, and so does either kind above whose
+        # target could not be resolved (TR12). A kind this handler has
+        # never heard of lands here too, and that is the right answer for
+        # any kind that can be added later rather than an oversight: every
+        # call has ITSELF, so there is no fourth kind for which "show the
+        # call" is wrong. The constant is deliberately not imported --
+        # naming it would read as a branch, and this is the floor.
+        self.open_tool_call(call_id)
+
+    def open_agent_thread(self, thread_id) -> None:
+        """Show a stored thread, read-only (§47).
+
+        VIEW ONLY, and the prompt is disabled rather than merely
+        ignored, so that is visible instead of only true.
+
+        Clicking the row for the conversation you are already in CLOSES
+        the viewer rather than opening a second copy of it -- the root
+        row and the first crumb segment both mean "back to the main
+        agent", and making that one behaviour keeps them from being two
+        affordances that look identical and are not.
+        """
+        try:
+            resolved = UUID(str(thread_id))
+        except (ValueError, AttributeError, TypeError):
+            # Metadata is text and a UUID is the only shape that means
+            # anything here. Contained rather than raised: this arrives
+            # from a click handler, and an unopenable row must not take
+            # the app down.
+            logger.warning("Ignoring a click naming %r, which is not a "
+                           "thread id.", thread_id)
+            return
+        if resolved == getattr(self._memory, "thread_id", None):
+            self.close_thread_view()
+            return
+
+        try:
+            entries = replay_entries(resolved)
+        except Exception as e:                              # noqa: BLE001
+            # THE PANE ON SCREEN. This used to write to `_transcript`
+            # unconditionally, reasoning that "the viewer is not open
+            # yet" -- true of a click in the live transcript and false of
+            # the two routes that arrive while it IS open, a crumb
+            # segment and a sidebar row. The reader stays where they
+            # were, so the message has to be where they are looking.
+            self._visible_transcript.write_error(
+                f"Could not open that run: {e}")
+            return
+
+        # BEFORE the paint, exactly as `switch_to_thread` does it, and for
+        # the same reason: the paint arms this run's own `▸ spawn_subagent`
+        # lines and the arming is what a click resolves against. Without
+        # it the viewer could descend one level and no further on a
+        # RESUMED conversation -- the live span and the live tool result
+        # never happened in this process, and `child_threads()` is the
+        # only source that survives a restart. Contained in the helper, so
+        # a run whose children cannot be read still opens.
+        self._learn_spawn_threads(resolved)
+        self._paint_thread_view(entries)
+        self._viewing = resolved
+        self._crumb.show(self._thread_chain(resolved))
+        self._pane.current = "thread-view"
+        self._set_prompt_enabled(False)
+        self._sync_view_poll()
+        self.refresh_bindings()
+
+    def close_thread_view(self) -> None:
+        """Back to the live conversation. Idempotent.
+
+        Called by escape, by clicking the row you are already on, and by
+        anything that changes which conversation the session is in --
+        `/new` and a thread switch both, because a trail pointing into
+        the thread you just left is worse than no trail.
+
+        CLOSES WHATEVER IS OPEN since §49 (SS14) -- thread, session or,
+        since §55 (TR10), one tool call -- and keeps the name: every
+        caller means "put the live conversation back", and a second
+        closer per kind would be three places that have to agree about
+        the crumb, the prompt and the timer. EVERY pane is reset, not
+        the one that was up -- resetting the others costs nothing and
+        removes the branch that could get it wrong, which is what makes
+        a fourth pane cost one line here rather than a decision.
+        """
+        if self._viewing is None:
+            return
+        self._viewing = None
+        self._viewed_entries = 0
+        self._sync_view_poll()
+        self._crumb.show(())
+        self._pane.current = "transcript"
+        self._thread_view.reset()
+        self._session_view.reset()
+        self._call_view.reset()
+        self._set_prompt_enabled(True)
+        self.refresh_bindings()
+
+    # -- sessions (§49, SS14/SS18) -------------------------------------------
+
+    def on_session_selected(self, message: SessionSelected) -> None:
+        """A row of the session panel was clicked."""
+        self.open_session(str(message.session_id))
+
+    def open_session(self, session_id: str) -> None:
+        """Show a LIVE session, read-only (SS14).
+
+        The panel's route, and the only one that starts from a session
+        id: the panel draws what the manager holds, so by definition
+        this process has the session. A row that has finished between
+        the draw and the click is the one race, and it is answered the
+        way a missing thread is -- said, not ignored.
+        """
+        row = shell_sessions.sessions.row(session_id)
+        if row is None:
+            self._visible_transcript.write_system(
+                f"Session {session_id} is no longer here — it finished and "
+                f"aged out. Its result is on the line that started it.")
+            return
+        self._paint_session_view(row)
+        self._viewing = (_VIEW_LIVE, str(session_id))
+        self._crumb.show(self._session_chain(f"session {session_id}"))
+        self._pane.current = "session-view"
+        self._set_prompt_enabled(False)
+        self._sync_view_poll()
+        self.refresh_bindings()
+
+    def open_session_call(self, call_id: str) -> None:
+        """Show the session a tool-call line started (SS14, SS18).
+
+        THE TRANSCRIPT'S ROUTE, and it starts from a CALL id because
+        that is all the line has -- the same press-time resolution §47
+        does for a spawn, and for the same reason: the line is drawn
+        before the session has a result.
+
+        TWO SOURCES, TRIED IN THAT ORDER. A session this process still
+        holds is read from the manager, which has its live output. One
+        it does not -- aged out past the twenty kept (SS12), or started
+        before a restart -- is rebuilt from the archive, which is SS18's
+        promise and says so in its own header.
+
+        The thread asked is the one whose transcript was clicked, not
+        the live conversation: a session line inside the thread VIEWER
+        belongs to the run being read, and asking the live thread for it
+        would answer "no such call" with complete confidence.
+        """
+        session_id = self._session_calls.get(str(call_id))
+        if session_id:
+            row = shell_sessions.sessions.row(session_id)
+            if row is not None:
+                self.open_session(session_id)
+                return
+        thread_id = self._viewing_thread or getattr(
+            self._memory, "thread_id", None)
+        entries = []
+        if thread_id is not None:
+            try:
+                entries = stored_entries(thread_id, str(call_id))
+            except Exception as e:                          # noqa: BLE001
+                # THE PANE ON SCREEN, `open_agent_thread`'s rule: this
+                # click can come from inside the viewer, where a line
+                # written to the live transcript is invisible rather
+                # than merely quiet.
+                self._visible_transcript.write_error(
+                    f"Could not open that session: {e}")
+                return
+        if not entries:
+            # §55 (TR12). The call, rather than the sentence that used to
+            # end here. "It was refused" is exactly the case where the
+            # call's own result says WHY, and this method had it in the
+            # same archive it had just read and declined to show it.
+            self.open_tool_call(str(call_id))
+            return
+        self._paint_session_entries(entries)
+        self._viewing = (_VIEW_STORED, str(call_id))
+        self._crumb.show(self._session_chain("session"))
+        self._pane.current = "session-view"
+        self._set_prompt_enabled(False)
+        self._sync_view_poll()
+        self.refresh_bindings()
+
+    # -- one tool call (§55, TR6-TR15) ---------------------------------------
+
+    def open_tool_call(self, call_id: str) -> None:
+        """Show one tool call: the whole command, and what it printed.
+
+        THE ARCHIVE IS THE ONLY SOURCE, and that is TR8 rather than a
+        simplification. `memory.add_tool_result` persists the exact
+        string the provider was handed, so there is no live copy that
+        would be better and no retention to manage -- which is also why
+        this view needs no poll and no live/stored split of its own.
+
+        NOT FOUND IS SAID, `open_session_call`'s rule and the last
+        resort TR12 leaves standing: every other branch of
+        `on_call_selected` now falls back HERE, so this is where a click
+        on a call that is not in the thread at all has to stop.
+
+        The thread asked is the one whose transcript was clicked, not
+        the live conversation -- a tool line inside the thread VIEWER
+        belongs to the run being read, and asking the live thread for it
+        would answer "no such call" with complete confidence.
+        """
+        thread_id = self._viewing_thread or getattr(
+            self._memory, "thread_id", None)
+        entries = []
+        if thread_id is not None:
+            try:
+                entries = call_entries(thread_id, str(call_id))
+            except Exception as e:                          # noqa: BLE001
+                # THE PANE ON SCREEN, `open_agent_thread`'s rule.
+                self._visible_transcript.write_error(
+                    f"Could not open that call: {e}")
+                return
+        if not entries:
+            self._visible_transcript.write_system(
+                "That call is not in this conversation's record — there is "
+                "nothing stored to show.")
+            return
+        self._paint_call_entries(entries)
+        self._viewing = (_VIEW_CALL, str(call_id))
+        self._crumb.show(self._session_chain("call"))
+        self._pane.current = "call-view"
+        self._set_prompt_enabled(False)
+        self._sync_view_poll()
+        self.refresh_bindings()
+
+    def _paint_call_entries(self, entries) -> None:
+        """Draw `(role, text)` entries into the call pane.
+
+        IT RESETS, `_paint_session_entries`' rule, even though nothing
+        repaints this pane: the reset is what makes opening a second
+        call show the second call rather than both.
+        """
+        view = self._call_view
+        view.reset()
+        for role, text in entries:
+            view.write_role(role, text)
+
+    def _session_chain(self, label: str) -> list:
+        """The crumb for a session view: where you are, and the way back.
+
+        The live conversation's own segment is armed and this one is
+        not, which is ThreadCrumb's existing rule -- the last segment is
+        where you already are. Built from the chat thread rather than
+        from `_thread_chain`, because a session hangs off the run that
+        started it and has no lineage of its own to walk.
+
+        §55 (TR10) PASSES `"call"` AS THE LABEL and keeps the name: a
+        tool call hangs off its run in exactly the same way and wants
+        exactly the same trail, so a `_call_chain` would have been a
+        second copy differing in one string.
+        """
+        thread_id = self._viewing_thread or getattr(
+            self._memory, "thread_id", None)
+        chain = (self._thread_chain(thread_id) if thread_id is not None
+                 else [("chat", None)])
+        return list(chain) + [(label, None)]
+
+    def _paint_session_view(self, row) -> None:
+        """Draw a live session, and remember how much output was drawn.
+
+        The tail and the truncation flag come from the manager's buffer
+        in one call, and the redaction is core/session_view.py's -- this
+        function reads a buffer and paints, and never sees an
+        unredacted command.
+
+        EVERYTHING THE BUFFER HOLDS, not `tail_chars()` of it (A23). The
+        cut moved into `live_entries`, below the redaction, because a
+        credential straddling this boundary was being offered to the
+        redactor as two fragments. The number drawn is unchanged.
+        """
+        buffer = shell_sessions.sessions.buffer(row.id)
+        tail, truncated = (buffer.last() if buffer is not None
+                           else ("", False))
+        self._paint_session_entries(live_entries(row, tail, truncated))
+        # THE BUFFER'S OWN COUNT, which is what the poll compares
+        # against -- see `_poll_session_view` for why the drawn length
+        # is the wrong number.
+        self._viewed_entries = row.output_chars
+
+    def _paint_session_entries(self, entries) -> None:
+        """Draw `(role, text)` entries into the session pane.
+
+        IT RESETS, `_paint_thread_view`'s rule: the poll repaints, so
+        anything written into this pane by hand does not survive.
+        """
+        view = self._session_view
+        view.reset()
+        for role, text in entries:
+            view.write_role(role, text)
+
+    def action_close_thread_view(self) -> None:
+        self.close_thread_view()
+
+    def _set_prompt_enabled(self, enabled: bool) -> None:
+        """Disable the prompt while a stored thread is on screen.
+
+        Best-effort (#104's rule, which still holds for `#prompt`): this
+        is a query, so a modal on top hides it. Focus is given back
+        explicitly, because disabling a widget takes it away and a
+        reader who pressed escape expects to be able to type.
+        """
+        try:
+            prompt = self.query_one("#prompt", PromptInput)
+        except NoMatches:
+            return
+        prompt.disabled = not enabled
+        if enabled:
+            prompt.focus()
+
+    def _thread_chain(self, thread_id):
+        """[(label, id)] from the conversation down to `thread_id`.
+
+        Walked from the STORED parent link rather than from the order
+        things were opened in, which is the whole reason slice 1 put it
+        in a column: a trail assembled from navigation history would be
+        a record of what the reader did, not of what spawned what.
+
+        `seen` guards a cycle. Depth is bounded by SUBAGENT_MAX_DEPTH in
+        practice, but a hand-edited database must not hang the UI, and a
+        set is cheaper than trusting a bound this function does not own.
+        """
+        chain = []
+        seen = set()
+        current = thread_id
+        while current is not None and current not in seen:
+            seen.add(current)
+            try:
+                row = storage.get_thread(current)
+            except Exception:                               # noqa: BLE001
+                break
+            if row is None:
+                break
+            label = (row.get("agent_name")
+                     or ("chat" if row.get("kind") == "chat"
+                         else row.get("kind") or "run"))
+            chain.append((label, str(current)))
+            current = row.get("parent_thread_id")
+        chain.reverse()
+        return chain
+
+    def _sync_view_poll(self) -> None:
+        """Run the re-read timer exactly while what the viewer shows is
+        still being written.
+
+        A run's own events are drained internally (§18/D6), so the only
+        honest source for "what has it written since" is the archive it
+        is writing -- the same store replay reads. Nothing about D6
+        changes: this polls a database, it does not tap a stream.
+
+        The timer exists only while the viewed thread is one the sidebar
+        says is running, so a finished thread is read once and an idle
+        session pays nothing.
+
+        §49 (SS14) PUTS A SECOND SUBJECT ON THE SAME TIMER. A live
+        session's output is in memory and nowhere else -- the sink fires
+        when a session MOVES (starts, matches, finishes), not when it
+        prints, so a background session's view would sit frozen between
+        its first line and its last. It polls the buffer instead, under
+        this function's own discipline: while the session is live, and
+        not one tick afterwards. One timer for both, because the two are
+        never open at once -- `_viewing` holds one thing.
+        """
+        live = {str(row.thread_id) for row in self._agent_stack
+                if row.thread_id is not None}
+        viewing = self._viewing_thread
+        wanted = viewing is not None and str(viewing) in live
+        session_id = self._viewing_live_session
+        if session_id is not None:
+            row = shell_sessions.sessions.row(session_id)
+            wanted = row is not None and row.state in shell_sessions.LIVE_STATES
+        if wanted and self._view_timer is None:
+            self._view_timer = self.set_interval(
+                THREAD_VIEW_POLL_S, self._poll_view)
+        elif not wanted and self._view_timer is not None:
+            self._view_timer.stop()
+            self._view_timer = None
+
+    def _paint_thread_view(self, entries) -> None:
+        """Draw a viewed run, and remember how much of it was drawn.
+
+        ONE write path for the two callers -- opening a run and the poll
+        that follows it -- because they disagreed on the placeholder and
+        the count was read off the wrong thing in both, which is the same
+        defect twice. `_paint_entries` decides what a stored thread LOOKS
+        like; this decides what the VIEWER shows for one.
+
+        IT RESETS, so anything written into the pane BY HAND does not
+        survive a repaint -- `_visible_transcript`'s refusals and errors,
+        which is the only thing that writes there outside this function.
+        Bounded rather than fixed: the poll only runs while the viewed run
+        is live, so a stored run keeps such a line indefinitely, and the
+        alternative was writing it to a pane the switcher is hiding. Worth
+        knowing before treating this pane as somewhere a message lasts.
+        """
+        view = self._thread_view
+        view.reset()
+        # This runs while the switcher is still showing `#transcript`, so
+        # the viewer measures 0 -- and paints at the live pane's width by
+        # itself, since a hidden pane borrows the on-screen one's. Nothing
+        # is handed over and nothing needs clearing: see
+        # `Transcript._region_width`.
+        self._paint_entries(view, entries)
+        if not entries:
+            # A run that has not written anything yet -- which is the
+            # ordinary state for the first instant of a live one. NOT a run
+            # that failed at its first call, whatever this comment used to
+            # say: its task message is already one entry, so it never
+            # reaches here -- since batch 91 its replay ends with the
+            # failure instead. Re-said on every repaint, not only on the
+            # first: the poll used to repaint without it and leave the pane
+            # blank.
+            view.write_system("This run has not written anything yet.")
+        # WHAT THE ARCHIVE HELD, not what the widget drew. See the poll.
+        self._viewed_entries = len(entries)
+
+    def _poll_view(self) -> None:
+        """The timer's one tick: whichever of the two views is open.
+
+        A SINGLE ENTRY POINT rather than two timers, because `_viewing`
+        holds one thing and two timers would be two answers to which
+        one that is.
+        """
+        if self._viewing_live_session is not None:
+            self._poll_session_view()
+            return
+        self._poll_thread_view()
+
+    def _poll_session_view(self) -> None:
+        """Redraw the viewed session if it has written anything new.
+
+        Compared by the buffer's own CHARACTER COUNT, which is
+        `_poll_thread_view`'s entry-count rule in the units this source
+        has: a session's output only grows, and repainting every tick
+        would fight the reader's scroll for nothing. The count is the
+        buffer's `total`, not the length of the tail drawn -- a session
+        past the tail bound has a tail that stops changing length while
+        its content goes on moving, and comparing the drawn length would
+        freeze the view exactly when it gets interesting.
+
+        Best-effort, for `_poll_thread_view`'s reason: a timer can fire
+        while a modal is up or while the app is being torn down.
+        """
+        session_id = self._viewing_live_session
+        try:
+            row = shell_sessions.sessions.row(session_id)
+            if row is None:
+                return
+            if row.output_chars == self._viewed_entries:
+                return
+            self._paint_session_view(row)
+        except Exception:                                   # noqa: BLE001
+            logger.exception("Could not refresh the session view.")
+
+    def _poll_thread_view(self) -> None:
+        """Redraw the viewed run if it has written anything new.
+
+        Compared by ENTRY COUNT rather than by content: a repaint that
+        happened every second would fight the reader's scroll position
+        for no reason, and a replayed thread only ever grows.
+
+        COUNTED AGAINST THE LAST REPLAY, not against the pane's own
+        entries, and the two are not the same number in two reachable
+        states -- in both of which this repainted on every single tick,
+        which is the behaviour the paragraph above says it exists to
+        avoid:
+
+          * `/thinking` off. `_paint_entries` SKIPS a reasoning entry
+            rather than dimming it (§44), so a run that thought is
+            permanently one or more entries shorter on screen than in the
+            archive.
+          * an empty run. The placeholder above is an entry the archive
+            does not have, so 0 never equalled 1.
+
+        Best-effort, batch 66's rule on a new surface: this runs from a
+        timer, so it can fire while a modal is up and while the app is
+        being torn down. A failure to redraw must not take the session
+        with it.
+        """
+        viewing = self._viewing_thread
+        if viewing is None:
+            return
+        try:
+            entries = replay_entries(viewing)
+            if len(entries) == self._viewed_entries:
+                return
+            self._paint_thread_view(entries)
+        except Exception:                                   # noqa: BLE001
+            logger.exception("Could not refresh the thread view.")
+
+    @property
+    def _thread_view(self) -> Transcript:
+        """The read-only pane. HELD, for `_transcript`'s reason."""
+        if self._thread_view_widget is not None:
+            return self._thread_view_widget
+        return self.query_one("#thread-view", Transcript)
+
+    @property
+    def _session_view(self) -> Transcript:
+        """The session pane (§49, SS14). HELD, for `_transcript`'s reason.
+
+        A THIRD PANE rather than a second use of `#thread-view`. The
+        thread poll repaints that one from the archive, so a session
+        drawn into it would be wiped by the next tick of a timer meant
+        for something else -- and both panes being reset on close is
+        then a statement rather than a hope.
+        """
+        if self._session_view_widget is not None:
+            return self._session_view_widget
+        return self.query_one("#session-view", Transcript)
+
+    @property
+    def _call_view(self) -> Transcript:
+        """The one-call pane (§55, TR10). HELD, for `_transcript`'s reason.
+
+        A FOURTH PANE, and NOT for the reason above it. Nothing polls
+        this view -- a one-shot call has nothing to stream (TR11) -- so
+        the timer collision that forced `#session-view` apart does not
+        arise. The reason here is naming: a pane called `#session-view`
+        holding a `fetch_url` call is a name that lies, and the drift
+        this record keeps closing starts exactly there.
+        """
+        if self._call_view_widget is not None:
+            return self._call_view_widget
+        return self.query_one("#call-view", Transcript)
+
+    @property
+    def _visible_transcript(self) -> Transcript:
+        """Whichever pane the switcher is showing.
+
+        For anything the harness says to the READER, as opposed to
+        anything it says about the conversation. Only `#pane`'s current
+        child is on screen, so a line written to the other one is not
+        quieter than intended -- it is invisible, which is the state a
+        deliberate click answered with silence reads as a broken feature.
+
+        Derived from `_viewing`, like the switcher's `current`, the
+        crumb's rows and the prompt's `disabled` flag, so it cannot drift
+        into disagreeing with them about which pane is up.
+
+        THREE-WAY SINCE §55 (TR10), and the call arm is tested FIRST of
+        the two tuple kinds: `_viewing_thread` already discriminates the
+        UUID, so the only thing left to tell apart is which tag a tuple
+        carries, and naming the new one rather than defaulting to it
+        keeps the session arm reading as it did.
+        """
+        if self._viewing is None:
+            return self._transcript
+        if self._viewing_thread is not None:
+            return self._thread_view
+        return (self._call_view if self._viewing_call is not None
+                else self._session_view)
+
+    @property
+    def _viewing_thread(self):
+        """The stored THREAD the viewer is showing, or None (§49, SS14).
+
+        For the sites that mean a thread specifically -- the replay
+        poll, the crumb chain -- as opposed to the sites that mean "the
+        viewer is open". Both read `_viewing`, so there is still one
+        fact; this is the question, not a second copy of the answer.
+        """
+        return self._viewing if isinstance(self._viewing, UUID) else None
+
+    @property
+    def _viewing_live_session(self):
+        """The id of the LIVE session the viewer is showing, or None.
+
+        Only a live one: a rebuilt view has nothing to re-read, so the
+        poll must not run for it, and this is the predicate that says
+        so (`_sync_view_poll`).
+        """
+        seen = self._viewing
+        return (seen[1] if isinstance(seen, tuple) and seen[0] == _VIEW_LIVE
+                else None)
+
+    @property
+    def _viewing_call(self):
+        """The id of the CALL the viewer is showing, or None (§55, TR10).
+
+        `_viewing_live_session`'s sibling, asked by the one site that has
+        to tell the two tuple kinds apart. It is not a second fact: both
+        read `_viewing`, which is still the only thing that knows what is
+        open.
+        """
+        seen = self._viewing
+        return (seen[1] if isinstance(seen, tuple) and seen[0] == _VIEW_CALL
+                else None)
+
+    @property
+    def _crumb(self) -> ThreadCrumb:
+        if self._crumb_widget is not None:
+            return self._crumb_widget
+        return self.query_one("#thread-crumb", ThreadCrumb)
+
+    @property
+    def _pane(self) -> ContentSwitcher:
+        if self._pane_widget is not None:
+            return self._pane_widget
+        return self.query_one("#pane", ContentSwitcher)
+
+    @property
     def _raven(self) -> RavenPanel:
+        """The mascot, HELD rather than queried per access.
+
+        Same reason as `_usage_line` above: every event branch touches
+        the raven (pause/resume/state), so the second event handled
+        under a modal would have died one branch below where the usage
+        line died. Nothing ever remounts it; the query remains as the
+        fallback for an app that was constructed but never mounted.
+        """
+        if self._raven_widget is not None:
+            return self._raven_widget
         return self.query_one("#raven", RavenPanel)
 
     @property
     def _research_progress(self) -> ResearchProgress:
+        """Live pipeline state, HELD rather than queried per access.
+
+        Same reason as `_todo_panel`: on_pipeline_event_message runs on
+        the UI thread off a worker's post, and an attended run can have
+        a review-consent modal open while passes still report -- the
+        exact shape that took the app down over the usage line. Nothing
+        ever remounts it; the query remains as the fallback for an app
+        that was constructed but never mounted.
+        """
+        if self._progress_widget is not None:
+            return self._progress_widget
         return self.query_one("#research-progress", ResearchProgress)
 
     @property
@@ -1290,8 +2791,8 @@ class VenastineApp(App):
         # Clear AFTER the busy check, not before. /research holds _busy
         # for a whole ten-pass pipeline, so a follow-up typed during one
         # was wiped and had to be retyped from memory.
-        if not text.startswith("/") and self._busy:
-            self._transcript.write_error("Still working — wait for this turn to finish.")
+        if not text.startswith("/") and self.refuse_if_occupied(
+                "send a message"):
             return
         event.prompt.value = ""
         # Batch 63. AFTER the busy refusal above, which returns without
@@ -1309,8 +2810,42 @@ class VenastineApp(App):
             # time the answer changes: a history never empties.
             self.refresh_bindings()
         if text.startswith("/"):
-            if not commands.dispatch(self, text):
-                name = text[1:].split(" ")[0]
+            name = text[1:].split(" ")[0]
+            # CONTAINED HERE, not inside CommandRegistry.dispatch, and the
+            # split is the same one that keeps policy out of
+            # tools/registry.py: the registry is MECHANISM, and what a
+            # broken command does to the shell is the shell's decision.
+            #
+            # Without this, a handler's exception reached Textual's
+            # `_handle_exception` and exited the whole application --
+            # transcript, thread view and session with it -- because the
+            # handler runs on the UI thread inside a message handler.
+            # Reachable by one mistyped line in a file a PROJECT ships:
+            # a non-string element in `additional_tools` parses clean
+            # (only `isinstance(tools, list)` is checked) and crashes
+            # `/skill` with an AttributeError (batch 135).
+            #
+            # `AGENTS.md` states the rule one layer down -- "A raising tool
+            # must not kill the run. `dispatch()` wraps the handler call and
+            # turns any exception into `{"error": ...}`, logged at ERROR with
+            # the traceback so a real bug stays findable" -- and
+            # tui/commands.py's own docstring claims kinship with that
+            # module ("the same mechanism-vs-policy split tools/registry.py
+            # already uses for tools") while inheriting none of its
+            # containment. This is the layer above having the same property.
+            #
+            # `logger.exception`, so the traceback reaches logs/app.log
+            # through the redacting formatter and a real bug stays findable.
+            try:
+                handled = commands.dispatch(self, text)
+            except Exception:  # noqa: BLE001 -- see the comment above
+                logger.exception("The /%s command handler raised.", name)
+                self._transcript.write_error(
+                    f"/{name} failed. The error is in logs/app.log; the "
+                    f"session is intact."
+                )
+                return
+            if not handled:
                 self._transcript.write_error(
                     f"Unknown command /{name}. Try /help."
                 )
@@ -1333,6 +2868,14 @@ class VenastineApp(App):
         # every later turn with "Still working" for a turn that never
         # started.
         try:
+            # §49 (SS2/SS19). BEFORE the user's own message, so the model
+            # reads what it missed beside what was just said rather than
+            # as a turn of its own -- which is the whole point of holding
+            # it: a session the user stopped themselves is not worth a
+            # model call on its own. `note_user_input` then resumes waking
+            # for whatever is still live.
+            self._deliver_held(self.memory.thread_id)
+            shell_sessions.sessions.note_user_input(self.memory.thread_id)
             self.memory.add_user_message(user_input)
         except Exception as e:                              # noqa: BLE001
             self._busy = False
@@ -1388,52 +2931,236 @@ class VenastineApp(App):
         # the event-driven one could not carry a question with more than
         # two answers. The worker now blocks inside the channel's `ask`,
         # exactly as an attended research pass already did.
-        generator = RunAgentLoop._run(
-            self.memory,
-            prompt,
-            provider,
-            model,
-            context,
-            max_steps,
-            # #4: the TUI turn runs on the configured spend cap, same as
-            # every other path. _SPEND_UNSET would resolve it too; passing
-            # the resolved value explicitly keeps this direct-_run call
-            # honest about what it is doing.
-            config_loader.spend_cap(),
-            effort=self.effort,
-            response_channel=self.response_channel(),
-            # Batch 59. Rides beside the response channel because it is the
-            # same kind of thing: an out-of-band object handed down to a
-            # run that happens inside a tool call, where a LoopEvent cannot
-            # reach. This is the route by which a spawn -- and a spawn
-            # inside that spawn -- becomes a row in the sidebar.
-            activity=self._activity,
-        )
+        channel = self.response_channel()
+        memory = self.memory
+
+        # A FACTORY, not a generator, since §49. A wake turn is this turn
+        # continuing (SS5), so it has to run with the same prompt, model,
+        # channel and activity -- and the only way to guarantee that is to
+        # build both from one closure instead of assembling the facts a
+        # second time somewhere else. `wake_conversation` is deliberately
+        # not called here: it drains, and its own docstring says the TUI
+        # builds its own generator, as it does for a user's turn.
+        def _turn():
+            return RunAgentLoop._run(
+                memory,
+                prompt,
+                provider,
+                model,
+                context,
+                max_steps,
+                # #4: the TUI turn runs on the configured spend cap, same as
+                # every other path. _SPEND_UNSET would resolve it too; passing
+                # the resolved value explicitly keeps this direct-_run call
+                # honest about what it is doing.
+                config_loader.spend_cap(),
+                effort=self.effort,
+                response_channel=channel,
+                # ROADMAP_v3 §61. Beside the channel, because it is the
+                # same kind of thing: an out-of-band object this turn
+                # needs where a LoopEvent cannot reach. A wake turn is
+                # this turn continuing (SS5) and is built from this same
+                # closure, so it inherits the switch for free.
+                cancel=self._cancel,
+                # Batch 59. Rides beside the response channel because it is the
+                # same kind of thing: an out-of-band object handed down to a
+                # run that happens inside a tool call, where a LoopEvent cannot
+                # reach. This is the route by which a spawn -- and a spawn
+                # inside that spawn -- becomes a row in the sidebar.
+                activity=self._activity,
+            )
+
+        def _wake(text: str, record: dict):
+            """The harness row, then a turn that answers it."""
+            memory.add_harness_message(text, record)
+            return _turn()
+
+        # ROADMAP_v3 §61. One token per turn, and built HERE rather than
+        # at the top: the early return above leaves `_busy` False for a
+        # turn that never started, and a token built before it would
+        # outlive that turn -- arming escape with nothing to stop, and
+        # staying armed until the next turn replaced it. Past every
+        # return in this function, so the token exists only once a worker
+        # is about to. Cleared in on_turn_finished beside
+        # `_permission_channel`, which has exactly this lifetime.
+        #
+        # `_turn()` reads it when the WORKER calls it, below, so building
+        # it here rather than above changes nothing about the handoff.
+        self._cancel = CancelToken()
+        thread_id = getattr(memory, "thread_id", None)
         self.run_worker(
-            lambda: self._consume(generator),
+            lambda: self._consume(_turn(), thread_id=thread_id, wake=_wake),
             thread=True,
             exit_on_error=False,       # §16 AC3 — see the module docstring
             name="agent-turn",
         )
 
-    def _consume(self, generator) -> None:
-        """Drain the generator on the worker thread, forwarding every event.
+    def _consume(self, generator, thread_id=None, wake=None) -> None:
+        """Drain the generator on the worker thread, forwarding every event,
+        then stay for whatever background sessions the turn started.
 
         The try/except is not redundant with on_worker_state_changed: an
         exception here leaves the UI mid-turn (busy flag set, raven stuck on
         whatever it was doing), and only this frame knows the turn is over.
         The handler below still fires and is what surfaces the message.
+
+        `consuming()` WRAPS THE WHOLE THING, and it has to be entered here
+        rather than at the call site: it is a ContextVar, threads do not
+        inherit their parent's context, and the generator runs on this
+        thread. That mark is what SS17 checks -- without it a session
+        started from the TUI is refused, which is exactly what the TUI did
+        until this batch, because nothing in `tui/` had ever entered it.
+
+        The wait is INSIDE the worker and before `TurnFinished`, which is
+        what keeps `_busy` true across it. That is not a side effect but
+        the mechanism: SS2 wants input blocked while sessions are live, and
+        `_busy` already blocks it everywhere `refuse_if_occupied` asks.
         """
         error = None
         try:
-            for event in generator:
-                self.post_message(LoopEventMessage(event))
+            with shell_sessions.consuming():
+                for event in generator:
+                    self.post_message(LoopEventMessage(event))
+                if wake is not None and thread_id is not None:
+                    self._wait_for_sessions(thread_id, wake)
         except BaseException as e:   # noqa: BLE001 — re-raised below
             error = e
         finally:
             self.post_message(TurnFinished(error))
         if error is not None:
             raise error
+
+    def _wait_for_sessions(self, thread_id, wake) -> None:
+        """Hold the worker until this thread's sessions are done, running a
+        turn for each batch of results (§49, SS2/SS5).
+
+        main.py's `_wait_for_sessions` is the same loop for the CLI, and
+        the two are deliberately not shared: that one owns a REPL and
+        prints, this one owns a worker and posts. What they DO share is
+        the manager -- `wait_for_wake`, `suspended`, `pending` -- which is
+        where the policy actually lives, so neither can drift on the part
+        that matters.
+
+        A KILL DOES NOT END THE WAIT. Killing a session produces a `killed`
+        event like any other, and the loop keeps going until nothing is
+        live and nothing is pending, so the results of what the user
+        stopped are still delivered rather than dropped on the floor.
+        """
+        from core.session_wake import build_wake
+
+        sessions = shell_sessions.sessions
+        while True:
+            if not sessions.live_for(thread_id) and not sessions.pending(thread_id):
+                return
+            # BATCH 145. The SAME rule as `sessions.closing`
+            # below, one step earlier in the same teardown: the flag means
+            # main.py's `finally` is about to do the killing, and the row
+            # saying what became of these sessions is written by the quit
+            # path rather than by a turn. Two teardown signals, one answer.
+            #
+            # Without it the quit gesture answered itself with a hang.
+            # `closing` is set only by `SessionManager.close()`, reached
+            # from `main.py`'s `finally` -- which runs AFTER `run_tui()`
+            # returns, and `run_tui()` is `App.run()`, which does not
+            # return while this worker is alive. So the only thing that
+            # would have stopped this loop ran after the thing it was
+            # waiting on. Measured: with one live session and the flag up,
+            # the worker was still spinning after 111 `wait_for_wake`
+            # calls; the same run via `closing` returned after 13.
+            #
+            # ABOVE the cancel branch, deliberately. A quit sets both this
+            # flag and the cancel token (batch 145), and the cancel branch
+            # posts "their results will arrive with your next message" --
+            # true for escape, false for a quit, where there is no next
+            # message. Whichever is tested first decides what the user is
+            # told, so the order is the message.
+            if self._shutting_down:
+                return
+            if sessions.closing:
+                # The harness is on its way out and `_close_sessions` is
+                # killing these. `wait_for_wake` returns None instantly
+                # once that flag is up, so without this the loop spins at
+                # full speed through teardown -- and there is nothing left
+                # to wake, since the row saying what became of them is
+                # written by the quit path rather than by a turn.
+                return
+            # ROADMAP_v3 §61 (CN2), this shell's drain. A turn that was
+            # stopped must not be followed by a wake turn answering the
+            # sessions it started -- that is the same turn continuing
+            # (SS5), and the user asked for it to end.
+            #
+            # The sessions are LEFT RUNNING and their results HELD, which
+            # is the suspension path immediately below arriving by a
+            # different route: escape stops the conversation, ctrl+b
+            # stops the sessions, and neither quietly does the other's
+            # job. SS19 then delivers what they produced with the user's
+            # next message.
+            #
+            # BELOW the two teardown tests since batch 145, and the
+            # comment above them says why: a quit sets the cancel token
+            # too, and this branch's message promises a next message that
+            # a quit will never have.
+            if self._cancel is not None and self._cancel.cancelled:
+                self.post_message(SessionNote(
+                    "system",
+                    "— stopped; background sessions are still running "
+                    "and their results will arrive with your next "
+                    "message —"))
+                return
+            batch = sessions.wait_for_wake(thread_id, timeout=1.0)
+            if batch is None:
+                if sessions.suspended(thread_id):
+                    # SS2's consecutive-wake limit. The block lifts here,
+                    # so this message has to name what happens next: the
+                    # results are not lost, they are held for the next
+                    # thing the user says.
+                    self.post_message(SessionNote(
+                        "system",
+                        "— no further automatic replies until you say "
+                        "something; results will arrive with your next "
+                        "message —"))
+                    return
+                continue
+            text, record = build_wake(batch)
+            # ITS FIRST LINE, matching core/replay.py's rule for the same
+            # row: the rest is program output the model was given, which
+            # can run to thousands of lines and would bury the
+            # conversation it interrupted. Posted BEFORE the turn's own
+            # events, and the queue is FIFO from one thread, so the
+            # harness line cannot land under the answer it prompted.
+            self.post_message(SessionNote(
+                "wake", text.split("\n", 1)[0].strip()))
+            for event in wake(text, record):
+                self.post_message(LoopEventMessage(event))
+
+    def on_session_note(self, message: SessionNote) -> None:
+        self._transcript.write_role(message.role, message.text)
+
+    def _deliver_held(self, thread_id) -> None:
+        """Results held for the user's next message (§49, SS2/SS19): past
+        the consecutive-wake limit, or from a kill the user made between
+        turns.
+
+        `add_harness_message`, NOT main.py's `append_harness_row`. The two
+        write the same row, and the difference is whether this process
+        holds a ConversationMemory for the thread -- the CLI does not
+        between turns, and the TUI always does. Writing through storage
+        here would leave the live memory one row short of what was
+        persisted, so the turn about to run would send the model a history
+        missing the very results it is being handed.
+
+        On the UI thread, with run_agent_turn's storage guard around it:
+        this is a database write, and a failure has to fail the turn
+        rather than reach the message pump.
+        """
+        from core.session_wake import build_held
+
+        held = shell_sessions.sessions.take_held(thread_id)
+        if not held:
+            return
+        text, record = build_held(held)
+        self.memory.add_harness_message(text, record)
+        self._transcript.write_role("wake", text.split("\n", 1)[0].strip())
 
     def run_one_shot(self, agent, message: str) -> None:
         """Run ONE turn in the CURRENT thread under a different agent's
@@ -1595,17 +3322,79 @@ class VenastineApp(App):
         try:
             _, ceiling = compaction.thresholds(
                 self.model, provider_name=self.provider_name)
+            # Batch 119. The same function thresholds() derives from, so
+            # the two figures on this line cannot disagree about which
+            # window they mean -- and it is cache-only plus a dict lookup,
+            # with the fallback WARNING already deduplicated per model, so
+            # asking per repaint costs nothing new.
+            window = compaction.context_limit(self.model, self.provider_name)
         except Exception:  # noqa: BLE001 -- see above
-            ceiling = 0
+            ceiling = window = 0
         overridden = session.trigger_for(self.provider_name, self.model) is not None
-        self.query_one("#usage-line", UsageLine).update_usage(
+        self._usage_line.update_usage(
             self._memory.billed_tokens, self._memory.last_input_tokens,
-            ceiling, overridden)
+            ceiling, overridden, window)
 
     def on_agent_stack_changed(self, message: AgentStackChanged) -> None:
         """The sink spoke. Runs on the UI thread."""
         self._agent_stack = message.stack
+        # §47. A running child's thread reaches the transcript's spawn
+        # LINE through here: the span knows which call started it and
+        # `bind` gave it a thread, so the pairing exists before the
+        # tool result does. Accumulated rather than replaced -- a row
+        # leaves the stack the moment its run ends, and the line it
+        # belongs to stays on screen for the rest of the session.
+        for row in message.stack:
+            if row.call_id and row.thread_id is not None:
+                self._spawn_threads[str(row.call_id)] = str(row.thread_id)
         self.refresh_agent_panel()
+        # §47. This is the ONLY signal that a viewed run has finished --
+        # a child's own events are drained internally, so its span
+        # closing is what the shell learns. Without this the poll would
+        # go on re-reading a thread nothing is writing to any more.
+        self._sync_view_poll()
+
+    def on_session_rows_changed(self, message: SessionRowsChanged) -> None:
+        """The session sink spoke. Runs on the UI thread (§49, SS14)."""
+        self.refresh_session_panel(message.rows)
+        # SS14: the panel shows live sessions only, so a session that
+        # just finished leaves it -- and the view of it, if one is open,
+        # is now showing a state that has moved. Repainted here because
+        # this is the only signal: the poll stops the moment the session
+        # stops being live, so without this the view would keep the last
+        # tick's "running" header for good.
+        session_id = self._viewing_live_session
+        if session_id is not None:
+            for row in message.rows:
+                if row.id == session_id:
+                    self._paint_session_view(row)
+                    break
+        self._sync_view_poll()
+        # §49 (SS2). ctrl+b is bound only while something is running, so
+        # the footer entry appears and goes with the sessions themselves.
+        self.refresh_bindings()
+
+    def refresh_session_panel(self, rows) -> None:
+        """Redraw the session panel from a set of rows.
+
+        ONE function for the sink's handler and the mount-time seed, for
+        `refresh_agent_panel`'s reason: two writers of one widget is how
+        the two come to draw it differently.
+
+        THE FILTER IS HERE, which is SS14's "live sessions only" -- the
+        message carries everything the manager holds, so this is the one
+        place that decides what a reader sees.
+        """
+        live = [row for row in rows
+                if row.state in shell_sessions.LIVE_STATES]
+        self._session_panel.show(_panel_rows(live))
+
+    @property
+    def _session_panel(self) -> SessionPanel:
+        """The sidebar's session panel. HELD, for `_transcript`'s reason."""
+        if self._session_panel_widget is not None:
+            return self._session_panel_widget
+        return self.query_one("#session-panel", SessionPanel)
 
     def refresh_agent_panel(self) -> None:
         """Redraw the panel from the two facts that make it up: the
@@ -1627,7 +3416,13 @@ class VenastineApp(App):
         if panel is None:
             return
         name = self.active_agent.name if self.active_agent else None
-        panel.show(name, self._agent_stack)
+        # `self._memory`, NOT `self.memory`: the property CREATES a
+        # thread on first use, and painting a panel must not be what
+        # starts a conversation -- refresh_goal_banner's rule, and the
+        # reason this reads the field. None before the first turn, which
+        # draws a root row that is simply not armed.
+        root = getattr(self._memory, "thread_id", None)
+        panel.show(name, self._agent_stack, root)
 
     def restyle_sidebar(self) -> None:
         """Re-render the Rich-styled sidebar widgets after a /theme
@@ -1643,16 +3438,48 @@ class VenastineApp(App):
         """
         self.refresh_goal_banner()
         self.refresh_todo_panel()
-        self.query_one("#research-progress", ResearchProgress).restyle()
+        self._research_progress.restyle()
         # Batch 59. A Rich-styled sidebar widget like the two above it, so
         # it needs the same poke -- tcss reaches the panel's box and not
         # the styles inside its Text.
         self.query_one("#agent-panel", AgentPanel).restyle()
+        # §49 (SS14). Its neighbour, with its neighbour's problem: the
+        # armed row styles are Rich's, so a /theme would leave the panel
+        # in the old palette and -- worse -- the arming is carried in the
+        # same Style, so a redraw is also what keeps the rows clickable.
+        self.query_one("#session-panel", SessionPanel).restyle()
+        # §47. In #main rather than the sidebar, but the same kind of
+        # surface and the same problem: Rich styles resolved per draw,
+        # which tcss cannot reach inside.
+        self.query_one("#thread-crumb", ThreadCrumb).restyle()
 
     def on_loop_event_message(self, message: LoopEventMessage) -> None:
         event = message.event
         transcript = self._transcript
 
+        if logger.isEnabledFor(logging.DEBUG):
+            # Batch 78. The ordering breadcrumbs: which event shapes were
+            # handled, and how many screens were on the stack -- the two
+            # facts the spawn crash needed and neither shell recorded. A
+            # permission_request posted before its modal is pushed is
+            # handled after, and only the depth says so. Kind flags only,
+            # never payloads (params/answers stay out of the file); off
+            # by default so the per-token hot path pays one predicate.
+            kinds = ",".join(kind for kind, present in (
+                ("token", event.token_delta),
+                ("thinking", event.thinking_delta),
+                ("call", event.tool_call_start),
+                ("result", event.tool_result),
+                ("notice", event.notice),
+                ("ask", event.permission_request),
+                ("final", event.final_response is not None),
+            ) if present)
+            try:
+                depth = len(self.screen_stack)
+            except Exception:  # noqa: BLE001 -- no screen yet
+                depth = 0
+            logger.debug("loop event [%s] with %d screen(s) on the stack",
+                         kinds, depth)
         self.refresh_usage_line()
         # Batch 61. Counted whether or not the renderer draws it: the
         # commit cap withholds a table from its header row with no
@@ -1660,7 +3487,47 @@ class VenastineApp(App):
         # would go still during the one silence it exists to cover.
         if event.token_delta:
             self._meter.add_output_chars(len(event.token_delta))
+        # Batch 118. THINKING IS GENERATED OUTPUT, and counting only the
+        # visible answer is why the live figure read `~0 tok/s`: it needs
+        # only fewer than two characters per active second to round to
+        # zero, and a reasoning model emits minutes of thinking and a
+        # sentence of answer. Providers bill it as output tokens too, so
+        # the completion line's exact figure already included it while the
+        # live estimate did not -- the two instruments disagreed about
+        # their own numerator.
+        #
+        # OUTSIDE the `_show_thinking` branch below, deliberately: the
+        # model generated these characters whether or not this app is
+        # drawing them, and metering them behind the display switch would
+        # make `/thinking off` bring the bug back.
+        if event.thinking_delta:
+            self._meter.add_output_chars(len(event.thinking_delta))
         self._refresh_meter()
+
+        if event.retract:
+            # Batch 113 (TECHNICAL_DEBT 25). The model call that drew
+            # everything below the last flush failed in a way that can
+            # pass, and is about to be tried again -- so those rows come
+            # off before the retry draws its own, and the reader is told
+            # why the answer they were reading vanished.
+            #
+            # NOT through `_end_thinking()`, which every other branch
+            # here opens with: that closes the reasoning span first,
+            # drawing a delimiter onto entries this is about to delete.
+            # `retract_to_mark` clears the open-span flags itself, and
+            # the INDICATOR is stopped afterwards on #104's rule -- an
+            # undrawable indicator must not kill an event handler.
+            transcript.retract_to_mark(event.retract["text"])
+            try:
+                self._thinking_indicator.stop()
+            except NoMatches:
+                pass
+            # The mascot goes back to moving. The deltas paused it, and
+            # what follows is several seconds of a backoff wait with
+            # nothing arriving -- batch 61's worry about a figure going
+            # still during the one silence it exists to cover, one
+            # surface over.
+            self._raven.resume_animation()
 
         if event.thinking_delta:
             # §38. Same mascot handling as a token delta -- reasoning is
@@ -1681,6 +3548,32 @@ class VenastineApp(App):
             transcript.stream_delta(event.token_delta)
 
         if event.tool_call_start:
+            # Batch 118, both halves of the same correction.
+            #
+            # The CLOCK: a tool running is not the model writing, so the
+            # rate's denominator stops here and resumes at `tool_result`.
+            # `elapsed` keeps running -- a two-minute tool IS part of how
+            # long the turn took, and the transcript line says `took`.
+            # Depth-counted inside the meter, because `_dispatch_parallel`
+            # can have several outstanding at once.
+            #
+            # The COUNT: `input` is the arguments the model generated, and
+            # they are output tokens the provider bills. They never arrive
+            # as a delta -- `StreamToken` carries text, thinking, or the
+            # final response, so tool-call JSON lands whole in the last one
+            # -- which made generating a large call pure denominator with no
+            # numerator. Measured by its serialised length, the same rough
+            # instrument `CHARS_PER_TOKEN` already is.
+            self._meter.set_tool_running(1, monotonic())
+            try:
+                self._meter.add_output_chars(
+                    len(json.dumps(event.tool_call_start.get("input") or {},
+                                   ensure_ascii=False)))
+            except (TypeError, ValueError):
+                # A tool whose params do not serialise is not a reason to
+                # drop an event: the figure is an estimate and this one
+                # argument list simply does not get counted.
+                pass
             self._end_thinking()
             transcript.flush_stream()
             self._raven.resume_animation()
@@ -1696,9 +3589,19 @@ class VenastineApp(App):
                 # `new_text` -- which is the thing the diff replaces,
                 # and printing both would be the truncated payload back
                 # again, above a block that says it properly.
+                #
+                # ARMED ANYWAY SINCE §55 (TR7), and these two are the
+                # case that makes TR7's no-exception-list rule earn
+                # itself: X4 kept the payload off this line, and the
+                # diff that replaced it shows the CHANGE rather than
+                # the call -- so the pane is the only place the
+                # untruncated `content` can be read, and it is exactly
+                # the kind of thing a reader goes looking for.
                 self._file_calls[call_id] = (
                     name, params or {}, self._snapshot(params))
-                transcript.write_role("tool", f"▸ {name}")
+                transcript.write_role(
+                    "tool", f"▸ {name}", (),
+                    (tool_registry.opens(name)[0], str(call_id)))
             else:
                 # §42 (RA3): the registry's digest, not param_digest
                 # direct -- a tool's declared rationale is prose for
@@ -1713,17 +3616,50 @@ class VenastineApp(App):
                 # cut-off span to resolve against. Redacted at the
                 # producer, and a value the redactor rewrote is not
                 # among them -- see `redacted_values`.
+                # §47, widened by §49 (SS14). The call id rides along
+                # for a tool that opens a thread or a session of its
+                # own, so the line becomes openable once the thing it
+                # started exists. The REGISTRY is asked rather than the
+                # name compared, for the same reason core/replay.py
+                # asks: one declaration, and the live line and the
+                # replayed one cannot disagree about which lines are
+                # openable.
+                kind = tool_registry.opens(name)
+                opens = (kind[0], str(call_id)) if kind and call_id else ()
                 transcript.write_role(
                     "tool", f"▸ {name}{detail}",
-                    tool_registry.call_links(name, params))
+                    tool_registry.call_links(name, params), opens)
 
         if event.tool_result:
+            # Batch 118. The other end of the tool window opened above.
+            self._meter.set_tool_running(-1, monotonic())
             result = event.tool_result["result"]
             call_id = event.tool_result.get("id")
+            # §47, the second of three sources for `_spawn_threads`.
+            # The agent stack pairs a call with its thread while the
+            # child RUNS; this is what survives the span closing, and
+            # it is the one that catches a child whose span never
+            # reached the shell at all. The tool has said the id in
+            # its result since §18 -- it was simply never read here.
+            if call_id and isinstance(result, dict):
+                spawned = result.get("subagent_thread_id")
+                if spawned:
+                    self._spawn_threads[str(call_id)] = str(spawned)
+                # §49 (SS14), the session half of the line above. The
+                # start tools have said the id in their result since
+                # batch 95 (`_started_result`); this is what reads it.
+                started = result.get("session")
+                if started:
+                    self._session_calls[str(call_id)] = str(started)
             failed = isinstance(result, dict) and "error" in result
             if failed:
                 tool_name = self._tool_names.get(call_id) if call_id else None
-                error_text = redact_secrets(str(result["error"]))
+                # The shared diagnostic composition (batch 144), not
+                # `redact_secrets`: a tool's error string is the most
+                # likely place in the harness for a credential shape with
+                # no vendor prefix to appear, because it is usually the
+                # upstream request that failed.
+                error_text = redact_diagnostic_text(str(result["error"]))
                 if tool_name:
                     transcript.write_role("tool_error", f"  ✗ {tool_name}  {error_text}")
                 else:
@@ -1799,7 +3735,7 @@ class VenastineApp(App):
                 return None
             if os.path.getsize(resolved) > DIFF_SNAPSHOT_MAX_BYTES:
                 return None
-            with open(resolved, "r", encoding="utf-8", errors="replace") as f:
+            with open(resolved, encoding="utf-8", errors="replace") as f:
                 return f.read()
         except Exception:  # noqa: BLE001 -- see the docstring
             return None
@@ -1918,7 +3854,64 @@ class VenastineApp(App):
             # declines the press, so the key is inert on a fresh
             # session. One return value buys both halves.
             return True if self._history else None
+        if action == "kill_session":
+            # §49 (SS2). None rather than False, for `recall_previous`'s
+            # reason: the footer greys the entry instead of dropping it
+            # and reflowing, while the press is still declined when
+            # nothing is running. This key is what SS2 keeps usable while
+            # input is blocked, so it has to stay VISIBLE while blocked --
+            # a control that vanishes is one nobody knows to reach for.
+            return True if shell_sessions.sessions.live_rows() else None
+        if action == "close_thread_view":
+            # §47. FALSE when the viewer is closed, and False rather than
+            # None for the ctrl+c reason rather than the recall one: this
+            # binding has no footer entry to grey out (`show=False`), and
+            # what it must not do is sit live-but-inert on a key another
+            # widget wants. `PromptInput` binds escape to dismissing the
+            # slash panel, and a focused widget wins -- but the prompt is
+            # DISABLED while the viewer is open, so nothing is focused
+            # there and this is the binding that fires. The two never
+            # contend, and this is what makes that true rather than
+            # lucky.
+            return self._viewing is not None
+        if action == "cancel_turn":
+            # §61 CN8. FALSE, never None, for close_thread_view's reason
+            # one line up and ctrl+c's two above that: `active_bindings`
+            # is keyed by KEY and skips a binding only on `is False`, so
+            # a None-refused one keeps the slot and the other escape
+            # action never fires. This binding has no footer entry to
+            # grey out either, so there is nothing on the other side of
+            # the trade.
+            #
+            # Already-cancelled counts as unavailable: the run is
+            # winding down and a second press has nothing left to ask
+            # for, which also lets escape fall back through to the
+            # thread view underneath.
+            return self._cancel is not None and not self._cancel.cancelled
         return True
+
+    def action_cancel_turn(self) -> None:
+        """escape, while a turn is running: ask it to stop (§61 CN8).
+
+        The line is written HERE rather than when the loop notices,
+        because the gap between the two is the whole user-visible cost
+        of a cooperative stop: a tool call already running finishes
+        first (CN6), and a model call still waiting on its first token
+        cannot be reached at all until it arrives. Saying so is what
+        makes a slow stop read as a stop rather than as a dead key.
+
+        `cancel()` returning False means someone already asked -- the
+        binding refuses in that state, so this is belt and braces for a
+        press that raced the refresh rather than a case to report.
+        """
+        token = self._cancel
+        if token is None or not token.cancel("stopped from the keyboard"):
+            return
+        self._transcript.write_system(
+            "— stopping; anything already running finishes first —")
+        # The footer and the binding map both read check_action, and
+        # this is the moment its answer changes.
+        self.refresh_bindings()
 
     def action_recall_previous(self) -> None:
         """ctrl+up: the prompt before this one."""
@@ -2001,7 +3994,99 @@ class VenastineApp(App):
         if self._quit_timer is not None:
             self._quit_timer.stop()
             self._quit_timer = None
-        self.exit()
+        self.quit_with_sessions()
+
+    def quit_with_sessions(self) -> None:
+        """Quit, asking first when background sessions would be killed
+        (§49, SS6).
+
+        The DELIBERATE quit routes only -- the second ctrl+c and `/quit`.
+        `exit()` stays unconditional because every other exit funnels
+        through it (a config restart, a programmatic close, the message
+        pump unwinding), and a modal on that path is a shell that cannot
+        be closed. SS6's other half is already done and lives elsewhere:
+        main.py's `finally` calls `_close_sessions`, which kills what is
+        live and writes a row into each owning thread, and that covers the
+        TUI because the app runs inside that try.
+
+        ASKING AGAIN MEANS GOING. If the prompt is already up, a further
+        confirm-quit exits rather than stacking a second copy of it --
+        ctrl+c twice is how someone insists, and a gesture that answers
+        insistence with another dialog is the hang it was meant to avoid.
+        """
+        if self._quit_asking:
+            self.exit()
+            return
+        rows = shell_sessions.sessions.live_rows()
+        if not rows:
+            self.exit()
+            return
+        plural = "" if len(rows) == 1 else "s"
+        self._quit_asking = True
+
+        def _decided(confirmed) -> None:
+            self._quit_asking = False
+            if confirmed:
+                self.exit()
+                return
+            self._visible_transcript.write_system(
+                f"Still here. {len(rows)} session{plural} still running.")
+
+        self.push_screen(
+            ConfirmScreen(
+                "Quit and stop what is running?",
+                f"{len(rows)} background session{plural} would be stopped. "
+                f"Each one's conversation gets a line saying so, but the "
+                f"output is not kept past this process and there is no way "
+                f"to re-attach.",
+                "Quit"),
+            _decided)
+
+    # -- restarting to apply a config change (batch 84) ----------------------
+
+    def _research_is_running(self) -> bool:
+        """True while the deep-research worker is alive.
+
+        `_busy` covers a chat turn, a research run and `/compact` alike,
+        and the restart treats the first two differently: a turn is worth
+        queueing behind, a pipeline run is minutes long and a restart
+        queued behind one arrives after the question has scrolled away.
+        The worker has been named `research` since §22, which is what makes
+        the distinction readable without a second flag to keep in step
+        with `_busy`.
+        """
+        return any(worker.name == "research"
+                   and worker.state is WorkerState.RUNNING
+                   for worker in self.workers)
+
+    def _fire_pending_restart(self) -> None:
+        """The queued restart, once the turn that blocked it has ended."""
+        key, self._pending_restart = self._pending_restart, None
+        if key is None or self._shutting_down:
+            return
+        self.restart_for_config(key)
+
+    def restart_for_config(self, key: str) -> None:
+        """Leave, asking `main.py` to launch again where this left off.
+
+        EXIT WITH A REQUEST rather than replacing the process from in here.
+        The MCP servers are subprocesses of this one and the database is
+        open; `main.py` closes both in a `finally` that a process replaced
+        from inside the UI would never reach. So this hands back a record,
+        the ordinary shutdown runs, and the relaunch happens at the top
+        level where there is nothing left to leak.
+        """
+        thread = getattr(self._memory, "thread_id", None)
+        self._transcript.write_system(f"Restarting to apply {key}…")
+        self.exit(config_edit.RestartRequest(
+            key=key,
+            thread_id=str(thread) if thread else None,
+            # Named only when a FLAG pinned the pair at launch. Without one
+            # the remembered choice in tui/preferences.py answers at the
+            # next launch exactly as it did at this one, and passing a flag
+            # the user never typed would outrank it.
+            provider=self.provider_name if self._cli_pinned else None,
+            model=self.model if self._cli_pinned else None))
 
     def _disarm_quit(self) -> None:
         """The window closed with one press in it. The label goes back."""
@@ -2041,9 +4126,22 @@ class VenastineApp(App):
         # rather than on the quit binding alone.
         if self._busy:
             # #105, D4. Say what quitting does to a run rather than
-            # leaving it mysterious: the worker stops forwarding at its
-            # next event (#105's fix), so this is a bounded goodbye, and
-            # the line tells the user what became of the run.
+            # leaving it mysterious: this is a bounded goodbye, and the
+            # line tells the user what became of the work.
+            #
+            # BATCH 145 REWORDED IT, because it was true of one
+            # of the two things `_busy` covers. `_research_is_running`'s
+            # docstring says `_busy` is a chat turn, a research run or
+            # `/compact` alike; only the research path read the flag
+            # (`_forwarding` breaks at the next event, #105), and
+            # `_consume` was deliberately untouched -- recorded as such in
+            # BREAKING_CHANGES. So on a chat turn this sentence asserted
+            # an abandonment that did not happen while the worker went on
+            # draining the generator, which is up to `max_steps` further
+            # model calls and every tool call inside them, dispatched
+            # against an app that has gone. A user told the work is
+            # abandoned had been told the opposite of what was being done
+            # with their API budget.
             #
             # Best-effort (#104's rule), though the case it was written
             # for is gone: `_transcript` is held from on_mount, so
@@ -2053,13 +4151,55 @@ class VenastineApp(App):
             # the goodbye.
             try:
                 self._transcript.write_system(
-                    "[quitting — the active work is abandoned at its next "
-                    "event; its checkpoints are kept.]")
+                    "[quitting — the active work stops at its next "
+                    "boundary; anything already running finishes, and "
+                    "what it did is kept.]")
             except NoMatches:
                 pass
         self._shutting_down = True
+        # BATCH 145. AFTER the flag, so a worker that can see the
+        # cancellation can already see the flag -- `_wait_for_sessions`
+        # tests the two in that order and the message it posts depends on
+        # which it finds.
+        #
+        # THE TOKEN, not a break in `_consume`'s drain, and the difference
+        # is measured. Breaking out of the drain stops it at whatever event
+        # is next, and one of those events is `tool_call_start`: D20 has
+        # already persisted the assistant turn carrying the `tool_use` and
+        # nothing has written the matching `tool_result`, so the thread is
+        # left holding M4's broken pairing -- "an HTTP 400 on Anthropic, a
+        # hard wire error" on the next resume. Driven on the real
+        # generator, three ways: abandoning on `tool_result` orphaned
+        # nothing (that is what #42 fixed), abandoning on `tool_call_start`
+        # orphaned one, and the cancel token orphaned nothing and ended the
+        # turn `cancelled`.
+        #
+        # It orphans nothing because SS61 already answered this: the token
+        # is tested BETWEEN tool groups, and `_finish_cancelled` writes a
+        # row for every call it will not run -- "#42's lesson from the
+        # other side", in that function's own words. Reusing it is also
+        # what makes the line above true for both halves of `_busy`
+        # instead of one, and what stops a quit spending money.
+        token = self._cancel
+        if token is not None:
+            token.cancel("quitting")
         self._release_permission_channel()
         return super().exit(*args, **kwargs)
+
+    def _handle_exception(self, error: Exception) -> None:
+        """Log an unhandled UI error before Textual reports it (batch 78).
+
+        Textual catches message-handler exceptions internally and reports
+        them to the error console only -- `logs/app.log` heard nothing of
+        the NoMatches that took the app down over a usage-line repaint,
+        and the `textual run --dev` note on the exit screen does not apply
+        to an app launched from `main.py`. This flows through the
+        redacting formatter like every other record, then delegates: the
+        pilot re-raise, the return code and the exit screen are all
+        super()'s to keep.
+        """
+        logger.critical("Unrecoverable UI error: %s", error, exc_info=error)
+        super()._handle_exception(error)
 
     def response_channel(self, honour_run_scope: bool = True):
         """This app's one way of being asked anything (§23 AC1).
@@ -2095,7 +4235,9 @@ class VenastineApp(App):
                 request.payload.get("params") or {},
                 request.notice,
                 request.payload.get("rationale"),
-                request.payload.get("headline"))
+                request.payload.get("headline"),
+                request.payload.get("asking_agent"),
+                request.payload.get("asking_depth") or 0)
         if request.kind == interaction.REVIEW:
             return self.ask_review_blocking(
                 request.payload.get("finding") or {},
@@ -2105,6 +4247,11 @@ class VenastineApp(App):
                 request.payload.get("title", ""),
                 request.payload.get("body", ""),
                 request.payload.get("confirm_label", "Yes"))
+        if request.kind == interaction.SECRET:
+            return self.ask_secret_blocking(
+                request.payload.get("title", "Enter a secret"),
+                request.payload.get("body", ""),
+                request.payload.get("confirm_label", "Unlock"))
         if request.kind == interaction.CHOICE:
             return self.ask_choice_blocking(request.payload)
         if request.kind == interaction.QUESTION:
@@ -2112,7 +4259,13 @@ class VenastineApp(App):
         if request.kind == interaction.SUBAGENT_SIGNOFF:
             return self.ask_signoff_blocking(
                 request.payload.get("agent", "this subagent"),
-                request.payload.get("candidates") or [])
+                request.payload.get("candidates") or [],
+                # §47. `agent` above is the one about to be SPAWNED;
+                # this is the run doing the spawning, and with three
+                # children of one turn able to ask at once it is what
+                # tells two of these screens apart.
+                request.payload.get("asking_agent"),
+                request.payload.get("asking_depth") or 0)
         # An unrecognised kind is a bug in whoever built the Request;
         # interaction.decode raises on one, and falling through lets that
         # happen rather than answering a question this app cannot render.
@@ -2120,7 +4273,8 @@ class VenastineApp(App):
 
     def ask_permission_blocking(self, tool_name: str, params: dict,
                                 notice, rationale=None,
-                                headline=None) -> bool:
+                                headline=None, asked_by=None,
+                                depth=0) -> bool:
         """Show the permission modal and BLOCK until answered.
 
         Called from a worker thread, never the UI thread -- both the chat
@@ -2142,7 +4296,7 @@ class VenastineApp(App):
         # answer no longer goes anywhere.
         return self._blocking_modal(
             PermissionScreen(tool_name, params, notice, rationale,
-                             headline),
+                             headline, asked_by, depth),
             on_timeout=lambda screen: self._timed_out_ask(
                 screen,
                 dismiss_with=False,
@@ -2194,28 +4348,71 @@ class VenastineApp(App):
         declining default, which is why nothing here fabricates an answer.
         """
         channel: queue.Queue = queue.Queue()
-        self._permission_channel = channel
-        # Batch 61. The turn clock stops while a human is being waited
-        # on -- this is their time, not the harness's, and counting it
-        # would make a 30-second decision read as a slow model and
-        # collapse the throughput figure to nothing. The tick reads the
-        # screen stack for the general case; this call is what makes
-        # the pause exact when `tui.animations: false` leaves no tick
-        # to notice the transition. set_blocked is idempotent, so the
-        # two routes are one piece of state.
-        #
-        # DIRECT, never call_from_thread: this runs on a worker, and
-        # a quitting app has no message pump left to marshal into --
-        # measured, that parks the worker forever and breaks the
-        # shutdown release this method exists to keep working
-        # (test_quitting_during_an_attended_research_prompt_releases_
-        # the_worker). The meter touches no widget, so there is
-        # nothing to marshal.
-        self._meter.set_blocked(True, monotonic())
-        self.call_from_thread(
-            self.push_screen, screen, lambda answer: channel.put(answer))
+        # BATCH 145. EVERYTHING the `finally` undoes is now
+        # inside the `try`, and the three statements below were outside
+        # it. `call_from_thread` raises -- `RuntimeError("App is not
+        # running")` when textual's `_loop` is None, which teardown sets,
+        # and again from its same-thread guard -- and when it did, the
+        # `finally` was never entered: `_permission_channel` stayed set,
+        # so the field stopped meaning "there is an ask outstanding", and
+        # `set_blocked(False)` was never called, so the TURN CLOCK STAYED
+        # PAUSED for the rest of the session. The clock is the visible
+        # half: `tui/meters.py` explains that the two pauses must not
+        # overlap, and every later turn's time and `~tok/s` are wrong once
+        # the resume is lost -- TECHNICAL_DEBT 9's misreading arriving by a
+        # new route, in the batch 61 machinery written to stop it.
+        # Measured on the real method: with the marshal raising, the field
+        # read LEFT SET and the clock STILL PAUSED; with the fix, cleared
+        # and resumed.
         try:
-            return channel.get(timeout=config.ATTENDED_APPROVAL_TIMEOUT_S)
+            self._permission_channel = channel
+            # BATCH 145. The `_shutting_down` guard is tested by
+            # each of the seven CALLERS, and this method -- the one place
+            # they all share -- did not test it again after publishing.
+            # The release is read-and-clear, so a release that runs while
+            # the field is still None puts nothing anywhere, and an ask
+            # publishing a moment later parks on a queue with no writer
+            # left. The caller-side guards close the SEQUENTIAL re-arm,
+            # which is what TECHNICAL_DEBT 5's r1-1 hang was; they leave
+            # the window where the re-arm is CONCURRENT with the release.
+            #
+            # Re-tested HERE, which is after the publication and before
+            # the marshal: a flag set before this point means the release
+            # has either already happened or is about to find the channel,
+            # and either way there is nothing to ask. Declining with None
+            # is what the timeout path returns and what `interaction.decode`
+            # turns into the kind's declining default, so this adds no new
+            # answer. Driven with the window widened on purpose: the
+            # subject returned None only when the 2 s timeout expired,
+            # where the control returned False in 0.60 s.
+            if self._shutting_down:
+                return None
+            # Batch 61. The turn clock stops while a human is being waited
+            # on -- this is their time, not the harness's, and counting it
+            # would make a 30-second decision read as a slow model and
+            # collapse the throughput figure to nothing. The tick reads the
+            # screen stack for the general case; this call is what makes
+            # the pause exact when `tui.animations: false` leaves no tick
+            # to notice the transition. set_blocked is idempotent, so the
+            # two routes are one piece of state.
+            #
+            # DIRECT, never call_from_thread: this runs on a worker, and
+            # a quitting app has no message pump left to marshal into --
+            # measured, that parks the worker forever and breaks the
+            # shutdown release this method exists to keep working
+            # (test_quitting_during_an_attended_research_prompt_releases_
+            # the_worker). The meter touches no widget, so there is
+            # nothing to marshal.
+            self._meter.set_blocked(True, monotonic())
+            self.call_from_thread(
+                self.push_screen, screen, lambda answer: channel.put(answer))
+            if logger.isEnabledFor(logging.DEBUG):
+                # Batch 78. Which question went on screen -- screen type
+                # only, never the params it shows or the answer it
+                # returns. Paired with the answered/timed-out lines below,
+                # this orders the modal against the loop events above.
+                logger.debug("modal pushed: %s", type(screen).__name__)
+            answer = channel.get(timeout=config.ATTENDED_APPROVAL_TIMEOUT_S)
         except queue.Empty:
             # NARRATION IS BEST-EFFORT; THE ANSWER IS NOT. This method's
             # contract is to return the dismissal value raw, and None here
@@ -2234,10 +4431,19 @@ class VenastineApp(App):
                 logger.exception(
                     "Could not narrate the timeout for this request; it is "
                     "still declined.")
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("modal timed out, declined: %s",
+                             type(screen).__name__)
             return None
         finally:
             self._permission_channel = None
             self._meter.set_blocked(False, monotonic())
+        if logger.isEnabledFor(logging.DEBUG):
+            # The answer CLASS, never the value: notes and ticks stay out
+            # of the file, and a shutdown release reads as an answer here
+            # by design (a bare False), so this orders but does not judge.
+            logger.debug("modal answered: %s", type(screen).__name__)
+        return answer
 
     def ask_choice_blocking(self, payload: dict):
         """Pick one of a set of offered options. Blocks; returns whatever
@@ -2280,7 +4486,12 @@ class VenastineApp(App):
             payload.get("question", ""),
             payload.get("options") or (),
             payload.get("multi_select", False),
-            payload.get("allow_text", True))
+            payload.get("allow_text", True),
+            # §47. Which run is asking, when it is not the conversation
+            # itself. `ask_user` puts these on the payload from the open
+            # span, the same source `_obtain_approval` reads.
+            payload.get("asking_agent"),
+            payload.get("asking_depth") or 0)
         return self._blocking_modal(
             screen,
             on_timeout=lambda screen: self._timed_out_ask(
@@ -2291,7 +4502,8 @@ class VenastineApp(App):
                 after_line=("[answer arrived after the timeout — the model "
                             "was told nobody answered]")))
 
-    def ask_signoff_blocking(self, agent: str, candidates: list):
+    def ask_signoff_blocking(self, agent: str, candidates: list,
+                             asked_by: str = None, depth: int = 0):
         """Which of a subagent's gated tools it may use unprompted (§23
         AC1b). Blocks; returns a set, or None to refuse the spawn.
 
@@ -2302,7 +4514,7 @@ class VenastineApp(App):
         if self._shutting_down:
             return None
         return self._blocking_modal(
-            SubagentSignoffScreen(agent, candidates),
+            SubagentSignoffScreen(agent, candidates, asked_by, depth),
             on_timeout=lambda screen: self._timed_out_ask(
                 screen,
                 dismiss_with=False,
@@ -2311,6 +4523,32 @@ class VenastineApp(App):
                     f"denied; the spawn was refused]"),
                 after_line=("[answer arrived after the timeout — the spawn "
                             "was refused]")))
+
+    def ask_secret_blocking(self, title: str, body: str = "",
+                            confirm_label: str = "Unlock"):
+        """Show the masked modal and BLOCK until answered (SS59).
+
+        Returns the dismissal RAW -- the string, or None for a cancel, an
+        escape, a shutdown release or a timeout. `interaction.decode` turns
+        everything that is not a non-empty string into the declining
+        default, so a dismissed prompt cannot become an empty passphrase
+        and an empty passphrase cannot become an authentication attempt.
+
+        THE TIMEOUT LINE NAMES NO VALUE and neither does anything else on
+        this path. Every other `ask_*_blocking` writes a transcript line
+        saying what was decided; this one says only that nothing was
+        entered, because the decision here IS the value.
+        """
+        if self._shutting_down:
+            return None
+        return self._blocking_modal(
+            SecretScreen(title, body, confirm_label),
+            on_timeout=lambda screen: self._timed_out_ask(
+                screen,
+                dismiss_with=None,
+                on_timeout_line="[no answer — nothing was entered]",
+                after_line=("[answer arrived after the timeout — nothing "
+                            "was entered]")))
 
     def ask_review_blocking(self, finding: dict, round_index: int):
         """Show the review modal and BLOCK until answered. §20 V4.
@@ -2403,7 +4641,39 @@ class VenastineApp(App):
 
     def on_turn_finished(self, message: TurnFinished) -> None:
         self._busy = False
+        # BATCH 145. The transcript removes terminal control
+        # sequences from everything it draws, and this is where that gets
+        # said. ONE record per turn, read-and-clear, rather than one per
+        # span or one per sequence.
+        #
+        # HERE rather than in the widget, and that is not a preference:
+        # `tui/widgets.py` does no logging deliberately -- `Transcript`'s
+        # own contract is that "write* does no logging, so a handler
+        # feeding a widget that logs cannot loop here", and
+        # `on_log_record_message` routes records straight back into
+        # `write_role`. A Transcript that logged while writing would make
+        # that sentence false, which is the shape batch 144 spent a whole
+        # surface removing. The widget counts; this layer, which knows
+        # whose text it was, is the one that speaks.
+        #
+        # INFO, so it reaches `logs/app.log` at the default level and goes
+        # through batch 144's redacting formatter like every other record,
+        # and NOT the transcript: `TranscriptLogHandler` is WARNING+, and a
+        # model that merely emitted a colour code is not a warning. The
+        # text itself says nothing -- the stripped sequence leaves no mark
+        # on screen, which is `core/ansi.py`'s locked answer for the pty
+        # and the same answer here, so that `_entries`, the screen, `/copy`
+        # and the replay stay byte-identical to one another.
+        stripped = self._transcript.take_stripped_count()
+        if stripped:
+            logger.info(
+                "Removed %d terminal control sequence(s) from this turn's "
+                "rendered text.", stripped)
         self._permission_channel = None
+        # ROADMAP_v3 §61 (CN9). Same lifetime as the channel above: with
+        # no turn to stop, escape goes back to meaning only what it
+        # meant before, and check_action says so.
+        self._cancel = None
         self._tool_names.clear()
         self._file_calls.clear()
         # §38: close a thinking span before the answer's, so a turn that
@@ -2547,6 +4817,13 @@ class VenastineApp(App):
         """§16 AC3. Required alongside exit_on_error=False: without a handler the
         exception is available on the worker and reported nowhere."""
         if event.worker.state is WorkerState.ERROR:
+            # Batch 78. The toast is transient; the traceback is the part
+            # worth keeping, and no other site logs it -- on_turn_finished
+            # renders message.error into the transcript but never records
+            # it, so logging here (the one handler every run_worker shares)
+            # is the single site, not a second copy beside that render.
+            logger.error("Worker %r failed: %s", event.worker.name,
+                         event.worker.error, exc_info=event.worker.error)
             self.notify(f"Turn failed: {event.worker.error}", severity="error")
 
     # -- actions -------------------------------------------------------------
@@ -2557,9 +4834,7 @@ class VenastineApp(App):
         # into the abandoned thread while rendering under the new one, so
         # transcript and stored history diverge. Plain chat, /research and
         # /grill-me all enforce this guard already.
-        if self._busy:
-            self._transcript.write_error(
-                "Still working — wait for this turn to finish.")
+        if self.refuse_if_occupied("read another run"):
             return
         # #104. Every storage read from here down runs on the UI THREAD,
         # inside a screen-dismiss callback, so an uncaught exception does
@@ -2605,9 +4880,7 @@ class VenastineApp(App):
         separated by a failure. A second copy of this sequence would have
         to re-learn each comment the hard way."""
         resolved = thread_id if isinstance(thread_id, UUID) else UUID(str(thread_id))
-        if self._busy:
-            self._transcript.write_error(
-                "Still working — wait for this turn to finish.")
+        if self.refuse_if_occupied("switch threads"):
             return
         # BEFORE anything is torn down, deliberately. A failure here means
         # the switch does not happen at all and the session continues on
@@ -2638,8 +4911,25 @@ class VenastineApp(App):
         # transcript's entry log, which `reset()` below drops.
         self._last_run = None
         self._live_claims = {}
+        # Batch 96, and it belongs to the two lines above rather than
+        # beside them: the panel IS the visible half of `_last_run`, and
+        # clearing the fact while leaving the drawing of it on screen is
+        # the stale-panel bug this comment block already argues against.
+        self._research_progress.clear_for_thread()
         self._tool_names.clear()
         self._file_calls.clear()
+        # §47. Keyed by the call ids of the thread being left, so a map
+        # that survived would answer the next conversation's clicks
+        # with the previous one's runs.
+        self._spawn_threads.clear()
+        # §49 (SS14), on that same list: a start call belongs to the
+        # conversation that made it.
+        self._session_calls.clear()
+        # §47. A trail pointing into the thread the session just left is
+        # worse than no trail, and the pane underneath it would be
+        # showing a run belonging to a conversation that is no longer
+        # open. Same list, same reason, as the four lines above.
+        self.close_thread_view()
         # CLEAR, then replay. Swapping memory without clearing left the
         # previous conversation on screen beneath the new thread's id --
         # bug 1's worst half, since a blank panel is merely unhelpful
@@ -2667,33 +4957,75 @@ class VenastineApp(App):
                 f"open and usable — only its history could not be "
                 f"drawn.")
             return
-        for role, text, links in entries:
-            if role == "user":
-                self._transcript.write_user(text)
-            elif role == "assistant":
-                self._transcript.write_answer(text)
-            elif role == "thinking":
-                # §44. Skipped rather than dimmed when the setting is off:
-                # /thinking is about whether reasoning is shown at all, and
-                # a replay that showed what a live turn had hidden would be
-                # the same conversation rendered two ways -- which is the
-                # defect this whole commit exists to remove, arriving
-                # through the other door.
-                #
-                # write_role, not a new method: Transcript._render_entry
-                # has known the "thinking" role since §38 and already draws
-                # the bar block and opens §43's turn label above it, so a
-                # replayed span and a streamed one go through one renderer.
-                if self._show_thinking:
-                    self._transcript.write_role(role, text)
-            else:
-                self._transcript.write_role(role, text, links)
+        # §47. BEFORE the paint, because the paint arms the lines and
+        # the arming is what a click resolves against. Contained: a
+        # thread whose children cannot be read still replays, with its
+        # spawn lines simply not openable.
+        self._learn_spawn_threads(resolved)
+        self._paint_entries(self._transcript, entries)
         if entries:
             noun = "entry" if len(entries) == 1 else "entries"
             self._transcript.write_system(
                 f"— end of {len(entries)} replayed {noun} —")
         else:
             self._transcript.write_system("This thread has no messages yet.")
+
+    def _learn_spawn_threads(self, thread_id) -> None:
+        """Pair this thread's spawn calls with the runs they made (§47).
+
+        ONE query for the whole conversation rather than one per line:
+        a resumed thread resolves every `▸ spawn_subagent` it draws,
+        and asking per line would be a query per row of a screen.
+
+        This is the third source for `_spawn_threads`, and the only one
+        that works after a restart -- the other two are a live span and
+        a live tool result, neither of which happened in this process.
+        It is why slice 1 put the parent link in a column.
+        """
+        try:
+            children = storage.child_threads(thread_id)
+        except Exception:                                   # noqa: BLE001
+            logger.exception("Could not read this thread's spawned runs.")
+            return
+        for child in children:
+            call_id = child.get("parent_call_id")
+            if call_id:
+                self._spawn_threads[str(call_id)] = str(child["id"])
+
+    def _paint_entries(self, transcript, entries) -> None:
+        """Draw replayed entries into `transcript` (§27 T5).
+
+        ONE loop for the two callers -- a resume, and §47's read-only
+        view -- because what a stored thread LOOKS like is a policy
+        decision, and §26's L2 spent a decision on there being one
+        translation site for it. Two copies would be free to disagree
+        about the thinking rule below, which is exactly the divergence
+        that rule exists to close.
+
+        Takes the target rather than reaching for `self._transcript`,
+        which is what makes it reusable at all.
+        """
+        for role, text, links, opens in entries:
+            if role == "user":
+                transcript.write_user(text)
+            elif role == "assistant":
+                transcript.write_answer(text)
+            elif role == "thinking":
+                # §44. Skipped rather than dimmed when the setting is off:
+                # /thinking is about whether reasoning is shown at all, and
+                # a replay that showed what a live turn had hidden would be
+                # the same conversation rendered two ways -- which is the
+                # defect that commit exists to remove, arriving through the
+                # other door.
+                #
+                # write_role, not a new method: Transcript._render_entry
+                # has known the "thinking" role since §38 and already draws
+                # the bar block and opens §43's turn label above it, so a
+                # replayed span and a streamed one go through one renderer.
+                if self._show_thinking:
+                    transcript.write_role(role, text)
+            else:
+                transcript.write_role(role, text, links, opens)
 
     def action_show_claims(self) -> None:
         self.show_claims("")
@@ -2853,9 +5185,7 @@ def _cmd_model(app: VenastineApp, args: str) -> None:
             "Usage: /model <name>, or /model <PROVIDER> <name>.")
         return
 
-    if app._busy:
-        app._transcript.write_error(
-            "Still working — wait for this turn to finish.")
+    if app.refuse_if_occupied("change the model"):
         return
 
     parts = args.split()
@@ -2982,7 +5312,9 @@ def _cmd_research(app: VenastineApp, args: str) -> None:
     sets. Bare --grant opens the picker.
     """
     from core.reasoning.authorization import (
-        candidates, parse_grant_spec, GrantSpecError,
+        GrantSpecError,
+        candidates,
+        parse_grant_spec,
     )
 
     attended, review, grant_spec, query = _split_research_flags(args)
@@ -3000,8 +5332,7 @@ def _cmd_research(app: VenastineApp, args: str) -> None:
             "Usage: /research [--attended] [--review|--no-review] "
             "[--grant[=a,b]] <query>")
         return
-    if app._busy:
-        app._transcript.write_error("Still working — wait for this turn to finish.")
+    if app.refuse_if_occupied("start a research run"):
         return
 
     offered = candidates()
@@ -3176,7 +5507,8 @@ def _start_research(app: VenastineApp, query: str, authorization) -> None:
 
     def work() -> None:
         from core.reasoning.orchestrator import (
-            run_pipeline_to_completion, stream_deep_research_pipeline,
+            run_pipeline_to_completion,
+            stream_deep_research_pipeline,
         )
         from core.reasoning.output_writer import write_run_artifacts
         error = None
@@ -3195,6 +5527,11 @@ def _start_research(app: VenastineApp, query: str, authorization) -> None:
                 authorization=authorization,
                 review=consent,
                 subagent_review=review_on,
+                # §47. The sink, so the ten passes and the reviewer
+                # draw in the panel and can be opened while they run.
+                # `getattr`, matching every other span call site: a
+                # stub app in the suite has no sink.
+                activity=getattr(app, "_activity", None),
                 # #139. The pipeline runs at the effort the session shows
                 # in the status bar -- captured HERE, so a mid-run /effort
                 # affects the next run, exactly like model/provider.
@@ -3243,6 +5580,36 @@ def _cmd_threads(app: VenastineApp, args: str) -> None:
     app.action_pick_thread()
 
 
+def _cmd_kill(app: VenastineApp, args: str) -> None:
+    """Stop a background session (§49, SS2).
+
+    NOT behind `refuse_if_occupied`, and it is the one command that must
+    not be: SS2 keeps a kill usable precisely while sessions are blocking
+    everything else. A funnel that refused this would refuse the only way
+    out of the block it enforces.
+
+    With an id, it kills that one; bare, it opens the same picker ctrl+b
+    does. Both routes land on `_kill_session`, so the wait-off-the-UI-
+    thread rule holds however the user got here.
+    """
+    named = args.strip()
+    if not named:
+        app.action_kill_session()
+        return
+    row = shell_sessions.sessions.row(named)
+    if row is None:
+        app._visible_transcript.write_error(
+            f"No session {named}. /kill on its own lists what is running.")
+        return
+    if row.state not in shell_sessions.LIVE_STATES:
+        # SAID rather than ignored, for on_spawn_selected's reason: a
+        # deliberate kill that produces silence reads as broken.
+        app._visible_transcript.write_system(
+            f"Session {named} already finished ({row.state}).")
+        return
+    app._kill_session(row.id)
+
+
 def _cmd_resume(app: VenastineApp, args: str) -> None:
     """#30/#32's other half. The picker caps at PICKER_THREAD_LIMIT, so
     "older conversations stay reachable" needs a by-id path in THIS shell
@@ -3286,9 +5653,7 @@ def _cmd_new(app: VenastineApp, args: str) -> None:
     use, which after a switch is not the pair the app launched with.
     The /ref attachments are thread state and leave with the thread.
     """
-    if app._busy:
-        app._transcript.write_error(
-            "Still working — wait for this turn to finish.")
+    if app.refuse_if_occupied("start a new thread"):
         return
     # None, not a fresh ConversationMemory: /new followed by /new should
     # not leave two empty threads behind. The next turn creates it.
@@ -3302,8 +5667,16 @@ def _cmd_new(app: VenastineApp, args: str) -> None:
     # log it reads.
     app._last_run = None
     app._live_claims = {}
+    # switch_to_thread's list gains the research panel for switch_to_thread's
+    # reason (batch 96): /new left the previous thread's run drawn in the
+    # sidebar, failed or finished alike, under a thread that never ran it.
+    app._research_progress.clear_for_thread()
     app._tool_names.clear()
     app._file_calls.clear()
+    # §47, on that list for that reason: these keys belong to the
+    # conversation being left.
+    app._spawn_threads.clear()
+    app._session_calls.clear()
     # State first, then the screen, then anything written -- so a
     # failure cannot leave the transcript cleared while the panels still
     # describe the previous thread.
@@ -3604,9 +5977,7 @@ def _cmd_compact(app: VenastineApp, args: str) -> None:
     automatic one does, since "summarize this conversation" and "throw
     away what I just said" are different requests.
     """
-    if app._busy:
-        app._transcript.write_error(
-            "Still working — wait for this turn to finish.")
+    if app.refuse_if_occupied("compact this thread"):
         return
     if app._memory is None:
         app._transcript.write_error("Nothing to compact — this thread is empty.")
@@ -3839,7 +6210,7 @@ def _cmd_thinking(app: VenastineApp, args: str) -> None:
 
 
 def _cmd_quit(app: VenastineApp, args: str) -> None:
-    app.exit()
+    app.quit_with_sessions()
 
 
 # ---------------------------------------------------------------------------
@@ -3894,7 +6265,7 @@ def _pipeline_role_args(app: VenastineApp, args: str, command: str):
 def _clear_pipeline_role(app: VenastineApp, role: str, label: str) -> None:
     """`/critic off`. Three outcomes, because the store has three.
 
-    "Cleared" is not the same as "unset": config.py may still answer, and
+    "Cleared" is not the same as "unset": config.yaml may still answer, and
     saying otherwise would be a lie about behaviour the next run will
     show. So the sentence names what is in force AFTERWARDS.
     """
@@ -3942,7 +6313,7 @@ def _cmd_critic(app: VenastineApp, args: str) -> None:
         current = pipeline_models.resolve("critic")
         if current:
             source = ("remembered" if pipeline_models.remembered("critic")
-                      else "config.py")
+                      else "config.yaml")
             app._transcript.write_system(
                 f"Critic model: {current['provider_name']} | "
                 f"{current['model']} ({source}).")
@@ -3956,9 +6327,7 @@ def _cmd_critic(app: VenastineApp, args: str) -> None:
             "/critic off.")
         return
 
-    if app._busy:
-        app._transcript.write_error(
-            "Still working — wait for this turn to finish.")
+    if app.refuse_if_occupied("change the critic model"):
         return
 
     if args.strip().lower() in ("off", "clear", "auto", "none"):
@@ -4008,7 +6377,7 @@ def _cmd_embedder(app: VenastineApp, args: str) -> None:
         current = pipeline_models.resolve("embedder")
         if current:
             source = ("remembered" if pipeline_models.remembered("embedder")
-                      else "config.py")
+                      else "config.yaml")
             app._transcript.write_system(
                 f"Embedder: {current['provider_name']} | {current['model']} "
                 f"({source}).")
@@ -4022,9 +6391,7 @@ def _cmd_embedder(app: VenastineApp, args: str) -> None:
             "/embedder off.")
         return
 
-    if app._busy:
-        app._transcript.write_error(
-            "Still working — wait for this turn to finish.")
+    if app.refuse_if_occupied("change the embedder"):
         return
 
     if args.strip().lower() in ("off", "clear", "auto", "none"):
@@ -4038,6 +6405,578 @@ def _cmd_embedder(app: VenastineApp, args: str) -> None:
 
     app._transcript.write_system(f"Checking {provider} | {model}…")
     app.start_embedder_probe(provider, model)
+
+
+# ---------------------------------------------------------------------------
+# ---- /config (batch 84) ---------------------------------------------------
+# ---------------------------------------------------------------------------
+#
+# THE ROWS ARE `SlashCommand`s WHOSE NAME IS THE WHOLE LINE, and that is the
+# whole trick. `SlashSuggest._entry` draws `"/" + command.name` and
+# `PromptInput._complete` writes `"/" + command.name + " "`, so a row named
+# `config max_tokens` renders as `/config max_tokens ● …` and completes to
+# exactly the text that dispatches. The panel, its row budget, its sliding
+# window and the four keys it spends are untouched by this feature -- the only
+# change anywhere near them is `CommandRegistry.matching` learning to ask the
+# command what comes after its own name.
+#
+# The trailing space `_complete` appends is not incidental either: it is what
+# asks this function for the next stage. Typing a key and pressing tab moves
+# from the key list to that key's value list in one keystroke.
+
+
+def _config_value_choices(row, typed: str) -> list:
+    """The values to offer for `row`, given what has been typed so far.
+
+    A CLOSED VOCABULARY IS OFFERED WHENEVER IT MATCHES; A FREE-FORM VALUE IS
+    OFFERED ONLY INTO AN EMPTY SLOT. That asymmetry is a bug fix rather than
+    a preference. `enter` completes while the panel is open, so a number
+    offered against a half-typed number would be taken INSTEAD of what was
+    being typed: with the shipped 16000 on offer, typing `/config max_tokens
+    1` and pressing enter to send would silently write 16000, because `16000`
+    starts with `1`. A bool or a Literal cannot do that -- completing one is
+    the only reason to have typed its first letter.
+    """
+    if "|" in row.values:
+        return [choice.strip() for choice in row.values.split("|")
+                if choice.strip().startswith(typed)]
+    if typed:
+        return []
+    if row.kind == "pair":
+        # `off` is the only single token this kind takes; a pair is two.
+        return ["off"]
+    return [config_edit.shown(row.in_file)]
+
+
+def _remembered_for_panel() -> "tuple[str, str] | None":
+    """The `/model` store's whole pair, or None.
+
+    A STORE FACT for the panel, deliberately unvalidated: staleness and
+    provider checks belong to `_startup_model`, which alone knows the flags
+    that outrank them. `KeyRow` labels it remembered rather than running,
+    so the row stays true however the session resolved; `_cmd_config`
+    (which has the app) turns it into the authoritative sentence.
+    """
+    record = preferences.load_model()
+    if record is None:
+        return None
+    return record["provider"], record["model"]
+
+
+#: `_config_read`'s answer when the file could not be read. A sentinel
+#: rather than None, because None is a real answer from `find()`.
+_UNREADABLE = object()
+
+
+def _config_read(app: VenastineApp, read):
+    """`read()`, or `_UNREADABLE` after writing why the file cannot answer.
+
+    THE PRODUCER'S SENTENCE, NOT THE GENERIC ONE. Every reader in
+    `config_edit` raises `ValueError` naming `config.yaml` and the remedy
+    when the document has moved under the session (batch 155), and the
+    documented workflow is exactly how it moves -- `explain()` tells
+    every container row to "Edit it in config.yaml" and nothing re-reads
+    the file (UN1).
+
+    WITHOUT THIS THE COMMAND STILL SURVIVED, which is why this is about
+    the sentence and not about a crash. Batch 135 contains `dispatch()`
+    at its call site, so a handler raising here prints "/config failed.
+    The error is in logs/app.log; the session is intact." -- true, and
+    not an answer to "I just edited that file".
+
+    `OSError` travels with `ValueError` because `read_text` raises it for
+    the file being gone or locked, and its message names the path too.
+    """
+    try:
+        return read()
+    except (ValueError, OSError) as exc:
+        app._transcript.write_error(str(exc))
+        return _UNREADABLE
+
+
+def _config_rows(argument: str) -> list:
+    """The panel's offers after `/config `. Keys first, then that key's
+    values once a space follows it.
+
+    CONTAINED, because the right answer to "what can I complete" over an
+    unreadable file is nothing. The catalogue parses `config.yaml`, which
+    raises if the file has been deleted, locked by an editor or an
+    antivirus scan, or saved as UTF-16.
+
+    NOT BECAUSE AN EXCEPTION HERE WOULD KILL THE APP -- it would have,
+    and this docstring said so, and that stopped being true one batch
+    later: `CommandRegistry.matching` has contained `command.complete`
+    since batch 135 and logs it. This clause stays because it
+    is narrower and quieter than that one: the four shapes named above
+    are an unreadable FILE rather than a broken completer, and the panel
+    should offer nothing without writing a traceback to app.log every
+    keystroke while someone edits in another window. `/config <key>` is
+    where the loader's message, which names the file and the remedy,
+    belongs.
+    """
+    typed = argument.lstrip()
+    key, space, value_text = typed.partition(" ")
+    remembered = _remembered_for_panel()
+    try:
+        if not space:
+            return [SlashCommand(f"config {row.name}", row.summary,
+                                 _cmd_config)
+                    for row in config_edit.matching(key, remembered)]
+        row = config_edit.find(key, remembered)
+    except (ValueError, OSError):
+        return []
+    if row is None or not row.settable:
+        return []
+    # The FILE's value, because that is what a write replaces. Once a value
+    # has been written this session the two diverge, and offering "replaces
+    # 16000" over a file that already says 18000 is the drift batch 85 is
+    # about.
+    in_file = config_edit.shown(row.in_file)
+    rows = []
+    for choice in _config_value_choices(row, value_text):
+        note = ("what the file says" if choice == in_file
+                else f"replaces {in_file}")
+        rows.append(SlashCommand(f"config {key} {choice}", note, _cmd_config))
+    return rows
+
+
+def _cmd_config(app: VenastineApp, args: str) -> None:
+    """Browse and set the values in `config.yaml` (debt item 20).
+
+    Every tunable the harness has moved into `config.yaml` in batch 82, and
+    the only way to change one was still to open the file in an editor. This
+    is the other half: every one of those keys, browsable in the panel and
+    settable by name, written back through a round trip that keeps 600 lines
+    of comments, and applied by relaunching -- because `config.py` binds at
+    import and `security/posture.py` depends on that (UN1), so there is no
+    honest way to move a value in a running process.
+    """
+    text = args.strip()
+    if not text:
+        _config_orientation(app)
+        return
+    if text == "--cancel-restart":
+        if app._pending_restart is None:
+            app._transcript.write_error("No restart is queued.")
+            return
+        app._pending_restart = None
+        app._transcript.write_system(
+            "Restart cancelled. The change is still written and will apply "
+            "whenever you next launch.")
+        return
+
+    name, _, value_text = text.partition(" ")
+    remembered = _remembered_for_panel()
+    row = _config_read(app, lambda: config_edit.find(name, remembered))
+    if row is _UNREADABLE:
+        return
+    if row is None:
+        near = _config_read(app, lambda: config_edit.matching(name, remembered))
+        if near is _UNREADABLE:
+            return
+        app._transcript.write_error(
+            f"{name} is not a key in config.yaml."
+            + (f" Did you mean {near[0].name}?" if near else
+               " Type /config and a space to browse them."))
+        return
+    if not value_text.strip():
+        lines = _config_read(app, lambda: config_edit.explain(
+            name, remembered=remembered,
+            cli_pinned=getattr(app, "_cli_pinned", False),
+            session_pair=(app.provider_name, app.model)))
+        if lines is _UNREADABLE:
+            return
+        for line in lines:
+            app._transcript.write_system(line)
+        return
+    _config_set(app, row, value_text.strip())
+
+
+def _config_orientation(app: VenastineApp) -> None:
+    """Bare `/config`. What is here and how to reach it.
+
+    NOT a listing. 166 names would fill the transcript and bury the
+    conversation, and the panel is the browser -- so this says how to open
+    it, which is the one thing someone typing a bare `/config` does not yet
+    know.
+
+    THE CATALOGUE READ IS GUARDED and the pending read is not, which is
+    not an oversight: the first one is what fails over a file edited
+    under the session, and it returns. Nothing reaches the second read
+    with a document the first could not build from.
+    """
+    rows = _config_read(app, config_edit.catalogue)
+    if rows is _UNREADABLE:
+        return
+    settable = sum(1 for row in rows if row.settable)
+    app._transcript.write_system(
+        f"config.yaml holds {len(rows)} settings, {settable} of them "
+        f"settable from here.")
+    app._transcript.write_system(
+        "Type /config and a space to browse them; the panel completes a "
+        "name, then offers that name's values.")
+    app._transcript.write_system(
+        "/config <key> explains one. /config <key> <value> writes it and "
+        "offers to relaunch, because values are read once at startup.")
+    app._transcript.write_system(
+        f"The file is {config_schema.CONFIG_PATH}. CONFIG_ARCHITECTURE.md "
+        f"says why each value is what it is.")
+
+    # WHAT IS PENDING, last and only when there is any. This is the place a
+    # person checks their work before applying it, and after four writes
+    # the alternative is scrolling 166 rows looking for the marker.
+    pending = config_edit.pending_changes()
+    if not pending:
+        return
+    app._transcript.write_system(
+        f"{len(pending)} change(s) written and waiting for a restart:")
+    for row in pending:
+        app._transcript.write_system(
+            f"  {row.name}: {config_edit.shown(row.in_session)} → "
+            f"{config_edit.shown(row.in_file)}")
+
+
+def _config_set(app: VenastineApp, row, value_text: str) -> None:
+    """Parse, validate against the whole document, then gate and write."""
+    if row.kind == "pair":
+        role = "critic" if row.name == "critic_model" else "embedder"
+        if value_text.lower() in config_edit.NULL_WORDS:
+            value = None
+        else:
+            resolved = _pipeline_role_args(app, value_text, role)
+            if resolved is None:
+                return
+            value = {"provider_name": resolved[0], "model": resolved[1]}
+    else:
+        try:
+            value = config_edit.parse_value(row, value_text)
+        except ValueError as exc:
+            app._transcript.write_error(str(exc))
+            return
+
+    try:
+        proposal = config_edit.propose(row.name, value)
+    except ValueError as exc:
+        # The loader's own message, naming the key and the problem. It
+        # covers the cross-field invariants too -- a strategy that is not
+        # in the roster beside it fails here, before anything is written.
+        app._transcript.write_error(str(exc))
+        return
+    except OSError as exc:
+        # Validating writes a candidate beside config.yaml, and a global npm
+        # prefix owned by root is not writable -- an ordinary install, not a
+        # broken one. This used to escape into Textual's message handler and
+        # take the app down on the first /config write of such a session.
+        app._transcript.write_error(
+            f"{row.name} could not be validated: {exc}. Nothing changed.")
+        return
+
+    if not proposal.lines:
+        app._transcript.write_system(
+            f"{row.name} is already {config_edit.shown(value)}. Nothing "
+            f"written.")
+        return
+
+    key = config_edit.authority_key(row.name)
+    if key is None:
+        _config_write(app, proposal)
+        return
+
+    # AUTHORITY. The gate is the compensating control for letting a slash
+    # command reach these at all (batch 84): what makes it defensible is
+    # that the person is told what the key permits, so the body is the
+    # sentence for THIS key rather than a generic "are you sure".
+    # `.capitalize()` LOWERCASES THE REST, and these sentences carry
+    # `Docker`, `WITHOUT` and `D14` -- a product name, an emphasis and a
+    # decision id, in a modal whose whole job is to say precisely what a
+    # key permits. Only the first character is meant to move.
+    effect = config_edit.AUTHORITY_EFFECT[key]
+    body = (f"{effect[:1].upper() + effect[1:]}\n\n"
+            f"{row.name}\n"
+            f"  now:  {config_edit.shown(proposal.before)}\n"
+            f"  after: {config_edit.shown(proposal.after)}\n\n"
+            f"No settings file, environment variable or tool call can "
+            f"change this. Writing it needs you.")
+
+    def _decided(confirmed) -> None:
+        if confirmed:
+            _config_write(app, proposal)
+        else:
+            app._transcript.write_system("Nothing written.")
+
+    app.push_screen(
+        ConfirmScreen(f"Change {row.name}?", body, "Write it"), _decided)
+
+
+def _config_write(app: VenastineApp, proposal) -> None:
+    """Write the validated document, then offer the relaunch."""
+    try:
+        config_edit.write(proposal.text, proposal.newline)
+    except OSError as exc:
+        app._transcript.write_error(
+            f"config.yaml could not be written ({exc}). Nothing changed. "
+            f"An installed copy may sit in a directory you cannot write.")
+        return
+    app._transcript.write_system(
+        f"config.yaml: {proposal.name} is now "
+        f"{config_edit.shown(proposal.after)} "
+        f"(was {config_edit.shown(proposal.before)}).")
+    _config_offer_restart(app, proposal.name)
+
+
+def _config_offer_restart(app: VenastineApp, key: str) -> None:
+    """Ask whether to relaunch, or explain why now is not the moment.
+
+    A RESEARCH RUN IS NOT WAITED FOR. A chat turn is seconds and queueing
+    behind it is reasonable; a pipeline run is minutes to tens of minutes,
+    and a restart queued behind one is a restart nobody remembers asking
+    for, arriving long after the question scrolled away. The write has
+    already landed either way, so nothing is lost by saying so.
+    """
+    def _refuse() -> None:
+        app._transcript.write_system(
+            "A research run is in flight, so the restart is not queued. "
+            "The change is written; relaunch when the run finishes and it "
+            "takes effect.")
+
+    if app._research_is_running():
+        _refuse()
+        return
+
+    def _decided(confirmed) -> None:
+        if not confirmed:
+            app._transcript.write_system(
+                "Not restarting. It applies at your next launch.")
+            return
+        # RE-ASKED HERE, beside the `_busy` read it is paired with. The check
+        # above runs before the modal opens; a pipeline started while it was
+        # open would otherwise be caught by `_busy` -- which covers a chat
+        # turn, a research run and /compact alike -- and the restart would
+        # queue behind the very thing this refuses to wait for.
+        if app._research_is_running():
+            _refuse()
+            return
+        if app._busy:
+            app._pending_restart = key
+            app._transcript.write_system(
+                "Restarting when this turn finishes. /config "
+                "--cancel-restart calls it off.")
+            return
+        app.restart_for_config(key)
+
+    app.push_screen(
+        ConfirmScreen(
+            "Restart now?",
+            f"{key} is written. Values are read once at startup, so it "
+            f"changes nothing until the harness restarts.\n\n"
+            f"Restarting reopens this conversation where it is.",
+            "Restart"),
+        _decided)
+
+
+def _cmd_secrets(app: "VenastineApp", args: str) -> None:
+    """Manage the harness-held secret store (ROADMAP_v3 §49 slice 5a).
+
+    `status`, `list`, `set <name>`, `delete <name>`, `lock` -- and NOTHING
+    that prints a value. `security.secrets.names()` is the only accessor a
+    listing surface may reach for, which is what lets this whole command be
+    written without a way to show a password by accident (SS62).
+
+    CALLBACKS, NOT `ask_secret_blocking`. A command handler runs on the UI
+    THREAD, and the blocking asks are drained by that same thread -- so
+    calling one here would deadlock the app on the first `/secrets`, not
+    fail it. `action_pick_thread` is the pattern being followed: push the
+    screen, continue in its dismiss callback.
+
+    NOT MODEL-REACHABLE, and that is a property rather than an accident:
+    slash commands are typed by a human and are not tools, so nothing in a
+    context window can drive this. It is the same argument
+    `security/posture.py` makes for having no posture command -- the
+    surface that matters is the one reachable AFTER untrusted content is
+    already in the window.
+    """
+    from security import secrets
+
+    parts = args.split()
+    verb = parts[0].lower() if parts else "status"
+    rest = parts[1:]
+    say = app._transcript.write_system
+    err = app._transcript.write_error
+
+    def with_unlocked(then) -> None:
+        """Call `then()` with the store open, asking for the passphrase if
+        it is not. Does nothing at all if the user declines, which is the
+        declining default arriving through a callback instead of a return
+        value."""
+        if secrets.is_unlocked():
+            then()
+            return
+        if not secrets.exists():
+            say(f"No secrets store yet. /secrets set <name> creates one at "
+                f"{secrets.store_path()}.")
+            return
+
+        def opened(answer) -> None:
+            if not answer:
+                say("Nothing was entered — the store is still locked.")
+                return
+            try:
+                secrets.unlock(answer)
+            except secrets.StoreUnreadable as exc:
+                # `main.py`'s arm, and the same note: the ordering is
+                # forced by subclassing, but what keeps the recovery text
+                # away from a mistyped passphrase is that
+                # `WrongPassphrase` is not a `StoreUnreadable` (batch 108).
+                #
+                # TWO entries rather than one string with a newline in it.
+                # `_emit` renders ONE entry, and measured across `tui/`,
+                # not one existing `write_error` call carries an embedded
+                # newline -- so this would have been the first, on the
+                # path whose docstring says it draws a single line.
+                err(str(exc))
+                err(secrets.recovery_hint())
+                return
+            except secrets.SecretsError as exc:
+                err(str(exc))
+                return
+            then()
+
+        app.push_screen(
+            SecretScreen("Unlock the secrets store",
+                         f"Stored at {secrets.store_path()}."),
+            opened)
+
+    if verb == "lock":
+        say("Secrets locked." if secrets.lock("/secrets lock")
+            else "The secrets store was not unlocked.")
+        return
+
+    if verb == "status":
+        if not secrets.exists():
+            say(f"No secrets store. It would live at {secrets.store_path()}.")
+        elif secrets.is_unlocked():
+            say(f"Secrets store unlocked — {len(secrets.names())} entries. "
+                f"/secrets lock closes it.")
+        else:
+            say("Secrets store present, locked.")
+        return
+
+    if verb == "list":
+        def show() -> None:
+            entries = secrets.names()
+            if not entries:
+                say("No secrets stored.")
+                return
+            say("Stored secrets (names only):\n" +
+                "\n".join("  " + name for name in entries))
+        with_unlocked(show)
+        return
+
+    if verb == "delete":
+        if not rest:
+            say("Usage: /secrets delete <name>")
+            return
+
+        def remove() -> None:
+            say(f"Deleted {rest[0]}." if secrets.delete(rest[0])
+                else f"No secret named {rest[0]}.")
+        with_unlocked(remove)
+        return
+
+    if verb == "set":
+        if not rest:
+            say("Usage: /secrets set <name>")
+            return
+        name = rest[0]
+
+        def ask_value() -> None:
+            def saved(value) -> None:
+                if not value:
+                    say("Nothing was entered — unchanged.")
+                    return
+                try:
+                    secrets.put(name, value)
+                except secrets.SecretsError as exc:
+                    err(str(exc))
+                    return
+                say(f"Saved {name}.")
+                offer_twin(value)
+
+            app.push_screen(
+                SecretScreen(f"Value for {name}", "", confirm_label="Save"),
+                saved)
+
+        def offer_twin(value) -> None:
+            # SS58's reuse offer. A stacked host uses ONE account password
+            # for the ssh login and then for `sudo -S` on the far side, and
+            # typing it twice is how the two silently drift apart later.
+            # They stay SEPARATE entries so rotating one is a visible edit.
+            twin = _secret_twin(name)
+            if not twin:
+                return
+
+            def answered(yes) -> None:
+                if not yes:
+                    return
+                try:
+                    secrets.put(twin, value)
+                except secrets.SecretsError as exc:
+                    err(str(exc))
+                    return
+                say(f"Saved {twin}.")
+
+            app.push_screen(
+                ConfirmScreen(
+                    "Use the same value for another entry?",
+                    f"Many hosts use one account password for both the "
+                    f"SSH login and sudo.\n\n  {name}\n  {twin}",
+                    f"Also save as {twin}"),
+                answered)
+
+        if secrets.exists():
+            with_unlocked(ask_value)
+            return
+
+        def created(first) -> None:
+            if not first:
+                say("Nothing was entered — no store was made.")
+                return
+            try:
+                secrets.create(first)
+            except secrets.SecretsError as exc:
+                err(str(exc))
+                return
+            ask_value()
+
+        # Creating the store and adding the first entry are two passphrases
+        # in a row, so they are two prompts with different titles rather
+        # than one prompt that means different things on different runs.
+        app.push_screen(
+            SecretScreen(
+                "Choose a master passphrase",
+                "It encrypts the store. There is no recovery: if you "
+                "forget it, delete the file and start again.",
+                confirm_label="Create"),
+            created)
+        return
+
+    say("Usage: /secrets [status|list|set <name>|delete <name>|lock]")
+
+
+def _secret_twin(name: str):
+    """The entry a value is most often shared with (SS58).
+
+    `ssh.<host>.login` and `ssh.<host>.sudo` are the pair: the account
+    password authenticates the connection and then answers `sudo -S` on the
+    far side. Returned so `/secrets set` can OFFER to write both, which
+    keeps one typing mistake from becoming two different stored values --
+    while leaving them separate entries, so rotating one later is a visible
+    edit rather than a silent break in two places with one diagnosis.
+    """
+    for left, right in (("login", "sudo"), ("sudo", "login")):
+        if name.endswith("." + left):
+            return name[: -len(left)] + right
+    return None
 
 
 def register_builtin_commands() -> None:
@@ -4065,6 +7004,11 @@ def register_builtin_commands() -> None:
                      _cmd_window, "[tokens|off]"),
         SlashCommand("trigger", "override when this chat compacts, for the session",
                      _cmd_trigger, "[tokens|off]"),
+        SlashCommand("config", "browse and set the harness configuration",
+                     _cmd_config, "[key] [value]", complete=_config_rows),
+        SlashCommand("secrets", "manage the harness-held secret store",
+                     _cmd_secrets,
+                     "[status|list|set <name>|delete <name>|lock]"),
         SlashCommand("claims", "show a research run's claims and their tiers",
                      _cmd_claims, "[run id]"),
         SlashCommand("copy", "copy text out of the session", _cmd_copy,
@@ -4073,6 +7017,8 @@ def register_builtin_commands() -> None:
         SlashCommand("resume", "resume a thread by id, even an old one",
                      _cmd_resume, "<thread-id>"),
         SlashCommand("new", "start a new thread", _cmd_new),
+        SlashCommand("kill", "stop a background session", _cmd_kill,
+                     "[session-id]"),
         SlashCommand("quit", "exit the harness", _cmd_quit,
                      aliases=("exit", "bye")),
     ):
@@ -4087,14 +7033,25 @@ register_init_commands()  # §24: /init
 
 
 def run(provider_name: str, model: str, settings: dict | None = None,
-        cli_pinned: bool = False) -> None:
+        cli_pinned: bool = False, startup_notices: "list[str] | None" = None):
     """Entry point used by main.py --tui.
 
     `cli_pinned` says whether --provider/--model named this launch's
     pair (§43, RM3). main.resolve_runtime_defaults has already collapsed
     the flags into `provider_name`/`model` by here, so the app cannot
     tell by looking -- and a flag has to outrank a remembered choice.
+
+    `startup_notices` is batch 121: pre-mount lines main() could not
+    print, because this screen erases stdout the moment it renders and
+    the log handler that would have carried them attaches at mount. on
+    _mount writes each into the transcript.
+
+    RETURNS whatever the app exited with, which is `None` for every exit
+    except a `/config` write the user chose to apply (batch 84): that one
+    returns a `config_edit.RestartRequest`, and `main.py` relaunches on it
+    after its own teardown has run.
     """
     config_loader_settings = settings if settings is not None else config_loader.get_settings()
-    VenastineApp(provider_name, model, config_loader_settings,
-                 cli_pinned=cli_pinned).run()
+    return VenastineApp(provider_name, model, config_loader_settings,
+                        cli_pinned=cli_pinned,
+                        startup_notices=startup_notices).run()

@@ -1,27 +1,73 @@
 """
 tui/widgets.py
 
-ROADMAP_v2 §16 widgets. Presentation only -- nothing here imports core/
-or reaches into harness state; tui/app.py feeds them.
+ROADMAP_v2 §16 widgets. Presentation only -- nothing here reaches into
+harness state or does I/O; tui/app.py feeds them.
+
+THE RULE SAID "nothing here imports core/" UNTIL BATCH 145, and the one
+import it now has is the reason the wording moved rather than the rule.
+`core/ansi.py` is a pure text transform -- it imports `__future__` and
+nothing else, holds no harness state, touches no widget and does no I/O,
+which its own docstring says in those words. It lives in `core/` because
+the pty reader needs it too, not because it is harness machinery; it is
+the same KIND of module as `tui/markdown.py`, one directory over. A second
+copy here is what the rule would actually have bought, and that is the
+two-copies-of-one-decision shape (EP6, #157) that `core/ansi.py`'s own
+docstring refuses -- and batch 144 had just spent a whole surface undoing
+it for the secret redactors. The part of the rule that matters is intact:
+nothing here reads config, storage, a session or a tool.
 """
 
 import webbrowser
+from dataclasses import dataclass
 
 from rich import box
 from rich.console import Console
+from rich.measure import measure_renderables
 from rich.style import Style
 from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 from textual.binding import Binding
+from textual.content import Content
 from textual.message import Message
 from textual.reactive import reactive
-from textual.widgets import RichLog, Static, TextArea
+from textual.widgets import ContentSwitcher, RichLog, Static, TextArea
 
+from core.ansi import AnsiStripper
 from prompts.system_prompts import pass_label
-
 from tui import diffs, markdown, ravens, themes
 from tui.commands import registry as commands
+
+
+def as_content(text: Text) -> Content:
+    """A Rich ``Text`` as the ``Content`` textual would build from it anyway.
+
+    ``Static.update`` routes its argument through ``visual.visualize()``,
+    which special-cases a Rich ``Text`` into
+    ``Content.from_rich_text(obj, console=widget.app.console)`` -- and
+    ``self.app`` RAISES outside a running app. Every panel in this module is
+    built bare in the suite (``ThinkingIndicator._redraw``'s guard is the
+    same fact one door along), so handing textual a ``Text`` turned every
+    such construction into an error about the event loop.
+
+    ``Content.from_rich_text`` itself takes ``console=None`` and falls back
+    to ``RichStyle.parse``, so doing the conversion HERE is what removes the
+    app lookup. Parity rather than approximation, measured: over 1085
+    (theme, role) style strings across all 35 selectable themes the console
+    changes not one span. ``role_styles`` emits literal Rich style strings
+    (``bold #0178D4``, ``dim italic``, ``green``) and never a textual CSS
+    variable, and those are exactly what ``RichStyle.parse`` reads.
+
+    The other half is what does NOT survive: ``Content`` carries no
+    ``no_wrap`` and no ``overflow``, and ``from_rich_text`` drops both.
+    Textual's own call drops them too, so a widget that set them on its
+    ``Text`` lost them the moment the pin moved -- silently, and with no
+    test able to see it. They are ``text-wrap`` / ``text-overflow`` in
+    ``app.tcss`` now; see ``#agent-panel`` and ``#thread-crumb``.
+    """
+    return Content.from_rich_text(text)
+
 
 # Animation cadence. Slow enough to read, and paused outright while tokens
 # are streaming -- a redraw loop competing with token deltas is the one
@@ -42,6 +88,14 @@ THINKING_INDENT = "  "
 # has bigger problems than streaming cadence, and an unmeasurable width
 # (a bare-built test widget, a widget before mount) reads as 0.
 MIN_WRAP_WIDTH = 20
+
+# Batch 112 (TECHNICAL_DEBT 23). How long after the LAST resize event the
+# transcript re-lays itself. Dragging a window edge delivers one Resize per
+# frame and a replay is O(the whole session), so the redraw is coalesced
+# rather than run per event. 0.15s is below the threshold at which a redraw
+# reads as a delay and comfortably above a drag's frame interval. Tests
+# monkeypatch it to 0 rather than sleeping through it.
+REFLOW_DEBOUNCE_S = 0.15
 
 # Batch 55, the slash-command suggestion panel. The two caps are a pair:
 # five entries is the list a reader takes in at a glance, eight rows is
@@ -163,7 +217,14 @@ MARK_STAGE = "·"
 # one target or the other by accident.
 CONVERSATION_ROLES = frozenset({
     "user", "assistant", "thinking", "tool", "tool_error", "diff",
-    "pipeline_tool"})
+    "pipeline_tool",
+    # ROADMAP_v3 §49 (SS14): a line of a background session's own output,
+    # in a session view. CONVERSATION rather than META for `tool_error`'s
+    # reason -- it is the far end of a tool call, which is part of the
+    # exchange, and the harness is quoting it rather than saying it. Its
+    # only home today is the session-view pane, which `/copy` does not
+    # read; the classification is what a copy of one WOULD do.
+    "output"})
 
 # `pass` and `pass_done` are here rather than above deliberately: a
 # ten-pass run's boundaries are progress reporting about the harness,
@@ -174,7 +235,12 @@ CONVERSATION_ROLES = frozenset({
 # call now can -- and it classifies as CONVERSATION so batch 48's copy
 # shape survives the rename unchanged.
 META_ROLES = frozenset({
-    "system", "warning", "error", "pass", "pass_done", "success"})
+    "system", "warning", "error", "pass", "pass_done", "success",
+    # ROADMAP_v3 §49 (SS5). A background session's result, written by the
+    # harness to start a turn. The model reads it, but nobody in the
+    # conversation SAID it, so /copy conversation leaves it out as it leaves
+    # out a routed warning -- and the answer it prompted still copies.
+    "wake"})
 
 # Batch 65 (TECHNICAL_DEBT 16). The lines whose URLs are armed for
 # ctrl+click, beside the two sets above for their reason: which roles a
@@ -280,7 +346,7 @@ class ThinkingIndicator(Static):
         except Exception:  # noqa: BLE001 -- no running app; render unstyled
             style = ""
         frame = self.FRAMES[self._frame] if self._animations else self.FRAMES[-1]
-        self.update(Text(f"{THINKING_INDENT}{frame}", style))
+        self.update(as_content(Text(f"{THINKING_INDENT}{frame}", style)))
 
     def start(self) -> None:
         """Idempotent -- called on every thinking delta."""
@@ -348,7 +414,7 @@ class PostureBadge(Static):
         body = Text("!! REDUCED SECURITY\n")
         for label, _detail in self._reasons:
             body.append("- " + label + "\n")
-        self.update(body)
+        self.update(as_content(body))
         self.display = True
 
 
@@ -391,17 +457,30 @@ class UsageLine(Static):
         self.update("")
 
     def update_usage(self, billed: int, ctx: int,
-                     ceiling: int = 0, overridden: bool = False) -> None:
+                     ceiling: int = 0, overridden: bool = False,
+                     window: int = 0) -> None:
         """`ceiling` is the compaction trigger this thread is measured
-        against, shown as a denominator so `ctx` has a scale. `overridden`
-        marks it with a `*` when a session /trigger set it -- ephemeral
-        state that changes when compaction fires should not be invisible,
-        which is the same rule M14 states for injected memories.
+        against and `window` is the model's actual context limit.
+        `overridden` marks the trigger with a `*` when a session /trigger
+        set it -- ephemeral state that changes when compaction fires should
+        not be invisible, which is the same rule M14 states for injected
+        memories.
 
-        Both are optional so a caller that has no threshold to hand still
+        THE DENOMINATOR IS THE WINDOW SINCE BATCH 119, and the trigger is
+        annotated beside it. It used to be the trigger alone, which was
+        defensible -- that is the number `ctx` is compared against, and the
+        line existed to give `ctx` a scale -- and was still the wrong
+        choice, because a denominator is read as a LIMIT. `ctx 230k/223k`
+        says "over budget" about a thread with 32k of window left, and the
+        window appeared nowhere in the TUI but `/window`. An owner read that
+        line and concluded the harness treats the window and the trigger as
+        one value; the blocked-compaction notice saying "Context is full"
+        was the other half, and batch 119 corrects both.
+
+        All three are optional so a caller with no threshold to hand still
         gets the batch-27 two-instrument line unchanged.
         """
-        key = (billed, ctx, ceiling, overridden)
+        key = (billed, ctx, ceiling, overridden, window)
         if key == self._last or not (billed or ctx):
             # Change-guard: on_loop_event fires per token delta during a
             # stream; both figures only move at step boundaries, so this
@@ -413,13 +492,26 @@ class UsageLine(Static):
             return f"{n / 1000:.0f}k" if n >= 1000 else str(n)
 
         self.display = True
-        scale = f"/{_k(ceiling)}{'*' if overridden else ''}" if ceiling else ""
+        mark = "*" if overridden else ""
+        if window:
+            # The limit as the scale, the fold point named as what it is.
+            scale = f"/{_k(window)}"
+            scale += f" (fold {_k(ceiling)}{mark})" if ceiling else ""
+        elif ceiling:
+            # No window resolved -- context_limit() always answers, so this
+            # is the bare-built widget and the pre-batch-119 callers that
+            # pass four arguments. The old shape exactly, rather than a
+            # blank scale, because a trigger is still better than nothing.
+            scale = f"/{_k(ceiling)}{mark}"
+        else:
+            scale = ""
         # `system` is the harness-talking-about-itself role -- the right
         # meaning for a usage line, and the palette route the batch-26
         # guard test demands (it caught this line as a literal within one
         # commit of the widget existing).
-        self.update(Text(f"usage · ctx {_k(ctx)}{scale} · billed {_k(billed)}",
-                          style=self._styles().get("system", "")))
+        self.update(as_content(
+            Text(f"usage · ctx {_k(ctx)}{scale} · billed {_k(billed)}",
+                 style=self._styles().get("system", ""))))
 
 
 class GoalBanner(Static):
@@ -450,7 +542,7 @@ class GoalBanner(Static):
             # is the second place a weight would be decided. Guarded still,
             # because a bare-built widget has no styles dict at all.
             style = self._styles().get("warning", "") or "bold"
-            self.update(Text(f"goal  {self.goal}", style=style))
+            self.update(as_content(Text(f"goal  {self.goal}", style=style)))
         else:
             self.display = False
             self.update("")
@@ -530,19 +622,316 @@ class TodoPanel(Static):
             body.append(f"(+{len(items) - self.ROWS} earlier)\n",
                         styles.get("system", ""))
         self.display = True
-        self.update(body)
+        self.update(as_content(body))
+
+
+#: How often the viewer re-reads a thread whose run is still going.
+#: A second is slow enough to cost nothing on a database this size and
+#: fast enough that watching a subagent work does not feel like
+#: refreshing a page. The timer only exists while the viewed run is
+#: live, so an idle session pays nothing.
+THREAD_VIEW_POLL_S = 1.0
+
+#: Between crumb segments. A single glyph, so the trail reads as one
+#: line rather than a path someone could mistake for a filename.
+CRUMB_SEPARATOR = "  \u203a  "
+
+
+def meta_style(style, key: str, value):
+    """`style`, carrying `value` under `key` as click metadata.
+
+    The mechanism half of `armed_style`, split out by ROADMAP_v3 §49
+    (SS14) when the session panel needed the same thing with a different
+    key. Two keys rather than one, because the click handlers on the
+    other side ask different questions of the answer -- see
+    `Transcript.on_click`, which has kept `url` and a pane target apart
+    since batch 58 for exactly this reason.
+    """
+    if value is None:
+        return style
+    return Style.parse(style or "") + Style(meta={key: str(value)})
+
+
+def armed_style(style, thread_id):
+    """`style`, carrying `thread_id` as click metadata (§47).
+
+    Returns the bare style unchanged when there is no thread, so a run
+    whose thread does not exist yet -- the window between `enter` and
+    `bind` -- draws identically and simply answers nothing when
+    clicked. Arming it anyway and failing on the click would be a lie
+    told to save nobody any time.
+
+    ONE FUNCTION for the panel and the crumb, because they are the same
+    affordance in two places and a second copy is how the two would
+    come to disagree about what a click reads.
+
+    `str()` because a thread id is a UUID and metadata crosses into a
+    handler that looks it up as text.
+    """
+    return meta_style(style, "agent_thread", thread_id)
+
+
+class CallSelected(Message):
+    """Someone ctrl+clicked a tool line that opens something (§47,
+    widened by ROADMAP_v3 §49 SS14).
+
+    Carries the CALL id, not a thread or a session id, because the
+    transcript does not have one: the line is drawn when the call
+    starts, and neither the child's thread nor the session's final
+    state exists yet. Resolution happens at PRESS time in the app,
+    which is what lets a line drawn before its run existed still open
+    it.
+
+    `kind` is `OPENS_THREAD` or `OPENS_SESSION`, as the registry
+    answered at draw time. IT TRAVELS WITH THE ID rather than being
+    re-derived from the tool name here, because the transcript does not
+    keep the tool name either -- a line is text and metadata by the
+    time anyone can click it -- and asking again on the other side
+    would be the second copy §47 spent a declaration to avoid.
+
+    This was `SpawnSelected` until batch 98, when a second kind of
+    target made the name a lie.
+    """
+
+    def __init__(self, kind: str, call_id: str) -> None:
+        self.kind = kind
+        self.call_id = call_id
+        super().__init__()
+
+
+class SessionSelected(Message):
+    """Someone clicked a row of the session panel (ROADMAP_v3 §49,
+    SS14).
+
+    Carries the SESSION id directly, and that is the difference from
+    `CallSelected`: the panel draws only sessions that exist, so there
+    is nothing to resolve later. The same split `ThreadSelected` and
+    `SpawnSelected` have had since §47, one subject over.
+    """
+
+    def __init__(self, session_id: str) -> None:
+        self.session_id = session_id
+        super().__init__()
+
+
+class ThreadSelected(Message):
+    """Someone clicked a row that names a thread (§47).
+
+    A MESSAGE, not a call into the app. The panel and the crumb know
+    which thread a row is about and nothing else -- what opening one
+    means is the app's question, and a widget reaching into `self.app`
+    to answer it would put half of that decision here.
+
+    Carries the id as TEXT, because that is what came back out of style
+    metadata; the app parses it once, where it also decides what an
+    unparseable one means.
+    """
+
+    def __init__(self, thread_id: str) -> None:
+        self.thread_id = thread_id
+        super().__init__()
+
+
+def _clicked_meta(widget, event, key: str):
+    """The value stored under `key` at a click's position, or None.
+
+    METADATA, NEVER ARITHMETIC. Computing a row index from `event.y`
+    would need a second copy of the widget's layout, and that copy
+    would already be wrong: `#agent-panel` has `padding-top: 1`, so the
+    Nth content line sits at y = N+1. `get_style_at` asks the widget
+    that drew the row, which cannot disagree with itself.
+    """
+    style = widget.get_style_at(event.x, event.y)
+    return (getattr(style, "meta", None) or {}).get(key)
+
+
+def _clicked_thread(widget, event):
+    """The thread id under a click, or None (§47)."""
+    return _clicked_meta(widget, event, "agent_thread")
+
+
+@dataclass(frozen=True)
+class AgentRow:
+    """One row of the agent panel: a run, and where to find it (§47).
+
+    Batch 59 drew rows from `(name, depth)` tuples, which cannot name a
+    RUN -- two spawns of `explore` at one depth produce the same tuple,
+    which is why the sink had to remove rows by last match and hope.
+
+    `thread_id` is None between `enter` and `bind`: the span opens
+    before its run creates a thread, so for the first instants a row
+    describes a run that has no address yet. An unbound row simply
+    carries no metadata, which is the honest drawing of "there is
+    nothing to open yet" -- and the window is short enough that the
+    alternative, arming it and failing on the click, would be a lie
+    told to save nobody any time.
+
+    Lives here rather than in tui/app.py because the panel is what
+    draws it and app.py already imports this module; the reverse would
+    close an import cycle.
+    """
+    name: str
+    depth: int
+    span_id: str = ""
+    thread_id: object = None
+    # §47. WHICH tool call started this run, so the app can pair the
+    # transcript's `▸ spawn_subagent` line with the thread bound to
+    # this row -- and the line becomes openable while the run is
+    # still going, rather than only once its result comes back.
+    call_id: object = None
+    # §47 slice 8. WHOSE child this run is, carried from AgentSpan so the
+    # panel can order rows by lineage instead of by arrival.
+    #
+    # It was not needed while one agent ran at a time: a stack arrives in
+    # the only order it can be in, so indenting by depth drew the chain
+    # correctly for free. With peers it does not. Two children of one turn
+    # each spawning a grandchild can arrive A, B, A's child, B's child --
+    # and depth alone then draws A's child hanging off B, which is a
+    # LINEAGE THE PANEL INVENTED. Wrong rather than missing, which is the
+    # harder kind to notice.
+    parent_id: object = None
+
+
+def lineage_rows(rows) -> list:
+    """`[(row, level)]` depth-first, every child immediately under its
+    own parent, at the column its own lineage puts it in.
+
+    §47 SLICE 8. The panel indents, so what sits ABOVE a row is what a
+    reader takes to be its parent. While one agent ran at a time arrival
+    order guaranteed that reading: a stack can only arrive
+    outermost-first. Peers break it -- two children of one turn each
+    spawning a grandchild can arrive A, B, A's child, B's child, and
+    drawing that in order puts A's child under B. The panel would be
+    inventing a lineage, which is worse than omitting one.
+
+    THE LEVEL IS THE DEEPER OF THE WALK AND `AgentRow.depth`, which are
+    two different questions however often they agree. `depth` is
+    ToolContext.subagent_depth -- the number C3 BOUNDS, about how many
+    spawns deep a run is. The walk is where the row sits in the parent
+    chain THIS stack contains. Each is a lower bound on how nested the run
+    is, so the honest column is the larger, and the two ways they part are
+    both real:
+
+      * The walk knows more where a span added a display level without
+        adding a spawn level. A research pass opens its span at
+        `context_depth + 1` and hands the same context down, so a subagent
+        it spawns reports depth 1 as well and drew level with its own
+        parent; `/init`'s initializer is the same shape. Taking the walk
+        fixes every instance at once and leaves the spawn bound alone --
+        bumping the pass's context would have spent one level of what a
+        pass may spawn on a rendering fix.
+      * The row knows more where its parent is not in the stack at all.
+        `parent_id` is None for a genuine top-level span AND for a row
+        that never recorded one, and a depth above 1 is what tells them
+        apart, since a run two spawns deep has a parent by construction.
+
+    A top-level span is level 1, so the ordinary case draws exactly where
+    it drew before: a chat turn's spawn at depth 1 is also at level 1.
+
+    Ordered here rather than sorted in the sink for the reason the sink
+    keeps its own stack: enter/exit pairing is the sink's business and
+    what the rows MEAN on screen is this widget's. It is also why this
+    takes rows and returns them rather than mutating anything. PUBLIC,
+    unlike the module's other helpers, because two surfaces draw this
+    same list -- the panel and §47's ctrl+g picker, which is a screen
+    rather than a widget. The picker indented by `depth` in ARRIVAL order
+    and invented the lineage this function exists to prevent, in the one
+    case slice 8 made ordinary.
+
+    ORPHANS ARE DRAWN, at the end. A row whose parent is not in the stack
+    cannot happen through `span()` -- a child's span opens inside its
+    parent's frame, so parents always outlive children -- so this is the
+    defensive half, covering a hand-built row and a stack observed
+    mid-tear-down. Dropping them would make the panel lie by omission
+    instead.
+
+    The `seen` set is what makes a cycle terminate rather than hang, which
+    is the same guard ThreadCrumb's walk carries and for the same reason:
+    a row's parent is data, and data can be wrong in ways that recursion
+    turns into a wedged UI rather than a visible mistake.
+
+    IT KEYS ON ROW IDENTITY, NOT ON `span_id`, and that is not fussiness.
+    `AgentRow.span_id` defaults to `""`, so every hand-built row shares
+    one -- and a set of span ids would treat the second such row as
+    already drawn and silently DROP it. Live rows always carry a real id,
+    so this would have been invisible in the app and wrong in every test
+    that builds rows directly, which `tests/BREAKING_CHANGES.md` already
+    warns is a thing tests here do. Identity is unique by construction,
+    which is the property the guard actually needs.
+    """
+    by_parent: dict = {}
+    for row in rows:
+        by_parent.setdefault(row.parent_id, []).append(row)
+
+    seen: set = set()
+    ordered: list = []
+
+    def walk(parent, level: int) -> None:
+        for row in by_parent.get(parent, []):
+            if id(row) in seen:
+                continue
+            seen.add(id(row))
+            # THE DEEPER OF THE TWO ANSWERS, because both are LOWER BOUNDS
+            # on how nested this run is and neither may be under-drawn.
+            # The walk knows the lineage this stack contains; the row knows
+            # how many spawns deep it is. Where they differ, one of them is
+            # missing something:
+            #
+            #   level > depth -- a span that added a display level without
+            #     adding a spawn level. A research pass and the subagent it
+            #     spawned both report depth 1, so only the walk tells them
+            #     apart.
+            #   depth > level -- a run whose parent is not in this stack.
+            #     `parent_id` is None both for a genuine top-level span and
+            #     for a row that never recorded one, and a depth above 1
+            #     settles which: a run two spawns deep HAS a parent, so an
+            #     absent one is missing rather than nonexistent. That is
+            #     the orphan case below reached through a null instead of a
+            #     dangling id, and drawing it at level 1 would claim it is
+            #     a child of the conversation.
+            drawn = max(level, row.depth)
+            ordered.append((row, drawn))
+            # Only a row with a real id can have children. Recursing on
+            # `""` would look up the bucket every defaulted row shares.
+            #
+            # ONE IN FROM WHERE THE PARENT WAS DRAWN, not from the walk's
+            # own count, so a chain always steps in. Pass the walk level
+            # instead and a parent bumped out by its own depth ends up
+            # level with its child, which is the invented lineage this
+            # function exists to prevent, one row along.
+            if row.span_id:
+                walk(row.span_id, drawn + 1)
+
+    # Depth is bounded by SUBAGENT_MAX_DEPTH, so the recursion is too.
+    walk(None, 1)
+    for row in rows:
+        if id(row) not in seen:
+            seen.add(id(row))
+            # An ORPHAN has no walk position, so its own depth is the only
+            # answer available -- floored at 1 for the reason the panel
+            # floors it, and the honest drawing of "somewhere below the
+            # root, we cannot say where".
+            ordered.append((row, max(row.depth, 1)))
+    return ordered
 
 
 class AgentPanel(Static):
     """Who is running, and how deep (batch 59).
 
-    A STACK, NEVER A LIST OF PEERS, and that is a fact about the harness
-    rather than a rendering choice. core/loop.py dispatches tool calls in
-    a plain `for` loop and spawn_subagent BLOCKS on the child run, so
-    there is never a second agent alongside the first -- what there is is
-    a chain, each frame suspended inside the one below it, bounded by
-    config.SUBAGENT_MAX_DEPTH. Indentation is the honest drawing of that;
-    a flat list would claim a concurrency this harness does not have.
+    A TREE SINCE §47 SLICE 8, AND IT USED TO BE A STACK. This docstring
+    said "A STACK, NEVER A LIST OF PEERS, and that is a fact about the
+    harness rather than a rendering choice", because it was: core/loop.py
+    dispatched tool calls in a plain `for` loop and spawn_subagent BLOCKED
+    on the child run, so there was never a second agent alongside the
+    first. It finished "a flat list would claim a concurrency this harness
+    does not have". NA9 gave it that concurrency, so both sentences went.
+
+    What replaces them is smaller than it sounds, because slice 2 built the
+    data model as a tree ON PURPOSE against this day. Rows still indent by
+    `depth`, bounded by config.SUBAGENT_MAX_DEPTH, and peers at one depth
+    now legitimately share a column. The one thing that had to change is
+    the ORDER: arrival order and lineage order were the same thing for a
+    stack and are not for a tree. See `lineage_rows`.
 
     Fed from core/agent_activity.py through app.py, never polled -- the
     same split TodoPanel keeps: the sink says when, and this widget holds
@@ -551,6 +940,13 @@ class AgentPanel(Static):
     Hidden when it has nothing to say, GoalBanner-style: the sidebar is
     twenty columns wide and its rows are contested, so `default` with an
     empty stack costs nothing rather than a permanent row saying so.
+
+    §47 ARMS EACH ROW WITH THE THREAD IT STANDS FOR, as style metadata
+    -- the mechanism batch 58 built for URLs, reused rather than
+    re-derived. Metadata rather than arithmetic on the click's y: the
+    row heights, the blank line and the header are this widget's own
+    layout, and a second copy of them at the click site would be free
+    to disagree with the first.
     """
 
     # 22-column box, less a border column and a padding column each side.
@@ -567,6 +963,7 @@ class AgentPanel(Static):
         super().__init__(**kwargs)
         self._agent = None
         self._stack: list = []
+        self._root = None
         # Explicit, for TodoPanel's reason: a widget that renders nothing
         # yet must not be a visible empty box before its first update.
         self.display = False
@@ -578,22 +975,29 @@ class AgentPanel(Static):
             return {}
         return themes.styles_for(app)
 
-    def show(self, agent_name, stack) -> None:
+    def show(self, agent_name, stack, root_thread=None) -> None:
         """Draw the active agent and the spans currently open under it.
 
         `agent_name` is None when no /agent switch is active. `stack` is a
-        list of (name, depth), outermost first.
+        list of AgentRow, outermost first. `root_thread` is the id of the
+        conversation the root row stands for, or None before there is
+        one -- a session that has not had a turn yet has no thread, and
+        the panel must not be what creates one.
         """
         self._agent = agent_name
         self._stack = list(stack)
+        self._root = root_thread
         self._redraw()
 
     def restyle(self) -> None:
         """Re-render under the current theme (#183), like ResearchProgress."""
         self._redraw()
 
-    @classmethod
-    def _fit(cls, text: str, width: int) -> str:
+    #: Shared with SessionPanel, which fits the same box to the same
+    #: width -- a staticmethod on the class that measured the box,
+    #: rather than a second copy of the ellipsis rule.
+    @staticmethod
+    def _fit(text: str, width: int) -> str:
         """Truncate to `width` cells, with an ellipsis when it bites.
 
         Appended by hand rather than through `Text.truncate()`, which
@@ -609,6 +1013,25 @@ class AgentPanel(Static):
         if width == 1:
             return "\u2026"
         return text[:width - 1] + "\u2026"
+
+    #: Shared with ThreadCrumb -- see armed_style.
+    _armed = staticmethod(armed_style)
+
+    def on_click(self, event) -> None:
+        """Open the run this row is about.
+
+        A PLAIN CLICK, unlike the transcript's ctrl+click, and the
+        asymmetry is caused by text selection existing in one place and
+        not the other. A sidebar row is a control; dragging across it
+        selects nothing, so there is no gesture to dodge.
+
+        A click on a row with no thread does nothing at all -- not even
+        a message -- so an unbound run and the header are the same
+        silence.
+        """
+        thread_id = _clicked_thread(self, event)
+        if thread_id:
+            self.post_message(ThreadSelected(thread_id))
 
     def _redraw(self) -> None:
         if self._agent is None and not self._stack:
@@ -630,23 +1053,209 @@ class AgentPanel(Static):
         # of the two without introducing a second hue.
         body.append(
             self._fit(self._agent or "default", self.WIDTH) + "\n",
-            styles.get("assistant_label", ""))
-        for name, depth in self._stack:
-            # `max(depth, 1)` so a span that somehow reports depth 0 still
-            # reads as nested rather than colliding with the root row --
-            # two rows at column zero would say two agents are running,
-            # which is the one thing this panel must never claim.
-            pad = " " * (self.INDENT * max(depth, 1))
+            # The root row stands for the conversation itself, so it is
+            # armed like any other -- "back to the main agent" is then a
+            # click rather than a special case somebody has to remember.
+            self._armed(styles.get("assistant_label", ""), self._root))
+        for row, level in lineage_rows(self._stack):
+            # THE WALK'S LEVEL, not `row.depth`. The two agree for a chat
+            # turn's spawns and part company wherever a span adds a display
+            # level without adding a spawn level -- a research pass and its
+            # own subagent both report depth 1, and drawing that put a
+            # child level with its parent. See `lineage_rows`.
+            #
+            # It is never 0, so a span cannot collide with the root row.
+            # That floor USED to be spelled `max(depth, 1)` and its reason
+            # USED to be "two rows at column zero would say two agents are
+            # running, which is the one thing this panel must never
+            # claim". Slice 8 makes that claim true, and peers sharing a
+            # column is now the point. What survives is the narrower half:
+            # the root row stands for the CONVERSATION, and a span drawn
+            # level with it would read as a second conversation rather
+            # than as a run inside this one.
+            pad = " " * (self.INDENT * level)
             room = self.WIDTH - len(pad) - 2      # the marker and its space
-            body.append(f"{pad}{MARK_RUNNING} {self._fit(name, room)}\n",
-                        styles.get("tool", ""))
-        # `no_wrap` / crop for batch 55's reason: a row this widget already
-        # sized must not be re-wrapped by the Static underneath it, and a
-        # miscalculation should clip visibly rather than reflow invisibly.
-        body.no_wrap = True
-        body.overflow = "crop"
+            body.append(f"{pad}{MARK_RUNNING} {self._fit(row.name, room)}\n",
+                        self._armed(styles.get("tool", ""), row.thread_id))
+        # Batch 55's reason -- a row this widget already sized must not be
+        # re-wrapped by the Static underneath it, and a miscalculation
+        # should clip visibly rather than reflow invisibly -- but the rule
+        # is `text-wrap: nowrap` / `text-overflow: clip` on `#agent-panel`
+        # now. `Content` carries neither flag and `from_rich_text` drops
+        # both, so setting them on the Text stopped meaning anything the
+        # moment the pin moved: silently, and on the widget least able to
+        # afford a reflow. See `as_content`.
         self.display = True
-        self.update(body)
+        self.update(as_content(body))
+
+class SessionPanel(Static):
+    """What is running in the background, and nothing else (§49, SS14).
+
+    LIVE SESSIONS ONLY, which is the decision rather than a consequence
+    of how it is fed. A finished session is still readable -- SS14 puts
+    that on the tool-call line that started it, resolved at press time
+    the way §47 resolves a spawn -- so listing finished ones here would
+    spend contested sidebar rows on a second route to the same pane,
+    and would grow without bound in a session that starts many.
+
+    PROCESS-WIDE, like AgentPanel above it and like ctrl+b's picker.
+    SS11 scopes the five TOOLS to the caller's own thread, which is a
+    rule about what the model may touch; what the person may SEE is a
+    different question, and a panel that hid a subagent's sessions
+    would disagree with the kill picker about what is running.
+
+    Fed from core/shell_sessions.py's SessionActivity through app.py,
+    never polled -- TodoPanel's split, and AgentPanel's: the sink says
+    when, and this widget holds no authoritative copy of anything. It
+    is handed ROWS ALREADY REDACTED AND ALREADY FITTED TO A LABEL, for
+    SessionKillScreen's reason (batch 97): a command reaches a display
+    surface only through check_output_policy, and keeping that call in
+    app.py means this file never holds an unredacted one.
+
+    Hidden when nothing is running, GoalBanner-style, which is almost
+    always -- the sidebar is twenty columns wide and its rows are
+    contested.
+    """
+
+    #: AgentPanel's, measured the same way and for the same box.
+    WIDTH = 18
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._rows: list = []
+        # TodoPanel's reason: a widget that renders nothing yet must not
+        # be a visible empty box before its first update.
+        self.display = False
+
+    def _styles(self) -> dict:
+        try:
+            app = self.app
+        except Exception:  # noqa: BLE001 -- see Transcript._styles
+            return {}
+        return themes.styles_for(app)
+
+    def show(self, rows) -> None:
+        """Draw the live sessions. `rows` is [{"id", "label"}], already
+        redacted, in the order they started.
+
+        An empty list hides the widget, which is how the panel closes
+        without a second method meaning the same thing (ThreadCrumb's
+        rule).
+        """
+        self._rows = list(rows)
+        self._redraw()
+
+    def restyle(self) -> None:
+        """Re-render under the current theme (#183), like AgentPanel."""
+        self._redraw()
+
+    def on_click(self, event) -> None:
+        """Open the session this row is about.
+
+        A PLAIN CLICK, for AgentPanel's reason: a sidebar row is a
+        control, and dragging across it selects nothing, so there is no
+        text-selection gesture to dodge here the way the transcript's
+        ctrl+click dodges one.
+        """
+        session_id = _clicked_meta(self, event, "session")
+        if session_id:
+            self.post_message(SessionSelected(session_id))
+
+    def _redraw(self) -> None:
+        if not self._rows:
+            self.display = False
+            self.update("")
+            return
+
+        styles = self._styles()
+        body = Text()
+        body.append("sessions\n\n")
+        for row in self._rows:
+            label = AgentPanel._fit(row.get("label", ""), self.WIDTH - 2)
+            body.append(
+                f"{MARK_RUNNING} {label}\n",
+                meta_style(styles.get("tool", ""), "session", row.get("id")))
+        # AgentPanel's note: the nowrap/clip rule lives on the widget in
+        # app.tcss, because `Content` carries neither flag.
+        self.display = True
+        self.update(as_content(body))
+
+
+class ThreadCrumb(Static):
+    """Where you are, and every step back out (§47).
+
+    `chat  \u203a  explore  \u203a  review`, each segment but the last armed
+    with its own thread. The viewer needs a header row anyway to say
+    what is being looked at, so making it the LINEAGE costs nothing and
+    turns "up one level" into a visible click rather than hidden
+    history. It is honest because the parent link is stored now: this
+    is read from the database, not reconstructed from the order things
+    were opened in.
+
+    THE LAST SEGMENT IS NOT ARMED. It is where you already are, and a
+    control that does nothing is worse than one that is plainly inert.
+
+    Hidden when empty, GoalBanner-style, so the live conversation costs
+    no row for a trail it does not need.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._steps: list = []
+        self.display = False
+
+    def _styles(self) -> dict:
+        try:
+            app = self.app
+        except Exception:  # noqa: BLE001 -- see Transcript._styles
+            return {}
+        return themes.styles_for(app)
+
+    def show(self, steps) -> None:
+        """Draw the trail. `steps` is [(label, thread_id)], root first.
+
+        An empty list hides the widget, which is how the viewer closes
+        its header without a second method meaning the same thing.
+        """
+        self._steps = list(steps)
+        self._redraw()
+
+    def restyle(self) -> None:
+        """Re-render under the current theme (#183), like AgentPanel."""
+        self._redraw()
+
+    def on_click(self, event) -> None:
+        thread_id = _clicked_thread(self, event)
+        if thread_id:
+            self.post_message(ThreadSelected(thread_id))
+
+    def _redraw(self) -> None:
+        if not self._steps:
+            self.display = False
+            self.update("")
+            return
+
+        styles = self._styles()
+        body = Text()
+        for index, (label, thread_id) in enumerate(self._steps):
+            if index:
+                body.append(CRUMB_SEPARATOR, styles.get("system", ""))
+            here = index == len(self._steps) - 1
+            if here:
+                body.append(label, styles.get("assistant_label", ""))
+            else:
+                body.append(label, armed_style(styles.get("tool", ""),
+                                               thread_id))
+        body.append("    read-only \u2014 esc to go back",
+                    styles.get("system", ""))
+        # One line, elided rather than wrapped: a trail that reflowed
+        # would take a second row from the transcript below it, and the
+        # segment that matters most is the one you are standing on. The
+        # rule is on `#thread-crumb` in app.tcss, for `as_content`'s
+        # reason.
+        self.display = True
+        self.update(as_content(body))
+
 
 class ResearchProgress(Static):
     """Live state of a /research run (ROADMAP_v2 §22).
@@ -703,6 +1312,36 @@ class ResearchProgress(Static):
     def start_run(self) -> None:
         self.reset()
         self.display = True
+        self._redraw()
+
+    def clear_for_thread(self) -> None:
+        """Drop the run and hide, because the session changed threads.
+
+        THE ONE-WAY REVEAL ABOVE IS DELIBERATE and stays (TodoPanel is the
+        panel that hides again, for the reason its own tests record): a
+        finished run's shape is worth reading while its report is on
+        screen. That argument is about the thread the run belongs to, and
+        it stops at the thread boundary.
+
+        This panel was the last piece of per-thread state that survived a
+        switch. `switch_to_thread` and `/new` already clear `_last_run`,
+        `_live_claims` and the transcript on the stated rule that a stale
+        panel pointing at the wrong thread is WRONG where a blank one is
+        merely unhelpful -- and the research panel, which is the most
+        panel-shaped thing in the sidebar, was missed at both sites. A
+        failed run stayed on screen under a thread that never ran it, and
+        so did a successful one; nothing distinguished them, because
+        nothing cleared either.
+
+        CLEARED rather than reloaded, and that is forced rather than
+        chosen: a `PipelineRun` records its own pass threads and has no
+        column naming the chat thread that launched it, so "this thread's
+        run" is not a question the database can answer. Clearing is also
+        what makes the sidebar agree with `/claims`, which already answers
+        "No research run in this session yet" after a switch.
+        """
+        self.reset()
+        self.display = False
         self._redraw()
 
     def pass_started(self, pass_id: str) -> None:
@@ -820,7 +1459,7 @@ class ResearchProgress(Static):
                 body.append(f"  {label} {count}\n", styles.get(tier, ""))
         if self._retries:
             body.append(f"{self._retries} revision(s)\n")
-        self.update(body)
+        self.update(as_content(body))
 
 
 class SlashSuggest(Static):
@@ -1182,16 +1821,32 @@ class PromptInput(TextArea):
 
     `priority=True` on enter. `TextArea._on_key` maps enter to a newline
     insert and calls `event.stop()` / `event.prevent_default()`, which
-    beats an ordinary binding: measured on the pinned textual 1.0.0 (D22,
+    beats an ordinary binding: measured on the installed textual (D22,
     both ways -- without the flag enter inserts and never submits). It
-    reads like caution and is the opposite.
+    reads like caution and is the opposite. Re-read on 8.2.8 when the
+    pin moved: `_on_key` still maps enter through `insert_values` and
+    still stops the event, so the flag is still what makes this a
+    prompt box rather than a text editor.
 
     `ctrl+j` is what carries the newline; `shift+enter` is a courtesy.
-    Textual turns the kitty keyboard protocol on in its LINUX drivers
-    alone (`drivers/linux_driver.py`, `linux_inline_driver.py`), and
-    without it a terminal sends a bare CR for shift+enter and the parser
-    yields plain `enter` -- so on Windows that binding is unreachable and
-    the box would submit instead. `ctrl+j` is byte 0x0a, parses to its own
+    Every half of that courtesy the CODE owns works now, and it is still
+    not the key. Textual turned the kitty keyboard protocol on in its
+    LINUX drivers alone through 6.5, which is why batch 54 called this
+    binding unreachable here; 6.6.0 added it to
+    `drivers/windows_driver.py`, which writes `ESC [>1u` when application
+    mode starts, and the parser turns `ESC [13;2u` into `shift+enter`.
+    Both measured on 8.2.8 and both pinned by
+    `TestShiftEnterIsStillNotTheKey`, because that is the sentence that
+    went stale unnoticed for twenty months last time.
+
+    What is left is the TERMINAL. This driver reads console records and
+    keeps the translated character alone, discarding the modifier state,
+    so that escape sequence is the only route a modified Enter has -- and
+    a terminal that does not implement the protocol still sends a bare CR,
+    which reads as `enter` and submits the half-written message. Windows
+    Terminal shipped support in Preview 1.25 and this is developed on
+    1.24, so the press has never been observed here and the courtesy stays
+    unclaimed. `ctrl+j` is byte 0x0a, parses to its own
     key, is bound by neither Input, TextArea, App nor Footer, and is
     exactly what iTerm2 / VS Code / Windows Terminal emit once configured
     to send a newline on shift+enter. `alt+enter` is the obvious third
@@ -1219,10 +1874,12 @@ class PromptInput(TextArea):
     both keys, but only while the panel is open: `check_action` hands them
     back to the focus system and to nobody the rest of the time.
 
-    The placeholder is the border TITLE because `TextArea` has no
-    placeholder at all -- no parameter, no attribute. Taking it as a
-    `placeholder=` keyword anyway keeps the call site in app.py reading
-    as it always did.
+    The placeholder is the border TITLE. `TextArea` has a native
+    `placeholder` reactive that renders inside the box when it is empty,
+    so assigning the same string to both drew it twice -- once on the
+    frame, once in the text. Taking it as a `placeholder=` keyword anyway
+    keeps the call site in app.py reading as it always did; it is simply
+    never assigned to `self.placeholder`.
     """
 
     BINDINGS = [
@@ -1241,6 +1898,7 @@ class PromptInput(TextArea):
     suggest = None          # the SlashSuggest panel; app.py hands it over
     _api_edit = False       # the next Changed came from .value, not a key
     _dismissed = False      # escape latched the panel shut
+    _completing = False     # ...and that .value came from tab or enter
 
     class Submitted(Message):
         """Posted when enter is pressed. `Input.Submitted`'s shape.
@@ -1302,7 +1960,9 @@ class PromptInput(TextArea):
 
     def __init__(self, placeholder: str = "", **kwargs) -> None:
         super().__init__(soft_wrap=True, show_line_numbers=False, **kwargs)
-        self.placeholder = placeholder
+        # Never assigned to self.placeholder: TextArea renders that reactive
+        # inside the box when empty, which drew the hint twice (frame and
+        # text). The border title is the only placeholder this box has.
         self.border_title = placeholder
 
     @property
@@ -1327,6 +1987,13 @@ class PromptInput(TextArea):
             # what makes `event.prompt.value = ""` on submit tidy up.
             self._api_edit = False
             self._dismissed = False
+            if self._completing:
+                # ...except the one assignment a keystroke made. See
+                # `_complete`.
+                self._completing = False
+                self.post_message(
+                    self.SuggestionsChanged(self, commands.matching(self.text)))
+                return
             self.post_message(self.SuggestionsChanged(self, []))
             return
         matches = commands.matching(self.text)
@@ -1348,13 +2015,26 @@ class PromptInput(TextArea):
         command = self.suggest.chosen
         if command is None:
             return False
-        # The TRAILING SPACE is doing two jobs: `matching()` is empty once
-        # the line has whitespace in it, so the panel closes on its own,
-        # and deleting that one character is what brings it back.
+        # The TRAILING SPACE is doing two jobs: for a command with no
+        # argument completer `matching()` is empty once the line has a
+        # space in it, so the panel closes on its own, and deleting that
+        # one character is what brings it back.
         self.value = "/" + command.name + " "
         # load_text leaves the cursor at the START of the document, which
         # would have the next typed argument land in front of the command.
         self.move_cursor(self.document.end)
+        # RE-OFFER (batch 84), through a FLAG rather than a message posted
+        # from here. The assignment above went through `load_text`, which
+        # queues a `TextArea.Changed` -- so anything posted here is handled
+        # BEFORE that Changed arrives and is then overwritten by the empty
+        # list its api-edit branch posts. Measured: the panel came back
+        # with 133 rows and was cleared a tick later.
+        #
+        # The branch exists because assignment is the API and typing is the
+        # user; a tab is the user, which is why this one re-offers. For
+        # every command without an argument completer it posts the same
+        # empty list that branch already did.
+        self._completing = True
         return True
 
     def check_action(self, action: str, parameters) -> bool | None:
@@ -1437,11 +2117,18 @@ class Transcript(RichLog):
     streaming latency should look here first." They should still look
     here first; the answer is now the two rules above.
 
-    Known edge, stated rather than fixed: a terminal resize mid-answer
-    leaves already-drawn rows wrapped to the old width. `_entries` keeps
-    the unwrapped source, so rerender() puts it right, and a resize
-    handler for the seconds an answer is in flight is machinery with no
-    user.
+    A TERMINAL RESIZE RE-LAYS THE TRANSCRIPT since batch 112, which is
+    what this paragraph used to say was a known edge. RichLog renders at
+    write time and stores Strips, so nothing re-wraps itself and every row
+    drawn before a drag kept the width it was drawn at -- not only an
+    answer in flight. `_entries` keeps the unwrapped source, so a replay
+    puts it right; what took nine batches is that `rerender()` opens with
+    `flush_stream()`, which ENDS an open answer span, so routing a resize
+    to it would split a live answer into two entries under two
+    `venastine ›` labels. `reflow()` is the replay that leaves the span
+    open -- see `_uncommit_partial_line` for the one thing it has to move
+    first -- and `on_resize` coalesces it. A pane the switcher HIDES is a
+    different cause with the same look, fixed earlier: see `_region_width`.
 
     §26 adds two things and one obligation.
 
@@ -1486,6 +2173,10 @@ class Transcript(RichLog):
         # rather than part of what was said. Keyed by INDEX, which
         # rerender() already walks.
         self._links: dict[int, tuple] = {}
+        # §47, widened by §49 (SS14). entry index -> (kind, call id) for
+        # the call that drew that line, where kind says whether clicking
+        # it opens a thread or a session.
+        self._opens: dict = {}
         # §38. An assistant span with rows already on screen: its label is
         # drawn and its single entry is open at _entries[-1].
         self._stream_open = False
@@ -1500,6 +2191,165 @@ class Transcript(RichLog):
         # ONE label per turn, above the model's first output of it
         # whether that output is reasoning or text -- see _open_label.
         self._label_in_force = False
+        # Batch 112 (TECHNICAL_DEBT 23). The width the rows on screen were
+        # laid out at -- maintained in `write()`, which every draw path
+        # funnels through -- and the pending coalesced redraw. None before
+        # the first write, which no real width equals, so the first resize
+        # always reflows rather than having to guess what was drawn.
+        self._drawn_width: int | None = None
+        self._reflow_timer = None
+        # Batch 113 (TECHNICAL_DEBT 25). How many entries were on screen
+        # when the span now streaming began, which is where
+        # `retract_to_mark` truncates back to. None means nothing is
+        # retractable. See that method for why a mark and not a span.
+        self._retract_mark: int | None = None
+        # Batch 145. Three, and each one is measured -- see
+        # `_strip` for the vocabulary and `_new_strippers` for why the
+        # count is three rather than one.
+        self._new_strippers()
+
+    def _new_strippers(self) -> None:
+        """One stripper per independent ingress stream (batch 145).
+
+        THREE, not one, and not one per call:
+
+        `_entry` takes complete strings -- every `write_*` path -- so it is
+        fed and flushed within the call and carries nothing between two
+        unrelated entries.
+
+        `_answer` and `_thinking` are held ACROSS deltas, because a
+        sequence split over two of them is ordinary rather than a corner:
+        the model's chunk boundaries fall wherever the provider put them,
+        which is the same argument `core/ansi.py` makes about a pipe. A
+        fresh stripper per delta was measured both ways and both are wrong
+        -- dropping the carry turns `hi ESC [` + `2Jthere` into
+        `hi 2Jthere`, and flushing it per call emits the ESC itself.
+
+        They are SEPARATE from each other for the reason `_thinking_pending`
+        is separate from `_pending` one screen up: the two spans interleave,
+        and a shared stripper carries one span's unterminated sequence into
+        the other. Measured -- an open CSI from the answer ate the `t` of
+        the next reasoning chunk, because 0x74 is inside the CSI final-byte
+        range, so the sequence terminated on the reasoning text's first
+        character.
+
+        `release_unterminated=False` on all three. The pty's default is to
+        release a carry that never completed as text; here the text is
+        handed to a terminal, where `ESC [` with no final byte consumes
+        whatever is drawn next, so an unterminated sequence is dropped.
+        `core/ansi.py` argues both contracts where the flag is defined.
+        """
+        self._entry_ansi = AnsiStripper(release_unterminated=False)
+        self._answer_ansi = AnsiStripper(release_unterminated=False)
+        self._thinking_ansi = AnsiStripper(release_unterminated=False)
+
+    def _strip(self, stripper, text: str) -> str:
+        """The ONE redaction of terminal control sequences this widget does.
+
+        A function rather than three call sites spelling it out, for the
+        reason batch 144 spent a surface on: five sinks each composing
+        their own version of one transform is how two of them end up with
+        different vocabularies, and nothing can tell you which.
+
+        Returns the text with every escape sequence removed, in BOTH
+        encodings (`ESC [` and U+009B alike, batch 145's addition to
+        `core/ansi.py`). What it does NOT do is announce anything: this
+        widget does no logging, deliberately -- `on_log_record_message`
+        feeds routed records straight back into `write_role`, and a
+        Transcript that logged while writing would close that loop. The
+        count is kept instead and `tui/app.py` reads it, which is the
+        layer that knows whose text this was.
+        """
+        return stripper.feed(text)
+
+    def take_stripped_count(self) -> int:
+        """How many control sequences have been removed since the last ask.
+
+        READ-AND-CLEAR, so the caller gets a count per turn rather than a
+        total that only grows -- `tui/app.py` asks once when a turn ends.
+        """
+        total = 0
+        for stripper in (self._entry_ansi, self._answer_ansi,
+                         self._thinking_ansi):
+            total += stripper.sequences_removed
+            stripper.sequences_removed = 0
+        return total
+
+    def write(self, content, *args, width=None, **kwargs):
+        """Write at the width this pane will be SHOWN at (§47).
+
+        `RichLog.write` wraps at WRITE time -- 8.x stores Strips --
+        measuring the widget's own region, which is 0 while the switcher
+        hides this pane and is then floored to min_width (78). Both panes
+        are written hidden (see `_region_width`), so a `width=None` write
+        there is handed the width RichLog would have chosen with the pane
+        on screen; our own pre-wrap (thinking, lists, diffs, streamed
+        commits) reads the same region through `_wrap_width`, so the two
+        halves of one transcript cannot break at two widths.
+
+        The borrowed REGION is not that width, and passing it is the
+        obvious shortcut this used to take. An explicit width switches off
+        RichLog's shrink, so a renderable that pads to its render width --
+        a code block under a syntax theme with a background -- drew edge
+        to edge where the same block on screen stopped at
+        max(longest line, 78). Both shipped syntax themes are transparent,
+        which is why nobody saw it; the width pins run under monokai.
+
+        An explicit width is the caller's and passes through untouched.
+
+        `*args` because Textual itself replays deferred writes
+        positionally (`self.write(*deferred_render)` on resize, with
+        content/width/expand/shrink/scroll_end all filled) -- a
+        keyword-only width would turn its own replay into a TypeError. A
+        never-shown pane defers every write, so its deferred entries carry
+        the width computed here, which is the width it is shown at.
+        """
+        # Batch 112. Every drawn row passes here, so this is the one place
+        # that can say what width the screen is currently laid out at --
+        # which is what `on_resize` compares against, so a resize that does
+        # not change the wrap width (a height-only drag) redraws nothing.
+        self._drawn_width = self._wrap_width()
+        if args:
+            # Textual's own replay (or any positional caller): pass
+            # through byte-identical, never merging a keyword beside it.
+            return super().write(content, *args, **kwargs)
+        if width is None:
+            width = self._borrowed_render_width(content, **kwargs)
+        return super().write(content, width=width, **kwargs)
+
+    def _borrowed_render_width(self, content, expand: bool = False,
+                               shrink: bool = True,
+                               **_ignored) -> int | None:
+        """RichLog.write's render width as if this pane were on screen, or
+        None when it is on screen (or there is nothing to borrow), which
+        leaves RichLog to measure for itself.
+
+        Mirrors `RichLog.write` in the pinned textual step for step:
+        measure the renderable, expand or shrink it against the region,
+        raise the result to min_width. A pin bump that changes that
+        computation fails the row equality in
+        `TestTheLiveTranscriptWritesAtTheOnScreenWidth`.
+        """
+        try:
+            if self.scrollable_content_region.width:
+                return None
+            region = self._borrowed_width()
+        except Exception:  # noqa: BLE001 -- unmounted; RichLog decides
+            return None
+        if not region:
+            return None
+        renderable = self._make_renderable(content)
+        console = self.app.console
+        options = console.options
+        if isinstance(renderable, Text) and not self.wrap:
+            options = options.update(overflow="ignore", no_wrap=True)
+        measured = measure_renderables(console, options, [renderable]).maximum
+        render_width = measured
+        if expand and measured < region:
+            render_width = max(measured, region)
+        if shrink and measured > region:
+            render_width = min(measured, region)
+        return max(render_width, self.min_width)
 
     # -- styling -----------------------------------------------------------
 
@@ -1532,21 +2382,51 @@ class Transcript(RichLog):
     # -- writing -----------------------------------------------------------
 
     def _emit(self, role: str, text: str, record: bool = True,
-              links=()) -> None:
+              links=(), opens: tuple = ()) -> None:
         """Render one entry and remember it. THE single write path.
 
         `links` are batch 65's click targets, remembered beside the
         entry so a `/theme` rerender arms what the live draw armed. An
         entry with none -- every role outside LINKED_ROLES, and most
         tool lines -- stores nothing.
+
+        `opens` is §47's `(kind, call id)`, and it is kept in a SECOND
+        side table rather than folded into `_links`. They are different
+        kinds of target: a link opens a browser and a call opens a
+        pane, and the click handler has to tell them apart anyway. Same
+        keying, same two lifetimes -- `reset()` drops it, `rerender()`
+        replays it -- because it is the same kind of fact ABOUT a line.
+
+        ONE TABLE FOR BOTH KINDS since batch 98, because a thread and a
+        session are the same fact about a line -- what clicking it
+        opens -- and a second dict keyed by the same index would have
+        been a third lifetime to keep in step with the other two.
         """
+        # Batch 145. BEFORE the entry is recorded, so `_entries`,
+        # the screen, `/copy` and the replay all hold the same bytes --
+        # which is the obligation this method's own docstring states, now
+        # also about what the text IS and not only about where it goes.
+        # Fed and flushed within the call: this is a complete string, so a
+        # sequence left open at the end of it was never split, and the
+        # flush discards it rather than releasing it as text.
+        text = self._strip(self._entry_ansi, text)
+        self._entry_ansi.flush()
         if record:
             self._entries.append((role, text))
             if links:
                 self._links[len(self._entries) - 1] = tuple(links)
-        self._render_entry(role, text, links)
+            if opens:
+                self._opens[len(self._entries) - 1] = tuple(opens)
+        self._render_entry(role, text, links, opens)
 
-    def _render_entry(self, role: str, text: str, links=()) -> None:
+    def _render_entry(self, role: str, text: str, links=(),
+                      opens: tuple = (), *, closed: bool = True) -> None:
+        """Draw one entry. `closed` says whether the span it belongs to has
+        ENDED, and only `reflow()` ever passes False (batch 112): a resize
+        mid-reasoning replays a thinking entry that is still being streamed,
+        and drawing its `╰ …done thinking` there would announce an end that
+        has not happened. An open ANSWER span needs nothing -- it has no
+        closing furniture -- so the flag is thinking's alone."""
         if role == "user":
             # §43 (RM1). The turn's label is retired HERE and nowhere
             # else, so where the labels land is a pure function of the
@@ -1556,6 +2436,14 @@ class Transcript(RichLog):
             self.write(Text.assemble(
                 ("\nyou ›  ", self._style("user_label")),
                 (text, self._style("user"))))
+        elif role == "wake":
+            # ROADMAP_v3 §49 (SS5). The harness opening a turn with a
+            # background session's result. It retires the label exactly as a
+            # `user` row does, for §43's reason: the answer it prompts is a
+            # new turn with its own `venastine ›`, and where labels land stays
+            # a pure function of the role sequence, so rerender() agrees.
+            self._label_in_force = False
+            self.write(Text(f"\n{text}", self._style("wake")))
         elif role == "assistant":
             self._open_label()
             # One trailing newline is dropped, exactly as a committed
@@ -1579,7 +2467,7 @@ class Transcript(RichLog):
             # §43 sentence true: a tool line INSIDE the turn, after
             # reasoning or text has already opened the label, is a no-op.
             self._open_label()
-            self.write(self._linked_line(text, "tool", links))
+            self.write(self._linked_line(text, "tool", links, opens))
         elif role == "pipeline_tool":
             # The research pipeline's tool lines. Same kind of line and
             # the same style, deliberately NOT an opener: the run's label
@@ -1595,7 +2483,8 @@ class Transcript(RichLog):
             self._open_label()
             self._write_thinking_open()
             self._write_thinking_lines(text)
-            self._write_thinking_close()
+            if closed:
+                self._write_thinking_close()
         elif role in LINKED_ROLES:
             # `tool_error` arrives here, and needs no `links`: its text
             # is redact_secrets(str(error)) with no truncation, so the
@@ -1604,7 +2493,8 @@ class Transcript(RichLog):
         else:
             self.write(Text(f"     {text}", self._style(role)))
 
-    def _linked_line(self, text: str, role: str, targets=()) -> Text:
+    def _linked_line(self, text: str, role: str, targets=(),
+                     opens: tuple = ()) -> Text:
         """One harness-drawn line, with its URLs armed (batch 65).
 
         The five-space indent every one of these lines carries is inside
@@ -1616,7 +2506,55 @@ class Transcript(RichLog):
         out = Text(style=self._style(role))
         self._append_spans(out, f"     {text}", self._styles(),
                            block=False, links_only=True, targets=targets)
+        if opens:
+            self._arm_call(out, opens)
         return out
+
+    def _arm_call(self, out: Text, opens: tuple) -> None:
+        """Make the TOOL NAME on a line open what the call opened (§47,
+        widened by §49 SS14).
+
+        THE NAME, not the whole line. A tool line is `▸ name  digest`,
+        and the digest is the task text -- which for a spawn is a
+        sentence a reader wants to select and read, and for a session
+        is the command, not a control. Arming the name keeps the
+        clickable region exactly as wide as the thing it is about.
+
+        ONE LOCATOR for both kinds. This was `_arm_spawn` and the shape
+        it finds is the same either way, so a second copy for sessions
+        would have been two implementations of "where does the tool
+        name start" -- and the one that drifted would disarm a line
+        rather than fail visibly.
+
+        Applied AFTER the URL scan and over its own columns only, so a
+        URL in the task text keeps its own target: the two never
+        overlap, because the name ends before the digest begins.
+
+        Located STRUCTURALLY rather than by the marker glyph. The `▸`
+        is written by app.py and by core/replay.py as a literal and has
+        no shared constant, so matching on it here would be a third
+        copy -- and the shape (indent, marker, space, name, two spaces,
+        digest) is what both writers actually agree on.
+
+        A line that does not have that shape is left unarmed, which is
+        what an unopenable line should be.
+        """
+        plain = out.plain
+        marker = len(plain) - len(plain.lstrip())
+        start = plain.find(" ", marker) + 1
+        if not start or start >= len(plain):
+            return
+        end = plain.find("  ", start)
+        if end < 0:
+            end = len(plain.rstrip())
+        if end <= start:
+            return
+        # A TUPLE in the metadata, which rich marshals and hands back
+        # as one. The kind has to survive the round trip: the click
+        # handler is the only thing that reads it, and by then the tool
+        # name that decided it is long gone.
+        out.stylize(Style(meta={"opens": (str(opens[0]), str(opens[1]))}),
+                    start, end)
 
     def _open_label(self) -> None:
         """Draw this turn's `venastine ›`, once (§43, RM1).
@@ -1896,7 +2834,7 @@ class Transcript(RichLog):
     # -- links (batch 58) ---------------------------------------------------
 
     def on_click(self, event) -> None:
-        """CTRL+click a URL to open it.
+        """CTRL+click a URL to open it, or a spawn to read its run.
 
         Ctrl rather than a bare click, which is the terminal's own
         convention for a link and also the reason a click while reading
@@ -1915,9 +2853,28 @@ class Transcript(RichLog):
         if not getattr(event, "ctrl", False):
             return
         style = getattr(event, "style", None)
-        url = (getattr(style, "meta", None) or {}).get("url")
+        meta = getattr(style, "meta", None) or {}
+        url = meta.get("url")
         if url:
             self.open_url(url)
+            return
+        # §47. The same gesture, a different kind of target: a URL
+        # leaves for a browser, a call opens a pane. One key each
+        # rather than one key with two meanings, so the branch here
+        # reads as what it is.
+        #
+        # THE TWO PANE TARGETS SHARE A KEY, and that is not the same
+        # compromise: a thread and a session are both "open this in the
+        # viewer", the gesture is identical, and the kind rides in the
+        # value where the app can branch on it once. What the paragraph
+        # above refuses is a key that sometimes means a browser.
+        #
+        # POSTED rather than resolved: the transcript knows which CALL
+        # drew the line and nothing about what it made -- the line is
+        # drawn before the child thread or the session's result exists.
+        opens = meta.get("opens")
+        if opens:
+            self.post_message(CallSelected(str(opens[0]), str(opens[1])))
 
     def open_url(self, url) -> None:
         """Hand `url` to the platform's browser, off the UI thread.
@@ -1960,7 +2917,8 @@ class Transcript(RichLog):
         self.flush_stream()
         self._emit("error", text)
 
-    def write_role(self, role: str, text: str, links=()) -> None:
+    def write_role(self, role: str, text: str, links=(),
+                   opens: tuple = ()) -> None:
         """Write a line in an arbitrary palette role (§26).
 
         Exists so the research view can style a pass boundary, a tool call
@@ -1970,10 +2928,12 @@ class Transcript(RichLog):
 
         `links` is batch 65's, and it is ignored for every role outside
         LINKED_ROLES rather than refused: a caller that has candidates
-        should not have to know which roles use them.
+        should not have to know which roles use them. `opens` is §47's
+        and follows the same rule -- only a `tool` line arms it,
+        because only a tool call opens a run or a session.
         """
         self.flush_stream()
-        self._emit(role, text, links=links)
+        self._emit(role, text, links=links, opens=opens)
 
     def write_answer(self, text: str) -> None:
         """A model answer that did not arrive as a stream (a one-shot turn,
@@ -1983,6 +2943,46 @@ class Transcript(RichLog):
         self._emit("assistant", text)
 
     # -- streaming ---------------------------------------------------------
+
+    def _region_width(self) -> int:
+        """This pane's scrollable width -- or, while `#pane` hides it, the
+        width of the pane the switcher is showing instead (§47).
+
+        A hidden widget has no region, so it measures 0 and RichLog floors
+        the write to min_width (78). Both panes are written while hidden:
+        the viewer is painted before the switcher shows it, and a running
+        turn goes on writing to the live transcript while a stored run is
+        being read. RichLog stores Strips, so a row drawn at 78 stays at 78
+        after the pane comes back -- the answer down the left half of a
+        wide panel, healed only by a restart's replay.
+
+        Equal by construction rather than by hope: every pane in the
+        switcher is the same box in app.tcss (`border: solid`,
+        `padding: 0 1`) and RichLog is `overflow-y: scroll`, so the
+        scrollbar gutter is the same on all of them.
+        `test_the_panes_measure_the_same_width_when_shown` holds that, and
+        it asks the switcher for its children rather than naming them --
+        there were two when this was written, three after §49's SS14 and
+        four after §55's TR10, and the sentence above was the one that had
+        to keep up. Measured at every write, so there is nothing to set
+        when the viewer opens, nothing to clear when it closes, and a
+        resize with the viewer up is simply the next measurement.
+
+        Raises where the widget cannot be measured at all (built bare in the
+        suite); callers guard, as `_wrap_width` always has.
+        """
+        return self.scrollable_content_region.width or self._borrowed_width()
+
+    def _borrowed_width(self) -> int:
+        """The on-screen sibling's width while the switcher hides this pane,
+        or 0 when there is no such sibling to measure."""
+        parent = self.parent
+        if not isinstance(parent, ContentSwitcher):
+            return 0
+        shown = parent.visible_content
+        if shown is self or not isinstance(shown, Transcript):
+            return 0
+        return shown.scrollable_content_region.width
 
     def _wrap_width(self, prefix: str = "") -> int:
         """Usable text columns for one rendered row, or 0 when there is
@@ -1997,14 +2997,15 @@ class Transcript(RichLog):
         for safety) wrapped a streamed answer ~15 columns narrower than the
         same text replayed by rerender() -- so a /theme mid-session visibly
         reflowed the conversation, which is the one thing a pre-wrap must
-        not do.
+        not do. The region is read through `_region_width`, so a pane the
+        switcher is hiding pre-wraps at the width it will be shown at.
 
         A widget has no size before mount and is built bare throughout the
         suite, so the guard is around the measurement itself, for the same
         reason _styles' is.
         """
         try:
-            width = max(self.scrollable_content_region.width, self.min_width)
+            width = max(self._region_width(), self.min_width)
         except Exception:  # noqa: BLE001 -- unmounted; the newline rule alone
             return 0
         width -= len(prefix)
@@ -2048,8 +3049,25 @@ class Transcript(RichLog):
         return markdown.plain_split(pending, width)
 
     def stream_delta(self, delta: str) -> None:
-        self._pending += delta
+        self._arm_retraction()
+        # Batch 145. AT INGRESS, before `_pending` holds it: the
+        # commit rules below measure this buffer in rendered cells, and an
+        # escape sequence counted as cells is a row that wraps early.
+        # Measured: `display_len` read 10 for text whose visible width is
+        # 6, so stripping here also corrects arithmetic that was wrong.
+        self._pending += self._strip(self._answer_ansi, delta)
         self._commit_ready()
+
+    def _arm_retraction(self) -> None:
+        """Remember where the span now starting begins (batch 113).
+
+        Called by both delta entry points and idempotent within a span,
+        so interleaved reasoning -- which closes an open ANSWER without
+        flushing -- keeps one mark across all the entries of one model
+        call. `flush_stream` is what clears it.
+        """
+        if self._retract_mark is None:
+            self._retract_mark = len(self._entries)
 
     def _commit_ready(self) -> None:
         """Write whatever of the pending stream can safely be drawn now.
@@ -2078,6 +3096,27 @@ class Transcript(RichLog):
         on EITHER path, so the rows it is drawn in are the rows the replay
         will draw. Without that a model could hold the screen indefinitely
         by never sending a newline.
+
+        BATCH 112 ADDS A THIRD RULE: A CUT THAT KEEPS NOTHING BACK COMMITS
+        NOTHING (TECHNICAL_DEBT 24). The width rule can drain the buffer,
+        in exactly one shape -- `width_split`/`plain_split` cut after the
+        last space that fits, and when that space is the buffer's final
+        character (a row that filled the width exactly, then a space that
+        overflows by its own cell) the cut is the whole of it. Committing
+        then buys nothing, because nothing is held back; and if the
+        model's NEXT delta opens with the newline, the newline rule
+        commits a chunk that is only `"\\n"` and both draw paths render it
+        as a blank row the replay does not have (measured: an answer drew
+        5 rows live and 4 replayed). Holding the row until the next delta
+        or the flush puts the newline in the SAME chunk, where it simply
+        ends the line -- which is what `plain_wrap`'s own docstring
+        already says about the replay side of this shape.
+
+        `limit >= len(self._pending)` is the half that is easy to drop:
+        the split is handed the CAPPED prefix, so a drained prefix is not
+        a drained buffer. Without it a paragraph sitting in front of a
+        held table would wait for the table to close, which is precisely
+        the regression the cap was built to remove.
         """
         width = self._wrap_width()
         while True:
@@ -2089,6 +3128,9 @@ class Transcript(RichLog):
                 self._pending[:limit], width, marks=True,
                 block=not mid_line)
             if not chunk:
+                return
+            if not chunk.endswith("\n") and not rest \
+                    and limit >= len(self._pending):
                 return
             self._pending = rest + self._pending[limit:]
             self._write_stream_chunk(chunk, line_start=not (mid_line or forced))
@@ -2123,7 +3165,12 @@ class Transcript(RichLog):
         ordering for free.
         """
         self.end_thinking()
-        return self._close_answer()
+        text = self._close_answer()
+        # Batch 113. A flush ENDS the retractable region: what it just
+        # committed belongs to a model call that finished, and the next
+        # delta will arm a new mark where its own span begins.
+        self._retract_mark = None
+        return text
 
     def _close_answer(self) -> str:
         """flush_stream without the thinking half.
@@ -2135,6 +3182,14 @@ class Transcript(RichLog):
         emits that remainder as a second, standalone thinking entry and
         then drops it.
         """
+        # Batch 145. The span is over, so a sequence still open was never
+        # going to be completed by a later delta. Discarded rather than
+        # released (`release_unterminated=False`), and discarded HERE
+        # rather than left in place, because a carry that outlived its span
+        # would prepend itself to the next one's first delta and eat a
+        # character of it -- which is the measurement in `_new_strippers`,
+        # arriving between two spans instead of between two streams.
+        self._answer_ansi.flush()
         if not self._pending and not self._stream_open:
             return ""
         residual, self._pending = self._pending, ""
@@ -2169,23 +3224,56 @@ class Transcript(RichLog):
                         self._style("thinking")))
 
     def _write_thinking_lines(self, text: str) -> None:
-        """One bar-prefixed row per source line. The rows are pre-wrapped
-        by the time they arrive here (that is what _wrap_width's prefix
-        argument is for), because RichLog's own soft wrap would put the
-        bar on the first row of a wrapped line and nothing on the rest."""
+        """One bar-prefixed row per RENDERED row.
+
+        RichLog's own soft wrap would put the bar on the first row of a
+        wrapped line and nothing on the rest, so every source line is cut
+        into rows here, at `_wrap_width`'s width after the bar, by
+        `markdown.plain_wrap` -- `plain_split`'s rule, the one
+        `thinking_delta` commits by.
+
+        It has to happen HERE and not only in `thinking_delta`, because two
+        callers hand this lines longer than a row: a replay (`rerender()`, a
+        resumed thread, the thread viewer) passes the whole entry, and the
+        newline rule commits everything through the last newline uncut.
+        Both drew their continuation rows with no bar -- visible in any
+        restarted session with long reasoning. A chunk `thinking_delta` has
+        already cut fits one row and passes through as it was.
+        """
+        width = self._wrap_width(THINKING_INDENT + THINKING_BAR)
         lines = text.split("\n")
         if lines and lines[-1] == "":
             lines.pop()
+        style = self._style("thinking")
         for line in lines:
-            self.write(Text(f"{THINKING_INDENT}{THINKING_BAR}{line}",
-                            self._style("thinking")))
+            for row in markdown.plain_wrap(line, width):
+                self.write(Text(f"{THINKING_INDENT}{THINKING_BAR}{row}",
+                                style))
 
     def thinking_delta(self, delta: str) -> None:
-        self._thinking_pending += delta
+        self._arm_retraction()
+        # Batch 145, and `stream_delta`'s comment. Its own
+        # stripper, because the two spans interleave -- see
+        # `_new_strippers` for what a shared one was measured to do.
+        self._thinking_pending += self._strip(self._thinking_ansi, delta)
+        self._commit_thinking_ready()
+
+    def _commit_thinking_ready(self) -> None:
+        """`_commit_ready` for the reasoning span, and split out of
+        `thinking_delta` for its reason: `reflow()` has to re-commit a
+        buffer nothing has added to."""
         width = self._wrap_width(THINKING_INDENT + THINKING_BAR)
         while True:
             chunk, rest = self._split_committable(self._thinking_pending, width)
             if not chunk:
+                return
+            # A cut that keeps nothing back commits nothing, for
+            # _commit_ready's reason (TECHNICAL_DEBT 24) -- and here with
+            # no `limit` clause beside it, because this path has no
+            # commit cap and the buffer IS the whole of what was offered.
+            # Measured before the fix: a streamed span drew 7 rows where
+            # the replay drew 6, the extra one a bar with nothing beside it.
+            if not chunk.endswith("\n") and not rest:
                 return
             self._thinking_pending = rest
             self._write_thinking_chunk(chunk)
@@ -2207,6 +3295,11 @@ class Transcript(RichLog):
     def end_thinking(self) -> str:
         """Close the thinking span, if one is open. Idempotent: every
         non-thinking event calls it, and most of them find nothing."""
+        # Batch 145, for `_close_answer`'s reason. Before the early
+        # return, so an idempotent call that finds no span still clears a
+        # carry -- `flush` on an empty stripper costs nothing, which is
+        # what lets this sit in front of the cheap exit.
+        self._thinking_ansi.flush()
         if not self._thinking_open and not self._thinking_pending:
             return ""
         residual, self._thinking_pending = self._thinking_pending, ""
@@ -2252,12 +3345,35 @@ class Transcript(RichLog):
         # in the session with no `venastine ›`.
         self._label_in_force = False
         self._entries.clear()
+        # Batch 113, on the open-span flags' list and for their reason: a
+        # mark left pointing into an emptied log would have the next
+        # retraction truncate to an index that no longer means anything.
+        self._retract_mark = None
+        # Batch 145, on the same list and for the same reason twice over: a
+        # carry left behind would put the previous thread's unterminated
+        # sequence in front of this one's first delta, and a count left
+        # behind would be reported against a thread that did not produce it.
+        self._new_strippers()
         # Batch 65, and the same sentence as the line above it: a click
         # target left behind would belong to a thread that is no longer
         # on screen, and index N would then arm the NEXT thread's Nth
         # line with the previous one's URL.
         self._links.clear()
+        # §47, on `_links`' list for its reason: keyed by entry index,
+        # so a table that outlived its entries would arm the NEXT
+        # thread's Nth line with the previous thread's run.
+        self._opens.clear()
         self.clear()
+
+    def opens_at(self, index: int) -> tuple:
+        """The `(kind, call id)` recorded for entry `index`, or `()`
+        (§47, widened by §49 SS14).
+
+        An accessor because the app resolves at press time and has no
+        business reading a private table -- and because `_opens` is
+        keyed by entry index, which is this widget's own bookkeeping.
+        """
+        return self._opens.get(index, ())
 
     def rerender(self) -> None:
         """Redraw every entry under the current theme.
@@ -2266,19 +3382,256 @@ class Transcript(RichLog):
         cannot restyle what is already on screen -- without this, /theme
         would leave the session split between two palettes at the exact
         line the command was typed.
+
+        The flush is what makes this safe to call from a COMMAND and unsafe
+        to call from an event: it closes an open answer span, so a resize
+        routed here mid-turn would split the live answer into two entries
+        under two `venastine ›` labels. `reflow()` below is the route that
+        does not (TECHNICAL_DEBT 23).
         """
         self.flush_stream()
+        self._replay()
+
+    def _replay(self) -> None:
+        """Draw `_entries` from an empty screen. The shared half of
+        `rerender()` and `reflow()`, which differ only in what they do to
+        an open span before calling it."""
         self.clear()
         # §43 (RM1). The screen is empty, so no label is in force; the
         # loop below re-derives every one of them from the role sequence
         # exactly as the live path did.
         self._label_in_force = False
+        last = len(self._entries) - 1
         for index, (role, text) in enumerate(self._entries):
             # Batch 65: the targets too, or a /theme would silently
             # disarm every long URL in the session -- the line would
             # look identical and stop being clickable, which is the
             # kind of loss only the pointer can find.
-            self._render_entry(role, text, self._links.get(index, ()))
+            # §47's side table too, for batch 65's reason one table
+            # over: a /theme that dropped it would leave every spawn
+            # line looking identical and silently unopenable.
+            self._render_entry(role, text,
+                               self._links.get(index, ()),
+                               self._opens.get(index, ()),
+                               closed=not (self._thinking_open
+                                           and index == last))
+
+    # -- reflow on resize (TECHNICAL_DEBT 23, batch 112) --------------------
+
+    def on_resize(self, _event) -> None:
+        """Coalesce a redraw at the new width.
+
+        RichLog renders at WRITE time and stores Strips, so nothing already
+        drawn re-wraps by itself: widen a terminal mid-session and every row
+        drawn before the drag keeps the width it was drawn at while new rows
+        use the full panel. Measured before the fix: rows 114 wide against a
+        198-column panel.
+
+        Two guards, both load-bearing. A `Resize` also arrives for a HEIGHT
+        change, which moves no wrap, so the redraw is keyed on
+        `_wrap_width()` changing rather than on the event. And a width of 0
+        is "cannot be measured" (a widget before mount, a bare-built one in
+        the suite), never a real narrow pane -- a hidden pane measures its
+        on-screen sibling through `_region_width` and DOES reflow, which is
+        batch 90's fix and the reason this cannot simply skip hidden panes.
+        """
+        width = self._wrap_width()
+        if not width or width == self._drawn_width:
+            return
+        if self._reflow_timer is not None:
+            self._reflow_timer.stop()
+        self._reflow_timer = self.set_timer(REFLOW_DEBOUNCE_S, self.reflow)
+
+    def reflow(self) -> None:
+        """Re-lay the whole transcript at the current width, WITHOUT closing
+        an open span.
+
+        That is the whole difference from `rerender()`, and it is the reason
+        item 23 stayed open: a replay that flushes first would end the
+        answer being streamed and start the next chunk as a second entry
+        under a second label, which is what §38's one-entry-per-span rule
+        exists to prevent.
+        """
+        if not self._wrap_width():
+            return
+        fraction, at_bottom = self._scroll_fraction()
+        # AUTO-SCROLL OFF FOR THE REDRAW. RichLog scrolls to the end after
+        # every write, and it DEFERS that scroll to after the next screen
+        # refresh -- so a position set here would be overwritten a frame
+        # later by the last write's pending scroll_end, and the reader
+        # would land at the bottom however carefully it was computed.
+        # `rerender()` is left alone: /theme belongs at the bottom.
+        auto, self.auto_scroll = self.auto_scroll, False
+        try:
+            self._uncommit_partial_line()
+            self._replay()
+            # AND COMMIT AGAIN AT THE NEW WIDTH, which is not tidying: the
+            # line handed back above is usually the whole of an open span
+            # (a model sends a paragraph before it sends a newline), so a
+            # replay on its own would leave the reader watching their
+            # half-written answer disappear until the next delta arrived.
+            # These re-cut it at the width now in force and put it back.
+            self._commit_ready()
+            self._commit_thinking_ready()
+        finally:
+            self.auto_scroll = auto
+        self._restore_scroll(fraction, at_bottom)
+
+    def _uncommit_partial_line(self) -> None:
+        """Give an open span's half-drawn line back to its pending buffer.
+
+        Without this the replay draws `_stream_text` whole -- ending in the
+        middle of a line -- and the next committed chunk is a separate
+        `write()` and therefore a separate ROW, so the join lands mid-row at
+        the new width and the seam is visible for the rest of the answer.
+        Handing the tail back means the next commit re-cuts it at the width
+        now in force.
+
+        `_entries` moves with it. Pending text has never been in the entry
+        log, so keeping the two in step is what lets a `/copy` or a `/theme`
+        in the same window agree with the screen; the flush appends the
+        residual back at the end of the span, exactly as it always has.
+
+        If the tail was the whole entry, the entry goes: an empty assistant
+        entry would replay as a row nothing wrote, and `_open_label`'s guard
+        means the next chunk re-opening the span draws the same single
+        label. The two branches cannot both fire -- opening either span
+        closes the other -- and both are written because the state is
+        per-span and reading one to decide the other is how they drift.
+        """
+        if self._stream_open:
+            tail = self._stream_text.rsplit("\n", 1)[-1]
+            if tail:
+                self._stream_text = self._stream_text[:-len(tail)]
+                self._pending = tail + self._pending
+                if self._stream_text:
+                    self._entries[-1] = ("assistant", self._stream_text)
+                else:
+                    self._drop_last_entry()
+                    self._stream_open = False
+        if self._thinking_open:
+            tail = self._thinking_text.rsplit("\n", 1)[-1]
+            if tail:
+                self._thinking_text = self._thinking_text[:-len(tail)]
+                self._thinking_pending = tail + self._thinking_pending
+                if self._thinking_text:
+                    self._entries[-1] = ("thinking", self._thinking_text)
+                else:
+                    self._drop_last_entry()
+                    self._thinking_open = False
+
+    def _drop_last_entry(self) -> None:
+        """Remove the final entry and the side-table rows keyed to it.
+
+        Both tables are keyed by INDEX, and the index this frees is the one
+        the next appended entry takes -- so a row left behind would arm an
+        unrelated line with someone else's URL or someone else's call."""
+        index = len(self._entries) - 1
+        self._entries.pop()
+        self._links.pop(index, None)
+        self._opens.pop(index, None)
+
+    def retract_to_mark(self, note: str | None = None) -> None:
+        """Take back everything drawn since the last flush, and redraw.
+
+        TECHNICAL_DEBT 25, batch 113. A model call that fails mid-answer
+        can now be tried again, and the reader must not be shown the
+        answer twice -- so what the failed attempt drew is deleted from
+        `_entries` and the transcript is redrawn from what is left. The
+        redraw is batch 112's `_replay()`, which is the whole reason this
+        costs a dozen lines rather than a batch of its own.
+
+        A MARK AND NOT A SPAN, which is the part worth reading. The
+        obvious rule is "drop the open span", and it is wrong: interleaved
+        reasoning makes `_write_thinking_chunk` close an open ANSWER
+        before it draws, so one attempt can leave several entries behind
+        with only the last of them open. Measured -- text, then reasoning,
+        then text, inside one attempt, is three entries and one open span.
+        Dropping the open one would leave the first two on screen and the
+        retry would then draw them again underneath.
+
+        THE MARK IS ARMED BY THE FIRST DELTA and CLEARED BY A FLUSH, and
+        the asymmetry is the correction of a rule this batch tried first.
+        Taking the mark at the flush reads well and is wrong, because
+        `write_system`, `write_user`, `write_error` and `write_role` all
+        OPEN with `flush_stream()`: a line written while a span was live
+        moved the mark past the attempt's own text, so the retraction
+        deleted the unrelated line and kept the half-answer. Wrong in
+        both directions at once, and found by the test written to pin
+        what the rule was supposed to cost.
+
+        Armed at the span's start instead, the ordinary case is identical
+        -- the app flushes before a tool line and at the end of a turn,
+        so the mark lands at the beginning of the call now streaming --
+        and the awkward one degrades to doing nothing, which is the right
+        way for it to fail.
+
+        Idempotent, and a no-op when nothing is armed: an attempt that
+        failed before its first delta has nothing to take back, which is
+        also why the loop guards the event on `shown`. The `note` is
+        still written in that case, because the retry is happening
+        whether or not this widget had anything to undo.
+
+        `note`, when given, is written under the redraw and survives the
+        next retraction; the tail of this method says why that costs
+        nothing.
+        """
+        while (self._retract_mark is not None
+               and len(self._entries) > self._retract_mark):
+            self._drop_last_entry()
+        # The buffers as well as the entries: text held back by the commit
+        # cap was produced by the attempt being retracted, and leaving it
+        # would splice the dead attempt's tail onto the new one's head.
+        self._pending = ""
+        self._stream_text = ""
+        self._stream_open = False
+        self._thinking_pending = ""
+        self._thinking_text = ""
+        self._thinking_open = False
+        # Both spans are closed now, so the replay draws every entry
+        # closed -- which is correct here and is exactly what `reflow()`
+        # must NOT do, the one place the two callers differ.
+        self._retract_mark = None
+        self._replay()
+        # No scroll restore, unlike `reflow()`. A retraction happens at the
+        # live end of the transcript with the reader watching it, so
+        # `auto_scroll` keeping them at the bottom is the right answer --
+        # `/theme`'s reasoning, not a resize's.
+        if note:
+            # AND IT SURVIVES THE NEXT RETRACTION for free, which is worth
+            # a sentence because the first version of this method bought
+            # it with a line of code. `write_system` opens with
+            # `flush_stream()`, so the note lands with NOTHING armed, and
+            # the next delta arms the mark after it. Two failures
+            # therefore leave two lines rather than one reading "attempt 3
+            # of 3" with nothing saying there had been an attempt 2 --
+            # which is the disclosure §21 spent a section on. Under the
+            # rule this batch tried first, where a flush SET the mark, the
+            # note would have landed inside the next retraction's region
+            # and an explicit advance was needed; the mutation pass found
+            # that line still here and no longer doing anything.
+            self.write_system(note)
+
+    def _scroll_fraction(self) -> tuple:
+        """How far down the transcript the reader is, and whether that is
+        the bottom. A fraction rather than a row, because the row COUNT
+        changes with the width -- an exact restore is not available at any
+        price, and a resize is involuntary, so landing back where /theme
+        lands (the bottom) would lose a reader's place on a window drag."""
+        limit = self.max_scroll_y
+        if not limit:
+            return 0.0, True
+        return self.scroll_y / limit, self.scroll_y >= limit - 1
+
+    def _restore_scroll(self, fraction: float, at_bottom: bool) -> None:
+        """`immediate=True` on both, because the default defers the scroll
+        to after the next refresh and the reflow is already over by then --
+        the same deferral that makes turning `auto_scroll` off necessary."""
+        if at_bottom:
+            self.scroll_end(animate=False, immediate=True, x_axis=False)
+            return
+        self.scroll_to(y=round(fraction * self.max_scroll_y),
+                       animate=False, immediate=True)
 
     def last_answer(self) -> str:
         """The most recent answer in this session, or "" (for /copy last).

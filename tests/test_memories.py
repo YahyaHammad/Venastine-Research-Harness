@@ -42,7 +42,7 @@ def _remember(fake_storage, content, scope="project", path="/proj/a",
 # ---------------------------------------------------------------------------
 
 def test_a_plain_chat_turn_counts_as_opted_in():
-    """M13. system_prompt_for() -- where CONTEXT.md is injected -- is
+    """M13. system_prompt_for() -- where the project hub is injected -- is
     reachable only when running AS an agent, so a literal reading of "an
     agent opts in" makes memories invisible in ordinary chat, which is the
     main case. That is the §25 shape: a capability a whole shell cannot
@@ -177,3 +177,64 @@ def test_nothing_is_said_about_truncation_when_none_happened(
     _remember(fake_storage, "uses pnpm")
 
     assert "most recent of" not in manager.prompt_fragment()
+
+
+def test_a_cap_of_zero_injects_nothing_at_all(fake_storage, monkeypatch):
+    """S09-01's sibling, S09-02. config.yaml says a cap of 0 "disables the
+    `remember` tool rather than injecting nothing", and the tool half
+    honours that -- but the injection half announced a header listing
+    nothing on every single turn:
+
+        ## Remembered
+
+        Showing the 0 most recent of 2. Older ones exist and are not
+        listed here.
+
+    `rows[:0]` is empty and `2 > 0` fires the truncation branch, so the
+    model was told that remembered content exists and is being withheld,
+    while the tool that could have earned it was hidden.
+    """
+    monkeypatch.setattr(config, "MAX_INJECTED_MEMORIES", 0)
+    _remember(fake_storage, "likes tabs")
+    _remember(fake_storage, "is in Berlin", scope="global")
+
+    assert manager.prompt_fragment() == ""
+
+
+def test_a_cap_of_zero_warns_about_nothing(fake_storage, monkeypatch,
+                                           caplog):
+    """The other half of the same noise, and the half a user would
+    actually complain about: a WARNING per turn, naming a config value
+    they set on purpose, telling them to raise it."""
+    import logging
+
+    monkeypatch.setattr(config, "MAX_INJECTED_MEMORIES", 0)
+    _remember(fake_storage, "likes tabs")
+    _remember(fake_storage, "is in Berlin", scope="global")
+
+    with caplog.at_level(logging.WARNING, logger="memories.manager"):
+        manager.prompt_fragment()
+
+    assert [r.getMessage() for r in caplog.records
+            if r.levelno >= logging.WARNING] == []
+
+
+def test_both_halves_of_off_agree_at_zero(fake_storage, monkeypatch):
+    """The relation, rather than two tests that happen to agree. A cap of
+    0 is one setting with two consumers -- `remember`'s available_check
+    hides the tool, this one skips the injection -- and the defect was
+    exactly that they disagreed. Asserting them together is what makes a
+    future change to either one visible as a contradiction."""
+    from tools.builtin import remember
+
+    monkeypatch.setattr(config, "MAX_INJECTED_MEMORIES", 0)
+    _remember(fake_storage, "likes tabs")
+
+    assert (manager.prompt_fragment(), remember.available()) == ("", False)
+
+    monkeypatch.setattr(config, "MAX_INJECTED_MEMORIES", 1)
+
+    fragment, available = manager.prompt_fragment(), remember.available()
+    assert available is True
+    assert "likes tabs" in fragment, (
+        "the control: at a cap of 1 both halves are on")

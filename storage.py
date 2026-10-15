@@ -1,11 +1,13 @@
 import json
 import logging
-from datetime import datetime, timezone
-from typing import List, Dict, Any, Optional
+from datetime import UTC, datetime
+from typing import Any, Optional
 from uuid import UUID, uuid4
 
-from sqlmodel import Field, SQLModel, JSON, Session, select
-from sqlalchemy import func as sa_func  # real sqlalchemy; sqlmodel is faked in tests, this is not
+from sqlalchemy import (
+    func as sa_func,  # real sqlalchemy; sqlmodel is faked in tests, this is not
+)
+from sqlmodel import JSON, Field, Session, SQLModel, select
 
 from database import engine  # your SQLAlchemy engine, assumed to exist here
 
@@ -14,8 +16,8 @@ logger = logging.getLogger(__name__)
 
 class ConversationThread(SQLModel, table=True):
     id: UUID = Field(default_factory=uuid4, primary_key=True)
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    extra_data: Dict[str, Any] = Field(default_factory=dict, sa_type=JSON)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    extra_data: dict[str, Any] = Field(default_factory=dict, sa_type=JSON)
     # ROADMAP_v2 §27 (T1). What this thread IS: "chat" (a conversation a
     # human had), "research_pass" (one pass of the ten-pass pipeline) or
     # "subagent" (a spawned agent, the §20 reviewer, or the compactor).
@@ -48,6 +50,38 @@ class ConversationThread(SQLModel, table=True):
     # MessageLog rows in production and stamps this in the same session
     # it writes the message, so the two cannot drift.
     last_activity_at: Optional[datetime] = Field(default=None)
+    # ROADMAP_v2 §47. WHO spawned this thread, and at which call.
+    #
+    # Before these, the only trace of the edge was the child's uuid
+    # stringified inside the parent's tool-result row -- a repr inside a
+    # JSON blob, not a field, not queryable, and skipped by replay's T4
+    # anyway. A sidebar row and a `▸ spawn_subagent` line could describe
+    # a run nobody could then open.
+    #
+    # COLUMNS, not `extra_data`, for `kind`'s reason exactly (T1): the
+    # question asked of them is "which threads are children of this
+    # one", and answering that from an opaque JSON blob means loading
+    # every row and testing in Python. Not indexed, also for T1's
+    # reason -- ensure_columns() ALTERs a column in and builds no index,
+    # and create_all() adds none to a table that already exists, so
+    # index=True would mean an index on fresh databases and none on
+    # migrated ones.
+    #
+    # Nullable and additive, so database.ensure_columns() adds them to an
+    # existing app.db exactly as it added `pinned`, `kind`, `thinking`
+    # and `last_activity_at`. NULL is the honest value for every thread
+    # that predates them and for every one nothing spawned.
+    parent_thread_id: Optional[UUID] = Field(default=None)
+    # The parent's `tool_call_id` for the call that made this thread --
+    # the SAME id MessageLog stores on the parent's side, which is what
+    # lets one specific `▸ spawn_subagent` line find one specific child
+    # when a turn spawned three. None for a run no tool call made: the
+    # compactor, the reviewer, /init's initializer.
+    parent_call_id: Optional[str] = Field(default=None)
+    # Which agent ran, for a reader who has only the row. `kind` says
+    # what a thread IS; this says who it was. A viewer opening a stored
+    # thread cannot ask the span, because the span is long gone.
+    agent_name: Optional[str] = Field(default=None)
 
 
 class MessageLog(SQLModel, table=True):
@@ -57,7 +91,7 @@ class MessageLog(SQLModel, table=True):
     content: str  # always JSON-encoded, regardless of the original type
     name: Optional[str] = None
     tool_call_id: Optional[str] = None
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     # ROADMAP_v2 §21. Compaction-exempt within this thread (D26's pin
     # tool). This is the first field this project has ever added to a
     # table that already exists on disk, which is why database.py grew
@@ -77,6 +111,43 @@ class MessageLog(SQLModel, table=True):
     # an existing database exactly as it added `pinned` -- see the note on
     # that field's migration in _ordered_rows.
     thinking: Optional[str] = None
+    # Batch 91. Why the run this row STARTED failed, or None -- user rows
+    # only, written by mark_turn_failed when an exception escapes the loop.
+    #
+    # A column on the user row rather than a row of its own, and that is
+    # the whole design. A failed run leaves no assistant turn behind (D20
+    # persists one only when a call returns), so without this a thread
+    # whose first call failed read as a request nobody answered. An `error`
+    # ROLE would have been a harness notice stored as conversation -- the
+    # compactor's `_as_text` and /summary render every role, so it would
+    # have been summarized into what the model later reads, which is M8's
+    # mistake. A column is read by nothing that measures the conversation:
+    # provider translation and the compactor take `content` alone. On the
+    # user row because that is what says WHICH turn failed, which a
+    # thread-level field could not for a chat. Nullable and additive, so
+    # database.ensure_columns() adds it like `thinking`.
+    error: Optional[str] = None
+    # ROADMAP_v3 §49 (SS5). What wrote this row when the HARNESS did, as a
+    # JSON object -- {"kind": "session_wake" | "session_killed_at_quit" |
+    # "session_held", "sessions": [{"id", "call_id", "shape"}, ...]} -- or
+    # None for everything a person or the model wrote.
+    #
+    # A column on a USER row, for batch 91's reason one field over. A
+    # finished background session has to reach the model as a message that
+    # starts a turn, and a tool result cannot carry it: every tool_use is
+    # answered in the step that made it (D20, NA11), long before the session
+    # ends. A user-role row is the one shape every provider accepts there,
+    # and a compacted thread already sends one the person never wrote (M8's
+    # summary). A `harness` ROLE would need translating and summarizing as
+    # something new; a column is read by nothing that builds a request, so
+    # the row goes out as the plain user message it is, while replay and
+    # the compactor can still tell it was not the person.
+    #
+    # NEVER beside a tool_call_id. `pinned_through` treats any kept row's
+    # tool_call_id as an answered call, so a wake row carrying its session's
+    # start call id would hide the real tool_result -- the HTTP 400 M4
+    # exists to prevent. The call id lives inside this JSON instead.
+    harness: Optional[str] = None
 
 
 class CompactionCheckpoint(SQLModel, table=True):
@@ -108,7 +179,7 @@ class CompactionCheckpoint(SQLModel, table=True):
     summary_text: str
     covers_up_to_message_id: UUID
     strategy: str = Field(default="rederive")
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class ThreadSummary(SQLModel, table=True):
@@ -143,7 +214,7 @@ class ThreadSummary(SQLModel, table=True):
     thread_id: UUID = Field(foreign_key="conversationthread.id", index=True)
     summary_text: str
     covers_up_to_message_id: UUID
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class UserMemory(SQLModel, table=True):
@@ -183,7 +254,7 @@ class UserMemory(SQLModel, table=True):
     scope: str = Field(default="project", index=True)
     project_path: Optional[str] = Field(default=None, index=True)
     source_thread_id: UUID = Field(foreign_key="conversationthread.id")
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 #: ROADMAP_v2 §27 (T1). The three things a thread can be. Not an Enum:
@@ -196,15 +267,25 @@ THREAD_KIND_RESEARCH_PASS = "research_pass"
 THREAD_KIND_SUBAGENT = "subagent"
 
 
-def create_thread(kind: str = THREAD_KIND_CHAT) -> UUID:
+def create_thread(kind: str = THREAD_KIND_CHAT, *,
+                  parent_thread_id: Optional[UUID] = None,
+                  parent_call_id: Optional[str] = None,
+                  agent_name: Optional[str] = None) -> UUID:
     """Starts a brand-new conversation thread and returns its id.
 
     `kind` defaults to "chat" (§27 AC1), so every existing caller keeps
     creating conversations and only the paths that know they are creating
     something else pass anything here.
+
+    The three lineage arguments (§47) are keyword-only and all default to
+    None, for the same reason: a caller that does not know it is creating
+    a child is not one, and should not be able to say so by accident in a
+    positional slot.
     """
     with Session(engine) as session:
-        thread = ConversationThread(kind=kind)
+        thread = ConversationThread(
+            kind=kind, parent_thread_id=parent_thread_id,
+            parent_call_id=parent_call_id, agent_name=agent_name)
         session.add(thread)
         session.commit()
         session.refresh(thread)
@@ -222,9 +303,16 @@ def get_thread(thread_id: UUID) -> Optional[dict]:
     which is exactly the question _ordered_rows' docstring says copying
     columns removes.
 
-    The kind fallback lives HERE rather than at the caller: a row read
-    from a database whose ALTER has not run yet has no attribute at all,
-    and the caller should not have to know that.
+    THE `getattr` FALLBACKS COVER A NULL, NOT A MISSING COLUMN, and this
+    paragraph said the second thing until batch 75. It read: "a row read
+    from a database whose ALTER has not run yet has no attribute at all".
+    It cannot -- `session.get` SELECTs every mapped column, so a database
+    missing one raises OperationalError before any attribute is read, and
+    the class always has the attribute anyway. What these actually absorb
+    is a NULL on a row written before the column existed (and a hand-built
+    stand-in in a test), which is why each pairs the lookup with a default
+    the caller can use. The migration case belongs to
+    `database.ensure_columns()`, which runs at startup.
     """
     with Session(engine) as session:
         thread = session.get(ConversationThread, thread_id)
@@ -236,10 +324,65 @@ def get_thread(thread_id: UUID) -> Optional[dict]:
             "extra_data": dict(thread.extra_data or {}),
             "kind": getattr(thread, "kind", None) or THREAD_KIND_CHAT,
             "last_activity_at": getattr(thread, "last_activity_at", None),
+            # getattr for the kind fallback's reason, one column over --
+            # see the docstring for what that reason actually is. NULL on
+            # a row written before §47 means "no known parent", and a
+            # viewer showing that is better than one that raises.
+            "parent_thread_id": getattr(thread, "parent_thread_id", None),
+            "parent_call_id": getattr(thread, "parent_call_id", None),
+            "agent_name": getattr(thread, "agent_name", None),
         }
 
 
-def get_thread_extra(thread_id: UUID) -> Dict[str, Any]:
+def child_threads(parent_thread_id: UUID) -> list[dict]:
+    """The threads spawned by this one, oldest first (§47).
+
+    Each entry: ``{"id", "created_at", "kind", "parent_call_id",
+    "agent_name"}``. Empty for a thread that spawned nothing, which is
+    most of them.
+
+    ONE QUERY, not one per spawn line. A resumed conversation resolves
+    every `▸ spawn_subagent` line it draws, and asking per line would be
+    a query per row of a screen.
+
+    Oldest first because that is the order the calls happened in, so a
+    reader comparing this against the transcript walks both the same
+    way. `parent_call_id` is what pairs an entry to a specific line;
+    ordering is for the human, not for the lookup.
+
+    ORDERED BY `(created_at, id)`, which is `_ordered_rows`' rule and was
+    missing here (batch 75). That rule reads: timestamps have microsecond
+    resolution so ties are unlikely, but "unlikely" is not an ordering
+    guarantee. This is the query where it stopped being merely unlikely --
+    §47's NA9 makes three `create_thread` calls land from three threads at
+    once, which is the one place in this file that can actually tie.
+
+    NO `kind` FILTER, deliberately. Every child of a chat thread is
+    machinery of some sort, and which kinds exist is §27's question
+    rather than this one's -- a filter here would have to be widened
+    again the moment a sixth source appears, which is how §27's own
+    picker missed the compactor.
+    """
+    with Session(engine) as session:
+        statement = (
+            select(ConversationThread)
+            .where(ConversationThread.parent_thread_id == parent_thread_id)
+            .order_by(ConversationThread.created_at.asc(),
+                      ConversationThread.id.asc())
+        )
+        return [
+            {
+                "id": t.id,
+                "created_at": t.created_at,
+                "kind": getattr(t, "kind", None) or THREAD_KIND_CHAT,
+                "parent_call_id": getattr(t, "parent_call_id", None),
+                "agent_name": getattr(t, "agent_name", None),
+            }
+            for t in session.exec(statement).all()
+        ]
+
+
+def get_thread_extra(thread_id: UUID) -> dict[str, Any]:
     """Copy of the thread's extra_data JSON column (goal mode §18, todo
     list §23). Raises ValueError for an unknown thread, same contract as
     the other accessors."""
@@ -275,6 +418,7 @@ def save_message(
     name: Optional[str] = None,
     tool_call_id: Optional[str] = None,
     thinking: Optional[dict] = None,
+    harness: Optional[dict] = None,
 ) -> None:
     """Append one archived row and stamp the thread's activity (#32).
 
@@ -297,18 +441,21 @@ def save_message(
             # absent, so "this turn did no reasoning" costs no bytes and
             # reads back as None rather than as an empty structure.
             thinking=json.dumps(thinking) if thinking else None,
+            # ROADMAP_v3 §49 (SS5), on `thinking`'s terms: NULL for every
+            # row a person or the model wrote, which is nearly all of them.
+            harness=json.dumps(harness) if harness else None,
         )
         session.add(new_message)
         thread = session.get(ConversationThread, thread_id)
         if thread is not None:
-            thread.last_activity_at = datetime.now(timezone.utc)
+            thread.last_activity_at = datetime.now(UTC)
             session.add(thread)
         session.commit()
 
 
 def list_threads(
     kind: Optional[str] = THREAD_KIND_CHAT, limit: Optional[int] = None,
-) -> List[dict]:
+) -> list[dict]:
     """Conversation threads, most recently ACTIVE first (#32).
 
     Each entry: ``{"id": UUID, "created_at": datetime, "kind": str,
@@ -363,9 +510,15 @@ def list_threads(
             {
                 "id": t.id,
                 "created_at": t.created_at,
-                # getattr, not t.kind: a row read back from a database
-                # whose ALTER has not run yet has no attribute at all, and
-                # a picker that raises is worse than one showing "chat".
+                # getattr, not t.kind: it absorbs a NULL on a row
+                # written before the column existed -- the additive
+                # migration never backfills (M7) -- which is what
+                # get_thread's docstring has said since batch 75. NOT a
+                # database whose ALTER has not run: the mapped class always
+                # has the attribute, and a database missing the column
+                # raises OperationalError at the SELECT above, before any
+                # attribute is read. This was the third copy of that wrong
+                # mechanism; 47257f3 removed the other two and missed it.
                 "kind": getattr(t, "kind", None) or THREAD_KIND_CHAT,
                 "preview": previews.get(t.id, ""),
             }
@@ -397,7 +550,7 @@ def thread_preview(thread_id: UUID) -> str:
         return _first_user_messages(session, [thread_id]).get(thread_id, "")
 
 
-def _first_user_messages(session, thread_ids: List[UUID]) -> Dict[UUID, str]:
+def _first_user_messages(session, thread_ids: list[UUID]) -> dict[UUID, str]:
     """thread id -> truncated first user message, for the given threads.
 
     ONE query for the whole list, walked oldest-first so the first row seen
@@ -434,7 +587,7 @@ def _first_user_messages(session, thread_ids: List[UUID]) -> Dict[UUID, str]:
         select(ranked.c.thread_id, ranked.c.content)
         .where(ranked.c.rn == 1)
     ).all()
-    out: Dict[UUID, str] = {}
+    out: dict[UUID, str] = {}
     for thread_id, raw in rows:
         try:
             text = json.loads(raw)
@@ -462,6 +615,19 @@ def _decode_thinking(raw):
     except (TypeError, ValueError):
         return None
     return value if isinstance(value, dict) and value.get("blocks") else None
+
+
+def _decode_harness(raw):
+    """A stored harness record (ROADMAP_v3 §49, SS5), or None for anything
+    unusable -- `_decode_thinking`'s rule for `_decode_thinking`'s reason: a
+    mark that cannot be read costs the mark, never the thread."""
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if isinstance(value, dict) and value.get("kind") else None
 
 
 def _to_neutral(msg: dict) -> dict:
@@ -505,6 +671,19 @@ def _to_neutral(msg: dict) -> dict:
         payload = {"role": role, "content": decoded}
         if msg["tool_call_id"]:
             payload["tool_call_id"] = msg["tool_call_id"]
+        # Batch 91, on §44's terms for `thinking`: present ONLY when the row
+        # records a failed run, so every message written before reconstructs
+        # to exactly the shape it did. Nothing that builds a request reads
+        # it -- _messages_for_provider takes a user row's `content` alone,
+        # and so does the compactor's _as_text.
+        if msg.get("error"):
+            payload["error"] = msg["error"]
+        # ROADMAP_v3 §49 (SS5), on the same terms: present ONLY when the HARNESS
+        # wrote the row, so every other message reconstructs exactly as it did.
+        # Read by replay and the compactor's labelling; never by translation.
+        harness = _decode_harness(msg.get("harness"))
+        if harness is not None:
+            payload["harness"] = harness
 
     if msg["name"]:
         payload["name"] = msg["name"]
@@ -512,7 +691,7 @@ def _to_neutral(msg: dict) -> dict:
     return payload
 
 
-def _ordered_rows(thread_id: UUID) -> List[dict]:
+def _ordered_rows(thread_id: UUID) -> list[dict]:
     """Every row of a thread as plain column values, oldest first.
 
     Ordered by (created_at, id) rather than created_at alone. Timestamps
@@ -546,12 +725,17 @@ def _ordered_rows(thread_id: UUID) -> List[dict]:
                 # Not coerced, unlike `pinned`: NULL is the ordinary state
                 # of this column and _decode_thinking answers None for it.
                 "thinking": m.thinking,
+                # Batch 91, and NULL is ordinary here too: a run failed.
+                "error": m.error,
+                # ROADMAP_v3 §49 (SS5). NULL for every row a person or the
+                # model wrote.
+                "harness": m.harness,
             }
             for m in session.exec(statement).all()
         ]
 
 
-def _split_at(rows: List[dict], message_id: Optional[UUID]) -> int:
+def _split_at(rows: list[dict], message_id: Optional[UUID]) -> int:
     """Index just past `message_id` in `rows`, or 0 when it isn't there.
 
     Resolving a watermark by POSITION in the already-loaded, already-ordered
@@ -576,7 +760,7 @@ def _split_at(rows: List[dict], message_id: Optional[UUID]) -> int:
 
 def get_session_history(
     thread_id: UUID, after_message_id: Optional[UUID] = None,
-) -> List[dict]:
+) -> list[dict]:
     """The thread's messages in neutral shape, oldest first.
 
     `after_message_id` (ROADMAP_v2 §21) loads only the UNCOMPACTED TAIL --
@@ -591,7 +775,7 @@ def get_session_history(
     return [_to_neutral(m) for m in rows[_split_at(rows, after_message_id):]]
 
 
-def archive_history(thread_id: UUID) -> List[dict]:
+def archive_history(thread_id: UUID) -> list[dict]:
     """Every message ever written to this thread, compaction or not.
 
     This is ROADMAP_v2 §21 AC1 made greppable: compaction adds
@@ -605,8 +789,38 @@ def archive_history(thread_id: UUID) -> List[dict]:
     return get_session_history(thread_id)
 
 
-def pinned_through(thread_id: UUID, message_id: Optional[UUID]) -> List[dict]:
-    """Pinned rows at or before the watermark, in neutral shape (§21 M9).
+def _turn_opener_index(rows: list[dict], span: list[dict]) -> list[int]:
+    """`[i]` for the user row that OPENS the turn a MID-TURN watermark cut
+    into, or `[]`. Batch 120, register item 40.
+
+    A sub-turn fold puts the watermark inside a turn, so the turn's own
+    request falls on the covered side and would be summarized away -- and
+    the model would then read a paraphrase of the question it is answering
+    rather than the question. That is M5's objection to folding the current
+    turn at all, and re-adding the request verbatim is what answers it.
+
+    The TEST IS THE FIRST KEPT ROW, not a flag on the checkpoint. When the
+    watermark is turn-aligned the tail opens with a `user` row and nothing
+    needs re-adding; when it is mid-turn the tail opens with an `assistant`
+    row, because that is the only boundary _sub_turn_span will place. So
+    the state is derivable from the rows, which means no column, no
+    migration, and no checkpoint written before this existed that lies
+    about its own shape.
+    """
+    if not span or len(span) >= len(rows):
+        return []
+    if rows[len(span)]["role"] == "user":
+        return []
+    for index in range(len(span) - 1, -1, -1):
+        if span[index]["role"] == "user":
+            return [index]
+    return []
+
+
+def pinned_through(thread_id: UUID, message_id: Optional[UUID]) -> list[dict]:
+    """Rows at or before the watermark the derived view must carry
+    verbatim: the pinned set, made whole (§21 M9), plus the opening request
+    of a turn a mid-turn watermark cut into (batch 120).
 
     A summary covers a contiguous span, but §21 AC2 says a pinned message is
     never summarized -- so pinned rows INSIDE the covered span have to
@@ -667,13 +881,23 @@ def pinned_through(thread_id: UUID, message_id: Optional[UUID]) -> List[dict]:
              if not m["pinned"] and m["role"] == "tool"
              and neutral[i].get("tool_call_id") in need]
 
+    # Batch 120. ONE INDEX, AND THE SORT BELOW PLACES IT -- which is the
+    # whole reason the turn opener lives here rather than in a function of
+    # its own beside this one. The view needs these rows in ARCHIVE ORDER,
+    # and `_derived_view` has no positions to merge two lists by: a pinned
+    # row from an older turn belongs before the request and a pinned row
+    # from inside this turn belongs after it, and either sibling-function
+    # arrangement gets one of those wrong. `set()` covers the opener
+    # already being pinned.
+    keep += _turn_opener_index(rows, span)
+
     return [neutral[i] for i in sorted(set(keep))]
 
 
 def history_through(
     thread_id: UUID, message_id: Optional[UUID],
     after_message_id: Optional[UUID] = None,
-) -> List[dict]:
+) -> list[dict]:
     """The span a compaction is about to summarize, in neutral shape.
 
     Pinned rows are EXCLUDED (§21 AC2: a pinned message is never included in
@@ -688,7 +912,7 @@ def history_through(
     return [_to_neutral(m) for m in rows[start:end] if not m["pinned"]]
 
 
-def turn_start_ids(thread_id: UUID) -> List[UUID]:
+def turn_start_ids(thread_id: UUID) -> list[UUID]:
     """Ids of the rows that BEGIN each turn, oldest first.
 
     A turn starts at a user message: the wrapper adds one, then the loop
@@ -701,7 +925,7 @@ def turn_start_ids(thread_id: UUID) -> List[UUID]:
     return [m["id"] for m in _ordered_rows(thread_id) if m["role"] == "user"]
 
 
-def message_ids_from(thread_id: UUID, message_id: UUID) -> List[UUID]:
+def message_ids_from(thread_id: UUID, message_id: UUID) -> list[UUID]:
     """Ids of `message_id` and everything after it. Resolves pin()'s
     ordinal ("the last N turns") into the real row ids the pinned flag is
     written against -- §21 keeps MessageLog.id an implementation detail
@@ -714,7 +938,7 @@ def message_ids_from(thread_id: UUID, message_id: UUID) -> List[UUID]:
     return [message_id] + [m["id"] for m in rows[start:]]
 
 
-def set_pinned(message_ids: List[UUID], pinned: bool = True) -> int:
+def set_pinned(message_ids: list[UUID], pinned: bool = True) -> int:
     """Flag rows compaction-exempt. Returns how many rows changed."""
     if not message_ids:
         return 0
@@ -729,6 +953,36 @@ def set_pinned(message_ids: List[UUID], pinned: bool = True) -> int:
             changed += 1
         session.commit()
     return changed
+
+
+def mark_turn_failed(thread_id: UUID, error: str) -> bool:
+    """Record on the thread's NEWEST user row why the run it started failed.
+
+    Batch 91; see MessageLog.error for why this is a column. The newest user
+    row is always the right one: every entry point writes the message that
+    starts a run BEFORE the loop begins -- run_agent_conversation,
+    continue_conversation, stream_deep_research_mode and the TUI turn -- so
+    by the time a failure escapes the loop, the row that started it is the
+    last user row there is. Ordered by (created_at, id), `_ordered_rows`'
+    own order, so the two can never disagree about which row is newest.
+
+    Returns False for a thread with no user row. Does not stamp
+    last_activity_at the way save_message does: a failure is not a message.
+    """
+    with Session(engine) as session:
+        statement = (
+            select(MessageLog)
+            .where(MessageLog.thread_id == thread_id)
+            .where(MessageLog.role == "user")
+            .order_by(MessageLog.created_at.desc(), MessageLog.id.desc())
+        )
+        row = session.exec(statement).first()
+        if row is None:
+            return False
+        row.error = error
+        session.add(row)
+        session.commit()
+    return True
 
 
 def _current_watermark(thread_id: UUID) -> Optional[UUID]:
@@ -939,7 +1193,7 @@ def save_memory(
 
 def list_memories(
     project_path: Optional[str] = None, scope: Optional[str] = None,
-) -> List[dict]:
+) -> list[dict]:
     """Memories visible from `project_path`, NEWEST FIRST.
 
     Returns global memories plus the project ones recorded against exactly

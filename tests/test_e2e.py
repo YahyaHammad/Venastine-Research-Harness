@@ -18,11 +18,9 @@ from uuid import uuid4
 
 import pytest
 
-from core.client import ToolCallRequest
 from core.reasoning.base import PipelineRun
 from main import run_chat, run_research
 from tests.conftest import make_model_response, make_stream_from_response
-
 
 # ===========================================================================
 # ---- Chat mode: multi-turn with tool use ----------------------------------
@@ -123,7 +121,24 @@ def test_chat_mode_e2e_multi_turn_with_tool_use(mocker, capsys, fake_storage,
     # active) and its RunInfo (parent_run) to every dispatch call.
     mock_dispatch.assert_called_once_with(
         "get_time", {}, context=None, approval_callback=None, parent_run=ANY,
-        response_channel=None, signoff=None, memory=ANY, activity=None)
+        response_channel=None, signoff=None, memory=ANY, activity=None,
+        # ROADMAP_v3 61 (CN7/CN10). ANY, and then asserted by TYPE
+        # below: this test drives the real CLI chat turn, which
+        # builds a token per turn, so the useful claim is not that
+        # the argument is present but that the SHELL'S OWN token is
+        # what reached the tool layer. A spawn inside this call
+        # inherits it from here, which is how Ctrl+C stops a child.
+        cancel=ANY,
+        # §47: the model's own id for this call reaches dispatch, so a
+        # tool that creates something durable can record which call
+        # created it.
+        call_id="tc_01")
+    # ...and it is a real CancelToken rather than whatever ANY
+    # would also have accepted.
+    from core.cancel import CancelToken
+
+    assert isinstance(mock_dispatch.call_args.kwargs["cancel"],
+                      CancelToken)
 
     # --- Verify multi-turn thread resume ---
     # call_model_stream is called with memory.messages as the 4th positional

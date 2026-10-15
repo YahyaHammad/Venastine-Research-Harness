@@ -219,6 +219,68 @@ def check_workspace(workspace_dir: str) -> str | None:
     return None
 
 
+def check_project(project_path: str) -> str | None:
+    """Why *project_path* may not be the PROJECT, or None (debt item 26).
+
+    The project is what `config_loader.get_project_path()` resolves, and
+    everything downstream follows it: D17 workspace trust, the
+    `.venastine/` config tier, `/init`'s destination and `UserMemory`'s
+    project scope (WS7, D25/M12). It may not be the harness's own install
+    tree.
+
+    THE DISPARITY THIS CLOSES, and it is why this is a guard rather than a
+    convention. Naming that directory was ALREADY refused --
+    `check_workspace` above returns a reason for `AGENT_WORKSPACE=<harness
+    root>`, and for every non-exempt subfolder of it. But `main()` falls
+    back to `os.getcwd()` when nothing names a workspace as the project, so
+    launching from a clone reached the same state by saying nothing:
+    measured in batch 96 from an owner report and reproduced in batch 107,
+    the trust prompt listed the harness's own `AGENTS.md`. The rule was
+    enforced when you said it and skipped when you did not.
+
+    THE MESSAGE NAMES THREE WAYS OUT since batch 111, and used to name two
+    and a trap. It said `workspace_dir` in `config.yaml` "is not enough on
+    its own" -- true, and no help at all to the person reading it, who had
+    just written the directory they meant into the file this refusal is
+    about. `workspace_is_project` is the third way (TECHNICAL_DEBT 28), and
+    the sentence is now about what to do rather than about what does not
+    work.
+
+    EQUALITY, NOT CONTAINMENT, which is the one place this deliberately
+    differs from `check_workspace`. That one is a WRITE boundary and
+    refuses anything inside the tree except `workspace/` and `output/`;
+    this one answers "is the project the harness", and `<harness>/workspace`
+    is a perfectly good project. It is the shipped layout, and it is the
+    answer for someone working on the harness itself.
+
+    A REASON STRING rather than an exception, for `check_workspace`'s
+    reason: the caller prints it and exits. REALPATH'D HERE rather than at
+    the caller, because `main()`'s implicit branch hands over a bare
+    `os.getcwd()` -- and because the realpath is what makes this a question
+    about a directory instead of about a spelling. `_relation` compares
+    strings, so `<root>/workspace/..` and a Windows path differing only in
+    case both read as `disjoint` to it; `os.path.realpath` resolves the
+    first on every platform and canonicalises the second on Windows
+    (measured, batch 107).
+    """
+    root = harness_root()
+    if _relation(os.path.realpath(project_path), root) != "equal":
+        return None
+    return (
+        f"The project would be the harness's own install tree ({root}), "
+        f"because nothing named a workspace as the project and this was "
+        f"launched from there. Workspace trust, .venastine/, /init's "
+        f"destination and project-scoped memories all follow the project, "
+        f"so the harness would be asked to trust its own AGENTS.md and "
+        f"/init would scaffold documentation into its own source. Three "
+        f"ways out, any one of them enough: launch from the directory you "
+        f"want to work in; set AGENT_WORKSPACE to it; or, if you have "
+        f"already written it as workspace_dir in config.yaml, set "
+        f"workspace_is_project: true beside it. To work on the harness "
+        f"itself, AGENT_WORKSPACE=./workspace."
+    )
+
+
 def readonly_mounts(workspace_real: str) -> list[str]:
     """Docker `-v` arguments binding every protected path NESTED inside
     *workspace_real* read-only, in the order docker expects them.
@@ -280,13 +342,24 @@ def readonly_mounts(workspace_real: str) -> list[str]:
 # project_docs.py unions this set into its own wider denylist rather than
 # re-spelling the segment.
 #
+# AND ONE COMPARISON, since batch 146 -- `folded_segments` below, because
+# the fact is not the spelling on its own but the spelling together with
+# how a filesystem will match it. Two of the three consumers had their own
+# comparison and only one of them folded case, which is not a thing either
+# file said; it was a thing you could only find by writing `.VENASTINE/`.
+#
 # KNOWN LIMITS, in the house style. The file tools DENY; the shell only
 # ever ASKS, because a token check that learned shell syntax would be a
 # parser whose bugs auto-approve (G2), and an approval prompt leaves the
 # whole command text in front of a human instead. The auto-approved INERT
 # tier executes argv with no shell (§46 EP5), so its tokens ARE its
-# arguments and a token check is sound there; every tier that could
-# expand a glob or a variable into the segment is asked about anyway.
+# arguments and a token check is sound there; under `tiered` every tier
+# that could expand a glob or a variable into the segment is asked about
+# anyway. That sentence was FALSE until §48 (CE1): a contained command was
+# auto-approved, and `cat .ven*/settings.json; true` read the file unasked.
+# Under `contained` and `never` it is still not true -- such a spelling,
+# or code that opens the file, runs unasked; the ro mount stops a write,
+# and the read is recorded in SECURITY.md as documented risk.
 # MCP servers exposing their own file tools are a separate surface this
 # list does not reach, and the user-tier `~/.config/venastine` stays
 # where it always was -- outside a default workspace it is prompt-gated
@@ -294,16 +367,60 @@ def readonly_mounts(workspace_real: str) -> list[str]:
 PROTECTED_SEGMENTS = frozenset({".venastine"})
 
 
+def folded_segments(names) -> frozenset:
+    """`names` prepared for the comparison a filesystem will actually make.
+
+    THE ONE SPELLING OF THE FOLD (batch 146). Both consumers that compare a
+    path's segments against a denylist call this -- `protected_segment`
+    below and `project_docs._is_readable_doc` -- because the alternative is
+    what was there before: two comparisons, one of them case-sensitive, and
+    nothing in either file able to say they disagreed.
+
+    `casefold` rather than `lower`, which is the comparison Python offers
+    for "are these the same name to a human"; for ASCII segment names they
+    are identical and the difference costs nothing.
+    """
+    return frozenset(name.casefold() for name in names)
+
+
+#: PUBLIC, because `shell.py`'s raw-token branch compares against it too
+#: and a second `folded_segments(PROTECTED_SEGMENTS)` at that module's top
+#: would be one derived value computed twice.
+PROTECTED_SEGMENTS_FOLDED = folded_segments(PROTECTED_SEGMENTS)
+
+
 def protected_segment(resolved_path: str) -> str | None:
     """The protected segment *resolved_path* carries, or None.
 
     Callers pass a realpath'd path (file_ops' ``resolve_path``, the
     sandbox's ``_within``), so `..` travel and symlinks are already
-    collapsed: a link pointing at `.venastine/settings.json` arrives
-    here as the real thing, and on Windows so does a case-spelled one.
-    Split on both separators because a raw shell token may carry either.
+    collapsed: a link pointing at `.venastine/settings.json` arrives here
+    as the real thing. Split on both separators because a raw shell token
+    may carry either.
+
+    CASE-FOLDED ON EVERY PLATFORM, and the word "realpath" above is exactly
+    why it has to be (batch 146). This used to say that on Windows a
+    case-spelled path "arrives here as the real thing" too, and that is
+    true only where the path ALREADY EXISTS for realpath to canonicalise --
+    which is not the state a `write` is in. With no `.venastine/` yet,
+    `.VENASTINE/mcp.json` resolved to itself, carried no known segment, was
+    auto-approved, and created the protected directory under the spelling
+    the guard did not know. After that realpath canonicalised every later
+    path to the ON-DISK name, so BOTH spellings were admitted in that
+    project from then on, and the file `config_loader` opens at startup was
+    one of them. Measured, including the control: a project whose directory
+    was created lowercase refuses both.
+
+    Folding unconditionally rather than per platform is the fail-closed
+    direction and costs what it costs: on a case-SENSITIVE filesystem a
+    directory genuinely named `.VENASTINE` is now denied to the file tools
+    with no prompt and no override, because for them this list is the hard
+    deny rather than a reason to ask. The shell consumer only ever ASKS, so
+    there the same fold costs one prompt.
     """
     for part in re.split(r"[\\/]", resolved_path):
-        if part in PROTECTED_SEGMENTS:
+        if part.casefold() in PROTECTED_SEGMENTS_FOLDED:
+            # The spelling from the PATH, not from the list, so the refusal
+            # names what the caller actually wrote.
             return part
     return None

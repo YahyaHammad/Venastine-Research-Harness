@@ -21,35 +21,63 @@ ROADMAP_v2 §15:
 
 import inspect
 import logging
+from typing import TYPE_CHECKING, Optional
 
 import config
-from typing import Optional, TYPE_CHECKING
-
-from tools.base import (
-    BUDGET_COMPUTE, BUDGET_HUMAN, BUDGET_IO,
-    GRANT_ANYWHERE, GRANT_NEVER, GRANT_SIGNOFF_ONLY, ToolSpec,
-    assert_budget_declared, assert_grant_policy_declared,
-)
-from tools import isolation
-from tools.builtin import (
-    web_search, fetch_url, get_time, arxiv,
-    symbolic_math, linear_algebra, probability_stats, discrete_math, logic, geometry,
-    file_ops, shell, load_skill, pin, remember, project_docs,
-    ask_user, todo,
+from agents import subagent_tool
+from safety.policy_enforcement import (
+    check_input_policy,
+    check_output_policy,
+    param_digest,
+    redacted_values,
 )
 from security.permissions import (
-    assert_permissions_declared, is_tool_allowed, requires_approval,
+    APPROVAL_BY_SHELL_MODE,
+    assert_permissions_declared,
+    is_tool_allowed,
+    requires_approval,
 )
-from safety.policy_enforcement import (check_input_policy,
-                                        check_output_policy,
-                                        param_digest,
-                                        redacted_values)
-from agents import subagent_tool
+from tools import isolation
+from tools.base import (
+    BUDGET_COMPUTE,
+    BUDGET_HUMAN,
+    BUDGET_IO,
+    GRANT_ANYWHERE,
+    GRANT_NEVER,
+    GRANT_SIGNOFF_ONLY,
+    OPENS_CALL,
+    OPENS_SESSION,
+    OPENS_THREAD,
+    ToolSpec,
+    assert_budget_declared,
+    assert_grant_policy_declared,
+)
+from tools.builtin import (
+    arxiv,
+    ask_user,
+    discrete_math,
+    fetch_url,
+    file_ops,
+    geometry,
+    get_time,
+    linear_algebra,
+    load_skill,
+    logic,
+    pin,
+    probability_stats,
+    project_docs,
+    remember,
+    shell,
+    shell_sessions,
+    symbolic_math,
+    todo,
+    web_search,
+)
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from tools.context import ToolContext, RunInfo
+    from tools.context import RunInfo, ToolContext
 
 # Handler parameter names dispatch() will inject, by signature inspection
 # (ROADMAP_v2 §18). A tool handler that declares one of these receives the
@@ -76,6 +104,20 @@ _INJECTABLE_PARAMS = (
     # threaded through params because it is a run-scoped value, exactly
     # like response_channel beside it.
     "activity",
+    # ROADMAP_v3 §61 (CN7): the turn's CancelToken, for spawn_subagent. A
+    # child run is the parent's turn continuing, so stopping the parent
+    # stops it -- and the only way a value reaches a run that happens
+    # INSIDE a tool call is this list, which is `activity`'s own argument
+    # one line up.
+    "cancel",
+    # ROADMAP_v2 §47: the model's own id for THIS call. A tool that
+    # creates something durable can then record which call created it,
+    # which is what lets one line in a transcript find one row in the
+    # database when a turn made three of them. Injected rather than put
+    # in params, twice over: params are the MODEL'S, parsed from its
+    # tool call, and a model that could write its own call id could
+    # claim a line it did not make.
+    "call_id",
 )
 
 
@@ -512,6 +554,85 @@ class ToolRegistry:
         key = self.rationale_param(tool_name)
         return redacted_values(params, omit=(key,) if key else ())
 
+    def opens_thread(self, tool_name: str) -> bool:
+        """Whether a call to this tool creates a thread of its own (§47).
+
+        Mechanism, not policy, exactly like request_kind below: a reader
+        asks rather than knowing that spawn_subagent is special. Two
+        consumers -- core/replay.py, deciding what a stored tool line
+        carries, and the TUI, deciding which live line to arm -- and one
+        declaration between them.
+
+        False for an unknown tool, which is what an MCP tool registered
+        at runtime is until it says otherwise.
+        """
+        spec = self._tools.get(tool_name)
+        return bool(spec is not None and spec.opens_thread)
+
+    def opens_session(self, tool_name: str) -> bool:
+        """Whether a call to this tool starts a background session (§49,
+        SS14). `opens_thread`'s sibling, and False for an unknown tool for
+        the same reason."""
+        spec = self._tools.get(tool_name)
+        return bool(spec is not None and spec.opens_session)
+
+    def opens(self, tool_name: str) -> tuple:
+        """What a call to this tool OPENS: `("thread",)`, `("session",)` or
+        `("call",)` (§47, extended by §49 SS14, widened by §55 TR7).
+
+        THE ONE QUESTION A CONSUMER ASKS, and the reason the two flags above
+        are not read directly outside this class. core/replay.py and the TUI
+        each decide what a tool line carries; before this they asked
+        `opens_thread` and would each have had to grow the same second
+        branch, which is how the live line and the replayed one come to
+        disagree about what is clickable -- the exact divergence
+        `opens_thread`'s own docstring exists to prevent, one kind over.
+
+        THERE IS NO LONGER AN EMPTY ANSWER, and the contract that replaced
+        it is the one thing to read here before changing a caller. Until
+        §55 this returned `()` for a line that opened nothing, and the two
+        consumers paired that falsy tuple with a call id as their gate:
+        `opens and call_id`. TR7 makes every call openable -- its own
+        params and its own result, which is the half of a tool call nothing
+        rendered -- so the kind is always present and THE CALL ID IS THE
+        ONLY GATE. A call the model made without an id cannot be looked up
+        in the archive and is the one unarmed line.
+
+        OPENS_CALL IS ANSWERED WITHOUT A REGISTRY LOOKUP, deliberately.
+        `opens_thread` and `opens_session` are False for a tool this
+        registry has never seen -- which is what an MCP tool registered at
+        runtime is until it says otherwise, and what a tool removed between
+        a thread being written and being replayed is for ever. Neither of
+        those is a reason to hide a stored result: the archive holds the
+        call and its result whatever this process knows about the tool, so
+        the fallback is a property of the ARCHIVE rather than of the
+        registry, and asking would only teach it to lie about old threads.
+
+        A tuple rather than a string because the two consumers carry
+        `(kind, call id)` into style metadata as one unit, and because the
+        shape outlived the falsy contract that first chose it.
+        """
+        if self.opens_thread(tool_name):
+            return (OPENS_THREAD,)
+        if self.opens_session(tool_name):
+            return (OPENS_SESSION,)
+        return (OPENS_CALL,)
+
+    def parallel(self, tool_name: str) -> bool:
+        """Whether several calls to this tool in one response may run at
+        the same time (§47 slice 8, NA9).
+
+        Mechanism, not policy, in `opens_thread`'s exact shape and for its
+        reason: core/loop.py partitions a response by asking, so the file
+        that decides what runs concurrently names no tool.
+
+        False for an unknown tool, which is what an MCP tool registered at
+        runtime is until it says otherwise -- and the answer that keeps a
+        stranger's tool sequential, which is the safe one here.
+        """
+        spec = self._tools.get(tool_name)
+        return bool(spec is not None and spec.parallel)
+
     def request_kind(self, tool_name: str) -> str:
         """Which kind of question approving this tool asks (§23).
 
@@ -600,6 +721,8 @@ class ToolRegistry:
         signoff=None,
         memory=None,
         activity=None,
+        call_id=None,
+        cancel=None,
     ) -> dict:
         # Unknown-tool guard: ValueError, deliberately NOT ToolCallDenied.
         # The two exception types separate "you misnamed it" from "policy
@@ -637,7 +760,33 @@ class ToolRegistry:
         if refused is not None:
             logger.info("%s refused before approval: %s",
                         tool_name, refused)
-            return {"error": refused}
+            # THROUGH THE REDACTOR, like every other result (batch 156,
+            # A60). This was the one `return` in this function that did
+            # not, and it is a result path: the success path, the
+            # handler-exception path and the depth cap all pass the call
+            # below, and this one went straight out.
+            #
+            # IT WAS NOT A THEORETICAL HOLE. Measured (batch 156) through
+            # this very function: `spawn_subagent` with an `agent_name` of
+            # `ghp_` plus 36 characters came back as "Unknown agent:
+            # '<the whole token>' is not one of this harness's agents" --
+            # the full credential, to the model and to the transcript,
+            # from a value the model chose. And the harness has a scanner
+            # for exactly that input: `check_input_policy` BELOW refuses
+            # the same params with "an argument contains what looks like
+            # a credential". The refusal returned above it, so both
+            # scanners were skipped on one path -- §25 (R5) exists
+            # because "the parameters were chosen by a model reading an
+            # attacker's web page", and this is where that argument was
+            # not being applied.
+            #
+            # THE SINK AND NOT THE PRODUCER, which is the same split the
+            # handler containment two inches below uses: a refusal string
+            # is written by whichever tool owns the gate, and this is the
+            # one place that covers the next one. `tools/base.py` still
+            # asks producers not to echo a value, for a reason that
+            # survives this change and is stated there.
+            return check_output_policy(tool_name, {"error": refused})
 
         spec = self._tools[tool_name]
 
@@ -673,6 +822,8 @@ class ToolRegistry:
             "signoff": signoff,
             "memory": memory,
             "activity": activity,
+            "call_id": call_id,
+            "cancel": cancel,
         }
         injected = {p: available[p] for p in self._injectable.get(tool_name, ())}
         try:
@@ -687,8 +838,12 @@ class ToolRegistry:
             # The branch is HERE, inside the containment try and at the
             # one place a handler is ever invoked, rather than inside the
             # six tools. A tool that isolated itself could not be called
-            # plainly by a test, and the 123 tests in test_math_tools.py
+            # plainly by a test, and every test in test_math_tools.py
             # would then be measuring the transport instead of the maths.
+            # (The count that used to stand here said 123 and was 131 by
+            # the time anyone checked, and 141 after batch 131 -- the
+            # ARGUMENT never needed the number, which is why it is gone
+            # rather than corrected.)
             #
             # `injected` is not passed: nothing in _INJECTABLE_PARAMS
             # survives a process boundary, and assert_budget_declared
@@ -786,13 +941,51 @@ registry.register(ToolSpec("geometry", geometry.TOOL_SCHEMA, geometry.run, grant
 # pre-approval, so no human is asked a question the tool would refuse
 # anyway. The handlers re-test -- the refusal_check is the
 # prompt-suppression half, not the enforcement.
-registry.register(ToolSpec("read", file_ops.READ_TOOL_SCHEMA, file_ops.read_run, approval_check=file_ops._file_approval_check, refusal_check=file_ops._protected_refusal, grant_policy=GRANT_NEVER, budget=BUDGET_IO))
-registry.register(ToolSpec("write", file_ops.WRITE_TOOL_SCHEMA, file_ops.write_run, approval_check=file_ops._file_approval_check, refusal_check=file_ops._protected_refusal, grant_policy=GRANT_NEVER, budget=BUDGET_IO))
-registry.register(ToolSpec("edit", file_ops.EDIT_TOOL_SCHEMA, file_ops.edit_run, approval_check=file_ops._file_approval_check, refusal_check=file_ops._protected_refusal, grant_policy=GRANT_NEVER, budget=BUDGET_IO))
+registry.register(ToolSpec("read", file_ops.READ_TOOL_SCHEMA, file_ops.read_run, approval_check=file_ops._file_approval_check, refusal_check=file_ops._refusal_for("read"), grant_policy=GRANT_NEVER, budget=BUDGET_IO))
+registry.register(ToolSpec("write", file_ops.WRITE_TOOL_SCHEMA, file_ops.write_run, approval_check=file_ops._file_approval_check, refusal_check=file_ops._refusal_for("write"), grant_policy=GRANT_NEVER, budget=BUDGET_IO))
+registry.register(ToolSpec("edit", file_ops.EDIT_TOOL_SCHEMA, file_ops.edit_run, approval_check=file_ops._file_approval_check, refusal_check=file_ops._refusal_for("edit"), grant_policy=GRANT_NEVER, budget=BUDGET_IO))
 # §28: approval_notice carries the capability profile into the prompt.
 # The command text is already in the params; what it does not show is
 # WHERE it runs, and "cat /etc/shadow" does not look like a host read.
 registry.register(ToolSpec("shell", shell.TOOL_SCHEMA, shell.run, approval_check=shell._shell_approval_check, approval_notice=shell._shell_approval_notice, grant_policy=GRANT_NEVER, budget=BUDGET_IO, rationale_param="rationale", headline_param="command"))
+# ROADMAP_v3 §49 (SS11, SS16, SS17). Five tools over background and monitor
+# sessions, and the two that START one are `shell` with a lifetime: the same
+# approval_check OBJECT, because a session runs a command and a second gate
+# over it would be the ratchet G3 removed -- _assert_shell_mode_exemption
+# below requires that identity, which is what ties the missing
+# `tool_approvals` field to the gate that replaces it.
+#
+# available_check rather than a permission: all seven are hidden wherever
+# nothing will wake the run when a session reports (a research pass, any run
+# outside a chat turn or a subagent). A start is refused there too, by
+# refusal_check before any approval prompt and again in the handler -- but
+# advertising a tool that can only be refused is the D24 defect, and under
+# `shell_approval_mode: never` nothing else would stop a pass calling it.
+# SS14: the three START tools open a session, so their lines are the ones a
+# reader can click. `shell_output`, `shell_kill` and `shell_input` name a
+# session they did not create -- arming those would put the same target on
+# four lines, and on twenty for an interactive session that is typed into
+# twenty times, which makes "the line that started it" stop meaning
+# anything.
+registry.register(ToolSpec("shell_background", shell_sessions.BACKGROUND_TOOL_SCHEMA, shell_sessions.background_run, approval_check=shell._shell_approval_check, approval_notice=shell_sessions.background_notice, refusal_check=shell_sessions.background_refusal, available_check=shell_sessions.available, grant_policy=GRANT_NEVER, budget=BUDGET_IO, rationale_param="rationale", headline_param="command", opens_session=True))
+registry.register(ToolSpec("shell_monitor", shell_sessions.MONITOR_TOOL_SCHEMA, shell_sessions.monitor_run, approval_check=shell._shell_approval_check, approval_notice=shell_sessions.monitor_notice, refusal_check=shell_sessions.monitor_refusal, available_check=shell_sessions.available, grant_policy=GRANT_NEVER, budget=BUDGET_IO, rationale_param="rationale", headline_param="command", opens_session=True))
+# Slice 2. Its gate is NOT shell's: `_interactive_approval_check` asks
+# about the session being opened rather than about its first line, because
+# the yes covers every line that follows (SS29, SS32). The assert below
+# holds it to that function by identity, exactly as it holds the three
+# above to theirs.
+registry.register(ToolSpec("shell_interactive", shell_sessions.INTERACTIVE_TOOL_SCHEMA, shell_sessions.interactive_run, approval_check=shell._interactive_approval_check, approval_notice=shell_sessions.interactive_notice, refusal_check=shell_sessions.interactive_refusal, available_check=shell_sessions.available, grant_policy=GRANT_NEVER, budget=BUDGET_IO, rationale_param="rationale", headline_param="command", opens_session=True))
+# Typing into a session is NOT a start, so `opens_session` is False: one
+# session would otherwise be the target of every line sent to it, which is
+# the same reason `shell_output` and `shell_kill` are not armed. It keeps
+# an approval_check because SS29's exception -- a line naming a protected
+# segment -- still asks, and a control key never does (SS30).
+registry.register(ToolSpec("shell_input", shell_sessions.INPUT_TOOL_SCHEMA, shell_sessions.input_run, approval_check=shell_sessions.input_approval_check, approval_notice=shell_sessions.input_notice, refusal_check=shell_sessions.input_refusal, available_check=shell_sessions.available, grant_policy=GRANT_NEVER, budget=BUDGET_IO, headline_param="text"))
+# Reading and stopping need no approval (SS11): they act only on sessions
+# this conversation started, which someone already approved.
+registry.register(ToolSpec("shell_sessions", shell_sessions.SESSIONS_TOOL_SCHEMA, shell_sessions.sessions_run, available_check=shell_sessions.available, grant_policy=GRANT_ANYWHERE, budget=BUDGET_IO))
+registry.register(ToolSpec("shell_output", shell_sessions.OUTPUT_TOOL_SCHEMA, shell_sessions.output_run, available_check=shell_sessions.available, grant_policy=GRANT_ANYWHERE, budget=BUDGET_IO))
+registry.register(ToolSpec("shell_kill", shell_sessions.KILL_TOOL_SCHEMA, shell_sessions.kill_run, available_check=shell_sessions.available, grant_policy=GRANT_ANYWHERE, budget=BUDGET_IO))
 registry.register(ToolSpec("load_skill", load_skill.TOOL_SCHEMA, load_skill.run, available_check=load_skill.has_skills, grant_policy=GRANT_ANYWHERE, budget=BUDGET_IO))
 registry.register(ToolSpec("pin", pin.TOOL_SCHEMA, pin.run, available_check=pin.available, grant_policy=GRANT_ANYWHERE, budget=BUDGET_IO))
 # §21/D26 restored (#89): the mirror of pin. Same gating posture (ungated,
@@ -860,6 +1053,18 @@ registry.register(ToolSpec(
     # names the destination and the size. That is the per-call consent a
     # gate is for, which is also why --attended was never the mode at
     # issue in #133.
+    #
+    # OFFERED TO NOTHING THAT SHIPS, measured in batch 139 and ruled
+    # deliberate (TECHNICAL_DEBT 83). This is the only
+    # GRANT_SIGNOFF_ONLY registration in the registry, and no agent in
+    # agents/builtin/ declares `write_project_doc` -- so the policy
+    # value above is correct and has no shipped instance. The sign-off
+    # picker is for operator-configured installs: an agent that
+    # declines to narrow `allowed_tools`, or one naming a gated tool
+    # outright. Do not "fix" this by adding the tool to a shipped
+    # agent -- `writer` is the only plausible candidate and its own
+    # file refuses write capability in two places, so that is a
+    # decision reversal and wants its own batch.
     grant_policy=GRANT_SIGNOFF_ONLY,
     budget=BUDGET_IO))
 registry.register(ToolSpec(
@@ -899,8 +1104,80 @@ registry.register(ToolSpec(
     # which agent they are authorising.
     grant_policy=GRANT_NEVER,
     budget=BUDGET_HUMAN,
+    # TECHNICAL_DEBT 13, batch 110. The asymmetry `load_skill` did not
+    # have: with no spawnable agent discovered, this tool's only possible
+    # answer is `Unknown agent`, and until batch 51 shipped two of them
+    # that was every default install. See has_agents for why it reads the
+    # catalog function rather than the roster.
+    available_check=subagent_tool.has_agents,
+    # §47. The only tool that does, so far: the child runs in a thread
+    # of its own, which is what makes `▸ spawn_subagent` a line a
+    # reader can open.
+    opens_thread=True,
+    # §47 slice 8 (NA9). The only tool that declares it, and the reason
+    # the slice exists: a model emitting three spawns in one response
+    # meant three runs one after another, so the parallelism a subagent
+    # swarm is FOR was spent. Safe to declare because everything the
+    # child's run touches was made concurrency-safe first -- the budget's
+    # lock, the serialised question, the per-future authorization -- which
+    # is why this one field is the last line of the section rather than
+    # the first.
+    parallel=True,
 ))
 
+# WHICH gate each shell-mode-exempt tool must carry, by identity. A mapping
+# rather than the single name this started as, because slice 2 added a tool
+# whose gate is deliberately a different function: `shell_interactive` is
+# governed by `shell_approval_mode` like the rest, but asks its question
+# about the SESSION rather than about one command (SS29, SS32). Naming the
+# expected gate per tool keeps the check as strict as identity ever was and
+# makes it stricter in one way -- a name added to APPROVAL_BY_SHELL_MODE
+# with no entry here now fails, where before any shell gate would have done.
+_SHELL_MODE_GATES = {
+    "shell": shell._shell_approval_check,
+    "shell_background": shell._shell_approval_check,
+    "shell_monitor": shell._shell_approval_check,
+    "shell_interactive": shell._interactive_approval_check,
+}
+
+
+def _assert_shell_mode_exemption(tools: dict) -> None:
+    """SS16: every tool exempt from `tool_approvals` carries the shell gate.
+
+    `security.permissions.APPROVAL_BY_SHELL_MODE` is a HOLE in D24's
+    import-time check -- the names in it may omit an approvals field -- and
+    the whole argument for the hole is that `shell_approval_mode` decides
+    their approval instead. That argument is true only while they actually
+    go through that gate, so the exemption is tied to it by IDENTITY here
+    rather than by trusting the registration to have done it: a tool that
+    lost its approval_check, or was given one of its own, would otherwise
+    be a command-running tool with no approval question anywhere and
+    nothing to say so. Raises for D24's reason -- the failure it guards
+    against is invisible at runtime.
+    """
+    broken = []
+    for name in sorted(APPROVAL_BY_SHELL_MODE):
+        spec = tools.get(name)
+        expected = _SHELL_MODE_GATES.get(name)
+        if spec is None:
+            broken.append(f"{name} is not registered")
+        elif expected is None:
+            broken.append(f"{name} has no declared gate in "
+                          f"_SHELL_MODE_GATES")
+        elif spec.approval_check is not expected:
+            broken.append(f"{name} does not use {expected.__name__}")
+    if broken:
+        raise RuntimeError(
+            "These tools are exempt from tool_approvals because "
+            "shell_approval_mode is supposed to gate them, and it does not: "
+            f"{broken}. Either register them with the gate "
+            "_SHELL_MODE_GATES names, or take them out of "
+            "security.permissions.APPROVAL_BY_SHELL_MODE and give them a "
+            "tool_approvals field (ROADMAP_v3 §49, SS16)."
+        )
+
+
+_assert_shell_mode_exemption(registry._tools)
 # D24: fail loudly at import if any statically registered tool has no
 # declared permission/approval field. Runs here rather than in
 # security/permissions.py because that file must not import the registry

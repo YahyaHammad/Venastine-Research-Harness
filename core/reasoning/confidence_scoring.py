@@ -18,7 +18,11 @@ flag it if you intended something different.
 from __future__ import annotations
 
 from core.reasoning.base import (
-    CLAIM_TYPES, GROUNDING_STATUSES, Claim, ConfidenceTier, PipelineRun,
+    CLAIM_TYPES,
+    GROUNDING_STATUSES,
+    Claim,
+    ConfidenceTier,
+    PipelineRun,
 )
 
 # --- Tunable weights -- change these, not the logic below, to retune scoring ---

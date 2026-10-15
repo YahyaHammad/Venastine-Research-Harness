@@ -28,9 +28,11 @@ WHAT THE GUARANTEE IS, AND IS NOT
 Stated precisely, because a half-understood control is worse than none
 (UN4). The posture CANNOT be changed by:
 
-  * any tool call -- nothing writes `config.py` without an approval
-    prompt, since it is outside the workspace and `_file_approval_check`
-    hard-returns True there;
+  * any tool call -- nothing writes `config.yaml`, where the values
+    live, or `config.py`, which reads them, without an approval prompt:
+    both are outside the workspace and `_file_approval_check`
+    hard-returns True there. `write` and `edit` are globally denied on
+    top of that;
   * `settings.json` at either tier -- the keys are rejected BY NAME, the
     way G7 rejects `shell_approval_mode`, because a project's settings
     beat the user's and arrive with a directory you cloned;
@@ -50,9 +52,28 @@ ORDERING IS SELF-ENFORCING (UN2)
 --------------------------------
 `current()` marks the posture bound. `apply_cli()` raises if folding in
 the command line would now CHANGE it. So a wrong call order in `main.py`
-is a LOUD startup failure rather than a silently stale posture -- which
-matters because the failure mode of getting it wrong is a run that
+would be a LOUD startup failure rather than a silently stale posture --
+which matters because the failure mode of getting it wrong is a run that
 believes it is safer than it is, and that is invisible.
+
+AND THAT GUARD IS DORMANT ON EVERY SHIPPED LAUNCH (batch 142).
+`main.py` calls `apply_cli()` with NO ARGUMENTS -- it is the only
+production call -- so `supplied` is always empty, `candidate` always
+equals `_posture`, and `candidate != _posture` is never true. Measured:
+`current()` then `apply_cli()` does not raise, while the control
+`apply_cli(shell_approval_mode="never")` does. There is no live harm and
+that is the same fact as the finding -- with nothing folded in, a
+premature reader reads the right value anyway -- but a reader creeping
+above that line today produces nothing at all.
+
+WHAT ENFORCES UN2 TODAY is
+`test_posture.py::test_no_module_reads_the_posture_at_import`, a source
+scan, which is what AGENTS.md names as the pin. The scan covers IMPORT
+time only, not a reader placed inside `main()` above the `apply_cli()`
+call. The guard below becomes live the day the first posture flag
+exists (`--unsafe` is written about in this module and in
+`test_posture.py` as though it did), and `TestApplyCliOrdering` keeps it
+working for that day -- which is why it is kept rather than removed.
 
 The predicate is "a change after a read", not "a read", and the
 difference is not a softening. The guard exists to catch *something acted
@@ -68,7 +89,10 @@ Never calling `apply_cli()` at all -- a library import, a bare test --
 leaves the config-derived default, which is the safe posture.
 
 This module imports `config` and the stdlib and nothing else, per
-ARCHITECTURE's rule for `security/`.
+ARCHITECTURE's rule for `security/`. Note that `config` is now a shim over
+`config.yaml` and so pulls in `ruamel.yaml` and `pydantic` transitively --
+the rule this sentence states is about what `security/` may NAME, and that
+is unchanged: `config` and the stdlib.
 """
 
 from __future__ import annotations
@@ -76,8 +100,9 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import os
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Any, Iterator
+from typing import Any
 
 import config
 
@@ -95,7 +120,7 @@ class Posture:
     legal statement anywhere in the process.
     """
 
-    # "always" / "tiered" / "never" -- validated at bind time, so a typo
+    # "always" / "tiered" / "contained" / "never" -- validated at bind time, so a typo
     # is a startup failure and never a policy that quietly means
     # something else (the argument capability.validate_mode makes).
     shell_approval_mode: str
@@ -104,6 +129,19 @@ class Posture:
     # records that it is not defended against because it cannot be.
     allow_insecure_fallback: bool
     auto_approve_fallback: bool
+    # ROADMAP_v3 §49 slice 3 (SS35). Whether a command may run in WSL at
+    # all. Frozen here rather than read live for the reason the whole
+    # module exists, and the reason it belongs here rather than beside
+    # `wsl_distro` in plain config: a distro NAME decides where a command
+    # lands, and this decides whether it may leave the container.
+    allow_wsl_backend: bool
+    # ROADMAP_v3 §49 slice 4 (SS46). Whether a command may run on the
+    # configured remote host at all. Here rather than beside `ssh_host` in
+    # plain config for `allow_wsl_backend`'s reason, with one more: the
+    # other SSH keys say WHERE a command would land, and this one says
+    # whether this machine may run agent commands on a machine it cannot
+    # inspect.
+    allow_ssh_backend: bool
     # Master switch for pattern-based redaction of what leaves a tool.
     redact_tool_outputs: bool
     # VENASTINE_REDACT_OFF, the per-run weakening of the line above.
@@ -152,7 +190,24 @@ class Posture:
                 "SHELL_APPROVAL_MODE is 'never' -- no shell command is "
                 "ever asked about, including one that reads outside the "
                 "workspace on the host"))
-        if self.allow_insecure_fallback and self.auto_approve_fallback:
+        elif self.shell_approval_mode == "contained":
+            # §48 (CE4). Not a network or host-read weakening -- both still
+            # ask -- but anything the container confines runs unasked,
+            # including code the agent wrote itself, and in a workspace that
+            # holds a `.venastine/` that code can read it.
+            reasons.append((
+                "shell: contained",
+                "SHELL_APPROVAL_MODE is 'contained' -- a command that runs "
+                "in the container without network runs without asking, "
+                "including code the agent wrote itself; host reads and "
+                "network commands still ask"))
+        # §48 (CE6). Under "always" the pair is NOT "no ask": the mode check
+        # returns before the fallback opt-in is ever read, so every command
+        # asks, the host fallback included. Measured, and the badge said
+        # otherwise -- so under "always" the pair reports as the fallback
+        # alone, which is what it actually is.
+        if (self.allow_insecure_fallback and self.auto_approve_fallback
+                and self.shell_approval_mode != "always"):
             reasons.append((
                 "host shell, no ask",
                 "ALLOW_INSECURE_SANDBOX_FALLBACK and "
@@ -162,9 +217,58 @@ class Posture:
         elif self.allow_insecure_fallback:
             reasons.append((
                 "host shell fallback",
-                "ALLOW_INSECURE_SANDBOX_FALLBACK is on -- if Docker is "
-                "down, commands run on the host with no filesystem or "
-                "network isolation"))
+                "ALLOW_INSECURE_SANDBOX_FALLBACK is on -- if no container "
+                "runtime (Docker or Podman) can run the sandbox, commands "
+                "run on the host with no filesystem or network isolation"))
+        # ROADMAP_v3 §49 slice 3 (SS41). Reported when it is ENABLED rather
+        # than when it is used: the badge describes what this process may
+        # do, and a user reading it after a WSL command has already run has
+        # read it too late. It is its own pair rather than folded into the
+        # fallback's, because the two are different weakenings -- the
+        # fallback is the host when there is no container, and this is a
+        # Linux userland the agent can ask for while one is running.
+        if self.allow_wsl_backend:
+            # ROADMAP_v3 §49 slice 5b (SS65). The last clause used to read
+            # "Only a read-only command inside the workspace runs there
+            # without asking" unconditionally, and that is FALSE when the
+            # fallback opt-in is on -- measured against the real gate, where
+            # `rm -rf /home` on WSL answers asks=False, because WSL is
+            # UNCONTAINED and the opt-in sits above the capability rule.
+            # A badge that overstates what asks is worse than no badge, and
+            # this is §48 (CE6)'s correction applied to a second pair.
+            if (self.auto_approve_fallback
+                    and self.shell_approval_mode not in ("always", "never")):
+                asking = ("AUTO_APPROVE_SANDBOX_FALLBACK is on as well, so "
+                          "NOTHING there asks first -- that opt-in answers "
+                          "for the whole backend, not only for the host "
+                          "fallback it is named after. Running as root is "
+                          "the one exception and always asks")
+            else:
+                asking = ("Only a read-only command inside the workspace "
+                          "runs there without asking, and a command that "
+                          "runs as root always asks")
+            reasons.append((
+                "wsl backend",
+                "ALLOW_WSL_BACKEND is on -- the agent can ask for a command "
+                "to run in WSL, which is not a sandbox: it reaches this "
+                "harness's own config and authority files, has no memory or "
+                "process limits, and can start Windows programs with your "
+                "full authority. " + asking))
+        # SS55. A THIRD pair, not a widening of the WSL one, because the
+        # three weakenings are different: the fallback is the host when
+        # there is no container, WSL is a Linux userland beside a running
+        # one, and this is a machine that is not this machine at all. A
+        # user who reads "uncontained" has to be able to tell which.
+        if self.allow_ssh_backend:
+            reasons.append((
+                "ssh backend",
+                "ALLOW_SSH_BACKEND is on -- the agent can ask for a command "
+                "to run on the configured remote host, which this harness "
+                "cannot inspect: no isolation, no memory or process limits, "
+                "and credentials it did not issue. Nothing runs there "
+                "without asking you first -- running as root included "
+                "(slice 5b) -- and `write` still saves locally while the "
+                "shell runs remotely"))
         if not self.redact_tool_outputs:
             reasons.append((
                 "no redaction",
@@ -197,6 +301,8 @@ def _from_config() -> Posture:
         shell_approval_mode=config.SHELL_APPROVAL_MODE,
         allow_insecure_fallback=bool(config.ALLOW_INSECURE_SANDBOX_FALLBACK),
         auto_approve_fallback=bool(config.AUTO_APPROVE_SANDBOX_FALLBACK),
+        allow_wsl_backend=bool(config.ALLOW_WSL_BACKEND),
+        allow_ssh_backend=bool(config.ALLOW_SSH_BACKEND),
         redact_tool_outputs=bool(config.REDACT_TOOL_OUTPUTS),
         redact_off_env=_redact_off_from_env(),
     )
@@ -261,6 +367,12 @@ def apply_cli(**overrides: Any) -> Posture:
     # the read alone would also make `main()` un-callable twice in one
     # interpreter, which the suite does constantly -- and a guard that
     # forces the tests to work around it stops being read as a guard.
+    #
+    # DORMANT UNTIL THE FIRST POSTURE FLAG EXISTS (batch 142). No shipped
+    # launch passes an override, so `supplied` is {} and this cannot
+    # fire. The predicate is NOT the thing to revisit -- raising on the
+    # read alone was tried and was wrong twice, and the paragraph above
+    # is why. See the module docstring for what enforces UN2 meanwhile.
     if _read and candidate != _posture:
         raise RuntimeError(
             "security.posture.apply_cli() would CHANGE the posture after it "

@@ -20,8 +20,8 @@ from types import SimpleNamespace
 import pytest
 
 from core.client import (
-    _tools_for_provider,
     _messages_for_provider,
+    _tools_for_provider,
     call_model_stream,
 )
 
@@ -213,19 +213,67 @@ def test_tools_openai_wraps_in_function_envelope():
 def test_tools_google_wraps_in_function_declarations():
     """Google wants [Tool(function_declarations=[FunctionDeclaration(...)])].
     The translation must map name/description/input_schema from the
-    Anthropic-native shape into FunctionDeclaration fields."""
+    Anthropic-native shape into FunctionDeclaration fields.
+
+    WHAT THIS ASSERTS, since batch 147 (S10-07). The third claim used to be
+    `parameters == {"type": "object"}`, and that was wrong twice over. It is
+    true of the root conftest's `_FakeFunctionDeclaration`, which stores
+    whatever dict it is handed, and FALSE of the real SDK for every input
+    including that one: the real `FunctionDeclaration` builds a
+    `types.Schema` out of it, whose `.type` is the enum `Type.OBJECT`. So
+    the assertion encoded a model of the field that no version of the SDK
+    has ever had. And `{"type": "object"}` is a FIXED POINT of
+    `_reduce_for_google`, which is the vacuity shape "input that cannot
+    discriminate" with the discrimination removed by the input rather than
+    by the fake -- no reduction, however broken, could have failed it.
+
+    So the input below is one the reduction must change, and the claim is
+    about the dict production HANDS OVER: name, description, and a
+    `parameters` derived from `input_schema` rather than copied from it.
+    What the real SDK then makes of that dict is a question for the real
+    package, and `test_sdk_conformance.py` asks it there -- which is the
+    division this file's `_FakeOpenAIResponse` siblings already use.
+    """
     schemas = [
-        {"name": "web_search", "description": "Search the web", "input_schema": {"type": "object"}},
-        {"name": "get_time", "description": "Get current UTC time", "input_schema": {"type": "object"}},
+        {"name": "web_search", "description": "Search the web",
+         "input_schema": {
+             "type": "object",
+             "properties": {
+                 "query": {"type": "string"},
+                 # Optional[dict] -- pydantic renders every Optional field
+                 # this way, and `additionalProperties` is not a field on
+                 # the pinned `Schema`. This repository's own
+                 # probability_stats carries exactly this.
+                 "counts": {"anyOf": [
+                     {"additionalProperties": {"type": "number"},
+                      "type": "object"},
+                     {"type": "null"}], "description": "optional counts"},
+             },
+             "additionalProperties": False,
+         }},
+        {"name": "get_time", "description": "Get current UTC time",
+         "input_schema": {"type": "object"}},
     ]
     out = _tools_for_provider("GOOGLE", schemas)
     assert len(out) == 1
     tool = out[0]
     assert len(tool.function_declarations) == 2
-    assert tool.function_declarations[0].name == "web_search"
-    assert tool.function_declarations[0].description == "Search the web"
-    assert tool.function_declarations[0].parameters == {"type": "object"}
+    first = tool.function_declarations[0]
+    assert first.name == "web_search"
+    assert first.description == "Search the web"
     assert tool.function_declarations[1].name == "get_time"
+
+    # Derived, not copied: the key the pinned Schema cannot carry is gone
+    # from both levels, and the Optional union became one type plus the
+    # flag this SDK spells `nullable`.
+    assert first.parameters != schemas[0]["input_schema"]
+    assert "additionalProperties" not in first.parameters
+    counts = first.parameters["properties"]["counts"]
+    assert counts == {"type": "object", "description": "optional counts",
+                      "nullable": True}
+    # ...and an ordinary field is untouched, so "derived" is not "stripped".
+    assert first.parameters["properties"]["query"] == {"type": "string"}
+    assert first.parameters["type"] == "object"
 
 
 def test_tools_empty_returns_none():

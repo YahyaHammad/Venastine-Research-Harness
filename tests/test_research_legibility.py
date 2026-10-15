@@ -37,14 +37,21 @@ import pytest
 from core.events import LoopEvent
 from core.loop import RunAgentLoop
 from core.reasoning import orchestrator
+
 # §27 moved the param digest here from orchestrator.py, because the replay
 # renderer became its second caller and redact-before-truncate must not
 # exist in two copies. These tests moved with it rather than being
 # duplicated, so there is still exactly one place that ordering is pinned.
 from safety import policy_enforcement
-from tests.conftest import (drain, make_model_response,
-                            make_stream_sequence, pass_stream, run_pass,
-                            settle, well_shaped)
+from tests.conftest import (
+    drain,
+    make_model_response,
+    make_stream_sequence,
+    pass_stream,
+    run_pass,
+    settle,
+    well_shaped,
+)
 from tests.test_orchestrator import _build_pass_mock, _clean_pipeline_payloads
 
 
@@ -300,6 +307,122 @@ class TestTheParamDigestIsRedacted:
         assert policy_enforcement.param_digest({}) == ""
         assert policy_enforcement.param_digest(None) == ""
         assert "1" in policy_enforcement.param_digest({"n": [1, 2]})
+
+
+class TestTheDigestIsOneLine:
+    """Batch 96. A digest is drawn as ONE row -- `▸ shell  <digest>` --
+    and nothing downstream re-flows it, so every newline it carries is a
+    row drawn at column 0, outside the indent and outside the tool's own
+    line. Measured before the fix: a heredoc command drew three rows."""
+
+    def test_a_multi_line_command_collapses_to_one_row(self):
+        command = "python3 - <<EOF\nimport socket\nprint(1)\nEOF"
+
+        digest = policy_enforcement.param_digest({"command": command})
+
+        assert "\n" not in digest, f"{digest!r} would draw more than one row"
+        assert "python3 - <<EOF import socket" in digest
+
+    def test_every_kind_of_whitespace_collapses(self):
+        """Tabs and carriage returns are the same defect wearing different
+        bytes -- a CRLF heredoc is the ordinary case on this platform."""
+        digest = policy_enforcement.param_digest(
+            {"command": "a\r\nb\tc   d"})
+
+        assert digest == "a b c d"
+
+    def test_the_collapse_happens_before_the_truncation(self):
+        """Sixty characters has to mean sixty VISIBLE ones. Truncating
+        first would spend the budget on whitespace and then collapse the
+        survivors, so the cap would cut a different amount of real text
+        depending on how the command happened to be indented."""
+        command = "x" * 30 + "\n" * 40 + "y" * 30
+
+        digest = policy_enforcement.param_digest({"command": command})
+
+        assert "y" in digest, \
+            "the newlines were counted against the cap and ate the tail"
+
+
+class TestADigestDrawsAWholeURL:
+    """Batch 96, and the reason is a layer this code does not own.
+
+    Batch 65 made a truncated URL clickable by carrying the untruncated
+    one alongside, so the harness has always opened the right page. The
+    TERMINAL does not know that: `https://host/a/b…` minus the ellipsis
+    is itself a valid URL, so its own link detector offers a SHORTER
+    address than the harness resolved, and ctrl+click opens that one.
+    Drawing the whole URL is what stops the two layers disagreeing.
+    """
+
+    URL = ("https://api.github.com/repos/an-owner/a-repository/contents/"
+           "docs?ref=main")
+
+    def test_an_ordinary_url_is_drawn_whole(self):
+        assert len(self.URL) > policy_enforcement._DIGEST_VALUE_CHARS, \
+            "the premise: this URL is past the GENERAL cap"
+
+        digest = policy_enforcement.param_digest({"url": self.URL})
+
+        assert digest == self.URL, (
+            f"the line draws {digest!r}, so a terminal reading the visible "
+            f"text would open something other than what was fetched")
+
+    def test_a_url_past_the_wider_cap_is_still_elided(self):
+        """The elision did not go away, it moved. Past this cap the batch
+        65 machinery is still what makes the span clickable."""
+        url = self.URL + "&pad=" + "a" * 300
+
+        digest = policy_enforcement.param_digest({"url": url})
+
+        assert digest.endswith("…")
+        assert len(digest) <= policy_enforcement._DIGEST_URL_CHARS
+
+    def test_the_total_cap_does_not_re_truncate_a_whole_url(self):
+        """BOTH caps or neither: a value kept whole at 200 and then cut by
+        a 140-character TOTAL is the same mismatch one line further down.
+
+        THE PREMISES ARE ASSERTED, because the first version of this test
+        was vacuous and the mutation pass is what said so. It used a
+        73-character URL and a short rationale -- about 97 characters
+        together, which never reaches the old 140 total, so it passed with
+        the widened total removed. A pair that does not exceed the OLD cap
+        cannot detect whether the NEW one is applied.
+        """
+        url = self.URL + "&filter=" + "b" * 80
+        rationale = "checking whether the docs tree moved"
+
+        assert len(url) <= policy_enforcement._DIGEST_URL_CHARS, \
+            "premise: this URL is within the per-value URL cap"
+        assert (len(url) + len(rationale)
+                > policy_enforcement._DIGEST_CHARS), \
+            "premise: the pair must exceed the OLD total, or the widened " \
+            "total is never the thing under test"
+
+        digest = policy_enforcement.param_digest(
+            {"url": url, "rationale": rationale})
+
+        assert url in digest, \
+            f"the total cap cut the whole URL back up: {digest!r}"
+
+    def test_a_digest_with_no_url_keeps_its_old_width(self):
+        """The widening is scoped to the values that need it. A `write`
+        call must not start pasting 240 characters of file into the
+        transcript because a URL-shaped cap exists somewhere.
+
+        ASSERTED ON THE VALUE, not on the total, and that is the whole
+        force of it: the mutation that widens EVERY value survived a
+        `len(digest) <= _DIGEST_CHARS` assertion, because the 140-character
+        total re-cut the over-wide value and hid the change. The per-value
+        cap has to be read directly -- one value is truncated to exactly
+        the cap, 59 characters and an ellipsis.
+        """
+        digest = policy_enforcement.param_digest({"content": "z" * 5000})
+
+        assert len(digest) == policy_enforcement._DIGEST_VALUE_CHARS, (
+            "a value carrying no URL must be cut at the GENERAL cap rather "
+            f"than the URL one -- drew {len(digest)} characters")
+        assert digest.endswith("…")
 
 
 # ===========================================================================
@@ -572,6 +695,111 @@ class TestTheClaimsView:
         assert "found so far" in body
 
 
+class TestTheClaimsViewSurvivesAFailedRunsRecord:
+    """Batch 149, found under the payload-boundary fix rather than in any
+    review scope.
+
+    The pipeline's except block persists a snapshot of the partial run
+    before it re-raises, so a run that died in Pass 5 on a model-supplied
+    value leaves that value in a durable record -- and `/claims <run id>`
+    is how a person looks at a failed run. Four fields here are
+    model-supplied lists, and all four were joined with
+    `'; '.join(map(str, value))`, which raises on anything that is not
+    iterable.
+
+    WHY A GUARD AND NOT JUST THE BOUNDARY FIX. The boundary now rejects
+    these shapes at the pass that sent them, which closes the producer for
+    every run from here on. It does nothing for a record already on disk,
+    and reading those records is this view's entire job.
+
+    WHY IT MATTERS MORE THAN A BROKEN MODAL. `_render_claims` is called
+    from `compose()`. `push_screen` returns an `await_mount`, so compose
+    runs in Textual's message pump rather than in the `/` handler's call
+    stack -- which is outside the containment batch 145 put at that call
+    site -- and the exception reaches `_handle_exception` and takes the
+    whole application down. Measured against the real ClaimsScreen in a
+    minimal host app.
+    """
+
+    # What a run that died in Pass 5 leaves behind, per field. Each value
+    # is one the payload boundary used to accept.
+    PERSISTED = [
+        ("assumption_flags", 123, "123"),
+        ("entities", 123, "123"),
+        ("fallacies", 7, "7"),
+        ("contradictions", {"a": 1}, "'a': 1"),
+    ]
+
+    @pytest.mark.parametrize("field, value, expected", PERSISTED)
+    def test_a_non_list_value_renders_instead_of_raising(self, field, value,
+                                                         expected):
+        from tui.screens import _render_claims
+
+        body = _render_claims([{"id": "c1", "text": "a claim",
+                                "confidence_tier": "LOW", field: value}])
+
+        assert "c1" in body
+        assert expected in body, (
+            f"the value was dropped rather than shown; a reader asked what "
+            f"the run recorded, and {value!r} is the answer"
+        )
+
+    def test_the_lists_still_render_as_lists(self):
+        """The control. A guard that stringified the whole container would
+        pass every test above and turn every ordinary claim into a repr."""
+        from tui.screens import _render_claims
+
+        body = _render_claims([{
+            "id": "c1", "text": "a claim", "confidence_tier": "HIGH",
+            "entities": ["CRISPR", "Cas9"],
+            "assumption_flags": ["extrapolates", "small sample"],
+        }])
+
+        assert "entities: CRISPR, Cas9" in body
+        assert "assumptions: extrapolates; small sample" in body
+        assert "['CRISPR'" not in body
+
+    def test_a_non_list_source_collection_does_not_break_the_count(self):
+        """`len(sources or ())` was the fifth site, and the only one whose
+        failure would be a wrong NUMBER rather than a crash."""
+        from tui.screens import _render_claims
+
+        body = _render_claims([{"id": "c1", "text": "a claim",
+                                "grounding_status": "grounded",
+                                "grounding_sources": 3}])
+
+        assert "grounding: grounded" in body
+
+    def test_and_a_real_source_list_is_still_counted(self):
+        from tui.screens import _render_claims
+
+        body = _render_claims([{"id": "c1", "text": "a claim",
+                                "grounding_status": "partial",
+                                "grounding_sources": [{"url": "a"},
+                                                      {"url": "b"}]}])
+
+        assert "2 sources" in body
+
+    def test_the_whole_stored_shape_of_a_failed_run_renders(self):
+        """Not one field at a time: the record a Pass 5 crash actually
+        leaves, which carries the flags Pass 4 stored and the grounding
+        Pass 3a stored and NO tier at all, because Pass 5 is where it
+        died."""
+        from tui.screens import _render_claims
+
+        body = _render_claims([{
+            "id": "c1", "text": "a claim", "type": "factual",
+            "confidence_tier": None, "entities": ["madrid"],
+            "grounding_status": "grounded",
+            "grounding_sources": [{"url": "https://example.test/a"}],
+            "assumption_flags": 123, "score_breakdown": {},
+        }])
+
+        assert "c1" in body
+        assert "madrid" in body
+        assert "123" in body
+
+
 # ===========================================================================
 # ---- The shell: colour, copy, and the claims binding ----------------------
 # ===========================================================================
@@ -591,6 +819,7 @@ async def test_the_speaker_labels_are_distinguishable_and_coloured():
     it introduced and carried no separator, so it read as the first word
     of the sentence."""
     from rich.text import Text
+
     from tui.app import VenastineApp
 
     app = VenastineApp("ANTHROPIC", "test-model", {})
@@ -657,7 +886,7 @@ def test_the_panel_marks_code_stages_apart_from_passes():
     panel = ResearchProgress()
     panel.pass_started("Pass 6a")
     panel.stage_completed("Pass 5")
-    body = panel.renderable.plain
+    body = panel.content.plain
 
     assert f"{MARK_RUNNING} Pass 6a" in body, "a running pass"
     assert f"{MARK_STAGE} Pass 5" in body, "a code stage"
@@ -673,10 +902,10 @@ def test_the_panel_counts_tool_calls_on_the_running_pass():
     panel.pass_started("Pass 1")
     panel.tool_called("Pass 1")
     panel.tool_called("Pass 1")
-    assert "2 tools" in panel.renderable.plain
+    assert "2 tools" in panel.content.plain
 
     panel.pass_completed("Pass 1", ok=True)
-    assert "2 tools" not in panel.renderable.plain, \
+    assert "2 tools" not in panel.content.plain, \
         "the counter belongs to the pass in flight; keeping it on a " \
         "finished row spends sidebar width on a number nobody is waiting on"
 
@@ -704,8 +933,18 @@ async def test_switching_theme_replays_the_transcript():
         # `links` since batch 65: rerender() passes the stored click
         # targets, so a two-argument spy stops standing in for the method
         # it replaced.
-        transcript._render_entry = lambda role, text, links=(): (
-            replayed.append((role, text)), original(role, text, links))[1]
+        # §47 widened it again (an armed spawn line); the spy takes
+        # whatever it is handed rather than enumerating the arguments,
+        # which is the coupling registry.dispatch()'s stubs already
+        # dropped for the same reason.
+        # **kwargs since batch 112, because the sentence above was only
+        # true of POSITIONAL arguments: `closed` is keyword-only, and a
+        # spy that swallows *args alone raised a TypeError from inside
+        # rerender() -- three files from anything that batch touched, so
+        # only the full suite saw it.
+        transcript._render_entry = lambda role, text, *targets, **rest: (
+            replayed.append((role, text)),
+            original(role, text, *targets, **rest))[1]
 
         app.query_one("#prompt").value = "/theme light-red"
         await pilot.press("enter")
@@ -1103,8 +1342,7 @@ def test_tool_counts_land_on_the_current_run_of_a_repeated_pass():
     that never run and hide rows that run three times -- and a count that
     lands on the FIRST run's row would report activity on a pass nobody
     is waiting on while the retry reads silent."""
-    from tui.widgets import (
-        MARK_DONE, MARK_RUNNING, ResearchProgress)
+    from tui.widgets import MARK_DONE, MARK_RUNNING, ResearchProgress
 
     panel = ResearchProgress()
     panel.pass_started("Pass 6a")
@@ -1114,7 +1352,7 @@ def test_tool_counts_land_on_the_current_run_of_a_repeated_pass():
 
     panel.pass_started("Pass 6a")
     panel.tool_called("Pass 6a")
-    body = panel.renderable.plain
+    body = panel.content.plain
 
     assert f"{MARK_RUNNING} Pass 6a" in body, \
         "the retry round never showed as running"
@@ -1132,7 +1370,7 @@ def test_tool_counts_land_on_the_current_run_of_a_repeated_pass():
     panel.pass_started("Pass 1")
     panel.pass_started("Pass 1")
     panel.tool_called("Pass 1")
-    body = panel.renderable.plain
+    body = panel.content.plain
     assert body.rindex("1 tool") > body.rindex(f"{MARK_RUNNING} Pass 1"), \
         f"the call landed on the first-started candidate:\n{body}"
 
@@ -1143,14 +1381,13 @@ def test_a_completion_tick_lands_on_the_run_that_just_finished():
     the most recent UNRESOLVED row -- scanning forward instead would tick
     the first candidate and leave the one that actually returned showing
     as still running."""
-    from tui.widgets import (
-        MARK_DONE, MARK_RUNNING, ResearchProgress)
+    from tui.widgets import MARK_DONE, MARK_RUNNING, ResearchProgress
 
     panel = ResearchProgress()
     panel.pass_started("Pass 1")
     panel.pass_started("Pass 1")
     panel.pass_completed("Pass 1", ok=True)
-    body = panel.renderable.plain
+    body = panel.content.plain
 
     assert body.index(f"{MARK_RUNNING} Pass 1") \
         < body.index(f"{MARK_DONE} Pass 1"), \
@@ -1166,7 +1403,7 @@ def test_a_zero_llm_stage_is_recorded_already_done():
     panel = ResearchProgress()
     panel.stage_completed("Pass 5")
     panel.stage_completed("D2")
-    body = panel.renderable.plain
+    body = panel.content.plain
 
     assert f"{MARK_STAGE} Pass 5" in body and f"{MARK_STAGE} D2" in body
     assert "> Pass 5" not in body and "> D2" not in body, \

@@ -52,15 +52,24 @@ material the conversation was about. The call is what says what happened,
 and `param_digest` says WHICH url or query -- redacted, because a tool
 argument can carry a credential and this is now the third place one could
 surface.
+
+T4 IS UNCHANGED BY §55, AND §55 IS WHY IT CAN STAY. A result is still not
+replayed into the conversation; it is now REACHABLE from the line that
+produced it, because every tool line carries `(OPENS_CALL, call id)` and
+`core/call_view.py` reads the same archive on demand (TR6/TR7). That is
+the distinction worth keeping straight if either side is ever revisited:
+T4 is about what a replay PUTS IN FRONT of a reader, and §55 is about what
+a reader can ask for. A feature that inlined the output would be T4 undone
+rather than extended.
 """
 
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
+from typing import Optional
 from uuid import UUID
 
-from tools.registry import registry
 from storage import archive_history
+from tools.registry import registry
 
 #: One replayed entry: (role, text, links). The roles are transcript palette
 #: roles (tui/themes.role_styles), so the TUI can paint them with what it
@@ -76,23 +85,68 @@ from storage import archive_history
 #: the same characters as a live turn and quietly refuse to open them,
 #: which is the one conversation rendered two ways that Section 44 removed
 #: for thinking spans. Empty for every entry that is not a tool call.
-ReplayEntry = Tuple[str, str, Tuple[str, ...]]
+#:
+#: `opens` is §47's, widened by ROADMAP_v3 §49 (SS14) and again by §55
+#: (TR7): `(kind, call id)` for a tool line, and `()` only where there is
+#: no call id to carry. The id is the model's own id for the call that
+#: drew the line, and the kind is `OPENS_THREAD`, `OPENS_SESSION` or
+#: `OPENS_CALL` -- the registry is asked, so this file does not have to
+#: know that `spawn_subagent` is special and cannot come to disagree with
+#: the TUI about which lines are openable.
+#:
+#: SINCE §55 THE GATE IS THE ID, NOT THE KIND. `registry.opens()` has no
+#: empty answer any more, so an unarmed line is one whose call the archive
+#: cannot be asked about rather than one whose tool declared nothing.
+#: It does not widen the sentence above either: a caller is still
+#: rendering rather than reasoning about history, and what a line opened
+#: is a fact about the LINE. Without it a resumed conversation would draw
+#: `▸ spawn_subagent` exactly as the live turn did and refuse to open it
+#: -- the same divergence §44 removed for thinking spans, and batch 65
+#: for a truncated URL.
+#:
+#: IT CARRIES THE KIND, not just the id, and that is what SS14 needed:
+#: a `▸ shell_background` line opens a SESSION, which is read from the
+#: manager or rebuilt from the wake rows it wrote rather than replayed
+#: from the archive. A bare id would have left the reader on the other
+#: side of the click guessing, and guessing by tool name there is the
+#: second copy this slot exists to avoid.
+ReplayEntry = tuple[str, str, tuple[str, ...], tuple]
 
 
-def replay_entries(thread_id: UUID) -> List[ReplayEntry]:
+def replay_entries(thread_id: UUID) -> list[ReplayEntry]:
     """A stored thread as display entries, oldest first (§27 T3/T4).
 
     Empty for a thread with no messages -- a `/new` thread that was never
     used is a real state, and the shells write their own "nothing here yet"
     line rather than this function inventing one.
     """
-    entries: List[ReplayEntry] = []
+    entries: list[ReplayEntry] = []
     for message in archive_history(thread_id):
         role = message.get("role")
         if role == "user":
             text = _as_text(message.get("content"))
-            if text:
-                entries.append(("user", text, ()))
+            if message.get("harness"):
+                # ROADMAP_v3 §49 (SS5). The HARNESS wrote this row -- a
+                # background session's result -- so it must not replay under
+                # `you ›`, which is M8's mistake for the compaction summary.
+                # Its first line only, for T4's reason: the rest is program
+                # output the model was given, which can run to thousands of
+                # lines and would bury the conversation it interrupted.
+                header = text.split("\n", 1)[0].strip()
+                if header:
+                    entries.append(("wake", header, (), ()))
+            elif text:
+                entries.append(("user", text, (), ()))
+            # Batch 91. The run this message started FAILED, and why. Right
+            # after it, because nothing else from that run was ever written:
+            # without this a subagent whose first call failed replays as its
+            # task and nothing else, which is indistinguishable from a run
+            # still thinking. `error` is a harness voice (META_ROLES), so
+            # /copy conversation leaves it out as it leaves out the live
+            # `[error: ...]` line.
+            failure = message.get("error")
+            if failure:
+                entries.append(("error", f"This run failed: {failure}", (), ()))
         elif role == "assistant":
             # BEFORE the answer, because that is the order it happened in
             # and the order the live transcript drew it in (§43 RM1 puts
@@ -101,10 +155,10 @@ def replay_entries(thread_id: UUID) -> List[ReplayEntry]:
             # reflowed it.
             reasoning = _reasoning_text(message.get("thinking"))
             if reasoning:
-                entries.append(("thinking", reasoning, ()))
+                entries.append(("thinking", reasoning, (), ()))
             text = _as_text(message.get("text"))
             if text:
-                entries.append(("assistant", text, ()))
+                entries.append(("assistant", text, (), ()))
             for call in message.get("tool_calls") or []:
                 entries.append(("tool", *_tool_marker(call)))
         # role == "tool": skipped by T4. Not a gap -- see the module
@@ -139,8 +193,8 @@ def _reasoning_text(record) -> str:
     return "\n\n".join(parts)
 
 
-def _tool_marker(call: dict) -> Tuple[str, Tuple[str, ...]]:
-    """One line for one tool call, and its click targets.
+def _tool_marker(call: dict) -> tuple[str, tuple[str, ...], str]:
+    """One line for one tool call, its click targets, and its own id.
 
     The line is the name, then a redacted param digest.
 
@@ -167,7 +221,20 @@ def _tool_marker(call: dict) -> Tuple[str, Tuple[str, ...]]:
     # (batch 65): a resumed thread that armed fewer URLs than the live
     # turn would be the archive disagreeing with the screen it came from.
     line = f"▸ {name}  {digest}".rstrip() if digest else f"▸ {name}"
-    return line, registry.call_links(name, params)
+    # §47, widened by §49 (SS14) and §55 (TR7). The registry is what says
+    # WHICH kind -- naming `spawn_subagent` here would be a second copy of
+    # a fact the tool already declares, free to disagree with the TUI's
+    # copy. `str()` because it crosses into style metadata.
+    #
+    # `if opens` SURVIVES AS A GUARD WITH NOTHING LEFT TO GUARD: TR7 gave
+    # `opens()` a fallback kind, so it is never empty now and the id below
+    # is the only thing that can leave a line unarmed. Kept rather than
+    # deleted because the tuple is indexed on the next line, and a reader
+    # who has not met TR7 should find the shape intact.
+    opens = registry.opens(name)
+    call_id = str(call.get("id") or "") if opens else ""
+    return (line, registry.call_links(name, params),
+            (opens[0], call_id) if call_id else ())
 
 
 def _as_text(value: Optional[object]) -> str:

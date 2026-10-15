@@ -173,8 +173,10 @@ class TestTheOrchestratorActuallyReadsIt:
         about what routing looks like."""
         from core.loop import RunAgentLoop
         from tests.conftest import pass_stream, run_pipeline
-        from tests.test_critic_routing import (_build_routing_mock,
-                                               _payloads_with_retry_loop)
+        from tests.test_critic_routing import (
+            _build_routing_mock,
+            _payloads_with_retry_loop,
+        )
 
         pipeline_models.remember("critic", "OPENAI", "gpt-5.1")
         call_log: list = []
@@ -196,8 +198,10 @@ class TestTheOrchestratorActuallyReadsIt:
     def test_a_remembered_critic_outranks_config_on_a_real_run(self, mocker):
         from core.loop import RunAgentLoop
         from tests.conftest import pass_stream, run_pipeline
-        from tests.test_critic_routing import (_build_routing_mock,
-                                               _payloads_with_retry_loop)
+        from tests.test_critic_routing import (
+            _build_routing_mock,
+            _payloads_with_retry_loop,
+        )
 
         mocker.patch.dict(config.__dict__, {
             "CRITIC_MODEL": {"provider_name": "GOOGLE", "model": "gemini"}})

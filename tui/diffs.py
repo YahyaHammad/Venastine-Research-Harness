@@ -46,7 +46,7 @@ the call's own arguments and need no file at all.
 from __future__ import annotations
 
 import difflib
-from typing import List, Optional, Tuple
+from typing import Optional
 
 #: Lines of unchanged context either side of a change.
 CONTEXT_LINES = 3
@@ -71,7 +71,7 @@ _ELIDE_MARK = "…"
 #: (kind, gutter, text). `gutter` is a string, not an int: a `-` row
 #: carries the OLD line number and a `+` row the NEW one, and a row from a
 #: degraded block carries neither.
-Row = Tuple[str, str, str]
+Row = tuple[str, str, str]
 
 
 def build_block(path: str, pre: Optional[str], post: str, *,
@@ -136,7 +136,7 @@ def build_replacement_block(path: str, old: str, new: str, *,
     return _render(path, _capped(rows, max_rows))
 
 
-def parse(block: str) -> Tuple[str, List[Row]]:
+def parse(block: str) -> tuple[str, list[Row]]:
     """A block back into (path, rows). The renderer's half of the format.
 
     Tolerant by construction: a line this cannot make sense of comes back
@@ -147,7 +147,7 @@ def parse(block: str) -> Tuple[str, List[Row]]:
     """
     lines = block.split("\n")
     path = lines[0] if lines else ""
-    rows: List[Row] = []
+    rows: list[Row] = []
     for line in lines[1:]:
         if not line:
             continue
@@ -170,7 +170,7 @@ def parse(block: str) -> Tuple[str, List[Row]]:
 # ---- internals ------------------------------------------------------------
 # ---------------------------------------------------------------------------
 
-def _rows(pre_lines: List[str], post_lines: List[str], context: int) -> List[Row]:
+def _rows(pre_lines: list[str], post_lines: list[str], context: int) -> list[Row]:
     """Changed lines with `context` unchanged lines either side.
 
     `SequenceMatcher` rather than `unified_diff`, because what is wanted
@@ -179,7 +179,7 @@ def _rows(pre_lines: List[str], post_lines: List[str], context: int) -> List[Row
     format one line after emitting it is the second definition this module
     exists to avoid.
     """
-    rows: List[Row] = []
+    rows: list[Row] = []
     opcodes = difflib.SequenceMatcher(None, pre_lines, post_lines).get_opcodes()
     if all(tag == "equal" for tag, *_rest in opcodes):
         return rows
@@ -202,7 +202,7 @@ def _rows(pre_lines: List[str], post_lines: List[str], context: int) -> List[Row
     return rows
 
 
-def _equal_rows(post_lines, length, j1, j2, head, tail) -> List[Row]:
+def _equal_rows(post_lines, length, j1, j2, head, tail) -> list[Row]:
     """One unchanged run, trimmed to `head` lines at its start and `tail`
     at its end.
 
@@ -231,7 +231,7 @@ def _equal_rows(post_lines, length, j1, j2, head, tail) -> List[Row]:
     return rows
 
 
-def _capped(rows: List[Row], max_rows: int) -> List[Row]:
+def _capped(rows: list[Row], max_rows: int) -> list[Row]:
     """At most `max_rows`, with the remainder counted rather than dropped
     silently -- M14's no-silent-caps rule, applied to a rendering."""
     if max_rows <= 0 or len(rows) <= max_rows:
@@ -243,7 +243,7 @@ def _capped(rows: List[Row], max_rows: int) -> List[Row]:
     return kept
 
 
-def _render(path: str, rows: List[Row]) -> str:
+def _render(path: str, rows: list[Row]) -> str:
     # An EMPTY string when nothing changed, so a caller can treat the
     # block as falsy rather than inspecting it. `write` with identical
     # content is a real call and a real no-op, and a block carrying a

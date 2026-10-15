@@ -1,4 +1,4 @@
-![Venastine Research Harness Screenshot](Venastine_Research_Harness_Demo_Photo.png)
+![Venastine Research Harness Screenshot](docs/assets/Venastine_Research_Harness_Demo_Photo.png)
 
 # Venastine Research Harness
 
@@ -37,6 +37,8 @@ Two things differ from a clone, both to make a command you run from anywhere beh
 * **Credentials** fall back to `~/.config/venastine/providers.json` when the directory you are in has no `providers.json` of its own. A local one still wins, so per-project keys keep working.
 * **Conversation state** — `app.db` and the log — lives in `~/.config/venastine/`, so threads and memories follow you between directories instead of each folder getting its own silo. Research reports still land in `./output` beside the work that produced them, and the file-ops workspace stays in the current directory because it is a permission boundary. An existing `./app.db` always wins, so running the command inside a clone uses that clone's data.
 
+**Updating keeps your settings.** `npm update` replaces the package directory wholesale, `config.yaml` with it, so the launcher merges your own values back in before the harness starts and prints what it kept. Settings you never touched pick up the new version's defaults, and keys the new version adds arrive at theirs; a value the new version no longer accepts is dropped on its own and named, rather than costing you the rest. It works for values set with `/config` and for ones you edited in the file by hand, which is the only way to set a list like `ensemble_models`. The one case it cannot help with is an edit made after your last session and never launched before you updated -- npm has already replaced the file by the time anything of ours runs.
+
 `venastine --venastine-doctor` prints every one of those resolved paths, plus the interpreter and environment it found.
 
 ### From a clone
@@ -68,6 +70,26 @@ Both are gitignored. They are kept apart on purpose: provider keys are read by o
 ---
 
 ## Running it
+
+**Run it from the directory you want to work in, not from the harness's own.** The directory you
+launch from is the *project* — workspace trust, `.venastine/`, `/init`'s destination and
+project-scoped memories all follow it — so launching from the install tree would make the harness
+its own project, and that is refused at startup (exit 2). Either of these is the answer:
+
+```bash
+cd ~/my-project && python /path/to/venastine/main.py   # the project is where you are
+AGENT_WORKSPACE=~/my-project python main.py            # or name it, from anywhere
+```
+
+```yaml
+# or, in config.yaml, for a setup with no variable to set
+workspace_dir: ~/my-project
+workspace_is_project: true
+```
+
+Working on the harness itself is `AGENT_WORKSPACE=./workspace`, which is the shipped layout and is
+exempt. `workspace_dir` alone is *not* a substitute for either route: it moves the workspace and
+leaves the project where it was, which is what `workspace_is_project` beside it is for.
 
 ```bash
 python main.py                                    # chat, new thread
@@ -168,7 +190,7 @@ answers: `true`, `false` — meaning the run fetched this page and the quoted wo
 which is a fabricated citation — and `null`, meaning there was nothing to check against, which is
 not the same thing.
 
-**Cited papers can be scored on their own standing.** With `SCHOLAR_LOOKUP = True` in `config.py`,
+**Cited papers can be scored on their own standing.** With `scholar_lookup: true` in `config.yaml`,
 an arXiv or DOI URL is resolved against OpenAlex and scored on venue (peer-reviewed or preprint),
 citation standing, and author h-index. Citation standing is a percentile *within the paper's own
 field-and-year cohort*, measured by two counting queries rather than modelled — OpenAlex's own
@@ -207,7 +229,7 @@ than refusing to start the run — unlike the compaction knobs above, where an i
 model calls on every turn. An *unknown* key still raises, as everywhere else in `settings.json`.
 `critic_model` and `embedder_model` are rejected there by name: both name a provider this harness
 sends research content to, and a project's `settings.json` outranks your own — use `/critic` and
-`/embedder`, or `config.py`.
+`/embedder`, or `config.yaml`.
 
 ### A pass that answers the wrong shape is corrected, then it stops the run
 
@@ -236,7 +258,7 @@ where *nothing* matched is treated as a failure. Every number in `04_confidence.
 
 Set `CRITIC_MODEL` and passes 3a, 3b and 6c run on a *different* provider and model from the one that wrote the answer. A model checking its own output brings its own blind spots to the inspection.
 
-**Ensemble mode** extends the same idea to the answer itself. List `{provider_name, model}` pairs in `ENSEMBLE_MODELS` in `config.py` (a settings.json key is deliberately absent — choosing providers multiplies spend, so it stays in code you own) and Pass 1 runs once per entry, each candidate on its own provider and model. Fewer than two *distinct* pairs is refused: N copies of one model agree most confidently on that model's systematic errors, which is exactly where agreement has to mean something. Claims extracted from all candidates are pooled, and factual claims take a disagreement penalty of `0.15 × (1 − consistency)` before tiering — unanimity costs nothing, dissent demotes. A candidate that fails mid-run is named and skipped; if only one survives, the run degrades to the ordinary single-response path rather than scoring an "ensemble of one". Artifacts come out as `01_candidate_1.md`, `01_candidate_2.md`, … numbered to match each claim's `asserted_by_candidates` tags.
+**Ensemble mode** extends the same idea to the answer itself. List `{provider_name, model}` pairs under `ensemble_models` in `config.yaml` (a settings.json key is deliberately absent — choosing providers multiplies spend, so it stays in the harness's own file) and Pass 1 runs once per entry, each candidate on its own provider and model. Fewer than two *distinct* pairs is refused: N copies of one model agree most confidently on that model's systematic errors, which is exactly where agreement has to mean something. Claims extracted from all candidates are pooled, and factual claims take a disagreement penalty of `0.15 × (1 − consistency)` before tiering — unanimity costs nothing, dissent demotes. A candidate that fails mid-run is named and skipped; if only one survives, the run degrades to the ordinary single-response path rather than scoring an "ensemble of one". Artifacts come out as `01_candidate_1.md`, `01_candidate_2.md`, … numbered to match each claim's `asserted_by_candidates` tags.
 
 ### What you get out
 
@@ -251,7 +273,7 @@ Every run writes `output/<run_id>/`:
 03_completeness.json  pass_threads.json
 ```
 
-`sources/` holds what each cited page actually served: `index.json` lists every URL the run retrieved text from — with the tool, the timestamp, a content hash and the length — and one `<sha256>.txt` per document holds the text itself, redacted. That is what makes a similarity score checkable after the fact rather than a number you have to take on trust; set `PERSIST_SOURCE_TEXT = False` in `config.py` to keep the index and drop the text.
+`sources/` holds what each cited page actually served: `index.json` lists every URL the run retrieved text from — with the tool, the timestamp, a content hash and the length — and one `<sha256>.txt` per document holds the text itself, redacted. That is what makes a similarity score checkable after the fact rather than a number you have to take on trust; set `persist_source_text: false` in `config.yaml` to keep the index and drop the text.
 
 In ensemble mode the Pass-1 slot is `01_candidate_1.md`, `01_candidate_2.md`, … — one file per surviving candidate, numbered to match the trace and each claim's `asserted_by_candidates` tags, since no single candidate is "the" response the claims came from.
 
@@ -294,7 +316,7 @@ startup rather than at its first call:
 
 | | |
 |---|---|
-| **compute** | The six maths tools. Pure functions of their arguments with nothing to interrupt them from the inside, so they run in a separate process that can be stopped — 15 seconds by default, plus CPU and memory ceilings on Linux |
+| **compute** | The six maths tools. Pure functions of their arguments with nothing to interrupt them from the inside, so they run in a separate process that can be stopped — 20 seconds by default, plus CPU and memory ceilings on Linux |
 | **io** | Anything that reads a file, fetches a page or talks to an MCP server. Each already carries its own limit: a request timeout, a size check before opening, a sandbox |
 | **human** | `ask_user` and `spawn_subagent`, which wait on a person or on a separately metered sub-run. A ten-minute pause here is the feature |
 
@@ -314,7 +336,7 @@ When a compute tool does hit its limit, the model is told which tool and which l
 for something smaller instead of retrying the same call:
 
 ```
-symbolic_math exceeded its 15s limit and was stopped. The inputs given are too
+symbolic_math exceeded its 20s limit and was stopped. The inputs given are too
 large for this operation -- try smaller values.
 ```
 
@@ -331,9 +353,9 @@ Because approval ORs, an override can only ever *add* a prompt. There is no way 
 
 | | |
 |---|---|
-| No approval | `web_search`, `fetch_url`, `arxiv_search`, `get_time`, the six maths tools (`symbolic_math`, `linear_algebra`, `probability_stats`, `discrete_math`, `logic`, `geometry`), `load_skill`, `pin`, `unpin`, `ask_user`, `todo_write`, `read_project_doc` |
+| No approval | `web_search`, `fetch_url`, `arxiv_search`, `get_time`, the six maths tools (`symbolic_math`, `linear_algebra`, `probability_stats`, `discrete_math`, `logic`, `geometry`), `load_skill`, `pin`, `unpin`, `ask_user`, `todo_write`, `read_project_doc`, and the three that act on this conversation's own background sessions (`shell_sessions`, `shell_output`, `shell_kill`), and `shell_input` — typing into an interactive shell you already approved (a line naming a protected path still asks, and a Ctrl-C never does) |
 | Depends on the call | `read`, `write`, `edit` — decided per path, and all three are denied by default anyway |
-| Always | `shell`, `spawn_subagent`, `remember`, `write_project_doc`, and **every MCP tool** |
+| Always | `shell` and the three that start a session (`shell_background`, `shell_monitor`, `shell_interactive`), `spawn_subagent`, `remember`, `write_project_doc`, and **every MCP tool** |
 
 Every registered tool appears in that table, and a test asserts it (audit #125): `ToolPermissions` and `ToolApprovals` are plain dataclasses, so "did the table keep up with the registry" is a question the suite can answer instead of a reader. `write_project_doc` is the one the omission mattered for — it is what `/init` uses to write documents into a repository, and §24's I1 gives it a fixed allowlist of document *names* with no path parameter precisely because it is dangerous enough to constrain.
 
@@ -343,31 +365,32 @@ Every registered tool appears in that table, and a test asserts it (audit #125):
 
 ### `shell` is classified, not just approved
 
-`shell` ships **disabled** (`ToolPermissions.shell = False`) and cannot be enabled at runtime, so none of this applies to a default install. If you do enable it, the gate is `config.SHELL_APPROVAL_MODE`:
+`shell` ships **disabled** (`tool_permissions.shell: false` in `config.yaml`) and cannot be enabled at runtime, so none of this applies to a default install. If you do enable it, the gate is `shell_approval_mode` in the same file:
 
 | mode | behaviour |
 |---|---|
 | `always` | every command is asked about, whatever it does |
-| `tiered` | **shipped.** The classifier decides — see below |
+| `tiered` | **shipped.** The classifier decides — see below. Only a read-only command runs unasked; anything that can run code asks, even inside the container |
+| `contained` | anything the container confines runs unasked unless it needs network, code included; reads outside the workspace and network commands still ask. Flagged on the startup banner and the TUI badge |
 | `never` | nothing is ever asked about |
 
-`ToolApprovals.shell` is **not** the gate; it is the ratchet. It ships `False`, and setting it `True` forces `always` regardless of the mode. An agent's `approval_overrides` reaches the same place with the same one-way power: these can tighten and never loosen. An unknown mode string raises at startup rather than falling back to a default — one direction of that default asks about everything and the other about nothing, and a typo cannot pick.
+There is deliberately no second switch: `tool_approvals` has no `shell` key, so nothing here can disagree with the mode. An agent's `approval_overrides` still reaches shell with the same one-way power -- an agent can demand approval for a command the mode would auto-approve, and can never wave one past a gate the mode set. An unknown mode string raises at startup rather than falling back to a default — one direction of that default asks about everything and the other about nothing, and a typo cannot pick.
 
-Under `tiered`, each command is classified **once** into what it can do, and the same answer is read by the approval check and by the sandbox that runs it:
+Under `tiered` and `contained`, each command is classified **once** into what it can do, and the same answer is read by the approval check and by the sandbox that runs it:
 
-| tier | what it is | where it runs | asked? |
-|---|---|---|---|
-| `INERT` | read-only command, every argument inside the workspace | host | no |
-| `HOST_READ` | read-only, but an argument reaches outside the workspace | host | **yes** |
-| `SANDBOXED` | anything else, no network | container | no, if Docker is confirmed up |
-| `SANDBOXED_NET` | **any** word is on the network allowlist (`curl`, `pip`, `git`, …) — first word only for an INERT command, which cannot chain | container, with network | **yes** |
-| `UNKNOWN` | could not be characterised at all | — | **yes** |
+| tier | what it is | where it runs | asked under `tiered`? | under `contained`? |
+|---|---|---|---|---|
+| `INERT` | read-only command, every argument inside the workspace | container (host when no container runtime is available) | no | no |
+| `HOST_READ` | read-only, but an argument reaches outside the workspace | host | **yes** | **yes** |
+| `SANDBOXED` | anything else, no network — it may run code | container | **yes** | no, if a container runtime (Docker or Podman) is confirmed up |
+| `SANDBOXED_NET` | **any** word is on the network allowlist (`curl`, `pip`, `git`, …) — first word only for an INERT command, which cannot chain | container, with network | **yes** | **yes** |
+| `UNKNOWN` | could not be characterised at all | — | **yes** | **yes** |
 
-The auto-approved set is narrower than the `read` tool's, which is already unprompted inside the workspace. A `SANDBOXED` command can do what `write` and `edit` can already do without asking — corrupt the workspace — bounded to 1 CPU, 1 GB, 200 processes, 60 seconds, no network and no host filesystem.
+Under `tiered` the auto-approved set is narrower than the `read` tool's, which is already unprompted inside the workspace. There is **no list of interpreters** behind that: `python -c` is the obvious case, but `pytest` runs a `conftest.py`, `make` runs a Makefile, and `"python"`, `python3.13` and `echo x | python` are all the same call to a shell, so every command that is not `INERT` is treated as able to run code. Under `contained` a `SANDBOXED` command runs unasked and can do anything code can do inside the container — corrupt the workspace, as `write` and `edit` already can, or read a `.venastine/` directory the workspace contains — bounded to 1 CPU, 2 GB, 200 processes, 120 seconds, no network and no host filesystem.
 
 **The argument rule does not parse, deliberately.** Every token after the first is read as a path and required to stay inside the workspace; a flag like `-la` passes only because it is *relative*, not because anything recognised it as a flag. Refusing to interpret shell syntax is what makes the check trustworthy — a classifier that parses is a shell parser, and a parser that is wrong auto-approves something dangerous. The cost is occasional false positives: `grep /etc/passwd notes.txt` searches for a string that looks like a path, and costs one prompt.
 
-**Quoted arguments are never inert.** The corollary of not parsing: the raw tokens have to be the real tokens. A quoted command is classified `SANDBOXED` and goes to a container, because the classifier splits on whitespace while the executor splits with `shlex` — and `shlex` strips quotes, so `cat "/etc/passwd"` read as one token *inside* the workspace and then ran as two tokens naming the host's file. Under Docker this costs nothing: `cat "my notes.txt"` is still auto-approved, it simply runs in the container. Fixed in batch 37; `'single quotes'` and `--file="/etc/x"` did it too.
+**Quoted arguments are never inert.** The corollary of not parsing: the raw tokens have to be the real tokens. A quoted command is classified `SANDBOXED` and goes to a container, because the classifier splits on whitespace while the executor splits with `shlex` — and `shlex` strips quotes, so `cat "/etc/passwd"` read as one token *inside* the workspace and then ran as two tokens naming the host's file. Under `contained` with Docker this costs nothing: `cat "my notes.txt"` is still auto-approved, it simply runs in the container. Under `tiered` it asks, as every command that is not `INERT` does. Fixed in batch 37; `'single quotes'` and `--file="/etc/x"` did it too.
 
 **Escaped arguments are never inert either.** The same corollary, one character further, and it
 took a second batch to find: `shlex` consumes `\` exactly as it consumes quotes, so
@@ -387,13 +410,13 @@ is set to something weaker than the shipped default, the harness says so at laun
 
 **`never` is the old unbounded behaviour, kept on purpose.** In that mode `cat ~/.aws/credentials` runs on the host, unprompted, and its output goes into the model's context. It is reachable by writing the word `never` — which is the fix for [#157](https://github.com/YahyaHammad/Venastine-Research-Harness/issues/157): previously you reached it by switching off a field that read like "stop nagging me".
 
-`shell_approval_mode` is **rejected** in `.venastine/settings.json`, by name and with a reason. A project's settings beat your own, and a cloned repository must not be able to set this. Set it in `config.py`.
+`shell_approval_mode` is **rejected** in `.venastine/settings.json`, by name and with a reason. A project's settings beat your own, and a cloned repository must not be able to set this. Set it in `config.yaml`.
 
-If your workspace contains a `.venastine/` directory, it is bind-mounted **read-only** inside the container, so a sandboxed command cannot rewrite the context and MCP definitions that feed later prompts. This covers writes on the Docker path only — not reads, and not the subprocess fallback.
+If your workspace contains a `.venastine/` directory, it is bind-mounted **read-only** inside the container, so a sandboxed command cannot rewrite the context and MCP definitions that feed later prompts. This covers writes on the container path only, under Docker or Podman — not reads, and not the subprocess fallback.
 
-**The workspace may not be the harness.** The container mounts your workspace read-write, and a sandboxed command with no network is auto-approved inside it — so a workspace pointing at the harness's own directory would be unattended write access to the code about to run next. `AGENT_WORKSPACE` is refused at startup, and by the sandbox, when it *is* or sits *inside* the harness install tree or `~/.config/venastine/`. The two artifact directories `workspace/` and `output/` stay usable, which is the shipped layout; everything else in the install tree is refused, including a module added in a later release — it is an allowlist, so it fails closed. When one of those trees is *nested inside* your workspace instead — a workspace set to your home directory, say — there is nothing to refuse, so it is bind-mounted read-only, along with `providers.json`, the conversation database and the log directory. The guard names the harness that is *running*, so pointing a globally-installed `venastine` at a development clone of its own source still works.
+**The workspace may not be the harness.** The container mounts your workspace read-write, and a sandboxed command with no network is auto-approved inside it — so a workspace pointing at the harness's own directory would be unattended write access to the code about to run next. `AGENT_WORKSPACE` is refused at startup, and by the sandbox, when it *is* or sits *inside* the harness install tree or `~/.config/venastine/`. **Since batch 107 the implicit route is refused too**: with the variable unset the project is the directory you launched from, so launching from the install tree made the harness its own project -- the same state, reached by saying nothing instead of by saying it. The two artifact directories `workspace/` and `output/` stay usable, which is the shipped layout; everything else in the install tree is refused, including a module added in a later release — it is an allowlist, so it fails closed. When one of those trees is *nested inside* your workspace instead — a workspace set to your home directory, say — there is nothing to refuse, so it is bind-mounted read-only, along with `providers.json`, the conversation database and the log directory. The guard names the harness that is *running*, so pointing a globally-installed `venastine` at a development clone of its own source still works.
 
-**From approval to execution, one answer throughout.** The classification is computed once per call and the same profile is handed to both the approval check and the sandbox, so what was approved is what runs. Inert commands never touch Docker — they are plain subprocesses on the host. Anything else probes Docker once per call and shares the result between gate and runner: if Docker was up when the call was approved but down when it executes, and the only route left is the fallback, the call returns an error telling the model to retry rather than silently downgrading onto the host. With Docker unavailable and `ALLOW_INSECURE_SANDBOX_FALLBACK = True` in `config.py`, non-inert commands fall back to a weakly-isolated host subprocess — prompted per run unless `AUTO_APPROVE_SANDBOX_FALLBACK = True` opts that prompt away. Inside the container the workspace is mounted at `/workspace` and output comes back truncated at 50,000 characters (`MAX_READ_CHARS`); the container runs under a 60-second wall clock, 1024 MB of memory, a single CPU core and a 200-process cap, while the weak fallback enforces its own rlimits instead — 30 CPU-seconds and the same memory ceiling. Two environment knobs affect the mechanics: `AGENT_SHELL` overrides the detected host shell (bash on Linux/macOS, PowerShell on Windows), and `AGENT_SANDBOX_IMAGE` swaps the default `python:3.13-slim` image.
+**From approval to execution, one answer throughout.** The classification is computed once per call and the same profile is handed to both the approval check and the sandbox, so what was approved is what runs. **The container comes from Docker, or from Podman when Docker cannot run one** — probed once per process, Docker first. Podman is used only if it can enforce the memory, CPU and process limits below: a rootless Podman on cgroups v1, or without those controllers delegated to your user, accepts the flags and ignores them, so it is refused and the reason is logged and shown. An inert command runs in that container as a plain argument list with no shell, and on the host only when no runtime is available. Anything else shares the probe's answer between gate and runner: if a runtime was up when the call was approved but gone when it executes, and the only route left is the fallback, the call returns an error telling the model to retry rather than silently downgrading onto the host. With no container runtime available and `allow_insecure_sandbox_fallback: true` in `config.yaml`, non-inert commands fall back to a weakly-isolated host subprocess — prompted per run unless `auto_approve_sandbox_fallback: true` opts that prompt away. Inside the container the workspace is mounted at `/workspace` and output comes back truncated at 50,000 characters (`max_read_chars`); the container runs under a 120-second wall clock, 2048 MB of memory, a single CPU core and a 200-process cap, while the weak fallback enforces its own rlimits instead — 30 CPU-seconds and the same memory ceiling — **on Unix only**. `rlimit` does not exist on Windows, so there that route runs under the wall clock and nothing else, which is worth knowing before you turn it on: it is the route with no filesystem isolation, and on Windows it is also the route with no memory or CPU ceiling. **A third backend exists and ships off: WSL.** With `allow_wsl_backend: true`, `shell`, `shell_background` and `shell_monitor` take a `backend` field the agent sets per call, and `backend: "wsl"` runs the command in a WSL distribution (`wsl_distro`, or WSL's default) instead of the container. It is there for work that genuinely needs your machine or a Linux toolchain the image does not carry — and it gives up everything the container provides: your own files, the network always on, no memory or process limits, no read-only bind over `.venastine/`, and Windows interop that no argv or environment choice can switch off. So it is treated as uncontained for every tier: under `tiered` and `contained` only a read-only command whose arguments are all inside the workspace runs without a prompt, a command naming a protected path segment is refused outright rather than asked about, and the backend appears on the startup banner and the sidebar badge for as long as it is on. An interactive shell cannot run there yet. **A fourth backend exists and also ships off: SSH.** With `allow_ssh_backend: true` and a host configured (`ssh_host`, `ssh_user`, `ssh_remote_workspace` and a PINNED `ssh_host_key`), `backend: "ssh"` runs the command on that machine. It is the strictest of the four to use and the least protected to run on: **nothing there is auto-approved, not even a read-only command**, because the check that decides whether a command's arguments stay inside the workspace resolves them against this machine's filesystem and would be answering about the wrong one. Authentication is a key or a running `ssh-agent` and the harness never asks for or holds a passphrase; a host key that changes is refused rather than accepted; and two things are disclosed rather than fixed — ending a session does not kill the remote command (its in-guest `timeout` does), and `write` saves locally while the shell runs remotely. **The harness can hold the credentials those backends need, encrypted at rest.** `/secrets` in the TUI (or `--secrets` on the CLI) stores named values -- `ssh.<host>.key_passphrase`, `ssh.<host>.login` -- in `~/.config/venastine/secrets.json`, sealed with AES-256-GCM under a master passphrase you type once a session. That is what lets an encrypted SSH key or a password-authenticated host work at all: before it, an encrypted key with no agent simply failed. A stacked `publickey,password` host works too. Nothing is taken from the command line -- every value is read at a masked prompt, because an argv is readable by every process on the machine and lands in your shell history. The file is useless without the passphrase, so a shell command the agent runs reads ciphertext; the plaintext lives in process memory only and is dropped on `/secrets lock`, on quit, and on anything unexpected. A stored value never reaches the model: it is stripped from tool output whatever your redaction setting says. **A command can also be run as root, on those two backends and nowhere else.** A call may set `needs_root`; the harness then prefixes `sudo -k -S -p '' --` and supplies the password stored for that machine as `wsl.<distro>.sudo` or `ssh.<host>.sudo`, on the command's standard input and nowhere else -- never in an argv, an environment or a log, and the command behind `sudo` has its own stdin closed so it cannot read the password either. The container is refused because a command there already runs as root, and the host fallback because Windows elevation is a consent dialog rather than a password prompt. **You are asked every single time**, above both sandbox opt-ins and in every approval mode but `never` -- and the question is asked whether the call declares `needs_root` or merely writes `sudo` itself, so the declaration is not a thing to forget your way around. If no password is stored for that machine the call is refused outright and the refusal names the entry to create: the stored secret is what turns root on at all, and there is no separate switch for it. Two environment knobs affect the mechanics: `AGENT_SHELL` overrides the detected host shell (bash on Linux/macOS, PowerShell on Windows), and `AGENT_SANDBOX_IMAGE` swaps the default `docker.io/library/python:3.13-slim` image (fully qualified, so Podman resolves it without a short-name alias).
 
 ### "Headless" means *unable to ask*, not "not a GUI"
 
@@ -471,7 +494,7 @@ Whichever you configure (`compaction.strategy` in settings.json), a span too lar
 
 `pin` keeps recent turns out of any summary (capped at half the compaction trigger per call — a pin is a permanent floor, so refusing beats trimming); `unpin` releases it again when pinned detail goes stale. `/compact` in the TUI triggers a compaction by hand. **When compaction runs depends on what the thread is**: a chat thread folds at a share of the model's context window (85% by default, so 850k on a 1M model and 170k on a 200k one); research passes and subagents compact only at a hard backstop just under that window, wherever they are resumed — spending a model call on a judgement nobody is watching is not worth it mid-run. The chat trigger used to be a flat 40k regardless of model, which meant a 1M-window thread was condensed at 4% of its window.
 
-The knobs, all under `compaction` in `settings.json`, each overriding a default in `config.py`:
+The knobs, all under `compaction` in `settings.json`, each overriding a default in `config.yaml`:
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -506,15 +529,23 @@ A skill declaring `additional_tools` is stating a *need*, not granting anything 
 
 An agent declares `spawnable` — whether the `spawn_subagent` tool can actually feed it. A task string in a fresh thread is all a spawn can pass, and an agent that needs a transcript, a thread or a finished research run cannot be given one; spawning it anyway produces a confident answer about nothing. Your own agents are not spawnable unless they say so.
 
-Seven ship. Five are not spawnable, each because a real caller supplies something a task string cannot carry — `compactor` (a stretch of transcript), `initializer` (a document manifest), `pipeline-reviewer` (a finished research run), `grill-me` and `plan` (the live conversation). Two are:
+Eleven ship. Five are not spawnable, each because a real caller supplies something a task string cannot carry — `compactor` (a stretch of transcript), `initializer` (a document manifest), `pipeline-reviewer` (a finished research run), `grill-me` and `plan` (the live conversation). Six are:
 
 | agent | for | reach it with |
 |---|---|---|
 | `plan` | designing an approach before the work starts — reads what exists, names the decisions, says what would make the plan wrong | `/agent plan` |
 | `explore` | finding where something lives and how it is wired, in a codebase or in the literature, and reporting locations and evidence | `spawn_subagent`, or `/agent explore` |
 | `review` | reading a finished change or document against what it claims to do, and reporting defects with the evidence for each | `spawn_subagent`, or `/agent review` |
+| `build` | implementing a specified change from pointers — reads what exists, makes the smallest diff, reports what changed plus how it was verified | `spawn_subagent`, or `/agent build` |
+| `test` | verifying a change against its claim — reproduces, runs the checks, reports pass/fail with the exact command and what was not covered | `spawn_subagent`, or `/agent test` |
+| `writer` | turning notes, claims or sources into clear structured prose for a named audience — reports, READMEs, changelogs, decision records | `spawn_subagent`, or `/agent writer` |
+| `general` | scoping a task's intent, splitting it into self-contained sub-tasks, delegating to specialized subagents in parallel, synthesizing their answers | `spawn_subagent`, or `/agent general` |
 
-`explore` and `review` are **read-only by omission**: `write`, `edit`, `write_project_doc` and `remember` are simply absent from their tool lists, so no configuration makes one reachable. They do list `read` and `shell`, which are [denied by default](#what-needs-approval-by-default) and cannot be enabled at runtime — so on a stock install `explore` works from `read_project_doc` and the three network tools, and both become code agents only where you have enabled file access in `config.py`. Approving a spawn of either grants nothing standing: `shell` carries a per-call gate, so it is excluded from every grant path by name and each non-inert command still asks.
+`build`, `test`, `writer`, `explore` and `review` are leaves: they take a task string as their entire input and cannot spawn further. `general` is the one spawnable branch — the spawning discipline lives there and nowhere else, so users who want a less constricted experience change one file or add their own. `plan` keeps its own spawning ability for interactive `/agent` use but is not itself spawnable.
+
+An agent can also name **which** agents it may spawn, with `spawn_targets`. `plan` is the shipped case: it may spawn `explore`, `review`, `writer` and `test`, and asking it for `build` or `general` is refused with a reason rather than quietly obeyed. That is the point of planning as its own turn — you read the plan and change your mind before anything is written. Say nothing and an agent may spawn anything spawnable, which is the default every definition had before the field existed; a list only ever narrows, and narrows again for anything it spawns in turn.
+
+`explore`, `review`, `build`, `test` and `writer` are **read-only or write-only by omission**: none of them lists `spawn_subagent`, `remember` or `write_project_doc`, so no configuration makes one reachable. `build` is the exception that proves the shape — it declares `write`/`edit` because implementing means writing, while the other four simply absent them. They all list tools (`read`, `shell`) which are [denied by default](#what-needs-approval-by-default) and cannot be enabled at runtime — so on a stock install `explore` works from `read_project_doc` and the three network tools, and all become code agents only where you have enabled file access in `config.yaml`. Approving a spawn of a leaf grants nothing standing: `shell` carries a per-call gate, so it is excluded from every grant path by name and each non-inert command still asks.
 
 Fourteen skills ship, under `security/`, `crypto/`, `math/`, `research/` and `software/` — methodologies for reviewing code, debugging, designing tests, designing experiments, statistical inference, reproducibility, evaluating sources, technical writing, numerical methods, formal specification, literature review, proof writing, cryptography verification and cybersecurity research.
 
@@ -544,7 +575,7 @@ An agent's or a skill's `name` and `description` go straight into the system pro
 
 ### MCP servers
 
-Configured in `mcp.json`, at `~/.config/venastine/mcp.json` or `.venastine/mcp.json` — `/init --config` creates an empty project one to fill in. Claude Code compatible, and unrecognised keys are ignored so a config shared with another client works as-is:
+Configured in `mcp.json`, at `~/.config/venastine/mcp.json` or `.venastine/mcp.json`. **The user-level one is created empty on startup if it is absent**, and the launch says where it is — two plausible homes and no way to tell from inside a session meant an edit could land in a file the harness never reads. `/init --config` creates an empty project one to fill in. Claude Code compatible, and unrecognised keys are ignored so a config shared with another client works as-is:
 
 ```json
 {"mcpServers": {"files": {"command": "npx", "args": ["-y", "@example/server"]}}}
@@ -581,11 +612,13 @@ The first connection to a **user-level** server asks once, showing the resolved 
 | `/compact [--strength 1-5]` | Fold older turns now instead of waiting for the trigger. Recent turns keep exactly the protection an automatic compaction gives them |
 | `/trigger [tokens\|off]` | Override **when this chat compacts**, for this session only. An absolute prompt size (`80k`), not a margin below the window. A value below the warning margin or the keep-recent floor is refused naming it; a value below the thread's current size is accepted and says a fold is coming |
 | `/window [tokens\|off]` | Set this model's **context window** and remember it, per `(provider, model)` and across launches. It outranks both the provider's own answer and the built-in table, and it moves everything derived from the window: the chat compaction trigger, the research-pass backstop and the summarizer's input budget. Above what the provider reports it warns rather than refusing, because raising it is the point — a gateway or a self-hosted endpoint can report its own default rather than your deployment's |
+| `/config [key] [value]` | Browse and set the harness's own settings without leaving the session. Typing `/config ` lists all 133 of them in the same panel the slash commands use, with the values each one takes and the value in the file; completing a key then offers that key's values. A value you have already changed reads `pending restart` until you relaunch, and bare `/config` lists every one of them, old to new — so several settings can be changed in a row and applied together. Bare `/config <key>` explains one, including what outranks it — an environment variable, a `settings.json` key — and containers are listed but edited in the file. A write goes through the whole document's validation first, keeps every comment in `config.yaml`, and offers to relaunch, because values are read once at startup. The nine AUTHORITY keys ask first, naming what the key permits |
 | `/claims [run id]` | Open the claims view — tier, grounding status, assumption flags, score breakdown per claim — during a run or afterwards (**ctrl+l**) |
 | `/copy [last\|report\|claims\|conversation\|all] [--file <path>]` | Copy out of the session. Defaults to the last response; `conversation` is the exchange alone — your turns, the answers, the reasoning, the tool calls and the diffs; `all` is everything on screen (the harness's own lines included) plus report plus claims. Clipboard delivery cannot be confirmed, so `--file <path>` is the route that provably worked |
 | `/threads` | Conversations-only picker — research runs' internal threads excluded — most recently active first, capped at 200 with a notice (**ctrl+t**) |
 | `/resume <thread-id>` | Open any thread by id, however old |
 | `/new` | Start a fresh thread; created lazily on your next message, so `/new` twice leaves nothing behind |
+| `/kill [session-id]` | Stop a background session. Bare, it opens the picker **ctrl+b** opens; with an id it stops that one. Deliberately usable *while* sessions are blocking the prompt — it is the way out of that block, so it is the one command that never refuses for being busy |
 | `/agent [name\|default]` | Make an agent active for subsequent turns; `default` clears. Active skills are re-checked against the new agent's tool policy |
 | `/goal [text\|clear]` | Persistent objective for this thread — injected into every turn in either shell, mirrored in a banner |
 | `/grill-me` | One turn under the grill-me agent inside the current thread, reading the live history rather than a digest of it |
@@ -597,7 +630,7 @@ The first connection to a **user-level** server asks once, showing the resolved 
 | `/init [--software\|--research] [--config]` | Scaffold the project documentation set; `--config` adds `.venastine/settings.json` and `mcp.json` with default values, and on its own is the whole command |
 | `/quit` | Leave the harness, on one invocation — a typed command is already deliberate. `/exit` and `/bye` are the same command under other names; type toward either and the suggestion list says so |
 
-Keys: **ctrl+c** twice quits — the first press arms it and the footer changes to say so, and it goes back to `Quit` after a couple of seconds; a **ctrl+c** over selected text copies instead and arms nothing, so nothing you copy can end the session. **ctrl+q** quits on a single press, from anywhere, including under a dialog · **ctrl+t** thread picker · **ctrl+l** claims view · **ctrl+j** (or **shift+enter**) newline in the prompt · **up/down** and **enter**/**tab** to pick a slash command, **escape** to dismiss the list · **ctrl+click** a URL in an answer — or in a tool line — to open it.
+Keys: **ctrl+c** twice quits — the first press arms it and the footer changes to say so, and it goes back to `Quit` after a couple of seconds; a **ctrl+c** over selected text copies instead and arms nothing, so nothing you copy can end the session. **ctrl+q** quits on a single press, from anywhere, including under a dialog · **ctrl+t** thread picker · **ctrl+l** claims view · **ctrl+j** (or **shift+enter**) newline in the prompt · **up/down** and **enter**/**tab** to pick a slash command, **escape** to dismiss the list · **ctrl+click** a URL in an answer — or in a tool line — to open it, or the name on a `spawn_subagent` line to read what that agent did, or the name on a `shell_background`, `shell_monitor` or `shell_interactive` line to read that session -- its command, why it was started, what it printed, and what became of it. A session the harness no longer holds (it aged out, or you restarted) opens the same way and shows what the agent was given, saying so; a live one refreshes as it writes. While sessions are running the sidebar lists them, and clicking a row opens it; **ctrl+g** lists the runs going on right now and opens one from the keyboard · **ctrl+b** stops a background session, and always asks which one rather than killing on a single press. While background sessions are running the prompt and most commands are refused — `ctrl+b`, `/kill`, answering a dialog and quitting stay usable, because they are the ways out.
 
 Answers are rendered rather than printed as their source: tables become grids, headings and `**bold**` take weight, `*emphasis*` and `~~strike~~` take their own marks, code fences are highlighted, and a list item that runs past the edge wraps **under its own text** instead of back to the margin. A line indented four spaces or more is left exactly as written, so a code sample keeps its operators and its `#` comments. What is deliberately not rendered: block quotes, horizontal rules, heading *levels* (a `#` and a `######` look the same), and anything at all inside a reasoning block. `/copy` always hands back the markdown the model wrote — the rendering is what the screen does, never what is stored.
 
@@ -617,7 +650,7 @@ Only `AGENTS.md` is written for you in full; the rest arrive as skeletons with r
 
 `/init --config` is the other half, and it is independent of the two above: it writes `.venastine/settings.json` and `.venastine/mcp.json`, and creates `.venastine/agents/` and `.venastine/skills/`. On its own it makes **no model call** and costs nothing — no document set, no question about which kind of project this is; combined (`/init --software --config`) it does both under one confirmation. An existing `settings.json` or `mcp.json` is never touched, per file, so a project with one and not the other gets the other. From the CLI it is `--init --project-config`.
 
-The settings file it writes is **every key with a shipped default, at that default** — because the file cannot explain itself. An unknown key raises at startup, so there is no comment syntax, no `$schema` line and no way to leave a key in the file but switched off; the scaffold is the schema. Six keys are deliberately left out, because something reads them by *presence* rather than by value, so writing their own default would decide rather than restate: `default_provider` and `default_model` (adding either discards a model you picked with `/model` in that project), `effort` (makes every launch probe the provider's effort table), `compaction.trigger_tokens` (disables the window-derived trigger, invisibly), `ensemble_mode` and `research.subagent_review` (both defer to `config.py` only while absent). Set any of those by hand and they work normally. Everything the scaffold does write changes nothing until you edit it — and because a project's `settings.json` beats yours by *presence*, the command tells you which of your own keys the new file has taken over before it asks to write it.
+The settings file it writes is **every key with a shipped default, at that default** — because the file cannot explain itself. An unknown key raises at startup, so there is no comment syntax, no `$schema` line and no way to leave a key in the file but switched off; the scaffold is the schema. Six keys are deliberately left out, because something reads them by *presence* rather than by value, so writing their own default would decide rather than restate: `default_provider` and `default_model` (adding either discards a model you picked with `/model` in that project), `effort` (makes every launch probe the provider's effort table), `compaction.trigger_tokens` (disables the window-derived trigger, invisibly), `ensemble_mode` and `research.subagent_review` (both defer to `config.yaml` only while absent). Set any of those by hand and they work normally. Everything the scaffold does write changes nothing until you edit it — and because a project's `settings.json` beats yours by *presence*, the command tells you which of your own keys the new file has taken over before it asks to write it.
 
 `/summary` distils this conversation and shows it — it does **not** shorten what the model sees; that is `/compact`. `/ref` picks another conversation, summarises it, and attaches that summary to this one as standing context: you choose what crosses between threads, so nothing read or argued in one conversation can steer another without your say-so. `/ref --list` and `/ref --clear` are the way back out, and the summaries are labelled so the model knows they are not part of this conversation. From the CLI the same two are launch flags: `--summary <thread>` and a repeatable `--ref <thread>`.
 
@@ -732,7 +765,9 @@ Three things can end a turn or pass early:
 
 The CLI names the figures behind an early stop — billed this turn, and the thread's measured context size — rather than a bare reason, because "budget exceeded" invites exactly the misreading that there is a size problem.
 
-Other ceilings worth knowing: the six maths tools run in killable subprocesses under a 15-second wall clock (`TOOL_COMPUTE_TIMEOUT_S`) and are told which tool and which limit stopped them; pre-granted tool calls cap at 150 per research run (`MAX_GRANTED_TOOL_CALLS`), degrading to asking when exhausted; subagent nesting stops at depth 2 (`SUBAGENT_MAX_DEPTH`); attended prompts expire after 600 seconds (`ATTENDED_APPROVAL_TIMEOUT_S`), denying that one call while the run continues.
+Other ceilings worth knowing: the six maths tools run in killable subprocesses under a 20-second wall clock (`tool_compute_timeout_s`) and are told which tool and which limit stopped them; pre-granted tool calls cap at 150 per research run (`MAX_GRANTED_TOOL_CALLS`), degrading to asking when exhausted; subagent nesting stops at depth 2 (`SUBAGENT_MAX_DEPTH`) and at most three subagents of one turn run at once (`SUBAGENT_MAX_PARALLEL`), with anything beyond that running in waves; attended prompts expire after 600 seconds (`ATTENDED_APPROVAL_TIMEOUT_S`), denying that one call while the run continues.
+
+Subagents spawned in one model response run **concurrently**, up to `SUBAGENT_MAX_PARALLEL`. Their answers come back to the model in the order it asked for them however they finish, one approval question reaches you at a time, and the sidebar draws them as a tree rather than a chain. The database runs in SQLite's WAL mode to keep their writes from contending, which means `app.db` is accompanied by `app.db-wal` and `app.db-shm` while the harness is open — both are gitignored, and excluded from `git archive`, because a WAL file holds recently written messages.
 
 ### Logging
 
@@ -751,9 +786,9 @@ In the TUI stderr is detached before the screen is taken (anything written there
 | `trusted_projects.json` | workspace-trust store | user-level (`~/.config/venastine/`); written by the trust prompt or `--trust-project`, keyed to resolved path + content hash |
 | `AGENTS.md` | project context for the model | project root; covered by workspace trust |
 
-Precedence for provider and model is CLI flag > `settings.json` > `config.py`. Two different merge orders, deliberately:
+Precedence for provider and model is CLI flag > `settings.json` > `config.yaml`. Two different merge orders, deliberately:
 
-- **Inside `settings.json`, project beats user** — this is the one file where "more specific wins" holds, which is exactly why the two authority-bearing keys below are rejected there by name. Nested objects merge key-by-key across tiers.
+- **Inside `settings.json`, project beats user** — this is the one file where "more specific wins" holds, which is exactly why the five authority-bearing keys below are rejected there by name. Nested objects merge key-by-key across tiers.
 - **MCP servers, agents and skills run harness > user > project**, inverted from the usual rule, because there "more specific" means "arrived with a repository you cloned".
 
 #### Every `settings.json` key
@@ -766,7 +801,7 @@ An unknown key raises at startup, naming the file and the key — a typo must ne
 | `default_model` | string | `claude-sonnet-5` | Used unless `--model` overrides |
 | `effort` | string | `"high"` | Reasoning effort for chat and research; `"auto"` clears even this. See [Reasoning effort](#reasoning-effort) |
 | `max_token_budget` | int \| null | null — uncapped | Per-run billed-spend ceiling. See [Budgets and stop conditions](#budgets-and-stop-conditions) |
-| `ensemble_mode` | bool | `false` | Master switch for ensemble Pass 1; the roster lives in `config.py` |
+| `ensemble_mode` | bool | `false` | Master switch for ensemble Pass 1; the roster lives in `config.yaml` |
 | `ensemble_n` | int | — | Accepted with a warning; vestigial — the count now derives from the roster |
 | `compaction` | object | — | Seven keys tabulated in [the compaction section](#long-conversations-condense-themselves) above |
 | `tui.theme` | string | — | One of the fourteen theme names; validated at use and falls back rather than blocking startup. Outranked by a theme you picked with `/theme` — until you change this value, which re-asserts it |
@@ -777,46 +812,55 @@ An unknown key raises at startup, naming the file and the key — a typo must ne
 | `research.approval_mode` | string | `"none"` | `"attended"` makes research runs ask about every gated call, as if launched with `--attended` |
 | `research.subagent_review` | bool | `false` | Review on by default, as if launched with `--review`; escaped per run with `--no-review` |
 
-Two keys are rejected **by name** — well-formed shapes that will never load, because a project tier that could set them would decide what runs without being asked:
+Five keys are rejected **by name** — well-formed shapes that will never load, because a project tier that could set them would decide what runs without being asked:
 
 | Rejected key | Why |
 |---|---|
-| `shell_approval_mode` | Decides whether shell commands are asked about at all; set `SHELL_APPROVAL_MODE` in `config.py` instead |
+| `shell_approval_mode` | Decides whether shell commands are asked about at all; set `shell_approval_mode` in `config.yaml` instead |
+| `ensemble_models` | A roster chooses which providers N research passes call, so a cloned repository could point them at endpoints you never configured and multiply the run's cost by the length of its list; set `ensemble_models` in `config.yaml` instead |
+| `critic_model` | Names a provider every claim is sent to; use `/critic`, which writes a user-tier store, or set `critic_model` in `config.yaml` |
+| `embedder_model` | Names a provider sent claim text and the text of every page a run fetched; use `/embedder`, or set `embedder_model` in `config.yaml` |
 | `research.granted_tools` | A persisted grant list could only ever *remove* prompts — standing authorisation carried by any repo you clone. Grants are per-run flags precisely so they cannot be |
 
-#### `config.py`-only settings
+#### `config.yaml`-only settings
 
-Deliberately not settings.json keys: editing these means editing the file in your checkout, so nothing a cloned repository carries can reach them.
+Deliberately not settings.json keys: editing these means editing the harness's own file, which has exactly one location and no override variable, so nothing a cloned repository carries can reach them. `CONFIG_ARCHITECTURE.md` carries the argument for each.
 
-| Constant | Default | Controls |
+| Key | Default | Controls |
 |---|---|---|
-| `CRITIC_MODEL` | `None` | Routes passes 3a/3b/6c to a different `{provider_name, model}` |
-| `ENSEMBLE_MODELS` (with `ENSEMBLE_MODE`) | `None` (off) | Pass-1 roster; fewer than two distinct pairs is refused |
-| `DEFAULT_EFFORT` | `"high"` | Effort when neither flag nor settings speaks |
-| `MODEL_EFFORT_LEVELS` | see file | Per-model level lists for non-Anthropic providers; an entry mapped to an *empty* list means "takes no effort parameter" and drops the level cleanly |
-| `GOOGLE_THINKING_BUDGETS` | low→2,048 … max→dynamic | Google level→thinking-token map |
-| `MODELS_REJECTING_SAMPLING_PARAMS` | current Anthropic models | These 400 on temperature/top_p/top_k; such parameters are dropped with a WARNING rather than sent |
-| `MODEL_CONTEXT_WINDOWS` / `DEFAULT_CONTEXT_WINDOW` | 200k fallback | The **fallback** for the window, not the only source: Anthropic and Google report it on their model endpoints, and the OpenAI-compatible providers that carry it (Groq, Mistral, Together, OpenRouter) are read through one alias sniff. This table answers for the ones that report nothing (OpenAI, DeepSeek, Perplexity). Feeds the research-pass compaction backstop **and** the summarizer's one-call input budget; an unknown model warns once and assumes the default. Keys are stored normalized — no date suffix, no `vendor/` prefix |
-| `SHELL_APPROVAL_MODE` | `"tiered"` | The shell gate: `always` / `tiered` / `never`; a bad value raises at import. Rejected in settings.json by name, see above |
-| `NETWORK_ALLOWED_COMMANDS` | pip, curl, git, npm, … | Binaries granted network access inside the sandbox. Matched against **every** word of a command that needs a sandbox, so `cd x && pip install .` is recognised and asked about — and against the **first word only** of an inert one, which cannot chain, so `grep pip notes.txt` still runs unprompted |
-| `INERT_COMMANDS` | ls, cat, grep, wc, … | Read-only commands that run as plain host subprocesses, skipping Docker entirely |
-| Sandbox bounds | image `python:3.13-slim`; 60 s, 1024 MB, 30 CPU-s, 200 pids | `SANDBOX_DOCKER_IMAGE`, `SANDBOX_TIMEOUT_SECONDS`, `SANDBOX_MEMORY_MB`, `SANDBOX_CPU_SECONDS`, `SANDBOX_MAX_PIDS` |
-| `ALLOW_INSECURE_SANDBOX_FALLBACK` / `AUTO_APPROVE_SANDBOX_FALLBACK` | `False` / `False` | Enable, then de-prompt, the weak host-subprocess fallback |
-| `REDACT_TOOL_OUTPUTS` | `True` | Master switch for output redaction. Never affects input refusals, the depth-cap bound, or the log formatter's own guard |
-| `TOOL_COMPUTE_TIMEOUT_S` | 15 | Wall clock per maths-tool subprocess |
-| `MAX_GRANTED_TOOL_CALLS` | 150 | Pre-granted calls per research run before it must ask again |
-| `ATTENDED_APPROVAL_TIMEOUT_S` | 600 | Attended prompt deadline; expiry denies that call while the run continues |
-| `SUBAGENT_REVIEW` | `False` | Shipped default for the post-pipeline review |
-| `MAX_REVIEW_FINDINGS` / `MAX_REVIEW_REFINEMENTS` | 25 / 3 | Consent-fatigue caps on the review stage |
-| `MAX_PIPELINE_RETRIES` / `MAX_JSON_RETRIES` | 2 / 2 | Revise/re-validate rounds per claim; corrective attempts per malformed pass payload |
-| `MAX_ITERATIONS` | 50 | Step ceiling for a turn or pass absent an agent's own `max_steps` |
-| `SUBAGENT_MAX_DEPTH` | 2 | `spawn_subagent` nesting limit |
-| `PIN_MAX_TRIGGER_FRACTION` | 0.5 | Largest share of the trigger one pin may protect |
-| `MAX_INJECTED_MEMORIES` / `MAX_INJECTED_REFS` / `MAX_TODO_ITEMS` | 50 / 3 / 50 | Prompt-injection caps; refs and todos refuse past the cap rather than trimming silently |
-| `SUMMARY_TARGET_CHARS` | 2000 | Size cap on whole-thread summaries injected via `/ref` |
-| `MAX_CATALOG_TEXT_CHARS` | 300 | Cap on an agent/skill `name` + `description` entering system prompts |
-| `INIT_READ_CHARS` / `INIT_MAX_STEPS` | 20,000 / 12 | `/init` per-read volume; step-ceiling fallback (the initializer agent's own frontmatter sets 12, which wins) |
-| `TEARDOWN_BUDGET_S` | 10 | Shared wall clock for MCP shutdown; stragglers are named in a WARNING |
+| `critic_model` | `null` | Routes passes 3a/3b/6c to a different `{provider_name, model}` |
+| `ensemble_models` (with `ensemble_mode`) | `null` (off) | Pass-1 roster; fewer than two distinct pairs is refused |
+| `default_effort` | `high` | Effort when neither flag nor settings speaks |
+| `model_effort_levels` | see file | Per-model level lists for non-Anthropic providers; an entry mapped to an *empty* list means "takes no effort parameter" and drops the level cleanly |
+| `google_thinking_budgets` | low→2,048 … max→dynamic | Google level→thinking-token map |
+| `models_rejecting_sampling_params` | current Anthropic models | These 400 on temperature/top_p/top_k; such parameters are dropped with a WARNING rather than sent |
+| `model_context_windows` / `default_context_window` | 256k fallback | The **fallback** for the window, not the only source: Anthropic and Google report it on their model endpoints, and the OpenAI-compatible providers that carry it (Groq, Mistral, Together, OpenRouter) are read through one alias sniff. This table answers for the ones that report nothing (OpenAI, DeepSeek, Perplexity). Feeds the research-pass compaction backstop **and** the summarizer's one-call input budget; an unknown model warns once and assumes the default. Keys are stored normalized — no date suffix, no `vendor/` prefix |
+| `shell_approval_mode` | `tiered` | The shell gate: `always` / `tiered` / `never`; a bad value raises at import. Rejected in settings.json by name, see above |
+| `network_allowed_commands` | pip, curl, git, npm, … | Binaries granted network access inside the sandbox. Matched against **every** word of a command that needs a sandbox, so `cd x && pip install .` is recognised and asked about — and against the **first word only** of an inert one, which cannot chain, so `grep pip notes.txt` still runs unprompted. This list is a *lexical* test, so since ROADMAP_v3 §50 the agent can also declare `requires_network: true` on `shell`, `shell_background`, `shell_monitor` and `shell_interactive` for anything the word list cannot see — an inline script that opens a socket, say. The declaration only ever ADDS network access, and the command is then asked about wherever your approval mode would allow a prompt |
+| `inert_commands` | ls, cat, grep, wc, … | Read-only commands eligible to run unprompted under `tiered` — as a plain argument list in the container, or on the host only when no container runtime is available |
+| Sandbox bounds | image `docker.io/library/python:3.13-slim`; 120 s, 2048 MB, 1 CPU core, 200 pids — under Docker, or Podman when Docker cannot run the sandbox. The container's CPU control is a RATE (`--cpus 1`), so `sandbox_cpu_seconds` (30 CPU-s) is a budget the weak fallback enforces instead, and on Unix only | `sandbox_docker_image`, `sandbox_timeout_seconds`, `sandbox_memory_mb`, `sandbox_cpu_seconds`, `sandbox_max_pids` |
+| Background sessions | 3600 s cap; 4 live; 10 consecutive wakes; first 10,000 + last 190,000 characters of output kept, in memory only | `shell_session_timeout_cap_s`, `shell_session_max_live`, `shell_session_max_consecutive_wakes`, `shell_session_output_head_chars`, `shell_session_output_tail_chars` |
+| `allow_insecure_sandbox_fallback` / `auto_approve_sandbox_fallback` | `false` / `false` | Enable, then de-prompt, the weak host-subprocess fallback |
+| `allow_wsl_backend` / `wsl_distro` | `false` / `''` | Let the agent ask for a command to run in WSL, and which distribution. WSL is not a sandbox — see below |
+| `allow_ssh_backend` / `ssh_*` | `false` / `''` | Let the agent ask for a command to run on one configured remote host. Nothing runs there unasked; the host key is pinned and auth is key-or-agent only — see below |
+| `redact_tool_outputs` | `true` | Master switch for output redaction. Never affects input refusals, the depth-cap bound, or the log formatter's own guard |
+| `tool_compute_timeout_s` | 20 | Wall clock per maths-tool subprocess |
+| `max_granted_tool_calls` | 150 | Pre-granted calls per research run before it must ask again |
+| `attended_approval_timeout_s` | 600 | Attended prompt deadline; expiry denies that call while the run continues |
+| `subagent_review` | `false` | Shipped default for the post-pipeline review |
+| `max_review_findings` / `max_review_refinements` | 25 / 3 | Consent-fatigue caps on the review stage |
+| `max_pipeline_retries` / `max_json_retries` | 2 / 2 | Revise/re-validate rounds per claim; corrective attempts per malformed pass payload |
+| `max_iterations` | 50 | Step ceiling for a turn or pass absent an agent's own `max_steps` |
+| `subagent_max_depth` | 2 | `spawn_subagent` nesting limit |
+| `subagent_max_parallel` | 3 | How many subagents of one model response run at once; 1 makes them sequential again |
+| `pin_max_trigger_fraction` | 0.5 | Largest share of the trigger one pin may protect |
+| `compaction_trigger_fraction` | 0.90 | Share of the context window a thread may fill before it folds. Applied to the HEADROOM, which is clamped by the two keys below — so it is exact at 160k and up, and a floor beneath that |
+| `compaction_min_headroom_tokens` / `compaction_max_headroom_fraction` | 16,000 / 0.25 | Floor and cap on the room left between the trigger and the window. Nothing recovers from a prompt that overflows the window, and one capped read is 12,500 tokens, so a 64k model keeps 16,000 rather than the 6,553 a bare share leaves |
+| `max_injected_memories` / `max_injected_refs` / `max_todo_items` | 50 / 3 / 50 | Prompt-injection caps; refs and todos refuse past the cap rather than trimming silently |
+| `summary_target_chars` | 2000 | Size cap on whole-thread summaries injected via `/ref` |
+| `max_catalog_text_chars` | 300 | Cap on an agent/skill `name` + `description` entering system prompts |
+| `init_read_chars` / `init_max_steps` | 20,000 / 12 | `/init` per-read volume; step-ceiling fallback (the initializer agent's own frontmatter sets 12, which wins) |
+| `teardown_budget_s` | 10 | Shared wall clock for MCP shutdown; stragglers are named in a WARNING |
 
 #### Environment variables
 
@@ -826,9 +870,9 @@ Deliberately not settings.json keys: editing these means editing the file in you
 | `AGENT_PROVIDERS_FILE` | `providers.json` | Credential-file location |
 | `APP_DB_PATH` | `app.db` | SQLite database path |
 | `AGENT_OUTPUT_DIR` | `./output` | Research artifacts root |
-| `AGENT_WORKSPACE` | `./workspace` | File-tools and sandbox workspace root. **When you set it, it is also the project**: workspace trust, `.venastine/`, `/init`'s destination, `output/` and project-scoped memories all follow it rather than the directory you launched from |
+| `AGENT_WORKSPACE` | `./workspace` | File-tools and sandbox workspace root. **When you set it, it is also the project**: workspace trust, `.venastine/`, `/init`'s destination, `output/` and project-scoped memories all follow it rather than the directory you launched from. Unset, the project is the launch directory — and launching from the harness's own install tree is refused (exit 2), because that would make the harness its own project. The `workspace_dir` key in `config.yaml` sets the workspace but **not** the project on its own -- the rule is the presence of this variable, never its value -- so the file's way of saying it is the `workspace_is_project` key beside it |
 | `AGENT_SHELL` | auto-detect | Host shell binary for the `shell` tool |
-| `AGENT_SANDBOX_IMAGE` | `python:3.13-slim` | Sandbox container image |
+| `AGENT_SANDBOX_IMAGE` | `docker.io/library/python:3.13-slim` | Sandbox container image, under Docker or Podman |
 | `AGENT_LOG_LEVEL` | `INFO` | Log verbosity — name or numeric level |
 | `AGENT_LOG_FILE` | `logs/app.log` | Rotating log location |
 | `VENASTINE_REDACT_OFF` | unset | Truthy value disables tool-output pattern redaction for one run. The environment can only ever weaken redaction, never restore it past the constant — and input refusals, the depth-cap bound and the log formatter's guard stay on regardless |
@@ -852,7 +896,7 @@ Deliberately not settings.json keys: editing these means editing the file in you
 
 **Built:** ROADMAP.md §1–§12 (§10's ensemble mode rebuilt by its revisit — diversity now comes from a roster of different models) and ROADMAP_v2.md §13 (streaming loop), §14 (config loader + workspace trust), §15 (permissions), §16 (TUI), §17 (MCP), §18 (agents), §19 (skills), §20 (post-pipeline review), §21a (compaction + `pin`), §21b (durable memory), §22 (live pipeline progress), §25 (authorised tool use in the pipeline), §26 (research legibility: per-pass tool calls, code-stage announcements, the claims view, role colour, `/copy`), §27 (thread legibility: transcript replay on resume, a conversations-only thread picker), §21c (session summaries and cross-thread referencing — §21 is now complete), §24 (`/init`), §23 (interactive tools: the response channel, per-tool subagent sign-off, `ask_user`, and the todo list), §28 (the shell capability classifier).
 
-**Remaining:** nothing in either roadmap, and §10's revisit is now closed. TECHNICAL_DEBT.md items 9 and 10 are open, and two live checks are recorded against §10 (see DEVLOG) that cannot be settled offline: the default `temperature` on OpenAI and Google, and whether OpenAI's reasoning models belong in `config.MODELS_REJECTING_SAMPLING_PARAMS`.
+**Remaining:** nothing in `ROADMAP.md` or `ROADMAP_v2.md`, and §10's revisit is now closed. `ROADMAP_v3.md` §49–§52 are built, and so is §61 — escape in the TUI and Ctrl+C in the CLI now stop a running turn rather than the harness. One place Ctrl+C deliberately does NOT stop the turn is the wait on a background session: a wake turn runs to its end and the sessions stop afterwards, because a press aimed at copying must not be able to end a model turn (§64's A21). §53–§60 are recorded and NOT built — a network-I/O budget, `@` file references, the shell transcript, a decision-model classifier, `/submodel`, the harness persona, two TUI pickers, and Unified Harness Protocol compliance, each specified from the owner's request and each awaiting its own design round. TECHNICAL_DEBT.md items 9 and 10 are open, and two live checks are recorded against §10 (see DEVLOG) that cannot be settled offline: the default `temperature` on OpenAI and Google, and whether OpenAI's reasoning models belong in `config.MODELS_REJECTING_SAMPLING_PARAMS`.
 
 **Not finished, though: an audit is open.** Both roadmaps being built is not the same as the
 code being clean, and saying only the first would be the "built and runs are different claims"
@@ -863,33 +907,34 @@ worked in numbered fix batches — 32 so far, each recorded in `DEVLOG.md` and
 `tests/BREAKING_CHANGES.md` with what was measured and what would break the fix.
 
 **#157 — `shell`'s unbounded auto-approval — is closed** by batch 8 and ROADMAP_v2 §28; the
-classifier is described under *Security model* above. If you have a fork or a local `config.py`,
-note that `ToolApprovals.shell` now ships `False` and `SHELL_APPROVAL_MODE` is the gate — see
-`tests/BREAKING_CHANGES.md` §24.
+classifier is described under *Security model* above. If you have a fork or a local config,
+note that shell approval is governed solely by `shell_approval_mode` -- `tool_approvals`
+deliberately has no `shell` key, so an old file carrying one is refused at startup
+naming the key — see `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 4045 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+Run the test suite with `pytest` — 7214 tests, fully offline, no API keys needed. The suite's own packages are `requirements-test.txt`, separate from `requirements.txt` since batch 136: they used to be in the shipped dependency list, so installing the harness also installed a test runner. It runs in parallel by default (`pytest-xdist`, 70% of your cores): **1:26 on a 16-core machine, against 9:06 single-process.** `pytest -n0` forces the old serial run, which is what you want under a debugger or when something is parsing the output. Four further tests are marked `integration` and excluded by default: three spawn a real stdio MCP server, the fourth runs an external program through the host fallback shell (`pytest -m integration`).
 
 ## Documentation
 
 This file is the user-facing one. For working on the code:
 
 - **[AGENTS.md](./AGENTS.md)** — the agent-context file, and the place to start. `CLAUDE.md` and `QWEN.md` are pointers to it so a tool looking for a particular filename finds one without the guidance being duplicated.
-- **[ARCHITECTURE.md](./ARCHITECTURE.md)** — file-by-file contracts, what belongs where, and the known gotchas. Read before changing anything non-trivial, especially around persistence (`database.py` / `storage.py` / `core/memory.py` are three distinct and easily confused responsibilities).
-- **[ROADMAP.md](./ROADMAP.md)** and **[ROADMAP_v2.md](./ROADMAP_v2.md)** — implementation specs plus the locked Design Decisions Record that most of the reasoning above traces back to.
-- **[DEVLOG.md](./DEVLOG.md)** — what was followed, what was deviated from, and why.
+- **[ARCHITECTURE.md](./docs/ARCHITECTURE.md)** — file-by-file contracts, what belongs where, and the known gotchas. Read before changing anything non-trivial, especially around persistence (`database.py` / `storage.py` / `core/memory.py` are three distinct and easily confused responsibilities).
+- **[ROADMAP.md](./docs/ROADMAP.md)**, **[ROADMAP_v2.md](./docs/ROADMAP_v2.md)** and **[ROADMAP_v3.md](./docs/ROADMAP_v3.md)** — implementation specs plus the locked Design Decisions Record that most of the reasoning above traces back to. Section numbers run on across the three: v3 opens at §49.
+- **[DEVLOG.md](./docs/DEVLOG.md)** — what was followed, what was deviated from, and why.
 
 ### Contributing and policies
 
-- **[CONTRIBUTING.md](./CONTRIBUTING.md)** — inbound license (Apache-2.0 + DCO), the setup and test loop, the issue and PR format, and a table of which document to update for what.
-- **[SECURITY.md](./SECURITY.md)** — how to report a vulnerability privately, what is in and out of scope, and the coordinated-disclosure timeline. **Do not open a public issue for one.**
-- **[PRIVACY.md](./PRIVACY.md)** — what is stored locally, what leaves your machine, and how to delete it. No telemetry.
-- **[CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md)** — Contributor Covenant 2.1, and the private channel for reporting a violation.
-- **[THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)** — the dependency license assessment: every declared direct dependency, its license, and its Apache-2.0 compatibility.
+- **[CONTRIBUTING.md](./docs/CONTRIBUTING.md)** — inbound license (Apache-2.0 + DCO), the setup and test loop, the issue and PR format, and a table of which document to update for what.
+- **[SECURITY.md](./docs/SECURITY.md)** — how to report a vulnerability privately, what is in and out of scope, and the coordinated-disclosure timeline. **Do not open a public issue for one.**
+- **[PRIVACY.md](./docs/PRIVACY.md)** — what is stored locally, what leaves your machine, and how to delete it. No telemetry.
+- **[CODE_OF_CONDUCT.md](./docs/CODE_OF_CONDUCT.md)** — Contributor Covenant 2.1, and the private channel for reporting a violation.
+- **[THIRD_PARTY_NOTICES.md](./docs/THIRD_PARTY_NOTICES.md)** — the dependency license assessment: every declared direct dependency, its license, and its Apache-2.0 compatibility.
 
 ## License
 
 Apache-2.0 — see [LICENSE](./LICENSE) and [NOTICE](./NOTICE). Copyright 2026 Yahya Hammad.
 
 No third-party source code is bundled here; dependencies are resolved from PyPI at install time
-under their own licenses. [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md) records the
+under their own licenses. [THIRD_PARTY_NOTICES.md](./docs/THIRD_PARTY_NOTICES.md) records the
 assessment of each one, and of the third-party text the repository reproduces.

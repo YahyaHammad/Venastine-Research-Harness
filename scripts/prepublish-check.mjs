@@ -36,13 +36,16 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+// Read once, at the top: FORBIDDEN below is derived from `neverDistribute`
+// and the version check further down uses the same object.
+const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
 const problems = [];
 
 /** Files whose absence would be a licensing defect, not a packaging one. */
 const REQUIRED = [
   'LICENSE',
   'NOTICE',
-  'THIRD_PARTY_NOTICES.md',
+  'docs/THIRD_PARTY_NOTICES.md',
   'README.md',
   'requirements.txt',
   'main.py',
@@ -65,18 +68,62 @@ const ROOT_PY_NOT_SHIPPED = new Set([
   'conftest.py',
 ]);
 
-/** Anything matching these must never leave this machine. */
-const FORBIDDEN = [
-  { label: 'provider credentials', test: (f) => f === 'providers.json' },
-  { label: 'tool secrets', test: (f) => f === '.env' || f.endsWith('/.env') },
-  { label: 'local database', test: (f) => f.endsWith('.db') },
-  { label: 'logs', test: (f) => f === 'logs' || f.startsWith('logs/') },
-  { label: 'research output', test: (f) => f === 'output' || f.startsWith('output/') },
-  { label: 'compiled python', test: (f) => f.endsWith('.pyc') || f.includes('__pycache__') },
-  { label: 'notebook checkpoints', test: (f) => f.includes('.ipynb_checkpoints') },
-  { label: 'security scan artifacts', test: (f) => f.startsWith('CLAUDE-SECURITY') },
-  { label: 'the unsafe-mode branch marker', test: (f) => f === 'UNSAFE_BRANCH' },
-];
+/**
+ * Anything matching these must never leave this machine.
+ *
+ * DERIVED FROM package.json's `neverDistribute`, which is the one list all
+ * three channels read (batch 140). It used to be a literal
+ * here, and that was the FOURTH copy of "keep local secrets out of a
+ * distribution" -- `.gitignore` for push, `.gitattributes export-ignore` for
+ * archive, this, and `never_named` in tests/test_docs_consistency.py. Two
+ * documents claimed three copies. No two of the five agreed, and the
+ * disagreements were not cosmetic: `secrets.json` was in both git channels
+ * and in neither npm-side list, and the database test was
+ * `f.endsWith('.db')`, which does not match `app.db-wal` -- the very defect
+ * both git channels had already fixed and written a comment about.
+ *
+ * Keeping the ALLOWLIST as the first line of defence is unchanged: `files`
+ * names none of these, so nothing here can reach a tarball through it. This
+ * is the second layer, and publish.yml states why it exists in its own words
+ * -- "it cannot happen because of a list somewhere else" is exactly the
+ * assumption worth not making about a credential file.
+ */
+const MATCHERS = {
+  exact: (vs) => (f) => vs.includes(f),
+  // A basename anywhere in the tree: `.env` and `sub/.env` both count.
+  basename: (vs) => (f) => vs.some((v) => f === v || f.endsWith(`/${v}`)),
+  suffix: (vs) => (f) => vs.some((v) => f.endsWith(v)),
+  prefix: (vs) => (f) => vs.some((v) => f.startsWith(v)),
+  // A whole PATH SEGMENT, not a substring. `f.includes('__pycache__')` was
+  // the old spelling and it also matches `notes__pycache__.txt`, which is
+  // somebody's file rather than build residue.
+  segment: (vs) => (f) => vs.some((v) => f === v || f.split('/').includes(v)),
+  'suffix-or-segment': (vs) => (f) =>
+    vs.some((v) => f.endsWith(v) || f.split('/').includes(v)),
+  dir: (vs) => (f) => vs.some((v) => f === v || f.startsWith(`${v}/`)),
+};
+
+const FORBIDDEN = (pkg.neverDistribute || []).flatMap((entry) => {
+  const make = MATCHERS[entry.match];
+  // LOUD, not skipped. A match kind this file does not know is an entry the
+  // gate would silently stop enforcing -- the defensive-default shape that
+  // batch 141 files against the bandit baseline, and the one thing a denylist
+  // must never do.
+  if (!make) {
+    throw new Error(
+      `package.json neverDistribute: unknown match kind ${JSON.stringify(entry.match)} ` +
+      `for ${JSON.stringify(entry.label)}. Teach MATCHERS about it or fix the entry; ` +
+      `skipping it would turn this gate off for that pattern.`);
+  }
+  return [{ label: entry.label, test: make(entry.value) }];
+});
+
+if (FORBIDDEN.length === 0) {
+  throw new Error(
+    'package.json neverDistribute produced no npm-channel patterns. That ' +
+    'would make the tarball check below pass unconditionally, which is the ' +
+    'vacuity this gate exists to avoid.');
+}
 
 /**
  * The unsafe-mode branch must never reach npm (ROADMAP_v2 UN5).
@@ -92,9 +139,9 @@ const FORBIDDEN = [
  * from there. A published npm version can never be replaced, only
  * deprecated, so the reverse accident is the unrecoverable one.
  *
- * Two independent detectors, because either alone is one rename away from
+ * Three independent detectors, because any one alone is one rename away from
  * silence: a marker file the branch carries, and the config constants
- * themselves. The FORBIDDEN entry above catches the marker if it is ever
+ * themselves, in `config.py` and in `config.yaml`. The FORBIDDEN entry above catches the marker if it is ever
  * packed; this catches it in the working tree whether packed or not.
  */
 function unsafeBranchProblems() {
@@ -109,6 +156,27 @@ function unsafeBranchProblems() {
     }
   } catch {
     found.push('config.py could not be read to check for unsafe-mode flags');
+  }
+  // The values moved to config.yaml, so an unsafe-mode build declares them
+  // there now. All three detectors are kept: config.py is still where a human
+  // could add a constant back, and dropping any one is the rename away
+  // from silence this function's own comment warns about.
+  //
+  // `[\r\n]` rather than `^` with /m is belt and braces, and the reason
+  // this comment USED to give was wrong (corrected in batch 140): it
+  // said these files are stored CRLF in the worktree. Measured -- config.py
+  // is 95 LF lines and config.yaml 1030, neither containing one CRLF. `^`
+  // with /m would also have worked on CRLF anyway, since `^` matches after
+  // `\n` and the `\s*` that follows absorbs the `\r`. The construct is
+  // correct either way; it is kept, and the config.py check four lines up
+  // uses bare `^` with /m, so the two spellings differ harmlessly.
+  try {
+    const yml = fs.readFileSync(path.join(ROOT, 'config.yaml'), 'utf8');
+    if (/(^|[\r\n])\s*unsafe_no_(approval|sandbox)\s*:/i.test(yml)) {
+      found.push('config.yaml declares unsafe_no_approval / unsafe_no_sandbox');
+    }
+  } catch {
+    found.push('config.yaml could not be read to check for unsafe-mode flags');
   }
   return found.map(
     (why) =>
@@ -157,7 +225,6 @@ function rootPythonModules() {
     .filter((name) => !ROOT_PY_NOT_SHIPPED.has(name));
 }
 
-const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
 const pyVersion = versionFromPyproject();
 
 if (pyVersion && pyVersion !== pkg.version) {

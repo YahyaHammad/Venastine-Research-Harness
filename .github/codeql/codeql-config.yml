@@ -1,0 +1,31 @@
+# CodeQL configuration shared by both jobs in workflows/codeql.yml
+# (batch 158, ROADMAP_v3 §75, A66).
+#
+# PATHS ONLY. This file must never carry `queries:` -- the security /
+# security-and-quality split is per JOB, and codeql.yml's header says why
+# the two jobs differ on purpose. A shared key here would make them the
+# same. `test_codeql_ignores_only_what_never_ships` fails on one.
+#
+# `tests/` is skipped because it never ships: package.json's `files`
+# allowlist does not name it, so nothing in it reaches a user. The rule
+# is a relation and the same test enforces it -- an entry here that a
+# shipped path falls under is red, so this list cannot grow into a way of
+# silencing production code.
+#
+# Why it is needed at all: PR #200's first analysis raised five alerts in
+# tests/, and every one was the test doing its job --
+#   * py/clear-text-logging-sensitive-data at test_logging_setup.py and
+#     test_secrets.py, which log a fake credential ON PURPOSE to prove the
+#     redactor and `Secret.__str__` strip it. A redaction test that does
+#     not log a secret tests nothing, so each new one would re-fire.
+#   * py/incomplete-url-substring-sanitization at test_live_output.py,
+#     test_policy_enforcement.py and test_shell.py, which are assertions
+#     (`"evil.com" in reason`), not sanitizers.
+# Both rules stay live on everything that ships. False positives THERE are
+# dismissed in GitHub with a reason and recorded in DEVLOG (batch 158 has
+# the first eight), not ignored here.
+
+name: venastine-codeql
+
+paths-ignore:
+  - tests

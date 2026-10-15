@@ -3,10 +3,11 @@ security/sandbox.py
 
 Cross-platform command sandboxing with two backends:
 
-1. **Docker** (default) — strong isolation via container namespaces.
-   The workspace is mounted as a volume so output files appear on the
-   host seamlessly. Network is disabled unless the command matches
-   config.NETWORK_ALLOWED_COMMANDS.
+1. **A container** (default) — strong isolation via container namespaces,
+   run by Docker, or by Podman when Docker cannot run one (ROADMAP_v3
+   §49, SS22). The workspace is mounted as a volume so output files
+   appear on the host seamlessly. Network is disabled unless the command
+   matches config.NETWORK_ALLOWED_COMMANDS.
 
 2. **Subprocess + hardening** (fallback) — weak isolation. Requires
    explicit opt-in via config.ALLOW_INSECURE_SANDBOX_FALLBACK.
@@ -14,10 +15,40 @@ Cross-platform command sandboxing with two backends:
    workspace). Network cannot be restricted. CPU/memory limits are
    Unix-only (rlimit); Windows relies on wall-clock timeout only.
 
+3. **WSL** (ROADMAP_v3 §49, slice 3) — a real Linux userland, and NO
+   isolation at all. Requires explicit opt-in via
+   config.ALLOW_WSL_BACKEND, and the agent asks for it per call. It is
+   not a weaker container; it is the user's own machine with a POSIX
+   front on it: the harness's own config.yaml is writable from there,
+   `~/.config` is writable, and Windows interop survives an emptied
+   environment (measured), so a command can start `cmd.exe` with the
+   user's full authority. `containment_for` answers UNCONTAINED for
+   every tier on this backend (SS1).
+
+4. **SSH** (ROADMAP_v3 §49, slice 4) — a command on ANOTHER machine, and
+   the least inspectable backend there is. Requires explicit opt-in via
+   config.ALLOW_SSH_BACKEND, and the agent asks for it per call. What
+   makes it different in kind from WSL rather than in degree: this
+   process cannot `lstat` the remote filesystem, so every local question
+   about a path is being asked about the wrong machine. NOTHING on this
+   route is auto-approved (SS48) — not even a read-only command, which
+   every other backend runs unasked. Authentication is a key or an agent
+   and this harness never holds a secret (SS47); the host key is pinned
+   in config and a changed one is refused (SS49).
+
 Inert commands (read-only inspection from config.INERT_COMMANDS with
-no shell metacharacters and no path-qualified binary) bypass both
-backends and run via a lightweight subprocess with a scrubbed
-environment and timeout — no Docker or fallback config needed.
+no shell metacharacters and no path-qualified binary) run in the
+container as an argv with no shell, and on the host only when no
+container runtime is available (ROADMAP_v2 §46, EP5). This docstring said
+they bypassed both backends, which stopped being true at EP5.
+
+THE WORD "docker" IN THIS MODULE'S NAMES MEANS THE CONTAINER ROUTE,
+whichever runtime serves it: `is_docker_available`, `_run_docker`, the
+`docker_available` parameter and `config.SANDBOX_DOCKER_IMAGE` all kept
+their names when Podman arrived. Renaming the config key would break
+config_update.py's merge of a user's own value across an npm update, and
+the function names are patched at about thirty-five test sites. What the
+route runs is `known_runtime()`.
 
 This module is intentionally separate from tools/builtin/shell.py so
 that other tools needing safe command execution can reuse it.
@@ -25,18 +56,27 @@ that other tools needing safe command execution can reuse it.
 
 from __future__ import annotations
 
+import atexit
+import contextlib
 import functools
+import json
 import logging
 import os
 import platform
 import re
 import shlex
+import shutil
+import signal
 import subprocess
+import tempfile
+import threading
 import uuid
-from typing import Callable, Optional
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Optional
 
 import config
-from security import posture, protected_paths
+from security import askpass, posture, protected_paths, secrets
 from security.capability import (
     CONTAINED,
     UNAVAILABLE,
@@ -72,7 +112,7 @@ def detect_shell() -> str:
     if platform.system() == "Windows":
         for candidate in ("pwsh", "powershell"):
             try:
-                subprocess.run(
+                subprocess.run(  # nosec B603 - shell probe: argv is three literals plus a candidate from the tuple above
                     [candidate, "-NoProfile", "-Command", "exit 0"],
                     capture_output=True, timeout=5,
                 )
@@ -84,42 +124,1427 @@ def detect_shell() -> str:
 
 
 # ---------------------------------------------------------------------------
-# ---- Docker availability --------------------------------------------------
+# ---- Container runtime ----------------------------------------------------
 # ---------------------------------------------------------------------------
 
+DOCKER = "docker"
+PODMAN = "podman"
 
-@functools.lru_cache(maxsize=1)
+# The cgroup controllers the container argv's limits need: --cpus, --memory
+# and --pids-limit. A rootless runtime without all three delegated to the
+# user cannot bind those flags (ROADMAP_v3 §49, SS24).
+_LIMIT_CONTROLLERS = frozenset({"cpu", "memory", "pids"})
+
+# A key in Podman's `info` output that Docker's never carries -- measured
+# against podman 5.7.0 and Docker Desktop's CLI in batch 93. It is how a
+# `docker` command that is really Podman (the podman-docker shim) is
+# recognised without a second subprocess on the ordinary Docker path, so
+# that SS24's check cannot be skipped by the name alone.
+_PODMAN_INFO_MARKER = "buildahVersion"
+
+
+@dataclass(frozen=True)
+class RuntimeProbe:
+    """What the one probe per process found (SS22).
+
+    `name` is the CLI that runs the sandbox, or None. `reason` says why it
+    is None, for the unavailable message. `refused` marks the case worth a
+    WARNING: a runtime WAS there and was turned away because it cannot
+    enforce the limits, which a user can fix and would not otherwise learn.
+    """
+
+    name: Optional[str]
+    reason: str = ""
+    refused: bool = False
+
+
+_runtime_probe: Optional[RuntimeProbe] = None
+_runtime_lock = threading.Lock()
+
+
+def _run_info(argv: list[str]) -> Optional[subprocess.CompletedProcess]:
+    """One `info` call, or None when the CLI is missing or does not answer
+    within the probe's 10s."""
+    try:
+        return subprocess.run(argv, capture_output=True, text=True,  # nosec B603 - container-runtime `info` probe; callers build argv from the runtime name and literals
+                              timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def _why_podman_cannot_limit(cli: str) -> str:
+    """Why the Podman behind *cli* cannot enforce the sandbox's resource
+    limits, or "" when it can (SS24).
+
+    ROOTLESS is the only case that can fail. A rootful runtime owns the
+    cgroup tree and binds the flags on either cgroup version; a rootless one
+    needs cgroups v2 AND the three controllers delegated to the user, and on
+    cgroups v1 Podman accepts `--memory` with a warning and ignores it -- a
+    container with no pids limit is a fork bomb that reaches the host.
+
+    Fails CLOSED on anything unreadable. Not knowing whether the limits bind
+    is not a reason to assume they do.
+    """
+    result = _run_info([cli, "info", "--format", "{{json .}}"])
+    if result is None or result.returncode != 0:
+        return (f"`{cli} info` would not report its cgroup setup, so whether "
+                f"it can enforce the sandbox's limits is unknown")
+    try:
+        host = json.loads(result.stdout)["host"]
+        rootless = bool(host["security"]["rootless"])
+        version = host.get("cgroupVersion")
+        controllers = set(host.get("cgroupControllers") or ())
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return (f"`{cli} info` could not be read, so whether it can enforce "
+                f"the sandbox's limits is unknown")
+    if not rootless:
+        return ""
+    if version != "v2":
+        return (f"rootless Podman on cgroups {version or 'of unknown version'} "
+                f"cannot enforce the sandbox's memory, CPU and process "
+                f"limits; move the host to cgroups v2")
+    missing = sorted(_LIMIT_CONTROLLERS - controllers)
+    if missing:
+        return (f"rootless Podman has no delegated {', '.join(missing)} "
+                f"cgroup controller, so the sandbox's limits would not "
+                f"bind; delegate cpu, memory and pids to your user")
+    return ""
+
+
+def _probe_container_runtime() -> RuntimeProbe:
+    """Docker first, then Podman (SS22). Uncached -- `_probe()` memoises it.
+
+    Docker wins whenever it answers, which is the only behaviour anyone had
+    before Podman was supported. Podman is asked only when Docker is not
+    installed or its daemon does not answer, and is used only if it can
+    enforce the limits (SS24).
+    """
+    docker = _run_info([DOCKER, "info"])
+    if docker is not None and docker.returncode == 0:
+        if (isinstance(docker.stdout, str)
+                and _PODMAN_INFO_MARKER in docker.stdout):
+            why = _why_podman_cannot_limit(DOCKER)
+            if why:
+                return RuntimeProbe(None, f"`docker` is Podman here, and "
+                                          f"{why}", refused=True)
+        return RuntimeProbe(DOCKER)
+
+    docker_why = ("Docker is not installed or did not answer"
+                  if docker is None else "Docker's daemon did not answer")
+    podman = _run_info([PODMAN, "info"])
+    if podman is None:
+        return RuntimeProbe(None, f"{docker_why}, and Podman is not "
+                                  f"installed or did not answer")
+    if podman.returncode != 0:
+        return RuntimeProbe(None, f"{docker_why}, and Podman did not answer "
+                                  f"(is its machine running?)")
+    why = _why_podman_cannot_limit(PODMAN)
+    if why:
+        return RuntimeProbe(None, f"{docker_why}, and {why}", refused=True)
+    return RuntimeProbe(PODMAN)
+
+
+def _probe() -> RuntimeProbe:
+    """The probe, run at most once per process.
+
+    Memoised for the process, and worth it -- but NOT for the reason this
+    module used to give (audit #21). §18's headless callability filter
+    never reaches here: `schemas()` and `headless_hidden()` call
+    `_advertised()` first, which asks `is_tool_allowed`, and `shell` ships
+    permission `False` (measured by making the probe raise on entry: a full
+    `schemas(callable_only=True)` build reached it zero times). What the memo
+    is for is `shell.run()` and `_shell_approval_check`, on the path a user
+    takes after enabling `shell`: whether a runtime can run the sandbox does
+    not change meaningfully inside one process, a wrong answer costs a
+    restart, and each uncached probe costs up to 10s per CLI when a daemon
+    is unresponsive.
+
+    A lock rather than lru_cache, because two threads asking at once must
+    get ONE probe -- a parallel batch of subagents each calling `shell` --
+    and because the memo now carries the reason alongside the answer.
+    """
+    global _runtime_probe
+    with _runtime_lock:
+        if _runtime_probe is None:
+            _runtime_probe = _probe_container_runtime()
+            if _runtime_probe.refused:
+                logger.warning("No container runtime can run the sandbox: %s",
+                               _runtime_probe.reason)
+            elif _runtime_probe.name == PODMAN:
+                logger.info("Container runtime: podman (Docker cannot run "
+                            "the sandbox)")
+        return _runtime_probe
+
+
+def container_runtime() -> Optional[str]:
+    """The CLI that runs the sandbox -- "docker", "podman" -- or None."""
+    return _probe().name
+
+
+def known_runtime() -> str:
+    """The CLI a container route invokes, read WITHOUT probing.
+
+    Every production path reaches a container route through
+    `is_docker_available()`, which runs the probe, so by then this is the
+    real answer. A caller that hands `run_sandboxed` `docker_available=True`
+    without probing -- only tests do -- gets Docker's CLI, which is what
+    every argv test asserts. Probing here instead would run real `docker`
+    and `podman` subprocesses inside a test that patched the availability
+    answer, and GitHub's runners ship Podman, so the argv would change
+    under CI.
+    """
+    probe = _runtime_probe
+    return probe.name if probe is not None and probe.name else DOCKER
+
+
+def _known_unavailable_reason() -> str:
+    """Why no runtime can run the sandbox, if the probe has said; never
+    probes, for `known_runtime()`'s reason."""
+    probe = _runtime_probe
+    return probe.reason if probe is not None and probe.name is None else ""
+
+
+def _reset_runtime_probe() -> None:
+    """Forget the probe's answer. Tests only.
+
+    The memo above is SESSION-GLOBAL, so this is called from
+    `tests/conftest.py`'s `isolate_sandbox_probes` before every test and
+    not only by the two classes that test the detector (TECHNICAL_DEBT
+    27). Until batch 107 it was the latter alone, and the first test
+    anywhere to reach a live probe decided the answer for every test
+    after it -- on Windows as well as WSL, so whether the suite passed
+    depended on whether a daemon happened to be running.
+    """
+    global _runtime_probe
+    with _runtime_lock:
+        _runtime_probe = None
+
+
 def is_docker_available() -> bool:
-    """Probe whether the Docker daemon is reachable.
+    """Whether a container runtime can run the sandbox: Docker, or Podman
+    when Docker cannot (ROADMAP_v3 §49, SS22).
 
-    Cached for the process, and worth keeping cached -- but NOT for the
-    reason this docstring used to give (audit #21).
+    The name predates Podman and is kept, like `_run_docker`'s -- see the
+    module docstring. The probe behind it runs once per process.
+    """
+    return container_runtime() is not None
 
-    It said §18's headless callability filter reaches here via shell's
-    approval_check on every schema build, costing roughly two `docker
-    info` subprocesses per _run(). It cannot: `schemas()` and
-    `headless_hidden()` both call `_advertised()` FIRST, `_advertised`
-    calls `is_tool_allowed`, and `shell` is permission `False` -- so the
-    filter never reaches approval_needed for it. Measured by making this
-    probe raise on entry: a full `schemas(callable_only=True)` build
-    reached it ZERO times.
 
-    What the cache is actually for is `shell.run()` and
-    `_shell_approval_check`, which both call this on the path a user
-    takes after enabling `shell` in config.py. Docker's availability does
-    not change meaningfully inside one process; a wrong answer costs a
-    restart, and each uncached probe costs up to the 10s timeout when the
-    daemon is unresponsive. So the cache stays -- it matters the moment
-    the tool is enabled, which is the only moment anything here runs.
+# ---------------------------------------------------------------------------
+# ---- The WSL backend (ROADMAP_v3 §49, slice 3, SS35-SS45) ------------------
+# ---------------------------------------------------------------------------
+
+BACKEND_CONTAINER = "container"
+BACKEND_WSL = "wsl"
+BACKEND_SSH = "ssh"
+BACKENDS = (BACKEND_CONTAINER, BACKEND_WSL, BACKEND_SSH)
+
+WSL = "wsl.exe"
+
+# `wsl.exe -l -q` answers in UTF-16LE with CRLF line endings -- measured,
+# and the reason this constant exists rather than a bare `.decode()`. Read
+# as UTF-8 the output is a NUL-riddled string that splits into garbage and
+# matches no distro name, so the probe would report "no distro installed"
+# on a machine with three.
+_WSL_LIST_ENCODING = "utf-16-le"
+
+
+@dataclass(frozen=True)
+class WslProbe:
+    """What the one WSL probe per process found.
+
+    `distro` is the name every WSL argv will carry, or None. It is always a
+    NAME, never the empty string that means "whatever the default is":
+    resolving it once here is what lets a refusal say which distro it tried,
+    and what stops a default that changes mid-run from moving where a
+    command lands. `reason` says why it is None.
+    """
+
+    distro: Optional[str]
+    reason: str = ""
+
+
+_wsl_probe: Optional[WslProbe] = None
+_wsl_lock = threading.Lock()
+
+
+def _wsl_distros() -> Optional[list[str]]:
+    """Every installed distro's name, or None if WSL would not answer."""
+    try:
+        result = subprocess.run([WSL, "-l", "-q"], capture_output=True,  # nosec B603 - WSL distro list: a module constant and two literal flags
+                                timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        text = result.stdout.decode(_WSL_LIST_ENCODING)
+    except (UnicodeDecodeError, AttributeError):
+        return None
+    return [name.strip() for name in text.splitlines() if name.strip()]
+
+
+def _probe_wsl() -> WslProbe:
+    """Which distro the WSL backend runs in, or why it cannot. Uncached.
+
+    A NAME is always resolved, even when `wsl_distro` is empty and WSL's
+    own default would do, because a name is what the rest of this module
+    needs: `wsl.exe -d NoSuchDistro` exits 4294967295 and writes its
+    complaint to STDOUT in UTF-16 (measured), so an unvalidated name fails
+    in a way that reads as the command failing rather than the backend
+    being misconfigured.
+
+    The default is taken as the first name `-l -q` lists, which is the
+    order `wsl.exe` itself prints and the one `--status` names as the
+    default.
+    """
+    if platform.system() != "Windows":
+        return WslProbe(None, "WSL exists only on Windows")
+    names = _wsl_distros()
+    if names is None:
+        return WslProbe(None, "`wsl.exe -l -q` did not answer, so WSL is not "
+                              "installed or its service is not running")
+    if not names:
+        return WslProbe(None, "WSL is installed but no distribution is, so "
+                              "there is nothing to run a command in")
+    configured = (config.WSL_DISTRO or "").strip()
+    if not configured:
+        return WslProbe(names[0])
+    for name in names:
+        if name.lower() == configured.lower():
+            return WslProbe(name)
+    return WslProbe(None, f"wsl_distro is {configured!r} and no such "
+                          f"distribution is installed (found: "
+                          f"{', '.join(names)})")
+
+
+def _wsl() -> WslProbe:
+    """The WSL probe, run at most once per process and LAZILY.
+
+    Lazy is the point, not an optimisation: a user who never turns the
+    backend on must not pay `wsl.exe -l -q` at launch on a machine where
+    WSL's service has to start to answer it. The container probe is eager
+    because every shell call needs its answer; this one is reached only
+    from a call that asked for WSL.
+
+    A lock rather than lru_cache for `_probe()`'s reason: two subagents
+    calling at once must get one probe, and the memo carries the reason
+    beside the answer.
+    """
+    global _wsl_probe
+    with _wsl_lock:
+        if _wsl_probe is None:
+            _wsl_probe = _probe_wsl()
+            if _wsl_probe.distro is None:
+                logger.info("WSL backend unavailable: %s", _wsl_probe.reason)
+            else:
+                logger.info("WSL backend distribution: %s", _wsl_probe.distro)
+        return _wsl_probe
+
+
+def _reset_wsl_probe() -> None:
+    """Forget the WSL probe's answer and the workspace translation it
+    produced. Tests only -- and BOTH, because the translation names the
+    distro that resolved it.
+
+    Called from `tests/conftest.py`'s `isolate_sandbox_probes` before
+    every test (TECHNICAL_DEBT 27). That it owns the lru_cache as well as
+    the memo is exactly why the fixture calls this rather than assigning
+    `_wsl_probe` itself.
+    """
+    global _wsl_probe
+    with _wsl_lock:
+        _wsl_probe = None
+    _wsl_workspace_memo.cache_clear()
+
+
+def wsl_enabled() -> bool:
+    """Whether the USER has turned the WSL backend on (SS35).
+
+    Separate from `wsl_available()` and asked first everywhere, because the
+    two refusals say different things: one is "this machine does not allow
+    it" and the other is "this machine cannot do it", and a user who sees
+    the second when the first is true goes looking for a missing distro.
+    Read off the frozen posture, never `config` (UN1).
+    """
+    return posture.current().allow_wsl_backend
+
+
+def wsl_available() -> bool:
+    """Whether a WSL command could run: enabled AND a distro resolved."""
+    return wsl_enabled() and _wsl().distro is not None
+
+
+def wsl_distro() -> str:
+    """The distro a WSL argv names, read WITHOUT probing.
+
+    `known_runtime()`'s rule, for `known_runtime()`'s reason: a test that
+    patches availability must not make the argv builder start a real WSL
+    service, and the argv every test asserts is the one with the configured
+    name in it.
+    """
+    probe = _wsl_probe
+    if probe is not None and probe.distro:
+        return probe.distro
+    return (config.WSL_DISTRO or "").strip()
+
+
+def wsl_unavailable_reason() -> str:
+    """Why a WSL call cannot run, as a whole sentence for the model.
+
+    One copy, for the gate and the two run paths -- `containment_for` and
+    `_route` must not describe the same refusal differently (EP6).
+    """
+    if not wsl_enabled():
+        return ("The WSL backend is turned off. A command can only run in "
+                "WSL when allow_wsl_backend is true in config.yaml, which "
+                "ships false because WSL is not an isolation boundary: a "
+                "command there reaches this harness's own files and can "
+                "start Windows programs with the user's full authority.")
+    reason = _wsl().reason
+    return (f"The WSL backend is on, but no command can run: {reason}."
+            if reason else "")
+
+
+class _WslPathUnavailable(Exception):
+    """`wslpath` did not answer.
+
+    Private, and raised for one mechanical reason rather than to be
+    handled: it is what keeps a FAILURE out of
+    `_wsl_workspace_memo`'s cache. See that function (batch 142,
+    batch 142).
+    """
+
+
+@functools.lru_cache(maxsize=8)
+def _wsl_workspace_memo(workspace_dir: str) -> str:
+    """The live `wslpath` translation, memoised -- SUCCESSES ONLY.
+
+    THE FAILURE IS NOT CACHED, and that is why this is a separate
+    function instead of a branch. `functools.lru_cache` stores a
+    RETURN VALUE and never an exception, so raising makes "only a
+    success is remembered" a property of the cache rather than a rule
+    the body has to keep. Returning "" from inside the cached
+    function instead cached the REFUSAL for the life of the process.
+
+    Measured (batch 142) with `wslpath` set to fail once and
+    then succeed: calls 2 and 3 answered '' from the cache after a
+    single `wsl.exe` invocation, so the backend stayed down until the
+    user restarted -- and the refusal the model read named a cause
+    (a UNC path, an unmounted drive) that was not what happened.
+
+    CACHED AT ALL, because otherwise every WSL command pays a second
+    `wsl.exe` round trip for an answer that cannot change: a
+    workspace is bound once per process, and the mount that makes it
+    visible is a property of the machine. A `wslpath` that exited
+    non-zero or missed its 10s deadline is NOT a property of the
+    machine -- the two likeliest causes are the distro's service
+    still starting (the state `_probe_wsl`'s own reason text
+    anticipates) and a loaded machine missing a deadline, and both
+    change by themselves. That is the whole difference in lifetime:
+    the round trip worth saving is the one on the happy path, which
+    is the one that repeats.
+
+    The key is *workspace_dir* alone while the answer also depends on
+    `wsl_distro()`. Left as a note rather than a key change: the
+    distro cannot change inside one process, and `_reset_wsl_probe`
+    clears this cache and the distro memo together.
     """
     try:
-        result = subprocess.run(
-            ["docker", "info"],
-            capture_output=True, timeout=10,
-        )
-        return result.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+        result = subprocess.run(  # nosec B603 - wslpath translation; the distro name came from WSL itself and the path from config
+            [WSL, "-d", wsl_distro(), "-e", "wslpath", "-a", "-u",
+             workspace_dir],
+            capture_output=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise _WslPathUnavailable(
+            "wslpath did not run: %s" % type(exc).__name__) from None
+    if result.returncode != 0:
+        raise _WslPathUnavailable(
+            "wslpath exited %d" % result.returncode)
+    translated = result.stdout.decode("utf-8", "replace").strip()
+    if not translated:
+        raise _WslPathUnavailable("wslpath printed nothing")
+    return translated
+
+
+def _wsl_workspace(workspace_dir: str) -> str:
+    """*workspace_dir* as the distro sees it, or "" when it cannot see it.
+
+    `wsl.exe --cd` takes a Windows path and translates it -- and when it
+    CANNOT, it does not fail. Measured: `--cd \\\\127.0.0.1\\C$` exits 0,
+    warns on stderr, and runs the command in the user's Linux HOME. A
+    command that was approved against one working directory then runs in
+    another and reports success, which is the drift EP6 is about, arriving
+    through a flag rather than through a branch.
+
+    So the translation is done HERE, by `wslpath`, whose failure is an exit
+    code, and the POSIX path is what `--cd` is given -- measured working,
+    `--cd /tmp` runs in /tmp. An empty answer means the route refuses.
+
+    The caching, and why a failure is not cached, are in
+    `_wsl_workspace_memo`. This wrapper is the "" half of the
+    contract above: every caller refuses on an empty string, and
+    none of them should have to know that the absence arrives as an
+    exception so that the cache cannot keep it.
+    """
+    try:
+        return _wsl_workspace_memo(workspace_dir)
+    except _WslPathUnavailable as exc:
+        logger.debug("wslpath could not translate %r: %s",
+                     workspace_dir, exc)
+        return ""
+
+
+def _wsl_argv(
+    command: str,
+    workspace_posix: str,
+    *,
+    argv_mode: bool,
+    session_timeout_s: Optional[int] = None,
+    as_root: bool = False,
+) -> list[str]:
+    """The argv that runs *command* in the distro (SS43).
+
+    `_docker_argv`'s opposite number, and deliberately the same shape: a
+    prefix that says WHERE, then either the inert argv or a shell with the
+    command as one argument.
+
+    ARGV MODE IS NOT AN OPTIMISATION (SS39, SS43). An INERT command runs as
+    a bare argv with no shell because SS39 -- the classifier learns nothing
+    about WSL path forms -- rests on it. `_SHELL_METACHARACTERS` rejects
+    `~` and `$`, so those cannot reach an inert command; but `execve` also
+    does not expand them, and a shell between the classifier and the
+    executor would be a third tokeniser in the gap #157 came through twice.
+
+    `--norc --noprofile` for the other route, so what runs does not depend
+    on a user's `.bashrc` -- the container's property, kept. Measured: the
+    shell reports NOT_LOGIN, zero aliases and no BASH_ENV.
+
+    *workspace_posix* is already translated by `_wsl_workspace`; see there
+    for why `--cd` is never handed a Windows path.
+
+    *as_root* (slice 5b) puts `sudo` outermost and forces the SHELL form.
+    Both halves are decisions:
+
+    SS69 -- sudo wraps the shell, so the WHOLE command line runs as root,
+    pipes and redirects included. Prefixing only the first word gives the
+    classic half-root surprise (`sudo echo x > /etc/f` writes as the user)
+    and would make the approval notice a lie about what was approved.
+
+    ARGV MODE IS DROPPED HERE, and that does not weaken what it protects.
+    Argv mode exists so an AUTO-APPROVED inert command has no shell between
+    the classifier and the executor (SS39/SS43). A root command is never
+    auto-approved -- SS65/SS67 put an always-ask step above both opt-ins --
+    so the property has no work to do, and the guard below needs a shell.
+    """
+    args = [WSL, "--cd", workspace_posix, "-d", wsl_distro(), "-e"]
+    if as_root:
+        inner = ["bash", "--norc", "--noprofile", "-c",
+                 _SUDO_STDIN_GUARD + command]
+    else:
+        inner = (_inert_argv(command) if argv_mode
+                 else ["bash", "--norc", "--noprofile", "-c", command])
+    if session_timeout_s is not None:
+        # The container route's backstop, unchanged in purpose: the harness
+        # kills at the timeout and owns the `timed_out` answer, and this is
+        # for a harness that is no longer there to kill anything. Measured
+        # in the distro: `timeout -k 5 3` over a `sleep 60` exited 124 after
+        # 3.2s.
+        inner = ["timeout", "-k", str(_KILL_GRACE_S),
+                 str(session_timeout_s)] + inner
+    if as_root:
+        # OUTERMOST, so `timeout` runs as root and can kill a root child.
+        # Measured both ways: rc 124 at 3s with no process left behind
+        # either way, and this order is the one that does not depend on
+        # sudo forwarding a signal it has no obligation to forward.
+        inner = _sudo_argv() + inner
+    return args + inner
+
+
+# ---------------------------------------------------------------------------
+# ---- The SSH backend (ROADMAP_v3 §49, slice 4, SS46-SS55) ------------------
+# ---------------------------------------------------------------------------
+
+# The OS's own OpenSSH, preferred over whatever `PATH` resolves -- SS38's
+# GnuWin32 `cat` on a third route. Measured on the machine this was built
+# on: `shutil.which("ssh")` answers a git-for-Windows MSYS2 build, not this
+# one, and the two are NOT interchangeable. They agree on every happy path
+# (argv, exit codes, streams) and disagree on FAILURES, which is the half a
+# refusal is built out of: a refused connection is `ssh: connect to host
+# ... Connection refused` from the MSYS2 build and `banner exchange:
+# Connection to UNKNOWN port -1: Connection refused` from this one.
+_SSH_SYSTEM_BINARY = os.path.join(
+    os.environ.get("SYSTEMROOT", r"C:\Windows"),
+    "System32", "OpenSSH", "ssh.exe")
+
+# SS52. A remote `cd` that fails must not read as the command failing, so
+# it exits with a code of our choosing and says so on stderr. Both, not
+# either: 125 alone collides with `timeout`'s own vocabulary (124 timed
+# out, 125 timeout itself failed, 126/127 exec problems), and a marker
+# alone could be printed by a command. Measured together over a missing
+# directory and an unreadable one -- rc 125 and the marker, both times.
+_SSH_NO_WORKSPACE_CODE = 125
+_SSH_NO_WORKSPACE_MARKER = "VEN_SSH_NO_WORKSPACE"
+
+# Measured: a refused connection answers in 2.1 s and an unroutable host in
+# whatever ConnectTimeout says. Kept short because a wrong host should cost
+# the user a moment, not a minute.
+_SSH_CONNECT_TIMEOUT_S = 10
+# A dead network must end a session rather than hang it. There is no
+# harness-side read deadline on a session's stream, so this is the only
+# thing that ends one whose remote stopped answering.
+_SSH_ALIVE_INTERVAL_S = 15
+_SSH_ALIVE_COUNT_MAX = 3
+# What the identity question is allowed to cost at startup (SS50).
+_SSH_PROBE_TIMEOUT_S = 20
+
+# SS50. A remote that is not POSIX would be given `bash --norc --noprofile
+# -c` and a `cd --` guard, and neither means anything on, say, a Windows
+# OpenSSH server whose shell is cmd.exe. The check is what the remote SAYS
+# it is, and a remote that will not say is refused rather than guessed at.
+_SSH_POSIX_SYSTEMS = ("linux", "darwin", "freebsd", "openbsd", "netbsd",
+                      "dragonfly", "sunos", "aix")
+
+
+@dataclass(frozen=True)
+class SshProbe:
+    """What the one SSH probe per process found.
+
+    `target` is the `user@host` every SSH argv will carry, or None when no
+    command can run. `reason` says why it is None -- composed HERE rather
+    than quoted from `ssh`, because `ssh`'s own text is either generic or
+    absent: an encrypted key with no agent, an unknown user and no key at
+    all all say `Permission denied (publickey)`, and a refused connection
+    said nothing at all until `LogLevel=ERROR` was removed. SS36 reached
+    the same conclusion about `wsl.exe` exiting 4294967295 in silence.
+
+    `remote` is what the far end answered about itself, kept so the
+    approval notice and the result can DISCLOSE where a command ran
+    instead of implying it (SS50).
+    """
+
+    target: Optional[str]
+    binary: str = ""
+    version: str = ""
+    remote: str = ""
+    known_hosts: str = ""
+    reason: str = ""
+
+
+_ssh_probe: Optional[SshProbe] = None
+_ssh_lock = threading.Lock()
+_ssh_known_hosts_path: Optional[str] = None
+
+
+def ssh_enabled() -> bool:
+    """Whether the USER has turned the SSH backend on (SS46).
+
+    Separate from `ssh_available()` and asked first everywhere, for
+    `wsl_enabled()`'s reason: "this machine does not allow it" and "this
+    machine cannot do it" are different sentences, and a user shown the
+    second when the first is true goes looking for a broken network.
+    Read off the frozen posture, never `config` (UN1).
+    """
+    return posture.current().allow_ssh_backend
+
+
+def _ssh_binary() -> str:
+    """The `ssh` this harness runs, resolved explicitly and never from PATH.
+
+    A configured value wins. Otherwise the OS's own copy, and only if that
+    is absent does `PATH` get a say -- which is also what makes this work
+    on a POSIX host, where `/usr/bin/ssh` is what `shutil.which` finds.
+    """
+    configured = (config.SSH_BINARY or "").strip()
+    if configured:
+        return configured
+    if os.path.exists(_SSH_SYSTEM_BINARY):
+        return _SSH_SYSTEM_BINARY
+    return shutil.which("ssh") or ""
+
+
+def _write_known_hosts(host_key: str) -> str:
+    """Materialise the pinned host key into a file `ssh` will accept (SS49).
+
+    A file of our own, never `~/.ssh/known_hosts`: the harness's trust set
+    is exactly what the user pinned in config, and neither this process nor
+    anything else edits the user's. `ssh-keyscan`'s output carries a `#`
+    banner comment above the key, so a user who pastes the whole thing gets
+    the same result as one who pastes the key line.
+    """
+    global _ssh_known_hosts_path
+    lines = [ln.strip() for ln in host_key.splitlines()]
+    lines = [ln for ln in lines if ln and not ln.startswith("#")]
+    handle, path = tempfile.mkstemp(prefix="venastine_known_hosts_")
+    with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write("\n".join(lines) + "\n")
+    _ssh_known_hosts_path = path
+    # REMOVED ON EXIT (batch 117). One file per process, not per call --
+    # `_ssh_known_hosts()` reuses the path once it is set -- so this never
+    # grew unbounded, but every SSH-using run left a
+    # `venastine_known_hosts_*` behind in TMPDIR. The only unlink was in
+    # `_reset_ssh_probe`, which has no production caller: conftest and
+    # test_ssh_backend are the only two files that reach it.
+    #
+    # The key itself is public, so this is hygiene rather than exposure.
+    # Registered per path and ignoring every error: a cleanup that raises
+    # during interpreter shutdown turns a tidy-up into a traceback on exit.
+    atexit.register(_remove_known_hosts, path)
+    return path
+
+
+def _remove_known_hosts(path: str) -> None:
+    """Best-effort unlink of one known_hosts file, for `atexit`.
+
+    Swallows everything: the file may already be gone (`_reset_ssh_probe`
+    in tests), the directory may be read-only, and nothing a process can
+    learn at shutdown is worth a traceback on the way out.
+    """
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+def _ssh_config_reason() -> str:
+    """The first thing missing from the configured host, or "".
+
+    Answered before any IO, so a machine with nothing configured pays
+    nothing for the answer, and each sentence says what to put where.
+    """
+    if not (config.SSH_HOST or "").strip():
+        return ("no host is configured. Set `ssh_host` (and `ssh_user`) in "
+                "config.yaml")
+    if not (config.SSH_USER or "").strip():
+        return ("no remote user is configured. Set `ssh_user` in config.yaml")
+    if not (config.SSH_REMOTE_WORKSPACE or "").strip():
+        # SS52. Not a default, deliberately: a backend that silently picks
+        # the remote login home would run approved work somewhere nobody
+        # named, and on a machine this process cannot look at.
+        return ("no remote working directory is configured. Set "
+                "`ssh_remote_workspace` in config.yaml to an absolute path "
+                "on the remote host -- it is not defaulted, because a "
+                "command that runs somewhere nobody named is the failure "
+                "this backend is most able to cause")
+    if not (config.SSH_HOST_KEY or "").strip():
+        host = (config.SSH_HOST or "").strip()
+        port = str(config.SSH_PORT or 22).strip()
+        return ("no host key is pinned. Run `ssh-keyscan -p " + port + " "
+                + host + "` and put its output in `ssh_host_key` in "
+                "config.yaml. It is pinned rather than trusted on first "
+                "use so that a host key that CHANGES is refused instead of "
+                "quietly accepted")
+    if not _ssh_binary():
+        return ("no `ssh` program was found. Set `ssh_binary` in "
+                "config.yaml to its full path")
+    return ""
+
+
+def _probe_ssh() -> SshProbe:
+    """Ask the configured host what it is, once (SS50).
+
+    Config first and IO second, so the common case -- nothing configured --
+    costs no round trip. The identity command runs WITHOUT the `cd` guard:
+    a missing remote workspace is a per-command refusal with its own words
+    (SS52), and folding it in here would report "the host is unreachable"
+    for a directory typo.
+    """
+    reason = _ssh_config_reason()
+    if reason:
+        return SshProbe(None, reason=reason)
+
+    binary = _ssh_binary()
+    user = (config.SSH_USER or "").strip()
+    host = (config.SSH_HOST or "").strip()
+    target = f"{user}@{host}"
+    try:
+        known = _write_known_hosts(config.SSH_HOST_KEY or "")
+    except OSError as exc:
+        return SshProbe(None, binary=binary,
+                        reason=f"the pinned host key could not be written "
+                               f"to a temporary file ({exc})")
+
+    version = ""
+    try:
+        shown = subprocess.run([binary, "-V"], capture_output=True,  # nosec B603 - `ssh -V`; the binary was resolved by this probe
+                               timeout=_SSH_PROBE_TIMEOUT_S)
+        version = (shown.stderr or shown.stdout).decode(
+            "utf-8", "replace").strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return SshProbe(None, binary=binary,
+                        reason=f"`{binary}` could not be run")
+
+    identity = "uname -s; command -v bash; command -v timeout"
+    argv = _ssh_connection_argv(binary, target, known) + [identity]
+    try:
+        result = subprocess.run(argv, capture_output=True,  # nosec B603 - ssh identity probe; the remote command is the literal assembled two lines up
+                                stdin=subprocess.DEVNULL,
+                                timeout=_SSH_PROBE_TIMEOUT_S,
+                                env=_ssh_env())
+    except subprocess.TimeoutExpired:
+        return SshProbe(None, binary=binary, version=version, known_hosts=known,
+                        reason=f"{target} did not answer within "
+                               f"{_SSH_PROBE_TIMEOUT_S}s")
+    except OSError as exc:
+        return SshProbe(None, binary=binary, version=version, known_hosts=known,
+                        reason=f"`{binary}` could not be run ({exc})")
+
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", "replace").strip()
+        detail = " ".join(detail.split())[:300]
+        return SshProbe(
+            None, binary=binary, version=version, known_hosts=known,
+            reason=_ssh_connect_failure_reason(target, detail))
+
+    answered = [ln.strip() for ln
+                in result.stdout.decode("utf-8", "replace").splitlines()
+                if ln.strip()]
+    system = answered[0].lower() if answered else ""
+    if not any(system.startswith(name) for name in _SSH_POSIX_SYSTEMS):
+        return SshProbe(
+            None, binary=binary, version=version, known_hosts=known,
+            reason=f"{target} answered `uname -s` with "
+                   f"{answered[0] if answered else '(nothing)'!r}, which "
+                   f"this backend does not support. Every command it sends "
+                   f"is a POSIX shell line -- `bash --norc --noprofile -c` "
+                   f"inside a `cd --` guard -- and none of that means "
+                   f"anything on a remote whose shell is not POSIX. A "
+                   f"Windows OpenSSH server is the known case, and it is "
+                   f"recorded as unmeasured rather than assumed to work")
+    missing = [need for need in ("bash", "timeout")
+               if not any(need in line for line in answered[1:])]
+    if missing:
+        return SshProbe(
+            None, binary=binary, version=version, known_hosts=known,
+            reason=f"{target} is missing {' and '.join(missing)}, which "
+                   f"this backend needs on the remote: `bash` runs the "
+                   f"command without the remote user's dotfiles, and "
+                   f"`timeout` is the only thing that bounds a session "
+                   f"after this harness has stopped watching it")
+
+    return SshProbe(target, binary=binary, version=version,
+                    known_hosts=known, remote=" ".join(answered))
+
+
+def _ssh_connect_failure_reason(target: str, detail: str) -> str:
+    """One sentence for a connection that did not happen, composed here.
+
+    `ssh`'s own text is the wrong thing to hand a model: measured, every
+    authentication failure -- an encrypted key with no agent, an unknown
+    user, no key offered at all -- says exactly `Permission denied
+    (publickey)`, so quoting it would tell the model the same thing about
+    three different fixes. The detail is kept AFTER the interpretation
+    rather than instead of it.
+    """
+    lowered = detail.lower()
+    if "permission denied" in lowered:
+        return (f"{target} refused the key. The backend only ever offers a "
+                f"key (SS47): check `ssh_identity_file`, and if the key is "
+                f"encrypted, load it into an agent with `ssh-add` first -- "
+                f"this harness never asks for a passphrase and never holds "
+                f"one, so an encrypted key with no agent cannot connect. "
+                f"ssh said: {detail}")
+    if "host key verification failed" in lowered or "known_hosts" in lowered:
+        return (f"{target} presented a host key that is not the one pinned "
+                f"in `ssh_host_key`. This is refused rather than accepted: "
+                f"either the host was rebuilt and the pin needs updating, "
+                f"or the connection is not reaching the host you think. "
+                f"ssh said: {detail}")
+    if "connection refused" in lowered:
+        return (f"nothing is listening for SSH at {target}. Check "
+                f"`ssh_host` and `ssh_port`. ssh said: {detail}")
+    if "timed out" in lowered or "timeout" in lowered:
+        return (f"{target} did not answer within {_SSH_CONNECT_TIMEOUT_S}s. "
+                f"ssh said: {detail}")
+    return f"{target} could not be reached. ssh said: {detail or '(nothing)'}"
+
+
+def _ssh() -> SshProbe:
+    """The memoised answer, probed at most once per process.
+
+    LAZY, like the WSL probe and for the same reason: a user with the flag
+    off must not pay a network round trip at launch for a backend they
+    never asked for. Every caller reaches it through `ssh_available()`,
+    which asks `ssh_enabled()` first.
+    """
+    global _ssh_probe
+    if _ssh_probe is None:
+        with _ssh_lock:
+            if _ssh_probe is None:
+                _ssh_probe = _probe_ssh()
+    return _ssh_probe
+
+
+def _reset_ssh_probe() -> None:
+    """Forget the SSH probe's answer and remove the known_hosts it wrote.
+    Tests only -- and both, because the file names the key that resolved.
+
+    Called from `tests/conftest.py`'s `isolate_sandbox_probes` before
+    every test (TECHNICAL_DEBT 27). Like `_reset_wsl_probe`, it owns more
+    than the memo, which is why the fixture goes through it.
+    """
+    global _ssh_probe, _ssh_known_hosts_path
+    with _ssh_lock:
+        _ssh_probe = None
+        if _ssh_known_hosts_path:
+            try:
+                os.unlink(_ssh_known_hosts_path)
+            except OSError:
+                pass
+            _ssh_known_hosts_path = None
+
+
+def ssh_available() -> bool:
+    """Whether an SSH command could run: enabled AND a host answered AND
+    the stored credentials have not already been refused."""
+    if _ssh_auth_rejected:
         return False
+    return ssh_enabled() and _ssh().target is not None
+
+
+def ssh_target() -> str:
+    """The `user@host` an SSH argv names, read WITHOUT probing.
+
+    `wsl_distro()`'s rule, for `wsl_distro()`'s reason: a test that patches
+    availability must not make the argv builder open a real connection, and
+    the argv every test asserts is the one built from the configured names.
+    """
+    probe = _ssh_probe
+    if probe is not None and probe.target:
+        return probe.target
+    user = (config.SSH_USER or "").strip()
+    host = (config.SSH_HOST or "").strip()
+    return f"{user}@{host}" if (user and host) else host
+
+
+def ssh_unavailable_reason() -> str:
+    """Why an SSH call cannot run, as a whole sentence for the model.
+
+    One copy, for the gate and the two run paths -- `containment_for` and
+    `_route` must not describe the same refusal differently (EP6).
+    """
+    if not ssh_enabled():
+        return ("The SSH backend is turned off. A command can only run on "
+                "a remote host when allow_ssh_backend is true in "
+                "config.yaml, which ships false because a remote host is "
+                "not a sandbox: it is a machine this harness cannot "
+                "inspect, with no isolation, no resource limits, and "
+                "credentials it did not issue.")
+    if _ssh_auth_rejected:
+        return ("The SSH backend is on, but no command can run: "
+                f"{_ssh_auth_rejected}.")
+    reason = _ssh().reason
+    return (f"The SSH backend is on, but no command can run: {reason}."
+            if reason else "")
+
+
+#: SS60/SS63. Set when a connection that USED stored credentials was
+#: refused by the server, and never cleared by another attempt. A wrong
+#: stored password is not a reason to lock the whole store -- that would
+#: cost the master passphrase over one typo and buy nothing, since an
+#: attacker is not involved -- but it IS a reason to stop REPLAYING it:
+#: measured, one refused call makes TWO authentication attempts (the
+#: keyboard-interactive method and the password method each get their own
+#: prompt budget), so a harness that retried on every command would walk a
+#: real account into a lockout at four attempts a call.
+_ssh_auth_rejected = ""
+
+
+def _ssh_secret_name(suffix: str) -> str:
+    """Where this host's secrets live (SS58).
+
+    The NAME says which machine it unlocks, and it is built from the
+    configured host rather than from the target, so changing `ssh_user`
+    does not silently orphan the entry the user typed.
+    """
+    return "ssh.%s.%s" % ((config.SSH_HOST or "").strip(), suffix)
+
+
+def _ssh_stored_secrets() -> dict:
+    """`{askpass logical name -> Secret}` for the configured host.
+
+    Empty means "nothing is stored, or the store is locked", and empty is
+    what keeps slice 4's behaviour EXACTLY as it shipped: `_ssh_connection_argv`
+    reads this and, with nothing here, builds the argv it always built,
+    option for option. A user on key-and-agent auth is not moved by this
+    batch at all.
+
+    Reads through `secrets` rather than holding anything: this module never
+    stores a plaintext, and the `Secret`s handed out live only for the
+    length of one `askpass.serving` block.
+    """
+    if _ssh_auth_rejected:
+        return {}
+    if not (config.SSH_HOST or "").strip():
+        return {}
+    found = {}
+    try:
+        for logical, suffix in ((askpass.KEY_PASSPHRASE, "key_passphrase"),
+                                (askpass.LOGIN, "login")):
+            secret = secrets.get(_ssh_secret_name(suffix))
+            if secret is not None:
+                found[logical] = secret
+    except secrets.StoreLocked:
+        # THE one place "the store is not open" is answered, and it is the
+        # handler rather than an `is_unlocked()` check above it. Both were
+        # written; the mutation pass showed the check could be deleted
+        # without breaking anything, because this already answers.
+        #
+        # The handler is the half that survives a RACE, which is why it is
+        # the one kept: the store can lock BETWEEN a check and a read --
+        # the askpass listener refuses on its own thread, and a file that
+        # changed on disk locks inside `secrets.get` itself -- and no
+        # check above can cover that gap. Nothing stored is the safe
+        # reading, and it is also the true one.
+        return {}
+    return found
+
+
+def _note_ssh_auth_failure(stderr: str, used_secrets: bool) -> None:
+    """Quarantine the stored credentials when the server refused them."""
+    global _ssh_auth_rejected
+    if not used_secrets or _ssh_auth_rejected:
+        return
+    if "Permission denied" not in stderr:
+        return
+    _ssh_auth_rejected = (
+        "the stored credentials for this host were refused by the server. "
+        "They will not be tried again this run, so a wrong value cannot "
+        "walk the account into a lockout. Fix them with `/secrets set "
+        "%s` (or `%s`) and restart"
+        % (_ssh_secret_name("login"), _ssh_secret_name("key_passphrase")))
+    logger.warning("ssh: stored credentials refused; quarantined for this run")
+
+
+def _reset_ssh_auth_quarantine() -> None:
+    """Tests only."""
+    global _ssh_auth_rejected
+    _ssh_auth_rejected = ""
+
+
+def _ssh_env() -> dict:
+    """The environment the local `ssh` PROCESS gets.
+
+    `_scrubbed_env()` plus exactly one name, and the distinction is the
+    point: `_SAFE_ENV_KEYS` says what a sandboxed COMMAND may see, and this
+    says what the CLIENT needs to function. Measured, nothing from here
+    crosses to the remote anyway -- an SSH session's environment is twelve
+    variables and every one is the server's -- so widening the shared
+    allowlist for this would have loosened three other routes to fix one.
+
+    WHY `PROGRAMDATA`, and why this was found by running rather than by
+    reading: with `_scrubbed_env()` alone, Windows OpenSSH exits 255 and
+    writes NOTHING to stderr. That is SS36's shape exactly -- a failure
+    with no reason attached -- and it would have been diagnosed as an
+    unreachable host. Bisected over twelve candidate variables (USERNAME,
+    APPDATA, LOCALAPPDATA, SYSTEMDRIVE, PATHEXT and the rest), this is the
+    only one that changes the answer FOR THIS ROUTE; it resolves
+    `%PROGRAMDATA%\\ssh`, which the client reads even under `-F none`.
+
+    PATHEXT is named in that bisection and is now in `_SAFE_ENV_KEYS`
+    anyway, which does not weaken the conclusion above: it was added for the
+    FALLBACK shell, where its absence made `powershell` not wait for an
+    external program, and it still changes nothing about `ssh`. Two routes,
+    two measurements, one variable that happens to appear in both.
+    """
+    env = _scrubbed_env()
+    for name in ("PROGRAMDATA", "ProgramData"):
+        value = os.environ.get(name)
+        if value:
+            env["PROGRAMDATA"] = value
+            break
+    return env
+
+
+def _ssh_auth_options() -> list[str]:
+    """The authentication options, and THE ONE PLACE that mode is decided.
+
+    Read through `_ssh_connection_argv` by the probe and by `_ssh_argv`
+    alike, so the connection the probe measured is the connection a command
+    gets -- EP6's rule on the half of this route that can now differ.
+
+    WITH NOTHING STORED THIS IS SLICE 4, OPTION FOR OPTION AND IN ORDER.
+    `BatchMode=yes` and publickey-only: an encrypted key with no agent
+    fails in 0.12 s instead of hanging for as long as anyone waits (SS47).
+    A user on key-and-agent auth is not moved by slice 5 at all, and a test
+    pins this list against the literal slice 4 shipped.
+
+    With something stored, `BatchMode` must come OFF -- it suppresses
+    askpass too, so it and a stored secret are mutually exclusive -- and
+    the anti-hang property moves to `SSH_ASKPASS_REQUIRE=force`, which
+    `security/askpass.py` sets and which sends every prompt to a helper
+    that answers immediately (SS63). Measured: `BatchMode=no` with no
+    askpass hung for 20 s on the Windows build; with forced askpass the
+    same call returned in 0.8 s.
+
+    `NumberOfPasswordPrompts=1` bounds the RETRIES within one method. It
+    does NOT bound the number of prompts -- measured, a wrong password
+    still produces two asks, because keyboard-interactive and password are
+    separate methods with separate budgets. That is why the listener
+    bounds its serves rather than serving exactly one, and why a refused
+    call is quarantined rather than retried.
+
+    The preference list is measured too: a server offering both serves
+    `keyboard-interactive`, so naming only `password` would fail against an
+    ordinary sshd while reading as a credential problem.
+    """
+    if _ssh_stored_secrets():
+        return [
+            "-o", "BatchMode=no",
+            "-o", "NumberOfPasswordPrompts=1",
+            "-o", ("PreferredAuthentications="
+                   "publickey,keyboard-interactive,password"),
+        ]
+    return [
+        # SS47, and the measurement that justifies the key-only default:
+        # WITHOUT this, an encrypted key with no agent HANGS -- 20 s and
+        # still waiting, because ssh is trying to prompt for a passphrase
+        # on a terminal this process does not own.
+        "-o", "BatchMode=yes",
+        "-o", "PreferredAuthentications=publickey",
+    ]
+
+
+def _ssh_connection_argv(binary: str, target: str, known: str) -> list[str]:
+    """Everything that says WHERE and WHO, with no command on the end.
+
+    Shared by the probe and `_ssh_argv` so the connection the probe
+    measured is the connection a command gets -- one of the two halves
+    EP6's rule is about, on a route where the probe is the only thing that
+    ever proved the host reachable.
+    """
+    auth = _ssh_auth_options()
+    argv = [
+        binary,
+        # NO DOTFILES, the same property `bash --norc --noprofile` gives on
+        # the far end (SS51). `ssh` otherwise reads a per-user config whose
+        # location this harness CANNOT redirect -- measured: Windows
+        # OpenSSH resolves the user's profile from the login token, so
+        # setting HOME and USERPROFILE does not move it, and a probe that
+        # tried to test the file's influence by redirecting HOME was
+        # measuring nothing. That file can carry `ProxyCommand`,
+        # `LocalCommand` and `SendEnv`, so without this flag what runs is
+        # not what this argv says.
+        "-F", "none",
+        *auth,
+        # SS49. The pin is the whole host-key policy: an unknown key and a
+        # CHANGED key both refuse, and neither can be answered by a prompt
+        # that a headless run has nobody to show.
+        "-o", "StrictHostKeyChecking=yes",
+        "-o", f"UserKnownHostsFile={known}",
+        "-o", f"ConnectTimeout={_SSH_CONNECT_TIMEOUT_S}",
+        "-o", f"ServerAliveInterval={_SSH_ALIVE_INTERVAL_S}",
+        "-o", f"ServerAliveCountMax={_SSH_ALIVE_COUNT_MAX}",
+    ]
+    identity = (config.SSH_IDENTITY_FILE or "").strip()
+    if identity:
+        argv += ["-i", identity]
+        # Only meaningful WITH an identity: it restricts ssh to the keys
+        # this argv named. Omitted when none is configured, because there
+        # it would rule out the agent, which SS47 explicitly allows as the
+        # other way to authenticate without this harness holding a secret.
+        argv += ["-o", "IdentitiesOnly=yes"]
+    argv += ["-p", str(config.SSH_PORT or 22), target]
+    return argv
+
+
+def _ssh_remote_script(command: str, workspace: str,
+                       session_timeout_s: Optional[int] = None,
+                       as_root: bool = False) -> str:
+    """The ONE string the remote login shell parses (SS51).
+
+    `ssh` has no `execve` path: it joins its trailing argv with spaces and
+    the remote LOGIN SHELL re-parses the result. So EP5's "argv, no shell"
+    property -- which `_docker_argv` and `_wsl_argv` both keep -- cannot
+    exist here, and pretending otherwise would put a third tokeniser in the
+    gap #157 came through twice. What is possible is exactly one quoting
+    boundary, owned by `shlex.quote`, and that is measured rather than
+    argued: ten adversarial tokens (embedded quotes, backslashes, a
+    trailing backslash, `$(id)`, backticks, a newline, glob characters)
+    round-trip BYTE-IDENTICALLY through `list2cmdline` -> ssh -> the login
+    shell -> `bash -c`.
+
+    It is also the second reason nothing here is auto-approved (SS48): the
+    tier that the other routes may run unasked is the one defined by having
+    no shell between the classifier and the executor, and this route cannot
+    offer that.
+
+    *as_root* (slice 5b) splices `sudo` in front of the runner, INSIDE the
+    one quoting boundary and BEHIND the `cd --` guard -- so a remote
+    workspace that is not there still refuses with 125 and the marker
+    before anything is elevated, and the guard's own failure is still the
+    unprivileged user's. Measured against a real sshd: rc 125 and the
+    marker, with sudo in the script.
+    """
+    runner = ["bash", "--norc", "--noprofile", "-c",
+              _SUDO_STDIN_GUARD + command if as_root else command]
+    if session_timeout_s is not None:
+        # The container and WSL backstop, on a route that needs it MORE.
+        # Measured: killing the local `ssh` does NOT kill the remote
+        # command -- a `sleep 400` survived its client by design, because
+        # without a pty there is no hangup to deliver. This is what bounds
+        # a session whose harness has gone away, and it works with no
+        # client alive (rc 124).
+        runner = ["timeout", "-k", str(_KILL_GRACE_S),
+                  str(session_timeout_s)] + runner
+    if as_root:
+        runner = _sudo_argv() + runner
+    quoted = " ".join(shlex.quote(part) for part in runner)
+    return (
+        "cd -- %s || { printf '%%s\\n' %s >&2; exit %d; }; exec %s"
+        % (shlex.quote(workspace), shlex.quote(_SSH_NO_WORKSPACE_MARKER),
+           _SSH_NO_WORKSPACE_CODE, quoted)
+    )
+
+
+def _ssh_known_hosts() -> str:
+    """The file `StrictHostKeyChecking` is checked against (SS49).
+
+    SELF-SUFFICIENT, and that is a fix rather than a nicety: this used to
+    read the probe's path and fall back to "", which built
+    `UserKnownHostsFile=` with no value -- an argv `ssh` rejects outright
+    with `no argument after keyword`, reported as "the host could not be
+    reached". In production the probe always ran first, so the broken argv
+    was unreachable by luck rather than by construction, and every mocked
+    test handed the builder a path and so asserted the assumption. A LIVE
+    test found it. An argv builder that is correct only when someone else
+    ran first is the coupling EP6 is about.
+    """
+    probe = _ssh_probe
+    if probe is not None and probe.known_hosts:
+        return probe.known_hosts
+    if _ssh_known_hosts_path:
+        return _ssh_known_hosts_path
+    pinned = (config.SSH_HOST_KEY or "").strip()
+    if not pinned:
+        return ""
+    try:
+        return _write_known_hosts(pinned)
+    except OSError:
+        return ""
+
+
+def _ssh_argv(command: str, *,
+              session_timeout_s: Optional[int] = None,
+              as_root: bool = False) -> list[str]:
+    """The argv that runs *command* on the configured host.
+
+    `_wsl_argv`'s opposite number. There is no `argv_mode` parameter and
+    that absence is the decision: see `_ssh_remote_script`.
+    """
+    probe = _ssh_probe
+    known = _ssh_known_hosts()
+    workspace = (config.SSH_REMOTE_WORKSPACE or "").strip()
+    binary = (probe.binary if probe is not None and probe.binary
+              else _ssh_binary())
+    return _ssh_connection_argv(binary, ssh_target(), known) + [
+        _ssh_remote_script(command, workspace, session_timeout_s, as_root)]
+
+
+# ---------------------------------------------------------------------------
+# ---- Root commands (ROADMAP_v3 §49, slice 5b, SS65-SS72) -------------------
+# ---------------------------------------------------------------------------
+
+# An ABSOLUTE path, not a PATH lookup: `sudo` is the one binary on these
+# routes whose identity decides whether the password this harness holds
+# goes to the real thing. Measured present at this path on the distro
+# (a symlink to /etc/alternatives/sudo) and on the remote. A host without
+# it is refused by name rather than served by whatever `PATH` answers.
+_SUDO_BINARY = "/usr/bin/sudo"
+
+# `-k` invalidates any cached ticket, so ONE approval buys exactly ONE
+# authentication and a ticket warmed by an approved command cannot quietly
+# authorise a later one. That is the whole of what it does here, and the
+# correction matters: it does NOT stop the password line reaching the
+# command -- see _SUDO_STDIN_GUARD, where that was measured.
+#
+# `-S` reads the password from stdin. `-p ""` empties the prompt, measured
+# to leave a bare "\n" on stderr with sudo-rs and nothing at all with
+# classic sudo. `--` ends option parsing so a command starting with a dash
+# is a command.
+_SUDO_FLAGS = ("-k", "-S", "-p", "", "--")
+
+# THE GUARD, and the measurement that produced it (SS72).
+#
+# `sudo -S` reads stdin only when it actually has to authenticate. When it
+# does not -- a NOPASSWD rule, or a cached ticket on an implementation that
+# honours one -- it reads NOTHING, and the password this harness wrote is
+# then sitting in the pipe as THE COMMAND'S OWN STANDARD INPUT, where a
+# `cat`, a `tee` or an interactive installer reads it.
+#
+# Measured on both implementations, with `-k` and without it:
+#   sudo-rs 0.2.13 (Ubuntu) NOPASSWD -> the command received the password
+#   Sudo 1.9.17p2 (classic) NOPASSWD -> the command received the password
+# So `-k` is not the control; this is. The inner shell closes its own stdin
+# before the command runs, which costs nothing real: every one of these
+# routes gives a command DEVNULL today, so this preserves the contract
+# rather than changing it.
+_SUDO_STDIN_GUARD = "exec 0</dev/null; "
+
+# Per-backend, for the run. A refused password is not retried (SS71).
+_sudo_rejected: dict = {}
+
+
+def _sudo_argv() -> list:
+    """`sudo` and its flags. One copy, two argv builders."""
+    return [_SUDO_BINARY, *_SUDO_FLAGS]
+
+
+def _sudo_secret_name(backend: str) -> str:
+    """Which entry holds the password for this target (SS58).
+
+    The NAME says which machine it unlocks. Built from the configured
+    distro or host rather than from anything the model sent, so a call
+    cannot name someone else's secret.
+    """
+    if backend == BACKEND_WSL:
+        return "wsl.%s.sudo" % (wsl_distro() or "")
+    if backend == BACKEND_SSH:
+        return "ssh.%s.sudo" % ((config.SSH_HOST or "").strip())
+    return ""
+
+
+def _sudo_secret(backend: str):
+    """The stored password, or None when there is not one to be had.
+
+    None covers all three of "no entry", "the store is locked" and
+    "quarantined this run", because every one of them means the same thing
+    to a caller: this harness has no password to offer. `sudo_refusal` is
+    what tells them apart for a HUMAN.
+
+    The `StoreLocked` handler rather than an `is_unlocked()` check above
+    it, for `_ssh_stored_secrets`' recorded reason: the store can lock
+    BETWEEN a check and a read, and no check can cover that gap.
+    """
+    name = _sudo_secret_name(backend)
+    if not name or _sudo_rejected.get(backend):
+        return None
+    try:
+        return secrets.get(name)
+    except secrets.StoreLocked:
+        return None
+
+
+def sudo_refusal(backend: str):
+    """Why a root command cannot run on *backend*, or None (SS66/SS68).
+
+    ONE copy, for the same reason `uncontained_refusal` is one: the gate
+    reads it to answer "there is nothing to approve", and `run_sandboxed`
+    and `start_sandboxed` read it to stop the call. Three sites deciding
+    this separately is the drift #157 came from.
+
+    THE CONTAINER IS REFUSED BECAUSE IT IS ALREADY ROOT -- measured, the
+    pinned image runs as uid 0 and ships no `sudo` at all, so offering it
+    would be a control that does nothing and a prompt about a privilege
+    the command already has.
+
+    THE HOST FALLBACK IS REFUSED AND RECORDED rather than assumed: on
+    Windows the host shell is PowerShell and `sudo.exe` elevates through a
+    UAC consent dialog that cannot take a password on stdin at all. That is
+    a different mechanism and a separate measurement, and guessing at it is
+    how a control gets shipped that does not work.
+
+    NO STORED SECRET IS A REFUSAL, not a prompt (SS68). The store's
+    contents are the opt-in for root, which is why there is no
+    `allow_root_commands` key: a second switch over one decision is the
+    ratchet G3 removed.
+    """
+    if backend == BACKEND_WSL or backend == BACKEND_SSH:
+        quarantined = _sudo_rejected.get(backend)
+        if quarantined:
+            return quarantined
+        if _sudo_secret(backend) is None:
+            name = _sudo_secret_name(backend)
+            return (
+                f"This command asked to run as root, and no sudo password "
+                f"is stored for this target. Nothing is asked and nothing "
+                f"runs, because the stored secret is what turns root on at "
+                f"all. Store it with `/secrets set {name}` (or "
+                f"`--secrets set {name}` outside the app) and run the "
+                f"command again. The store must also be unlocked -- "
+                f"`/secrets status` says whether it is.")
+        return None
+    if backend == BACKEND_CONTAINER:
+        return (
+            "This command asked to run as root, and the container is "
+            "refused for that -- not because it is dangerous there but "
+            "because a command in the container ALREADY runs as root, and "
+            "the image ships no `sudo` at all. Drop `needs_root` and the "
+            "same command has the privileges it was asking for. Root on "
+            "the user's own machine is `backend: \"wsl\"`, and on the "
+            "remote `backend: \"ssh\"`.")
+    return (
+        "This command asked to run as root on a backend that cannot "
+        "offer it. Root runs on WSL and over SSH only.")
+
+
+def _note_sudo_auth_failure(stderr: str, backend: str,
+                            used_secret: bool) -> None:
+    """Quarantine a refused sudo password for the run (SS71).
+
+    `_note_ssh_auth_failure`'s shape and its reason. `passwd_tries`
+    defaults to three, and a model that retries a wrong password walks a
+    real account towards `pam_faillock` on the distributions that have it
+    in the auth stack. The harness stops offering the value and says which
+    entry to fix.
+
+    IT DOES NOT LOCK THE STORE. One wrong password must not cost the
+    master passphrase, which is the trade SS63 already made for SSH.
+    """
+    if not used_secret or _sudo_rejected.get(backend):
+        return
+    if "uthentication fail" not in stderr and "incorrect password" not in stderr:
+        return
+    name = _sudo_secret_name(backend)
+    _sudo_rejected[backend] = (
+        f"The stored sudo password for this target was refused. It will "
+        f"not be tried again this run, so a wrong value cannot walk the "
+        f"account towards a lockout. Fix it with `/secrets set {name}` "
+        f"and restart.")
+    logger.warning("sudo: stored password refused on %s; quarantined for "
+                   "this run", backend)
+
+
+def _reset_sudo_quarantine() -> None:
+    """Tests only."""
+    _sudo_rejected.clear()
+
+
+def _sudo_password_line(secret, binary: bool = False):
+    """The one line written to a root command's stdin.
+
+    ONE function for both shapes -- a session's streams are binary and a
+    one-shot's are text -- so the two cannot disagree about the encoding or
+    about the trailing newline, which `sudo -S` needs in order to end the
+    line at all. `reveal()` is the single named accessor SS62 leaves open,
+    which is what makes `grep -rn 'reveal()'` the audit.
+    """
+    line = secret.reveal() + b"\n"
+    return line if binary else line.decode("utf-8")
+
+
+def _feed_sudo_password(proc, secret) -> None:
+    """Hand a SESSION its password and close the pipe behind it.
+
+    A background session's stdin exists for this one line and nothing else,
+    so it is closed immediately: the command behind `sudo` is left with a
+    closed stdin, which is what every other route already gives it, and
+    what `_SUDO_STDIN_GUARD` enforces from the far side as well.
+    """
+    try:
+        proc.stdin.write(_sudo_password_line(secret, binary=True))
+        proc.stdin.flush()
+    except OSError as exc:
+        # Never the password, and never a raise: sudo then reads nothing
+        # and refuses, which the caller sees as the command's own failure
+        # with sudo's message on stderr.
+        logger.warning("sudo: could not write the password to the session: "
+                       "%s", exc.__class__.__name__)
+    finally:
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -156,17 +1581,118 @@ def is_docker_available() -> bool:
 # three are now all rejected. So for any command that reaches the inert
 # path, `command.split()` and `shlex.split(command)` are provably the
 # same list -- a closure, not a patch, and pinned as one by
-# `test_the_two_tokenisers_cannot_disagree`.
+# `TestTheTwoTokenisersCannotDisagree` in tests/test_shell.py.
+#
+# Until batch 108 this cited the same words in lower snake case, as
+# though the pin were a function -- a name that has never existed, while
+# the real one is the CLASS, cited correctly by `_within` 140 lines below.
+# It is the failure `protected_paths.user_config_dir` already recorded
+# about itself: a reader who greps the name finds nothing and concludes
+# the closure is unguarded. The dead spelling is described rather than
+# written out here, because `test_docs_consistency.py` now fails on a
+# cited test name that resolves to nothing, and a correction note is not
+# a reason to make the guard start its life with an exception.
 _SHELL_METACHARACTERS = re.compile(r"""[;|&$`><(){}!#~'"\\]""")
 
 # Dangerous flags for commands that remain in INERT_COMMANDS.
+#
+# BATCH 117 MADE THIS TABLE TRUE, because it was not. The claim beside
+# `writes=False` in `classify_command` is that this table "guards the
+# entries that have a writing mode", and three things were wrong with that:
+#
+#   * `diff` was the ONLY key that is actually in INERT_COMMANDS, and its
+#     value was an empty frozenset -- `if dangerous:` is falsy for one, so
+#     the consumer skipped it. `find` and `sort` are not on the inert list.
+#     The whole table therefore guarded nothing, while reading as though it
+#     guarded three commands.
+#   * `tree -o FILE` and `date -s TIME` are inert and write. Added below.
+#   * `uniq IN OUT` writes through a POSITIONAL argument, which a table of
+#     FLAGS structurally cannot express. It was dropped from
+#     `config.INERT_COMMANDS` instead -- see the note there. Teaching this
+#     table about positional arguments would make it the shell parser
+#     `_escapes_workspace` explains it must never become (G2).
+#
+# `find` and `sort` stay as written: they are defence-in-depth for a future
+# re-addition, which is what the entries were always for, and keeping them
+# costs a dict lookup that already happens.
+#
+# WHAT THIS IS NOT. `_escapes_workspace` reads every token after the first
+# as a path, so a write aimed OUTSIDE the workspace is refused there
+# regardless of this table -- measured: `uniq in.txt /etc/passwd` is caught.
+# What the table decides is whether an in-workspace write is reported as
+# `writes=False`, and the workspace is writable by design. So this is about
+# the profile telling the truth, not about an escape.
 # Even though find/sort were removed, this denylist provides
 # defense-in-depth for any future additions.
 _DANGEROUS_FLAGS: dict[str, frozenset[str]] = {
     "find": frozenset({"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf"}),
     "sort": frozenset({"-o", "--output"}),
-    "diff": frozenset(),  # diff is read-only, no dangerous flags
+    # Inert AND able to write, which is the combination that matters:
+    "tree": frozenset({"-o"}),
+    "date": frozenset({"-s", "--set"}),
 }
+# `diff` had an entry of its own here (an empty frozenset) until batch 117.
+# It needs no guard -- diff has no writing mode -- and an empty set reads
+# as coverage while providing none, which is exactly how the table came to
+# look populated while doing nothing.
+
+
+def _names_dangerous_flag(token: str, dangerous: frozenset) -> bool:
+    """True when *token* is one of *dangerous*, in any spelling the
+    tabled tool's own parser accepts (batch 142).
+
+    Batch 117 made the table true for the spellings it enumerated.
+    The residual was that the PARSER accepts a small language and the
+    table listed three points in it. GNU `date` and `tree` both parse
+    with `getopt_long`, where a short option with a required argument
+    takes it ATTACHED and an unambiguous long-option prefix resolves,
+    so these all reached `tier=INERT, writes=False` and ran with no
+    prompt while the space-separated spelling asked:
+
+        date -s2024-01-01    tree -oout.txt
+        date --s 2024-01-01  date --se=2024-01-01
+
+    THE DIRECTION IS DELIBERATE. A false positive costs a PROMPT and
+    a false negative costs the prompt the tier requires, so this errs
+    toward asking -- which is also why it stays this side of parsing.
+    It reads a token's shape; it does not learn what a flag MEANS,
+    and G2 is why (teaching the classifier which positions are
+    outputs is what got `uniq` removed rather than tabled).
+
+    Four rules, in the order a parser would apply them:
+
+      1. the whole token, and its head before the first `=` (117).
+      2. a long option ABBREVIATED: `--s` and `--se` are prefixes of
+         `--set` and resolve to it. Any prefix counts, not only an
+         unambiguous one -- deciding ambiguity needs the tool's whole
+         option list, which is the parsing this must not do.
+      3. a short option with its argument ATTACHED: `-oFILE`, where
+         the token's first letter is the flag and the rest is the
+         value. Recognised by the token carrying a non-letter.
+      4. a BUNDLE of short options, `-ao`: purely alphabetic after
+         the dash, so any dangerous letter in it is a flag rather
+         than part of a value. `tree -Pfoo` is flagged by this rule
+         and that is the accepted cost of rule 3's limit: a prompt.
+    """
+    head = token.split("=", 1)[0]
+    if token in dangerous or head in dangerous:
+        return True
+    if head.startswith("--"):
+        # Rule 2. `len(head) > 2` keeps a bare `--` (the end-of-options
+        # marker) from matching every long flag in the set.
+        return len(head) > 2 and any(
+            flag.startswith(head)
+            for flag in dangerous if flag.startswith("--"))
+    if not head.startswith("-") or len(head) < 2:
+        return False
+    shorts = {flag[1] for flag in dangerous
+              if len(flag) == 2 and not flag.startswith("--")}
+    if not shorts:
+        return False
+    letters = head[1:]
+    if letters.isalpha():
+        return bool(shorts.intersection(letters))  # rule 4
+    return letters[0] in shorts                     # rule 3
 
 
 def _is_inert(command: str) -> bool:
@@ -203,9 +1729,16 @@ def _is_inert(command: str) -> bool:
     # Check for dangerous flags on specific commands
     dangerous = _DANGEROUS_FLAGS.get(first_word)
     if dangerous:
-        tokens = stripped.split()
-        if any(t in dangerous for t in tokens):
-            return False
+        # THE SPELLING FAMILY, NOT A LIST OF SPELLINGS. Batch 117 added
+        # the `=` head because `sort --output=/tmp/x` is one token equal
+        # to neither "-o" nor "--output"; batch 142 added the
+        # other two shapes the same parsers accept, an attached short
+        # argument and an abbreviated long option. The rules and the
+        # reason the direction errs toward asking are in
+        # `_names_dangerous_flag`.
+        for token in stripped.split():
+            if _names_dangerous_flag(token, dangerous):
+                return False
     return True
 
 
@@ -251,8 +1784,30 @@ def _needs_network(command: str, first_word_only: bool) -> bool:
     if first_word_only:
         tokens = tokens[:1]
     allowed = set(config.NETWORK_ALLOWED_COMMANDS)
-    # Strip path components for matching (e.g. /usr/bin/pip → pip)
-    return any(os.path.basename(token) in allowed for token in tokens)
+    return any(_network_name(token) in allowed for token in tokens)
+
+
+def _network_name(token: str) -> str:
+    """A token reduced to the name NETWORK_ALLOWED_COMMANDS is written in.
+
+    Strips the path (`/usr/bin/pip` -> `pip`), then lowercases and drops a
+    `.exe`, because the list is fourteen lowercase bare names and Windows
+    spells several of them otherwise. Batch 117: `curl.exe` matched nothing,
+    so the same program got network on one platform and `--network none` on
+    the other.
+
+    THE OLD BEHAVIOUR FAILED CLOSED, which is why this was a usability
+    defect and not a hole: an unmatched command runs without egress. But it
+    is not harmless either. `network` has two consumers, and
+    `not profile.network` is a CONDITION FOR SKIPPING APPROVAL in
+    `tools/builtin/shell.py` -- so `curl.exe` was both denied the network it
+    needed and eligible for a shortcut that `curl` is not. Matching it makes
+    one program one answer.
+    """
+    name = os.path.basename(token).lower()
+    if name.endswith(".exe"):
+        name = name[:-len(".exe")]
+    return name
 
 
 # ---------------------------------------------------------------------------
@@ -296,13 +1851,61 @@ def _within(root: str, token: str) -> bool:
     generative corpus in TestTheTwoTokenisersCannotDisagree, which is what
     a generative corpus is for -- no enumerated list of spellings anyone
     would write was going to contain `\\;`.
+
+    SS45 extends that same sentence from a path this cannot resolve to a
+    LINK this platform cannot follow, which the text of a token can never
+    reveal. See `_unfollowable_link`.
     """
     try:
         root = os.path.realpath(root)
         resolved = os.path.realpath(os.path.join(root, token))
     except (OSError, ValueError):
         return False
-    return resolved == root or resolved.startswith(root + os.sep)
+    if not (resolved == root or resolved.startswith(root + os.sep)):
+        return False
+    return not _unfollowable_link(root, resolved)
+
+
+def _unfollowable_link(root: str, resolved: str) -> bool:
+    """Whether a component of *resolved* below *root* is a link THIS
+    platform cannot follow but another one can (ROADMAP_v3 §49, SS45).
+
+    The hole, measured in batch 101. A symlink created inside the workspace
+    from WSL is stored on an NTFS drive as an LX reparse point
+    (`0xa000001d`), and Windows does not understand it: `os.path.exists` is
+    False, `os.path.islink` is False, and `os.path.realpath` returns the
+    path UNCHANGED rather than following it or raising. So `_within`
+    answered True for a name that reads `/etc/passwd` in the distro --
+    `cat escape` classified INERT, was AUTO-APPROVED, and returned the
+    host's real password file. No amount of analysis of the token's TEXT
+    can see that, because the token is `escape`.
+
+    The rule is the platform's own admission rather than a list of tags:
+    a component that `lexists` and does not `exist` is one whose lstat
+    succeeded and whose stat did not, which for a path means exactly a link
+    that could not be followed. It is deliberately NOT "is a reparse
+    point", because a OneDrive placeholder is a reparse point whose path
+    means precisely what it says, and blocking those would make every
+    INERT command in a synced workspace ask.
+
+    Cheap where it matters: only components BELOW the root are walked, and
+    only after the resolved path has already been found to be inside it, so
+    a token heading somewhere else has returned before this is called.
+
+    On POSIX the case this closes cannot arise -- `realpath` follows a
+    symlink there, so a link out of the workspace has already resolved out
+    of it -- and what remains is a dangling link, where answering "ask"
+    costs a prompt on a command that was going to fail anyway.
+    """
+    rest = resolved[len(root):].strip("\\/")
+    if not rest:
+        return False
+    path = root
+    for part in re.split(r"[\\/]", rest):
+        path = os.path.join(path, part)
+        if os.path.lexists(path) and not os.path.exists(path):
+            return True
+    return False
 
 
 def _escapes_workspace(command: str, workspace_dir: str) -> bool:
@@ -326,12 +1929,32 @@ def _escapes_workspace(command: str, workspace_dir: str) -> bool:
     with it. Refusing to parse is only sound while nothing downstream
     parses either.
 
-    The `=` clause is the one place a token needs splitting: `--file=/etc/x`
-    is inside the workspace read whole (there is no such file, but the
-    join stays under the root) while the path it actually names is not.
-    Splitting on the first `=` and checking the tail costs nothing and
-    closes it. Everything else -- absolute paths, `..` escapes, drive
-    letters, UNC paths -- is caught by reading the token as it stands.
+    TWO PLACES A TOKEN NEEDS SPLITTING, and they are the same place
+    twice -- a path carried inside a flag token rather than beside it.
+
+      `--file=/etc/x` is inside the workspace read whole (there is no
+      such file, but the join stays under the root) while the path it
+      actually names is not. Splitting on the first `=` closes it.
+
+      `-f/etc/x` is the identical shape in the spelling `getopt` calls
+      an attached argument, and it was open until batch 142. MEASURED
+      (batch 142): `tree -o /etc/passwd` escaped and `tree -o/etc/passwd`
+      did not, because a token that does not START with `/` reads as
+      relative and lands under the root. `grep -f FILE` and
+      `file -f FILE` are INERT commands whose short option takes a
+      file, so that was an auto-approved read of a host file -- and
+      `file -f` echoes each unopenable line back, which is the
+      content. So anything after a leading `-x` is checked too.
+
+    THIS IS STILL NOT PARSING. Neither clause asks what a flag MEANS
+    or which one takes an argument; both read a token's shape and hand
+    the tail to the same `_within`. A token like `-la` or `-n5` offers
+    `a` and `5`, which are relative and land inside the workspace --
+    passing for the reason the whole function passes flags, not because
+    anything recognised them.
+
+    Everything else -- absolute paths, `..` escapes, drive letters, UNC
+    paths -- is caught by reading the token as it stands.
 
     False positives are the designed error direction: `grep /etc/passwd
     notes.txt` searches for a STRING that looks like a path, and it will
@@ -341,12 +1964,93 @@ def _escapes_workspace(command: str, workspace_dir: str) -> bool:
     for token in command.split()[1:]:
         if not _within(workspace_dir, token):
             return True
-        if "=" in token and not _within(workspace_dir, token.split("=", 1)[1]):
+        if "=" in token and not _within(workspace_dir,
+                                        token.split("=", 1)[1]):
+            return True
+        if (token.startswith("-") and len(token) > 2
+                and not _within(workspace_dir, token[2:])):
             return True
     return False
 
 
-def classify_command(command: str, workspace_dir: str) -> CommandProfile:
+def declared_network(params) -> bool:
+    """Whether a tool call DECLARED that it needs the network (§50, NW1).
+
+    THE coercion, and the reason it is a function rather than a `.get()`
+    at each site. The gate runs before Pydantic validates -- `params` is
+    the model's tool-call input verbatim -- so this value can be a string,
+    a number, or absent. If the gate and the runner coerced it
+    differently, one would ask about a networked command and the other
+    would run a non-networked one, which is #157's shape exactly, in the
+    module written to close it.
+
+    Only literal `True` is true, because the flag can only ADD egress
+    (NW2): a lenient coercion would let `"false"` or `0` grant network
+    that nobody asked about. A model that sends `"true"` is refused by
+    `StrictBool` at run time with an error naming the field, and nothing
+    executes -- so the two paths never disagree about what ran.
+    """
+    return isinstance(params, dict) and params.get("requires_network") is True
+
+
+def declared_backend(params) -> str:
+    """Which backend a tool call ASKED for (ROADMAP_v3 §49, SS35).
+
+    `declared_network`'s sibling, and a function for the same reason: the
+    gate reads the model's tool-call input BEFORE Pydantic has seen it, so
+    this value can be any JSON at all, and a gate and a runner that coerced
+    it differently would ask about a contained command and run an
+    uncontained one -- #157's shape, in the module written to close it.
+
+    ONLY an exact string selects a backend other than the container --
+    `"wsl"` or `"ssh"`. Everything else -- a misspelling, a list, `True`,
+    absent -- is the container, which is the safe direction: the failure
+    mode of a lenient reading is a command running outside the sandbox
+    because the model typed `"WSL "`, and the failure mode of a strict one
+    is a refusal the model can see and fix.
+    `Literal["container", "wsl", "ssh"]` on the param model then refuses
+    anything else at run time, so nothing executes on a disagreement.
+
+    Membership in a tuple would read better and is deliberately NOT used:
+    the container has to remain the answer for every unrecognised value,
+    and `value if value in BACKENDS else BACKEND_CONTAINER` says that in a
+    way that a later edit widening BACKENDS would silently change.
+    """
+    if not isinstance(params, dict):
+        return BACKEND_CONTAINER
+    asked = params.get("backend")
+    if asked == BACKEND_WSL:
+        return BACKEND_WSL
+    if asked == BACKEND_SSH:
+        return BACKEND_SSH
+    return BACKEND_CONTAINER
+
+
+def declared_root(params) -> bool:
+    """Whether a tool call DECLARED that it needs root (ROADMAP_v3 §49,
+    slice 5b, SS67).
+
+    `declared_network`'s sibling, coerced here for its reason exactly: the
+    gate reads the model's tool-call input BEFORE Pydantic has seen it, so
+    this value can be any JSON at all, and a gate and a runner that coerced
+    it differently would ask about an unprivileged command and run a
+    privileged one -- #157's shape, in the module written to close it.
+
+    Only literal `True`, like `declared_network` and for the same reason in
+    the same direction: a model that sends `"true"` is refused by
+    `StrictBool` at run time with an error naming the field, and NOTHING
+    EXECUTES -- so the two paths never disagree about what ran. A lenient
+    coercion would be the one that could run `sudo` off a string.
+
+    It is NOT the whole root question. `_shell_approval_check` ORs this
+    with a literal `sudo` token in the command text, because a model that
+    simply types `sudo` never sets the flag -- see SS67.
+    """
+    return isinstance(params, dict) and params.get("needs_root") is True
+
+
+def classify_command(command: str, workspace_dir: str,
+                     requires_network: bool = False) -> CommandProfile:
     """Measure *command* into a capability set (ROADMAP_v2 §28, G1).
 
     One classification, two consumers: `_shell_approval_check` reads it to
@@ -354,6 +2058,14 @@ def classify_command(command: str, workspace_dir: str) -> CommandProfile:
     decide how to run it. Before §28 those two asked `_is_inert`
     separately and never compared answers, which is how a command could be
     auto-approved as harmless and then executed on the host (#157).
+
+    *requires_network* is the agent's declaration (§50, NW1), already
+    coerced by `declared_network`. It is OR'd into the network fact and
+    can only ADD egress (NW2) -- a model cannot clear it on `curl` to
+    dodge a prompt, and the single fact keeps its two consumers reading
+    the same value. Nothing new gates it (NW3): a true `network` makes
+    the tier `SANDBOXED_NET`, which `auto_approved` already refuses to
+    cover under `tiered` and `contained` alike.
     """
     # Totality is a REQUIREMENT here, not defensiveness. This runs inside
     # registry.approval_needed(), which is handed the model's tool-call
@@ -367,44 +2079,64 @@ def classify_command(command: str, workspace_dir: str) -> CommandProfile:
     #
     # UNKNOWN rather than a raise: the gate's job is to answer, and
     # `measured=False` already means nobody may skip the human.
+    #
+    # The declaration is OR'd in here too, on a profile the classifier
+    # could not characterise. NW2 says the flag can only ADD egress, with
+    # no exception -- and an exception here would be one more rule to
+    # remember for two profiles that always ask a human anyway.
+    declared = bool(requires_network)
     if not isinstance(command, str):
         return CommandProfile(
             tier=UNKNOWN, measured=False, escapes_workspace=True,
-            writes=True, network=False,
+            writes=True, runs_code=True, network=declared,
             reason=f"command is {type(command).__name__}, not a string")
 
     stripped = command.strip()
     if not stripped:
         return CommandProfile(
             tier=UNKNOWN, measured=False, escapes_workspace=True,
-            writes=True, network=False, reason="empty command")
+            writes=True, runs_code=True, network=declared,
+            reason="empty command")
 
     # Order matters, and only for Q2: `_needs_network` reads every command
     # position of a compound command and the FIRST WORD ONLY of an inert
     # one, and `_is_inert` is what tells those apart. One call, read twice
     # -- not two calls, which is the shape #157 came from.
     inert = _is_inert(stripped)
-    network = _needs_network(stripped, first_word_only=inert)
+    detected = _needs_network(stripped, first_word_only=inert)
+    network = detected or declared
+    # §50's gap register: the prompt should say egress was REQUESTED, not
+    # merely that the tier needs it -- so the reason distinguishes the two
+    # ways the fact became true. Only when the detector did NOT already
+    # recognise the command: when both are true there is one fact and one
+    # sentence, which is what that register's open question settled on.
+    asked_for = ", and the call declared it needs the network" \
+        if declared and not detected else ""
 
     if inert:
         # INERT_COMMANDS is a read-only list and _DANGEROUS_FLAGS guards
         # the entries that have a writing mode, so writes=False here is a
         # claim about the COMMAND. It says nothing about the arguments,
         # which is what the next line is for.
+        #
+        # runs_code=False is the same kind of claim (§48, CE7): nothing on
+        # the list executes its arguments or a file, and an inert command
+        # carries no metacharacters, so there is no second command position
+        # for code to arrive through.
         if _escapes_workspace(stripped, workspace_dir):
             return CommandProfile(
                 tier=HOST_READ, measured=True, escapes_workspace=True,
-                writes=False,
+                writes=False, runs_code=False,
                 network=network,
                 reason=(f"reads {stripped.split()[0]!r} with an argument "
                         f"outside the workspace, which no container "
-                        f"can see"))
+                        f"can see" + asked_for))
         return CommandProfile(
             tier=INERT, measured=True, escapes_workspace=False,
-            writes=False,
+            writes=False, runs_code=False,
             network=network,
             reason=(f"read-only {stripped.split()[0]!r}, every argument "
-                    f"inside the workspace"))
+                    f"inside the workspace" + asked_for))
 
     tier = SANDBOXED_NET if network else SANDBOXED
     return CommandProfile(
@@ -415,13 +2147,22 @@ def classify_command(command: str, workspace_dir: str) -> CommandProfile:
         # rather than assumed True so the record says something real.
         escapes_workspace=_escapes_workspace(stripped, workspace_dir),
         writes=True,
+        # §48 (CE1). NOT a list of interpreters, and it must not become
+        # one: `python -c` is the obvious case, but `pytest` runs a
+        # conftest.py, `make` runs a Makefile, and `"python"`, `pyth?n`,
+        # `python3.13` and `echo x | python` are all the same call to a
+        # shell. Everything that is not INERT may run code, which is the
+        # only answer this classifier can give without parsing (G2).
+        runs_code=True,
         network=network,
-        reason=("needs network and a sandbox" if network
-                else "not a read-only command, so it needs a sandbox"))
+        reason=("can run code, and needs network and a sandbox" if detected
+                else "not a read-only command -- it can run code, so it "
+                     "runs in a sandbox" + asked_for))
 
 
 def containment_for(
     profile: CommandProfile, docker_available: bool,
+    backend: str = BACKEND_CONTAINER,
 ) -> str:
     """Which containment the backend that will actually run *profile*
     provides -- the second half of what the gate needs.
@@ -458,7 +2199,18 @@ def containment_for(
     put subprocess IO inside a predicate, and it would move the probe out
     from under the callers that pre-compute it for the TOCTOU thread --
     the same reason run_sandboxed takes it instead of asking.
+
+    *backend* is what the CALL asked for (SS35). WSL is UNCONTAINED for
+    every tier (SS1) and is answered FIRST, above HOST_READ and above the
+    runtime: a call that asked for WSL is never described by the
+    containment of a backend it did not ask for. When it cannot have WSL
+    the answer is UNAVAILABLE, never another backend's containment -- SS37,
+    and the same shape `_route` uses one function down.
     """
+    if backend == BACKEND_WSL:
+        return UNCONTAINED if wsl_available() else UNAVAILABLE
+    if backend == BACKEND_SSH:
+        return UNCONTAINED if ssh_available() else UNAVAILABLE
     if profile.tier == HOST_READ:
         return UNCONTAINED
     if docker_available:
@@ -477,7 +2229,28 @@ def containment_for(
 _SAFE_ENV_KEYS = frozenset({
     "PATH", "HOME", "USERPROFILE", "SYSTEMROOT", "TEMP", "TMP",
     "LANG", "LC_ALL", "TERM", "SHELL", "COMSPEC", "WINDIR",
+    "PATHEXT",
 })
+# WHY `PATHEXT`, and why this was found by running rather than by reading:
+# without it, `powershell -c "& 'prog' args"` STARTS the external program and
+# returns immediately instead of waiting for it. Measured on the fallback
+# route against a program that appends a line a second for five seconds and
+# exits non-zero: 0.37s, `return_code=0`, empty stdout, and ZERO lines
+# written by the time `run_sandboxed` returned -- with the work still running
+# six seconds later. With `PATHEXT` restored and nothing else changed: 5.26s,
+# the real exit code, the real output, all five lines done. So the model was
+# being told every build, install and test suite on this route had succeeded
+# and produced nothing, while it was only just starting; and because the
+# shell was gone before it, `SANDBOX_TIMEOUT_SECONDS` bounded nothing and a
+# session's `kill()` short-circuited on an already-exited shell.
+#
+# PATHEXT names extensions, not paths, so it leaks nothing this allowlist is
+# protecting -- and it is needed by the SHELL this harness chose, not by the
+# command. The other 64 names `_scrubbed_env()` drops were each restored one
+# at a time against the same program and none of them changes the answer, so
+# this is the one addition the measurement supports. PowerShell BUILTINS
+# (`Start-Sleep`, `Write-Output`) run in-process and are unaffected, which is
+# why a probe written with those alone sees nothing wrong.
 
 
 def _scrubbed_env() -> dict:
@@ -496,6 +2269,23 @@ def _scrubbed_env() -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _inert_argv(command: str) -> list[str]:
+    """The argv a host-side inert command executes -- one copy, for the
+    one-shot light path and for a background session on the host
+    (ROADMAP_v3 §49).
+
+    ONE copy because this tokenisation is load-bearing: `_is_inert` rejects
+    every character shlex consumes, which is what makes `command.split()`
+    and this list provably the same (Q1/Q5). Two copies of the rule would be
+    two tokenisers free to drift, and the gap between two of them is where
+    #157 arrived, twice.
+    """
+    try:
+        return shlex.split(command, posix=(platform.system() != "Windows"))
+    except ValueError:
+        return command.split()
+
+
 def _run_inert(
     command: str,
     workspace_dir: str,
@@ -507,10 +2297,7 @@ def _run_inert(
     _shell_binary is accepted for signature compatibility with the
     other backends but is not used (inert commands don't need a shell).
     """
-    try:
-        args = shlex.split(command, posix=(platform.system() != "Windows"))
-    except ValueError:
-        args = command.split()
+    args = _inert_argv(command)
 
     try:
         result = subprocess.run(
@@ -520,7 +2307,7 @@ def _run_inert(
             capture_output=True,
             text=True,
             timeout=config.SANDBOX_TIMEOUT_SECONDS,
-            shell=False,
+            shell=False,  # nosec B603 - EXECUTION ROUTE: carries the model's command by design. List form and no shell, so there is nothing to inject into; the bound is upstream -- mode gate G3, the INERT allowlist, the dangerous-flag check and the approval prompt -- not this call (ROUTE_INERT_HOST)
         )
     except subprocess.TimeoutExpired:
         return {
@@ -554,8 +2341,8 @@ def _run_inert(
 
 
 @functools.lru_cache(maxsize=8)
-def _resolved_image_id(image: str) -> str:
-    """The image ID `docker run` will actually use for *image*, or "".
+def _resolved_image_id(image: str, runtime: str = DOCKER) -> str:
+    """The image ID `<runtime> run` will actually use for *image*, or "".
 
     §46 (EP7). `SANDBOX_DOCKER_IMAGE` is a TAG, and a tag is not an
     identity: anything on the machine may `docker build -t
@@ -565,18 +2352,22 @@ def _resolved_image_id(image: str) -> str:
     command reported a filesystem nobody recognised -- it was not what
     happened that time, and it is still worth being able to see.
 
+    Two runtimes make the point twice (ROADMAP_v3 §49): Docker and
+    Podman keep separate image stores, and measured, the same tag pulled
+    by each a week apart resolved to two different IDs.
+
     LOGGED, NOT ENFORCED. Pinning by digest is a separate decision with
     a maintenance cost (somebody has to bump it), while a line in
     app.log naming the ID costs one cached subprocess per process and
     turns a silent substitution into a visible one.
 
-    Failure is not an error here: the image ID is diagnostic, and a
-    `docker image inspect` that fails must not stop a run that Docker
+    Failure is not an error here: the image ID is diagnostic, and an
+    `image inspect` that fails must not stop a run that the runtime
     itself is about to accept.
     """
     try:
-        result = subprocess.run(
-            ["docker", "image", "inspect", "--format", "{{.Id}}", image],
+        result = subprocess.run(  # nosec B603 - `image inspect`; runtime and image both come from config, list form
+            [runtime, "image", "inspect", "--format", "{{.Id}}", image],
             capture_output=True, text=True, timeout=10,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
@@ -584,21 +2375,23 @@ def _resolved_image_id(image: str) -> str:
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
-def _log_image_identity() -> None:
-    """Say once per process which image the sandbox resolves to (EP7)."""
+def _log_image_identity(runtime: str = DOCKER) -> None:
+    """Say once per process which image the sandbox resolves to, and under
+    which runtime (EP7)."""
     image = config.SANDBOX_DOCKER_IMAGE
-    resolved = _resolved_image_id(image)
+    resolved = _resolved_image_id(image, runtime)
     if _log_image_identity._said:
         return
     _log_image_identity._said = True
-    logger.info("Sandbox image %s resolves to %s", image,
-                resolved or "an id docker would not report")
+    logger.info("Sandbox image %s resolves to %s under %s", image,
+                resolved or "an id the runtime would not report", runtime)
 
 
 _log_image_identity._said = False
 
 
-def _annotate(result: dict, profile: CommandProfile, ran_on: str) -> dict:
+def _annotate(result: dict, profile: CommandProfile, ran_on: str,
+              as_root: bool = False) -> dict:
     """Record WHERE a command ran, in the result the model reads (§46, EP4).
 
     The gate has always told the HUMAN this -- `_shell_approval_notice`
@@ -632,6 +2425,11 @@ def _annotate(result: dict, profile: CommandProfile, ran_on: str) -> dict:
         return result
     result["ran_on"] = ran_on
     result["tier"] = profile.tier
+    # Slice 5b, and on the same argument as `ran_on` itself: a model that
+    # cannot see it ran as root will describe what it did as though it did
+    # not. Present only when true, so no unprivileged result changes shape.
+    if as_root:
+        result["as_root"] = True
     return result
 
 
@@ -684,17 +2482,87 @@ def _venastine_readonly_mount(workspace_real: str) -> list[str]:
     return ["-v", f"{venastine}:/workspace/.venastine:ro"]
 
 
-def _run_docker(
+# The command an interactive session's container runs (ROADMAP_v3 §49, slice
+# 2). Every part of it was measured through this builder before it was
+# written (batch 100), and each clause is here for a reason that was OBSERVED:
+#
+#   script -qfec          makes the pty INSIDE the container, so the client
+#                         never needs a real terminal and `docker run -t`'s
+#                         CR mangling never happens. `-e` returns the shell's
+#                         own exit code (measured: `exit 3` gives 3), `-f`
+#                         flushes so output arrives as it is written, `-q`
+#                         drops the transcript header.
+#   stty -echo            SS33. The pty is 0x0, so readline echoes a
+#                         200-character command back as `\r<xxxx` -- its
+#                         horizontal-scroll marker -- which no honest rule
+#                         could strip. With the echo off there is nothing to
+#                         strip at any length.
+#   rows 50 cols 1000     belt and braces for a program that turns echo back
+#                         on: then the mangling needs a 1000-column line
+#                         rather than an 80-character one.
+#   the prompt            SS34. Set to a token this process minted, so
+#                         "the shell is ready" is read rather than
+#                         inferred from silence. (Described rather than
+#                         named by its shell variable, whose spelling is
+#                         exactly the shape of a decision id -- the
+#                         citation guard is right to say so.)
+#   +o emacs +o vi        line editing off, so nothing re-enables the echo.
+#   --norc --noprofile    no user rc file reaches it, in a container whose
+#                         image the user may have replaced.
+_INTERACTIVE_INNER = (
+    "stty -echo rows 50 cols 1000; export PS1='{prompt}'; "
+    "exec bash --norc --noprofile -i +o emacs +o vi")
+
+_PROMPT_TOKEN_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789>")
+
+
+def new_prompt_token() -> str:
+    """A fresh prompt token for one interactive session (SS34).
+
+    Minted here rather than by the caller because it is embedded in a shell
+    string below: the character set is the reason that embedding is safe,
+    and a token and the quoting that contains it are one decision.
+    """
+    return "VEN" + uuid.uuid4().hex[:8] + ">"
+
+
+def _interactive_command(prompt_token: str) -> str:
+    """The container's command for an interactive session.
+
+    The token is asserted against its own alphabet rather than quoted
+    defensively: it is never a model's value -- `new_prompt_token` is the
+    only thing that makes one -- and a check that says so is worth more than
+    an escape that would hide the day it stopped being true.
+    """
+    if not prompt_token or set(prompt_token) - _PROMPT_TOKEN_CHARS:
+        raise ValueError("prompt token is not a minted one: %r" % prompt_token)
+    return 'script -qfec "%s" /dev/null' % _INTERACTIVE_INNER.format(
+        prompt=prompt_token)
+
+
+def _docker_argv(
     command: str,
     workspace_dir: str,
-    _shell_binary: str = "",
-    network: bool = False,
-    argv: bool = False,
-) -> dict:
-    """Run a command inside a Docker container with the workspace
-    mounted as a volume. On timeout, the container is explicitly
-    killed via ``docker kill`` to prevent orphaned containers from
-    continuing to write to the host via the volume mount.
+    network: bool,
+    argv: bool,
+    runtime: str,
+    name: str,
+    *,
+    session_timeout_s: Optional[int] = None,
+    prompt_token: str = "",
+) -> list[str]:
+    """The container command line, for a one-shot run and for a session.
+
+    ONE builder (ROADMAP_v3 §49), so a background session cannot come to
+    run in a laxer container than a one-shot command: a `--network none`
+    or a `:ro` bind present on one path and missing from the other is the
+    drift EP6 names for routing, one layer down.
+
+    *runtime* is the CLI -- "docker" or "podman" (SS22) -- and nothing else
+    in the argv changes with it: every flag here was measured to mean the
+    same thing under rootless Podman 5.7, the nested `:ro` bind and
+    `--network none` included.
 
     *argv* runs the command as a pre-split argument vector instead of
     through ``bash -c`` (§46, EP5). Only INERT commands set it, and
@@ -704,24 +2572,60 @@ def _run_docker(
     Handing those to bash anyway would insert a third tokeniser between
     the classifier and the executor, and the gap between two of them is
     where #157 arrived, twice.
+
+    *session_timeout_s* makes it a SESSION's argv, which differs in two
+    places and no others:
+
+      --sig-proxy=false  a console Ctrl+C reaches every process attached to
+                         the terminal, and `docker run` forwards signals
+                         into the container by default -- so a session
+                         would die of the user's keystroke and report
+                         `exited` where it was `killed`.
+      timeout -k 10 N    coreutils `timeout` as the container's first
+                         process, so a container orphaned by a harness that
+                         crashed still ends at its own cap. Measured: exit
+                         124 after 3.6 s over two children, and a child
+                         ignoring TERM KILLed at 5.5 s, the container
+                         removed both times.
+
+    *prompt_token* makes it an INTERACTIVE session's argv (slice 2), which
+    differs in two more places and no others:
+
+      -i                 docker keeps the container's stdin open as a PIPE.
+                         NOT `-t`: the pty is made inside the container by
+                         `script`, so nothing here needs a real terminal.
+      the wrapper        `_interactive_command`, in place of the agent's
+                         text. An interactive session's *command* is TYPED
+                         into the shell once it is up, not handed to the
+                         container -- so it is classified and approved as
+                         `shell` would (SS32), and the shell it lands in is
+                         always the one measured here rather than whatever
+                         the text happened to start.
     """
     workspace_real = os.path.realpath(workspace_dir)
-    container_name = f"sandbox-{uuid.uuid4().hex[:12]}"
 
     docker_args = [
-        "docker", "run", "--rm",
-        "--name", container_name,
+        runtime, "run", "--rm",
+        "--name", name,
         # §46 (EP7). Ours, and findable as ours. The name is a uuid, so
         # `docker ps` could not tell a container of ours from any other
         # tool's -- which matters when you are trying to work out
         # whether something on your machine is this harness.
         "--label", "venastine.sandbox=1",
+        # ROADMAP_v3 §49. Which harness PROCESS started it. Two instances
+        # may run at once, so cleaning up "our" containers by the label
+        # above would kill the other's sessions; this one scopes it.
+        "--label", f"venastine.process={PROCESS_TOKEN}",
         "-v", f"{workspace_real}:/workspace",
         "-w", "/workspace",
         "--memory", f"{config.SANDBOX_MEMORY_MB}m",
         "--cpus", "1",
         "--pids-limit", str(config.SANDBOX_MAX_PIDS),
     ]
+    if session_timeout_s is not None:
+        docker_args.append("--sig-proxy=false")
+    if prompt_token:
+        docker_args.append("-i")
 
     if not network:
         docker_args.append("--network")
@@ -737,14 +2641,62 @@ def _run_docker(
 
     docker_args.extend(["-e", "PATH=/usr/bin:/bin:/usr/local/bin"])
     docker_args.append(config.SANDBOX_DOCKER_IMAGE)
-    if argv:
-        docker_args.extend(shlex.split(command))
+    if session_timeout_s is not None:
+        docker_args.extend(["timeout", "-k", "10", str(session_timeout_s)])
+    if prompt_token:
+        # The agent's text is not in this argv at all; see the docstring.
+        docker_args.extend(
+            ["bash", "-c", _interactive_command(prompt_token)])
+    elif argv:
+        # `_inert_argv`, NOT a second `shlex.split` (batch 108). That
+        # function is the one copy of this tokenisation and its docstring
+        # is explicit that two copies are two tokenisers free to drift --
+        # which is the gap #157 arrived through, twice. This line was the
+        # second copy, and it had already drifted in two ways: `posix=True`
+        # unconditionally where `_inert_argv` reads
+        # `posix=(platform.system() != "Windows")`, and no fallback for the
+        # ValueError an unbalanced quote raises.
+        #
+        # Neither drift could be OBSERVED, and that is the point rather
+        # than a reason to have left it. Measured over 398,184 generated
+        # strings that `_SHELL_METACHARACTERS` admits, `command.split()`,
+        # `shlex.split(posix=True)` and `shlex.split(posix=False)` returned
+        # the same list every time -- because the only characters the two
+        # modes disagree about are the three the regex rejects. So the
+        # container path was correct by coincidence with a guard in another
+        # function, which is exactly the "correct only when someone else
+        # ran first" coupling `_ssh_known_hosts` was rewritten to stop
+        # being.
+        docker_args.extend(_inert_argv(command))
     else:
         docker_args.extend(["bash", "-c", command])
+    return docker_args
+
+
+def _run_docker(
+    command: str,
+    workspace_dir: str,
+    _shell_binary: str = "",
+    network: bool = False,
+    argv: bool = False,
+    runtime: str = DOCKER,
+) -> dict:
+    """Run a command inside a container with the workspace mounted as a
+    volume. On timeout, the container is explicitly killed via
+    ``<runtime> kill`` to prevent orphaned containers from continuing to
+    write to the host via the volume mount.
+
+    The argv is `_docker_argv`'s. The default runtime is Docker's so a
+    caller that never probed builds the argv every test asserts; the
+    production route passes `known_runtime()`.
+    """
+    container_name = f"sandbox-{uuid.uuid4().hex[:12]}"
+    docker_args = _docker_argv(command, workspace_dir, network, argv,
+                               runtime, container_name)
 
     proc = None
     try:
-        proc = subprocess.Popen(
+        proc = subprocess.Popen(  # nosec B603 - EXECUTION ROUTE: carries the model's command by design. List form and no shell, so there is nothing to inject into; the bound is upstream -- mode gate G3, the INERT allowlist, the dangerous-flag check and the approval prompt -- not this call (the container one-shot)
             docker_args,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -762,8 +2714,8 @@ def _run_docker(
         # Kill the container explicitly — killing the CLI client
         # (proc.kill()) does NOT stop the container under the daemon.
         try:
-            subprocess.run(
-                ["docker", "kill", container_name],
+            subprocess.run(  # nosec B603 - kills the container on timeout; runtime and container name are this module's
+                [runtime, "kill", container_name],
                 capture_output=True, timeout=10,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -781,9 +2733,253 @@ def _run_docker(
             proc.kill()
             proc.wait()
         raise SandboxUnavailable(
-            "Docker CLI not found. Install Docker Desktop or enable "
-            "ALLOW_INSECURE_SANDBOX_FALLBACK in config.py."
+            f"The {runtime} CLI was not found. Install Docker or Podman, "
+            "or set allow_insecure_sandbox_fallback: true in config.yaml."
         )
+
+
+def _run_wsl(command: str, workspace_dir: str, argv: bool = False,
+             as_root: bool = False) -> dict:
+    """Run a command in the distro (ROADMAP_v3 §49, slice 3).
+
+    `_run_docker`'s opposite number, and shorter for one measured reason:
+    killing the Windows process kills the Linux side. `sleep 987 &` plus a
+    foreground `sleep 986`, then `Popen.kill()`, left neither behind -- so
+    there is no `wsl kill <name>` step, no label, and no orphan to reap.
+    The container needs one because the CLI client is not the container.
+
+    No resource limits (SS44). They belong to the whole WSL VM, and a
+    `ulimit` inside the shell is removable by the command it is meant to
+    bound -- a control that reads as safety without being one, which is the
+    failure SECURITY.md already names for the insecure fallback.
+    """
+    workspace_posix = _wsl_workspace(workspace_dir)
+    if not workspace_posix:
+        raise SandboxUnavailable(_wsl_workspace_refusal(workspace_dir))
+    secret = None
+    if as_root:
+        # The same refusal the gate read, re-read here: `run_sandboxed` is
+        # a public entry point and the store can lock between the two.
+        refusal = sudo_refusal(BACKEND_WSL)
+        if refusal:
+            raise SandboxUnavailable(refusal)
+        secret = _sudo_secret(BACKEND_WSL)
+    args = _wsl_argv(command, workspace_posix, argv_mode=argv,
+                     as_root=as_root)
+    # SS60's "an exception escaping any secret consumer" trigger. The SSH
+    # route gets this from `askpass.serving`; this route has no listener,
+    # so it says so itself.
+    with secrets.guarded("a root command on WSL") if as_root \
+            else contextlib.nullcontext():
+        return _run_wsl_process(args, secret)
+
+
+def _run_wsl_process(args: list, secret) -> dict:
+    """The half of `_run_wsl` that owns the subprocess.
+
+    Split out for `_run_ssh_process`'s reason: the window in which a
+    plaintext is in flight should be a BLOCK, not a try/finally wrapped
+    round three returns and a raise.
+    """
+    as_root = secret is not None
+    proc = None
+    try:
+        proc = subprocess.Popen(  # nosec B603 - EXECUTION ROUTE: carries the model's command by design. List form and no shell, so there is nothing to inject into; the bound is upstream -- mode gate G3, the INERT allowlist, the dangerous-flag check and the approval prompt -- not this call (the WSL one-shot)
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            # SS70, and a fix rather than a parameter this route needed.
+            # Passing no `stdin` at all made a WSL command INHERIT this
+            # process's console -- measured, a command here read a string
+            # written to the harness's own stdin -- which is a second
+            # reader beside the CLI's one (§29 N1) on a route written
+            # before that rule existed. DEVNULL is what the container and
+            # the SSH one-shot already give; the pipe carries one line and
+            # is the harness's alone to write.
+            stdin=subprocess.PIPE if as_root else subprocess.DEVNULL,
+            text=True,
+            # SS42, and the only thing between a `WSLENV` naming an API key
+            # and the distro reading it. Measured: with `WSLENV` set to a
+            # secret's name the unscrubbed run printed the secret inside
+            # the distro; with this it printed ABSENT, and `id`/`pwd` still
+            # worked, so wsl.exe does not need what is being taken away.
+            env=_scrubbed_env(),
+        )
+        stdout, stderr = proc.communicate(
+            input=(_sudo_password_line(secret)
+                   if secret is not None else None),
+            timeout=config.SANDBOX_TIMEOUT_SECONDS,
+        )
+        _note_sudo_auth_failure(stderr, BACKEND_WSL, secret is not None)
+        return {
+            "stdout": stdout[:config.MAX_READ_CHARS],
+            "stderr": stderr[:config.MAX_READ_CHARS],
+            "return_code": proc.returncode,
+        }
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        return {
+            "stdout": "",
+            "stderr": f"Command timed out after "
+                      f"{config.SANDBOX_TIMEOUT_SECONDS}s",
+            "return_code": -1,
+        }
+    except FileNotFoundError:
+        if proc is not None:
+            proc.kill()
+            proc.wait()
+        raise SandboxUnavailable(
+            "wsl.exe was not found, so the WSL backend cannot run "
+            "anything.") from None
+
+
+def _wsl_workspace_refusal(workspace_dir: str) -> str:
+    """Why a workspace the distro cannot see stops the route. One copy for
+    the one-shot path and the session path."""
+    return (f"WSL cannot see the workspace {workspace_dir!r}. `wslpath` "
+            f"could not translate it, which happens for a UNC path or a "
+            f"drive WSL does not mount. The command is refused rather than "
+            f"run somewhere else: `wsl.exe --cd` answers an untranslatable "
+            f"path by exiting 0 and running in your Linux home directory, "
+            f"so it would have reported success from the wrong place.")
+
+
+def _ssh_workspace_refusal(stderr: str) -> str:
+    """Why a remote working directory that is not there stops the command.
+
+    Recognised by BOTH the exit code and the marker the guard prints
+    (SS52), because either alone is guessable: 125 is inside `timeout`'s
+    own vocabulary, and a command is free to print any string it likes.
+    """
+    workspace = (config.SSH_REMOTE_WORKSPACE or "").strip()
+    detail = " ".join(stderr.split())[:200]
+    return (f"The remote working directory {workspace!r} could not be "
+            f"entered on {ssh_target()}, so nothing was run. This is "
+            f"refused rather than run somewhere else -- `ssh_remote_"
+            f"workspace` names where approved work happens, and a command "
+            f"that silently ran in the login home would report success "
+            f"from a place nobody named. The remote said: {detail}")
+
+
+def _ssh_failed_to_start(stderr: str) -> str:
+    """A connection that never carried the command, told apart from one
+    that did. Same composition rule as the probe's (see
+    `_ssh_connect_failure_reason`): ssh's own text is generic, so it is
+    quoted after an interpretation rather than instead of one."""
+    return _ssh_connect_failure_reason(ssh_target(),
+                                       " ".join(stderr.split())[:300])
+
+
+def _run_ssh(command: str, workspace_dir: str,
+             as_root: bool = False) -> dict:
+    """Run a command on the configured remote host (ROADMAP_v3 §49, slice 4).
+
+    *workspace_dir* is the LOCAL workspace and is deliberately unused: the
+    command runs in `ssh_remote_workspace`, on a filesystem this process
+    cannot see. That gap is the trap this backend is most able to set --
+    `write` saves a file locally and a shell here cannot read it -- and it
+    is disclosed in the tool description and the approval notice rather
+    than papered over (SS55).
+
+    No resource limits (SS44's rule on a third route), and here not even a
+    `ulimit` to be theatre about: the remote's memory and CPU belong to the
+    remote. What DOES bound this is the local wall clock below, and for a
+    session the in-guest `timeout -k` that `_ssh_remote_script` wraps in.
+    """
+    sudo_secret = None
+    if as_root:
+        refusal = sudo_refusal(BACKEND_SSH)
+        if refusal:
+            raise SandboxUnavailable(refusal)
+        sudo_secret = _sudo_secret(BACKEND_SSH)
+    args = _ssh_argv(command, as_root=as_root)
+    stored = _ssh_stored_secrets()
+
+    # SS64. The listener stands up only when something is stored, so the
+    # no-secret path does not open a socket at all -- and `serving` locks
+    # the store if anything escapes this block, which is SS60's
+    # "an exception during a secret consumer" trigger.
+    #
+    # `guarded` is the same trigger for the ROOT half, which `serving`
+    # does not cover: a host on key auth stores no login secret, so there
+    # is no listener, and a sudo password is still in this process.
+    with secrets.guarded("a root command over SSH") if as_root \
+            else contextlib.nullcontext():
+        with askpass.serving(stored) if stored \
+                else contextlib.nullcontext() as live:
+            env = _ssh_env()
+            if live is not None:
+                env.update(live.env)
+            return _run_ssh_process(args, env, bool(stored), sudo_secret)
+
+
+def _run_ssh_process(args: list, env: dict, used_secrets: bool,
+                     sudo_secret=None) -> dict:
+    """The half of `_run_ssh` that owns the subprocess, split out so the
+    askpass window is a block rather than a try/finally wrapped round
+    three returns and two raises."""
+    proc = None
+    try:
+        proc = subprocess.Popen(  # nosec B603 - EXECUTION ROUTE: carries the model's command by design. List form and no shell, so there is nothing to inject into; the bound is upstream -- mode gate G3, the INERT allowlist, the dangerous-flag check and the approval prompt -- not this call (the SSH one-shot)
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            # DEVNULL unless there is a password to deliver, so the
+            # no-root path is byte-for-byte the call slice 4 made.
+            stdin=(subprocess.PIPE if sudo_secret is not None
+                   else subprocess.DEVNULL),
+            text=True,
+            # Measured, and NOT load-bearing the way SS42's is: nothing
+            # local crosses into an SSH session by itself -- the remote
+            # environment is twelve variables and every one is the
+            # server's. The scrub stays because what a client SENDS is
+            # `SendEnv`'s business and `SendEnv` lives in a config file
+            # this harness cannot redirect, which `-F none` closes from
+            # the other side. Two answers to one question is the point.
+            env=env,
+        )
+        stdout, stderr = proc.communicate(
+            input=(_sudo_password_line(sudo_secret)
+                   if sudo_secret is not None else None),
+            timeout=config.SANDBOX_TIMEOUT_SECONDS,
+        )
+        _note_ssh_auth_failure(stderr, used_secrets)
+        _note_sudo_auth_failure(stderr, BACKEND_SSH, sudo_secret is not None)
+        if (proc.returncode == _SSH_NO_WORKSPACE_CODE
+                and _SSH_NO_WORKSPACE_MARKER in stderr):
+            raise SandboxUnavailable(_ssh_workspace_refusal(stderr))
+        # 255 is ssh's own "I never got there", distinct from any exit code
+        # the remote command could return -- a remote exit status is 0-255
+        # but ssh reports 255 only for its own failures, and the command
+        # never ran in that case. Measured across every failure shape:
+        # refused port, unroutable host, unknown user, no key, wrong host
+        # key -- all 255.
+        if proc.returncode == 255 and not stdout:
+            raise SandboxUnavailable(_ssh_failed_to_start(stderr))
+        return {
+            "stdout": stdout[:config.MAX_READ_CHARS],
+            "stderr": stderr[:config.MAX_READ_CHARS],
+            "return_code": proc.returncode,
+        }
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        return {
+            "stdout": "",
+            "stderr": f"Command timed out after "
+                      f"{config.SANDBOX_TIMEOUT_SECONDS}s. The remote "
+                      f"command may still be running: killing the local "
+                      f"ssh process does not end it (SS53).",
+            "return_code": -1,
+        }
+    except FileNotFoundError:
+        if proc is not None:
+            proc.kill()
+            proc.wait()
+        raise SandboxUnavailable(
+            f"{_ssh_binary()!r} was not found, so the SSH backend cannot "
+            f"run anything.") from None
 
 
 # ---------------------------------------------------------------------------
@@ -791,19 +2987,26 @@ def _run_docker(
 # ---------------------------------------------------------------------------
 
 
-def _unix_resource_limits() -> Optional[Callable[[], None]]:
+def _unix_resource_limits(
+    cpu_seconds: Optional[int] = None,
+) -> Optional[Callable[[], None]]:
     """Return a preexec_fn that sets CPU and memory limits via rlimit.
-    Returns None on Windows (rlimit not available)."""
+    Returns None on Windows (rlimit not available).
+
+    *cpu_seconds* defaults to `config.SANDBOX_CPU_SECONDS`, a one-shot
+    command's budget. A background session passes its own effective
+    timeout (ROADMAP_v3 §49, SS15): 30 CPU-seconds would end a CPU-bound
+    session long before a cap of an hour, and report it as the program
+    dying rather than as the harness stopping it."""
     if platform.system() == "Windows":
         return None
 
     import resource
 
+    cpu = config.SANDBOX_CPU_SECONDS if cpu_seconds is None else int(cpu_seconds)
+
     def _set_limits():
-        resource.setrlimit(
-            resource.RLIMIT_CPU,
-            (config.SANDBOX_CPU_SECONDS, config.SANDBOX_CPU_SECONDS),
-        )
+        resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu))
         mem_bytes = config.SANDBOX_MEMORY_MB * 1024 * 1024
         resource.setrlimit(resource.RLIMIT_AS, (mem_bytes, mem_bytes))
 
@@ -823,23 +3026,41 @@ def _run_subprocess_fallback(
     """
     preexec = _unix_resource_limits()
 
+    # ITS OWN PROCESS GROUP ON POSIX, so the timeout path below can
+    # signal the GROUP. Without it the shell was killed and its
+    # children ran on (batch 142, four survivors measured), and the flag
+    # on its own is not the fix -- `_terminate_tree` is.
+    #
+    # NOT `_isolation_kwargs()`, which is the SESSION's answer and also
+    # carries CREATE_NEW_PROCESS_GROUP on Windows. A session is stopped
+    # through `kill()` from elsewhere; a one-shot is waited on right
+    # here, so taking it out of the console's group on Windows would
+    # only stop Ctrl+C reaching it, while `taskkill /T` already
+    # reclaims the tree by pid. What Ctrl+C costs on POSIX is paid
+    # below, where an interrupt reclaims before it unwinds.
+    group_kwargs = ({} if platform.system() == "Windows"
+                    else {"start_new_session": True})
     try:
-        result = subprocess.run(
+        proc = subprocess.Popen(
             [shell_binary, "-c", command],
             cwd=workspace_dir,
             env=_scrubbed_env(),
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            # DEVNULL rather than INHERITED, which is what
+            # `subprocess.run(capture_output=True)` left until batch
+            # 142. SS70 measured the identical omission on the WSL
+            # one-shot: a command there read a string written to the
+            # HARNESS's own stdin, a second reader of the console
+            # beside the CLI's one (N1). Every other route already
+            # passes DEVNULL, and a command that waits on stdin now
+            # ends instead of burning the whole wall clock.
+            stdin=subprocess.DEVNULL,
             text=True,
-            timeout=config.SANDBOX_TIMEOUT_SECONDS,
             preexec_fn=preexec,
-            shell=False,
+            shell=False,  # nosec B603 - EXECUTION ROUTE: carries the model's command by design. List form and no shell, so there is nothing to inject into; the bound is upstream -- mode gate G3, the INERT allowlist, the dangerous-flag check and the approval prompt -- not this call (the insecure host fallback)
+            **group_kwargs,
         )
-    except subprocess.TimeoutExpired:
-        return {
-            "stdout": "",
-            "stderr": f"Command timed out after {config.SANDBOX_TIMEOUT_SECONDS}s",
-            "return_code": -1,
-        }
     except FileNotFoundError as e:
         return {
             "stdout": "",
@@ -855,10 +3076,44 @@ def _run_subprocess_fallback(
             "return_code": -1,
         }
 
+    try:
+        stdout, stderr = proc.communicate(
+            timeout=config.SANDBOX_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        # H7: the message below asserts the work stopped, so it has to
+        # have stopped. `_reclaim_tree` is the session path's own
+        # answer, shared rather than copied.
+        reclaimed = _reclaim_tree(proc)
+        stdout, stderr = _drain_after_kill(proc)
+        note = (
+            "Command timed out after "
+            f"{config.SANDBOX_TIMEOUT_SECONDS}s. The shell and its "
+            "process group were killed."
+            if reclaimed else
+            "Command timed out after "
+            f"{config.SANDBOX_TIMEOUT_SECONDS}s, and it OUTLIVED a "
+            "forced kill: some of its processes may still be running "
+            "with your own authority, since this route has no "
+            "isolation.")
+        return {
+            "stdout": (stdout or "")[:config.MAX_READ_CHARS],
+            "stderr": ((stderr or "") + ("\n" if stderr else "")
+                       + note)[:config.MAX_READ_CHARS],
+            "return_code": -1,
+        }
+    except BaseException:
+        # Ctrl+C included, and it is the reason this is BaseException:
+        # on POSIX the child now leads its own group, so the keystroke
+        # the terminal delivered did NOT reach it. Reclaiming before
+        # the unwind is what keeps the group change from trading a
+        # timeout orphan for an interrupt orphan.
+        _reclaim_tree(proc)
+        raise
+
     return {
-        "stdout": result.stdout[:config.MAX_READ_CHARS],
-        "stderr": result.stderr[:config.MAX_READ_CHARS],
-        "return_code": result.returncode,
+        "stdout": (stdout or "")[:config.MAX_READ_CHARS],
+        "stderr": (stderr or "")[:config.MAX_READ_CHARS],
+        "return_code": proc.returncode,
     }
 
 
@@ -873,10 +3128,13 @@ def run_sandboxed(
     shell_binary: Optional[str] = None,
     docker_available: Optional[bool] = None,
     profile: Optional[CommandProfile] = None,
+    backend: str = BACKEND_CONTAINER,
+    needs_root: bool = False,
 ) -> dict:
     """Execute *command* through the appropriate sandbox backend.
 
     Routing:
+      0. The call asked for WSL or SSH → that backend, or a refusal (SS37)
       1. Inert command → lightweight subprocess (no Docker/fallback needed)
       2. Docker available → container with volume mount
       3. Fallback enabled → subprocess with shell interpretation
@@ -905,7 +3163,21 @@ def run_sandboxed(
     if refusal:
         raise SandboxUnavailable(refusal)
 
-    if shell_binary is None:
+    # Slice 5b, above makedirs for the workspace check's own reason: a call
+    # that cannot run must not leave a directory behind. `_shell_approval_
+    # check` already read this same refusal to answer "there is nothing to
+    # approve", and `sudo_refusal` is the one copy both of them read.
+    if needs_root:
+        refusal = sudo_refusal(backend)
+        if refusal:
+            raise SandboxUnavailable(refusal)
+
+    # Not on the WSL route, which runs `bash` IN THE DISTRO and never reads
+    # this. `detect_shell()` probes pwsh and then powershell with a 5s
+    # timeout each, so a WSL call was paying for a Windows shell it does
+    # not use -- and asking the host what shell it has, in order to run a
+    # command somewhere else, is the wrong question as well as a slow one.
+    if shell_binary is None and backend != BACKEND_WSL:
         shell_binary = detect_shell()
 
     # Audit #50: nothing else in the codebase ever created WORKSPACE_DIR,
@@ -920,29 +3192,57 @@ def run_sandboxed(
     if profile is None:
         profile = classify_command(command, workspace_dir)
 
+    # Use pre-computed Docker status if provided (fixes TOCTOU), otherwise
+    # probe now. HOST_READ never needs the answer, so it does not pay for
+    # the probe, which is how this function always behaved.
+    if docker_available is None and profile.tier != HOST_READ:
+        docker_available = is_docker_available()
+    # ROADMAP_v3 §49. The branch ladder below is `_route`'s, shared with
+    # `start_sandboxed`, so a background session is routed by the same
+    # decision a one-shot command is (EP6 keeps it agreeing with
+    # containment_for).
+    route = _route(profile, bool(docker_available), backend)
+
+    # ROADMAP_v3 §49 slice 3 (SS38). Above HOST_READ, because a call that
+    # asked for WSL must not be handed to the Windows host by a tier.
+    if route == ROUTE_WSL:
+        logger.debug("WSL path (%s): %s", wsl_distro(), command[:80])
+        return _annotate(
+            _run_wsl(command, workspace_dir, argv=(profile.tier == INERT),
+                     as_root=needs_root),
+            profile, "wsl", needs_root)
+
+    if route == ROUTE_SSH:
+        logger.debug("SSH path (%s): %s", ssh_target(), command[:80])
+        # `ran_on` is "ssh", not the host and not a container. `_annotate`
+        # already takes it as a string, so the disclosure costs nothing
+        # here -- what it buys is that a result can never imply the
+        # command ran on this machine.
+        return _annotate(_run_ssh(command, workspace_dir, needs_root),
+                         profile, "ssh", needs_root)
+
     # HOST_READ names a file the container cannot see, so it has exactly
     # one backend and takes it before Docker is even considered.
-    if profile.tier == HOST_READ:
+    if route == ROUTE_HOST_READ:
         logger.debug("Host read, using light path: %s", command[:80])
         return _annotate(_run_inert(command, workspace_dir, shell_binary),
                          profile, "host")
 
-    # Use pre-computed Docker status if provided (fixes TOCTOU),
-    # otherwise probe now.
-    if docker_available is None:
-        docker_available = is_docker_available()
-
-    if docker_available:
+    if route == ROUTE_CONTAINER:
         network = profile.network
+        # ROADMAP_v3 §49 (SS22). Docker's CLI or Podman's, as the probe that
+        # produced `docker_available` found -- read, never re-probed.
+        runtime = known_runtime()
         logger.debug(
-            "Docker path (network=%s): %s", network, command[:80],
+            "Container path (%s, network=%s): %s", runtime, network,
+            command[:80],
         )
         # HERE rather than inside _run_docker, which stays a function
         # that builds an argv and opens one process. Putting a second
         # subprocess in there would put it on the timeout and kill
         # paths too, and it collides with every test that patches Popen
         # to inspect the argv -- subprocess.run goes through Popen.
-        _log_image_identity()
+        _log_image_identity(runtime)
         return _annotate(
             _run_docker(command, workspace_dir, shell_binary, network,
                         # §46 (EP5). An inert command has no
@@ -952,7 +3252,8 @@ def run_sandboxed(
                         # executor, which is the gap #157 came through
                         # twice. argv keeps the `shell=False` semantics
                         # the light path always had.
-                        argv=(profile.tier == INERT)),
+                        argv=(profile.tier == INERT),
+                        runtime=runtime),
             profile, "container")
 
     # §46 (EP5). Docker is down. An inert command still has somewhere to
@@ -960,7 +3261,7 @@ def run_sandboxed(
     # approval answer is the same under either containment (see
     # containment_for). What the model is told changes, and that is the
     # point of saying it: `ran_on` reports "host" here.
-    if profile.tier == INERT:
+    if route == ROUTE_INERT_HOST:
         logger.debug(
             "Docker unavailable, inert command on the host: %s",
             command[:80],
@@ -968,7 +3269,7 @@ def run_sandboxed(
         return _annotate(_run_inert(command, workspace_dir, shell_binary),
                          profile, "host")
 
-    if posture.current().allow_insecure_fallback:
+    if route == ROUTE_FALLBACK:
         logger.warning(
             "Using INSECURE subprocess fallback: %s", command[:80],
         )
@@ -976,10 +3277,756 @@ def run_sandboxed(
             _run_subprocess_fallback(command, workspace_dir, shell_binary),
             profile, "host")
 
-    raise SandboxUnavailable(
-        "Docker is not available and ALLOW_INSECURE_SANDBOX_FALLBACK is "
-        "False. Install Docker Desktop for strong isolation, or set "
-        "ALLOW_INSECURE_SANDBOX_FALLBACK = True in config.py to use the "
+    raise SandboxUnavailable(_unavailable_message(backend))
+
+
+def _unavailable_message(backend: str = BACKEND_CONTAINER) -> str:
+    """What a caller is told when no backend can run a command.
+
+    The probe's reason goes in because the case it exists for is otherwise
+    baffling: Podman IS installed and answering, and was refused for limits
+    it cannot enforce (SS24). A user told only "no runtime" would reinstall
+    the one they have. One copy, for `run_sandboxed` and `start_sandboxed`.
+
+    A call that asked for WSL is told about WSL and nothing else (SS37).
+    Offering it the container's install instructions would be answering a
+    question it did not ask, and it is the shape that makes a model retry
+    the same call with the same result.
+    """
+    if backend == BACKEND_WSL:
+        return wsl_unavailable_reason() or (
+            "The WSL backend cannot run this command.")
+    if backend == BACKEND_SSH:
+        return ssh_unavailable_reason() or (
+            "The SSH backend cannot run this command.")
+    reason = _known_unavailable_reason()
+    return (
+        "No container runtime can run the sandbox"
+        + (f" ({reason})" if reason else "")
+        + " and ALLOW_INSECURE_SANDBOX_FALLBACK is False. Install Docker or "
+        "Podman for strong isolation, or set "
+        "allow_insecure_sandbox_fallback: true in config.yaml to use the "
         "weaker subprocess fallback (no filesystem isolation, no network "
         "restriction)."
     )
+
+
+# ---------------------------------------------------------------------------
+# ---- Routes and background sessions (ROADMAP_v3 §49, slice 1) --------------
+# ---------------------------------------------------------------------------
+
+# Which harness process started a container: `<pid>-<uuid>`, because a pid
+# alone is reused by the OS and a later process could inherit an earlier
+# one's orphans. Minted once, at import.
+PROCESS_TOKEN = f"{os.getpid()}-{uuid.uuid4().hex[:12]}"
+
+ROUTE_HOST_READ = "host_read"
+ROUTE_CONTAINER = "container"
+ROUTE_WSL = "wsl"
+ROUTE_SSH = "ssh"
+ROUTE_INERT_HOST = "inert_host"
+ROUTE_FALLBACK = "fallback"
+ROUTE_UNAVAILABLE = "unavailable"
+
+# How long past a session's own timeout the in-container `timeout` waits
+# before ending it. The harness kills at the timeout and owns the
+# `timed_out` answer; this is the backstop for a harness that is no longer
+# there to kill anything.
+SESSION_TIMEOUT_MARGIN_S = 30
+_KILL_GRACE_S = 5
+_SIGKILL = getattr(signal, "SIGKILL", 9)
+_CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP",
+                                    0x00000200)
+#: How long a reclaimed process gets to hand over what it had already
+#: written. Short, and bounded on purpose: an ORPHAN holding the write
+#: end of the pipe means EOF never comes, which is the 30.21s-for-a-5s
+#: bound half of the timeout defect batch 142 fixed.
+_DRAIN_AFTER_KILL_S = 2.0
+
+
+def _leads_its_own_group(pid: int) -> bool:
+    """True when *pid* is its own process group leader.
+
+    ASKED BEFORE EVERY `killpg`, and the reason is the failure mode
+    rather than tidiness. `os.killpg` takes a process GROUP id, and a
+    child started WITHOUT `start_new_session` sits in THIS process's
+    group -- so passing its pid as a group id means either no such
+    group (ESRCH, which the caller handles) or, if an unrelated group
+    happens to carry that id, somebody else's processes.
+
+    The property holds for both callers today: `_isolation_kwargs`
+    sets the flag for a session and `_run_subprocess_fallback` sets it
+    for a one-shot. So this is a guard that KEEPS it true rather than
+    a fix for a live defect -- a change at either launch site can no
+    longer turn a kill of the work into a kill of the harness.
+    """
+    try:
+        return os.getpgid(pid) == pid
+    except (OSError, AttributeError):
+        # AttributeError is Windows, where there are no process groups
+        # in this sense and `taskkill /T` is the tree walk instead.
+        return False
+
+
+def _signal_tree(proc, sig) -> None:
+    """Send *sig* to *proc*'s whole group, or to *proc* if it does not
+    lead one."""
+    if _leads_its_own_group(proc.pid):
+        try:
+            os.killpg(proc.pid, sig)
+            return
+        except OSError:
+            pass
+    proc.kill()
+
+
+def _terminate_tree(proc) -> None:
+    """The polite stop, for the work and not only its shell.
+
+    A shell's children are what actually do the work (SS15), so a
+    terminate that reaches only the shell reports a stop it did not
+    make -- which H7 forbids: an IO bound that reports a timeout must
+    have STOPPED the work. Measured (batch 142) on the one-shot route
+    before this existed: `pgrep -a sleep` listed four survivors after
+    a reported timeout, and the control in the same run showed
+    `start_new_session=True` ALONE changes nothing, because nothing
+    signalled the group.
+    """
+    if platform.system() == "Windows":
+        try:
+            subprocess.run(  # nosec B603 - `taskkill` against this process's own child, by pid
+                ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                capture_output=True, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            proc.kill()
+        return
+    _signal_tree(proc, signal.SIGTERM)
+
+
+def _force_tree(proc) -> None:
+    """The forced stop. On Windows `taskkill /T /F` was already the
+    forced one, so this is the single-process fallback for the case
+    where it could not run."""
+    if platform.system() == "Windows":
+        proc.kill()
+        return
+    _signal_tree(proc, _SIGKILL)
+
+
+def _reclaim_tree(proc, *, grace_s: float = _KILL_GRACE_S) -> bool:
+    """Stop *proc* and the work below it: polite, a grace period, then
+    forced. True when it is gone.
+
+    ONE DECISION IN ONE PLACE, which is EP6's rule applied to a
+    sibling pair rather than to a gate: `SessionProcess.kill` and
+    `_run_subprocess_fallback`'s timeout are both "stop this host
+    process and its children", and they were two different answers --
+    the session's correct, the one-shot's a terminate of the shell
+    alone under a message asserting the opposite.
+    """
+    _terminate_tree(proc)
+    try:
+        proc.wait(timeout=grace_s)
+        return True
+    except subprocess.TimeoutExpired:
+        pass
+    _force_tree(proc)
+    try:
+        proc.wait(timeout=grace_s)
+        return True
+    except subprocess.TimeoutExpired:
+        logger.warning("Process %s outlived a forced kill", proc.pid)
+        return False
+
+
+def _drain_after_kill(proc) -> tuple:
+    """Whatever *proc* had already written, bounded.
+
+    `communicate()` after a kill is how CPython hands over the
+    buffered output, and it waits for EOF on the pipes. An ORPHANED
+    GRANDCHILD STILL HOLDS THE WRITE END, so on Windows that wait is
+    what turned a 5s bound into a 30.21s return -- measured, and in
+    principle unbounded. The second bound is what makes the first one
+    true."""
+    try:
+        return proc.communicate(timeout=_DRAIN_AFTER_KILL_S)
+    except subprocess.TimeoutExpired:
+        return "", ""
+    except (OSError, ValueError):
+        # ValueError: the pipes are closed already, which is what a
+        # second drain on a reaped process looks like.
+        return "", ""
+
+
+def _route(profile: CommandProfile, docker_available: bool,
+           backend: str = BACKEND_CONTAINER) -> str:
+    """Which backend runs *profile*: the executor's half of EP6.
+
+    `run_sandboxed` and `start_sandboxed` both route through here, so a
+    background session cannot be routed by a different decision from a
+    one-shot command. `containment_for` is still the gate's half, written
+    separately on purpose (§46, EP6), and tests/test_session_backends.py
+    holds the two against each other for every tier, runtime answer,
+    backend and fallback posture.
+
+    THE WSL BRANCH IS FIRST, ABOVE HOST_READ (SS38), and that order is the
+    decision rather than a consequence of one. `cat /etc/passwd` asked for
+    on WSL classifies HOST_READ -- the argument is outside the workspace,
+    which is true on either machine -- and the old ladder would have run it
+    through `_run_inert` on WINDOWS, against `C:\\etc\\passwd`, with
+    whichever `cat` is first on the user's PATH. The tier keeps its whole
+    meaning (`escapes_workspace` still forces a prompt in every mode but
+    `never`); what it must not do is choose a machine the call did not ask
+    for and the prompt did not name.
+    """
+    if backend == BACKEND_WSL:
+        return ROUTE_WSL if wsl_available() else ROUTE_UNAVAILABLE
+    if backend == BACKEND_SSH:
+        return ROUTE_SSH if ssh_available() else ROUTE_UNAVAILABLE
+    if profile.tier == HOST_READ:
+        return ROUTE_HOST_READ
+    if docker_available:
+        return ROUTE_CONTAINER
+    if profile.tier == INERT:
+        return ROUTE_INERT_HOST
+    if posture.current().allow_insecure_fallback:
+        return ROUTE_FALLBACK
+    return ROUTE_UNAVAILABLE
+
+
+def _isolation_kwargs() -> dict:
+    """Popen arguments that take a session out of the console's signal group.
+
+    A console Ctrl+C is delivered to every process attached to the terminal.
+    The CLI kills sessions on Ctrl+C on purpose, through `kill()`; without
+    this the keystroke would reach them first and they would report
+    `exited` instead of `killed`. It also makes a host session its own
+    process group, which is what lets `kill()` end a shell's children and
+    not only the shell.
+    """
+    if platform.system() == "Windows":
+        return {"creationflags": _CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
+
+
+def _popen_session(args: list[str], *, cwd: Optional[str] = None,
+                   env: Optional[dict] = None,
+                   preexec_fn: Optional[Callable[[], None]] = None,
+                   stdin=subprocess.DEVNULL):
+    """Start a session's process: one merged output stream, and by
+    default no stdin.
+
+    NO STDIN BY DEFAULT, because a long-lived child reading the TERMINAL is
+    a second reader beside the CLI's one (§29 N1). An interactive session
+    passes a PIPE (slice 2), and N1's reason survives the constant intact:
+    what it forbids is a child INHERITING THE CONSOLE, and a pipe that only
+    the harness writes to is not a second reader of anything. The default
+    stays DEVNULL so a caller gets the old behaviour by saying nothing.
+
+    stderr MERGED into stdout, because a monitor has to see lines in the
+    order the program wrote them, and two pipes read on two threads do not
+    preserve that. For an interactive session there is only one stream to
+    merge anyway: a pty carries both.
+    """
+    return subprocess.Popen(  # nosec B603 - EXECUTION ROUTE: carries the model's command by design. List form and no shell, so there is nothing to inject into; the bound is upstream -- mode gate G3, the INERT allowlist, the dangerous-flag check and the approval prompt -- not this call (a shell session)
+        args, cwd=cwd, env=env,
+        stdin=stdin,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        preexec_fn=preexec_fn,
+        **_isolation_kwargs(),
+    )
+
+
+def _popen_session_with_credentials(
+        args: list[str], *, env: dict, sudo_secret=None,
+        guard_reason: str = "", askpass_answers=None):
+    """`_popen_session` plus the credential windows a SESSION needs.
+
+    Returns `(proc, window)`, where *window* is the live
+    `askpass.serving` context the session now OWNS, or None.
+
+    THE SCOPE MISMATCH IS THE WHOLE PROBLEM, and it is why this
+    exists instead of two more `with` statements in `start_sandboxed`.
+    `askpass.serving` and `secrets.guarded` are BLOCKS; a session is
+    not. `start_sandboxed` returns while the process it started keeps
+    running, so a block around the start closes the window before the
+    connection needs it and a block around the session cannot be
+    written at all. Both one-shot routes got this right and both
+    session routes got it wrong, which is EP6 one layer down: the
+    environment a mode DEPENDS ON was composed at two call sites and
+    only one of them knew.
+
+    THE ASKPASS HALF. `_ssh_auth_options` takes `BatchMode=yes`
+    OFF as soon as anything is stored for the host, because BatchMode
+    suppresses askpass too -- and its docstring records that the
+    anti-hang property moves to `SSH_ASKPASS_REQUIRE=force`, measured
+    as 20s hung versus 0.8s. `start_sandboxed` passed a bare
+    `_ssh_env()`, so a background session on a password-authenticated
+    host got the argv whose anti-hang property is a listener, with no
+    listener. Measured: four askpass variables on the one-shot path
+    and none on the session path, same store, same host.
+
+    THE GUARD HALF. SS60 locks the store on anything that is
+    not "still working normally", and an exception escaping a secret
+    consumer is one of its triggers. The one-shot routes say so
+    themselves (`_run_wsl`) or get it from `serving` (`_run_ssh`); the
+    session route did neither, on the route that holds the plaintext
+    LONGEST. The span wrapped here is the one where the plaintext is
+    in THIS process's hands -- from the start to the end of
+    `_feed_sudo_password` -- which is as narrow as it can be while
+    still being a block.
+
+    WHO CLOSES THE LISTENER. The session does, through
+    `SessionProcess.release_credentials`, on its kill and on the first
+    `poll`/`wait` that sees the process gone. Two backstops behind
+    that: `_Listener` has its own `DEADLINE_S` (120s), so a session
+    nobody ever reaps still stops serving, and `MAX_SERVES` caps the
+    prompts one window may answer.
+    """
+    window = None
+    if askpass_answers:
+        window = askpass.serving(askpass_answers)
+        live = window.__enter__()
+        env = dict(env)
+        env.update(live.env)
+    try:
+        with secrets.guarded(guard_reason) if sudo_secret is not None \
+                else contextlib.nullcontext():
+            proc = _popen_session(
+                args, env=env,
+                stdin=(subprocess.PIPE if sudo_secret is not None
+                       else subprocess.DEVNULL))
+            if sudo_secret is not None:
+                _feed_sudo_password(proc, sudo_secret)
+    except BaseException as exc:
+        # `__exit__` rather than `_cleanup`, because the exception is
+        # what locks the store (SS60) and that trigger must survive
+        # the window being hand-held rather than `with`-held.
+        if window is not None:
+            window.__exit__(type(exc), exc, exc.__traceback__)
+        raise
+    return proc, window
+
+
+class SessionProcess:
+    """A sandboxed command running in the background.
+
+    What the session manager holds: a binary `stdout` to read lines from,
+    `wait`, and `kill`. `kill` is idempotent and BOUNDED -- a polite stop,
+    a grace period, then a forced one -- because H7 says an IO bound that
+    reports a timeout must have stopped the work, and a kill that can hang
+    stops nothing.
+    """
+
+    ran_on = ""
+
+    def __init__(self, proc, *, tier: str, credentials=None) -> None:
+        self._proc = proc
+        self.tier = tier
+        self._kill_lock = threading.Lock()
+        self._kill_started = False
+        # The live `askpass.serving` window this session owns, or None.
+        # A session outlives the call that started it, so the listener
+        # it authenticated against cannot be scoped to that call
+        # (batch 142). See `_popen_session_with_credentials`.
+        self._credentials = credentials
+
+    @property
+    def stdout(self):
+        return self._proc.stdout
+
+    @property
+    def stdin(self):
+        """The write end, or None for a session started without one --
+        which is every kind but interactive."""
+        return self._proc.stdin
+
+    @property
+    def pid(self) -> int:
+        return self._proc.pid
+
+    @property
+    def returncode(self) -> Optional[int]:
+        return self._proc.returncode
+
+    def poll(self) -> Optional[int]:
+        code = self._proc.poll()
+        if code is not None:
+            self.release_credentials()
+        return code
+
+    def wait(self, timeout: Optional[float] = None) -> Optional[int]:
+        """The exit code, or None if the process is still running when
+        *timeout* runs out."""
+        try:
+            code = self._proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return None
+        self.release_credentials()
+        return code
+
+    def kill(self) -> None:
+        # ONE `finally` ROUND THE WHOLE METHOD, not round the last
+        # wait. `kill` has four exits -- already killed, already
+        # exited, stopped politely, forced -- and the credential
+        # release belongs to all of them. Found by the tests in
+        # batch 142: a session that had already ended kept its
+        # listener, because that path returns before any of the
+        # stopping happens.
+        try:
+            with self._kill_lock:
+                if (self._kill_started
+                        or self._proc.poll() is not None):
+                    self._kill_started = True
+                    return
+                self._kill_started = True
+            self._terminate()
+            try:
+                self._proc.wait(timeout=_KILL_GRACE_S)
+                return
+            except subprocess.TimeoutExpired:
+                pass
+            self._force()
+            try:
+                self._proc.wait(timeout=_KILL_GRACE_S)
+            except subprocess.TimeoutExpired:
+                logger.warning(
+                    "Session process %s outlived a forced kill",
+                    self._proc.pid)
+        finally:
+            self.release_credentials()
+
+    def release_credentials(self) -> None:
+        """Close the credential machinery this session owns. Idempotent.
+
+        Called from `kill`, and from the first `poll` or `wait` that
+        sees the process gone, so a session that ENDED BY ITSELF does
+        not leave a listener up until its own deadline. Idempotent
+        because all three can happen, in any order, from more than one
+        thread."""
+        with self._kill_lock:
+            window, self._credentials = self._credentials, None
+        if window is not None:
+            window.__exit__(None, None, None)
+
+    def _terminate(self) -> None:
+        self._proc.terminate()
+
+    def _force(self) -> None:
+        self._proc.kill()
+
+
+class DockerSessionProcess(SessionProcess):
+    """A session in a container, killed through its runtime by name."""
+
+    ran_on = "container"
+
+    def __init__(self, proc, *, runtime: str, name: str, tier: str) -> None:
+        super().__init__(proc, tier=tier)
+        self.runtime = runtime
+        self.name = name
+
+    def _terminate(self) -> None:
+        # The container, not the CLI client: killing the client does NOT
+        # stop the container under the daemon, which is `_run_docker`'s own
+        # lesson on its timeout path.
+        try:
+            subprocess.run([self.runtime, "kill", self.name],  # nosec B603 - kills this session's own container; runtime and name are this module's
+                           capture_output=True, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+
+class HostSessionProcess(SessionProcess):
+    """A session on the host -- a host read, an inert command with no
+    runtime, or the insecure fallback -- killed as a process GROUP, since a
+    shell's children are what actually do the work (SS15)."""
+
+    ran_on = "host"
+
+    # Both halves live at module level since batch 142, because the
+    # one-shot fallback needs the same reclamation and had its own
+    # weaker answer (batch 142).
+
+    def _terminate(self) -> None:
+        _terminate_tree(self._proc)
+
+    def _force(self) -> None:
+        _force_tree(self._proc)
+
+
+class WslSessionProcess(SessionProcess):
+    """A session in the distro (ROADMAP_v3 §49, slice 3).
+
+    It inherits `SessionProcess`'s plain terminate/kill and adds NOTHING,
+    which is the measured fact rather than an omission: ending the Windows
+    `wsl.exe` process ends its Linux children, a backgrounded grandchild
+    included. `sleep 987 &` plus a foreground `sleep 986` were both gone two
+    seconds after `Popen.kill()`, checked with `pgrep -a sleep` run as a
+    bare argv -- an earlier attempt asked through `bash -c` and matched its
+    own parent's command line, which reported a survivor that was the
+    question.
+
+    So there is no process group to signal as `HostSessionProcess` must,
+    and no `kill <name>` to send as `DockerSessionProcess` must. Anything
+    added here would be machinery for a case that does not exist.
+    """
+
+    ran_on = "wsl"
+
+
+class SshSessionProcess(SessionProcess):
+    """A session on a remote host (ROADMAP_v3 §49, slice 4).
+
+    It inherits the plain terminate/kill and adds nothing -- and unlike
+    `WslSessionProcess`, where that was the measured GOOD news, here it is
+    the measured bad news, recorded rather than hidden.
+
+    MEASURED: killing the local `ssh` process does NOT end the remote
+    command. A `sleep 400` on the far side outlived its client every time,
+    because without a pty there is no hangup to deliver to it. `-tt` DOES
+    end it -- and costs the stream: with a pty the remote's stderr is
+    merged into stdout and every newline becomes CRLF, measured, which
+    would silently change what every session and every one-shot command
+    reports. A session whose output shape depends on an unrelated
+    termination decision is the drift EP6 is about.
+
+    So the remote command is bounded by the in-guest `timeout -k` that
+    `_ssh_remote_script` wraps in (measured working with no client alive,
+    rc 124), and a KILL ends the local process and the output stream while
+    the remote command runs on until that backstop fires. That is stated
+    in the tool description and in the kill result rather than papered
+    over -- and a process-group kill on the remote, which would need a
+    second connection and the remote pid, stays an open item in §49's gap
+    register, where it already was.
+    """
+
+    ran_on = "ssh"
+
+
+def start_sandboxed(
+    command: str,
+    workspace_dir: str,
+    *,
+    profile: CommandProfile,
+    docker_available: bool,
+    timeout_s: int,
+    shell_binary: Optional[str] = None,
+    backend: str = BACKEND_CONTAINER,
+    needs_root: bool = False,
+) -> SessionProcess:
+    """Start *command* as a background session and return at once.
+
+    `run_sandboxed`'s twin for a process that outlives the call: the same
+    workspace refusal first, the same route, the same container argv. What
+    differs is what a long-lived process needs -- no stdin, merged output,
+    its own signal group, `--sig-proxy=false` and an in-container `timeout`
+    on the container route, and a CPU limit equal to its own timeout on the
+    host fallback, where a one-shot command's 30 CPU-seconds would kill a
+    session long before its cap (SS15).
+
+    *timeout_s* is the EFFECTIVE timeout, already clamped by the caller.
+    """
+    refusal = protected_paths.check_workspace(workspace_dir)
+    if refusal:
+        raise SandboxUnavailable(refusal)
+    if needs_root:
+        refusal = sudo_refusal(backend)
+        if refusal:
+            raise SandboxUnavailable(refusal)
+    os.makedirs(workspace_dir, exist_ok=True)
+    route = _route(profile, bool(docker_available), backend)
+    sudo_secret = _sudo_secret(backend) if needs_root else None
+    try:
+        if route == ROUTE_WSL:
+            workspace_posix = _wsl_workspace(workspace_dir)
+            if not workspace_posix:
+                raise SandboxUnavailable(
+                    _wsl_workspace_refusal(workspace_dir))
+            args = _wsl_argv(
+                command, workspace_posix, argv_mode=(profile.tier == INERT),
+                session_timeout_s=int(timeout_s) + SESSION_TIMEOUT_MARGIN_S,
+                as_root=needs_root)
+            try:
+                proc, _ = _popen_session_with_credentials(
+                    args, env=_scrubbed_env(), sudo_secret=sudo_secret,
+                    guard_reason="a root command on WSL")
+            except FileNotFoundError:
+                raise SandboxUnavailable(
+                    "wsl.exe was not found, so the WSL backend cannot run "
+                    "anything.") from None
+            return WslSessionProcess(proc, tier=profile.tier)
+        if route == ROUTE_SSH:
+            args = _ssh_argv(
+                command,
+                session_timeout_s=int(timeout_s) + SESSION_TIMEOUT_MARGIN_S,
+                as_root=needs_root)
+            try:
+                proc, window = _popen_session_with_credentials(
+                    args, env=_ssh_env(), sudo_secret=sudo_secret,
+                    guard_reason="a root command over SSH",
+                    askpass_answers=_ssh_stored_secrets())
+            except FileNotFoundError:
+                raise SandboxUnavailable(
+                    f"{_ssh_binary()!r} was not found, so the SSH backend "
+                    f"cannot run anything.") from None
+            return SshSessionProcess(proc, tier=profile.tier,
+                                     credentials=window)
+        if route == ROUTE_CONTAINER:
+            runtime = known_runtime()
+            _log_image_identity(runtime)
+            name = f"session-{uuid.uuid4().hex[:12]}"
+            args = _docker_argv(
+                command, workspace_dir, profile.network,
+                profile.tier == INERT, runtime, name,
+                session_timeout_s=int(timeout_s) + SESSION_TIMEOUT_MARGIN_S)
+            try:
+                proc = _popen_session(args)
+            except FileNotFoundError:
+                raise SandboxUnavailable(
+                    f"The {runtime} CLI was not found. Install Docker or "
+                    "Podman, or set allow_insecure_sandbox_fallback: true in "
+                    "config.yaml.") from None
+            return DockerSessionProcess(proc, runtime=runtime, name=name,
+                                        tier=profile.tier)
+        if route in (ROUTE_HOST_READ, ROUTE_INERT_HOST):
+            proc = _popen_session(_inert_argv(command), cwd=workspace_dir,
+                                  env=_scrubbed_env())
+            return HostSessionProcess(proc, tier=profile.tier)
+        if route == ROUTE_FALLBACK:
+            logger.warning("Using INSECURE subprocess fallback for a "
+                           "session: %s", command[:80])
+            proc = _popen_session(
+                [shell_binary or detect_shell(), "-c", command],
+                cwd=workspace_dir, env=_scrubbed_env(),
+                preexec_fn=_unix_resource_limits(cpu_seconds=timeout_s))
+            return HostSessionProcess(proc, tier=profile.tier)
+    except SandboxUnavailable:
+        raise
+    except OSError as e:
+        raise SandboxUnavailable(f"Could not start the command: {e}") from None
+    raise SandboxUnavailable(_unavailable_message(backend))
+
+
+
+def start_interactive(
+    workspace_dir: str,
+    *,
+    profile: CommandProfile,
+    docker_available: bool,
+    timeout_s: int,
+    prompt_token: str,
+    backend: str = BACKEND_CONTAINER,
+) -> SessionProcess:
+    """Open a shell with a pty inside the container and return it at once.
+
+    `start_sandboxed`'s twin for a session the agent TYPES INTO: the same
+    workspace refusal, the same route, the same container argv builder, plus
+    a stdin pipe and the pty wrapper.
+
+    THE CONTAINER ROUTE OR NOTHING (SS28). Every other route is refused with
+    the reason rather than served differently. A pipe-only shell with no pty
+    is not a worse interactive session, it is a DIFFERENT one that the model
+    cannot see is different: no prompt comes back, output is block-buffered
+    until a program exits, and `isatty` sends half the programs worth opening
+    down another path. That gap between what was approved and what runs is
+    the drift class §46 (EP6) and #157 are about, so it is closed by refusing
+    rather than by documenting.
+
+    SLICE 3 DOES NOT CHANGE THAT. WSL was measured holding a pty in §49 and
+    carries `script`, `stty` and the rest, so the wrapper would very likely
+    work -- and "very likely" is the word that made batch 100 expensive. Two
+    of that batch's assumptions about a pty it had NOT measured through the
+    real argv were false, and neither would have been caught by the tests,
+    because both were in what the tests would have been written against. So
+    an interactive session on WSL waits for the batch that measures its
+    stream, and until then asking for one is refused by name.
+
+    There is no *command* argument on purpose: the agent's text is typed into
+    the shell once it is up, so this function's answer does not depend on it.
+    """
+    refusal = protected_paths.check_workspace(workspace_dir)
+    if refusal:
+        raise SandboxUnavailable(refusal)
+    if backend == BACKEND_SSH:
+        raise SandboxUnavailable(
+            "An interactive shell cannot run over SSH. Its stream shape "
+            "there is not the container's: a remote pty is the only way to "
+            "get a prompt back, and a remote pty merges stderr into stdout "
+            "and turns every newline into CRLF -- measured. Use "
+            "shell_background with backend 'ssh' for a command that does "
+            "not need to be typed into, or open an interactive shell "
+            "without asking for SSH.")
+    if backend == BACKEND_WSL:
+        raise SandboxUnavailable(
+            "An interactive shell cannot run in WSL yet. Its stream shape "
+            "there -- the prompt, the echo and the pty's size -- has not "
+            "been measured, and a shell that answers differently in ways "
+            "you cannot see is worse than one you cannot open. Use "
+            "shell_background with backend 'wsl' for a command that does "
+            "not need to be typed into, or open an interactive shell "
+            "without asking for WSL.")
+    os.makedirs(workspace_dir, exist_ok=True)
+    route = _route(profile, bool(docker_available))
+    if route != ROUTE_CONTAINER:
+        raise SandboxUnavailable(
+            "An interactive shell needs a container runtime, and none is "
+            "available. Unlike a one-shot command there is no fallback: a "
+            "shell without a pty would answer differently in ways you could "
+            "not see -- no prompt, output held back until a program exits, "
+            "and programs taking their non-interactive path. Install Docker "
+            "or Podman, or use shell_background for a command that does not "
+            "need to be typed into.")
+    runtime = known_runtime()
+    _log_image_identity(runtime)
+    name = f"session-{uuid.uuid4().hex[:12]}"
+    args = _docker_argv(
+        "", workspace_dir, profile.network, False, runtime, name,
+        session_timeout_s=int(timeout_s) + SESSION_TIMEOUT_MARGIN_S,
+        prompt_token=prompt_token)
+    try:
+        proc = _popen_session(args, stdin=subprocess.PIPE)
+    except FileNotFoundError:
+        raise SandboxUnavailable(
+            f"The {runtime} CLI was not found. Install Docker or Podman.") \
+            from None
+    except OSError as e:
+        raise SandboxUnavailable(
+            f"Could not open the shell: {e}") from None
+    return DockerSessionProcess(proc, runtime=runtime, name=name,
+                                tier=profile.tier)
+
+
+def kill_labelled_containers() -> list[str]:
+    """Kill every container THIS process started that is still running.
+
+    Scoped by `PROCESS_TOKEN`, never by `venastine.sandbox=1`: two harness
+    instances may run at once, and one quitting must not end the other's
+    sessions. A process that never found a runtime started no container,
+    so it asks nothing. Bounded, and failure is logged rather than raised --
+    this runs on the way out.
+    """
+    probe = _runtime_probe
+    if probe is None or probe.name is None:
+        return []
+    runtime = probe.name
+    try:
+        listed = subprocess.run(  # nosec B603 - `ps` filtered on this process's own label, to find containers it started
+            [runtime, "ps", "-q", "--filter",
+             f"label=venastine.process={PROCESS_TOKEN}"],
+            capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if listed.returncode != 0:
+        return []
+    ids = [line.strip() for line in (listed.stdout or "").splitlines()
+           if line.strip()]
+    if ids:
+        try:
+            subprocess.run([runtime, "kill", *ids], capture_output=True,  # nosec B603 - kills exactly the ids the runtime printed on the line above
+                           timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            logger.warning("Could not kill this process's containers %s",
+                           ", ".join(ids))
+    return ids

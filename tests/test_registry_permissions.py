@@ -19,10 +19,9 @@ from config.ToolPermissions / config.ToolApprovals dataclass defaults.
 
 import pytest
 
-from tools.context import ToolContext
-from tools.registry import ToolRegistry, ToolCallDenied
 from tools.base import ToolSpec
-
+from tools.context import ToolContext
+from tools.registry import ToolCallDenied, ToolRegistry
 
 # ---------------------------------------------------------------------------
 # ---- Tool stub and registry fixture -------------------------------------

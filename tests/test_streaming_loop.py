@@ -14,7 +14,6 @@ directly (not through run_to_completion):
        final assistant turn (D20 invariant).
 """
 
-import queue
 
 import pytest
 
@@ -43,6 +42,7 @@ def _fake_client(mocker):
 # this fake existed in three near-identical copies. One class, in
 # conftest -- see FakeMemory there for why.
 from tests.conftest import FakeMemory as _FakeMemory
+
 
 def _answering_channel(*answers):
     """A ResponseChannel that hands back canned answers in order (§23).
@@ -287,7 +287,6 @@ def test_permission_channel_yields_request_and_dispatches_on_approval(mocker):
     _run() must yield a permission_request event, ask the channel,
     and — on approval — dispatch with a callback that returns True so the
     approved tool actually runs (not silently denied)."""
-    import queue as queue_mod
     from tools.registry import registry
 
     memory = _FakeMemory()
@@ -469,7 +468,9 @@ def _paramwise_tool():
     two branches indistinguishable.
     """
     from security.permissions import (
-        clear_dynamic_approval_defaults, set_dynamic_approval_default)
+        clear_dynamic_approval_defaults,
+        set_dynamic_approval_default,
+    )
     from tools.base import ToolSpec
     from tools.registry import registry
 

@@ -18,9 +18,14 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from core.loop import RunAgentLoop
 from core.events import LoopEvent
-from main import _uuid_type, build_parser, resolve_runtime_defaults, _ensure_workspace_trust
+from core.loop import RunAgentLoop
+from main import (
+    _ensure_workspace_trust,
+    _uuid_type,
+    build_parser,
+    resolve_runtime_defaults,
+)
 from tests.conftest import make_model_response
 
 
@@ -44,15 +49,19 @@ def test_run_agent_conversation_passes_thread_id_to_memory(mocker):
     known_thread_id = uuid4()
 
     captured_kwargs = {}
-    real_memory_cls = None
 
-    from core.memory import ConversationMemory
 
     class SpyMemory:
-        def __init__(self, thread_id=None, kind="chat"):
+        def __init__(self, thread_id=None, kind="chat", **lineage):
             captured_kwargs["thread_id"] = thread_id
             # §27: recorded so this file can assert what the CLI creates.
             captured_kwargs["kind"] = kind
+            # §47: parent_thread_id / parent_call_id / agent_name.
+            # Swallowed rather than enumerated -- this spy is about
+            # WHICH thread the CLI opens, and a spy that has to list
+            # every kwarg breaks on each one added, which is the
+            # coupling registry.dispatch()'s own stubs already dropped.
+            captured_kwargs["lineage"] = lineage
             self.thread_id = thread_id or uuid4()
             self.messages = []
             self.extra = {}  # §18: run_agent_conversation reads the goal
@@ -86,10 +95,16 @@ def test_run_agent_conversation_without_thread_id_starts_fresh(mocker):
     captured_kwargs = {}
 
     class SpyMemory:
-        def __init__(self, thread_id=None, kind="chat"):
+        def __init__(self, thread_id=None, kind="chat", **lineage):
             captured_kwargs["thread_id"] = thread_id
             # §27: recorded so this file can assert what the CLI creates.
             captured_kwargs["kind"] = kind
+            # §47: parent_thread_id / parent_call_id / agent_name.
+            # Swallowed rather than enumerated -- this spy is about
+            # WHICH thread the CLI opens, and a spy that has to list
+            # every kwarg breaks on each one added, which is the
+            # coupling registry.dispatch()'s own stubs already dropped.
+            captured_kwargs["lineage"] = lineage
             self.thread_id = uuid4()
             self.messages = []
             self.extra = {}  # §18: run_agent_conversation reads the goal
@@ -161,8 +176,8 @@ def test_resolve_runtime_defaults_precedence():
     assert (provider, model) == ("ANTHROPIC", "gpt-5.1")
 
     # no settings -> config.py constants
-    from core.loop import DEFAULT_PROVIDER
     import config
+    from core.loop import DEFAULT_PROVIDER
     provider, model = resolve_runtime_defaults(
         SimpleNamespace(provider=None, model=None), {})
     assert (provider, model) == (DEFAULT_PROVIDER, config.MODEL_NAME)
@@ -541,18 +556,340 @@ class TestOneReaderForEveryRead:
         run_chat -- an ordering coincidence between two functions rather
         than a property anyone stated, and it would break the first time
         a startup prompt moved. So: no live input() in this module.
+
+        BATCH 121 READS THIS AS "ONE READER AT A TIME", not "one object".
+        `_StdinReader` reads sys.stdin directly on the calling thread when
+        no pump exists, which is not a second reader -- there is nothing
+        to be second to -- and it is what stops a startup prompt leaving a
+        read parked for the TUI to collide with. input() stays banned
+        because it cannot tell whether a pump already owns the stream;
+        this class's other tests are what hold that line.
         """
-        import io
         import re
 
         import main
 
-        source = io.open(main.__file__, encoding="utf-8").read()
+        source = open(main.__file__, encoding="utf-8").read()
         code = re.sub(r'"""[\s\S]*?"""', "", source)      # drop docstrings
         code = "\n".join(line.split("#", 1)[0] for line in code.splitlines())
         assert not re.search(r"(?<![\w.])input\s*\(", code), (
             "a bare input() is a second reader on the stdin the approval "
             "pump owns -- that is audit #100")
+
+
+class TestTheTuiIsTheOtherReaderOfThisTerminal:
+    """Batch 121. §29 N1 is scoped to main.py, and the biggest reader of
+    this process's stdin is not in main.py: Textual reads the same console
+    from its own thread. So a pump parked in a blocking read when the TUI
+    starts is #100 again, with the TUI in the chat prompt's place.
+
+    Measured, real app, one flag apart -- Windows in a console of its own
+    and Linux under a pty, both the same:
+
+        reader parked   on_key never fired, and App.run() never RETURNED
+                        either (disable_input joins an input thread stuck
+                        in a read the pump drained), so the process had to
+                        be killed -- the owner's "only Alt+F4 works"
+        batch 121       all five injected keys arrived, exit 0
+
+    The owner's report is the first row: a TUI that animates, because
+    timers never touch stdin, and ignores the keyboard including Ctrl+C,
+    because enable_application_mode clears ENABLE_PROCESSED_INPUT and
+    Ctrl+C is just another key event in the queue the wrong reader holds.
+    """
+
+    @staticmethod
+    def _tty_pipe(text):
+        """A real pipe that claims to be a terminal, with the write end
+        LEFT OPEN -- so a read genuinely blocks. A StringIO would hit EOF
+        and let the pump exit, which is the one thing this must not do:
+        the defect is a reader that never finishes.
+        """
+        import os
+
+        read_fd, write_fd = os.pipe()
+        os.write(write_fd, text.encode())
+        handle = os.fdopen(read_fd, "r", encoding="utf-8")
+
+        class _TtyPipe:
+            def isatty(self):
+                return True
+
+            def readline(self):
+                return handle.readline()
+
+            def __iter__(self):
+                return iter(handle)
+
+        return _TtyPipe(), write_fd
+
+    def test_nothing_is_reading_stdin_when_the_tui_takes_the_terminal(
+            self, tmp_path, monkeypatch):
+        """THE ONE THAT FAILS ON THE PRE-121 TREE.
+
+        Drives the real startup: an untrusted project, so the trust prompt
+        fires, answered through the real `_StdinReader` over a real pipe.
+        The assertion is about the state of the terminal at the moment
+        Textual would take it, which is the only place the hazard lives.
+        """
+        import main
+        import tui.app
+        from core import workspace_trust
+
+        home = tmp_path / "home"
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))
+        proj = tmp_path / "proj"
+        (proj / ".venastine").mkdir(parents=True)
+        (proj / ".venastine" / "settings.json").write_text(
+            '{"default_model": "m"}', encoding="utf-8")
+        monkeypatch.chdir(proj)
+
+        # `startup` is the wrong fixture here: it stubs
+        # load_project_config, which is where the trust prompt lives, and
+        # the prompt is the whole point. So only the parts that would
+        # touch a database or a network are stubbed, by hand.
+        monkeypatch.setattr(main, "configure_logging", lambda *a, **k: None)
+        monkeypatch.setattr(main, "create_db_and_tables", lambda *a, **k: None)
+        monkeypatch.setattr(main, "_classify_legacy_threads",
+                            lambda *a, **k: None)
+        monkeypatch.setattr(main, "resolve_runtime_defaults",
+                            lambda *a, **k: ("ANTHROPIC", "m"))
+        monkeypatch.setattr(main, "setup_mcp", lambda *a, **k: None)
+        monkeypatch.setattr(main, "teardown_mcp", lambda *a, **k: None)
+        monkeypatch.setattr(main, "_close_sessions", lambda *a, **k: None)
+        # THE CWD IS THE PROJECT, SAID RATHER THAN ASSUMED. main() reads
+        # config.WORKSPACE_DIR when WORKSPACE_DIR_EXPLICIT is set, and a
+        # developer box with AGENT_WORKSPACE in the environment has it
+        # set -- so chdir decided nothing and this test described, and
+        # trusted, a real project of the developer's. Found by the prompt
+        # printing somebody's actual mcp.json.
+        monkeypatch.setattr(main.config, "WORKSPACE_DIR_EXPLICIT", False)
+
+        stdin, write_fd = self._tty_pipe("y\n")
+        monkeypatch.setattr(main.sys, "stdin", stdin)
+        # A fresh global, restored by monkeypatch -- the reader is a
+        # process singleton and this test releases the one it builds.
+        monkeypatch.setattr(main, "_STDIN_READER", None)
+
+        seen = {}
+        monkeypatch.setattr(
+            tui.app, "run",
+            lambda *a, **k: seen.update(
+                reader=main._STDIN_READER,
+                thread=getattr(main._STDIN_READER, "_thread", "no reader")))
+
+        main.main(["--tui"])
+
+        assert workspace_trust.is_trusted(str(proj)), (
+            "the trust prompt did not run, so this test proves nothing "
+            "about the state it leaves behind")
+        assert seen["reader"] is not None, (
+            "the prompt bypassed the one reader; see N1")
+        assert seen["thread"] is None, (
+            "a reader is still parked on this terminal as Textual takes "
+            "it -- that is the freeze: two readers, one console, and the "
+            "parked read wins every keystroke")
+        assert main._STDIN_READER._released is True, (
+            "the handover never happened, so a later prompt could start "
+            "a pump behind the TUI's back")
+        import os
+        os.close(write_fd)
+
+    def test_a_one_shot_prompt_leaves_no_reader_behind(self, monkeypatch):
+        """The mechanism, without main(): readline answers from the
+        calling thread and starts nothing."""
+        import main
+
+        stdin, write_fd = self._tty_pipe("y\n")
+        monkeypatch.setattr(main.sys, "stdin", stdin)
+        reader = main._StdinReader()
+
+        assert reader.readline("Trust? ") == "y"
+        assert reader._thread is None, (
+            "a pump was started for a read that has no deadline, so there "
+            "was nothing it could be abandoned for")
+        import os
+        os.close(write_fd)
+
+    def test_an_inline_read_still_ends_at_eof(self, monkeypatch):
+        """N3's contract on the new path. Ctrl+D has to stay the way out
+        of the chat loop and the default-No at a startup prompt."""
+        import io
+
+        import main
+
+        class _Empty(io.StringIO):
+            def isatty(self):
+                return True
+
+        monkeypatch.setattr(main.sys, "stdin", _Empty(""))
+        reader = main._StdinReader()
+        with pytest.raises(EOFError):
+            reader.readline("You: ")
+
+    def test_an_inline_read_that_raises_is_an_ended_stdin(self, monkeypatch):
+        """_pump's own rule, on the inline path: a stdin that cannot be
+        READ is, to the caller, a stdin that has ENDED. Under pytest's
+        capture the read raises, which is how the pump found this."""
+        import main
+
+        class _Explodes:
+            def isatty(self):
+                return True
+
+            def readline(self):
+                raise OSError("reading from stdin while output is captured")
+
+        monkeypatch.setattr(main.sys, "stdin", _Explodes())
+        reader = main._StdinReader()
+        with pytest.raises(EOFError):
+            reader.readline("You: ")
+
+    def test_a_live_pump_still_owns_stdin(self, monkeypatch):
+        """#100 STAYS FIXED, and this is the test that says so.
+
+        Once the approval pump exists it is the one reader, and the chat
+        prompt must not read the descriptor itself -- that was the wedge.
+        So the inline path is conditional on there being no pump, and the
+        proof is a stdin that raises if anyone reads it directly after the
+        pump has started.
+        """
+        import main
+
+        stdin, write_fd = self._tty_pipe("")
+        monkeypatch.setattr(main.sys, "stdin", stdin)
+        reader = main._StdinReader()
+        reader._start()                        # as ask() would
+
+        class _Forbidden:
+            def isatty(self):
+                return True
+
+            def readline(self):
+                raise AssertionError(
+                    "read stdin directly while the pump owns it -- #100")
+
+        monkeypatch.setattr(main.sys, "stdin", _Forbidden())
+        import os
+        os.write(write_fd, b"typed at the pump\n")
+        assert reader.readline("You: ") == "typed at the pump"
+        os.close(write_fd)
+
+    def test_releasing_the_terminal_refuses_every_later_read(self, monkeypatch):
+        """The handover's other half. A read after it would be a read of a
+        terminal this process no longer owns, which is exactly a stdin
+        nobody can type at -- EOFError and None, the two answers the
+        callers already handle."""
+        import main
+
+        class _Forbidden:
+            def isatty(self):
+                return True
+
+            def readline(self):
+                raise AssertionError("read a terminal we handed over")
+
+            def __iter__(self):
+                raise AssertionError("pumped a terminal we handed over")
+
+        monkeypatch.setattr(main.sys, "stdin", _Forbidden())
+        reader = main._StdinReader()
+        assert reader.release_terminal() is True
+
+        with pytest.raises(EOFError):
+            reader.readline("You: ")
+        assert reader.ask("Allow? ", 0.05) is None
+        reader._start()
+        assert reader._thread is None, (
+            "a pump started after the handover, which is the defect one "
+            "call site later")
+
+    def test_the_handover_reports_a_reader_it_could_not_retire(
+            self, monkeypatch):
+        """FALSE is not decoration. A blocking read cannot be interrupted
+        on any platform this runs on, so if a future prompt ever starts a
+        pump before the TUI, the only thing left is to SAY so -- the
+        alternative symptom is a UI that animates and ignores the
+        keyboard with nothing anywhere explaining it."""
+        import main
+
+        stdin, write_fd = self._tty_pipe("")
+        monkeypatch.setattr(main.sys, "stdin", stdin)
+        reader = main._StdinReader()
+        reader._start()
+        assert reader._thread.is_alive()
+
+        assert reader.release_terminal() is False, (
+            "a pump parked in a read was reported as a free terminal")
+        import os
+        os.close(write_fd)
+
+    def test_the_module_level_handover_tolerates_a_reader_never_built(
+            self, monkeypatch):
+        """A launch with no startup prompt has nothing to release, and
+        asking _stdin_reader() would CREATE one just to release it."""
+        import main
+
+        monkeypatch.setattr(main, "_STDIN_READER", None)
+        assert main._release_terminal() is True
+        assert main._STDIN_READER is None
+
+
+class TestTheUserTierFileIsAnnouncedOnBothShells:
+    """Batch 121, owner request. The file is only half the answer -- a file
+    created in silence is as undiscoverable as no file -- so the path is
+    said once, where the shell in use can show it.
+    """
+
+    @staticmethod
+    def _user_mcp():
+        import os
+
+        return os.path.expanduser("~/.config/venastine/mcp.json")
+
+    def test_the_tui_carries_it_because_a_print_would_be_erased(
+            self, startup, monkeypatch):
+        import os
+
+        import main
+        import tui.app
+
+        seen = {}
+        monkeypatch.setattr(
+            tui.app, "run",
+            lambda *a, **k: seen.update(notices=list(
+                k.get("startup_notices") or ())))
+
+        main.main(["--tui"])
+
+        assert os.path.exists(self._user_mcp()), "no file was created"
+        assert [line for line in seen["notices"]
+                if "mcp.json" in line and "created" in line], seen
+        assert ".venastine/mcp.json" in " ".join(seen["notices"]), (
+            "the notice names the user tier without distinguishing it from "
+            "the project tier, which is the confusion it exists to end")
+
+    def test_the_cli_prints_it_to_a_stdout_nothing_erases(
+            self, startup, capsys):
+        import main
+
+        main.main([])
+
+        out = capsys.readouterr().out
+        assert "mcp.json" in out and "created" in out, out
+
+    def test_the_second_launch_says_nothing(self, startup, capsys):
+        """It is a first-run convenience, not a status line. Saying it
+        every time would train the user to stop reading startup output,
+        which is where the provider warnings live."""
+        import main
+
+        main.main([])
+        capsys.readouterr()
+        main.main([])
+
+        assert "created" not in capsys.readouterr().out
 
 
 class TestTheDeadlineBelongsToTheChannel:
@@ -633,6 +970,10 @@ _PAYLOADS = {
     "confirm": {"title": "Write these files?", "body": "ARCHITECTURE.md"},
     "choice": {"options": ["software", "research"], "proposal": "software",
                "reason": "it has a pyproject.toml", "blank": False},
+    # ROADMAP_v3 §49 slice 5a (SS59). The seventh kind this table's own
+    # guard predicted.
+    "secret": {"title": "Unlock the secrets store",
+               "body": "Needed to authenticate to the remote host."},
 }
 
 
@@ -697,6 +1038,369 @@ class TestEveryKindIsRendered:
         missing = [k for k in interaction.SAFE_DEFAULTS
                    if f"interaction.{k.upper()}" not in source]
         assert not missing, f"tui/app.py cannot render {missing}"
+
+
+class TestNothingUntrustedCanRedrawAConsentPrompt:
+    """S16-02. The CLI printed the security-critical half of every consent
+    prompt with raw terminal escapes in it.
+
+    The params block was always safe -- `_render_params` runs
+    `json.dumps`, which emits `\\u001b` -- and the three lines the user
+    actually decides on were plain f-strings. Measured before the fix,
+    through the real channel: a headline of `cat README.md` + CSI `2K` +
+    CR + a second `$ cat .venastine/settings.json` reached stdout with the
+    introducer intact, and CSI `2K` erases the row the approved command
+    was drawn on. R1 says the description of what is being approved IS
+    the whole of informed consent, and EP1 puts the subject on the one
+    line a terminal cannot scroll away; a subject line the model can
+    repaint is neither.
+
+    A RELATION OVER `_PAYLOADS`, NOT A LIST OF PRINT SITES. That table is
+    held against `interaction.SAFE_DEFAULTS` by the guard two classes up,
+    so a kind added with an unscrubbed handler fails here without anyone
+    remembering to extend a list -- and an enumeration of `print` calls
+    could not have that property, because the thing being guarded against
+    is a NEW print call.
+
+    WHAT THE SWEEP REACHES, AND WHAT IT CANNOT. `_poison` can only reach
+    strings the table actually carries, and `_PAYLOADS` is deliberately
+    minimal -- it exists to prove that a kind is rendered at all. So the
+    sweep says nothing about `headline` (absent from the approval entry),
+    about `notice` (a field of the Request rather than of the payload), or
+    about the four fields of a review `finding` beyond `claim_id`. Each
+    has a named test below. That gap was found by the mutation pass and
+    not by reading: printing the headline raw again left the whole sweep
+    green, and the headline is the field the finding is about.
+    """
+
+    # Everything a terminal ACTS on rather than draws: C0 less the two a
+    # caller means, DEL, and the whole C1 range (U+009B is the same CSI
+    # introducer as `ESC [`, batch 145).
+    _ACTED_ON = frozenset(
+        [chr(c) for c in range(0x20) if chr(c) not in "\n\t"]
+        + [chr(0x7F)]
+        + [chr(c) for c in range(0x80, 0xA0)])
+
+    _SPOOF = "cat README.md\x1b[2K\r  $ cat .venastine/settings.json"
+
+    @classmethod
+    def _poison(cls, value):
+        """The same payload with the spoof appended to every string in it,
+        however deep. Recursive because two kinds carry their text one
+        level down -- `review` under `finding`, and every kind with
+        `options` under a list.
+        """
+        if isinstance(value, str):
+            return value + cls._SPOOF
+        if isinstance(value, dict):
+            return {k: cls._poison(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return type(value)(cls._poison(v) for v in value)
+        return value
+
+    @classmethod
+    def _strings(cls, value):
+        """Every string inside a payload, flattened."""
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, dict):
+            out = []
+            for item in value.values():
+                out.extend(cls._strings(item))
+            return out
+        if isinstance(value, (list, tuple)):
+            out = []
+            for item in value:
+                out.extend(cls._strings(item))
+            return out
+        return []
+
+    @staticmethod
+    def _render(kind, payload, notice=None, typed="n"):
+        """Ask the real channel, and give back everything the user saw.
+
+        The PROMPT counts as something the user saw: `_confirm`'s title
+        and the grant picker's tool name are interpolated into the
+        question rather than printed above it, so a test reading stdout
+        alone would miss two of the sites this covers.
+        """
+        import unittest.mock as mock
+
+        import main
+        from core import interaction
+        from tests.conftest import FakeStdinReader
+
+        reader = FakeStdinReader([typed])
+        with mock.patch.object(main, "_stdin_reader", return_value=reader):
+            channel = main.build_attended_provider()
+        answer = channel.ask(interaction.Request(
+            kind=kind, payload=payload, notice=notice))
+        return answer, reader
+
+    def test_the_poisoned_payloads_really_carry_a_control(self):
+        """Guards the guard, in the direction batch 151 spent its day on:
+        a payload with no control in it would pass the test below while
+        checking nothing, and `_poison` returning its argument unchanged
+        for some shape is exactly how that happens.
+        """
+        for kind, payload in _PAYLOADS.items():
+            poisoned = self._poison(payload)
+            assert poisoned != payload, kind
+            strings = self._strings(poisoned)
+            assert strings, f"{kind}: no strings to poison"
+            assert all(self._ACTED_ON & set(s) for s in strings), kind
+
+    @pytest.mark.parametrize("kind", sorted(_PAYLOADS))
+    def test_no_control_character_reaches_the_terminal(self, kind, capsys):
+        _, reader = self._render(kind, self._poison(_PAYLOADS[kind]))
+        shown = capsys.readouterr().out + "".join(reader.prompts)
+        leaked = sorted(self._ACTED_ON & set(shown))
+        assert not leaked, (
+            f"{kind} printed {[hex(ord(c)) for c in leaked]} to a terminal")
+
+    @pytest.mark.parametrize("kind", sorted(_PAYLOADS))
+    def test_the_prompt_says_something_was_removed(self, kind, capsys):
+        """The owner's ruling, and the half a silent strip would not give:
+        a tool call whose text tries to move the cursor is evidence about
+        the decision being asked. Nothing a tool legitimately needs to do
+        involves redrawing a consent prompt.
+        """
+        self._render(kind, self._poison(_PAYLOADS[kind]))
+        out = capsys.readouterr().out
+        assert "terminal control sequence" in out, (
+            f"{kind} stripped the controls and said nothing:\n{out}")
+
+    @pytest.mark.parametrize("kind", sorted(_PAYLOADS))
+    def test_a_clean_payload_renders_with_no_warning(self, kind, capsys):
+        """THE CONTROL. A filter that warns on everything is a filter
+        nobody reads, and a test that only ever feeds poison cannot tell
+        the two apart.
+        """
+        self._render(kind, _PAYLOADS[kind])
+        out = capsys.readouterr().out
+        assert "terminal control sequence" not in out, out
+
+    def test_the_approval_notice_is_covered_too(self, capsys):
+        """`notice` is a field of the Request rather than of the payload
+        -- `ToolSpec.approval_notice`, composed by the tool from the
+        model's own params -- so `_poison` above cannot reach it and the
+        parametrised tests say nothing about it.
+        """
+        self._render("approval", _PAYLOADS["approval"],
+                     notice="runs on the HOST" + self._SPOOF)
+        out = capsys.readouterr().out
+        assert not (self._ACTED_ON & set(out)), out
+        assert "terminal control sequence" in out
+
+    def test_the_real_command_survives_beside_the_forgery(self, capsys):
+        """What the fix is FOR, stated as the user's outcome rather than
+        as an absence of bytes. The approved command stays on the screen
+        and the forged text is still visible -- as text, on its own line,
+        wearing a second `$ ` prefix, because `str.splitlines()` splits on
+        a carriage return and the per-line prefix is applied after it.
+        Removing the escape is what stops the first line being erased.
+        """
+        self._render("approval",
+                     {"tool_name": "shell", "headline": self._SPOOF,
+                      "params": {"command": self._SPOOF}})
+        out = capsys.readouterr().out
+        # BOTH HALVES, and the second was missing. This asserted only that
+        # the real command was still there, and it passed against the
+        # UNFIXED code: the raw escape sat at the end of that same line,
+        # where a substring check cannot see it. What makes the line safe
+        # is the absence; what makes the fix worth having is the presence.
+        assert not (self._ACTED_ON & set(out)), out
+        assert "  $ cat README.md" in out, out
+        assert "  $   $ cat .venastine/settings.json" in out, out
+        assert "terminal control sequence" in out, out
+
+    def test_the_headline_is_covered_by_a_test_of_its_own(self, capsys):
+        """`headline` is absent from `_PAYLOADS["approval"]`, so the sweep
+        above never renders the field S16-02 is actually about. Found by
+        the mutation pass: printing it raw left every sweep green.
+
+        Three spellings, because the headline is the one field a shell
+        tool always has and the one place EP1 puts first. `capsys` is read
+        INSIDE the loop -- `readouterr()` clears the buffer, so a loop
+        that reads once afterwards checks only its last iteration.
+        """
+        for headline in (self._SPOOF,
+                         "ls\x9b2J",
+                         "ls\x1b]0;window title\x07"):
+            self._render("approval",
+                         {"tool_name": "shell", "headline": headline,
+                          "params": {"command": headline}})
+            out = capsys.readouterr().out
+            assert not (self._ACTED_ON & set(out)), (headline, out)
+            assert "terminal control sequence" in out, (headline, out)
+
+    def test_every_field_of_a_review_finding_is_covered(self, capsys):
+        """`_PAYLOADS["review"]`'s finding carries `claim_id` alone, so
+        `kind`, `severity`, `reason` and `proposed` -- all four written by
+        the reviewing model, and `proposed` is the text a user accepts
+        into a report -- were rendered by no test at all. The mutation
+        pass found this one too.
+        """
+        finding = {"claim_id": "c1" + self._SPOOF,
+                   "kind": "numeric" + self._SPOOF,
+                   "severity": "high" + self._SPOOF,
+                   "reason": "the figure is wrong" + self._SPOOF,
+                   "proposed": "42" + self._SPOOF}
+        self._render("review", {"finding": finding, "round": 1}, typed="r")
+        out = capsys.readouterr().out
+        assert not (self._ACTED_ON & set(out)), out
+        assert "terminal control sequence" in out, out
+
+
+    def test_the_params_block_was_already_safe(self, capsys):
+        """The other control, and the reason the fix is at the display
+        boundary rather than in the classifier or the registry: one path
+        in this prompt was always right, and it got there by rendering
+        the value instead of trusting it.
+        """
+        self._render("approval",
+                     {"tool_name": "shell", "headline": "ls",
+                      "params": {"command": self._SPOOF}})
+        out = capsys.readouterr().out
+        assert "\\u001b[2K" in out, out
+
+
+    def test_the_grant_picker_is_covered_too(self, capsys, monkeypatch):
+        """Not a kind, and the one consent prompt in this shell whose
+        whole substance is third-party text: `candidates()` exists for
+        MCP tools, its description comes from the server's own schema,
+        and `_pick_tools_to_grant`'s docstring says showing it IS the
+        informed consent. `_bounded` at registration collapses whitespace
+        -- measured, so a carriage return never arrives -- and leaves the
+        escape, which is the half that moves a cursor.
+        """
+        import main
+
+        monkeypatch.setattr(main, "_ask", lambda prompt: "n")
+        main._pick_tools_to_grant([("mcp__srv__post", "posts a message"
+                                    + self._SPOOF)])
+        out = capsys.readouterr().out
+        assert not (self._ACTED_ON & set(out)), out
+        assert "terminal control sequence" in out, out
+
+    def test_the_mcp_acknowledgement_is_covered_too(self, capsys,
+                                                    monkeypatch):
+        """`describe()` renders a file this user may not have written --
+        D31 exists because an installer can append to it -- onto the one
+        screen where they decide whether to run its command.
+        """
+        import main
+        from mcp_client import config as mcp_config
+
+        cfg = mcp_config.ServerConfig(
+            name="srv", tier="user", path="<test>", transport="stdio",
+            command="unused" + self._SPOOF)
+        monkeypatch.setattr(mcp_config, "is_known", lambda c: False)
+        monkeypatch.setattr(main.sys.stdin, "isatty", lambda: True)
+        monkeypatch.setattr(main, "_ask", lambda prompt: "n")
+        main._confirm_user_level_servers({"srv": cfg})
+        out = capsys.readouterr().out
+        assert not (self._ACTED_ON & set(out)), out
+        assert "terminal control sequence" in out, out
+
+
+class TestTheTerminalNamesTheAskingRun:
+    """§47's asker line, in the shell that was dropping it (batch 76).
+
+    `core/loop.py` puts `asking_agent` / `asking_depth` on every approval
+    payload and the `ask_user` tool puts them on a question, so all three
+    kinds that can be raised from INSIDE a run carry the asker -- and this
+    file rendered none of them while the TUI rendered one, then three.
+    That is audit #7's shape one level down: not a missing branch, but a
+    branch that drops a field, which looks perfectly wired up.
+
+    It matters most where the subject is a NAME. NA9 lets three children
+    of one response each ask at once, and three sign-offs naming only the
+    grandchild about to be spawned are three identical prompts on the one
+    stdin reader.
+    """
+
+    @staticmethod
+    def _ask(kind, payload, typed=None):
+        import unittest.mock as mock
+
+        import main
+        from core import interaction
+        from tests.conftest import FakeStdinReader
+
+        reader = FakeStdinReader([typed] if typed is not None else [])
+        with mock.patch.object(main, "_stdin_reader", return_value=reader):
+            channel = main.build_attended_provider()
+        return interaction.ask(
+            channel, interaction.Request(kind=kind, payload=payload))
+
+    def test_an_approval_says_who_is_asking_before_it_says_what(self, capsys):
+        """Placement as well as presence: under the bracketed header the
+        harness wrote, above the agent's own rationale. The line is the
+        most harness-y fact on the prompt, and a reader scrolling past it
+        after the agent's claim has already read the claim."""
+        from core import interaction
+
+        self._ask(interaction.APPROVAL,
+                  dict(_PAYLOADS["approval"],
+                       asking_agent="explore", asking_depth=2,
+                       rationale="I need this"))
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if ln]
+        where = [i for i, ln in enumerate(lines) if "asked by" in ln]
+
+        assert where, f"the prompt said {lines}, naming nobody"
+        assert lines[where[0]].strip() == "asked by explore (depth 2)"
+        assert lines[where[0] - 1].startswith("[approval]"), (
+            f"the label landed under {lines[where[0] - 1]!r}; it belongs "
+            "directly under the header")
+        assert any("I need this" in ln for ln in lines[where[0] + 1:]), (
+            "the agent's own words came BEFORE the harness fact")
+
+    def test_a_signoff_names_the_run_doing_the_spawning(self, capsys):
+        """`agent` on that prompt is the run about to be SPAWNED, which is
+        why this cannot be read off it."""
+        from core import interaction
+
+        self._ask(interaction.SUBAGENT_SIGNOFF,
+                  dict(_PAYLOADS["subagent_signoff"],
+                       asking_agent="explore", asking_depth=1))
+
+        assert "asked by explore (depth 1)" in capsys.readouterr().out
+
+    def test_a_signoff_with_nothing_to_tick_names_it_too(self, capsys):
+        """The no-candidates branch is its own composition here as it is
+        in the modal, and a nested spawn of an agent with no gated tools
+        is what reaches it."""
+        from core import interaction
+
+        self._ask(interaction.SUBAGENT_SIGNOFF,
+                  {"agent": "scout", "candidates": [],
+                   "asking_agent": "explore", "asking_depth": 1})
+
+        assert "asked by explore (depth 1)" in capsys.readouterr().out
+
+    def test_a_question_from_a_nested_run_names_it(self, capsys):
+        """"The assistant has a question" is an understatement for a run
+        two levels down, whose question surfaces here exactly as its
+        approvals do."""
+        from core import interaction
+
+        self._ask(interaction.QUESTION,
+                  dict(_PAYLOADS["question"],
+                       asking_agent="explore", asking_depth=2))
+
+        assert "asked by explore (depth 2)" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("kind", ["approval", "subagent_signoff",
+                                      "question"])
+    def test_nothing_is_said_at_the_top(self, kind, capsys):
+        """Scope rather than a gap: the asking run is then the
+        conversation the reader is watching, which needs no label."""
+        from core import interaction
+
+        self._ask(getattr(interaction, kind.upper()), _PAYLOADS[kind])
+
+        assert "asked by" not in capsys.readouterr().out
 
 
 class TestTheConfirmRenderer:
@@ -792,8 +1496,21 @@ def startup(monkeypatch, tmp_path):
     could reach the four parser.error validations, the ordering of the
     early-exit commands, or the `finally: teardown_mcp`. N7 is what makes
     it callable; this is what calls it.
+
+    BATCH 121 ADDS HOME TO THE LIST, and it belongs in the fixture rather
+    than in the tests: "every side effect stubbed" was true only while
+    nothing in the startup sequence wrote to the USER tier, and
+    mcp_client.config.ensure_user_config() does -- it creates
+    ~/.config/venastine/mcp.json when there isn't one. Unredirected, this
+    fixture ran that against the developer's own config directory, which
+    is how it was noticed. Stubbing that one function instead would have
+    left the next user-tier write to find this the same way.
     """
     import main
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("HOME", str(home))
 
     order = []
 
@@ -1114,6 +1831,64 @@ class TestTheDecliningDefaults:
                          typed="none") == set()
 
 
+    def test_a_line_naming_nothing_refuses_the_spawn(self):
+        """S16-01. `xyz` fell out of the piece loop with an empty
+        `chosen`, and the function returned it -- but the empty set is
+        already taken: it is the explicit `none`, and `core/loop.py:440`
+        spawns on "not None". So a mistyped refusal became an
+        authorisation to spawn. Measured through the real channel before
+        the fix: `xyz` returned set() and SPAWNED.
+
+        The pair either side of this were pinned (blank and unanswered)
+        and no test typed a non-blank line that named nothing, which is
+        why a hole between two green cells stayed green.
+        """
+        from core import interaction
+
+        assert self._ask(interaction.SUBAGENT_SIGNOFF,
+                         _PAYLOADS["subagent_signoff"], typed="xyz") is None
+
+    def test_a_line_of_numbers_that_name_nothing_refuses_too(self):
+        """The same hole reached with input that LOOKS like the thing the
+        prompt asked for. `0 99` is two digits, both out of range, so
+        every piece is dropped by the bounds check rather than by the
+        isdigit check -- a different route to the same empty set, and the
+        one a user hits by miscounting rather than by mistyping.
+        """
+        from core import interaction
+
+        assert self._ask(interaction.SUBAGENT_SIGNOFF,
+                         _PAYLOADS["subagent_signoff"], typed="0 99") is None
+
+    def test_a_mixed_line_still_grants_what_it_named(self):
+        """THE CONTROL FOR THE TWO ABOVE, and the reason the fix is "no
+        valid piece" rather than "any invalid piece". `1 xyz` named one
+        candidate and misspelled something else; refusing the spawn over
+        the second half would discard an answer the user did give, and
+        the per-piece message already says what was ignored.
+        """
+        from core import interaction
+
+        assert self._ask(interaction.SUBAGENT_SIGNOFF,
+                         _PAYLOADS["subagent_signoff"],
+                         typed="1 xyz") == {"remember"}
+
+    def test_the_refusal_says_which_kind_of_refusal_it_was(self, capsys):
+        """Not decoration: a user who typed a tool name instead of its
+        number gets a refused spawn, and "nothing there named a tool" is
+        the difference between a bug and an answer they can correct. The
+        blank case says "no answer"; this one cannot, because there was
+        one.
+        """
+        from core import interaction
+
+        self._ask(interaction.SUBAGENT_SIGNOFF,
+                  _PAYLOADS["subagent_signoff"], typed="remember")
+        out = capsys.readouterr().out
+        assert "nothing there named a tool" in out, out
+        assert "the spawn was refused" in out, out
+
+
 class TestAPipeDoesNotAcknowledgeAnMcpServer:
     """#102's fourth survivor. Mutation: drop the non-tty
     `approved.pop(...)`, and a piped run CONNECTS an unacknowledged
@@ -1140,7 +1915,6 @@ class TestAPipeDoesNotAcknowledgeAnMcpServer:
     def test_a_terminal_can_still_accept_it(self, monkeypatch, cli_stdin):
         """The control: skipping unconditionally would pass the test
         above and make user-level servers unusable."""
-        import main
         from mcp_client import config as mcp_config
 
         cli_stdin("y")
@@ -1148,7 +1922,6 @@ class TestAPipeDoesNotAcknowledgeAnMcpServer:
         assert set(self._pending(monkeypatch, interactive=True)) == {"srv"}
 
     def test_a_terminal_can_decline_it(self, monkeypatch, cli_stdin):
-        import main
 
         cli_stdin("n")
         assert self._pending(monkeypatch, interactive=True) == {}
@@ -1170,8 +1943,8 @@ class TestResumingAThreadReplaysItAtTheCallSite:
 
         mocker.patch.object(
             main, "replay_entries",
-            return_value=[("user", "earlier question", ()),
-                          ("assistant", "earlier answer", ())])
+            return_value=[("user", "earlier question", (), ""),
+                          ("assistant", "earlier answer", (), "")])
         cli_stdin()                      # EOF immediately: no turn needed
         main.run_chat(uuid4(), "ANTHROPIC", "m")
 
@@ -1270,8 +2043,9 @@ class TestTheLaunchProviderCheck:
     def test_a_healthy_install_is_silent(self, startup, capsys):
         """Silence is the healthy case's whole UX: /model does not
         announce anything on success either."""
-        import main
         import json
+
+        import main
 
         with open("providers.json", "w", encoding="utf-8") as f:
             json.dump({"ANTHROPIC": {"API_KEY": "sk-test", "API_URL": "",
@@ -1286,8 +2060,9 @@ class TestTheLaunchProviderCheck:
         """/model warns rather than refuses on a missing key -- a local
         OpenAI-compatible endpoint legitimately takes none. Launch makes
         the same call on the same facts."""
-        import main
         import json
+
+        import main
 
         with open("providers.json", "w", encoding="utf-8") as f:
             json.dump({"ANTHROPIC": {"API_KEY": "", "API_URL": "",
@@ -1313,6 +2088,7 @@ class TestTheLaunchProviderCheck:
         """
         import inspect
         import json
+
         import tui.app
 
         seen = {}
@@ -1322,8 +2098,10 @@ class TestTheLaunchProviderCheck:
         # wiring break with this test still green.
         monkeypatch.setattr(
             tui.app, "run",
-            lambda provider, model, settings, cli_pinned=False:
-                seen.update(provider=provider, cli_pinned=cli_pinned))
+            lambda provider, model, settings, cli_pinned=False,
+            startup_notices=None:
+                seen.update(provider=provider, cli_pinned=cli_pinned,
+                            notices=list(startup_notices or ())))
 
         with open("providers.json", "w", encoding="utf-8") as f:
             json.dump({"OPENAI": {"API_KEY": "k", "API_URL": "",
@@ -1340,6 +2118,17 @@ class TestTheLaunchProviderCheck:
             tui.app.run).parameters, (
             "the parameter is what let a stale finding travel; removing it "
             "is the fix, so its absence is the assertion")
+        # BATCH 121's `startup_notices` IS NOT THAT PARAMETER COMING BACK,
+        # and the difference is the whole of batch 44's finding: a provider
+        # finding is RECOMPUTABLE, and computing it in main() froze it
+        # against the config pair while the app went on to restore a
+        # remembered one. These are facts main() established and the app
+        # cannot rediscover -- a file it created, a terminal it could not
+        # free. So the test for them is that no provider finding is in
+        # here, not that the list is empty.
+        assert not [line for line in seen["notices"]
+                    if "provider" in line.lower() or "API_KEY" in line], (
+            "a provider finding travelled again, by another name")
         assert seen["cli_pinned"] is False, (
             "no --provider/--model was given, so nothing pinned this launch")
 
@@ -1384,11 +2173,32 @@ def test_resolve_effort_precedence():
     assert resolve_effort(ns(None), {"effort": "auto"}) is None
 
 
-def test_main_resolves_and_passes_effort_to_run_chat(monkeypatch):
+def test_main_resolves_and_passes_effort_to_run_chat(monkeypatch, tmp_path):
     """main() computes the level beside provider/model and hands it to the
     chat loop -- a flag that resolved to nothing would make --effort a
-    decorative argument."""
+    decorative argument.
+
+    THE CHDIR IS NOT DECORATION (batch 107). This is the only `main.main()`
+    call in the suite that does not take the `startup` fixture, whose first
+    act is exactly this line -- so it is the only one that ran from the
+    repository root, which is the harness's own install tree, which
+    `check_project` now refuses. It was green on the author's Windows box
+    for a reason worth knowing: that shell had `AGENT_WORKSPACE` set, so
+    the project resolved elsewhere and the guard never fired. WSL, with the
+    variable unset, failed it immediately. A test whose result depends on
+    the developer's environment is the same defect as TECHNICAL_DEBT 27 in
+    a different place, so the directory is pinned rather than inherited.
+    """
     import main
+
+    monkeypatch.chdir(tmp_path)
+    # Batch 121, and for the reason the paragraph above gives about
+    # AGENT_WORKSPACE: main() creates the user-level mcp.json when there
+    # isn't one, and the `startup` fixture this test deliberately does
+    # without is where that redirect otherwise lives.
+    home = tmp_path / "home"
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("HOME", str(home))
 
     captured = {}
 
@@ -1440,9 +2250,9 @@ def test_run_research_forwards_effort_to_the_pipeline(mocker, capsys):
     """#139 on the CLI's other path. The pipeline receives the resolved
     level, and the header names it. run_research imports the generator
     lazily from the orchestrator module, so that is the seam."""
+    import main
     from core.reasoning.base import PipelineRun
     from core.reasoning.events import PipelineEvent
-    import main
 
     captured = {}
     run = PipelineRun(user_query="q", final_report="REPORT")
@@ -1472,3 +2282,95 @@ def test_a_plain_run_still_gets_the_floor():
 
     args = SimpleNamespace(effort=None)
     assert main.resolve_effort(args, {}) == config.DEFAULT_EFFORT == "high"
+
+
+# ===========================================================================
+# ---- ROADMAP_v3 §49 slice 5a (SS59): the masked read ----------------------
+# ===========================================================================
+
+class TestTheTerminalActuallyStopsEchoing:
+    """`_echo_off` is the only thing that stops a passphrase appearing on
+    screen, and every other CLI test replaces the reader wholesale -- so
+    nothing had ever run it. That is the defect shape AGENTS.md records for
+    `registry.dispatch`: mocking the layer under test removes the thing
+    under test.
+
+    Against a REAL pty, because terminal attributes ARE the mechanism and a
+    mock of them would assert that the mock works.
+    """
+
+    def test_it_clears_the_echo_bit_and_puts_it_back(self):
+        import os
+
+        if os.name == "nt":
+            pytest.skip("no pty; the Windows branch is covered below")
+        termios = pytest.importorskip("termios")
+        import main
+
+        controller, follower = os.openpty()
+        try:
+            before = termios.tcgetattr(follower)
+            assert before[3] & termios.ECHO, (
+                "a fresh pty should start with echo ON, or this test is "
+                "asserting nothing")
+
+            class _Stdin:
+                def fileno(self):
+                    return follower
+
+                def isatty(self):
+                    return True
+
+            original = sys.stdin
+            sys.stdin = _Stdin()
+            try:
+                restore = main._echo_off()
+                assert restore is not None
+                during = termios.tcgetattr(follower)
+                assert not (during[3] & termios.ECHO), (
+                    "echo is still on -- a passphrase typed here would be "
+                    "drawn on the screen")
+                restore()
+                after = termios.tcgetattr(follower)
+                assert after[3] & termios.ECHO
+            finally:
+                sys.stdin = original
+        finally:
+            os.close(controller)
+            os.close(follower)
+
+    def test_a_non_tty_reads_nothing_rather_than_echoing_into_a_pipe(self):
+        """A redirected stdin has no echo to turn off, so a passphrase
+        typed into one lands in the pipe, the scrollback and any log
+        capturing the run. None decodes as the declining default, which is
+        a refusal the user can see rather than a secret they cannot take
+        back."""
+        import io
+
+        import main
+
+        reader = main._StdinReader()
+        original = sys.stdin
+        sys.stdin = io.StringIO("typed anyway\n")
+        try:
+            assert reader.readline_masked("pass: ") is None
+        finally:
+            sys.stdin = original
+
+    def test_a_terminal_that_cannot_hide_input_reads_nothing(self,
+                                                             monkeypatch):
+        """`_echo_off` returning None means this terminal cannot suppress
+        the echo. Reading anyway would print it."""
+        import main
+
+        monkeypatch.setattr(main, "_echo_off", lambda: None)
+
+        class _Stdin:
+            def isatty(self):
+                return True
+
+        monkeypatch.setattr(sys, "stdin", _Stdin())
+        reader = main._StdinReader()
+        monkeypatch.setattr(reader, "_start", lambda: None)
+        monkeypatch.setattr(reader, "_ended", lambda: False)
+        assert reader.readline_masked("pass: ") is None

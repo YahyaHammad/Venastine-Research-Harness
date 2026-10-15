@@ -13,9 +13,17 @@ different things to be true:
   1. The three docs agree WITH EACH OTHER. Pure text, no session state, so
      it runs under any invocation -- including `pytest tests/test_foo.py`
      while you are mid-change.
-  2. That number is the REAL one. Needs the collected total, which only
-     exists on an unfiltered run, so it skips when the invocation narrowed
-     rather than failing on a legitimately smaller session.
+  2. That number is the REAL one. Needs the collected total, so it skips
+     when the invocation narrowed rather than failing on a legitimately
+     smaller session -- EXCEPT when the invocation is THIS FILE ALONE,
+     where it collects the suite in a subprocess instead.
+
+     That exception is the entire point of tests.yml's `docs-consistency`
+     job, and it was missing from it. The job runs this file alone as a
+     fast gate so that "doc drift fails here instead of after the full
+     15-minute suite" -- and because both count checks skipped there, it
+     could not fail on drift at all. On c5fd7c2 the gate passed at 09:47
+     and the full suite failed on exactly these two tests at 09:53.
 
 WHY THIS FILE GREW (audit #121/#125/#126/#129). It used to end with:
 "Deliberately narrow. This checks the number that has actually drifted, not
@@ -44,19 +52,30 @@ Unit 16 found the shape all of them share: THE CLAIMS THAT DRIFT ARE THE
 ONES SOMEBODY HAD TO COUNT BY HAND.
 
 The checks that need the collected session skip on a narrowed invocation,
-via _was_narrowed. The ones that are pure text do not, so they still run
-under `pytest tests/test_foo.py` while you are mid-change.
+via _was_narrowed -- unless that invocation is this file alone, which is
+the fast gate's shape and gets a subprocess collection instead. The ones
+that are pure text never skip, so they still run under
+`pytest tests/test_foo.py` while you are mid-change.
 """
 
-import json
+import fnmatch
 import io
+import json
 import os
 import re
+import shutil
+import subprocess  # nosec B404 - the gates below drive git and pytest as subprocesses on purpose
+import sys
+import tempfile
 from collections import Counter
 
 import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# The reference record moved out of the root (batch 89). Everything the
+# root still owns -- README, AGENTS, CONFIG_ARCHITECTURE, LICENSE, NOTICE --
+# keeps joining ROOT; everything under docs/ joins this.
+DOCS = os.path.join(ROOT, "docs")
 
 # Anchored on the surrounding words, NOT a bare r"(\d+) tests". ARCHITECTURE
 # lists a per-file count for every test module in its tree ("# 29 tests --
@@ -65,7 +84,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DOC_PATTERNS = {
     "README.md": r"pytest` — (\d+) tests, fully offline",
     "AGENTS.md": r"# (\d+) tests, offline",
-    "ARCHITECTURE.md": r"# (\d+) tests, all offline",
+    "docs/ARCHITECTURE.md": r"# (\d+) tests, all offline",
 }
 
 
@@ -99,17 +118,54 @@ def test_the_three_docs_state_the_same_test_count():
     )
 
 
+def _default_markexpr(config) -> str:
+    """The `-m` expression this project's addopts actually supply.
+
+    READ OFF THE LIVE CONFIG RATHER THAN RESTATED (batch 151, S19-03). The
+    line below used to compare `markexpr` against the literal
+    `"not integration"`, which is a copy of `pytest.ini`'s addopts -- so
+    adding a marker there (two lines, because `--strict-markers`) made every
+    full run read as narrowed, four gates skip, and the subprocess-collection
+    agreement stop running anywhere, with no failure to say so.
+
+    `config.getini("addopts")` returns the SHLEX-SPLIT list, measured:
+    `['-ra', '--strict-markers', '-m', 'not integration', ...]`. So `-m` and
+    its expression are two elements. The squashed `-mEXPR` spelling is legal
+    too and arrives as one.
+
+    NO EXCLUSION FOR LONG OPTIONS, and the absence is deliberate. This read
+    `arg.startswith("-m") and not arg.startswith("--")`, on the stated
+    grounds that `--strict-markers` also begins with `-m`. It does not:
+    every long option begins with `--`, so the prefix test fails at index 1
+    for all of them and the second clause could never change an answer. It
+    was removed in the batch that added it, by the control that could not
+    kill it.
+
+    Returns `""` when addopts passes no `-m` at all, which is the right
+    answer: with no default filter, an invocation that carries a markexpr
+    HAS been narrowed.
+    """
+    addopts = list(config.getini("addopts") or [])
+    for index, arg in enumerate(addopts):
+        if arg == "-m":
+            return addopts[index + 1] if index + 1 < len(addopts) else ""
+        if arg.startswith("-m"):
+            return arg[2:]
+    return ""
+
+
 def _was_narrowed(config) -> bool:
     """Whether this invocation collected less than the whole suite.
 
     pytest.ini's addopts carries `-m "not integration"`, so a default run
     already has a markexpr -- comparing against None would skip always and
     the assertion would never run, which is the failure mode this guard
-    most needs to avoid.
+    most needs to avoid. What it compares against is read out of the live
+    config by `_default_markexpr`, for the reason stated there.
     """
     if getattr(config.option, "keyword", ""):          # -k
         return True
-    if getattr(config.option, "markexpr", "") != "not integration":
+    if getattr(config.option, "markexpr", "") != _default_markexpr(config):
         return True
     # An arg naming a file or a nodeid; a bare `pytest` or `pytest tests/`
     # collects everything and is not narrowing.
@@ -117,15 +173,34 @@ def _was_narrowed(config) -> bool:
 
 
 class _FakeOption:
-    def __init__(self, keyword="", markexpr="not integration"):
+    def __init__(self, keyword="", markexpr=""):
         self.keyword = keyword
         self.markexpr = markexpr
 
 
 class _FakeConfig:
-    def __init__(self, args, **kw):
+    """The parts of a `pytest.Config` that `_was_narrowed` reads.
+
+    `markexpr` DEFAULTS TO WHAT THIS FAKE'S OWN addopts SUPPLY (batch 151,
+    S19-03). It used to default to the literal `"not integration"` -- the
+    same literal `_was_narrowed` compared against -- so
+    `test_the_default_invocation_is_not_treated_as_narrowed` asserted that
+    two copies of one string agreed with each other, and could not fail for
+    the drift it exists to catch. Deriving it here means "a default run" is
+    default by construction, whatever addopts says.
+    """
+
+    def __init__(self, args, addopts=("-m", "not integration"),
+                 markexpr=None, keyword=""):
         self.args = args
-        self.option = _FakeOption(**kw)
+        self._addopts = list(addopts)
+        if markexpr is None:
+            markexpr = _default_markexpr(self)
+        self.option = _FakeOption(keyword=keyword, markexpr=markexpr)
+
+    def getini(self, name):
+        assert name == "addopts", f"the fake was asked for {name!r}"
+        return list(self._addopts)
 
 
 def test_the_default_invocation_is_not_treated_as_narrowed():
@@ -147,13 +222,154 @@ def test_the_default_invocation_is_not_treated_as_narrowed():
     assert _was_narrowed(_FakeConfig(["tests/test_review.py"]))
     assert _was_narrowed(_FakeConfig(["tests/test_review.py::test_x"]))
 
+    # THE CASE THE LITERAL COULD NOT SEE (batch 151, S19-03). A pytest.ini
+    # that gains a marker is a two-line edit; before this, the full run it
+    # produced read as narrowed and four gates below went quiet.
+    moved = ("-m", "not integration and not slow")
+    assert not _was_narrowed(_FakeConfig(["tests"], addopts=moved))
+    # ...and a real `-m` on the command line is still narrowing, which is
+    # the half that must not be lost to make the half above pass.
+    assert _was_narrowed(
+        _FakeConfig(["tests"], addopts=moved, markexpr="not integration"))
+
+
+#: This file's own name, which is the one narrowing that still owes the
+#: full answer rather than a skip.
+_THIS_FILE = os.path.basename(__file__)
+
+
+def _is_this_file_alone(config) -> bool:
+    """Whether the invocation named this file and nothing else.
+
+    `pytest tests/test_docs_consistency.py` is two things at once: the CI
+    fast gate's shape, and the shape a reader uses when they want exactly
+    the answer this file gives. Both are ASKING the question, so both get
+    a real answer. Every other narrowing still skips -- a targeted
+    `pytest -k something` must not pay for a full collection it did not
+    ask for.
+    """
+    named = [a for a in config.args if a not in (".", "tests", "tests/")]
+    return bool(named) and all(
+        os.path.basename(a.split("::")[0]) == _THIS_FILE for a in named)
+
+
+#: Filled once per process by _collect_in_a_subprocess.
+_COLLECTED = []
+
+
+def _collect_in_a_subprocess() -> list:
+    """Every node id a full `pytest` would collect, from a child process.
+
+    Measured at ~4.6s for 4261 ids, and the whole gate job at ~10s,
+    which is what buys it the point: it fails on drift in seconds
+    instead of after the full suite.
+
+    pytest.ini's addopts reaches the child, so its `-m "not integration"`
+    makes this the same population `session.items` holds on a full run --
+    and the test below pins that equality rather than assuming it.
+    `-p no:cacheprovider` keeps the child off .pytest_cache, which the
+    parent may be writing at the same time. No recursion: the child
+    collects and runs nothing.
+
+    `-n0` BECAUSE addopts REACHES THE CHILD, which is the same sentence
+    two lines up read the other way round. Since batch 109 that line also
+    carries `-n auto --dist loadscope`, so without this the child spawns a
+    worker per core to collect a list and run nothing -- pure cost, on a
+    call that is already the slowest thing in the fast CI gate. It also
+    keeps the parse below reading pytest's own `--collect-only -q` output
+    and not a distributed run's, whatever a future xdist does with the two
+    together.
+    """
+    if _COLLECTED:
+        return _COLLECTED
+
+    proc = subprocess.run(  # nosec B603 - re-collects this suite in a child to compare against the session
+        [sys.executable, "-m", "pytest", "--collect-only", "-q",
+         "-p", "no:cacheprovider", "-n0"],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    # Node ids are rootdir-relative and always use forward slashes, so this
+    # cannot pick up a summary line -- and an empty list is a FAILURE here,
+    # never a count of zero.
+    ids = [line.strip() for line in proc.stdout.splitlines()
+           if line.startswith("tests/") and "::" in line]
+
+    assert proc.returncode == 0 and ids, (
+        f"Collecting the suite in a subprocess failed (exit "
+        f"{proc.returncode}, {len(ids)} ids parsed). The count checks "
+        f"cannot run without it, and reporting zero would be worse than "
+        f"saying so.\n"
+        f"--- stdout (tail) ---\n{proc.stdout[-3000:]}\n"
+        f"--- stderr (tail) ---\n{proc.stderr[-2000:]}"
+    )
+    _COLLECTED.extend(ids)
+    return _COLLECTED
+
+
+def _collected_nodeids(request) -> list:
+    """The node ids the two count checks compare against, or a skip.
+
+    A full run already holds them, exactly and for free, and stays the
+    authority. Only the fast gate pays for a subprocess.
+    """
+    if not _was_narrowed(request.config):
+        return [item.nodeid for item in request.session.items]
+    if _is_this_file_alone(request.config):
+        return _collect_in_a_subprocess()
+    pytest.skip("filtered invocation collects less than the full suite")
+
+
+def test_this_file_alone_is_the_only_narrowing_that_gets_an_answer():
+    """The same silent failure mode as the guard above, one layer out.
+
+    Wrong in the restrictive direction and _is_this_file_alone never
+    fires: the fast gate goes back to skipping, stays green through any
+    drift, and looks exactly as it did while it was blind. Wrong in the
+    permissive direction and every `pytest -k foo` spawns a full
+    collection, which is loud and gets fixed the same afternoon.
+    """
+    assert _is_this_file_alone(_FakeConfig(["tests/test_docs_consistency.py"]))
+    assert _is_this_file_alone(
+        _FakeConfig(["tests/test_docs_consistency.py::test_x"]))
+
+    assert not _is_this_file_alone(_FakeConfig(["."]))
+    assert not _is_this_file_alone(_FakeConfig(["tests"]))
+    assert not _is_this_file_alone(_FakeConfig(["tests/test_review.py"]))
+    assert not _is_this_file_alone(
+        _FakeConfig(["tests/test_docs_consistency.py", "tests/test_review.py"]))
+
+
+def test_the_subprocess_collection_agrees_with_the_session(request):
+    """The two paths into _collected_nodeids must not disagree.
+
+    They are read by different runs -- the fast gate uses one, the full
+    suite the other -- so a divergence would show up as the gate failing
+    on a number the suite says is right, which reads as the gate being
+    broken and gets it disabled. Compared per FILE and not just in total,
+    because two offsetting errors are exactly what a total hides.
+    """
+    if _was_narrowed(request.config):
+        pytest.skip("needs the full session to compare against")
+
+    session = Counter(item.nodeid.split("::")[0]
+                      for item in request.session.items)
+    child = Counter(nodeid.split("::")[0]
+                    for nodeid in _collect_in_a_subprocess())
+
+    assert session == child, (
+        "A subprocess collection disagrees with this session:\n"
+        + "".join(f"  {name}: session {session[name]}, subprocess "
+                  f"{child[name]}\n"
+                  for name in sorted(set(session) | set(child))
+                  if session[name] != child[name])
+        + "The fast gate reads the subprocess and the full suite reads the "
+          "session; they answer the same question or the gate is noise."
+    )
+
 
 def test_the_documented_count_is_the_real_one(request):
-    if _was_narrowed(request.config):
-        pytest.skip("filtered invocation collects less than the full suite")
-
     documented = set(_documented_counts().values()).pop()
-    actual = len(request.session.items)
+    actual = len(_collected_nodeids(request))
 
     assert documented == actual, (
         f"The docs say {documented} tests; this run collected {actual}. "
@@ -173,7 +389,7 @@ _TREE_ENTRY = re.compile(r"(test_\w+\.py)\s*#\s*(\d+) tests?\b")
 
 
 def _tree_entries() -> dict:
-    with open(os.path.join(ROOT, "ARCHITECTURE.md"), encoding="utf-8") as f:
+    with open(os.path.join(DOCS, "ARCHITECTURE.md"), encoding="utf-8") as f:
         entries = _TREE_ENTRY.findall(f.read())
     assert entries, (
         "ARCHITECTURE.md's tree no longer states any per-file test count in "
@@ -206,13 +422,10 @@ def test_the_tree_states_a_correct_count_for_every_collected_test_file(request):
     The sibling test below is what catches an entry naming a file that has
     genuinely gone away.
     """
-    if _was_narrowed(request.config):
-        pytest.skip("filtered invocation collects less than the full suite")
-
     stated = _tree_entries()
     actual = Counter(
-        os.path.basename(item.nodeid.split("::")[0])
-        for item in request.session.items
+        os.path.basename(nodeid.split("::")[0])
+        for nodeid in _collected_nodeids(request)
     )
 
     wrong = [(name, stated[name], n) for name, n in sorted(actual.items())
@@ -258,7 +471,7 @@ def test_the_tree_names_every_production_module():
     document cannot tell "listed in the map" from "mentioned in a
     paragraph", which is the distinction the map is for.
     """
-    with open(os.path.join(ROOT, "ARCHITECTURE.md"), encoding="utf-8") as f:
+    with open(os.path.join(DOCS, "ARCHITECTURE.md"), encoding="utf-8") as f:
         tree = f.read().split("```")[1]
     entries = {e.rstrip("/").split("/")[-1]
                for e in re.findall(r"[\u251c\u2514]\u2500\u2500\s+([\w./-]+)", tree)}
@@ -307,6 +520,122 @@ def test_no_tree_entry_names_a_test_file_that_does_not_exist():
     )
 
 
+def test_the_default_marker_expression_is_read_and_not_restated(request):
+    """`_default_markexpr` agrees with the ini pytest itself parsed.
+
+    Live against live, which is this file's rule: the expectation is read
+    out of `config.getini("addopts")` by a second, dumber parse rather than
+    written down here. The two spellings below are the ones a hand edit to
+    `pytest.ini` could produce. The `--strict-markers` case pins that a
+    token which is not a `-m` is SKIPPED rather than guessed at, which is a
+    property of the loop and would fail if the prefix test were ever
+    loosened to a substring search -- it is not about long options being
+    excluded, and the comment here said so until the control for that
+    exclusion could not be made to kill anything.
+    """
+    addopts = list(request.config.getini("addopts"))
+    assert "-m" in addopts, (
+        "pytest.ini's addopts no longer passes `-m`. _default_markexpr "
+        "returns '' for that, which makes an UNFILTERED run the default "
+        "one -- check _was_narrowed still answers what it claims before "
+        f"changing this. addopts is {addopts}")
+    expected = addopts[addopts.index("-m") + 1]
+    assert _default_markexpr(request.config) == expected
+
+    assert _default_markexpr(
+        _FakeConfig([], addopts=("-mnot integration",))) == "not integration"
+    assert _default_markexpr(
+        _FakeConfig([], addopts=("--strict-markers",))) == ""
+
+
+# ---------------------------------------------------------------------------
+# ---- S19-05: the root conftest's own inventory ----------------------------
+# ---------------------------------------------------------------------------
+
+
+def test_the_root_conftest_header_names_every_module_it_stubs():
+    """The header's list of fakes against the modules it installs.
+
+    `conftest.py`'s first paragraph names what is injected into
+    `sys.modules`, and `_install_fake_sdks` installs one the paragraph did
+    not mention -- `markitdown`, since #144. The omission matters because
+    of what follows it: the docstring's next-but-one paragraph is a `NOT
+    faked, by explicit decision` list, which makes the first read as the
+    COMPLETE set rather than as an example. A reader asking "is markitdown
+    stubbed, or do I need it installed?" got "no" from the header and "yes"
+    from the installer, and `docs/ARCHITECTURE.md` records what that costs:
+    "a green local suite is not a green fresh install".
+
+    Both directions, because either can drift: a stub the header omits, and
+    a name the header keeps after the stub is gone. A dotted child counts
+    as named by its parent, so installing `google.genai.types` under a
+    header that says `google.genai` is not a miss.
+    """
+    import ast
+
+    with open(os.path.join(ROOT, "conftest.py"), encoding="utf-8") as handle:
+        tree = ast.parse(handle.read())
+
+    installer = next(
+        (node for node in tree.body
+         if isinstance(node, ast.FunctionDef)
+         and node.name == "_install_fake_sdks"), None)
+    assert installer is not None, (
+        "conftest.py has no _install_fake_sdks; if the stubs moved, this "
+        "gate moves with them rather than being deleted")
+
+    installed = set()
+    for node in ast.walk(installer):
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if (isinstance(target, ast.Subscript)
+                and isinstance(target.value, ast.Attribute)
+                and target.value.attr == "modules"
+                and isinstance(target.slice, ast.Constant)
+                and isinstance(target.slice.value, str)):
+            installed.add(target.slice.value)
+    assert len(installed) > 5, (
+        f"the ast walk found {sorted(installed)}, which is too few to be "
+        f"the stub set -- the assignment shape changed and this gate is "
+        f"now checking nothing")
+
+    #: THE ONE PARAGRAPH THAT IS AN INVENTORY, named rather than bounded by
+    #: what happens to follow it. This first split at "Why we fake these",
+    #: which left every backquoted name in the preamble in scope -- so the
+    #: two function names in the paragraph batch 151 added read as claimed
+    #: stubs. The rationale list below it, the `NOT faked, by explicit
+    #: decision` list below that and any prose added later are all out of
+    #: scope by construction now.
+    paragraphs = (ast.get_docstring(tree) or "").split("\n\n")
+    inventory = next(
+        (p for p in paragraphs if p.startswith("Injects fake")), "")
+    assert inventory, (
+        "conftest.py's header no longer opens a paragraph with `Injects "
+        "fake`, so this gate has nothing to read. Reword the assertion "
+        "with it -- do not delete the inventory, it is what the `NOT "
+        "faked, by explicit decision` list below it is read against.")
+    named = set(re.findall(r"`([A-Za-z_][\w.]*)`", inventory))
+    #: Named in that sentence as the DESTINATION, not as a stub.
+    named -= {"sys.modules"}
+
+    def covered(name, names):
+        return name in names or any(name.startswith(f"{n}.") for n in names)
+
+    missing = sorted(n for n in installed if not covered(n, named))
+    assert not missing, (
+        f"conftest.py stubs {missing} and its header does not say so. The "
+        f"paragraph reads as the complete set because a later one is a "
+        f"`NOT faked, by explicit decision` list, so a name missing here "
+        f"reads as a package you must install.")
+
+    stale = sorted(n for n in named if not covered(n, installed))
+    assert not stale, (
+        f"conftest.py's header claims to stub {stale} and the installer "
+        f"does not. A header naming a stub that is gone is how someone "
+        f"concludes the real package is unreachable in tests.")
+
+
 # ---------------------------------------------------------------------------
 # ---- #129: ROADMAP_v2's status markers -------------------------------------
 # ---------------------------------------------------------------------------
@@ -329,7 +658,7 @@ def test_every_roadmap_v2_index_entry_carries_a_status_marker():
     Checks only that a marker is PRESENT. What it says is a judgement no
     test can make -- the point is that the question was answered at all.
     """
-    with open(os.path.join(ROOT, "ROADMAP_v2.md"), encoding="utf-8") as f:
+    with open(os.path.join(DOCS, "ROADMAP_v2.md"), encoding="utf-8") as f:
         entries = _INDEX_ENTRY.findall(f.read())
 
     assert len(entries) >= 15, (
@@ -430,7 +759,7 @@ def test_architecture_states_the_real_registry_counts():
     advertised = len(registry.schemas(None))
     callable_ = len(registry.schemas(None, callable_only=True))
 
-    with open(os.path.join(ROOT, "ARCHITECTURE.md"), encoding="utf-8") as f:
+    with open(os.path.join(DOCS, "ARCHITECTURE.md"), encoding="utf-8") as f:
         arch = f.read()
 
     claim = f"this is {advertised} of {registered} registered tools"
@@ -510,9 +839,9 @@ def test_no_notebook_checkpoint_file_is_committed():
     Skips without git rather than falling back to a filesystem walk: the
     property is about what the repository CLAIMS, and that is a git fact.
     A walk would answer a different question and call it the same name."""
-    import subprocess
+    import subprocess  # nosec B404 - as above, deferred into the gate
     try:
-        listed = subprocess.run(
+        listed = subprocess.run(  # nosec B603, B607 - `git check-ignore` with a fixed argv; git is on PATH by assumption in a git repo
             ["git", "ls-files", "*" + _CHECKPOINT_DIR + "*"],
             cwd=_project_root(), capture_output=True, text=True,
             timeout=30)
@@ -559,7 +888,7 @@ def test_no_source_file_carries_double_encoded_text():
                 continue
             path = os.path.join(dirpath, name)
             try:
-                with io.open(path, encoding="utf-8") as f:
+                with open(path, encoding="utf-8") as f:
                     text = f.read()
             except (UnicodeDecodeError, OSError):
                 continue
@@ -629,7 +958,7 @@ def test_the_url_blocklist_is_defined_exactly_once():
 # What makes this computable is that ids are a closed set with two sides --
 # what the record DEFINES and what the code CITES -- and both are readable.
 
-_RECORD_DOCS = ("ROADMAP.md", "ROADMAP_v2.md")
+_RECORD_DOCS = ("ROADMAP.md", "ROADMAP_v2.md", "ROADMAP_v3.md")
 
 # THREE SHAPES FOR ONE DEFINITION, and this is the load-bearing detail. The
 # record writes a decision as a table row (`| **U1** | ... |`), as a bolded
@@ -686,7 +1015,7 @@ def _decision_definitions(docs=_RECORD_DOCS):
     """{id: [document, ...]} for every decision the record defines."""
     found = {}
     for name in docs:
-        path = os.path.join(ROOT, name)
+        path = os.path.join(DOCS, name)
         with open(path, encoding="utf-8", errors="replace") as f:
             for line in f:
                 for pattern in (_DEFINITION_ROW, _DEFINITION_LEAD):
@@ -700,8 +1029,8 @@ def _decision_definitions(docs=_RECORD_DOCS):
 def _map_line():
     with open(os.path.join(ROOT, "AGENTS.md"), encoding="utf-8") as f:
         text = f.read().replace("\r\n", "\n")
-    line = next((l for l in text.split("\n")
-                 if "Design Decisions Record" in l and "ROADMAP" in l), None)
+    line = next((ln for ln in text.split("\n")
+                 if "Design Decisions Record" in ln and "ROADMAP" in ln), None)
     assert line, (
         "AGENTS.md has no documentation-map line naming the Design Decisions "
         "Record. That line is what these checks quantify over; if it moved, "
@@ -740,7 +1069,6 @@ def _prose_lines(path):
     what the pipeline emits -- which is exactly what happened when this
     batch tried it, and how the boundary got drawn here instead of guessed.
     """
-    import io
     import tokenize
 
     with open(path, encoding="utf-8", errors="replace") as f:
@@ -936,7 +1264,7 @@ def test_every_decision_id_cited_in_production_code_resolves():
 
     assert not unresolved, (
         f"these ids are cited in production code and resolve to nothing in "
-        f"ROADMAP.md or ROADMAP_v2.md: "
+        f"ROADMAP.md, ROADMAP_v2.md or ROADMAP_v3.md: "
         f"{ {k: v[:3] for k, v in sorted(unresolved.items())} }. Either the "
         f"decision belongs in the record, or the citation belongs to one of "
         f"the namespaces AGENTS.md lists and should say so -- `gate D0`, "
@@ -1118,6 +1446,96 @@ def test_the_npm_package_and_pyproject_state_the_same_version():
         f"says {versions[0]!r}. They describe one release -- bump both.")
 
 
+def test_the_test_extra_matches_requirements_test():
+    """S18-07, batch 136. The suite's own packages in two files, pinned to
+    each other so they cannot drift.
+
+    They used to be at the bottom of requirements.txt, which
+    `dynamic = ["dependencies"]` reads, so pytest, pytest-mock,
+    pytest-asyncio, pytest-xdist and execnet were HARD REQUIREMENTS of the
+    distribution: `pip install venastine-research-harness` resolved a test
+    runner, and bin/venastine.mjs installed the same set into every end
+    user's venv.
+
+    TWO COPIES IS THE DELIBERATE TRADE, because setuptools'
+    `optional-dependencies` is all-or-nothing -- making `test` read a file
+    would force `documents` and `pdf` into files of their own. #144's rule is
+    not that a duplicate is always wrong, it is that a hand-maintained one is
+    only as good as the gate over it. This is the gate.
+
+    It compares the REQUIREMENT STRINGS, not just the names, so a floor
+    raised in one file and not the other fails here rather than at whichever
+    install happens to resolve differently.
+    """
+    def requirements(text):
+        found = []
+        for line in text.splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                found.append(line)
+        return sorted(found)
+
+    with open(os.path.join(ROOT, "requirements-test.txt"),
+              encoding="utf-8") as f:
+        from_file = requirements(f.read())
+
+    with open(os.path.join(ROOT, "pyproject.toml"), encoding="utf-8") as f:
+        pyproject = f.read()
+    block = re.search(r"^test = \[(.*?)\]", pyproject, re.MULTILINE | re.DOTALL)
+    assert block, (
+        "pyproject.toml has no `test = [...]` extra. If the group was renamed, "
+        "repoint this test -- do not delete it: the names it guards are what "
+        "stopped shipping to end users in batch 136.")
+    from_pyproject = sorted(re.findall(r'"([^"]+)"', block.group(1)))
+
+    # Vacuity guard. An empty file or an empty extra would make the
+    # comparison below pass while the suite's packages were declared nowhere.
+    assert len(from_file) >= 4, (
+        f"requirements-test.txt names only {from_file}; the suite needs at "
+        f"least pytest, pytest-mock, pytest-asyncio and pytest-xdist")
+
+    assert from_file == from_pyproject, (
+        f"requirements-test.txt and pyproject.toml's `test` extra disagree.\n"
+        f"  only in requirements-test.txt: "
+        f"{sorted(set(from_file) - set(from_pyproject))}\n"
+        f"  only in the pyproject extra:   "
+        f"{sorted(set(from_pyproject) - set(from_file))}\n"
+        f"They are the same four packages said twice -- change both.")
+
+
+def test_no_test_package_is_a_runtime_dependency():
+    """The other half of S18-07, and the one that would catch the regression
+    rather than the drift.
+
+    The gate above compares two files that both describe the TEST set; this
+    one asserts the test set is not in the SHIPPED set. Adding
+    `pytest` back to requirements.txt -- or adding a sixth test package there
+    by habit -- puts it in `[project].dependencies` again and into every end
+    user's venv, and nothing else in this suite would notice.
+    """
+    with open(os.path.join(ROOT, "requirements.txt"), encoding="utf-8") as f:
+        shipped = [line.strip() for line in f
+                   if line.strip() and not line.strip().startswith("#")]
+
+    # Not a blanket "pytest" substring match: `defusedxml` lives in the
+    # shipped set deliberately and a future comment could mention pytest.
+    offenders = [line for line in shipped
+                 if re.match(r"^(pytest|execnet|pluggy|iniconfig)\b", line)]
+    assert not offenders, (
+        f"{offenders} are in requirements.txt, which pyproject.toml reads for "
+        f"`[project].dependencies` -- so they are hard requirements of the "
+        f"published package and of every venv bin/venastine.mjs builds. Test "
+        f"packages belong in requirements-test.txt (S18-07, batch 136).")
+
+    # And the shipped set must still carry the one that LOOKS like a test
+    # dependency and is not: arxiv.py imports defusedxml at module load.
+    assert any(line.startswith("defusedxml") for line in shipped), (
+        "defusedxml left requirements.txt. It is a PRODUCTION dependency -- "
+        "tools/builtin/arxiv.py imports it at module load -- and it sat under "
+        "a 'Test dependencies' heading for twenty batches, which is exactly "
+        "how it would get tidied away by mistake (TECHNICAL_DEBT 18).")
+
+
 def test_every_npm_allowlist_entry_exists():
     """A `files` entry naming nothing ships nothing, and says nothing.
 
@@ -1156,8 +1574,19 @@ def test_the_npm_allowlist_cannot_ship_a_secret():
     """
     files = _package_json()["files"]
 
-    never_named = {"providers.json", ".env", "app.db", "logs", "logs/",
-                   "output", "output/", "conftest.py", "tests", "tests/"}
+    # DERIVED, since batch 140. This set was the FOURTH hand-written copy of
+    # "keep local secrets out of a distribution" -- and the one that was
+    # missing `secrets.json` and the WAL sidecars while both git channels had
+    # them. It now comes from package.json's `neverDistribute`, which all
+    # three channels read. `conftest.py` and `tests` are kept by hand: they
+    # are not credential-bearing, they are the npm channel's own concern
+    # (ROOT_PY_NOT_SHIPPED in prepublish-check.mjs says why for conftest),
+    # and the list they belong to is this one rather than the shared one.
+    never_named = {"conftest.py", "tests", "tests/"}
+    for entry in _never_distribute():
+        if "npm" in entry["channels"]:
+            never_named.update(entry["samples"])
+            never_named.update(entry["value"])
     named = sorted(set(f.rstrip("/") for f in files if not f.startswith("!"))
                    & set(n.rstrip("/") for n in never_named))
     assert not named, (
@@ -1173,6 +1602,550 @@ def test_the_npm_allowlist_cannot_ship_a_secret():
         f"not skip __pycache__ or .ipynb_checkpoints on its own, and "
         f"test_no_notebook_checkpoint_file_is_committed above exists because "
         f"a checkpoint copy of a prompt file is a real thing in this tree.")
+
+
+# ---------------------------------------------------------------------------
+# ---- S18-01 / S18-08: one exclusion list, three channels, driven ----------
+# ---------------------------------------------------------------------------
+#
+# "Keep local secrets out of a distribution" had FIVE copies and no two
+# agreed, while two documents claimed three. The disagreements were not
+# cosmetic: `secrets.json` was in both git channels and in neither npm-side
+# list, `.venastine/mcp.json` was in none of the five although `/init
+# --config` writes it and README names `Authorization` as what rides in it,
+# and the npm database test was `endsWith('.db')`, which misses the `-wal`
+# sidecar that both git channels had already been fixed for.
+#
+# package.json's `neverDistribute` is now the one list. These gates check the
+# channels against it rather than against each other.
+
+_NEVER_DISTRIBUTE_FIELDS = {"label", "match", "value", "channels", "samples"}
+_CHANNELS = {"git", "archive", "npm"}
+
+
+def _never_distribute() -> list:
+    """The one list, read from where both consumers read it."""
+    entries = _package_json().get("neverDistribute")
+    assert entries, (
+        "package.json has no `neverDistribute` list. It is the single source "
+        "for three exclusion channels (batch 140, S18-01/S18-08); if it was "
+        "renamed, repoint these gates -- do not delete them, because the "
+        "thing they replaced was five hand-written lists that disagreed.")
+    return entries
+
+
+def test_every_never_distribute_entry_is_well_formed_and_drivable():
+    """An entry nothing can test is an entry that stops being enforced.
+
+    `samples` is required for exactly that reason: it is what the two gates
+    below drive, so a pattern cannot be added without a concrete path that
+    demonstrates it.
+    """
+    entries = _never_distribute()
+    assert len(entries) >= 10, (
+        f"only {len(entries)} entries; this list covers the union of "
+        f".gitignore, .gitattributes export-ignore and the npm denylist, so a "
+        f"short list means something was dropped rather than tidied")
+
+    for entry in entries:
+        missing = _NEVER_DISTRIBUTE_FIELDS - set(entry)
+        assert not missing, f"{entry.get('label')!r} is missing {missing}"
+        assert entry["value"], f"{entry['label']!r} has no patterns"
+        assert entry["samples"], (
+            f"{entry['label']!r} has no samples, so no gate can drive it")
+        unknown = set(entry["channels"]) - _CHANNELS
+        assert not unknown, (
+            f"{entry['label']!r} names unknown channels {unknown}; the three "
+            f"are git (push), archive (git archive) and npm (the tarball)")
+        assert entry["channels"], (
+            f"{entry['label']!r} excludes nothing from anywhere")
+
+
+_MATCH_DEMOS = {
+    "exact": lambda value, s: s == value,
+    "basename": lambda value, s: os.path.basename(s) == value,
+    "suffix": lambda value, s: s.endswith(value),
+    "prefix": lambda value, s: any(p.startswith(value) for p in s.split("/")),
+    "dir": lambda value, s: s == value or s.startswith(value + "/"),
+    "segment": lambda value, s: value in s.split("/"),
+    "suffix-or-segment": lambda value, s: (s.endswith(value)
+                                           or value in s.split("/")),
+}
+
+
+def test_every_never_distribute_value_is_demonstrated_by_a_sample():
+    """An entry's `samples` must drive every PATTERN it declares, not just one.
+
+    The gate above requires samples to EXIST; this one requires them to
+    REACH. `compiled python` declared `.pyc` and `__pycache__`, sampled only
+    `x.pyc`, and .gitignore carried no `__pycache__` rule at all -- so the git
+    channel claimed a pattern it did not have while the npm channel enforced
+    the same pattern wholesale through `files`, and the three gates that exist
+    to catch exactly that disagreement had nothing to drive it with. It was
+    the ONE undriven value in the list when this was written (batch 157, A65),
+    which is why this is a check with a demonstrated consequence rather than
+    one looking for work.
+    """
+    for entry in _never_distribute():
+        demo = _MATCH_DEMOS.get(entry["match"])
+        assert demo, (
+            f"{entry['label']!r} uses match kind {entry['match']!r} and this "
+            f"gate has no rule for what would demonstrate it. The npm gate "
+            f"below checks the CONSUMER knows every kind; this checks the "
+            f"DATA carries a path showing what each pattern covers.")
+        for value in entry["value"]:
+            assert any(demo(value, s) for s in entry["samples"]), (
+                f"{entry['label']!r} declares {value!r} and none of its "
+                f"samples {entry['samples']} demonstrates it, so every gate "
+                f"driven off `samples` skips that pattern in silence. Add a "
+                f"sample the {entry['match']!r} match would catch.")
+
+
+# A path that must NOT be ignored. It rides in the same batch of samples as
+# the ones that must be, so the two halves cannot end up disagreeing about
+# which tree they measured.
+_PUSH_CONTROL = ".venastine/agents/example.md"
+
+
+def _unignored_in_a_fresh_clone(samples: list) -> set:
+    """The `samples` that no rule in the COMMITTED `.gitignore` covers.
+
+    DRIVEN THROUGH `git check-ignore`, so git does the matching and nothing
+    here re-implements it. What this adds is the TREE it asks about, and that
+    is not a detail: run in ROOT, this gate was green on every developer
+    machine for seventeen batches and failed on its first push, in all three
+    jobs that run it (batch 157).
+
+    THE WORKING TREE WAS PART OF THE QUESTION, which was the whole defect.
+    `logs/`, `output/` and `.ipynb_checkpoints/` are DIRECTORY-ONLY patterns
+    and git decides directory-ness by asking the filesystem, so a bare `logs`
+    matches on a machine that has run the app and matches nothing in a clone.
+    Measured: with `logs/` in .gitignore and nothing on disk, `logs` is not
+    ignored; after `mkdir logs` it is. The samples are paths INSIDE those
+    directories now (A63), because `git add -A` stages files and a path's
+    continuation is what tells git the component is a directory.
+
+    HERMETIC IN THE OTHER DIRECTION TOO. A global `core.excludesFile` also
+    reaches `check-ignore` -- measured in the same batch -- and so does
+    `.git/info/exclude`, so either could make this pass on evidence that does
+    not ship. GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM point at paths inside
+    the throwaway tree that do not exist, which git reads as empty
+    configuration. A non-existent path rather than `os.devnull`, because this
+    suite runs on win32 where that is `nul` and not a file git will open.
+    """
+    tracked = subprocess.run(  # nosec B603, B607 - `git` with a fixed argv, as above
+        ["git", "ls-files", "--", "*.gitignore"],
+        cwd=ROOT, capture_output=True, text=True)
+    assert tracked.stdout.split() == [".gitignore"], (
+        f"this tree tracks {tracked.stdout.split()} and this driver copies "
+        f"only the root `.gitignore` into its throwaway tree, so it would "
+        f"under-test the others. Copy them all at their own paths -- git "
+        f"applies a nested .gitignore only within its own directory.")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(  # nosec B603, B607 - `git` with a fixed argv, as above
+            ["git", "init", "-q", tmp], capture_output=True, check=True)
+        shutil.copyfile(os.path.join(ROOT, ".gitignore"),
+                        os.path.join(tmp, ".gitignore"))
+        env = dict(os.environ,
+                   GIT_CONFIG_GLOBAL=os.path.join(tmp, "absent-global"),
+                   GIT_CONFIG_SYSTEM=os.path.join(tmp, "absent-system"))
+        unignored = set()
+        for sample in samples:
+            proc = subprocess.run(  # nosec B603, B607 - `git` with a fixed argv, as above
+                ["git", "check-ignore", "-q", "--", sample],
+                cwd=tmp, env=env, capture_output=True)
+            if proc.returncode != 0:
+                unignored.add(sample)
+    return unignored
+
+
+def test_the_push_channel_ignores_every_sample_that_claims_it():
+    """The git channel, measured in the fresh clone the claim is about --
+    `_unignored_in_a_fresh_clone` records why that is the tree.
+
+    The control is inside the same mechanism: a path no rule covers makes
+    check-ignore exit non-zero and print nothing, which is how
+    `.venastine/mcp.json` was found -- it was absent from the tree's only
+    `.gitignore` while four sibling paths resolved to a rule.
+    """
+    claimed = [(e["label"], s) for e in _never_distribute()
+               if "git" in e["channels"] for s in e["samples"]]
+    assert claimed, "no entry claims the git channel, so this proves nothing"
+
+    unignored = _unignored_in_a_fresh_clone(
+        [s for _, s in claimed] + [_PUSH_CONTROL])
+
+    missing = [f"{s} ({label})" for label, s in claimed if s in unignored]
+    assert not missing, (
+        f"package.json `neverDistribute` claims the git channel for these, "
+        f"and `.gitignore` matches none of them: {missing}. A first-party "
+        f"command writes some of these into a user's project, so `git add -A` "
+        f"from the project root would stage them -- and a published "
+        f"credential is remedied by rotation, not by a later commit.")
+
+    # The positive control: the narrow pair was chosen over `.venastine/`
+    # precisely so project-tier agents and skills keep travelling with a
+    # repository (D17's trust prompt is the mechanism that exists for them).
+    assert _PUSH_CONTROL in unignored, (
+        "`.venastine/agents/` is ignored. The two credential files are "
+        "excluded by name on purpose -- excluding the directory wholesale "
+        "makes project-tier agents and skills untrackable, which is the "
+        "feature workspace trust exists to serve.")
+
+
+def test_the_archive_channel_excludes_every_sample_that_claims_it():
+    """TEXTUAL, and the reason is measured rather than assumed.
+
+    `git check-attr export-ignore` is NOT a faithful driver here. Measured in
+    batch 140 against a throwaway repository: `logs/ export-ignore` makes
+    `git archive` exclude `logs/a.txt`, while `check-attr` reports
+    `unspecified` for both `logs` and `logs/a.txt` -- archive prunes the tree
+    ENTRY, and attributes apply to files. A gate built on check-attr would
+    have reported two working entries as broken and invited a "fix" to them.
+
+    Driving `git archive` instead would be faithful and vacuous: it ships only
+    TRACKED content, and every path here is untracked, so each would be absent
+    whatever `.gitattributes` said.
+
+    So this reads the patterns. The comparison is deliberately crude -- equal,
+    or a directory prefix -- because the patterns in that file are, and a
+    cleverer matcher here would be the second implementation this whole batch
+    removes.
+    """
+    with open(os.path.join(ROOT, ".gitattributes"), encoding="utf-8") as f:
+        patterns = [line.split()[0].rstrip("/")
+                    for line in f
+                    if "export-ignore" in line and not line.startswith("#")]
+    assert patterns, (
+        ".gitattributes states no export-ignore patterns; if the format "
+        "moved, repoint this -- H3/C2 is the channel it covers")
+
+    def covered(sample: str) -> bool:
+        """Equal, a directory prefix, or a glob -- on the whole path or on
+        the basename, because `*.db` is written to match `app.db` anywhere.
+
+        An APPROXIMATION of git's gitattributes matching, stated as one:
+        `fnmatch`'s `*` crosses `/` where git's does not, so this is the
+        permissive direction. That is the right way round for a gate whose
+        job is to find patterns that cover NOTHING -- it cannot produce a
+        false red, only miss a pattern that is narrower than it looks.
+        """
+        base = os.path.basename(sample)
+        return any(sample == p
+                   or sample.startswith(p + "/")
+                   or fnmatch.fnmatch(sample, p)
+                   or fnmatch.fnmatch(base, p)
+                   for p in patterns)
+
+    missing = [f"{s} ({e['label']})"
+               for e in _never_distribute() if "archive" in e["channels"]
+               for s in e["samples"] if not covered(s)]
+
+    assert not missing, (
+        f"`neverDistribute` claims the archive channel for these and "
+        f".gitattributes carries no export-ignore pattern for them: "
+        f"{missing}. That channel is `git archive` and GitHub's "
+        f"\"Download ZIP\".")
+
+
+def test_the_npm_gate_derives_its_denylist_rather_than_restating_it():
+    """The structural half, and the one that keeps the others honest.
+
+    `scripts/prepublish-check.mjs` used to carry its own FORBIDDEN literal,
+    and that copy is where `secrets.json` went missing and where the `.db`
+    test failed to cover `.db-wal`. A gate that only compared the lists would
+    pass again the moment somebody re-inlined one.
+    """
+    with open(os.path.join(ROOT, "scripts", "prepublish-check.mjs"),
+              encoding="utf-8") as f:
+        source = f.read()
+
+    assert "pkg.neverDistribute" in source, (
+        "prepublish-check.mjs no longer reads package.json's "
+        "`neverDistribute`. If it grew its own list again, that is the fourth "
+        "copy returning -- the one that was missing secrets.json and the WAL "
+        "sidecars while both git channels had them.")
+
+    assert "const FORBIDDEN = [" not in source, (
+        "prepublish-check.mjs declares a literal FORBIDDEN array again. The "
+        "list is package.json's; this file applies it.")
+
+    # Every match kind the data uses has to exist in the consumer, or the
+    # consumer throws at publish time -- which is correct behaviour and a
+    # terrible moment to discover it.
+    kinds = {entry["match"] for entry in _never_distribute()}
+    for kind in sorted(kinds):
+        assert f"{kind}:" in source or f"'{kind}':" in source, (
+            f"package.json uses match kind {kind!r} and "
+            f"prepublish-check.mjs has no matcher for it. The consumer throws "
+            f"on an unknown kind by design, so this would abort the publish "
+            f"rather than silently skip the pattern -- but the publish is the "
+            f"wrong place to find out.")
+
+
+# ---------------------------------------------------------------------------
+# ---- S18-02..S18-05: CI properties nothing in the repo checked ------------
+# ---------------------------------------------------------------------------
+#
+# Five findings in this scope were CI properties that no file asserted, which
+# is why they survived a hundred commits. Each fix here is the property plus
+# something that notices when it stops holding.
+
+_WORKFLOW_DIR = os.path.join(ROOT, ".github", "workflows")
+_SHA40 = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _workflow_text() -> dict:
+    out = {}
+    for name in sorted(os.listdir(_WORKFLOW_DIR)):
+        if name.endswith((".yml", ".yaml")):
+            with open(os.path.join(_WORKFLOW_DIR, name), encoding="utf-8") as f:
+                out[name] = f.read()
+    assert out, "no workflows found; repoint this if .github/ moved"
+    return out
+
+
+def test_every_action_reference_is_pinned_to_a_commit():
+    """S18-05. A tag is a mutable ref held by a third party.
+
+    All 24 `uses:` lines were floating major tags, including the three in
+    `publish.yml` -- the job that holds `id-token: write` and will hold
+    `NODE_AUTH_TOKEN`. The rule was already written down in `gitleaks.yml`
+    ("D22's exact-pin rule applies to CI tooling too"), in a file whose own
+    checkout was floating.
+
+    The trailing `# vX.Y.Z` comment is required too, and not for tidiness: a
+    bare 40-hex is unreadable in review, and it is the form Dependabot
+    updates in place.
+    """
+    unpinned, uncommented = [], []
+    for name, text in _workflow_text().items():
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("- uses:") and " uses:" not in stripped:
+                continue
+            if "uses:" not in stripped:
+                continue
+            ref = stripped.split("uses:", 1)[1].strip()
+            target = ref.split("#")[0].strip()
+            if "@" not in target:
+                unpinned.append(f"{name}: {target}")
+                continue
+            digest = target.rsplit("@", 1)[1]
+            if not _SHA40.match(digest):
+                unpinned.append(f"{name}: {target}")
+            elif "#" not in ref:
+                uncommented.append(f"{name}: {target}")
+
+    assert not unpinned, (
+        f"these `uses:` references are not pinned to a commit: {unpinned}. A "
+        f"tag can be repointed by whoever owns it and the next run inherits "
+        f"the new code with no diff here.")
+    assert not uncommented, (
+        f"these pins carry no trailing version comment: {uncommented}. "
+        f"`uses: owner/action@<sha>  # v1.2.3` is what makes a pin readable "
+        f"in review and is the form Dependabot rewrites in place.")
+
+    # Vacuity guard: this swept something.
+    pinned = sum(len([1 for line in text.splitlines() if "uses:" in line])
+                 for text in _workflow_text().values())
+    assert pinned >= 20, (
+        f"only {pinned} `uses:` lines found across the workflows; the sweep "
+        f"is not reaching them")
+
+
+def test_dependabot_can_update_a_pinned_action():
+    """The other half of S18-05, and the reason pinning is not a trap.
+
+    SHA-pinning without an update channel means the pins are never moved
+    again. `dependabot.yml` declared `pip` and `npm` only, so nothing
+    proposed action bumps -- pinned or not.
+    """
+    with open(os.path.join(ROOT, ".github", "dependabot.yml"),
+              encoding="utf-8") as f:
+        text = f.read()
+    assert "github-actions" in text, (
+        "dependabot.yml declares no `github-actions` ecosystem, so the SHA "
+        "pins the gate above requires would never be updated again. That "
+        "trades one risk for another.")
+
+
+def test_the_publish_path_scans_for_secrets_before_publishing():
+    """S18-03. A release tag published with no secret scan on the commit.
+
+    `publish.yml` declares no `needs:` and reads no other workflow's verdict,
+    so the scanners ran CONCURRENTLY with it -- and `npm publish` is
+    irreversible. Measured on the one release tag that exists, v0.2.0: two
+    runs, tests and publish, no scanner.
+
+    It is not redundant with `prepublish-check.mjs`, which matches on
+    FILENAMES: a credential pasted into a file that is SUPPOSED to ship is
+    named by no entry of its denylist.
+    """
+    text = _workflow_text()["publish.yml"]
+    assert "gitleaks detect" in text, (
+        "publish.yml does not run gitleaks. The tarball check beside it "
+        "matches filenames, so a credential inside a file that ships is not "
+        "something it can see.")
+
+    scan = text.index("gitleaks detect")
+    publish = text.rindex("npm publish")
+    assert scan < publish, (
+        "publish.yml runs the secret scan AFTER `npm publish`. A published "
+        "npm version can never be replaced, only deprecated.")
+
+    # The scan must come after the step that plants the fake credentials file
+    # for the suite, or it is scanning a deliberately-planted secret and
+    # passing only because gitleaks.toml happens to allowlist that name.
+    removal = text.index("rm -f providers.json")
+    assert removal < scan, (
+        "publish.yml scans for secrets BEFORE removing the providers.json it "
+        "copied in for the suite. That passes only because gitleaks.toml "
+        "allowlists the filename -- which is the 'it cannot happen because of "
+        "a list somewhere else' assumption the removal step itself refuses to "
+        "make.")
+
+    assert "--source ." in text, (
+        "the scan must use a RELATIVE --source: an absolute path makes every "
+        ".gitleaksignore fingerprint unmatchable (measured).")
+
+
+def test_the_bandit_job_checks_counts_as_well_as_the_baseline():
+    """S18-02. `-b` suppresses by (file, test id, message), so a second
+    finding of the same id in the same file is silent -- measured,
+    `security/sandbox.py` went 7 -> 18 B603 with this job reporting nothing.
+    """
+    text = _workflow_text()["bandit.yml"]
+    # The INVOCATION, not the name: the comment block above the step names
+    # the script too, so a substring check passes with the step disabled.
+    # Measured -- mutation A5 survived the first version of this gate.
+    assert "run: python scripts/bandit-count-check.py" in text, (
+        "bandit.yml does not run scripts/bandit-count-check.py, so a second "
+        "subprocess call in a file that already carries a baselined B603 is "
+        "reported by nothing.")
+    assert "-b .github/bandit-baseline.json" in text, (
+        "the count check runs BESIDE `-b`, not instead of it: that one "
+        "matches on message text and still catches a reworded finding at an "
+        "unchanged count.")
+    assert os.path.exists(os.path.join(ROOT, "scripts",
+                                       "bandit-count-check.py")), (
+        "the script the job runs does not exist")
+
+
+_CODEQL_CONFIG_REF = "./.github/codeql/codeql-config.yml"
+_CODEQL_CONFIG = os.path.join(ROOT, ".github", "codeql", "codeql-config.yml")
+
+
+def _shipped_paths() -> list:
+    """Every file package.json's `files` puts in the tarball, as a
+    forward-slash path from the root."""
+    out = []
+    for entry in _package_json()["files"]:
+        if entry.startswith("!"):        # negation guards ship nothing
+            continue
+        top = os.path.join(ROOT, entry.rstrip("/"))
+        if os.path.isfile(top):
+            out.append(entry)
+            continue
+        for dirpath, dirnames, filenames in os.walk(top):
+            dirnames[:] = [d for d in dirnames if d != "__pycache__"]
+            rel = os.path.relpath(dirpath, ROOT).replace(os.sep, "/")
+            out.extend(f"{rel}/{name}" for name in filenames)
+    return out
+
+
+def _codeql_ignores(pattern: str, path: str) -> bool:
+    """CodeQL's `paths-ignore` reading of *pattern*, closely enough to
+    bound it: a bare path covers everything under it, and a leading `**/`
+    matches at the root too. `fnmatch`'s `*` crosses `/`, which errs toward
+    a match -- the safe direction for a gate that forbids one."""
+    pattern = pattern.strip("/")
+    candidates = {pattern}
+    if pattern.startswith("**/"):
+        candidates.add(pattern[3:])
+    return any(fnmatch.fnmatch(path, c) or fnmatch.fnmatch(path, c + "/*")
+               for c in candidates)
+
+
+def test_codeql_ignores_only_what_never_ships():
+    """Batch 158, A66. `paths-ignore` is how CodeQL is told not to look, so
+    it is bounded by the one list that says what reaches a user.
+
+    PR #200's first analysis raised five alerts in tests/, and each was a
+    test doing its job: a redaction test has to log a secret to prove the
+    secret is redacted. Skipping tests/ is safe because `files` does not
+    name it. An entry that a SHIPPED path falls under would turn the same
+    file into a way of silencing production code -- and a false positive
+    there is dismissed with a recorded reason instead, which keeps the rule
+    looking at the next change to that line.
+    """
+    import yaml
+
+    # PARSED, not grepped: codeql.yml's header names the config file too,
+    # so a substring check passes with the key deleted -- mutation A5's
+    # shape, one workflow over.
+    workflow = yaml.safe_load(_workflow_text()["codeql.yml"])
+    inits = [(job, step.get("with") or {})
+             for job, spec in workflow["jobs"].items()
+             for step in spec["steps"]
+             if step.get("uses", "").startswith("github/codeql-action/init@")]
+    assert len(inits) >= 2, (
+        f"found {len(inits)} CodeQL init step(s); codeql.yml has a security "
+        f"job and a quality job, so the sweep is not reaching them")
+    unwired = [job for job, given in inits
+               if given.get("config-file") != _CODEQL_CONFIG_REF]
+    assert not unwired, (
+        f"these CodeQL jobs do not read {_CODEQL_CONFIG_REF}: {unwired}. A "
+        f"job without it scans tests/ and re-raises the alerts batch 158 "
+        f"triaged, on the next pull request that touches a redaction test.")
+
+    with open(_CODEQL_CONFIG, encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+    extra = sorted(set(config) - {"name", "paths-ignore"})
+    assert not extra, (
+        f"codeql-config.yml carries {extra}. It is shared by BOTH jobs and "
+        f"holds paths only: `queries` would erase the security/quality split "
+        f"codeql.yml keeps per job on purpose, and a query filter or `paths` "
+        f"narrows what shipped code is checked for -- a decision A66 records "
+        f"the owner declining.")
+
+    ignored = config.get("paths-ignore") or []
+    assert ignored, (
+        "codeql-config.yml ignores nothing, so the relation below is vacuous; "
+        "if tests/ is meant to be scanned again, delete the file and this gate")
+    shipped = _shipped_paths()
+    assert "main.py" in shipped and len(shipped) > 100, (
+        f"only {len(shipped)} shipped paths enumerated; the walk is not "
+        f"reaching package.json's `files`")
+    hidden = sorted({f"{pattern} -> {path}" for pattern in ignored
+                     for path in shipped if _codeql_ignores(pattern, path)})
+    assert not hidden, (
+        f"codeql-config.yml's paths-ignore covers files that ship: "
+        f"{hidden[:10]}. CodeQL may skip only what never reaches a user; a "
+        f"false positive in shipped code is dismissed in GitHub with its "
+        f"reason, and recorded in DEVLOG.")
+
+
+def test_pip_audit_covers_every_declared_dependency_file():
+    """S18-04, and the half batch 136 created.
+
+    The job audited `requirements.txt` and its header called that "the one
+    dependency list". Batch 136 split the suite's packages into
+    `requirements-test.txt` and declared them as pyproject's `test` extra, so
+    four distributions were audited by nothing.
+    """
+    text = _workflow_text()["pip-audit.yml"]
+    declared = [name for name in os.listdir(ROOT)
+                if name.startswith("requirements") and name.endswith(".txt")]
+    assert len(declared) >= 2, (
+        f"expected at least requirements.txt and requirements-test.txt, "
+        f"found {declared}")
+    missing = [name for name in declared if f"-r {name}" not in text]
+    assert not missing, (
+        f"pip-audit.yml audits neither of {missing}. A requirements file "
+        f"nothing audits is a dependency set with no supply-chain gate, and "
+        f"the whole point of this job is that it is the only one.")
 
 
 def test_the_launcher_never_sets_the_two_variables_that_would_break_it():
@@ -1205,3 +2178,1229 @@ def test_the_launcher_never_sets_the_two_variables_that_would_break_it():
             f"both variables are inherited by machinery that computes its own "
             f"value from the parent process, and setting either from the "
             f"launcher breaks that quietly rather than loudly.")
+
+
+def test_the_launcher_and_python_agree_about_the_config_state():
+    """Batch 86, narrowed in batch 87. Every name spelled in two languages is
+    a drift that fails silently in the worst way -- the launcher writing to a
+    path the merge never reads means `npm update` goes back to discarding
+    every setting with nothing failing anywhere.
+
+    So batch 87 removed the duplication that mattered. The launcher no longer
+    writes the mirror (it spawns `--mirror` and Python decides), and it no
+    longer computes a state path (it READS `installs.json`, which Python
+    writes). What is left is a read-only doctor line, and these are the only
+    strings it still has to know.
+    """
+    import config_update
+
+    with open(os.path.join(ROOT, "bin", "venastine.mjs"), encoding="utf-8") as f:
+        source = f.read()
+
+    for spelling in (config_update.STATE_DIRNAME, config_update.VERSION_FILE,
+                     config_update.REPORT_FILE, config_update.INSTALLS_FILE):
+        assert f"'{spelling}'" in source, (
+            f"bin/venastine.mjs no longer spells {spelling!r}, which "
+            f"config_update.py still writes. The doctor line reads these; a "
+            f"name only one side believes in reports the wrong directory.")
+
+    assert "'--mirror'" in source, (
+        "the launcher no longer spawns the post-session mirror. Without it a "
+        "/config write made in a session is lost by an `npm update` that "
+        "happens before the next launch -- the common upgrade order.")
+    assert config_update.YOURS_FILE not in source, (
+        "bin/venastine.mjs names yours.yaml again. Writing the mirror from "
+        "Node is what batch 87 removed: it was the one writer not subject to "
+        "rule 1, and it destroyed the user's settings after a failed merge.")
+
+
+# ---------------------------------------------------------------------------
+# ---- hand-counted roster numbers (the September 2026 drift) -----------------
+# ---------------------------------------------------------------------------
+
+_SMALL_NUMBERS = {
+    "three": 3, "nine": 9, "eleven": 11, "twelve": 12, "fifteen": 15,
+    "nineteen": 19, "twenty-one": 21, "thirty-five": 35,
+}
+
+
+def _word_number(word):
+    word = word.lower()
+    if word.isdigit():
+        return int(word)
+    assert word in _SMALL_NUMBERS, (
+        f"a doc claim counts {word!r}, which is outside the small parser. "
+        f"Extend _SMALL_NUMBERS rather than working around it.")
+    return _SMALL_NUMBERS[word]
+
+
+def test_the_documented_provider_roster_matches_the_example():
+    """Three prose numbers described one roster three different ways: AGENTS.md
+    said nineteen providers, ARCHITECTURE.md and ROADMAP.md said fourteen,
+    and providers.json.example held fifteen -- with the stream-usage trio
+    right in every telling, so each paragraph read as careful while
+    disagreeing about its own denominator. The same drift lived in
+    tui/meters.py's and tui/app.py's comments, which is how a reader met the
+    wrong number whichever document they opened first.
+
+    Unit 16's shape again: somebody counted the roster by hand, in five
+    places, and the roster moved. So this parses the claimed totals out of
+    the live claims and compares them against the example file itself --
+    never against another hand-written number.
+
+    DEVLOG.md is deliberately out of scope: it is append-only history, and a
+    batch entry's contemporary count was true when written. tests/ is out for
+    the same reason the tree test skips it -- docstrings there describe the
+    behaviour under test, they are not a claim an agent navigates by.
+    """
+    with open(os.path.join(ROOT, "providers.json.example"),
+              encoding="utf-8") as f:
+        example = json.load(f)
+    live_total = len(example)
+    live_true = sorted(name for name, entry in example.items()
+                       if entry.get("supports_stream_usage"))
+
+    with open(os.path.join(ROOT, "AGENTS.md"), encoding="utf-8") as f:
+        agents = f.read()
+    total = _word_number(re.search(
+        r"THREE of the (\w+) configured providers", agents).group(1))
+    complement = _word_number(re.search(
+        r"the other (\w+) -- D21", agents).group(1))
+    assert (total, complement) == (live_total, live_total - len(live_true)), (
+        f"AGENTS.md's meter bullet claims {total} providers with "
+        f"{complement} complements; providers.json.example holds "
+        f"{live_total} with {live_total - len(live_true)} complements.")
+    assert len(live_true) == 3 and live_true == [
+            "ANTHROPIC", "OPENAI", "QWEN_TOKEN_PLAN"], (
+        f"the stream-usage trio changed: {live_true}. The bullet's THREE is "
+        f"stale alongside its denominator -- update both, not one.")
+
+    for doc, pattern in (
+            ("ARCHITECTURE.md",
+             r"across the (\d+) providers in `providers.json.example`"),
+            ("ROADMAP.md",
+             r"Across the (\d+) providers in `providers.json.example`")):
+        with open(os.path.join(DOCS, doc), encoding="utf-8") as f:
+            hit = re.search(pattern, f.read())
+        assert hit is not None, (
+            f"{doc} no longer states the roster size where it used to -- "
+            f"if the sentence moved, move this pattern with it.")
+        assert int(hit.group(1)) == live_total, (
+            f"{doc} claims {hit.group(1)} providers; the example holds "
+            f"{live_total}.")
+
+    for path, patterns in (
+            ("tui/meters.py", [r"(\w+) configured providers",
+                               r"forever on\s+(\w+) providers"]),
+            ("tui/app.py", [r"is (\w+) of the (\w+) configured",
+                             r"nothing on (\w+) of the (\w+)"])):
+        with open(os.path.join(ROOT, path), encoding="utf-8") as f:
+            source = f.read()
+        claimed = set()
+        for pattern in patterns:
+            for hit in re.finditer(pattern, source):
+                claimed.update(_word_number(g) for g in hit.groups())
+        assert claimed <= {live_total, live_total - len(live_true)}, (
+            f"{path} counts {sorted(claimed)} against a live roster of "
+            f"{live_total} with {live_total - len(live_true)} complements.")
+
+
+def test_the_held_widget_count_matches_the_prose():
+    """Batch 76 wrote "seven" and §47 added three more holds without
+    revisiting the sentence -- the transcript, the six crash-path widgets,
+    then the thread viewer, the crumb and the pane switcher, all held at
+    mount with a never-mounted fallback. A count that understates the set
+    tells the next author the set is closed, which is exactly how the two
+    NoMatches crashes happened: a widget added as a per-event query on a
+    path that runs under a modal.
+
+    The live value is the holds themselves, not a second list: every
+    `self._x = self.query_one(...)` in tui/app.py, all of which sit in
+    on_mount today, so a tenth hold anywhere in the file trips this and a
+    human decides whether the sentence follows it.
+    """
+    with open(os.path.join(ROOT, "tui", "app.py"), encoding="utf-8") as f:
+        app_source = f.read()
+    live = len(re.findall(r"self\._\w+ = self\.query_one\(", app_source))
+
+    with open(os.path.join(ROOT, "AGENTS.md"), encoding="utf-8") as f:
+        agents = f.read()
+    claimed = _word_number(re.search(
+        r"The held set is (\w+) now", agents).group(1))
+    assert claimed == live, (
+        f"AGENTS.md says the held set is {claimed}; tui/app.py holds "
+        f"{live}. Name the new hold in the bullet, or move it to a query "
+        f"with its NoMatches guard -- the count is the tripwire, the "
+        f"preconditions sentence beside it is the argument.")
+
+
+def _sections_missing_from_the_index(record):
+    """(headings, the section numbers with no index row) for one roadmap.
+
+    One `## N.` heading per section, in either of the two spellings the
+    record uses (`## 13.` for the older sections, `## §39.` for the newer
+    ones). The index block is everything between `## Index` and its closing
+    rule, in both of its row spellings (`- 13.` and `- **§32.**`).
+    """
+    with open(os.path.join(DOCS, record), encoding="utf-8") as f:
+        text = f.read()
+    headings = set(int(n) for n in
+                   re.findall(r"^## (?:§)?(\d+)\.", text, re.M))
+    index_block = text.split("## Index")[1].split("---")[0]
+    indexed = set(int(n) for n in re.findall(r"§(\d+)\.", index_block))
+    indexed.update(int(n) for n in
+                   re.findall(r"^- (\d+)\.", index_block, re.M))
+    return headings, sorted(headings - indexed)
+
+
+def test_the_roadmap_v2_index_covers_every_section():
+    """TECHNICAL_DEBT's index entry, closed 2026-09-10: the index stopped at
+    §31 while the record ran to §47, then backfills reached §45 and left
+    §39, §40, §46 and §47 absent -- the document a reader consults to find
+    out what is outstanding, missing the security posture and all of the
+    agent-navigation work. The marker test cannot see this: it checks the
+    entries it found, and an absent row has no marker to miss.
+
+    The prescription the debt entry recorded is the check: one index row per
+    section heading.
+    """
+    headings, missing = _sections_missing_from_the_index("ROADMAP_v2.md")
+    assert headings, "no section headings parsed -- the pattern moved."
+    assert not missing, (
+        f"ROADMAP_v2.md sections without an index row: {missing}. A section "
+        f"missing from the index reads as nonexistent, which is #129's "
+        f"complaint one level up.")
+
+
+def test_the_roadmap_v3_index_covers_every_section():
+    """ROADMAP_v3 §49 (SS21) opened a third record document, and the two
+    index checks were written against ROADMAP_v2 by NAME -- so without
+    this, v3 could grow a section its index never lists, the exact drift
+    the v2 check was written after."""
+    headings, missing = _sections_missing_from_the_index("ROADMAP_v3.md")
+    assert 49 in headings, (
+        "ROADMAP_v3.md parsed no §49 heading -- it opens at §49, so the "
+        "pattern moved or the document did.")
+    assert not missing, (
+        f"ROADMAP_v3.md sections without an index row: {missing}.")
+
+
+def test_every_roadmap_v3_index_entry_carries_a_status_marker():
+    """#129's rule for the third document. v3 writes every row in the bold
+    `- **§49. Title** — **(STATUS)**` spelling, which `_INDEX_ENTRY` (the
+    `- 13.` spelling) never matches -- so the v2 marker test cannot see a
+    v3 row at all. The marker is the bolded parenthetical AFTER the title,
+    since the title is itself bold."""
+    with open(os.path.join(DOCS, "ROADMAP_v3.md"), encoding="utf-8") as f:
+        block = f.read().split("## Index")[1].split("---")[0]
+    rows = re.findall(r"^- \*\*§\d+\..*$", block, re.M)
+    assert rows, "ROADMAP_v3.md's index parsed no rows -- the spelling moved."
+    unmarked = [row[:40] for row in rows
+                if "**(" not in row.split("**", 2)[2]]
+    assert not unmarked, (
+        f"ROADMAP_v3.md index rows with no status marker: {unmarked}.")
+
+
+def test_an_index_status_marker_agrees_with_its_own_section():
+    """The marker test above checks a marker EXISTS. It does not check that
+    the marker is true, and that gap shipped twice.
+
+    Batch 105 found `§49`'s index row still reading `IN PROGRESS` and still
+    stopping at slice 4, while the Slices list inside §49 said "§49 is
+    complete" -- written by batch 104, which had also written the slice list.
+    Batch 103 missed it before that. The index is the thing a reader
+    consults to find out what is outstanding, so a stale marker there is
+    worse than none: it answers, and the answer is wrong.
+
+    The check is deliberately narrow, because a general "is this status
+    accurate" test cannot exist. A section that declares itself complete IN
+    ITS OWN BODY may not be advertised as in progress or unbuilt by its own
+    index row. That is a contradiction inside one document, which is
+    decidable, and it is exactly the drift that occurred.
+    """
+    with open(os.path.join(DOCS, "ROADMAP_v3.md"), encoding="utf-8") as f:
+        text = f.read()
+
+    index_block = text.split("## Index")[1].split("---")[0]
+    rows = {}
+    for match in re.finditer(r"^- \*\*§(\d+)\..*$", index_block, re.M):
+        rows[int(match.group(1))] = match.group(0)
+    assert rows, "ROADMAP_v3.md's index parsed no rows -- the spelling moved."
+
+    # Each section's own body, from its heading to the next one.
+    bodies = {}
+    starts = [(int(m.group(1)), m.start())
+              for m in re.finditer(r"^## §(\d+)\.", text, re.M)]
+    for i, (number, start) in enumerate(starts):
+        end = starts[i + 1][1] if i + 1 < len(starts) else len(text)
+        bodies[number] = text[start:end]
+
+    STALE = ("IN PROGRESS", "not built", "NOT BUILT")
+    contradictions = []
+    for number, body in bodies.items():
+        declares_complete = (
+            f"§{number} is complete" in body
+            or f"§{number} is COMPLETE" in body)
+        row = rows.get(number, "")
+        if declares_complete and any(word in row for word in STALE):
+            contradictions.append(
+                f"§{number}: its body says it is complete, its index row "
+                f"says {[w for w in STALE if w in row]}")
+
+    assert not contradictions, (
+        "ROADMAP_v3.md's index contradicts its own sections:\n  "
+        + "\n  ".join(contradictions)
+        + "\nThe index is what a reader consults for what is outstanding; a "
+          "marker that is stale answers the question wrongly rather than "
+          "leaving it open.")
+
+
+def test_the_revisit_note_covers_the_ensemble_family():
+    """L1's shape, and the hole in the range test's scope: ROADMAP.md's §10
+    revisit blockquote said "Decisions record: E1-E12" while the record held
+    E1-E14, and test_a_claimed_range_covers_its_whole_family only reads
+    AGENTS.md's map line -- a range anywhere else can stop short while every
+    range check stays green.
+
+    Narrow on purpose: this pins the one out-of-scope range that already
+    drifted, against the record's live maximum, rather than rescanning every
+    document for ranges nobody has mis-stated yet.
+    """
+    record = _decision_definitions()
+    highest = max(int(re.match(r"E(\d+)$", one).group(1))
+                  for one in record if re.match(r"E\d+$", one))
+
+    with open(os.path.join(DOCS, "ROADMAP.md"), encoding="utf-8") as f:
+        roadmap = f.read()
+    hit = re.search(r"Decisions record: E1[–-]E?(\w+)", roadmap)
+    assert hit is not None, (
+        "ROADMAP.md's revisit note no longer carries its decisions-record "
+        "range -- if the sentence moved, move this pattern with it.")
+    assert _word_number(hit.group(1)) >= highest, (
+        f"ROADMAP.md's revisit note runs E1-E{hit.group(1)} while the "
+        f"record defines through E{highest}.")
+
+
+# ---------------------------------------------------------------------------
+# ---- Documented ceilings against the live config (batch 83) ---------------
+# ---------------------------------------------------------------------------
+#
+# Two clusters of documented numbers had been wrong for months, and nothing
+# anywhere compared a number in prose to the value that binds:
+#
+#   * the maths-tool wall clock ships 20 and README said 15 in three places,
+#     including a sample of output the harness cannot emit, while README's own
+#     settings table said 20;
+#   * the sandbox ships 120 s and 2048 MB and README said 60 s and 1024 MB in
+#     three places, its settings table among them.
+#
+# That earns a check, by this file's own rule: a claim earns one by having
+# ALREADY drifted, and only if the truth is something the suite can compute.
+#
+# EXPLICIT TRIPLES, NOT A REGEX OVER PROSE. A scraped version was tried first
+# and rejected: it reported 25 candidate passages that were almost all section,
+# issue and batch numbers, and it MISSED the real bug, because `15s` is glued
+# to a letter and the pattern wanted a word boundary. A detector that quiet
+# would be read as a clean bill of health, which is worse than no detector.
+#
+# Each row asserts BOTH halves. The substring must be present -- otherwise a
+# reword silently retires the check -- and the number inside it must equal the
+# live value. `{}` is where the number goes.
+DOCUMENTED_CEILINGS = [
+    ("README.md", "tool_compute_timeout_s",
+     "stopped — {} seconds by default"),
+    ("README.md", "tool_compute_timeout_s",
+     "symbolic_math exceeded its {}s limit"),
+    ("README.md", "tool_compute_timeout_s",
+     "killable subprocesses under a {}-second wall clock"),
+    ("README.md", "tool_compute_timeout_s",
+     "| `tool_compute_timeout_s` | {} |"),
+    ("README.md", "sandbox_timeout_seconds",
+     "200 processes, {} seconds, no network"),
+    ("README.md", "sandbox_timeout_seconds",
+     "the container runs under a {}-second wall clock"),
+    ("README.md", "sandbox_timeout_seconds",
+     "`docker.io/library/python:3.13-slim`; {} s,"),
+    ("README.md", "sandbox_memory_mb", "wall clock, {} MB of memory"),
+    ("README.md", "sandbox_memory_mb", "s, {} MB, 1 CPU core"),
+    ("README.md", "sandbox_max_pids", "{} processes, 120 seconds"),
+    ("README.md", "sandbox_cpu_seconds",
+     "`sandbox_cpu_seconds` ({} CPU-s) is a budget"),
+    # S02-08 (batch 142). The prose three pages up states this
+    # number too, and nothing matched it: `grep -c "30 CPU-seconds"` -> 1
+    # and `grep -c "30 CPU-s,"` -> 1, two separate claims with one gate.
+    # Changing the value in config.yaml turned the table row red and
+    # left the sentence saying 30 for ever, which is the failure this
+    # gate's own docstring names.
+    ("README.md", "sandbox_cpu_seconds",
+     "{} CPU-seconds and the same memory ceiling"),
+    ("README.md", "max_read_chars", "truncated at {:,} characters"),
+    ("README.md", "default_context_window", "| {}k fallback |"),
+    ("CONFIG_ARCHITECTURE.md", "tool_compute_timeout_s",
+     "{}s is chosen against measurement"),
+]
+
+
+def _ceiling_shown(template: str, value) -> str:
+    """Render the number the way the document writes it."""
+    if "{:,}" in template:
+        return template.format(value)
+    if "{}k" in template:
+        return template.format(value // 1000)
+    return template.format(value)
+
+
+def test_every_documented_ceiling_matches_the_live_config():
+    """A number in prose must be the number that binds.
+
+    The failure names the document, the claim and the live value, because the
+    thing that went wrong twice was someone updating a table row and not the
+    sentence three pages up that said something else.
+    """
+    import config_schema
+
+    cfg = config_schema.current()
+    wrong, missing = [], []
+    texts = {}
+    for filename, key, template in DOCUMENTED_CEILINGS:
+        if filename not in texts:
+            with open(os.path.join(ROOT, filename), encoding="utf-8") as f:
+                texts[filename] = f.read()
+        live = getattr(cfg, key)
+        expected = _ceiling_shown(template, live)
+        if expected in texts[filename]:
+            continue
+        # Present but with some other number in it? Then it is drift. Absent
+        # entirely? Then the claim was reworded and this row needs pointing
+        # at the new wording -- a different problem with a different fix.
+        head, _, tail = template.partition("{}")
+        head = head.rstrip()
+        if head and head in texts[filename]:
+            index = texts[filename].index(head)
+            wrong.append(
+                f"{filename}: expected {expected!r} for {key}={live!r}; the "
+                f"document says "
+                f"{texts[filename][index:index + len(expected) + 12]!r}")
+        else:
+            missing.append(f"{filename}: {template!r} (for {key}) is gone")
+
+    assert not wrong, (
+        "documented ceilings disagree with config.yaml:\n  "
+        + "\n  ".join(wrong)
+        + "\nThe value is what binds. Either the prose is stale or the value "
+          "moved without the prose; fix whichever is wrong and say which in "
+          "the commit.")
+    assert not missing, (
+        "these documented claims no longer appear, so nothing is being "
+        "checked:\n  " + "\n  ".join(missing)
+        + "\nIf the wording moved, point DOCUMENTED_CEILINGS at the new "
+          "wording rather than deleting the row -- the claim is the thing "
+          "being kept honest.")
+
+
+def test_the_ceiling_check_can_actually_fail():
+    """The guard on the guard.
+
+    Every row above could be absent from its document and the test would
+    still pass its first assertion, so the renderer is exercised directly
+    against a value the document does NOT carry.
+    """
+    import config_schema
+
+    cfg = config_schema.current()
+    with open(os.path.join(ROOT, "README.md"), encoding="utf-8") as f:
+        readme = f.read()
+
+    template = "killable subprocesses under a {}-second wall clock"
+    assert _ceiling_shown(template, cfg.tool_compute_timeout_s) in readme
+    assert _ceiling_shown(template, cfg.tool_compute_timeout_s + 1) \
+        not in readme, (
+        "README carries the wall clock at two different numbers, which is "
+        "the exact defect this pair of tests exists to catch")
+
+
+# ---------------------------------------------------------------------------
+# ---- Cited TEST NAMES resolve too (batch 108) ------------------------------
+# ---------------------------------------------------------------------------
+
+_CITED_TEST = re.compile(r"\b(Test[A-Z][A-Za-z0-9]*|test_[a-z0-9_]{4,})\b")
+
+
+def _defined_python_names():
+    """(every name the tree defines, every module basename).
+
+    DEFINITIONS, not just `def` and `class`, and the width is measured
+    rather than cautious: `project_init/manifest.py` documents a dataclass
+    field called `test_command` in its own docstring, and a def-only index
+    reports that as a dangling citation. Assignment targets, annotated
+    targets and parameters are all things prose legitimately names.
+    """
+    import ast
+
+    names, stems = set(), set()
+    for dirpath, _dirnames, filenames in _walk_project():
+        for name in filenames:
+            if not name.endswith(".py"):
+                continue
+            stems.add(os.path.splitext(name)[0])
+            path = os.path.join(dirpath, name)
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                try:
+                    tree = ast.parse(handle.read())
+                except SyntaxError:  # pragma: no cover -- another test's job
+                    continue
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.ClassDef, ast.FunctionDef,
+                                     ast.AsyncFunctionDef)):
+                    names.add(node.name)
+                elif isinstance(node, ast.Name) and isinstance(node.ctx,
+                                                               ast.Store):
+                    names.add(node.id)
+                elif (isinstance(node, ast.AnnAssign)
+                      and isinstance(node.target, ast.Name)):
+                    names.add(node.target.id)
+                elif isinstance(node, ast.arg):
+                    names.add(node.arg)
+    return names, stems
+
+
+def test_every_test_name_cited_in_production_code_resolves():
+    """The guard beside
+    `test_every_decision_id_cited_in_production_code_resolves`, for the
+    other thing production prose points at.
+
+    THE ONE IT WAS WRITTEN FROM (batch 108). `security/sandbox.py` closed
+    the argument for `_SHELL_METACHARACTERS` -- the closure that makes Q1
+    a closure rather than the next patch in a series -- with "pinned as
+    one by" the same words in lower snake case, as though the pin were a
+    function. It is the CLASS `TestTheTwoTokenisersCannotDisagree`, which
+    the same file cites correctly 140 lines further down. It survived two
+    batches, and a review found it rather than a reader.
+
+    WHY IT IS MORE THAN A TYPO. `protected_paths.user_config_dir` already
+    recorded this exact failure about itself and named the cost: "a reader
+    who greps the name finds nothing and concludes the duplication is
+    unguarded". Both sit under a sentence asserting that something
+    dangerous is pinned by a test, which is when a citation is
+    load-bearing.
+
+    PRODUCTION ONLY, deliberately. The suite's own prose legitimately
+    names tests and files that no longer exist -- `test_compaction_e2e.py`
+    is discussed by name in this very file, in the docstring of the check
+    that exists because five pointers survived its rename. A guard that
+    flagged those would need an allowlist on its first day.
+
+    A WRAPPED NAME IS NOT A MISSING ONE: a long citation broken across two
+    docstring lines arrives truncated, so a candidate that is a prefix of
+    a real name is read as that name rather than reported.
+    """
+    names, stems = _defined_python_names()
+    ordered = sorted(names)
+    dangling = []
+    for path in _production_python():
+        for line_number, text in _prose_lines(path):
+            for cited in sorted(set(_CITED_TEST.findall(text))):
+                if cited in names or cited in stems:
+                    continue
+                if any(real != cited and real.startswith(cited)
+                       for real in ordered):
+                    continue
+                dangling.append(
+                    f"{os.path.relpath(path, ROOT)}:{line_number} "
+                    f"cites {cited}")
+
+    assert not dangling, (
+        "Production code cites test names that do not exist:\n  "
+        + "\n  ".join(dangling)
+        + "\nA citation under a claim that something is pinned by a test "
+          "is load-bearing: a reader who greps the name and finds nothing "
+          "concludes the thing is unguarded. Fix the name, or describe the "
+          "pin without spelling a name that is not there."
+    )
+
+
+def test_the_cited_test_name_guard_can_actually_fail():
+    """The guard on the guard, in the shape
+    `test_the_ceiling_check_can_actually_fail` already uses here.
+
+    A walk that stopped finding files, or a regex that stopped matching,
+    would leave the check above passing forever. Each half is asserted
+    against a name nothing defines.
+    """
+    names, stems = _defined_python_names()
+    invented = "TestNothingAnywhereDefinesThis"
+
+    # The walk reaches real files.
+    assert "TestTheTwoTokenisersCannotDisagree" in names
+    assert len(list(_production_python())) > 20
+    # And the matcher would report an absent one.
+    assert invented not in names and invented not in stems
+    assert _CITED_TEST.findall(f"pinned by `{invented}`") == [invented]
+    assert not any(real.startswith(invented) for real in names)
+# ===========================================================================
+# ---- Batch 128: the numbers AGENTS.md states about the tree ---------------
+# ===========================================================================
+#
+# The two gates above this -- test_every_decision_id_cited_in_production_code_resolves
+# and test_every_test_name_cited_in_production_code_resolves -- are PRODUCTION
+# ONLY, deliberately, because "the suite's own prose legitimately names tests
+# and files that no longer exist". That reasoning is right about test prose and
+# wrong about AGENTS.md, which is not prose about tests: it is the file CLAUDE.md
+# calls not-optional reading because its decisions "have already been broken
+# once by someone who reasoned from the code alone".
+#
+# Swept by hand in batch 128, AGENTS.md was clean on everything mechanical --
+# 529 of 529 cited identifiers resolved, no dangling test name, no file:line
+# citation anywhere -- and wrong on SEVEN NUMBERS, every one of them a count of
+# something in this tree that nothing checked. So the counts get what
+# ARCHITECTURE's per-file counts got in audit #121, and for the reason that
+# document states about itself: a figure "was written as 113 in batch 84 and
+# left there through five batches that added thirty keys; the test counts, this
+# sentence did not".
+#
+# Each of these reads the figure back OUT of AGENTS.md rather than hardcoding
+# it, so the failure names the sentence to edit rather than a constant in here.
+
+
+def _agents_md() -> str:
+    with open(os.path.join(ROOT, "AGENTS.md"), encoding="utf-8") as handle:
+        return handle.read()
+
+
+def _one_number(pattern, what):
+    """The single integer AGENTS.md states for *what*, or a failure naming it."""
+    found = re.findall(pattern, _agents_md())
+    assert len(found) == 1, (
+        f"AGENTS.md should state {what} exactly once in the shape "
+        f"{pattern!r}; found {len(found)}: {found[:4]}. Editing that sentence "
+        f"means editing this pattern too -- which is the point: the number and "
+        f"the thing that checks it are supposed to move together.")
+    return int(found[0].replace(",", ""))
+
+
+#: Relative to the project root, and the same depth window AGENTS.md's sentence
+#: names. `read_project_doc` resolves anywhere under the project; the window is
+#: what makes the figure a figure rather than an unbounded walk.
+_DOC_BOUND_MAX_DEPTH = 3
+
+
+def _readable_docs_on_a_clean_checkout():
+    """(count, bytes) for what `read_project_doc` would admit, TRACKED ONLY.
+
+    Tracked only, and that is the deliberate narrowing. This worktree holds
+    untracked `output/`, `.qwen/reviews/` and `.ipynb_checkpoints/` files that
+    `is_readable_doc` accepts quite correctly, so a plain walk would make this
+    gate answer differently on every machine. `git ls-files` is how
+    test_no_notebook_checkpoint_file_is_committed asks the same question, with
+    the same two skips when git cannot answer at all.
+
+    Measured through the tool's OWN predicate. `tools/builtin/project_docs.py`
+    records what happened the last time this rule had a second implementation:
+    the two "disagreed in both directions -- six advertised paths the tool
+    refused, and four it accepted that never appeared".
+    """
+    from tools.builtin import project_docs
+
+    root = _project_root()
+    try:
+        listed = subprocess.run(["git", "ls-files"], cwd=root,  # nosec B603, B607 - `git ls-files`, fixed argv
+                                capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):  # pragma: no cover
+        pytest.skip("git is not available to ask what is tracked")
+    if listed.returncode != 0:  # pragma: no cover
+        pytest.skip("not a git checkout")
+
+    count = 0
+    total = 0
+    for line in listed.stdout.splitlines():
+        rel = line.strip()
+        if not rel:
+            continue
+        # Depth IS the slash count of the project-relative path: a root file
+        # is 0, `docs/X.md` is 1, `agents/builtin/x.md` is 2. Written as the
+        # bound rather than `- 1`, which dropped every depth-3 file and made
+        # this gate report 46 against a measured 60 on its first run.
+        if rel.count("/") > _DOC_BOUND_MAX_DEPTH:
+            continue
+        if not project_docs.is_readable_doc(root, rel):
+            continue
+        full = os.path.join(root, rel.replace("/", os.sep))
+        if not os.path.exists(full):  # pragma: no cover -- deleted but staged
+            continue
+        count += 1
+        total += os.path.getsize(full)
+    return count, total
+
+
+def test_the_documented_doc_read_bound_is_not_understated():
+    """THE ONE NUMBER HERE WHOSE ERROR HAS A DIRECTION.
+
+    `read_project_doc` is registered with permission True, so it is advertised
+    to every run -- plain chat and all ten research passes, not just an agent
+    that declared it. AGENTS.md states how much that reaches, and the sentence
+    after it says why the figure is written down at all: "ARCHITECTURE.md used
+    to say the most a prompt-injected pass gains is the README (audit #97);
+    understating a security bound is the one direction that costs something."
+
+    It then understated it by 3.3x. Batch 128 measured 60 files and 3.58 MB
+    against a stated 40 files and ~1.1 MB, and almost all of the growth was
+    this record -- DEVLOG.md alone is 1.2 MB. Nobody widened the tool; the
+    documents it can read got bigger, which is exactly the drift no reader
+    would think to re-check.
+
+    SO THE TWO FIGURES ARE GATED DIFFERENTLY, on purpose. The file COUNT is
+    exact: it moves only when a document is added or removed, which is rare and
+    worth being told about. The SIZE is a CEILING: this record grows every
+    batch, so an equality would go red on the next commit and be retyped
+    without being read, which is how a gate becomes a formality. A ceiling goes
+    red when the bound crosses a round number, and that is when noticing is
+    the correct outcome.
+    """
+    stated_count = _one_number(r"\*\*(\d+) files\n\s*and under \d+ MB at depths 0-3\*\*",
+                               "the readable-document count")
+    stated_mb = _one_number(r"\*\*\d+ files\n\s*and under (\d+) MB at depths 0-3\*\*",
+                            "the readable-document size ceiling")
+
+    count, total = _readable_docs_on_a_clean_checkout()
+    megabytes = total / (1024.0 * 1024.0)
+
+    assert count == stated_count, (
+        f"AGENTS.md says `read_project_doc` reaches {stated_count} files on a "
+        f"clean checkout; it reaches {count}. Update the sentence in the "
+        f"read_project_doc paragraph -- and if the number went UP, read it "
+        f"first: that paragraph is about a security bound, and the direction "
+        f"that costs something is the one you are in.")
+
+    assert megabytes < stated_mb, (
+        f"AGENTS.md says `read_project_doc` reaches under {stated_mb} MB on a "
+        f"clean checkout; it reaches {megabytes:.2f} MB. The bound genuinely "
+        f"grew -- raise the ceiling in that sentence deliberately rather than "
+        f"to the nearest number that passes, because the figure exists to be "
+        f"read by someone deciding whether this tool is safe to advertise.")
+
+
+def test_agents_md_states_the_real_test_tui_class_count():
+    """AGENTS.md said 41 classes from batch 114 until batch 128, when there
+    were 64.
+
+    The number is load-bearing where it sits: the paragraph is the argument
+    that classing `test_tui.py` is what unbound the suite's loadscope floor,
+    and `TestThisFileIsGroupedForLoadscope::test_every_test_here_is_inside_a_class`
+    makes every new test join a class. So the count rising is the rule
+    WORKING, and the sentence saying 41 made it look like a one-off.
+
+    `ast`, not a `grep`: a `^class ` count also takes the seven helper classes
+    in that file, and `Test*` is what pytest collects.
+    """
+    stated = _one_number(r"are \*\*(\d+)\*\* now, which is the rule working",
+                         "test_tui.py's class count")
+
+    import ast
+    path = os.path.join(ROOT, "tests", "test_tui.py")
+    with open(path, encoding="utf-8") as handle:
+        tree = ast.parse(handle.read())
+    live = sum(1 for node in tree.body
+               if isinstance(node, ast.ClassDef) and node.name.startswith("Test"))
+
+    assert live == stated, (
+        f"AGENTS.md says tests/test_tui.py is {stated} classes; it declares "
+        f"{live} `Test*` classes at module level. One digit, in the "
+        f"FLOOR-BOUND paragraph.")
+
+
+def test_agents_md_states_the_real_modal_parametrisation(request):
+    """AGENTS.md said 3 x 18 = 54 until batch 128, when it was 3 x 19 = 57.
+
+    Counted from the COLLECTED NODE IDS, because `_DECISION_CASES` is
+    `_modal_cases() + _overflowing_modal_cases()` -- computed, so there is no
+    literal list to read and a reimplementation of those two functions here
+    would be the parallel-implementation mistake `project_docs` records.
+
+    Narrowing is already solved in this file: `_collected_nodeids` falls back
+    to a subprocess collection when the invocation filtered the session, and
+    `test_the_default_invocation_is_not_treated_as_narrowed` guards the guard.
+    """
+    sizes = _one_number(r"is (\d+) sizes \u00d7 \d+ cases = \*\*\d+\*\* of them",
+                        "the modal size count")
+    cases = _one_number(r"is \d+ sizes \u00d7 (\d+) cases = \*\*\d+\*\* of them",
+                        "the modal case count")
+    product = _one_number(r"is \d+ sizes \u00d7 \d+ cases = \*\*(\d+)\*\* of them",
+                          "the modal node-id count")
+
+    assert sizes * cases == product, (
+        f"AGENTS.md states {sizes} x {cases} = {product}, which is not a "
+        f"product. Fix the arithmetic before trusting either factor.")
+
+    name = "test_every_modal_keeps_its_decision_on_screen"
+    live = sum(1 for node in _collected_nodeids(request) if name in node)
+    if not live:  # pragma: no cover -- a collection that cannot see test_tui.py
+        pytest.skip("the modal test was not collected in this invocation")
+
+    assert live == product, (
+        f"AGENTS.md says {name} is {sizes} x {cases} = {product} node ids; "
+        f"pytest collects {live}. A size or a screen was added -- update that "
+        f"sentence in the parametrised-floor paragraph.")
+
+
+def test_agents_md_states_the_real_sympy_allowlist_sizes():
+    """Three of the `safe_parse` figures, and the fourth left ungated on purpose.
+
+    GATED: the two MODULE CONSTANTS -- `_ALLOWED_NAMES` at 230 and
+    `_ALLOWED_NODES` at 39. Both are literals in `_math_common`, so both are
+    deterministic in any process that imports it.
+
+    NOT GATED, and the second one is the more interesting reason.
+
+    "out of the ~130 Python defines" is not gated because the interpreter is
+    not pinned: the floor is 3.11, 3.13 counts 132 `ast.AST` subclasses, and
+    the original sentence said 118. A gate would go red on an upgrade, which
+    is not a defect in anything.
+
+    `dir(sympy)` is not gated because **it is not a fixed number at all**, and
+    this test is how that was found. It read 926 when the four new gates ran
+    alone and 927 when the whole file ran. The extra name is `stats`:
+    `tools/builtin/probability_stats.py` does `import sympy.stats`, and
+    importing a submodule binds it as an attribute of the package, so
+    `dir(sympy)` grows by whatever any module happened to import first. WSL's
+    unpinned 1.14.0 reads 928 again. Pinning `sympy` exactly does not make
+    `dir()` on it stable, which is what the first draft of this test assumed.
+
+    THE CONSEQUENCE IS REAL AND IT IS INERT, which is worth having written
+    down rather than rediscovered. `_SAFE_GLOBALS` is built from `dir(sympy)`
+    at import time, so importing `probability_stats` first puts the `stats`
+    MODULE OBJECT into it -- and the module docstring's own rule is that "no
+    module object is ever permitted". It is unreachable anyway: `stats` is not
+    in `_ALLOWED_NAMES`, so `_validate_ast` never resolves the name, and the
+    implicit-multiplication transform turns the bare word into `a*s**2*t**2`
+    rather than a lookup. `stats.__class__` and `stats.Die` are refused
+    because `ast.Attribute` is absent from the node allowlist. Measured, all
+    four. The name gate is what makes the globals dict's contents not matter.
+
+    THE OFF-BY-ONE THAT STARTED THIS: AGENTS.md said "231 of 927 exposed" from
+    the day it was written -- the allowlist literal has held 230 words, none
+    duplicated, since #52 created it, and nothing has edited that region since.
+    Not drift. Wrong on arrival, for three years of batches, in the sentence
+    that says which names can reach the parser.
+    """
+    import sympy
+
+    from tools.builtin import _math_common
+
+    stated_names = _one_number(r"\(\*\*(\d+)\*\* of the ~\d+", "the allowlist size")
+    stated_exposed = _one_number(r"\(\*\*\d+\*\* of the ~(\d+)", "SymPy's exposed count")
+    stated_nodes = _one_number(r"allowlist of \*\*(\d+)\*\* node types",
+                               "the AST node allowlist size")
+
+    assert len(_math_common._ALLOWED_NAMES) == stated_names, (
+        f"AGENTS.md says `_ALLOWED_NAMES` holds {stated_names} names; it holds "
+        f"{len(_math_common._ALLOWED_NAMES)}.")
+    assert len(_math_common._ALLOWED_NODES) == stated_nodes, (
+        f"AGENTS.md says the AST allowlist is {stated_nodes} node types; it is "
+        f"{len(_math_common._ALLOWED_NODES)}.")
+
+    # APPROXIMATE, for the import-order reason in the docstring: a window, not
+    # an equality, so the sentence stays honest without claiming a stability
+    # `dir()` on a package does not have.
+    exposed = [name for name in dir(sympy) if not name.startswith("_")]
+    assert abs(len(exposed) - stated_exposed) <= 5, (
+        f"AGENTS.md says SymPy exposes ~{stated_exposed} public names; this "
+        f"SymPy ({sympy.__version__}) exposes {len(exposed)}, which is outside "
+        f"the few names import order can account for. If the pin moved, the "
+        f"sentence about what the allowlist admits is a claim about the new "
+        f"surface and needs re-reading, not just a new denominator.")
+
+    # The claim the two numbers are FOR: an allowlist, not a denylist.
+    assert stated_names < stated_exposed, (
+        "the allowlist cannot admit more names than SymPy exposes")
+
+
+def test_architecture_states_the_real_truth_table_ceiling():
+    """The one number batch 143 added, gated on the day it was added.
+
+    `logic._MAX_TRUTH_TABLE_SYMBOLS` is what refuses a truth table before
+    `2**n` rows exist, and ARCHITECTURE's tool contracts state it in prose
+    -- so it is a value derived in two places, which is the shape S06-10
+    and S06-11 on this same surface are both instances of. The bug is never
+    that two copies drift; it is that nothing can tell you they have.
+
+    The ROW COUNT is derived here rather than stated in the document, so
+    the prose carries one number and this test does the arithmetic. 8
+    columns is 256 rows and 33,575 characters measured -- the last table
+    under `config.MAX_READ_CHARS`, which is where the figure came from.
+    """
+    from tools.builtin import logic
+
+    with open(os.path.join(ROOT, "docs", "ARCHITECTURE.md"),
+              encoding="utf-8") as handle:
+        architecture = handle.read()
+
+    stated = re.findall(r"truth table above \*\*(\d+) columns\*\* is refused",
+                        architecture)
+    assert len(stated) == 1, (
+        "docs/ARCHITECTURE.md should state the truth-table ceiling exactly "
+        "once in the shape 'a truth table above **N columns** is refused'; "
+        "found %d: %s. Editing that sentence means editing this pattern "
+        "too, which is the point." % (len(stated), stated[:4]))
+
+    assert int(stated[0]) == logic._MAX_TRUTH_TABLE_SYMBOLS, (
+        "docs/ARCHITECTURE.md says a truth table above %s columns is "
+        "refused; `logic._MAX_TRUTH_TABLE_SYMBOLS` is %d, so the document "
+        "and the code disagree about what the tool does."
+        % (stated[0], logic._MAX_TRUTH_TABLE_SYMBOLS))
+
+    # The claim the number is FOR: the largest table it admits has to fit
+    # inside the ceiling the other five tools get, or the two bounds are
+    # answering different questions.
+    import config
+    assert 2 ** logic._MAX_TRUTH_TABLE_SYMBOLS * 140 < config.MAX_READ_CHARS * 2, (
+        "a %d-column table is 2**%d rows, which at the ~131 characters per "
+        "row measured is past `max_read_chars` -- the input bound and the "
+        "output bound no longer agree about where the edge is"
+        % (logic._MAX_TRUTH_TABLE_SYMBOLS, logic._MAX_TRUTH_TABLE_SYMBOLS))
+
+
+# ---------------------------------------------------------------------------
+# ---- S07-01: no sink composes its own redaction ---------------------------
+# ---------------------------------------------------------------------------
+
+def test_no_production_module_composes_its_own_secret_redaction():
+    """The relation, and the only form of this that cannot go vacuous.
+
+    S07-01 was not one wrong line. It was five sinks each holding part of
+    a rule: `logging_setup`'s formatter and `tui/app.py`'s log handler
+    composed `redact_secrets` with `redact_live_values` -- in opposite
+    orders -- while `tui/app.py`'s tool-error line, `core/loop.py`'s
+    `mark_turn_failed` and the orchestrator's pipeline event called
+    `redact_secrets` alone. Fixing the five was a one-line change each;
+    what stops a SIXTH is this.
+
+    `redact_secrets` is public and stays public -- `docs/ARCHITECTURE.md`
+    lists it, and it is the vendor-token pass that both compositions are
+    built from. The rule is only that nothing outside its own module
+    calls it directly, because every caller outside is by definition a
+    sink choosing a vocabulary.
+    """
+    offenders = {}
+    for path in _production_python():
+        rel = os.path.relpath(path, ROOT).replace("\\", "/")
+        if rel == "safety/policy_enforcement.py":
+            continue
+        with open(path, encoding="utf-8") as f:
+            for number, line in enumerate(f, 1):
+                if line.lstrip().startswith("#"):
+                    continue
+                if "redact_secrets(" in line:
+                    offenders.setdefault(rel, []).append(number)
+
+    assert not offenders, (
+        f"these call `redact_secrets` directly: {offenders}. That is the "
+        f"vendor-token pass alone -- seven patterns, no credential SHAPES "
+        f"and no value redaction -- so the sink would take a smaller "
+        f"vocabulary than tool output, which is S07-01 exactly. Call "
+        f"`redact_diagnostic_text` instead; it is the composition all five "
+        f"existing sinks share, and it decides the order too (S07-05).")
+
+
+# ---------------------------------------------------------------------------
+# ---- Batch 146: what a registered callable may raise, stated once ---------
+# ---------------------------------------------------------------------------
+
+#: The spellings the six copies used, in the PRESENT tense. load_skill's
+#: copy survives because it is an account of what happened -- "raised",
+#: "aborted" -- and every clause of it is true; these say a raise ends a
+#: turn today, and dispatch() has contained a handler's exception since
+#: well before any of them was written.
+_THE_FALSE_CLAIM = (
+    "aborts the whole turn",
+    "takes down the whole turn",
+    "escapes the loop's ToolCallDenied",
+)
+
+#: Where the reason lives. Matched on the heading rather than on a sentence
+#: so that rewording the paragraph does not quietly empty this relation.
+_THE_ONE_COPY = "WHAT A CALLABLE REGISTERED BELOW MAY RAISE"
+
+
+def test_no_production_module_restates_why_a_handler_validates():
+    """The relation, and the reason it is a relation rather than six fixes.
+
+    Six modules in tools/builtin/ justified `params.get` over `params[]`
+    with the same mechanism and cited each other as the authority --
+    "pin.py's rule", "Same reasoning as load_skill's", "remember.py's
+    note". The practice is right; the mechanism was false, and had been
+    since `dispatch()` started containing a handler's exception "on
+    purpose". Seven cross-citing copies of one claim is seven chances to
+    disagree with the code and one shared reason to believe it.
+
+    What none of the six said is the half that was live in their own
+    surface: a GATE's raise is not contained, and file_ops' two gates were
+    not total. That is in the one copy now, which is what makes this worth
+    gating -- the paragraph a seventh copy would be competing with is the
+    one that carries the part that matters.
+    """
+    offenders = {}
+    for path in _production_python():
+        rel = os.path.relpath(path, ROOT).replace("\\", "/")
+        if rel == "tools/base.py":
+            continue
+        for number, line in _prose_lines(path):
+            for claim in _THE_FALSE_CLAIM:
+                if claim in line:
+                    offenders.setdefault(rel, []).append(
+                        f"{number}: {claim}")
+
+    assert not offenders, (
+        f"these say a raise out of a tool ends the turn, in the present "
+        f"tense: {offenders}. `dispatch()` contains a handler's exception "
+        f"-- what validating params actually buys is an error dict the "
+        f"model can read instead of a generic wrapper. The one copy of "
+        f"this, including the half about GATES that none of the six "
+        f"carried, is tools/base.py's "
+        f"\"{_THE_ONE_COPY}\" block; cite it rather than restating it.")
+
+
+def test_the_one_copy_is_where_the_relation_says_it_is():
+    """The guard on the guard, and it closes the loosening the test above
+    invites: deleting the paragraph in tools/base.py would make every
+    citation of it dangle and the relation would go on passing, because
+    passing means "nobody restated it" and an empty tree restates nothing.
+
+    So: the block exists, exactly once, in the file whose fields declare
+    the two callables it is about -- and it says both halves, because a
+    version that kept only the containment half would be the comment the
+    six modules had.
+    """
+    base = os.path.join(ROOT, "tools", "base.py")
+    with open(base, encoding="utf-8") as f:
+        body = f.read()
+
+    assert body.count(_THE_ONE_COPY) == 1, (
+        f"tools/base.py mentions {_THE_ONE_COPY!r} "
+        f"{body.count(_THE_ONE_COPY)} times; the relation above exempts "
+        f"this file on the strength of there being one copy here")
+    for half in ("A HANDLER'S exception is contained",
+                 "A GATE'S exception is NOT contained"):
+        assert half in body, (
+            f"tools/base.py no longer states {half!r}. The six copies this "
+            f"replaced all had the first half and none had the second, "
+            f"which is the whole reason the paragraph exists.")
+
+    # And the citations are real, so the exemption is paying for something.
+    citing = []
+    for path in _production_python():
+        rel = os.path.relpath(path, ROOT).replace("\\", "/")
+        if rel == "tools/base.py":
+            continue
+        with open(path, encoding="utf-8") as f:
+            if _THE_ONE_COPY in f.read():
+                citing.append(rel)
+    assert len(citing) >= 4, (
+        f"only {citing} cite the one copy, and six modules were corrected "
+        f"to point at it -- a relation nobody references is a relation "
+        f"about nothing")
+
+
+
+# ---------------------------------------------------------------------------
+# ---- S16-03: a documented private symbol resolves -------------------------
+# ---------------------------------------------------------------------------
+#
+# AGENTS.md named `_ASK_HANDLERS` as the CLI's table of ask handlers. There
+# is no such symbol: the CLI's is a closure-local `handlers` published as
+# `channel.rendered_kinds`, and the TUI's is an if-chain in
+# `VenastineApp._ask_blocking`. `git log -S` returns only the docs commit
+# that coined the name, so it was born stale rather than renamed without
+# update -- which is the shape no convention catches, because there was
+# never a moment when somebody edited code and forgot the document.
+
+_PRIVATE_BACKQUOTED = re.compile(r"`(_[A-Za-z0-9_]+)`")
+
+
+def _all_python_sources():
+    """Every .py file in the live tree, tests included, EXCEPT this one.
+
+    `_production_python` skips `tests`, and this gate must not: AGENTS.md
+    legitimately names test helpers, and a production-only scan would
+    report those as dangling for a reason that is not a defect.
+
+    THIS FILE IS EXCLUDED, and it is not housekeeping. The gate below
+    explains the defect it exists for by naming `_ASK_HANDLERS`, so with
+    this file in scope the dangling token resolves against the paragraph
+    written to forbid it -- measured: the control that writes that name
+    back into AGENTS.md left the gate GREEN. A gate's evidence may not
+    come from its own explanation of what it forbids, which is the same
+    correction batch 151 made to the conftest-header gate one batch
+    earlier, when two function names in its own added prose read as
+    claimed stubs.
+    """
+    here = os.path.abspath(__file__)
+    for dirpath, _dirnames, filenames in _walk_project():
+        for name in sorted(filenames):
+            if not name.endswith(".py"):
+                continue
+            path = os.path.join(dirpath, name)
+            if os.path.abspath(path) == here:
+                continue
+            yield path
+
+
+def test_every_private_symbol_agents_md_names_exists_in_the_tree():
+    """S16-03. A reader who greps for a documented symbol has to find it,
+    and a fixer who "adds the missing handler to `_ASK_HANDLERS`" must not
+    be invited to build a third registry beside the two real ones.
+
+    THE DOMAIN IS EVERY BACKQUOTED PRIVATE IDENTIFIER, not the sentence
+    that was wrong. A leading underscore is an unambiguous signal that a
+    backquoted token is code rather than English, so nothing here has to
+    guess; 131 of them were measured when this was written and 130
+    resolved.
+
+    A SUBSTRING MATCH, AND BOTH ALTERNATIVES WERE MEASURED. This file
+    already owns an AST index of defined names -- `_defined_python_names`,
+    which the cited-test-name gate uses -- and reusing it would be the
+    stronger check and no new scanner. It fails on SEVENTEEN of the 131:
+    it collects `ast.Name` Store targets and not `ast.Attribute` ones, so
+    every instance attribute the document names (`_thinking_pending`,
+    `_last_run`, `_viewing`) reads as undefined, as do four dunders.
+
+    A `tokenize` NAME index is the other candidate and the only one that
+    can tell code from prose, which is the hole this gate's own first
+    form fell into (see `_all_python_sources`). It fails on eight, and
+    three of those are not this repository's symbols at all:
+    `_check_bindings` and `_watch_theme` are Textual's, `__builtins__` is
+    CPython's, and `_compacting` is prose about a design the code
+    deliberately did not take. A coherence gate that fails on a CORRECT
+    reference to somebody else's symbol is the wrong trade, so the
+    substring match stays and its one weakness is closed by excluding
+    this file. TECHNICAL_DEBT 106 carries the two the NAME index flagged
+    that may be genuinely stale.
+
+    The substring match also answers the reader's own question most
+    directly: a name reachable by grep is a name they will find.
+
+    THE DOMAIN IS ASSERTED IN BOTH DIRECTIONS, which is ARCHITECTURE
+    section 11's instruction and what batch 151 found missing in two
+    guards: a scan that matched no tokens, or read no sources, would pass
+    while checking nothing. The floors sit below the measured 131 and 243
+    so ordinary editing does not trip them, and far enough above zero
+    that a broken pattern or a mis-rooted walk does.
+
+    WHAT IT DOES NOT COVER, said here so the next reader does not assume
+    it: a dotted path whose first component is public, such as
+    `VenastineApp._ask_blocking`, does not match this pattern as a whole
+    -- the leading `V` is not an underscore -- so only its private tail
+    would be caught if it were written alone. Widening to dotted paths
+    means deciding what a public attribute resolves against, which is a
+    different gate.
+    """
+    text = _agents_md()
+    tokens = {}
+    for match in _PRIVATE_BACKQUOTED.finditer(text):
+        line = text.count("\n", 0, match.start()) + 1
+        tokens.setdefault(match.group(1), []).append(line)
+    assert len(tokens) > 80, (
+        f"only {len(tokens)} backquoted private identifiers were found in "
+        f"AGENTS.md, and 131 were measured when this gate was written, so "
+        f"the pattern has stopped matching what it was written for")
+
+    blobs = []
+    for path in _all_python_sources():
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            blobs.append(handle.read())
+    assert len(blobs) > 150, (
+        f"the scan read {len(blobs)} python files and 243 were measured, so "
+        f"it is looking in the wrong place and would resolve nothing")
+
+    missing = sorted(
+        f"{token} (AGENTS.md:{','.join(str(n) for n in lines)})"
+        for token, lines in tokens.items()
+        if not any(token in blob for blob in blobs))
+    assert not missing, (
+        "AGENTS.md names private symbols that exist nowhere in the tree: "
+        + "; ".join(missing)
+        + ". A reader greps the documented name, finds nothing, and either "
+        "concludes the thing is unguarded or adds it -- which creates a "
+        "second thing beside the real one. Name what exists, or delete "
+        "the sentence.")
+#: The one sentence in AGENTS.md that promises a named file cannot be
+#: carved out of the D17 trust hash. The filename is captured BY THE
+#: PATTERN, adjacent to the phrase, rather than by scanning the paragraph
+#: around it -- batch 152 lost a gate twice to a scan that could not tell
+#: code from the prose written about it, and the paragraph this sits in now
+#: names the OLD filename while explaining that it is gone.
+_HASH_PROMISE = re.compile(
+    r"`([A-Za-z0-9_][A-Za-z0-9_.-]*\.[A-Za-z0-9]+)` is never "
+    r"special-cased out of the hash")
+
+
+def test_the_file_agents_md_promises_is_inside_the_trust_hash(tmp_path):
+    """AGENTS.md's I6 bullet guarantees one named file is never carved out
+    of the trust hash. That name is pinned against the hash's actual input
+    set (S17-05, batch 153).
+
+    THE SENTENCE WAS BORN STALE BY RELOCATION, which is the shape a
+    convention cannot catch: nobody edited the trust hash and forgot the
+    document. Section 44 moved the hub from `.venastine/CONTEXT.md` to the
+    root `AGENTS.md` and removed the old file outright, and this sentence
+    went on promising that `CONTEXT.md` is never special-cased out of the
+    hash -- a guarantee about a file that is not in the hash because it
+    does not exist, while the guarantee that matters (the root `AGENTS.md`
+    is in the listing, by WS9, precisely so a cloned hub cannot reach a
+    system prompt unasked) went unstated. A reader checking the promise
+    would have found nothing to check.
+
+    `content_files()` is the right thing to compare against rather than
+    `_content_hash`: it IS the hash's input set, by construction since
+    section 44 -- the digest iterates the listing, so a file the listing
+    omits cannot enter the hash. That is the relation the sentence is
+    about.
+
+    PINNED IN BOTH DIRECTIONS (`docs/ARCHITECTURE.md` section 11). A
+    membership test that passes because the listing is large tells you
+    nothing, so the fixture's listing is asserted exact, a file the
+    sentence does NOT name is asserted present, and the name this sentence
+    carried until batch 153 is asserted ABSENT -- which is what makes the
+    pass mean something: the test it would have failed is the test it ran.
+    """
+    from core import workspace_trust
+
+    collapsed = re.sub(r"\s+", " ", _agents_md())
+    promised = _HASH_PROMISE.findall(collapsed)
+    assert len(promised) == 1, (
+        f"AGENTS.md should promise exactly once that a named file is never "
+        f"special-cased out of the trust hash; found {len(promised)}: "
+        f"{promised[:4]}. Rewording that sentence means editing this "
+        f"pattern too -- a gate that silently matches nothing is the "
+        f"defect it was written for, one level up.")
+    promised = promised[0]
+
+    project = tmp_path / "proj"
+    (project / ".venastine" / "agents").mkdir(parents=True)
+    (project / ".venastine" / "agents" / "reviewer.md").write_text(
+        "---\nname: reviewer\n---\nbody\n", encoding="utf-8")
+    (project / ".venastine" / "settings.json").write_text(
+        "{}\n", encoding="utf-8")
+    (project / workspace_trust.PROJECT_CONTEXT_FILENAME).write_text(
+        "# hub\n", encoding="utf-8")
+
+    listing = workspace_trust.content_files(str(project))
+    assert sorted(listing) == [
+        ".venastine/agents/reviewer.md",
+        ".venastine/settings.json",
+        workspace_trust.PROJECT_CONTEXT_FILENAME,
+    ], (f"the fixture project should list exactly its three files and "
+        f"listed {listing}; a listing that stopped walking would make the "
+        f"check below pass or fail for the wrong reason")
+    assert "CONTEXT.md" not in listing, (
+        "the name this sentence carried until batch 153 must be absent "
+        "from the listing, or this test cannot fail on the claim it was "
+        "written to catch")
+
+    assert promised in listing, (
+        f"AGENTS.md promises that `{promised}` is never special-cased out "
+        f"of the trust hash, and `workspace_trust.content_files()` -- which "
+        f"IS the hash's input set -- does not list it: {listing}. Either "
+        f"the file moved and the sentence did not, or the sentence names a "
+        f"file that no longer exists. A promise about a file outside the "
+        f"hash is not a weaker guarantee, it is no guarantee, and it reads "
+        f"exactly like the real one.")

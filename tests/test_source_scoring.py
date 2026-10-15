@@ -25,10 +25,22 @@ import config
 from core.reasoning.base import Claim, PipelineRun
 from core.reasoning.source_corpus import SourceCorpus
 from core.reasoning.source_scoring import (
-    EMBED_MAX_RETRIES, EmbeddingScorer, WINDOW_CHARS, calibrate,
-    calibration_for, chunk_text, claim_query_text, classify_domain, cosine,
-    l2_normalize, make_scorer, prefixes_for, score_grounding_sources,
-    source_passages, split_sentences, strip_markup,
+    EMBED_MAX_RETRIES,
+    WINDOW_CHARS,
+    EmbeddingScorer,
+    calibrate,
+    calibration_for,
+    chunk_text,
+    claim_query_text,
+    classify_domain,
+    cosine,
+    l2_normalize,
+    make_scorer,
+    prefixes_for,
+    score_grounding_sources,
+    source_passages,
+    split_sentences,
+    strip_markup,
 )
 
 

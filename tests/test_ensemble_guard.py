@@ -57,8 +57,8 @@ def test_ensemble_on_with_no_roster_is_refused(monkeypatch):
     with pytest.raises(ValueError) as exc_info:
         _ensemble_roster(True)
     message = str(exc_info.value)
-    assert "ENSEMBLE_MODELS" in message
-    assert "config.py" in message
+    assert "ensemble_models" in message
+    assert "config.yaml" in message
     assert "disable ensemble_mode" in message
 
 
@@ -125,7 +125,7 @@ def test_the_refusal_lands_before_any_work(mocker, monkeypatch):
     create = mocker.patch("core.reasoning.orchestrator.create_pipeline_run")
     run_pass = mocker.patch("core.reasoning.orchestrator._run_pass")
 
-    with pytest.raises(ValueError, match="ENSEMBLE_MODELS"):
+    with pytest.raises(ValueError, match="ensemble_models"):
         run_pipeline(
             user_query="anything", model="claude-sonnet-5",
             provider_name="ANTHROPIC", ensemble_mode=True,
@@ -222,5 +222,8 @@ class TestSettingsRejectsARoster:
             ]})
         message = str(exc.value)
         assert "deliberately not supported" in message
-        assert "config.ENSEMBLE_MODELS" in message
+        # Where the roster DOES belong. The name and the file are asserted
+        # together: the message's job is to send the reader somewhere, and
+        # either half alone would survive the roster moving house.
+        assert "ensemble_models in config.yaml" in message
         assert "unknown key" not in message

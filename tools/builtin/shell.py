@@ -6,7 +6,9 @@ Shell execution tool (ROADMAP §7). Runs commands in the detected shell
 (security/sandbox.py).
 
 SANDBOX MODEL (ROADMAP_v2 §46 moved one tier of this):
-  Almost everything runs in Docker. The one exception is HOST_READ --
+  Almost everything runs in a container -- Docker's, or Podman's when
+  Docker cannot run one (ROADMAP_v3 §49, SS22; the approval notice names
+  which). The one exception is HOST_READ --
   a read-only command from config.INERT_COMMANDS whose argument
   resolves OUTSIDE the workspace -- which runs as a host subprocess
   because the file it names is one no container can see. It always
@@ -23,7 +25,7 @@ SANDBOX MODEL (ROADMAP_v2 §46 moved one tier of this):
   approval answer (see security/sandbox.containment_for) and is
   reported to the model as `ran_on: "host"`.
 
-  Non-inert commands go through Docker (strong isolation) or the
+  Non-inert commands go through the container (strong isolation) or the
   explicit subprocess fallback (weak isolation, requires
   ALLOW_INSECURE_SANDBOX_FALLBACK=True).
 
@@ -31,16 +33,25 @@ SANDBOX MODEL (ROADMAP_v2 §46 moved one tier of this):
   told where a command would run; the model never was, and it is the
   one that writes the user an answer about the output.
 
-APPROVAL MODEL (ROADMAP_v2 §28):
-  config.SHELL_APPROVAL_MODE is the gate -- "always", "tiered" or
-  "never" -- and ToolApprovals.shell is the RATCHET above it: True
-  forces "always", and can never loosen (D14).
+APPROVAL MODEL (ROADMAP_v2 §28, amended by §48):
+  config.SHELL_APPROVAL_MODE is the gate -- "always", "tiered",
+  "contained" or "never" -- and it is the ONLY gate: there is no second
+  switch that can disagree with it (D14's one-way tightening for shell
+  lives in the agent's `approval_overrides`, which reach the same OR
+  below).
 
-  Under "tiered", the command is classified ONCE
+  Under "tiered" and "contained", the command is classified ONCE
   (security/sandbox.classify_command) into a capability set, and the
   generic rule in security/capability.auto_approved decides. The same
   profile is then handed to run_sandboxed, so the thing that was
   approved is the thing that runs.
+
+  The two differ in one capability (§48, CE1/CE2). "tiered" asks about
+  anything that may run code, contained or not, so only INERT runs
+  unasked. "contained" is the rule "tiered" had before §48: a command
+  the container confines runs unasked unless it gets network. There is
+  no interpreter list behind either, and there must not be one -- see
+  classify_command's `runs_code`.
 
   What this replaced: a five-step ladder whose bottom four steps could
   only return False on the shipped config flags, making the whole check
@@ -65,23 +76,48 @@ import logging
 import os
 import re
 import shutil
+from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 
 import config
 from security import capability, posture
-from security.capability import UNAVAILABLE, UNCONTAINED, auto_approved
-from security.protected_paths import PROTECTED_SEGMENTS, protected_segment
+from security.capability import (
+    UNAVAILABLE,
+    UNCONTAINED,
+    CommandProfile,
+    auto_approved,
+)
+from security.protected_paths import (
+    PROTECTED_SEGMENTS_FOLDED,
+    protected_segment,
+)
 from security.sandbox import (
+    BACKEND_CONTAINER,
+    BACKEND_SSH,
+    BACKEND_WSL,
     HOST_READ,
     INERT,
+    SANDBOXED,
+    SANDBOXED_NET,
     SandboxUnavailable,
     _is_inert,
     classify_command,
     containment_for,
+    declared_backend,
+    declared_network,
+    declared_root,
     detect_shell,
     is_docker_available,
+    known_runtime,
     run_sandboxed,
+    ssh_enabled,
+    ssh_target,
+    ssh_unavailable_reason,
+    sudo_refusal,
+    wsl_distro,
+    wsl_enabled,
+    wsl_unavailable_reason,
 )
 
 logger = logging.getLogger(__name__)
@@ -150,13 +186,70 @@ class ShellParams(BaseModel):
             "the command is allowed or how it runs."
         ),
     )
+    requires_network: StrictBool = Field(
+        default=False,
+        description=(
+            "Whether this command needs to reach the network. Say true "
+            "for anything that downloads, installs, clones, publishes or "
+            "calls an API. WITHOUT IT THE COMMAND RUNS WITH NETWORKING "
+            "OFF and the connection simply fails -- the harness reads "
+            "your command as text and cannot tell that an inline script "
+            "or an interpreter you invoke wants egress, so it assumes "
+            "not. Saying true does not bypass approval; it tells the "
+            "user what they are being asked to allow."
+        ),
+    )
+    needs_root: StrictBool = Field(
+        default=False,
+        description=(
+            "Whether this command must run as root. The harness prefixes "
+            "sudo for you and supplies the password it holds for that "
+            "machine -- DO NOT write `sudo` in the command yourself, and "
+            "never put a password in it. The WHOLE command line runs as "
+            "root, redirects and pipes included. Only 'wsl' and 'ssh' can "
+            "do this: in the container you ALREADY are root, so drop the "
+            "flag there. A human is asked every single time, whatever the "
+            "approval mode, and the call is refused outright if no "
+            "password is stored for that machine -- the refusal says which "
+            "one to store. Leave it false unless the command genuinely "
+            "cannot work otherwise."
+        ),
+    )
+    backend: Literal["container", "wsl", "ssh"] = Field(
+        default="container",
+        description=(
+            "Where to run it. 'container' is the sandbox: a pinned Linux "
+            "image with only the workspace visible, no network unless you "
+            "ask, and memory, CPU and process limits. 'wsl' is the USER'S "
+            "OWN Windows machine with a Linux userland on it -- their real "
+            "home directory, their installed tools, the network always on, "
+            "no resource limits, and no isolation from this harness's own "
+            "files. Ask for it only when the work genuinely needs the "
+            "user's machine or a Linux toolchain the image does not have, "
+            "say so in the rationale, and expect to be asked: only a "
+            "read-only command whose arguments are all inside the "
+            "workspace runs there without a prompt. It may be turned off, "
+            "in which case the call is refused and says so. Use paths "
+            "RELATIVE to the workspace -- an absolute POSIX path is read "
+            "as leaving the workspace and always asks. "
+            "'ssh' is a DIFFERENT MACHINE -- the remote host the user "
+            "configured. Nothing runs there without asking, not even a "
+            "read-only command, because this harness cannot resolve a "
+            "path on a filesystem it cannot see. Its network is always "
+            "on and `requires_network` means nothing there. Note the "
+            "trap: `write` saves files LOCALLY, so a file you just wrote "
+            "does not exist on the remote -- send it through the command "
+            "itself, or do the work in the container."
+        ),
+    )
 
 
 TOOL_SCHEMA = {
     "name": "shell",
     "description": (
-        "Execute a shell command. Commands run inside a Docker "
-        "container with the workspace mounted at /workspace -- EXCEPT "
+        "Execute a shell command. Commands run inside a container "
+        "(Docker, or Podman where Docker cannot run one) with the "
+        "workspace mounted at /workspace -- EXCEPT "
         "a read-only command with an argument outside the workspace, "
         "which runs on the HOST with the user's own file access "
         "because the container cannot see those files. The result "
@@ -184,7 +277,31 @@ TOOL_SCHEMA = {
 # So an omission costs nothing and is VISIBLE: the prompt says
 # "(none given)", which is itself the observation. A silent gap would
 # not be.
-TOOL_SCHEMA["input_schema"]["required"] = ["command", "rationale"]
+#
+# `requires_network` (ROADMAP_v3 §50, NW1) is listed on the same terms
+# and for the same reason: it is a thing the agent STATES, and a flag
+# it is never asked for is one it will not set -- but it defaults to
+# False, so a call that omits it runs with no network rather than
+# failing validation after a human has already said yes.
+#
+# `backend` (ROADMAP_v3 §49, SS35) is NOT on the list, and the difference
+# from `requires_network` is the direction its default fails in. An
+# unstated `requires_network` runs a command that needed egress without
+# it, so the command fails for a reason the model cannot see and the
+# field has to be asked for. An unstated `backend` runs in the container,
+# which is both the safe answer and the right one for almost every call --
+# requiring it would make every command state the obvious in order to
+# requiring it would make every command state the obvious in order to
+# surface a field that matters for a handful.
+#
+# `needs_root` (slice 5b, SS67) is off the list for `backend`'s reason and
+# not for `requires_network`'s. Unstated, the command runs unprivileged and
+# fails with a permission error the model can READ and act on -- the
+# visible direction. And unlike either of the others, forgetting it is not
+# how root is reached by accident: a command that names `sudo` itself still
+# meets a human, because the always-ask step reads the command text too.
+TOOL_SCHEMA["input_schema"]["required"] = [
+    "command", "rationale", "requires_network"]
 
 
 # ---------------------------------------------------------------------------
@@ -192,14 +309,41 @@ TOOL_SCHEMA["input_schema"]["required"] = ["command", "rationale"]
 # ---------------------------------------------------------------------------
 
 
-def _profile_and_containment(command: str):
+def _profile_and_containment(command: str, requires_network: bool = False,
+                             backend: str = BACKEND_CONTAINER):
     """Classify *command* and work out what will contain it.
 
     One helper for both the gate and the prompt so they cannot describe
     the same call differently -- which is the failure #157 came from,
     with `_is_inert` consulted twice for two different questions.
+
+    *requires_network* is the agent's declaration (§50), already coerced
+    by `declared_network`. It reaches the classifier rather than being
+    applied afterwards, so the gate and the prompt read the one network
+    fact instead of each OR-ing the flag in for itself.
+
+    *backend* is the agent's other declaration (§49, SS35), coerced by
+    `declared_backend`. It does NOT reach the classifier: what a command
+    is ABLE to do is a fact about the command, and the same text has the
+    same capabilities wherever it runs. It reaches `containment_for`,
+    which is the half of the question that is about the machine -- and
+    the answer there is UNCONTAINED for every tier (SS1).
     """
-    profile = classify_command(command, config.WORKSPACE_DIR)
+    profile = classify_command(command, config.WORKSPACE_DIR,
+                               requires_network=requires_network)
+    # SS35. Asked first, because on this backend the runtime's answer is
+    # not part of the question: WSL is uncontained whether or not a
+    # container could have run the command, and probing Docker to decide
+    # that would be paying for an answer nobody reads.
+    if backend == BACKEND_WSL:
+        return profile, containment_for(profile, False, backend)
+    # SS46/SS48, for SS35's reason and one more: a remote host's
+    # containment does not depend on what this machine's Docker is doing
+    # either, and the classified tier is kept only so the NOTICE can still
+    # describe the command. Nothing downstream may act on it -- see the
+    # SSH step in `_shell_approval_check`.
+    if backend == BACKEND_SSH:
+        return profile, containment_for(profile, False, backend)
     # Docker is probed only when the answer depends on it. HOST_READ is
     # UNCONTAINED whatever Docker is doing -- it names a file outside
     # the workspace, which no container can show it -- so it still
@@ -238,9 +382,16 @@ def _command_touches_protected(command: str) -> str | None:
     parse. A token like ``.ven*/settings.json`` carries no literal
     segment and reaches no answer here (G2 -- a classifier that learned
     shell syntax would be a parser whose bugs auto-approve). That is why
-    the consumer is an always-ASK trigger and never a deny: what slips
-    past a token check still lands in front of a human with the full
-    command text.
+    the consumer is an always-ASK trigger and never a deny: under
+    `tiered`, what slips past a token check still lands in front of a
+    human with the full command text, because a spelling that could
+    expand into the segment is not INERT and so asks anyway.
+
+    That last clause was FALSE until §48 (CE1). A contained command was
+    auto-approved, so `cat .ven*/settings.json; true` and a `python -c`
+    that opens the file read it unasked, while this docstring said they
+    met a human. Under `contained` and `never` they still do not: the
+    ro mount stops a write there, and the read is documented risk.
     """
     if not isinstance(command, str):
         return None
@@ -250,7 +401,11 @@ def _command_touches_protected(command: str) -> str | None:
             candidates.append(token.split("=", 1)[1])
         for candidate in candidates:
             for part in re.split(r"[\\/]", candidate):
-                if part in PROTECTED_SEGMENTS:
+                # Folded, like the resolved branch below it (batch 146).
+                # This is the branch for a token realpath cannot help with,
+                # so an exact-case compare here was the half of the fold
+                # that `protected_segment` could not reach.
+                if part.casefold() in PROTECTED_SEGMENTS_FOLDED:
                     return part
             try:
                 resolved = os.path.realpath(
@@ -263,31 +418,93 @@ def _command_touches_protected(command: str) -> str | None:
     return None
 
 
+# The binaries that make a command somebody else's. `sudo` is the one
+# slice 5b supplies a password for; the other three are here because they
+# answer the same question -- "does this line try to become another user"
+# -- and a step that knew only about `sudo` would auto-approve `doas` on
+# the one backend where the measurement showed nothing asks.
+_ROOT_BINARIES = frozenset({"sudo", "doas", "pkexec", "su"})
+
+
+def _command_names_root(command) -> bool:
+    """Whether the command TEXT names an escalation binary (SS67).
+
+    RAW `.split()` tokens and a basename compare -- a token check, never a
+    parser (G2), exactly like `_command_touches_protected` beside it and
+    for the same trade. `echo sudo` asks, and that costs one prompt; what
+    it buys is that `sudo apt-get install` cannot be auto-approved on WSL
+    because the call left `needs_root` unset. That was MEASURED to be the
+    live behaviour before this slice: under AUTO_APPROVE_SANDBOX_FALLBACK
+    the fallback opt-in answered for the whole WSL backend.
+
+    What it deliberately does NOT do is decide anything about HOW the
+    command runs. It only ever ADDS a prompt -- the harness supplies a
+    password for `needs_root` and for nothing else -- so a spelling that
+    slips past this check reaches a `sudo` with no password and fails,
+    rather than reaching one with a password nobody approved.
+
+    Total, like everything else the gate calls: `params["command"]` is
+    whatever the model emitted.
+    """
+    if not isinstance(command, str):
+        return False
+    for token in command.split():
+        if re.split(r"[\\/]", token)[-1] in _ROOT_BINARIES:
+            return True
+    return False
+
+
 def _shell_approval_check(tool_name: str, params: dict) -> bool:
     """Whether this shell call needs a human to say yes (ROADMAP_v2 §28).
 
     Reads top to bottom as the policy it is:
 
-      1. ToolApprovals.shell is the RATCHET. True forces "always",
-         whatever the mode says, so a config or an agent override can
-         still only tighten (D14).
-      2. The mode answers outright unless it is "tiered".
-      3. A command naming a protected path segment
+      1. The mode answers outright unless it is "tiered".
+      2. A command naming a protected path segment
          (security.protected_paths.PROTECTED_SEGMENTS) always asks --
          before the fallback opt-in and the capability rule can answer
          for it. The file tools DENY such a path outright; the shell
          only asks, because a command is free text and the token check
          refuses to parse it (G2), so what slips past the check still
-         meets a human. Behind step 2 deliberately: mode "never" is a
+         meets a human. Behind step 1 deliberately: mode "never" is a
          documented opt-out of ALL approval, and it already answers
          "auto-approve" for a host read of /etc/shadow.
-      4. AUTO_APPROVE_SANDBOX_FALLBACK is applied HERE, visibly, rather
+      2b. A call that will be REFUSED answers "no" rather than
+         "ask" (ROADMAP_v3 §49, SS37/SS40) -- the WSL backend turned
+         off, or a WSL command naming a protected segment. It reads
+         beside the UNAVAILABLE branch above and means the same
+         thing: there is nothing to approve, and asking would spend
+         a human decision on an outcome already fixed. `run` and the
+         session start handler refuse the same call, through the one
+         `uncontained_refusal`.
+      2c. An SSH call ALWAYS asks (ROADMAP_v3 §49, SS48), read
+         above every opt-in below so that neither of them can answer
+         for a machine this process cannot inspect.
+      2d. A ROOT call ALWAYS asks (slice 5b, SS65/SS67), in the same
+         position and for a measured version of the same reason: the
+         fallback opt-in already answers for the ENTIRE WSL backend,
+         so a root step below it would be dead code on the one
+         backend where root is most reachable. It fires on the
+         DECLARATION or on the command text naming an escalation
+         binary, because a model that types `sudo` itself never sets
+         the flag.
+      3. AUTO_APPROVE_SANDBOX_FALLBACK is applied HERE, visibly, rather
          than passed into the generic rule to be honoured out of sight.
          It is the user's own opt-in to an isolation level the harness
          has already told them is weak -- and it sits BELOW the
          protected-segment check, so one opt-in cannot cover the
-         directory the ro-mount exists to keep commands out of.
-      5. Otherwise the capability rule decides.
+         directory the ro-mount exists to keep commands out of. Honoured
+         under `tiered` and `contained` alike (§48, CE5): it is written on
+         purpose and already flagged. Under `always` it is never reached,
+         because step 1 returned (CE6).
+      4. The `contained` mode (§48, CE2) is the second visible opt-in, and
+         applied here for the same reason: a command the container
+         confines and that gets no network runs unasked. Below the
+         protected-segment check, so a literal `.venastine` token still
+         asks in that mode, and read off capabilities rather than the tier
+         label (G1), with `measured` first (G5).
+      5. Otherwise the capability rule decides -- which, since §48 (CE1),
+         asks about anything that may run code, contained or not.
 
     The return is `not auto_approved(...)` -- this function answers "must
     someone be asked", the rule answers "is this covered". Two names for
@@ -295,10 +512,6 @@ def _shell_approval_check(tool_name: str, params: dict) -> bool:
     is a silent auto-approve, so the negation stays on one line where it
     can be read.
     """
-    approvals = config.ToolApprovals()
-    if getattr(approvals, tool_name, False):
-        return True
-
     active = posture.current()
     mode = capability.validate_mode(active.shell_approval_mode,
                                     "config.SHELL_APPROVAL_MODE")
@@ -307,8 +520,19 @@ def _shell_approval_check(tool_name: str, params: dict) -> bool:
     if mode == capability.NEVER:
         return False
 
+    # TOTAL from here down (batch 146). Below the mode branches on
+    # purpose: `never` is a documented opt-out of ALL approval and answers
+    # without reading the params at all, so a guard above it would have
+    # changed what that opt-out means. From here the function reads six
+    # fields, and `params` is whatever the model emitted -- which for this
+    # shape means "not an object". ASK, like every other answer this
+    # function cannot settle.
+    if not isinstance(params, dict):
+        return True
     command = params.get("command", "")
-    profile, containment = _profile_and_containment(command)
+    backend = declared_backend(params)
+    profile, containment = _profile_and_containment(
+        command, declared_network(params), backend)
 
     # No backend can run this, so there is nothing to approve. NOT the
     # same as auto_approved() answering False, which means ASK -- the two
@@ -324,12 +548,57 @@ def _shell_approval_check(tool_name: str, params: dict) -> bool:
     if containment == UNAVAILABLE:
         return False
 
-    # Step 3: a protected segment always asks, whatever the sandbox says.
+    # SS40, and read beside the UNAVAILABLE branch above rather than with
+    # the protected-segment step below, because it is the same KIND of
+    # answer: this call is refused before it runs, so there is nothing to
+    # approve, and asking would spend a human decision on an outcome that
+    # is already fixed. Below the mode switch for the same reason
+    # UNAVAILABLE is -- `always` asks about everything, including calls
+    # that will not run, and that wart is one the gate already has.
+    # `declared_root` and NOT `_command_names_root`, and the asymmetry is
+    # the decision: the refusal is about a password THIS HARNESS would
+    # have to supply, which it only ever does for a declared call. A
+    # command that merely names `sudo` supplies its own or fails, and
+    # refusing it for want of a stored secret would break a passwordless
+    # setup that works today.
+    if uncontained_refusal(command, backend,
+                           declared_root(params)) is not None:
+        return False
+
+    # SS48. NOTHING on the SSH route is auto-approved, and this is the one
+    # place that is decided -- an explicit step rather than a synthesized
+    # profile that happens to fail `auto_approved`, because the opt-ins
+    # below (the fallback's and `contained`'s) each answer BEFORE that
+    # rule is reached, and a profile tuned to lose the last test would
+    # still have to be tuned to lose those two. One line that cannot be
+    # got wrong beats three that agree today.
+    #
+    # Two independent reasons, either sufficient. `_within` resolves
+    # against the LOCAL filesystem, so on a remote it answers a true
+    # question about the wrong machine -- and SS45, one slice old, is what
+    # a path check that cannot resolve costs: it does not fail open
+    # loudly, it approves confidently. And SS51: ssh has no `execve` path,
+    # so the "argv with no shell" property that EP5 makes the INERT tier
+    # out of does not exist on this route at all.
+    #
+    # Below the mode switch, so `never` still means never (SS1) and
+    # `always` still asks -- this widens neither.
+    if backend == BACKEND_SSH:
+        return True
+
+    # SS65/SS67. Above both opt-ins below, and the OR is the whole point:
+    # `declared_root` alone would be a step the model can step around by
+    # writing `sudo` and leaving the flag off, which is exactly what the
+    # measurement found already running unasked.
+    if declared_root(params) or _command_names_root(command):
+        return True
+
+    # Step 2: a protected segment always asks, whatever the sandbox says.
     segment = _command_touches_protected(command)
     if segment is not None:
         return True
 
-    # The pre-§28 steps 4 and 5, preserved exactly. For a non-inert tier,
+    # The pre-§28 fallback steps, preserved exactly. For a non-inert tier,
     # UNCONTAINED can only mean "Docker is down AND the insecure fallback
     # is enabled" -- that is what containment_for computed -- so this
     # reads the answer already in hand instead of re-deriving it from two
@@ -337,6 +606,15 @@ def _shell_approval_check(tool_name: str, params: dict) -> bool:
     if (profile.tier not in (INERT, HOST_READ)
             and containment == UNCONTAINED
             and active.auto_approve_fallback):
+        return False
+
+    # Step 4, §48 (CE2): the rule `tiered` had before §48, under the name
+    # that says what it trusts. `measured` first, for G5's reason -- the
+    # container must not argue an uncharacterised call through.
+    if (mode == capability.CONTAINED_MODE
+            and containment == capability.CONTAINED
+            and profile.measured
+            and not profile.network):
         return False
 
     return not auto_approved(profile, containment)
@@ -352,13 +630,60 @@ def _shell_approval_notice(params: dict, _context=None) -> str:
     someone tells you the inert path is a host subprocess.
     """
     command = params.get("command", "")
-    profile, containment = _profile_and_containment(command)
+    backend = declared_backend(params)
+    profile, containment = _profile_and_containment(
+        command, declared_network(params), backend)
+    # The runtime is read from the probe `_profile_and_containment` just
+    # ran, never re-probed: the person answering should see WHICH runtime
+    # isolates the command, since Podman and Docker are not the same
+    # product (ROADMAP_v3 §49, SS22).
     where = {
-        "contained": "in a Docker container, workspace mounted at /workspace",
+        "contained": (f"in a {known_runtime().capitalize()} container, "
+                      "workspace mounted at /workspace"),
         "uncontained": "on the HOST, with your own file access",
         "unavailable": "nowhere -- no sandbox backend is available",
     }.get(containment, containment)
+    # SS41. "uncontained" is true of WSL and nowhere near enough: the
+    # person answering has to know it is not a weaker container but their
+    # own machine, and that the two protections they may be picturing --
+    # the read-only mount over this harness's own files, and the memory
+    # and process limits -- are simply not there. Said here rather than
+    # only in the docs, because this prompt is where the decision is made.
+    if backend == BACKEND_WSL:
+        where = (f"in WSL ({wsl_distro() or 'default distribution'}) -- "
+                 f"YOUR machine, not a sandbox: your own files, the "
+                 f"network on, no memory or process limit, no read-only "
+                 f"mount over this harness's own config, and it can start "
+                 f"Windows programs with your full authority")
+    # SS48/SS55. The person answering has to know this is not their
+    # machine at all, and that two things they may be picturing are
+    # absent: any isolation, and any way for this harness to check what
+    # the command will touch. The remote is NAMED, because "uncontained"
+    # is equally true of the host fallback and means something different
+    # here -- and because a prompt that does not say which machine is
+    # about to run something is not a prompt anyone can answer.
+    if backend == BACKEND_SSH:
+        where = (f"on {ssh_target() or 'the configured remote host'} over "
+                 f"SSH -- ANOTHER MACHINE, not a sandbox and not this "
+                 f"one: no isolation, no memory or process limit, the "
+                 f"network on, and nothing here can see its filesystem, "
+                 f"so no argument of this command has been checked "
+                 f"against anything")
     notice = f"{profile.tier}: {profile.reason}. Runs {where}."
+    # Slice 5b. The person is answering for a privilege level, not only a
+    # machine, and "uncontained" does not say which. Two sentences, because
+    # the two cases are genuinely different: one is the harness handing over
+    # a password it holds, the other is the command asking for root on its
+    # own with nothing behind it.
+    if declared_root(params):
+        notice += (" AS ROOT -- the whole command line runs under sudo, "
+                   "with the password this harness holds for that machine. "
+                   "Anything root can do there, this can do.")
+    elif _command_names_root(command):
+        notice += (" It names sudo (or su, doas, pkexec) itself, which is "
+                   "why this is being asked about at all. The harness "
+                   "supplies a password only for a call that declares "
+                   "needs_root, so this one may simply fail.")
     binary = _resolved_binary(command) if containment == UNCONTAINED else ""
     if binary:
         notice += f" Binary resolves to {binary}."
@@ -369,6 +694,95 @@ def _shell_approval_notice(params: dict, _context=None) -> str:
         notice += (f" It names {segment}/, a protected path that always "
                    "requires approval.")
     return notice
+
+
+
+def interactive_profile(requires_network: bool = False) -> CommandProfile:
+    """What an interactive shell can do -- STATED, not derived (SS32).
+
+    `classify_command` reads a command's text. An interactive session has no
+    text to read: `cd`, an alias and a REPL mean what arrives later is not
+    an argv, and the first line is only the first line. So the capabilities
+    are declared at their upper bound -- it runs code, it writes -- and
+    `measured` is True because that IS the measurement: the answer does not
+    depend on parsing anything, which is exactly when a profile is allowed
+    to claim it was characterised (G5).
+
+    `escapes_workspace` is False because the container's filesystem is not
+    the host's, and SS28 admits no other route for this kind.
+    """
+    network = bool(requires_network)
+    return CommandProfile(
+        tier=SANDBOXED_NET if network else SANDBOXED,
+        measured=True,
+        escapes_workspace=False,
+        writes=True,
+        runs_code=True,
+        network=network,
+        reason=("an interactive shell in the container -- anything may be "
+                "typed into it" + (", and it was opened with network access"
+                                   if network else "")))
+
+
+def _interactive_approval_check(tool_name: str, params: dict) -> bool:
+    """Whether OPENING an interactive shell needs a human yes (SS29, SS32).
+
+    NOT `_shell_approval_check`, and the difference is the point. That one
+    answers about the text it is handed; here the text is only the first
+    line of a session whose LATER lines are covered by the same yes. Asking
+    about the first line would mean `shell_interactive` with `pwd` was
+    auto-approved as a read and handed back a shell that can run anything --
+    the approval and the authority describing different calls, which is
+    #157's shape.
+
+    So the question is asked about what is actually being granted:
+    `interactive_profile`, through the same mode ladder and the same
+    `auto_approved` rule as every other shell call. Under `tiered` and
+    `contained` that always asks, because it always runs code (§48, CE1) --
+    and it asks through the rule rather than by hardcoding "always", so if
+    the rule ever changes this follows it instead of contradicting it.
+    """
+    active = posture.current()
+    mode = capability.validate_mode(active.shell_approval_mode,
+                                    "config.SHELL_APPROVAL_MODE")
+    if mode == capability.ALWAYS:
+        return True
+    if mode == capability.NEVER:
+        return False
+    profile = interactive_profile(declared_network(params))
+    containment = containment_for(profile, is_docker_available())
+    if containment == UNAVAILABLE:
+        # Nothing can run it, so there is nothing to approve;
+        # `start_interactive` refuses with the instructions. Same polarity
+        # note as `_shell_approval_check`'s.
+        return False
+    return not auto_approved(profile, containment)
+
+
+def _interactive_approval_notice(params: dict, _context=None) -> str:
+    """What the person answering is being asked to allow.
+
+    It says the quiet part out loud (SS29): this yes is not for one command,
+    it is for the session. A prompt that described only the first line would
+    be telling the truth about the wrong thing.
+    """
+    network = declared_network(params)
+    profile = interactive_profile(network)
+    containment = containment_for(profile, is_docker_available())
+    where = ("in a container" if containment == capability.CONTAINED
+             else "with no container available")
+    first = params.get("command", "") if isinstance(params, dict) else ""
+    text = (f"Opens an interactive shell {where} and keeps it open. "
+            f"APPROVING THIS APPROVES EVERYTHING THE AGENT LATER TYPES INTO "
+            f"IT, not just the first line.")
+    if isinstance(first, str) and first.strip():
+        text += f" It starts by running: {first.strip()[:200]}"
+    if network:
+        text += " The call declared it needs the network, so egress is on."
+    segment = _command_touches_protected(first)
+    if segment is not None:
+        text += f" That first line names {segment}, which is protected."
+    return text
 
 
 def _resolved_binary(command) -> str:
@@ -407,6 +821,112 @@ def _resolved_binary(command) -> str:
 # ---------------------------------------------------------------------------
 
 
+def uncontained_refusal(command: str, backend: str,
+                        needs_root: bool = False) -> str | None:
+    """Why this call must not run at all, or None (§49).
+
+    `fallback_changed_refusal`'s shape, and ONE copy for the same reason:
+    the gate reads it to answer "there is nothing to approve", and `run`
+    and the session start handler read it to stop the call. Three sites
+    deciding this separately is the drift #157 came from.
+
+    Two refusals, and they say different things on purpose.
+
+    THE BACKEND IS OFF (SS35). Not "unavailable" -- a machine that has WSL
+    and is not allowed to use it, which a model told "no distro found"
+    would try to fix by asking the user to install one.
+
+    A PROTECTED SEGMENT (SS40). In the container `.venastine/` is mounted
+    read-only, so a write there fails with EROFS and a read is documented
+    risk; on WSL there is no mount at all, a write SUCCEEDS, and D17's
+    hash notices only at the next launch. So the shell's usual answer for
+    a protected segment -- always ask -- is the wrong one here, and this
+    is the file tools' answer instead: deny.
+
+    The token check is exactly sound where it bites. An INERT command
+    carries no metacharacters by construction, so `command.split()` IS the
+    argv that will run and a literal segment cannot hide behind quoting or
+    expansion. A non-inert command can hide one, and still meets a human
+    on top of this -- `runs_code` is True for every non-inert profile
+    (CE1), so it asks under `tiered` and, being UNCONTAINED here, under
+    `contained` too.
+
+    A THIRD refusal arrives with slice 5b, and it is read FIRST because it
+    is true of every backend including the container: a call that asked for
+    root and cannot have it. `sudo_refusal` owns that decision -- see there
+    for why the container is refused for already being root, and why no
+    stored password is a refusal rather than a prompt (SS68).
+    """
+    if needs_root:
+        refusal = sudo_refusal(backend)
+        if refusal is not None:
+            return refusal
+    if backend == BACKEND_SSH:
+        if not ssh_enabled():
+            return ssh_unavailable_reason()
+        segment = _command_touches_protected(command)
+        if segment is not None:
+            # SS54. SS40's answer, reached by a different road: WSL is
+            # refused because it demonstrably CAN write this harness's own
+            # authority files, and SSH is refused because nothing here can
+            # demonstrate that it cannot. `ssh localhost` is this machine,
+            # and a remote that mounts this one is not visible from here
+            # either -- so the question "is that path this harness's own?"
+            # has no answer, and an unanswerable question is not a yes.
+            return (
+                f"This command names {segment}/, and a command over SSH is "
+                f"refused rather than asked about when it does. This "
+                f"harness cannot tell whether the remote host is a "
+                f"different machine -- `ssh localhost` is this one, and a "
+                f"remote that mounts this one looks the same from here -- "
+                f"so it cannot tell whether that path is its own authority "
+                f"files. Run it in the container, or do the work somewhere "
+                f"inside the workspace.")
+        return None
+    if backend != BACKEND_WSL:
+        return None
+    if not wsl_enabled():
+        return wsl_unavailable_reason()
+    segment = _command_touches_protected(command)
+    if segment is not None:
+        return (
+            f"This command names {segment}/, and a command in WSL is "
+            f"refused rather than asked about when it does. In the "
+            f"container that directory is mounted read-only, so a write "
+            f"fails and a read is a documented risk you can accept. WSL "
+            f"mounts nothing: a write there would succeed against this "
+            f"harness's own authority files and would only be noticed at "
+            f"the next launch. Run it in the container, or do the work "
+            f"somewhere inside the workspace.")
+    return None
+
+
+def fallback_changed_refusal(command: str, docker_up: bool) -> str | None:
+    """The TOCTOU safety net, or None: why a command approved while a
+    container runtime answered must not now run on the fallback.
+
+    If the approval check auto-approved because the runtime was available
+    at that time, but it is now down and the command would take the
+    fallback, the fallback would have required approval that was never
+    given. One copy for `run` and for the background-session start tools
+    (ROADMAP_v3 §49), which pass the same gate and the same probe.
+    """
+    if docker_up or _is_inert(command):
+        return None
+    # Read here rather than passed in from the approval check: §40 makes the
+    # two reads the SAME object for the life of the process, so re-reading
+    # cannot reintroduce the TOCTOU gap this exists to close. Before §40 it
+    # could have.
+    active = posture.current()
+    if active.allow_insecure_fallback and not active.auto_approve_fallback:
+        return ("Docker became unavailable after the approval check. "
+                "The insecure subprocess fallback requires explicit "
+                "per-run approval (AUTO_APPROVE_SANDBOX_FALLBACK is "
+                "False). Please retry — the approval prompt will "
+                "appear this time.")
+    return None
+
+
 def run(params: dict) -> dict:
     # `parsed.rationale` is deliberately never read below. It is shown
     # to a person and archived with the call; it has no part in what
@@ -416,43 +936,42 @@ def run(params: dict) -> dict:
     # Probe Docker once for this execution — the result is threaded
     # into run_sandboxed to eliminate the TOCTOU gap where Docker
     # status changes between the approval check and execution.
-    docker_up = is_docker_available()
+    # SS37/SS40/SS54, above the container probe: a call that asked for WSL
+    # or SSH and cannot have it is refused by name, and is never quietly
+    # served by a backend it did not ask for.
+    refusal = uncontained_refusal(parsed.command, parsed.backend,
+                                  parsed.needs_root)
+    if refusal is not None:
+        return {"error": refusal}
 
-    # TOCTOU safety net: if the approval check auto-approved because
-    # Docker was available at that time, but Docker is now down and
-    # we'd use the fallback, check whether the fallback would have
-    # required approval that was never given.
-    if not docker_up and not _is_inert(parsed.command):
-        approvals = config.ToolApprovals()
-        base_needs_approval = getattr(approvals, "shell", False)
-        # Read here rather than passed in from the approval check: §40
-        # makes the two reads the SAME object for the life of the process,
-        # so re-reading cannot reintroduce the TOCTOU gap this block
-        # exists to close. Before §40 it could have.
-        active = posture.current()
-        if (
-            not base_needs_approval
-            and active.allow_insecure_fallback
-            and not active.auto_approve_fallback
-        ):
-            return {
-                "error": (
-                    "Docker became unavailable after the approval check. "
-                    "The insecure subprocess fallback requires explicit "
-                    "per-run approval (AUTO_APPROVE_SANDBOX_FALLBACK is "
-                    "False). Please retry — the approval prompt will "
-                    "appear this time."
-                ),
-            }
+    # Not probed for a WSL or SSH call, and not merely to save the 0.43s:
+    # the TOCTOU guard below is about a container runtime disappearing
+    # between the gate and the run and the command then taking the INSECURE
+    # FALLBACK. Neither can take it -- `_route` answers ROUTE_WSL/ROUTE_SSH
+    # or refuses (SS37) -- so running that guard here would refuse a call
+    # for a backend it was never going to touch.
+    docker_up = True if parsed.backend != BACKEND_CONTAINER \
+        else is_docker_available()
+
+    if parsed.backend == BACKEND_CONTAINER:
+        refusal = fallback_changed_refusal(parsed.command, docker_up)
+        if refusal is not None:
+            return {"error": refusal}
 
     try:
         return run_sandboxed(
             command=parsed.command,
             workspace_dir=config.WORKSPACE_DIR,
             docker_available=docker_up,
+            backend=parsed.backend,
+            needs_root=parsed.needs_root,
             # §28: the SAME classification the approval check made, so
-            # routing cannot disagree with the decision to allow it.
-            profile=classify_command(parsed.command, config.WORKSPACE_DIR),
+            # routing cannot disagree with the decision to allow it --
+            # the declaration included (§50), read off the validated
+            # params here and off the raw ones at the gate, which is why
+            # `declared_network` accepts only literal True.
+            profile=classify_command(parsed.command, config.WORKSPACE_DIR,
+                                     requires_network=parsed.requires_network),
         )
     except SandboxUnavailable as e:
         return {"error": str(e)}

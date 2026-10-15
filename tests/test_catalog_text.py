@@ -20,7 +20,7 @@ import pytest
 
 import config
 import prompts.system_prompts as system_prompts
-from core import config_loader
+from core import config_loader, workspace_trust
 from core.config_loader import _catalog_text
 
 
@@ -188,8 +188,6 @@ class TestOurOwnFilesAlreadyComply:
         import glob
         import os
 
-        import yaml
-
         from core.config_loader import _parse_frontmatter
 
         root = config_loader.HARNESS_ROOT
@@ -332,3 +330,217 @@ class TestTheTrustPromptNamesWhatEntersThePrompt:
         summary = config_loader.describe_project_content(str(tmp_path))
 
         assert "EVERY system prompt" not in summary
+
+
+# ===========================================================================
+# ---- S08-03 (A54, batch 155): how long the consent screen is --------------
+# ===========================================================================
+
+
+class TestTheProjectDoesNotChooseHowLongItsConsentScreenIs:
+    """The trust prompt is the informed-consent gate for content that
+    becomes instructions (D17), so its LENGTH must not be the untrusted
+    project's to pick.
+
+    FOUR SECTIONS, AND THE FINDING NAMED ONE. `describe_project_content`
+    renders the file listing, the hub, `settings.json` + `mcp.json` and
+    the agent/skill catalog. Measured before this batch: the listing had
+    no bound (20,000 padding files were 20,001 lines), the two JSON files
+    had none (2 x 2.2 MB rendered as 4.5 MB in 30 lines), the catalog
+    bounded each entry at `max_catalog_text_chars` and not the NUMBER of
+    them (3,000 agents were 1 MB in 6,002 lines), and the hub -- cited by
+    the finding as the bounded contrast -- had a LINE bound only, which a
+    2 MB single line walks straight through.
+
+    SO EVERY TEST HERE ASSERTS ON THE WHOLE PROMPT, not on its section.
+    A per-section assertion passes while three other channels are open,
+    which is the shape that made this worth a batch.
+    """
+
+    #: Generous: every section's own bound is 6,000 characters, four
+    #: sections plus markers and headers fit well inside this, and the
+    #: floods under test are 0.5 MB to 4.5 MB. A tight number here would
+    #: be a second copy of `_SECTION_CHARS` with nothing holding them
+    #: together.
+    CEILING = 40_000
+
+    def _flooded(self, tmp_path, **files):
+        v = tmp_path / ".venastine"
+        v.mkdir(exist_ok=True)
+        for name, body in files.items():
+            (v / name).write_text(body, encoding="utf-8")
+        return tmp_path
+
+    def test_an_unbounded_settings_file_is_bounded(self, tmp_path):
+        root = self._flooded(
+            tmp_path,
+            **{"settings.json": "{" + ",".join(
+                '"pad%05d": "%s"' % (n, "x" * 90) for n in range(20_000))
+                + "}"})
+
+        summary = config_loader.describe_project_content(str(root))
+
+        assert len(summary) < self.CEILING, (
+            f"a 1.8 MB settings.json produced a {len(summary)}-char "
+            f"consent screen")
+        assert "not shown here" in summary
+
+    def test_an_unbounded_mcp_file_is_bounded(self, tmp_path):
+        """The sharpest one: `mcp.json` names a local command that S13
+        EXECUTES, so this is the section whose unbounded paste the
+        finding is about. Measured before the bound, the real command sat
+        at 99.9994% of the way into 4.5 MB of padding."""
+        root = self._flooded(
+            tmp_path,
+            **{"mcp.json": "{\n" + "\n".join(
+                '  "pad%d": "%s",' % (n, "z" * 60) for n in range(30_000))
+                + '\n  "mcpServers": {}\n}'})
+
+        summary = config_loader.describe_project_content(str(root))
+
+        assert len(summary) < self.CEILING
+        assert "mcp.json" in summary
+        assert "not shown here" in summary
+
+    def test_one_enormous_line_is_bounded_too(self, tmp_path):
+        """The half a line bound cannot see, and the reason §44's hub cap
+        was not the shape to copy: 500 KB arriving as a single line is
+        seven lines of prompt and passes any line bound ever written."""
+        root = self._flooded(
+            tmp_path,
+            **{"mcp.json": '{"mcpServers": {"a": {"command": "%s"}}}'
+                % ("y" * 500_000)})
+
+        summary = config_loader.describe_project_content(str(root))
+
+        assert len(summary) < self.CEILING
+        assert max(len(line) for line in summary.splitlines()) < 10_000
+
+    def test_the_hub_is_bounded_on_both_axes_now(self, tmp_path):
+        """§44 gave the hub 20 LINES and nothing else, and this is what
+        that let through: twenty 100 KB lines are 2 MB from INSIDE the
+        cap. A5's cap on the catalog descriptions had the same gap in the
+        other direction and `test_the_summary_is_bounded_by_construction`
+        above is what closed that one."""
+        root = tmp_path
+        (root / ".venastine").mkdir()
+        (root / ".venastine" / "settings.json").write_text(
+            "{}", encoding="utf-8")
+        (root / "AGENTS.md").write_text(
+            "\n".join("B" * 100_000 for _ in range(20)), encoding="utf-8")
+
+        summary = config_loader.describe_project_content(str(root))
+
+        assert len(summary) < self.CEILING, (
+            f"2 MB in twenty lines produced a {len(summary)}-char consent "
+            f"screen from inside §44's twenty-line cap")
+
+    def test_many_short_lines_are_bounded_by_the_LINE_cap(self, tmp_path):
+        """The half the char bound cannot see, and the reason both bounds
+        are here rather than one. A hub of 5,000 BLANK lines carries no
+        characters at all, so a char bound passes it whole: measured at
+        25,209 characters and **5,006 lines** of consent screen for zero
+        characters of content.
+
+        THIS TEST EXISTS BECAUSE A CONTROL FOUND IT MISSING. Removing the
+        line bound left every other test in this class green -- a
+        5,000-file listing and a 1,000-entry catalog are each far past
+        6,000 characters, so the char bound was catching both and the
+        line bound had no demonstrated consequence in the suite. It has
+        one in the code, and this is it.
+
+        The assertion is on the LINE COUNT and not on `len(summary)`,
+        which is the whole point: 25,209 characters is inside this
+        class's character ceiling.
+        """
+        root = tmp_path
+        (root / ".venastine").mkdir()
+        (root / ".venastine" / "settings.json").write_text(
+            "{}", encoding="utf-8")
+        (root / "AGENTS.md").write_text("\n" * 5_000, encoding="utf-8")
+
+        summary = config_loader.describe_project_content(str(root))
+
+        assert len(summary.splitlines()) < 200, (
+            f"5,000 blank lines produced a "
+            f"{len(summary.splitlines())}-line consent screen")
+        assert "not shown here" in summary
+
+    def test_the_file_listing_is_bounded(self, tmp_path):
+        """`content_files()` is NOT bounded and must not be -- the hash
+        and workspace_trust's "the loader must read no file the trust
+        listing omits" invariant are about that function. What is bounded
+        is what this prompt PRINTS of its answer."""
+        v = tmp_path / ".venastine" / "pad"
+        v.mkdir(parents=True)
+        for n in range(5_000):
+            (v / f"f{n:05d}.txt").write_text("x", encoding="utf-8")
+
+        summary = config_loader.describe_project_content(str(tmp_path))
+
+        assert len(summary) < self.CEILING
+        assert len(workspace_trust.content_files(str(tmp_path))) == 5_000, (
+            "the LISTING was bounded, not just its rendering")
+
+    def test_the_catalog_is_bounded_by_entry_count_not_only_entry_length(
+            self, tmp_path):
+        """A5 bounds each description and nothing bounded how many there
+        are, so every entry can be individually legal and the section
+        still megabytes."""
+        agents = tmp_path / ".venastine" / "agents"
+        agents.mkdir(parents=True)
+        for n in range(1_000):
+            (agents / f"a{n:04d}.md").write_text(
+                f"---\nname: a{n:04d}\ndescription: {'d' * 5_000}\n"
+                f"---\n\nBody.\n", encoding="utf-8")
+
+        summary = config_loader.describe_project_content(str(tmp_path))
+
+        assert len(summary) < self.CEILING
+        assert "the agent and skill descriptions" in summary
+
+    def test_the_marker_says_how_much_and_that_trust_covers_it_all(
+            self, tmp_path):
+        """A cut nobody is told about turns a bounded prompt into one
+        that misrepresents what it covers. The grant is over the whole
+        file either way, so the sentence has to say so -- an ellipsis on
+        its own reads as "and a bit more"."""
+        root = self._flooded(
+            tmp_path,
+            **{"mcp.json": "\n".join('{"pad": "%s"}' % ("q" * 50)
+                                     for _ in range(500))})
+
+        summary = config_loader.describe_project_content(str(root))
+
+        marker = [line for line in summary.splitlines()
+                  if "not shown here" in line]
+        assert len(marker) == 1, marker
+        assert "more lines" in marker[0]
+        assert "more characters" in marker[0]
+        assert "mcp.json" in marker[0]
+        assert "Trust covers the whole file" in marker[0]
+
+    def test_a_project_of_ordinary_size_renders_whole(self, tmp_path):
+        """THE CONTROL, and the number that chose the bounds. A
+        five-server pretty-printed `mcp.json` is 54 lines and 923
+        characters, a realistic `settings.json` is 14 and 264, and this
+        project's own AGENTS.md is 4,033 characters in its first 60
+        lines: nothing legitimate is cut, which is what keeps the marker
+        meaningful where it does appear."""
+        servers = ", ".join(
+            '"%s": {"command": "npx", "args": ["-y", "server-%s"], '
+            '"env": {"TOKEN": "${X}"}}' % (name, name)
+            for name in ("filesystem", "github", "slack", "memory", "fetch"))
+        root = self._flooded(
+            tmp_path,
+            **{"settings.json": '{\n  "default_model": "claude-opus-5",\n'
+                                '  "effort": "high"\n}',
+               "mcp.json": "{\n  \"mcpServers\": {" + servers + "}\n}"})
+
+        summary = config_loader.describe_project_content(str(root))
+
+        assert "not shown here" not in summary, (
+            "an ordinary project was truncated, which would make the "
+            "marker noise rather than a signal")
+        assert "fetch" in summary, "the last server of five is not shown"
+        assert "claude-opus-5" in summary
