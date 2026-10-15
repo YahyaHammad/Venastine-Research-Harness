@@ -7,21 +7,21 @@
 # only reachable consumer is behind read/write/edit, which are globally
 # denied. `pip install -e ".[documents]"` brings them back.
 
-anthropic==0.116.0
-ddgs==9.14.4
+anthropic==1.13.0
+ddgs==9.16.0
 httpx==0.28.1
-openai==2.45.0
+openai==3.29.0
 # NOTE (ROADMAP_v2 §16): this pin has no ThinkingConfig.thinking_budget --
 # that field arrived in a later release. core/client.py checks for it at
 # runtime and reports no effort levels on GOOGLE rather than sending a
 # field the SDK cannot carry. Moving this pin enables Google effort; it
 # also puts §9's verified Google implementation back in scope for retest.
-google-genai==1.0.0
-pydantic==2.13.4
-sympy==1.13.3
-sqlmodel==0.0.39
-python-dotenv==1.2.2
-matplotlib==3.10.3
+google-genai==2.29.0
+pydantic==2.14.1
+sympy==1.14.0
+sqlmodel==0.0.48
+python-dotenv==1.2.4
+matplotlib==3.11.2
 pyyaml==6.0.3
 # config.yaml, via config_schema.py. TWO YAML PARSERS IN ONE TREE IS
 # DELIBERATE -- do not "unify" them. pyyaml above parses agent/skill
@@ -87,7 +87,7 @@ textual==8.2.8
 # without declaring, i.e. the one place such a migration would be silent.
 # The FLOOR is textual's, not a guess: 8.2.8 requires `rich>=14.2.0`, so
 # `>=13` stated a version this project can no longer be installed with.
-rich>=14.2,<16
+rich>=15.0.0,<16
 
 # ROADMAP_v2 §17 MCP client. Upper-bounded per D22 -- and D22 exists
 # BECAUSE of this package: it was mid-major-version transition when §17
@@ -114,7 +114,7 @@ rich>=14.2,<16
 # raising ToolError on purpose keeps its message, a tool that CRASHES has
 # its text withheld -- and re-run tests/test_mcp_client.py, which is written
 # to hold on both versions.
-mcp==2.0.0
+mcp==2.3.0
 
 # ROADMAP_v3 §49 (SS8). The engine for a monitor session's pattern -- a
 # regex the MODEL wrote, matched against program output nobody controls,
@@ -148,7 +148,7 @@ google-re2==1.1.20251105
 # doing the second one.
 #
 # DECLARING IT ADDS NOTHING TO AN INSTALL, measured rather than assumed:
-# google-genai==1.0.0 -> google-auth>=2.14.1 -> cryptography>=38.0.3, with
+# google-genai==2.29.0 -> google-auth>=2.14.1 -> cryptography>=38.0.3, with
 # no extra marker, so it is already in the hard closure of the line above.
 # What the declaration buys is that a dependency this project's SECURITY
 # rests on is pinned by this project rather than by whatever google-auth
@@ -167,7 +167,7 @@ google-re2==1.1.20251105
 # `cryptography.exceptions.InvalidTag` with NO message (the store relies on
 # the three failure causes being indistinguishable), and the wheel list
 # still covers this project's platforms.
-cryptography>=42.0,<52
+cryptography>=50.0.2,<52
 
 # TECHNICAL_DEBT 18, batch 116. A PRODUCTION dependency: `arxiv.py` imports
 # it at module load, and pyproject.toml reads this file for its dependency
