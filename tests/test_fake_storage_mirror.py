@@ -89,6 +89,12 @@ def _logical_rows():
          "harness": {"kind": "session_wake",
                      "sessions": [{"id": "s1", "call_id": "c1",
                                    "shape": "exited"}]}},
+        # ROADMAP_v3 §76 (IM2): a tool row with images in their own column,
+        # one entry unusable -- both sides drop that entry and keep the rest
+        {"role": "tool", "content": "Attached s.png",
+         "name": None, "tool_call_id": "call_3",
+         "images": [{"media_type": "image/png", "data": "iVBORw0KGgo="},
+                    {"media_type": "", "data": "x"}]},
     ]
 
 
@@ -96,12 +102,14 @@ def _for_production(logical):
     """storage._to_neutral's input: content is the JSON string the column
     holds, and every key is present (SQL columns are never absent)."""
     harness = logical.get("harness")
+    images = logical.get("images")
     return {
         "role": logical["role"],
         "content": json.dumps(logical["content"]),
         "name": logical["name"],
         "tool_call_id": logical["tool_call_id"],
         "harness": json.dumps(harness) if harness else None,
+        "images": json.dumps(images) if images else None,
     }
 
 
@@ -116,6 +124,7 @@ def _for_fake(logical, row_id=None, pinned=False):
         "tool_call_id": logical["tool_call_id"],
         "pinned": pinned,
         "harness": logical.get("harness"),
+        "images": logical.get("images"),
     }
 
 

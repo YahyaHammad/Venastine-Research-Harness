@@ -792,6 +792,41 @@ def test_an_unreadable_record_costs_the_reasoning_not_the_thread(real_storage):
     assert "thinking" not in neutral
 
 
+def test_an_attached_image_survives_a_write_and_a_read(real_storage):
+    """ROADMAP_v3 §76 (IM2), end to end on real SQLite, for the reason the
+    reasoning test above gives: the claim is about a COLUMN added to a table
+    that already exists on disk, and the fake would only prove a dict key.
+
+    The image a tool attached comes back on the tool row, from the archive
+    and from a fresh read of the thread -- the resume path -- while the
+    row's `content` stays the plain string every text reader expects.
+    """
+    from core.client import ModelResponse, ToolCallRequest
+    from core.memory import ConversationMemory
+
+    image = {"media_type": "image/png", "data": "iVBORw0KGgo="}
+    memory = ConversationMemory()
+    memory.add_user_message("look")
+    memory.add_assistant_message(ModelResponse(text="", tool_calls=[
+        ToolCallRequest(id="call_1", name="view_image",
+                        input={"path": "s.png"})]))
+    memory.attach_image("call_1", image["media_type"], image["data"])
+    memory.add_tool_result("call_1", {"content": "Attached s.png"})
+
+    stored = real_storage.archive_history(memory.thread_id)[-1]
+    assert stored == {"role": "tool", "tool_call_id": "call_1",
+                      "content": "{'content': 'Attached s.png'}",
+                      "images": [image]}
+    assert ConversationMemory(
+        thread_id=memory.thread_id).messages[-1]["images"] == [image]
+
+    # NULL for a row that attached nothing, so every tool row written
+    # before §76 reconstructs to exactly the shape it did.
+    memory.add_tool_result("call_2", {"content": "x"})
+    assert "images" not in real_storage.archive_history(
+        memory.thread_id)[-1]
+
+
 def test_a_backwards_watermark_is_refused(real_storage, compactor):
     """save_checkpoint enforces the invariant regardless of caller.
     latest_checkpoint resolves by timestamp, so a backwards watermark does

@@ -25106,3 +25106,92 @@ stated in `docs/ARCHITECTURE.md`'s source tree; the suite total in
 `AGENTS.md`, `README.md` and `docs/ARCHITECTURE.md`. Controls 13 of 13.
 CodeQL itself cannot run here -- there is no CLI on this machine -- so the
 config's effect is measured by the next analysis of PR #200, after the push.
+
+## Batch 159 -- an image a tool reads, delivered to a model that can see it (2026-10-15)
+
+**ROADMAP_v3 §76. Owner rulings, IM1-IM8.** The owner asked whether a
+multimodal model behind a compatible API could take non-text input by reading
+it from the workspace, with no attachment channel in the harness. It could not,
+and every path was checked rather than assumed: `add_user_message(text: str)`,
+`add_tool_result`'s `str(result)`, `read`'s markitdown-or-`errors="replace"`,
+`fetch_url`'s `raw.decode(..., errors="replace")`, and MCP's `_normalize`, which
+drops image blocks by recorded decision (A32).
+
+### The question asked first
+
+The owner asked whether this was a small-blast-radius change, to be built at
+once, or one with design decisions to discuss. It was the second. The pinned
+SDKs were installed in a scratch venv and their types read, rather than recalled:
+
+- anthropic 0.116.0: `ToolResultBlockParam.content` is
+  `Union[str, Iterable[Content]]`, where Content covers text, image, search
+  result, document and tool reference blocks.
+- openai 2.45.0: `ChatCompletionToolMessageParam.content` is
+  `Required[Union[str, Iterable[ChatCompletionContentPartTextParam]]]`, text
+  parts only.
+- google-genai 1.0.0: `FunctionResponse` fields are `id`, `name` and
+  `response`.
+
+Seven decisions were put to the owner with a recommendation each. The owner
+agreed the channel (a dedicated tool) and the storage (a column, in the
+database). They limited delivery to Anthropic and the OpenAI-compatible wire,
+deferred Google, and confirmed the recommendations for compaction, redaction,
+MCP and the pipeline.
+
+### What was built
+
+- `tools/builtin/file_ops.py`: `view_image`, with `read`'s path rules, format
+  read from magic bytes, the `max_image_bytes` cap, and the bytes handed to
+  `memory.attach_image`. It returns one sentence.
+- `core/memory.py` / `storage.py`: `attach_image` holds images by call id, and
+  `add_tool_result` writes them into the new `MessageLog.images` column of the
+  same row. `_decode_images` follows `_decode_thinking`'s degrade rule.
+  `ensure_columns()` migrates existing databases with no new code, because it
+  reads the metadata.
+- `tools/base.py` / `tools/registry.py` / `tools/context.py` / `core/loop.py`:
+  `ToolSpec.returns_images`; `schemas`, `is_advertised` and `headless_hidden`
+  take `images=` (default False); `image_hidden()` feeds a once-only WARNING;
+  `RunInfo.images` is computed once by `_images_deliverable`.
+- `core/client.py`: `accepts_images()` (strict `is True`, GOOGLE never, warned
+  once). `_messages_for_provider` takes `images=`. Anthropic gets image blocks
+  inside the `tool_result`. The OpenAI-compatible wire gets one harness user
+  message after the tool batch. Google, and any provider not flagged, gets
+  `_image_note`.
+- `core/compaction.py`: `IMAGE_TOKEN_ESTIMATE` = 1,600, with `_row_chars`
+  behind every row-size sum and the images counted in `_chars` too.
+- Config: `max_image_bytes: 3932160`, and `view_image: false` in both tool
+  tables. `providers.json.example` sets `accepts_images: true` for ANTHROPIC
+  only.
+
+### Why not a ContextVar, the SS17 precedent
+
+The shell-session tools are hidden in research passes by an argument-less
+`available_check` reading a ContextVar that the CALLERS set around a run. That
+did not transfer. The answer here depends on the run's provider and its
+thread's kind, both of which only `_run_steps` holds, and setting a ContextVar
+inside a generator leaks it across yields into whoever is iterating. So the
+answer travels explicitly: `RunInfo.images` for the handler, and
+`schemas(images=)` for the list.
+
+### Deviations
+
+None from the owner's rulings. Two calls were made inside them and recorded as
+decisions rather than left implicit:
+
+- The OpenAI-compatible note on the tool message ("the attached image(s)
+  follow") is part of IM4. Without it the model meets a tool result naming an
+  attachment and an unrelated-looking user message.
+- `providers.json.example` flags ANTHROPIC and not OPENAI. On Anthropic,
+  `accepts_images` is true for every model. On OpenAI it depends on the model,
+  and `echoes_reasoning`'s precedent is to ship a per-model fact off.
+
+### Verification
+
+Full suite 7214 -> 7283, stated in `AGENTS.md`, `README.md` and
+`docs/ARCHITECTURE.md`. New `tests/test_image_input.py`, 67 tests. `test_storage_e2e.py` gains the
+real-SQLite round trip (53 -> 54), and `test_fake_storage_mirror.py` gains the
+image row (17 -> 18). The pinned counts moved: tools 30 -> 31, authority
+leaves 56 -> 58, settable scalars 145 -> 148, registered tools 30 -> 31 in
+ARCHITECTURE's headless paragraph. A mutation pass reverted each of thirteen
+fixes in place; every one turned a test red, including the two that
+disconnect `RunInfo.images` from the loop's schema list.

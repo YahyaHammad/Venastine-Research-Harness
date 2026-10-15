@@ -43,6 +43,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
+- **§76. An image a tool reads, delivered to a model that can see it** - **(BUILT in batch 159)** (nothing a model could read from the workspace reached it as anything but text: a tool result was `str(result)`, `read` decoded bytes with `errors="replace"`, and MCP dropped image blocks by decision. `view_image` attaches an image to its own result through the memory, into a new column, never through the redactor; Anthropic carries it inside the `tool_result`, the OpenAI-compatible wire in a harness message after the tool batch because its tool messages take text only, and Google is deferred behind a note; opt-in per provider with `accepts_images`, never in a research pass, and counted at a fixed weight by the compactor)
 - **§75. Thirteen alerts that read a name as a secret, and the gate nothing in the workflow could fail** - **(BUILT in batch 158)** (PR #200's first `CodeQL` check raised 13 high-severity alerts and every one was a false positive: ten came from a source heuristic that reads `args.secrets`, `_secret_twin_name()` and `KEY_PASSPHRASE` as secrets because of their names, and three were test assertions read as URL sanitizers; `tests/` is now skipped because it never ships, the eight in shipped code are dismissed with recorded reasons, and the same red check is the measurement TECHNICAL_DEBT 76 lacked -- the gate is GitHub's pull-request check, and the workflow header now says so)
 - **§74. A gate that was green because of what one machine happened to contain** - **(BUILT in batch 157)** (CI's first run over batches 129-156 came back red on three check runs, and all three were one test: the push-channel gate drove `git check-ignore` in the WORKING TREE, where `logs/`, `output/` and `.ipynb_checkpoints/` exist because the harness creates them, so three directory-only patterns matched here and matched nothing in a fresh clone -- seventeen batches of green behind a branch whose gate had never met one; the same measurement found `__pycache__` declared for the git channel, carrying no rule in `.gitignore` at all, and the one value in the list that no sample could reach)
 - **§73. Three cuts the redactor ran after, and the one result path that never passed it** - **(BUILT in batch 156)** (the review marathon's last three findings, closing its `FIX-NOW` queue: `web_search` and `arxiv_search` cut their third-party text and let `registry.dispatch` redact the piece that was kept, so a `ghp_` token straddling any of the three cuts survived at 36 of the 39 offsets it could straddle -- RB1's defect in the two tools RB1 did not reach, and §52's gap register had declined to solve it generally while two such tools were already in the tree; the per-LIST caps bounded 25 authors and not the 5,000 characters each could carry, and two of the six unbounded values were named by no finding, one of them the `arxiv_id` that both recovery URLs are built from, while the row COUNT both schemas advertise a bound for was enforced in neither, so a request for five results returned all 5,000 rows a provider chose to send; and `dispatch()`'s refusal early-return was the one result path that never passed the output redactor, which `docs/ARCHITECTURE.md` had already asserted it did -- measured, a credential the model put in an `agent_name` came back whole, on a path that also returns above the input scanner written for exactly that value)
@@ -2724,6 +2725,86 @@ leaked PID.
   because MCP is the only dynamic registrant and the composed name is its
   fact. A bound in the registry would be the fix-at-the-consumer shape
   `AGENTS.md` names by name.
+---
+
+## §76. An image a tool reads, delivered to a model that can see it
+
+**Built in batch 159**, from the owner's question whether a multimodal model
+behind a compatible API could take non-text input by reading it from the
+workspace. It could not. Every path into a conversation was text: a user row
+was a string, a tool result was `str(result)`, `read` either ran markitdown or
+decoded with `errors="replace"`, `fetch_url` decoded the body, and MCP's
+`_normalize` dropped image blocks by decision (A32). The owner asked for the
+smallest change that gives a model eyes, with no attachment UI in the harness,
+and ruled on the shape before any code was written. Eight decisions, IM1-IM8.
+
+**WHAT MADE IT MORE THAN ONE FUNCTION.** Measured before designing, against the
+three pinned SDKs. Anthropic 0.116.0's `tool_result` content is
+`str | Iterable[TextBlock | ImageBlock | ...]`, so an image fits inside its own
+result. openai 2.45.0's tool message content is
+`str | Iterable[ChatCompletionContentPartTextParam]`: text parts ONLY, so an image
+from a tool can reach that wire only in a user message. google-genai 1.0.0's
+`FunctionResponse` has `id`, `name` and `response` and nothing an image could go
+in. So the neutral shape no longer translated nearly 1:1. Separately, every layer
+that measures or rewrites the conversation assumed text: the compactor sizes
+by characters, the output redactor runs its patterns over every string value,
+and thirty-five sites in sixteen modules read a message's `content` as a
+string.
+
+**THE SHAPE.** A new tool, `view_image(path)` (IM1), reads the file, judges its
+format from its leading bytes (IM7), and hands the base64 to the memory with
+`attach_image(call_id, ...)` (IM3). The loop's ordinary `add_tool_result` then
+writes the image into a new nullable `MessageLog.images` column of that same
+row (IM2). The tool's RESULT is one sentence naming what was attached. So the
+bytes never pass the redactor, the `tool_result` event, the transcript, replay
+or `/copy`, and `content` stays the string all thirty-five readers expect.
+Two readers know the column exists: provider translation (IM4, IM5) and the
+compactor's size proxy (IM8).
+
+**WHO IS OFFERED IT.** Whether an image can reach the model is a property of
+the run: its provider, and what its thread is. `RunInfo.images` is computed once
+by the loop and read twice, by the schema list and by the handler, so the two
+cannot disagree (IM6). A provider opts in with `accepts_images: true` in
+`providers.json`, on `echoes_reasoning`'s terms. A research pass never gets
+the tool, because the pipeline's sources, claims and grounding are all text.
+
+### What §76 deliberately does not change
+
+**MCP image blocks are still dropped.** A32's decline stands, and its in-band
+placeholder still tells the model. Passing them through is a separate step, now
+a small one: `_normalize` would attach rather than drop, through the memory, as
+`view_image` does.
+
+**Google is deferred.** Its wire gets IM5's note whatever its entry says, and a
+flag set on it is warned about once. Putting the image in a sibling `inline_data`
+part of the batched user Content is the likely shape. It is unmeasured against a
+real endpoint and changes the batching predicate there.
+
+**No attachment UI and no `@` image.** The owner ruled the harness gets no
+attachment channel for now, so the only producer is the tool. §54's `@` names a
+FILE in the prompt and is unbuilt. When it is built, an image named that way
+would reuse IM2's column on a user row rather than invent a second one.
+
+**No downscaling and no dimension parsing.** Both need an imaging dependency the
+harness does not carry. The cap (IM7) and the fixed weight (IM8) are what stand
+in for them.
+
+**`read` is unchanged.** Its result is pages of text lines with offset and count.
+An image is neither, so it gets its own tool and its own permission row.
+
+### Design Decisions Record — §76 (IM1-IM8)
+
+| id | decision |
+|---|---|
+| **IM1** | **The channel is a dedicated `view_image` tool, not `read`, and it ships disabled like `read`.** `read`'s contract is pages of text lines with `offset` and `count`, which an image has neither of. A separate tool keeps that contract and gets its own rows in both permission tables (D24), so it can be enabled apart from `read`. Both rows ship `false`, because a tool that reads arbitrary workspace files while `read` is off would be a way around that default. The path rules are `read`'s exactly: the same `_file_approval_check`, so outside the workspace asks; the same `_refusal_for` shape; and the protected segment re-tested in the handler, as every file tool re-tests it |
+| **IM2** | **The bytes live in a nullable `MessageLog.images` column, in the database, and `content` stays a string.** `thinking`'s precedent: a different kind of thing with different rules, read by two consumers and invisible to the rest, added to existing databases by `ensure_columns()`. Present in the neutral shape ONLY when a row attached one, so every row written before reconstructs exactly as it did, and an unreadable entry costs that entry, never the thread (`_decode_thinking`'s rule). In `app.db` rather than a blob store or a reference to the workspace file. A reference would make a resumed thread send whatever the file holds now. A second store would be a second place `docs/PRIVACY.md`'s "wipe everything" has to name |
+| **IM3** | **The image goes from the tool to the memory, never through the tool result.** `view_image` takes the injected `memory` and `call_id`. `attach_image` holds the image under that call id, and `add_tool_result` takes it into the row it writes. So the exemption from redaction that images need is structural rather than a rule. A base64 string run through the secret patterns can be altered, and an altered image is a request the provider rejects. The bytes never enter that path, so the redactor is unchanged and still scans every value of every result. Only first-party code holding the memory can attach; an MCP server's result is a dict and cannot. A call that never gets a result row never gets its image |
+| **IM4** | **Delivery is opt-in per provider, and each wire carries the image where its SDK allows.** `accepts_images` in `providers.json`, tested `is True` (A29's reason). Anthropic: image blocks after the text inside the `tool_result`, the text block omitted when empty because the API rejects an empty one. OpenAI-compatible: the tool message keeps its text and says the image follows. One harness-labelled user message carries every image of the batch AFTER the last tool message, because each tool message must directly follow the assistant turn that called it. That message is derived on every request and never persisted, the compaction summary's rule (M8). Google: never, deferred. `accepts_images()` in `core/client.py` is the one predicate, read by the loop and by `call_model_stream` |
+| **IM5** | **A wire that does not receive an image gets a sentence saying so, never the bytes and never silence.** One rule for Google, for a provider not marked `accepts_images`, and for a thread that switched to either after the image was attached. A model told nothing answers from a result that reads as complete, which is A32's lesson about MCP's placeholder |
+| **IM6** | **Whether a run can deliver an image is decided once, and both the schema list and the handler read that answer.** `RunInfo.images` = the provider accepts images AND the thread is not a research pass (a property of what the thread is, `_derived_compaction_mode`'s argument). `ToolSpec.returns_images` declares the tool. `registry.schemas()` drops it unless told `images=True`, and the parameter DEFAULTS FALSE, so a caller that never heard of images hides the tool rather than offering a result the model cannot see. It is not an `available_check`, which takes no arguments and cannot see the run. A tool the user enabled and the run leaves out is named once in a WARNING (`image_hidden()`, the headless notice's rule). The handler refuses a call made anyway |
+| **IM7** | **Format from the bytes, and a cap derived from the smaller wire.** PNG, JPEG, GIF and WEBP, the formats both wires accept, judged by signature and never by extension: a PNG named `.jpg` declared as JPEG is a rejected request. `max_image_bytes` is 3,932,160 (3.75 MiB). Base64 makes that 5 MiB on the wire, which is Anthropic's per-image limit; `CONFIG_ARCHITECTURE.md` carries the arithmetic. A file that grows between the size check and the read is refused, because the read stops one byte past the cap |
+| **IM8** | **The compactor counts an image as a fixed 1,600 tokens, and the summarizer never sees its bytes.** `IMAGE_TOKEN_ESTIMATE` in `core/compaction.py`, beside `CHARS_PER_TOKEN`. Every row-size sum goes through `_row_chars`, and the neutral-shape estimate counts images too, so no floor and no pin cap disagrees about an image. 1,600 is the top of Anthropic's own estimate for an image it has scaled to about 1.15 megapixels, so a large image is counted near its cost and a small one is overcounted. Overcounting folds a little early, where undercounting would let a thread of screenshots run past the window. Counting the base64 LENGTH would read a 1 MB file as 330,000 tokens. `_as_text` reads `content` alone, so a folded image leaves its sentence in the summary and its bytes with the row |
+
 ---
 
 ## §75. Thirteen alerts that read a name as a secret, and the gate nothing in the workflow could fail

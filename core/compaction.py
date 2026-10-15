@@ -30,6 +30,7 @@ Chars/4 applied to both sides of a ratio is self-consistent, which is all a
 ratio check needs -- it is never compared against a provider's count.
 """
 
+import json
 import logging
 import re
 import threading
@@ -45,6 +46,41 @@ logger = logging.getLogger(__name__)
 # every comparison this module makes, so its accuracy cancels out. Never
 # compare a value derived from it against a provider's token count.
 CHARS_PER_TOKEN = 4
+
+# ROADMAP_v3 §76 (IM8). What one image weighs in that proxy, in tokens.
+#
+# A FIXED number, because the alternative is decoding every image to learn
+# its dimensions, which would take an imaging dependency this harness does
+# not carry. 1,600 is the top of Anthropic's own estimate (width x height /
+# 750, on an image it has already scaled to about 1.15 megapixels), so a
+# large image is counted at roughly its real cost and a small one is
+# overcounted. Overcounting folds a little early; undercounting would let a
+# thread of screenshots run past the window. Counting an image by its base64
+# LENGTH would be the third option, and the worst: a 1 MB file is about 1.3
+# million characters, which reads as 330,000 tokens and folds at once.
+IMAGE_TOKEN_ESTIMATE = 1600
+_IMAGE_CHARS = IMAGE_TOKEN_ESTIMATE * CHARS_PER_TOKEN
+
+
+def _image_count(images) -> int:
+    """How many images one row or message carries (IM8): the decoded list on
+    a neutral message, the JSON text `MessageLog.images` stores on an archive
+    row, or nothing."""
+    if not images:
+        return 0
+    if isinstance(images, str):
+        try:
+            images = json.loads(images)
+        except ValueError:
+            return 0
+    return len(images) if isinstance(images, list) else 0
+
+
+def _row_chars(row) -> int:
+    """One archive row's size in the proxy: its persisted content, plus IM8's
+    fixed weight per image. EVERY row-size sum below goes through here, so a
+    floor and the pin cap cannot disagree about what an image costs."""
+    return len(row["content"]) + _image_count(row.get("images")) * _IMAGE_CHARS
 
 # The re-entrancy guard (M3). The compactor is an agent, so compacting runs
 # the loop, which evaluates the trigger, which could compact.
@@ -96,6 +132,7 @@ def _chars(messages) -> int:
     for message in messages:
         total += len(str(message.get("content", "")))
         total += len(str(message.get("text", "")))
+        total += _image_count(message.get("images")) * _IMAGE_CHARS
         for call in message.get("tool_calls", ()) or ():
             total += len(str(call))
     return total
@@ -675,7 +712,7 @@ def _sub_turn_span(rows, starts, settings, current_turn_start):
     kept = 0
     cut = steps[-1]
     for position in range(len(steps) - 1, 0, -1):
-        kept += sum(len(rows[i]["content"])
+        kept += sum(_row_chars(rows[i])
                     for i in range(bounds[position], bounds[position + 1]))
         cut = steps[position]
         if kept // CHARS_PER_TOKEN >= settings["keep_recent_tokens"]:
@@ -761,7 +798,7 @@ def compactable_span(memory, current_turn_start: Optional[int] = None,
     kept = 0
     token_cutoff = len(starts)
     for index in range(len(starts) - 1, -1, -1):
-        kept += sum(len(rows[i]["content"])
+        kept += sum(_row_chars(rows[i])
                     for i in range(bounds[index], bounds[index + 1]))
         token_cutoff = index
         if kept // CHARS_PER_TOKEN >= settings["keep_recent_tokens"]:
@@ -872,7 +909,7 @@ def compactable_span(memory, current_turn_start: Optional[int] = None,
     # to the current turn's user row and scans forward from there.
     worth_it = True
     if cutoff >= 1:
-        freed = sum(len(rows[i]["content"])
+        freed = sum(_row_chars(rows[i])
                     for i in range(starts[cutoff])) // CHARS_PER_TOKEN
         worth_it = freed >= settings["keep_recent_tokens"]
         if not worth_it:
@@ -1017,11 +1054,11 @@ def pin_measurements(thread_id, last_n: int, model: Optional[str] = None,
     bounds = starts + [len(rows)]
 
     def _tokens(lo: int) -> int:
-        return sum(len(rows[i]["content"])
+        return sum(_row_chars(rows[i])
                    for i in range(lo, len(rows))) // CHARS_PER_TOKEN
 
     requested = _tokens(bounds[max(0, len(starts) - last_n)]) if starts else 0
-    pinned = sum(len(row["content"]) for row in rows
+    pinned = sum(_row_chars(row) for row in rows
                  if row["pinned"]) // CHARS_PER_TOKEN
     return {
         "requested_tokens": requested,

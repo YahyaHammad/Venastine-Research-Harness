@@ -688,7 +688,7 @@ def catalogue(remembered_pair: Optional[tuple[str, str]] = None) -> list[KeyRow]
 
     The two tables are expanded rather than listed, because a row that says
     `tool_permissions · 23 entries` is not something anyone can act on, and
-    the 56 leaves are exactly the rows a person comes here for.
+    the 58 leaves are exactly the rows a person comes here for.
 
     BOTH VALUES COME FROM HERE: the file's, parsed through the cached
     document, and the session's, off the model bound at import. See

@@ -67,6 +67,10 @@ def _drive(tool_name, *, provider=None, granted=None,
 
     mocker.patch("core.loop.api_initialization", return_value=object())
     mocker.patch("core.loop.effort_for", return_value=None)
+    # ROADMAP_v3 §76 (IM6): whether the run can deliver an image reads
+    # providers.json, and the copy CI makes of the example marks ANTHROPIC.
+    # Pinned off so what the spies record does not depend on that file.
+    mocker.patch("core.loop.accepts_images", return_value=False)
     mocker.patch("core.loop.call_model_stream", side_effect=_stream)
     mocker.patch("core.loop.registry.dispatch", return_value={"result": "ok"})
 
@@ -109,21 +113,25 @@ class TestHeadlessIsAboutBeingUNABLEToAsk:
         """The status quo, and the control for the test below."""
         calls = []
         mocker.patch("core.loop.registry.schemas",
-                     side_effect=lambda ctx, callable_only=False, granted=None:
-                         calls.append((callable_only, granted)) or [])
+                     side_effect=lambda ctx, callable_only=False, granted=None,
+                     images=False:
+                         calls.append((callable_only, granted, images)) or [])
         _drive("mcp__a__gated", mocker=mocker)
-        assert calls == [(True, set())], "headless filter did not run"
+        # ROADMAP_v3 §76 (IM6): `images` is recorded too. `_drive` pins the
+        # provider's answer off, so it must arrive False.
+        assert calls == [(True, set(), False)], "headless filter did not run"
 
     def test_a_provider_means_the_tools_are_advertised(self, gated_tool, mocker):
         """A research pass with a provider CAN ask, so hiding its gated
         tools would report a limitation the run does not have."""
         calls = []
         mocker.patch("core.loop.registry.schemas",
-                     side_effect=lambda ctx, callable_only=False, granted=None:
-                         calls.append((callable_only, granted)) or [])
+                     side_effect=lambda ctx, callable_only=False, granted=None,
+                     images=False:
+                         calls.append((callable_only, granted, images)) or [])
         provider, _ = _recording_provider([True])
         _drive("mcp__a__gated", provider=provider, mocker=mocker)
-        assert calls == [(False, set())], (
+        assert calls == [(False, set(), False)], (
             "gated tools stayed hidden despite a provider")
 
 

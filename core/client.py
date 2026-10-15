@@ -78,6 +78,41 @@ def api_initialization(provider_name: str):
     return client
 
 
+# Providers already warned that `accepts_images` is ignored for them, so the
+# notice is said once per provider per process rather than on every call.
+_images_ignored_warned: set = set()
+
+
+def accepts_images(provider_name: str) -> bool:
+    """ROADMAP_v3 §76 (IM4). Whether an image in a tool result is DELIVERED
+    to this provider, as opposed to replaced by a note saying it was not.
+
+    Opt-in per provider through `accepts_images` in providers.json, on
+    `echoes_reasoning`'s terms: whether a provider takes an image depends on
+    the endpoint and often the model, cannot be discovered, and must not be
+    guessed, so it lives beside the endpoint and defaults to the
+    conservative answer. The test is `is True`, never truthiness:
+    `bool("false")` is True, and a quoted flag is a hand edit away (A29).
+
+    GOOGLE is never delivered to, whatever its entry says. The pinned
+    google-genai's FunctionResponse has no field an image can go in, so
+    that wire is deferred, and a flag set on it is warned about once
+    rather than honoured or ignored in silence.
+    """
+    entry = load_provider_data().get(provider_name, {})
+    if not isinstance(entry, dict) or entry.get("accepts_images") is not True:
+        return False
+    if provider_name == "GOOGLE":
+        if provider_name not in _images_ignored_warned:
+            _images_ignored_warned.add(provider_name)
+            logger.warning(
+                "providers.json marks GOOGLE `accepts_images`, which this "
+                "harness does not deliver yet: images in tool results reach "
+                "GOOGLE as a note saying they were omitted.")
+        return False
+    return True
+
+
 # ============================================================================
 # ---- Normalized response shape ---------------------------------------------
 # ============================================================================
@@ -569,9 +604,57 @@ def _echoed_blocks(provider_name: str, model: Optional[str],
     return [b for b in record.get("blocks") or [] if isinstance(b, dict)]
 
 
+def _image_note(images: list) -> str:
+    """What a tool result's images become on a wire that does not receive
+    them (ROADMAP_v3 §76, IM5): a sentence saying so, never the bytes and
+    never silence. One rule for every way to get here -- GOOGLE, a provider
+    not marked `accepts_images`, and a thread that switched to either after
+    the image was attached. A model told nothing would answer from a result
+    that reads as complete, which is A32's lesson about MCP's placeholder."""
+    kinds = ", ".join(sorted({image["media_type"] for image in images}))
+    return (f"[{len(images)} image(s) attached to this result ({kinds}) were "
+            f"not sent: this provider is not set up to receive images.]")
+
+
+def _with_image_note(msg: dict) -> str:
+    """A tool row's text, with the IM5 note appended when it carries images
+    this wire will not receive."""
+    images = msg.get("images")
+    if not images:
+        return msg["content"]
+    return f"{msg['content']}\n{_image_note(images)}"
+
+
+def _openai_image_turn(pending: list) -> dict:
+    """The user-role message that carries a tool batch's images on the
+    OpenAI-compatible wire (IM4).
+
+    A tool message there holds TEXT PARTS ONLY -- the installed SDK types its
+    content as text parts, and the API rejects an image part in it -- so an
+    image a tool returned can only travel in a user message. It goes AFTER
+    the whole batch: every tool message must directly follow the assistant
+    turn that called it, so one placed between two of them would break the
+    pairing. Built here and never persisted, like the compaction summary
+    (M8): the archive keeps the tool row with its images, and each request
+    derives this message from it again. It says it is the harness speaking,
+    so the model does not read the images as something the user sent.
+    """
+    parts: list = []
+    for tool_call_id, images in pending:
+        parts.append({"type": "text", "text": (
+            f"[Harness: the image(s) attached to the result of tool call "
+            f"{tool_call_id}. A tool message on this API carries text only, "
+            f"so they are delivered here.]")})
+        for image in images:
+            parts.append({"type": "image_url", "image_url": {
+                "url": f"data:{image['media_type']};base64,{image['data']}"}})
+    return {"role": "user", "content": parts}
+
+
 def _messages_for_provider(provider_name: str, neutral_messages: list[dict],
                            model: Optional[str] = None,
-                           echo_reasoning: bool = False) -> list:
+                           echo_reasoning: bool = False,
+                           images: bool = False) -> list:
     """The wire shape for one provider.
 
     `model` and `echo_reasoning` are §44's: they decide whether a stored
@@ -579,6 +662,11 @@ def _messages_for_provider(provider_name: str, neutral_messages: list[dict],
     no model means no echo, and the OpenAI-compatible side is opt-in per
     provider -- so a caller that does not pass them gets exactly the
     translation this function produced before.
+
+    `images` is ROADMAP_v3 §76's (IM4): whether a tool row's images are
+    delivered to this provider, or replaced by `_image_note`. It defaults
+    to the note, so a caller that does not pass it sends no bytes. GOOGLE
+    ignores it -- that wire is deferred and always gets the note.
     """
     # One rule, above the split (#13, #36). Note this can leave two
     # consecutive user turns -- which is the shape Google's branch has
@@ -637,7 +725,8 @@ def _messages_for_provider(provider_name: str, neutral_messages: list[dict],
                 part = genai_types.Part(
                     function_response=genai_types.FunctionResponse(
                         name=name,
-                        response={"result": msg["content"]},
+                        # §76 (IM4/IM5): never the image on this wire.
+                        response={"result": _with_image_note(msg)},
                     )
                 )
                 # Batch consecutive tool results into a single user
@@ -679,10 +768,30 @@ def _messages_for_provider(provider_name: str, neutral_messages: list[dict],
                 # blocks, not one message per result -- merge consecutive
                 # tool-role entries into the same message rather than
                 # appending a new one each time.
+                #
+                # §76 (IM4). An image travels INSIDE its tool_result here --
+                # the one wire of the three whose tool result takes an image
+                # block -- after the text, as a content array. The text
+                # block is omitted when empty, because the API rejects an
+                # empty text block.
+                content = msg["content"]
+                if msg.get("images"):
+                    if images:
+                        content = (
+                            [{"type": "text", "text": msg["content"]}]
+                            if msg["content"] else [])
+                        content += [{
+                            "type": "image",
+                            "source": {"type": "base64",
+                                       "media_type": image["media_type"],
+                                       "data": image["data"]},
+                        } for image in msg["images"]]
+                    else:
+                        content = _with_image_note(msg)
                 block = {
                     "type": "tool_result",
                     "tool_use_id": msg["tool_call_id"],
-                    "content": msg["content"],
+                    "content": content,
                 }
                 if translated and translated[-1]["role"] == "user" and _is_tool_result_message(translated[-1]):
                     translated[-1]["content"].append(block)
@@ -693,8 +802,15 @@ def _messages_for_provider(provider_name: str, neutral_messages: list[dict],
 
     # OpenAI-compatible: close to 1:1, each tool result is its own message
     translated = []
+    # §76 (IM4). (tool_call_id, images) for the tool batch being translated,
+    # sent as one user message when the batch ends -- see _openai_image_turn.
+    pending_images: list = []
     for msg in neutral_messages:
         role = msg["role"]
+
+        if role != "tool" and pending_images:
+            translated.append(_openai_image_turn(pending_images))
+            pending_images = []
 
         if role == "user":
             translated.append({"role": "user", "content": msg["content"]})
@@ -727,10 +843,21 @@ def _messages_for_provider(provider_name: str, neutral_messages: list[dict],
             translated.append(entry)
 
         elif role == "tool":
+            content = msg["content"]
+            if msg.get("images"):
+                if images:
+                    pending_images.append(
+                        (msg["tool_call_id"], msg["images"]))
+                    content = (f"{content}\n[The attached image(s) follow "
+                               f"these tool results, in a harness message.]")
+                else:
+                    content = _with_image_note(msg)
             translated.append({
-                "role": "tool", "tool_call_id": msg["tool_call_id"], "content": msg["content"],
+                "role": "tool", "tool_call_id": msg["tool_call_id"], "content": content,
             })
 
+    if pending_images:
+        translated.append(_openai_image_turn(pending_images))
     return translated
 
 
@@ -1307,7 +1434,8 @@ def call_model_stream(
     )
 
     translated_messages = _messages_for_provider(
-        provider_name, messages, model, echoes_reasoning)
+        provider_name, messages, model, echoes_reasoning,
+        images=accepts_images(provider_name))
     sampling = _sampling_kwargs(provider_name, model, temperature)
     thinking = _thinking_for_provider(provider_name, effort)
 

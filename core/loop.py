@@ -48,6 +48,7 @@ from core import agent_activity, interaction, provider_errors
 from core.cancel import is_cancelled
 from core.client import (
     ModelResponse,
+    accepts_images,
     api_initialization,
     call_model_stream,
     context_window_for,
@@ -93,6 +94,25 @@ DEFAULT_PROVIDER = "ANTHROPIC"
 # strictly larger set, and that difference was exactly what never got
 # logged -- the quiet invisibility this notice exists to prevent.
 _headless_notices_shown: set = set()
+
+# ROADMAP_v3 §76 (IM6), on the headless notice's terms: a tool the user
+# enabled and this run leaves out because no image could reach the model is
+# named once, deduplicated on (provider, thread kind, hidden set) -- the three
+# things the answer depends on, so a later run that differs in any of them
+# still hears about its own.
+_image_notices_shown: set = set()
+
+
+def _images_deliverable(provider_name: str, memory) -> bool:
+    """Whether an image in a tool result can reach the model in this run
+    (IM6): the provider takes images, and the thread is not a research
+    pass. A property of WHAT THE THREAD IS, for
+    `_derived_compaction_mode`'s reason: a pass re-entered by a JSON retry
+    or the reviewer is still a pass. Its sources, claims and grounding are
+    all text, so a pass is never offered an image tool (§76 leaves the
+    pipeline out of scope)."""
+    kind = getattr(memory, "kind", THREAD_KIND_CHAT)
+    return kind != THREAD_KIND_RESEARCH_PASS and accepts_images(provider_name)
 
 
 def with_goal(system_prompt: str, memory: ConversationMemory) -> str:
@@ -1593,7 +1613,8 @@ class RunAgentLoop:
         run_info = RunInfo(
             model=model, provider_name=provider_name, effort=effort,
             granted_tools=set(granted_tools or ()),
-            grant_budget=grant_budget)
+            grant_budget=grant_budget,
+            images=_images_deliverable(provider_name, memory))
         headless = response_channel is None
         # The BUDGET is deliberately not consulted here. Advertisement is
         # decided once per step; R6 makes exhaustion fall back to asking
@@ -1603,10 +1624,25 @@ class RunAgentLoop:
         # a reason it cannot observe, and the model would read that as the
         # tool having ceased to exist.
         tool_schemas = registry.schemas(
-            context, callable_only=headless, granted=run_info.granted_tools)
+            context, callable_only=headless, granted=run_info.granted_tools,
+            images=run_info.images)
+        if not run_info.images:
+            unoffered = tuple(sorted(registry.image_hidden(
+                context, granted=run_info.granted_tools)))
+            key = (provider_name, getattr(memory, "kind", THREAD_KIND_CHAT),
+                   unoffered)
+            if unoffered and key not in _image_notices_shown:
+                _image_notices_shown.add(key)
+                logger.warning(
+                    "Not advertising %s: an image in its result could not "
+                    "reach the model in this run (provider %s is not marked "
+                    "`accepts_images` in providers.json, or this is a "
+                    "research pass).",
+                    ", ".join(unoffered), provider_name)
         if headless:
             hidden = tuple(sorted(registry.headless_hidden(
-                context, granted=run_info.granted_tools)))
+                context, granted=run_info.granted_tools,
+                images=run_info.images)))
             if hidden and hidden not in _headless_notices_shown:
                 _headless_notices_shown.add(hidden)
                 logger.warning(
