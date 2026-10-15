@@ -24950,3 +24950,159 @@ inside it, because it is a different defect that shares a proximate cause.
 
 Two wrong diagnoses, both from reading a pattern and reaching for the entry
 that matched it. The measurement cost less than either.
+
+## Batch 158 -- thirteen alerts that read a name as a secret, and the gate nothing in the workflow could fail (2026-10-15)
+
+**ROADMAP_v3 §75. Two owner rulings, A66-A67.** PR #200 (`navigable-agents`,
+100 commits) could not merge for two reasons: GitHub's `CodeQL` check failed,
+and the PR was reported `CONFLICTING`.
+
+### What happened
+
+The check run's summary: `13 new alerts including 13 high severity security
+vulnerabilities`. `gh api .../code-scanning/alerts` returns 403 for this
+token, so the alerts were read from the CHECK RUN's annotations instead, which
+carry path, line, rule and message. Each was traced to its source by hand.
+
+| # | site | rule | what reaches the sink | verdict |
+|---|---|---|---|---|
+| 1 | `main.py:875` `print(prompt)` in `readline` | clear-text logging | `"Also save the same value as {twin}?"`, a secret's NAME | false positive |
+| 2 | `main.py:942` `print(prompt)` in `readline_masked` | clear-text logging | `"Value for {name}: "`, a NAME | false positive |
+| 3 | `main.py:1514` `Deleted {rest[0]}.` | clear-text logging | the name typed in `--secrets delete <name>` | false positive |
+| 4 | `main.py:1516` `No secret named {rest[0]}.` | clear-text logging | the same name | false positive |
+| 5 | `main.py:1545` `Saved {name}.` | clear-text logging | the same name | false positive |
+| 6 | `main.py:1556` `Saved {twin}.` | clear-text logging | the twin's name, `login` <-> `sudo` | false positive |
+| 7 | `security/askpass.py:215` | clear-text logging | a refusal reason; at most `"...a key_passphrase prompt"` | false positive |
+| 8 | `security/secrets.py:562` | clear-text logging | `lock()`'s reason: that string, or a literal | false positive |
+| 9 | `tests/test_logging_setup.py:217` | clear-text logging | a fake `sk-ant-` key, logged ON PURPOSE to prove the file redactor strips it | intended |
+| 10 | `tests/test_secrets.py:296` | clear-text logging | a `Secret`, logged ON PURPOSE to prove `__str__` redacts | intended |
+| 11 | `tests/test_live_output.py:1861` | incomplete URL substring sanitization | `assert any("example.com" in row ...)` | false positive |
+| 12 | `tests/test_policy_enforcement.py:734` | incomplete URL substring sanitization | `assert "evil.com" in reason` | false positive |
+| 13 | `tests/test_shell.py:374` | incomplete URL substring sanitization | `image.startswith("docker.io/")`, an image reference | false positive |
+
+### Why ten of them fired
+
+`py/clear-text-logging-sensitive-data` finds its SOURCES by name: an
+identifier containing `secret` or `passphrase` is taken to hold one. Three
+names here match and none holds a value. `run_secrets_command` starts
+`parts = list(args.secrets)` -- the `--secrets` argparse destination -- so
+`rest[0]` is the name the user typed, and every prompt built from it is
+tainted. `_secret_twin_name()` returns a name. And `classify()` returns
+`KEY_PASSPHRASE`, whose value is the string `"key_passphrase"`; that label is
+the only variable part of the askpass refusal reason, which is also what
+`lock()` logs. The other `lock()` reasons are literals: all three `guarded()`
+callers in `security/sandbox.py` pass one.
+
+The code was right. The function's own docstring says "Prints names,
+counts and outcomes. Never a value (SS62)", and every value it handles is read
+at a masked prompt.
+
+### The two rulings
+
+**A66 -- skip `tests/` and dismiss the eight in shipped code.** Three
+options were put to the owner: dismiss all thirteen; skip `tests/` and
+dismiss eight; or also exclude the logging rule outright, as `bandit.yml`
+did for B105/B106. The owner took the second. The third looked like
+precedent and is not, on a measured difference: B105/B106 match a literal,
+so every new fixture phrase is a new finding and no baseline can absorb them,
+while a CodeQL dismissal holds by fingerprint and a NEW flow into the same sink
+still reports. Excluding the rule would have bought nothing bandit's skip
+bought, and given up the one thing the rule is for -- a real `print(api_key)`
+in shipped code.
+
+`tests/` is outside `package.json`'s `files`, so nothing in it reaches a
+user, and both rules fire there by design: a redaction test that does not log
+a secret tests nothing. `.github/codeql/codeql-config.yml` holds
+`paths-ignore: [tests]` and both jobs read it. Renaming identifiers to quiet
+the heuristic and inline `# codeql[...]` comments were both declined: the
+first changes what the scanner reads and nothing the code does, and the
+second is not reliably honoured by code scanning without a third-party action.
+
+**A67 -- fold in TECHNICAL_DEBT 76.** That entry was `suspected`: nothing
+in `codeql.yml` can fail a build, and whether GitHub's pull-request check was
+configured to could not be read. This PR is the measurement. The header now
+says `analyze` only uploads, names the `CodeQL` pull-request check as the gate
+and its threshold as a repository setting, and records that 13 high alerts
+failed it. One correction to the entry while there: it expected the check to
+be called "Code scanning results", and it is called `CodeQL`. The exact
+threshold is still unread, and the header says that rather than a value
+nobody saw. Item 76 is closed.
+
+### The gate
+
+`test_codeql_ignores_only_what_never_ships`, beside the bandit gate in
+`tests/test_docs_consistency.py`. It PARSES `codeql.yml` and requires every
+`github/codeql-action/init` step to name the config file -- parsed, because
+the header names the file too and a substring check passes with the key
+deleted, mutation A5's shape one workflow over. It allows the config the keys
+`name` and `paths-ignore` and nothing else. And it walks every file
+`files` ships and fails if any `paths-ignore` entry covers one, reading a
+bare path as covering everything under it and a leading `**/` as matching at
+the root too.
+
+### The controls
+
+`mutate158.py` in the scratchpad, restoring from bytes held in memory (the
+batch was uncommitted) and asserting each needle applied exactly once, with
+stale bytecode blocked.
+
+```
+CONTROL                              GREEN
+A1 security job unwired              RED   "do not read"
+A2 quality job unwired               RED   "do not read"
+A3 ignore a shipped dir (core)       RED   "covers files that ship"
+A4 queries key                       RED   "carries ['queries']"
+A5 glob over all python (**/*.py)    RED   "covers files that ship"
+A6 ignore one shipped file (main.py) RED   "covers files that ship"
+A7 paths narrows                     RED   "carries ['paths']"
+A8 empty ignore list                 RED   "ignores nothing"
+A9 domain shrinks to the entries     RED   "shipped paths enumerated"
+B1 drop the leading-**/ candidate    RED -> GREEN   with '**/main.py' ignored
+B2 drop the directory rule           RED -> GREEN   with 'core' ignored
+B3 drop the slash strip              RED -> GREEN   with '/core/' ignored
+tree restored byte-identical: True
+```
+
+Every A row failed on its OWN message, not merely failed. Each B row breaks
+the config, is red, then also breaks one line of the matcher and goes green --
+which is what shows that line is the one doing the rejecting. A9 is the domain
+check: with the walk shrunk to the allowlist's entries, the relation would
+pass vacuously, and the enumeration guard is what says so.
+
+### The conflict was a rename
+
+`main` had one commit since the merge base, 88631f0, "Update
+Venastine_Research_Harness_Demo_Photo.png", which replaced the photo at the
+root. This branch's 7b81259 had MOVED that file, unchanged, to
+`docs/assets/`. `git merge-tree --write-tree origin/main HEAD` was clean
+under `ort` and put main's new blob (`e339b91`) at `docs/assets/` with no
+root copy, so it was resolved by a plain merge commit, a1b6fdd, with nothing
+edited by hand -- a merge rather than a rebase, as b252787 did before, because
+100 pushed commits are not rewritten. README.md line 1 and
+`docs/ARCHITECTURE.md`'s tree already pointed at `docs/assets/`. Why
+GitHub's merge disagreed with git's was not measured.
+
+### For the owner: the eight dismissals
+
+`tests/` drops out of the next analysis on its own. The eight in shipped code
+need dismissing in GitHub as **False positive** -- from the PR's annotations,
+or Security -> Code scanning filtered `pr:200` -- BEFORE the push, so the
+fresh analysis has nothing new to report. Each comment fits the 280-character
+field:
+
+1. `main.py:875` -- Prints a y/N prompt naming the twin secret (`ssh.<host>.sudo`), a NAME. The value is never printed (SS62). Tainted only by CodeQL's name heuristic on args.secrets/_secret_twin_name. Triage: DEVLOG batch 158.
+2. `main.py:942` -- Prints the masked prompt `Value for <name>:`. <name> is a secret's NAME from argv; the value is read with echo off and never printed (SS62). Triage: DEVLOG batch 158.
+3. `main.py:1514` -- `Deleted <name>.` echoes the NAME typed in `--secrets delete <name>`; no value is read on this path. Name heuristic on args.secrets. Triage: DEVLOG batch 158.
+4. `main.py:1516` -- `No secret named <name>.` echoes the NAME from argv; no value is read on this path. Name heuristic on args.secrets. Triage: DEVLOG batch 158.
+5. `main.py:1545` -- `Saved <name>.` prints the NAME; the value went to secrets.put() and is never echoed (SS62). Name heuristic on args.secrets. Triage: DEVLOG batch 158.
+6. `main.py:1556` -- `Saved <twin>.` prints the twin's NAME (login<->sudo); the value is never echoed (SS62). Name heuristic on _secret_twin_name. Triage: DEVLOG batch 158.
+7. `security/askpass.py:215` -- Logs the refusal REASON. Its only variable part is the logical name `key_passphrase`/`login` from classify(); CodeQL reads the constant KEY_PASSPHRASE as a password. No prompt text or value. Triage: DEVLOG batch 158.
+8. `security/secrets.py:562` -- Logs lock()'s REASON. Every caller passes a literal or askpass's refusal reason (`...a key_passphrase prompt`), so the constant name is what's read as a password, never a value. Triage: DEVLOG batch 158.
+
+### Verification
+
+Full suite 7213 -> 7214 (one new test, the gate). The docs file 62 -> 63,
+stated in `docs/ARCHITECTURE.md`'s source tree; the suite total in
+`AGENTS.md`, `README.md` and `docs/ARCHITECTURE.md`. Controls 13 of 13.
+CodeQL itself cannot run here -- there is no CLI on this machine -- so the
+config's effect is measured by the next analysis of PR #200, after the push.

@@ -43,6 +43,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
+- **§75. Thirteen alerts that read a name as a secret, and the gate nothing in the workflow could fail** - **(BUILT in batch 158)** (PR #200's first `CodeQL` check raised 13 high-severity alerts and every one was a false positive: ten came from a source heuristic that reads `args.secrets`, `_secret_twin_name()` and `KEY_PASSPHRASE` as secrets because of their names, and three were test assertions read as URL sanitizers; `tests/` is now skipped because it never ships, the eight in shipped code are dismissed with recorded reasons, and the same red check is the measurement TECHNICAL_DEBT 76 lacked -- the gate is GitHub's pull-request check, and the workflow header now says so)
 - **§74. A gate that was green because of what one machine happened to contain** - **(BUILT in batch 157)** (CI's first run over batches 129-156 came back red on three check runs, and all three were one test: the push-channel gate drove `git check-ignore` in the WORKING TREE, where `logs/`, `output/` and `.ipynb_checkpoints/` exist because the harness creates them, so three directory-only patterns matched here and matched nothing in a fresh clone -- seventeen batches of green behind a branch whose gate had never met one; the same measurement found `__pycache__` declared for the git channel, carrying no rule in `.gitignore` at all, and the one value in the list that no sample could reach)
 - **§73. Three cuts the redactor ran after, and the one result path that never passed it** - **(BUILT in batch 156)** (the review marathon's last three findings, closing its `FIX-NOW` queue: `web_search` and `arxiv_search` cut their third-party text and let `registry.dispatch` redact the piece that was kept, so a `ghp_` token straddling any of the three cuts survived at 36 of the 39 offsets it could straddle -- RB1's defect in the two tools RB1 did not reach, and §52's gap register had declined to solve it generally while two such tools were already in the tree; the per-LIST caps bounded 25 authors and not the 5,000 characters each could carry, and two of the six unbounded values were named by no finding, one of them the `arxiv_id` that both recovery URLs are built from, while the row COUNT both schemas advertise a bound for was enforced in neither, so a request for five results returned all 5,000 rows a provider chose to send; and `dispatch()`'s refusal early-return was the one result path that never passed the output redactor, which `docs/ARCHITECTURE.md` had already asserted it did -- measured, a credential the model put in an `agent_name` came back whole, on a path that also returns above the input scanner written for exactly that value)
 - **§72. A consent screen the project decided the length of, and three fields a rule was stated over but never applied to** - **(BUILT in batch 155)** (the review marathon's config-and-trust surface, all three findings: the trust prompt -- the informed-consent gate for content that becomes instructions -- pasted `settings.json` and `mcp.json` whole, so 2 x 2.2 MB rendered as 4.5 MB in 30 lines with the `mcp.json` command the section exists to show at 99.9994% of the way in, while the section the finding cited as the bounded contrast was bounded on one axis of two and a 2 MB `AGENTS.md` written as one line walked straight through it; `_parse_md_file` states "ELEMENT TYPES TOO, not just the container" in a comment and `model`, `provider` and the elements of `allowed_tools` sat under it unchecked, so `model: [a, b]` loaded clean and raised `TypeError: unhashable type: 'list'` out of the effort cache; and a `config.yaml` hand-edited mid-session -- the workflow `explain()` recommends by name -- answered a `/config` with "the error is in logs/app.log", which is true and is an answer to a different question. The crash that finding reported had already been closed by batch 135 and was found by re-driving rather than by reading)
@@ -2723,6 +2724,104 @@ leaked PID.
   because MCP is the only dynamic registrant and the composed name is its
   fact. A bound in the registry would be the fix-at-the-consumer shape
   `AGENTS.md` names by name.
+---
+
+## §75. Thirteen alerts that read a name as a secret, and the gate nothing in the workflow could fail
+
+**Built in batch 158**, from PR #200's first `CodeQL` check: 13 alerts, all
+high severity, and every one a false positive when traced to its source. Two
+owner rulings, recorded as A66-A67.
+
+**WHAT THE THIRTEEN WERE.** Two rules. Ten were
+`py/clear-text-logging-sensitive-data`, and its SOURCES are a name
+heuristic: an identifier containing `secret` or `passphrase` is treated as
+holding one. Three names in this tree match and none holds a value.
+`args.secrets` is the `--secrets` argparse destination, so
+`run_secrets_command`'s `rest[0]` is the name a user typed. `_secret_twin_name()`
+returns another name. `KEY_PASSPHRASE` is the constant `"key_passphrase"`, a
+logical label `classify()` returns. Traced, the six `main.py` sites print a
+secret's NAME or a prompt containing one -- the function reads every value at a
+masked prompt and prints names only, which is SS62. `security/askpass.py:215` and
+`security/secrets.py:562` log a refusal or lock REASON whose only variable part
+is that label, or a literal: every `guarded()` caller passes one. The two in
+tests/ log a fake credential on purpose, to prove the redactor and
+`Secret.__str__` strip it. The other three were
+`py/incomplete-url-substring-sanitization` in tests/, and all three are
+assertions -- `"evil.com" in reason` -- not sanitizers.
+
+It is the class `bandit.yml` already records for B105/B106: a check that
+"matches on the NAME, not the value". Bandit's answer was to skip the rule,
+and that answer does not transfer, which is A66's reason. B105/B106 match a
+literal string, so a baseline cannot absorb them and every new fixture phrase
+is a new finding. This rule follows dataflow, and a dismissed CodeQL alert
+stays dismissed by fingerprint -- so the cost that justified bandit's skip is
+not present, and the coverage it would give up is real: a future
+`print(api_key)` in shipped code is exactly what this rule exists to see.
+
+**WHY tests/ IS SKIPPED AND NOTHING ELSE IS.** `tests/` is outside
+`package.json`'s `files` allowlist, so it never reaches a user, and both
+rules fire there BY DESIGN -- a redaction test that does not log a secret
+tests nothing, so every new one would re-fire. `.github/codeql/codeql-config.yml`
+holds `paths-ignore: [tests]` and nothing else, and both jobs read it. The
+bound is a relation rather than a list: `test_codeql_ignores_only_what_never_ships`
+walks every file `files` ships and fails if any `paths-ignore` entry covers
+one, fails on any key but `name` and `paths-ignore`, and parses both `init`
+steps so a comment naming the file cannot stand in for the key. Its mutation
+pass ran nine rows that break what it reads (each red on its own named
+message) and three that break the gate's matcher (each red before and green
+after), with a green control.
+
+The eight in shipped code are DISMISSED in GitHub, each with its reason, and
+recorded in `DEVLOG.md` batch 158. A dismissal holds for that alert and no
+other, so a NEW flow into the same sink is reported again -- which is the
+property a rule exclusion would have removed.
+
+**THE GATE TECHNICAL_DEBT 76 COULD NOT SEE.** That entry recorded, as
+`suspected`, that nothing in `codeql.yml` can fail a build: `analyze`
+uploads SARIF and exits 0, and blocking rests on GitHub's own pull-request
+check at a threshold that is a repository setting no token here could read.
+PR #200 is the measurement. The check is named `CodeQL` -- not "Code scanning
+results", the name the entry expected -- and it failed with
+`13 new alerts including 13 high severity security vulnerabilities`. So
+high-severity alerts block a pull request. The exact threshold is still
+unread (`code-scanning/alerts` returns 403 for this token), and the header
+says so rather than guessing. Push runs still fail nothing, and stay that way
+(item 76's own "Not:").
+
+**AND THE CONFLICT WAS A RENAME.** `main`'s one new commit, 88631f0, updated
+`Venastine_Research_Harness_Demo_Photo.png` at the root; this branch's
+7b81259 had moved that file, unchanged, to `docs/assets/`. GitHub reported
+the PR `CONFLICTING`. Locally, `git merge-tree --write-tree` under `ort` was
+clean and put main's new blob at `docs/assets/` with no root copy, so a merge
+commit resolved it and nothing was edited by hand. Why GitHub's merge
+disagreed was not measured; a 100-commit branch that moved most of the tree is
+the obvious suspect, and it is only a suspect.
+
+### What §75 deliberately does not change
+
+**`py/clear-text-logging-sensitive-data` stays on for shipped code.** See
+A66: the bandit precedent's reason does not hold for a dataflow rule.
+
+**No identifier is renamed to dodge the heuristic.** `--secrets` is the
+CLI's own vocabulary. Renaming `args.secrets` or `KEY_PASSPHRASE` would
+change what the scanner reads and nothing about what the code does, and the
+next name to match would need the same treatment.
+
+**No inline `# codeql[...]` suppression comments.** Code scanning does not
+reliably honour them without a third-party action that rewrites dismissals
+from SARIF, and item 76's shape was "do not add tooling".
+
+**The root `conftest.py` stays scanned.** It does not ship either, but it
+raised nothing, and the ruling named `tests/`. The relation would permit it;
+nothing asks for it.
+
+### Design Decisions Record — §75 (A66-A67)
+
+| id | decision |
+|---|---|
+| **A66** | **CodeQL may skip only what never ships, and a false positive in shipped code is dismissed with its reason rather than configured away.** `.github/codeql/codeql-config.yml` carries `name` and `paths-ignore` and no other key, shared by both jobs so the security/quality split stays per job in `codeql.yml`. `paths-ignore` is bounded by `package.json`'s `files`, checked file by file, so the list cannot grow into a way of silencing production code. The rule-level exclusion `bandit.yml` made for B105/B106 was declined for this rule on a measured difference: bandit's matches a literal and re-fires on every fixture, so no baseline absorbs it, while a CodeQL dismissal holds by fingerprint and a new flow still reports. Renames and inline suppression comments were declined with it |
+| **A67** | **The CodeQL gate is GitHub's pull-request check, and the tree says so.** `codeql.yml`'s header now states that `analyze` only uploads, that the failing check is the `CodeQL` check GitHub posts on pull requests, that its threshold is a repository setting, and what PR #200 measured of it: 13 high-severity alerts failed it. The exact setting is recorded as unread rather than guessed. Closes TECHNICAL_DEBT 76 on its own prescription, and keeps its "Not:": no post-`analyze` step to fail push runs |
+
 ---
 
 ## §74. A gate that was green because of what one machine happened to contain

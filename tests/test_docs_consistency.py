@@ -2033,6 +2033,100 @@ def test_the_bandit_job_checks_counts_as_well_as_the_baseline():
         "the script the job runs does not exist")
 
 
+_CODEQL_CONFIG_REF = "./.github/codeql/codeql-config.yml"
+_CODEQL_CONFIG = os.path.join(ROOT, ".github", "codeql", "codeql-config.yml")
+
+
+def _shipped_paths() -> list:
+    """Every file package.json's `files` puts in the tarball, as a
+    forward-slash path from the root."""
+    out = []
+    for entry in _package_json()["files"]:
+        if entry.startswith("!"):        # negation guards ship nothing
+            continue
+        top = os.path.join(ROOT, entry.rstrip("/"))
+        if os.path.isfile(top):
+            out.append(entry)
+            continue
+        for dirpath, dirnames, filenames in os.walk(top):
+            dirnames[:] = [d for d in dirnames if d != "__pycache__"]
+            rel = os.path.relpath(dirpath, ROOT).replace(os.sep, "/")
+            out.extend(f"{rel}/{name}" for name in filenames)
+    return out
+
+
+def _codeql_ignores(pattern: str, path: str) -> bool:
+    """CodeQL's `paths-ignore` reading of *pattern*, closely enough to
+    bound it: a bare path covers everything under it, and a leading `**/`
+    matches at the root too. `fnmatch`'s `*` crosses `/`, which errs toward
+    a match -- the safe direction for a gate that forbids one."""
+    pattern = pattern.strip("/")
+    candidates = {pattern}
+    if pattern.startswith("**/"):
+        candidates.add(pattern[3:])
+    return any(fnmatch.fnmatch(path, c) or fnmatch.fnmatch(path, c + "/*")
+               for c in candidates)
+
+
+def test_codeql_ignores_only_what_never_ships():
+    """Batch 158, A66. `paths-ignore` is how CodeQL is told not to look, so
+    it is bounded by the one list that says what reaches a user.
+
+    PR #200's first analysis raised five alerts in tests/, and each was a
+    test doing its job: a redaction test has to log a secret to prove the
+    secret is redacted. Skipping tests/ is safe because `files` does not
+    name it. An entry that a SHIPPED path falls under would turn the same
+    file into a way of silencing production code -- and a false positive
+    there is dismissed with a recorded reason instead, which keeps the rule
+    looking at the next change to that line.
+    """
+    import yaml
+
+    # PARSED, not grepped: codeql.yml's header names the config file too,
+    # so a substring check passes with the key deleted -- mutation A5's
+    # shape, one workflow over.
+    workflow = yaml.safe_load(_workflow_text()["codeql.yml"])
+    inits = [(job, step.get("with") or {})
+             for job, spec in workflow["jobs"].items()
+             for step in spec["steps"]
+             if step.get("uses", "").startswith("github/codeql-action/init@")]
+    assert len(inits) >= 2, (
+        f"found {len(inits)} CodeQL init step(s); codeql.yml has a security "
+        f"job and a quality job, so the sweep is not reaching them")
+    unwired = [job for job, given in inits
+               if given.get("config-file") != _CODEQL_CONFIG_REF]
+    assert not unwired, (
+        f"these CodeQL jobs do not read {_CODEQL_CONFIG_REF}: {unwired}. A "
+        f"job without it scans tests/ and re-raises the alerts batch 158 "
+        f"triaged, on the next pull request that touches a redaction test.")
+
+    with open(_CODEQL_CONFIG, encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+    extra = sorted(set(config) - {"name", "paths-ignore"})
+    assert not extra, (
+        f"codeql-config.yml carries {extra}. It is shared by BOTH jobs and "
+        f"holds paths only: `queries` would erase the security/quality split "
+        f"codeql.yml keeps per job on purpose, and a query filter or `paths` "
+        f"narrows what shipped code is checked for -- a decision A66 records "
+        f"the owner declining.")
+
+    ignored = config.get("paths-ignore") or []
+    assert ignored, (
+        "codeql-config.yml ignores nothing, so the relation below is vacuous; "
+        "if tests/ is meant to be scanned again, delete the file and this gate")
+    shipped = _shipped_paths()
+    assert "main.py" in shipped and len(shipped) > 100, (
+        f"only {len(shipped)} shipped paths enumerated; the walk is not "
+        f"reaching package.json's `files`")
+    hidden = sorted({f"{pattern} -> {path}" for pattern in ignored
+                     for path in shipped if _codeql_ignores(pattern, path)})
+    assert not hidden, (
+        f"codeql-config.yml's paths-ignore covers files that ship: "
+        f"{hidden[:10]}. CodeQL may skip only what never reaches a user; a "
+        f"false positive in shipped code is dismissed in GitHub with its "
+        f"reason, and recorded in DEVLOG.")
+
+
 def test_pip_audit_covers_every_declared_dependency_file():
     """S18-04, and the half batch 136 created.
 

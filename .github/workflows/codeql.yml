@@ -3,8 +3,24 @@
 #
 # Split is cost control: the suite already runs ~15 min, and the
 # security-and-quality pack roughly doubles analysis time for findings
-# that are mostly hygiene. Security red blocks the change that introduced
-# it; quality red on the weekly run is triaged, not reverted around.
+# that are mostly hygiene. Security red blocks the PULL REQUEST that
+# introduced it; quality red on the weekly run is triaged, not reverted
+# around.
+#
+# WHERE THAT BLOCKING COMES FROM, because nothing in this file does it
+# (batch 158, A67, closing TECHNICAL_DEBT 76). `analyze` uploads SARIF to
+# code scanning and exits 0 whatever it found -- there is no
+# fail-on-severity input to go looking for. The red is GitHub's own
+# `CodeQL` check, which code scanning posts on pull requests only, at a
+# threshold that is a repository setting (Settings -> Code security ->
+# Code scanning -> "Check failure"). Measured on PR #200: 13 high-severity
+# alerts failed it, so high blocks; the exact setting was not readable
+# with the token that measured it. A direct PUSH records its alerts and
+# fails nothing.
+#
+# Both jobs read ../codeql/codeql-config.yml, which holds PATHS and never
+# queries. It skips tests/, and only because tests/ never ships; that file
+# carries the reason and the test that bounds it.
 #
 # BOTH SUITE NAMES WERE WRONG on the first run that ever executed this
 # file, in opposite directions, and only one of them said so:
@@ -57,6 +73,7 @@ jobs:
         with:
           languages: python
           build-mode: none
+          config-file: ./.github/codeql/codeql-config.yml
           # No `queries:` -- that IS the default suite. See the header.
 
       - uses: github/codeql-action/analyze@9f759ee644a3e7c15c1390abf49868036c00067b  # v3.38.3
@@ -73,6 +90,7 @@ jobs:
         with:
           languages: python
           build-mode: none
+          config-file: ./.github/codeql/codeql-config.yml
           queries: security-and-quality
 
       - uses: github/codeql-action/analyze@9f759ee644a3e7c15c1390abf49868036c00067b  # v3.38.3

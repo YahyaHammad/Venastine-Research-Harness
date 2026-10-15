@@ -3878,7 +3878,7 @@ checked offline and should not be -- it is a judgement, not a count.
 and template today and are the half of the taxonomy that has not drifted;
 `config.yml`'s contact links or the PR template, both correct.
 
-## 76. The CodeQL job contains no mechanism that can fail it (open, deferred batch 138)
+## 76. The CodeQL job contains no mechanism that can fail it (closed, batch 158 -- PR #200 measured the check)
 
 **S18-11, severity S4, `coherence`, harm `suspected`.**
 `.github/workflows/codeql.yml:5-8,47-78`. The header states the intent --
@@ -3916,6 +3916,20 @@ comment, so it is recorded in the tree.
 **Not:** a post-`analyze` step querying the code-scanning alerts API to fail push
 runs. It is the only route and is more moving parts than S4 is worth;
 recommended against. The security/quality split itself is sound.
+
+**CLOSED (batch 158), by the measurement this entry said it lacked.** PR #200
+was the first pull request whose analysis found anything, and its check failed:
+`13 new alerts including 13 high severity security vulnerabilities`. So the PR
+check IS configured to block, at least on high. One correction to the entry
+above: the check is named `CodeQL`, not "Code scanning results". The shape was
+followed as written -- `codeql.yml`'s header now says `analyze` only uploads,
+names the `CodeQL` pull-request check as the gate and its threshold as a
+repository setting, and records what PR #200 measured -- with no tooling added
+and push runs still ungated. The exact threshold is still unread, because
+`code-scanning/alerts` returns 403 for the token that measured this, and the
+header says so rather than naming a value nobody saw. ROADMAP_v3 §75, A67. The
+thirteen alerts themselves were all false positives; §75 and A66 carry how they
+were cleared.
 
 ## 77. The suite's one `integration` test runs in no workflow (open, deferred batch 138)
 
