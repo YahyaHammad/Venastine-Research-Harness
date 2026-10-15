@@ -4652,6 +4652,44 @@ TECHNICAL_DEBT 97 records from the other end, where the arity assumption that
 failed was in a test whose docstring had already reasoned carefully about
 timing.
 
+### A NEIGHBOURING defect, found in batch 157 -- and the instrument above cannot see it
+
+**`pause()`'s 46x cost has two consequences and this entry documents one.**
+The one above is a positive assertion read before the message pump has run.
+The other is a **WALL-CLOCK TIMER that expires while the test is inside a
+`pause()`**, and batch 157 paid for it: five of the ten tests in
+`TestTheQuitGesture` depend on `QUIT_CONFIRM_S`, the 2.0s window
+`_disarm_quit` is armed on, and none of the five pinned it. A loaded run
+closes the window between the two presses, the second `ctrl+c` re-arms instead
+of quitting, and the assertion fails -- which is what
+`test_a_second_press_inside_the_window_quits` did in a 373-second suite run
+against the ~71 the previous batch measured.
+
+**It is not this entry's shape, and the probe above is why we can say so.**
+With `Pilot.pause` patched to a bare `asyncio.sleep(0)` the original assertion
+PASSES, so the pump reaches the binding inside one loop turn and there is no
+race here to add a predicate for. Batch 157's first attempt was exactly that
+predicate, read off this entry, and it was **inert**: `settle` polls for state
+that never arrives once the window has closed, so it turned a fast failure
+into a slow one. The fix is `mocker.patch("tui.app.QUIT_CONFIRM_S", 30)`, and
+the class already contained both halves of that idiom -- the tests that are
+ABOUT expiry pin it to 0.05 to force it, and one already pinned it to 30 to
+prevent it.
+
+**The sharp part: the instrument that finds one of these defects HIDES the
+other.** Making `pause()` instant is the opposite of the condition a
+wall-clock expiry needs, so a timer-dependent test passes under the sleep(0)
+patch with its defect intact. Shrinking the window instead reproduced the
+failure deterministically and named the population at the same time -- 5 of
+10, where the mechanical source scan said 18 across the file and the sleep(0)
+patch said 35, neither of them this. **A probe is a hypothesis, and a passing
+probe only clears the hypothesis it encodes.**
+
+Fixed in batch 157, with the control stated as a relation rather than a flip:
+with the ambient `QUIT_CONFIRM_S` forced to 0.001s -- which killed 5 of 10
+before -- all ten pass, because each of the five now pins its own.
+
+
 ## 86. The decision-id gate scans `.py` only, and this project ships `.mjs` (open, found and filed batch 141)
 
 **Found by the gate catching me**, which is the useful half. Severity `S4`,

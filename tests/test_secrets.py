@@ -1031,8 +1031,10 @@ class TestTheStoreSurvivesAFailedRename:
         two statements, left a sealed envelope beside the real one.
 
         An offline guessing target rather than a plaintext one -- which is
-        exactly the risk `.gitignore:17-22` names as its reason for
-        listing `secrets.json` at all, at a name it did not list.
+        exactly the risk `.gitignore`'s `*.tmp` comment names as its
+        reason for listing `secrets.json` at all, at a name it did not
+        list. (By RULE and not by line number: that citation read
+        `.gitignore:17-22` until batch 157 added a line above it.)
         """
         import json_store
 

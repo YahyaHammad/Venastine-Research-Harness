@@ -112,7 +112,7 @@
         "npm"
       ],
       "samples": [
-        "logs"
+        "logs/app.log"
       ]
     },
     {
@@ -127,7 +127,7 @@
         "npm"
       ],
       "samples": [
-        "output"
+        "output/run-1/report.md"
       ]
     },
     {
@@ -142,7 +142,8 @@
         "npm"
       ],
       "samples": [
-        "x.pyc"
+        "x.pyc",
+        "__pycache__/README.txt"
       ],
       "note": "No archive row by decision (S18-08): `git archive` ships only TRACKED content, so export-ignore on a gitignored path is belt and braces. The row that mattered there was .venastine/."
     },
@@ -158,7 +159,7 @@
         "npm"
       ],
       "samples": [
-        ".ipynb_checkpoints"
+        ".ipynb_checkpoints/system.md"
       ]
     },
     {

@@ -1,6 +1,15 @@
 .ipynb_checkpoints/
 .env
 *.pyc
+# The DIRECTORY too, not only the compiled files inside it (batch 157, A65).
+# `package.json`'s `neverDistribute` claims `__pycache__` for this channel
+# and for npm; npm excludes it wholesale through `files`' `!**/__pycache__`
+# guard, and this file covered only `*.pyc`. So anything in there that is
+# NOT a .pyc was staged by an `add -A` from the root: CPython writes its
+# byte-compile temp as `<target>.<pid>` beside the target, inside this very
+# directory, and `*.pyc` does not match a name ending in digits. An
+# interrupted compile leaves one behind.
+__pycache__/
 logs/
 *.log
 *.db

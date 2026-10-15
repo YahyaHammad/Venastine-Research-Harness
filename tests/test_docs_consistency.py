@@ -63,8 +63,10 @@ import io
 import json
 import os
 import re
+import shutil
 import subprocess  # nosec B404 - the gates below drive git and pytest as subprocesses on purpose
 import sys
+import tempfile
 from collections import Counter
 
 import pytest
@@ -1659,44 +1661,133 @@ def test_every_never_distribute_entry_is_well_formed_and_drivable():
             f"{entry['label']!r} excludes nothing from anywhere")
 
 
+_MATCH_DEMOS = {
+    "exact": lambda value, s: s == value,
+    "basename": lambda value, s: os.path.basename(s) == value,
+    "suffix": lambda value, s: s.endswith(value),
+    "prefix": lambda value, s: any(p.startswith(value) for p in s.split("/")),
+    "dir": lambda value, s: s == value or s.startswith(value + "/"),
+    "segment": lambda value, s: value in s.split("/"),
+    "suffix-or-segment": lambda value, s: (s.endswith(value)
+                                           or value in s.split("/")),
+}
+
+
+def test_every_never_distribute_value_is_demonstrated_by_a_sample():
+    """An entry's `samples` must drive every PATTERN it declares, not just one.
+
+    The gate above requires samples to EXIST; this one requires them to
+    REACH. `compiled python` declared `.pyc` and `__pycache__`, sampled only
+    `x.pyc`, and .gitignore carried no `__pycache__` rule at all -- so the git
+    channel claimed a pattern it did not have while the npm channel enforced
+    the same pattern wholesale through `files`, and the three gates that exist
+    to catch exactly that disagreement had nothing to drive it with. It was
+    the ONE undriven value in the list when this was written (batch 157, A65),
+    which is why this is a check with a demonstrated consequence rather than
+    one looking for work.
+    """
+    for entry in _never_distribute():
+        demo = _MATCH_DEMOS.get(entry["match"])
+        assert demo, (
+            f"{entry['label']!r} uses match kind {entry['match']!r} and this "
+            f"gate has no rule for what would demonstrate it. The npm gate "
+            f"below checks the CONSUMER knows every kind; this checks the "
+            f"DATA carries a path showing what each pattern covers.")
+        for value in entry["value"]:
+            assert any(demo(value, s) for s in entry["samples"]), (
+                f"{entry['label']!r} declares {value!r} and none of its "
+                f"samples {entry['samples']} demonstrates it, so every gate "
+                f"driven off `samples` skips that pattern in silence. Add a "
+                f"sample the {entry['match']!r} match would catch.")
+
+
+# A path that must NOT be ignored. It rides in the same batch of samples as
+# the ones that must be, so the two halves cannot end up disagreeing about
+# which tree they measured.
+_PUSH_CONTROL = ".venastine/agents/example.md"
+
+
+def _unignored_in_a_fresh_clone(samples: list) -> set:
+    """The `samples` that no rule in the COMMITTED `.gitignore` covers.
+
+    DRIVEN THROUGH `git check-ignore`, so git does the matching and nothing
+    here re-implements it. What this adds is the TREE it asks about, and that
+    is not a detail: run in ROOT, this gate was green on every developer
+    machine for seventeen batches and failed on its first push, in all three
+    jobs that run it (batch 157).
+
+    THE WORKING TREE WAS PART OF THE QUESTION, which was the whole defect.
+    `logs/`, `output/` and `.ipynb_checkpoints/` are DIRECTORY-ONLY patterns
+    and git decides directory-ness by asking the filesystem, so a bare `logs`
+    matches on a machine that has run the app and matches nothing in a clone.
+    Measured: with `logs/` in .gitignore and nothing on disk, `logs` is not
+    ignored; after `mkdir logs` it is. The samples are paths INSIDE those
+    directories now (A63), because `git add -A` stages files and a path's
+    continuation is what tells git the component is a directory.
+
+    HERMETIC IN THE OTHER DIRECTION TOO. A global `core.excludesFile` also
+    reaches `check-ignore` -- measured in the same batch -- and so does
+    `.git/info/exclude`, so either could make this pass on evidence that does
+    not ship. GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM point at paths inside
+    the throwaway tree that do not exist, which git reads as empty
+    configuration. A non-existent path rather than `os.devnull`, because this
+    suite runs on win32 where that is `nul` and not a file git will open.
+    """
+    tracked = subprocess.run(  # nosec B603, B607 - `git` with a fixed argv, as above
+        ["git", "ls-files", "--", "*.gitignore"],
+        cwd=ROOT, capture_output=True, text=True)
+    assert tracked.stdout.split() == [".gitignore"], (
+        f"this tree tracks {tracked.stdout.split()} and this driver copies "
+        f"only the root `.gitignore` into its throwaway tree, so it would "
+        f"under-test the others. Copy them all at their own paths -- git "
+        f"applies a nested .gitignore only within its own directory.")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(  # nosec B603, B607 - `git` with a fixed argv, as above
+            ["git", "init", "-q", tmp], capture_output=True, check=True)
+        shutil.copyfile(os.path.join(ROOT, ".gitignore"),
+                        os.path.join(tmp, ".gitignore"))
+        env = dict(os.environ,
+                   GIT_CONFIG_GLOBAL=os.path.join(tmp, "absent-global"),
+                   GIT_CONFIG_SYSTEM=os.path.join(tmp, "absent-system"))
+        unignored = set()
+        for sample in samples:
+            proc = subprocess.run(  # nosec B603, B607 - `git` with a fixed argv, as above
+                ["git", "check-ignore", "-q", "--", sample],
+                cwd=tmp, env=env, capture_output=True)
+            if proc.returncode != 0:
+                unignored.add(sample)
+    return unignored
+
+
 def test_the_push_channel_ignores_every_sample_that_claims_it():
-    """DRIVEN through `git check-ignore`, so git does the matching and this
-    gate re-implements none of it.
+    """The git channel, measured in the fresh clone the claim is about --
+    `_unignored_in_a_fresh_clone` records why that is the tree.
 
     The control is inside the same mechanism: a path no rule covers makes
     check-ignore exit non-zero and print nothing, which is how
     `.venastine/mcp.json` was found -- it was absent from the tree's only
     `.gitignore` while four sibling paths resolved to a rule.
     """
-    import subprocess  # nosec B404 - as above, deferred into the gate
-
     claimed = [(e["label"], s) for e in _never_distribute()
                if "git" in e["channels"] for s in e["samples"]]
     assert claimed, "no entry claims the git channel, so this proves nothing"
 
-    unignored = []
-    for label, sample in claimed:
-        proc = subprocess.run(  # nosec B603, B607 - `git` with a fixed argv, as above
-            ["git", "check-ignore", "-q", "--", sample],
-            cwd=ROOT, capture_output=True)
-        if proc.returncode != 0:
-            unignored.append(f"{sample} ({label})")
+    unignored = _unignored_in_a_fresh_clone(
+        [s for _, s in claimed] + [_PUSH_CONTROL])
 
-    assert not unignored, (
+    missing = [f"{s} ({label})" for label, s in claimed if s in unignored]
+    assert not missing, (
         f"package.json `neverDistribute` claims the git channel for these, "
-        f"and `.gitignore` matches none of them: {unignored}. A first-party "
+        f"and `.gitignore` matches none of them: {missing}. A first-party "
         f"command writes some of these into a user's project, so `git add -A` "
         f"from the project root would stage them -- and a published "
         f"credential is remedied by rotation, not by a later commit.")
 
-    # The positive control: a path that must NOT be ignored, because the
-    # narrow pair was chosen over `.venastine/` precisely so project-tier
-    # agents and skills keep travelling with a repository (D17's trust prompt
-    # is the mechanism that exists for them).
-    proc = subprocess.run(  # nosec B603, B607 - `git` with a fixed argv, as above
-        ["git", "check-ignore", "-q", "--", ".venastine/agents/example.md"],
-        cwd=ROOT, capture_output=True)
-    assert proc.returncode != 0, (
+    # The positive control: the narrow pair was chosen over `.venastine/`
+    # precisely so project-tier agents and skills keep travelling with a
+    # repository (D17's trust prompt is the mechanism that exists for them).
+    assert _PUSH_CONTROL in unignored, (
         "`.venastine/agents/` is ignored. The two credential files are "
         "excluded by name on purpose -- excluding the directory wholesale "
         "makes project-tier agents and skills untrackable, which is the "

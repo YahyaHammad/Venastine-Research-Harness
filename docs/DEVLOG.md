@@ -24698,3 +24698,255 @@ as under-claimed. §72 avoided this by accident, its paragraphs opening
 with words; §73 does it on purpose.
 
 FIX-NOW: **86 done, 0 open.** The queue is closed.
+
+## Batch 157 -- a gate that was green because of what one machine happened to contain (2026-10-15)
+
+**ROADMAP_v3 §74. Three owner rulings, A63-A65.** Not a review-marathon
+batch: the marathon's `FIX-NOW` queue closed at 86 of 86 in batch 156. This
+is CI's verdict on the twenty-eight batches that had never reached it.
+
+### What happened
+
+Batches 129-156 were pushed as one push, and it was the first CI run that
+covered any of them. Three check runs came back red:
+
+```
+failure   docs-consistency     (tests)
+failure   pytest               (tests)
+failure   py313-info           (compat)      continue-on-error: true
+success   ruff / bandit / gitleaks / codeql / windows-subset
+```
+
+All three were the same test with the same three samples:
+
+```
+FAILED tests/test_docs_consistency.py::test_the_push_channel_ignores_every_sample_that_claims_it
+  package.json `neverDistribute` claims the git channel for these, and
+  `.gitignore` matches none of them:
+  ['logs (logs)', 'output (research output)', '.ipynb_checkpoints (notebook checkpoints)']
+```
+
+`compat` reports overall SUCCESS while containing one of the three, because
+`py313-info` carries `continue-on-error: true` -- a job that posts a failing
+check run without gating. That is why this read as three failures and two of
+them blocked.
+
+The totals are worth recording before anything else: `1 failed, 7182 passed,
+29 skipped` = 7212, which is exactly the digit `AGENTS.md`, `README.md` and
+`docs/ARCHITECTURE.md` state. The count gates were right; one assertion was
+wrong.
+
+### Why it was green here and red there
+
+The gate drives `git check-ignore` over every sample claiming the git
+channel, and it drove it in ROOT. The three rules are `.gitignore:1`
+`.ipynb_checkpoints/`, `:4` `logs/` and `:60` `output/` -- **directory-only
+patterns**, and git decides whether a path is a directory by asking the
+filesystem.
+
+Measured in a throwaway repository:
+
+```
+.gitignore: logs/        nothing on disk       `logs`   NOT IGNORED
+.gitignore: logs/        after mkdir logs      `logs`   ignored  (.gitignore:1:logs/)
+.gitignore: logs/        nothing on disk       `logs/`  ignored  -- the slash written out
+```
+
+All three directories exist on this machine because the harness creates
+them; none exists in a clone. The gate arrived in batch 140 with the rest of
+S18-01/S18-08 and was verified, seventeen times, against a working tree that
+already contained the answer.
+
+**Reproduced locally before changing anything.** A `git clone --no-hardlinks`
+of the worktree into the scratchpad, `cp providers.json.example
+providers.json` exactly as both jobs do, then the file alone:
+`1 failed, 59 passed, 1 skipped` -- the docs-consistency job's result, to the
+test.
+
+### The protection was intact, so the fix is to the question
+
+`git add -A` stages FILES. Measured in the fresh-clone tree: `logs/app.log`,
+`logs/sub/app.log`, `output/run-1/report.md` and
+`prompts/.ipynb_checkpoints/system.md` are **all** ignored with none of those
+directories present, because a path's continuation is what tells git the
+component before the slash is a directory. That is already why
+`CLAUDE-SECURITY-2026-01-01/report.md` resolved against `CLAUDE-SECURITY-*/`
+while its three siblings resolved against nothing -- the list contained a
+working example of the right sample shape the whole time.
+
+So `.gitignore` keeps its trailing slashes. Dropping them would have made the
+gate answerable and the patterns wider than they are meant to be.
+
+### The one real hole, and it was the one value nothing could ask about
+
+Sweeping every git-channel sample through a modelled fresh clone put 14 of 17
+in the clear and the three in question red. Then the same question asked one
+level down, of the DATA rather than the samples: which declared `value` does
+no sample demonstrate?
+
+```
+compiled python    suffix-or-segment   .pyc            x.pyc
+compiled python    suffix-or-segment   __pycache__     **NO SAMPLE**
+```
+
+One, out of sixteen values across thirteen entries. And `.gitignore` had no
+`__pycache__` rule at all -- only `*.pyc` -- so in a fresh-clone tree:
+
+```
+__pycache__/x.cpython-311.pyc           ignored via .gitignore:3:*.pyc
+core/__pycache__/loop.cpython-311.pyc   ignored via .gitignore:3:*.pyc
+__pycache__/README.txt                  **NOT IGNORED**
+__pycache__                             **NOT IGNORED**
+x.pyc.3912                              **NOT IGNORED**
+```
+
+The npm channel excludes the directory wholesale, through the
+`!**/__pycache__` guard that `package.json`'s own `files` gate REQUIRES. So
+one list, three channels, the channel with the weaker rule, and the only
+value in the list no gate could drive. The realistic trigger is not a README:
+CPython writes its byte-compile temp as `<target>.<pid>` beside the target,
+inside that directory, and `*.pyc` does not match a name ending in digits.
+Latent rather than live when found -- all fifteen `__pycache__` entries in
+the tree were `.pyc` files, reported `!!`, and nothing was tracked under one.
+
+### A second environment leak, measured rather than assumed
+
+A global `core.excludesFile` also reaches `check-ignore`. Set one naming a
+path nothing else covered, and that path came back ignored; with
+`GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` neutralised it did not, while the
+committed `.gitignore` still applied. `.git/info/exclude` is a third such
+source. So the old gate had three ways to be green for a reason that does not
+ship, and the only one that fired was the working tree.
+
+The driver now builds its own tree: `tempfile.TemporaryDirectory`, `git init
+-q`, copy the committed `.gitignore`, and both config variables pointed at
+paths inside that tree which do not exist -- git reads a missing config file
+as empty. A non-existent path rather than `os.devnull`, because this suite
+also runs on win32 where that is `nul` and not a file git will open; verified
+from Python on this machine. The gate also asserts the tree tracks exactly
+one `.gitignore`, since a nested one would mean the driver copies too little
+and under-tests in silence.
+
+### The insertion that broke a citation
+
+`__pycache__/` goes in next to `*.pyc`, which shifts every line below it --
+and `tests/test_secrets.py:1034` cited `.gitignore:17-22` by line range. That
+citation now names the RULE (`.gitignore`'s `*.tmp` comment) instead, so the
+next insertion cannot stale it. `docs/DEVLOG.md:6359` cites `.gitignore:7`
+and is deliberately left: an entry records what was true in its own batch,
+and rewriting history to match today is the opposite of what this file is
+for. Nothing in the repository resolves a `file:line` citation, which is
+register item 109 and stays there.
+
+### The controls
+
+Four, each restored from bytes held in the scratchpad and verified by
+sha256 -- never `git checkout`.
+
+```
+C1  bare `logs` sample restored            KILLED    the reshape is load-bearing
+C2  `__pycache__/` removed from .gitignore KILLED    the rule is load-bearing
+C3  `__pycache__/README.txt` sample gone   KILLED    the relation detects an undriven value
+C4  old ROOT driver + bare sample          SURVIVED  the defect, reproduced in place
+```
+
+C4 is the one worth keeping. With the old driver and the old sample the gate
+**passes on this machine** -- so the sample reshape alone would have been
+green again, and green for the same bad reason. The reshape fixes the
+failure; the driver is what stops it recurring.
+
+### Why py313-info is not being promoted
+
+Its own comment offers the flip: "one flag flip once the failures it finds
+are fixed rather than recorded." Its first run ever returned `7182 passed, 29
+skipped` on 3.13 -- identical to 3.11, with no version-specific failure in
+it. One run is not the sustained green that comment sets as the bar, so the
+flag stays, and the number is written down here instead of being re-derived
+by whoever asks next. Owner's ruling.
+
+### Verification
+
+Full suite 7212 -> 7213 (one new test, the relation). The docs file 61 -> 62,
+stated in `docs/ARCHITECTURE.md`'s source tree; the suite total in
+`AGENTS.md`, `README.md` and `docs/ARCHITECTURE.md`. Controls 4 of 4. Fresh
+clone red before and green after, which is the condition CI measures and the
+one this gate now measures for itself.
+
+### And one defect this batch's own verification found, after two wrong diagnoses
+
+The full suite failed once, at
+`tests/test_tui.py::TestTheQuitGesture::test_a_second_press_inside_the_window_quits`,
+in a run that took **373 seconds against the ~71 batch 156 measured**. A
+second run was green in 184. Nothing in this batch goes near the TUI.
+
+**Wrong diagnosis one, from the source shape.** The test is
+
+```python
+await pilot.press("ctrl+c")
+await pilot.pause()
+await pilot.press("ctrl+c")
+await pilot.pause()
+assert app._shutting_down, "two presses did not quit"
+```
+
+which is exactly TECHNICAL_DEBT 85's pattern -- a positive assertion after a
+raw `pause()` -- and item 85's resolution even names the mechanism: a POSTED
+key, `press` returning before the binding fires, `pause()` ending on
+`wait_for_idle(0)`, a process-wide CPU heuristic measured at **21ms idle
+against 1021ms with one busy sibling thread**. So the predicate that entry
+prescribes went in: `assert await settle(pilot, lambda: app._shutting_down)`.
+
+**It was inert, and the control is what said so.** Item 85's own instrument --
+`Pilot.pause` patched to a bare `asyncio.sleep(0)`, with a sabotage check
+confirming it is reached, all ten tests in the class failing when the patch
+raises -- leaves the ORIGINAL assertion passing. So the pump reaches the
+binding inside one loop turn and there was never a race here. The predicate
+polls for ten seconds and then fails anyway.
+
+**Wrong diagnosis two, from the same instrument pointed wider.** Re-pointed at
+all of `tests/test_tui.py` it fails 35 of 472, and those are not races either:
+one loop turn is not enough for Textual to COMPOSE AND RENDER, so
+`TestTheSidebarScrolls` and `TestTheModalsSubjectIsOnScreen` fail beside the
+pump ones. It separates *needs more than one loop turn* from *does not*. A
+mechanical source scan was no better -- `press` then raw `pause` then a
+positive assert matches 18 sites, ten of them `app.theme == "ember"` after a
+command dispatch, which is the synchronous population item 85 already warned
+twice is wrong to act on.
+
+**The actual defect is a wall-clock window the test never pinned.**
+`tui/app.py:3984` arms the gesture with `set_timer(QUIT_CONFIRM_S,
+self._disarm_quit)` and `QUIT_CONFIRM_S` is **2.0 seconds**. With `pause()`
+costing ~1021ms under load there is one of those between the two presses, plus
+what `press` itself awaits. Cross 2.0s and `_disarm_quit` has run, so the
+second `ctrl+c` ARMS AGAIN instead of quitting and `_shutting_down` stays
+False -- "two presses did not quit", the exact message.
+
+Shrinking the window reproduced it deterministically, with the inert predicate
+still in place:
+
+```
+VEN_PROBE_WINDOW=0.001  ->  FAILED test_a_second_press_inside_the_window_quits
+                            assert await settle(...) -> AssertionError
+```
+
+and the same probe named the population in the same measurement: **5 of the 10
+tests in that class** fail when the window shrinks. The five are the ones that
+never pinned it. The ones that pass are the tests ABOUT expiry, which pin it to
+0.05 to force it, and one that already pinned it to **30** to prevent it -- so
+both halves of the idiom were in the class and five tests used neither.
+
+All five now pin it at 30. The control is a relation rather than a red/green
+flip: **force the ambient window to 0.001s, which killed five of ten, and all
+ten pass**, because each pins its own. The class also passes an ordinary run,
+10 of 10.
+
+**The transferable part is about probes, not Textual.** Making `pause()`
+instant is the OPPOSITE of the condition a wall-clock expiry needs, so item
+85's instrument is systematically blind to this class -- a timer-dependent test
+passes under it with its defect intact. A probe encodes a hypothesis, and a
+passing probe clears only the hypothesis it encodes. Item 85 keeps its six and
+gains a note saying what it cannot see; this is recorded beside it rather than
+inside it, because it is a different defect that shares a proximate cause.
+
+Two wrong diagnoses, both from reading a pattern and reaching for the entry
+that matched it. The measurement cost less than either.

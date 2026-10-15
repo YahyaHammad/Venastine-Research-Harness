@@ -43,6 +43,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
+- **§74. A gate that was green because of what one machine happened to contain** - **(BUILT in batch 157)** (CI's first run over batches 129-156 came back red on three check runs, and all three were one test: the push-channel gate drove `git check-ignore` in the WORKING TREE, where `logs/`, `output/` and `.ipynb_checkpoints/` exist because the harness creates them, so three directory-only patterns matched here and matched nothing in a fresh clone -- seventeen batches of green behind a branch whose gate had never met one; the same measurement found `__pycache__` declared for the git channel, carrying no rule in `.gitignore` at all, and the one value in the list that no sample could reach)
 - **§73. Three cuts the redactor ran after, and the one result path that never passed it** - **(BUILT in batch 156)** (the review marathon's last three findings, closing its `FIX-NOW` queue: `web_search` and `arxiv_search` cut their third-party text and let `registry.dispatch` redact the piece that was kept, so a `ghp_` token straddling any of the three cuts survived at 36 of the 39 offsets it could straddle -- RB1's defect in the two tools RB1 did not reach, and §52's gap register had declined to solve it generally while two such tools were already in the tree; the per-LIST caps bounded 25 authors and not the 5,000 characters each could carry, and two of the six unbounded values were named by no finding, one of them the `arxiv_id` that both recovery URLs are built from, while the row COUNT both schemas advertise a bound for was enforced in neither, so a request for five results returned all 5,000 rows a provider chose to send; and `dispatch()`'s refusal early-return was the one result path that never passed the output redactor, which `docs/ARCHITECTURE.md` had already asserted it did -- measured, a credential the model put in an `agent_name` came back whole, on a path that also returns above the input scanner written for exactly that value)
 - **§72. A consent screen the project decided the length of, and three fields a rule was stated over but never applied to** - **(BUILT in batch 155)** (the review marathon's config-and-trust surface, all three findings: the trust prompt -- the informed-consent gate for content that becomes instructions -- pasted `settings.json` and `mcp.json` whole, so 2 x 2.2 MB rendered as 4.5 MB in 30 lines with the `mcp.json` command the section exists to show at 99.9994% of the way in, while the section the finding cited as the bounded contrast was bounded on one axis of two and a 2 MB `AGENTS.md` written as one line walked straight through it; `_parse_md_file` states "ELEMENT TYPES TOO, not just the container" in a comment and `model`, `provider` and the elements of `allowed_tools` sat under it unchecked, so `model: [a, b]` loaded clean and raised `TypeError: unhashable type: 'list'` out of the effort cache; and a `config.yaml` hand-edited mid-session -- the workflow `explain()` recommends by name -- answered a `/config` with "the error is in logs/app.log", which is true and is an answer to a different question. The crash that finding reported had already been closed by batch 135 and was found by re-driving rather than by reading)
 - **§71. A guard that compared two spellings of one id, and a cap whose two halves disagreed** - **(BUILT in batch 154)** (the review marathon's persistence surface, all four findings: tier 1 of the §27 thread classification -- the tier #82 calls authoritative over every clock comparison -- compared `str(thread_id)` as the producer records it against the hex spelling sqlmodel stores, so `'a-b' in {'ab'}` was False for every id there has ever been and the tier had never relabelled one row, while all four of its tests hand-wrote the same string on both sides; `max_injected_memories: 0` hid the `remember` tool and injected a "showing the 0 most recent of 2" header with a WARNING behind it on every turn, so the model was told that memories exist and are being withheld by a run that could never reach them; `list_threads` still carried the failure model batch 75 deleted from its two siblings; and the record's shape was stated as 9 fields and four data columns in thirteen live places after T2 and E13 each grew it by a column, including a BREAKING_CHANGES row promising a key-set assertion that did not exist)
@@ -2722,6 +2723,133 @@ leaked PID.
   because MCP is the only dynamic registrant and the composed name is its
   fact. A bound in the registry would be the fix-at-the-consumer shape
   `AGENTS.md` names by name.
+---
+
+## §74. A gate that was green because of what one machine happened to contain
+
+**Built in batch 157**, from the first CI run that covered batches 129-156.
+Three check runs came back red -- `tests / docs-consistency`, `tests / pytest`
+and `compat / py313-info` -- and all three were the same test, with the same
+three samples. Three owner rulings, recorded as A63-A65.
+
+**ONE TEST, THREE JOBS, AND IT HAD NEVER MET A FRESH CLONE.**
+`test_the_push_channel_ignores_every_sample_that_claims_it` drives
+`git check-ignore` over every `neverDistribute` sample that claims the git
+channel. It ran that in ROOT, and `logs/`, `output/` and
+`.ipynb_checkpoints/` are DIRECTORY-ONLY patterns: git decides whether a path
+is a directory by asking the filesystem. All three exist on a machine that
+has run the harness, because the harness creates them. None exists in a
+clone. So the gate answered yes here and no there, and the branch it guards
+had seventeen batches of green behind it.
+
+Measured in a throwaway repository: with `logs/` in `.gitignore` and nothing
+on disk, `logs` is not ignored; after `mkdir logs` it is; and `logs/`, with
+the slash written out, is ignored either way. The gate arrived in batch 140
+with the rest of S18-01/S18-08, and every batch after it was verified against
+a working tree that already had the answer in it.
+
+**THE PROTECTION ITSELF WAS INTACT, WHICH IS WHY THIS IS A FIX TO THE
+QUESTION AND NOT TO `.gitignore`.** `git add -A` stages FILES. `logs/app.log`
+is ignored whether or not `logs/` exists, because a path's continuation is
+what tells git that the component before the slash is a directory -- which is
+already why `CLAUDE-SECURITY-2026-01-01/report.md` resolved against
+`CLAUDE-SECURITY-*/` while its three siblings resolved against nothing. The
+samples the finding broke on were the only ones in the list written as a bare
+directory name, and a bare directory name is a shape the risk never takes.
+Dropping the trailing slashes in `.gitignore` would have made the gate
+answerable and made the patterns wider than they are meant to be: `logs/`
+covers a directory, and a file called `logs` is not what any of this is about.
+
+**ONE REAL HOLE FELL OUT OF THE SAME MEASUREMENT.** The `compiled python`
+entry declares two patterns, `.pyc` and `__pycache__`, for the git and npm
+channels. It sampled only `x.pyc` -- making `__pycache__` the one declared
+value in the whole list that no sample reached -- and `.gitignore` carried no
+`__pycache__` rule at all. So in a fresh-clone tree `__pycache__/README.txt`
+is not ignored, while npm excludes the directory wholesale through the
+`!**/__pycache__` guard that `package.json`'s own `files` gate REQUIRES. One
+list, three channels, and the channel with the weaker rule was the one no
+sample could ask about. The realistic trigger is not a README: CPython writes
+its byte-compile temp as `<target>.<pid>` beside the target, inside that
+directory, and `*.pyc` does not match a name ending in digits, so an
+interrupted compile leaves a file an `add -A` would stage. Latent rather than
+live when it was found -- all fifteen `__pycache__` entries in the tree were
+`.pyc` files and nothing was tracked under one.
+
+**AND A SECOND ENVIRONMENT LEAK, IN THE OTHER DIRECTION.** A global
+`core.excludesFile` also reaches `check-ignore`: measured, by setting one and
+watching a path it alone named come back ignored. `.git/info/exclude` does the
+same. So the old gate could have been made green by three separate things that
+do not ship, and the only one that fired was the working tree.
+
+**WHY THE INFORMATIONAL JOB IS NOT BEING PROMOTED.** `compat / py313-info`
+carries `continue-on-error: true`, which is why a workflow reporting overall
+success contained one of the three red checks, and why this read as three
+failures rather than two. Its own comment offers the flip -- "one flag flip
+once the failures it finds are fixed rather than recorded" -- and its first
+run ever returned `7182 passed, 29 skipped` on 3.13, identical to 3.11, with
+no version-specific failure in it. One run is not the sustained green that
+comment sets as the bar, so the flag stays and the number is written down here
+instead of being re-derived by whoever asks next.
+
+**AND ONE THING THIS BATCH'S OWN VERIFICATION FOUND**, which is not about the
+gate and cost two wrong diagnoses before it was measured. The full suite failed
+once, in 373 seconds against the ~71 batch 156 measured, at
+`tests/test_tui.py::TestTheQuitGesture::test_a_second_press_inside_the_window_quits`.
+The source shape -- a positive assertion after a raw `pilot.pause()` -- is
+TECHNICAL_DEBT 85's, so the predicate that entry prescribes went in first. It
+was INERT. `settle` polls for state that never arrives, because the defect is
+not the message pump: the quit arm is released by `set_timer(QUIT_CONFIRM_S,
+self._disarm_quit)` and that is WALL CLOCK at 2.0 seconds, while `pause()`
+costs 21ms idle and 1021ms with one busy sibling thread. A loaded run closes
+the window between the two presses and the second `ctrl+c` re-arms instead of
+quitting.
+
+Item 85's own instrument is what proves the distinction: with `Pilot.pause`
+patched to a bare `asyncio.sleep(0)` the ORIGINAL assertion passes, so the pump
+reaches the binding inside one loop turn and there was never a race here to add
+a predicate for. Shrinking the window instead reproduced the failure
+deterministically and named its population in the same measurement -- five of
+the ten tests in that class depend on a window none of them pinned, where the
+mechanical source scan said eighteen across the file and the sleep(0) patch
+said thirty-five, neither of them this. All five now pin it at 30, the value
+the class already used once, and the control is a relation rather than a flip:
+force the ambient window to 0.001s, which killed five of ten before, and all
+ten pass.
+
+**The transferable part is about probes, not about Textual.** Making `pause()`
+instant is the opposite of the condition a wall-clock expiry needs, so the
+instrument that found item 85's population is systematically blind to this one,
+and a test can pass under it with its defect intact. A probe encodes a
+hypothesis, and a passing probe clears only that hypothesis.
+
+### What §74 deliberately does not change
+
+**`.gitignore`'s directory-only patterns keep their trailing slashes.** The
+patterns are right; the question was wrong. See the third paragraph above.
+
+**The archive gate's `covered()` stays crude.** A nested sample
+(`prompts/.ipynb_checkpoints/system.md`) would demonstrate what the `segment`
+match means about depth, and it goes red there, because that matcher knows
+equality, a directory prefix and a glob and does not look for a segment in the
+middle of a path. Its docstring already states that it errs permissive so it
+"cannot produce a false red", and teaching it a new trick to accommodate a
+sample would be a second implementation of gitattributes matching grown for
+the gate's own convenience. The samples stay at the root instead.
+
+**No register item for the residual.** A `.pyc.<pid>` file OUTSIDE a
+`__pycache__` directory is still not ignored, and nothing writes one --
+CPython puts that temp beside its target, which is inside `__pycache__`.
+Widening to `*.pyc*` to cover a shape nothing produces is the move this
+section's own reasoning argues against twice.
+
+### Design Decisions Record — §74 (A63-A65)
+
+| id | decision |
+|---|---|
+| **A63** | **A sample is a path the risk actually takes, so a directory entry is sampled by a file inside it.** `logs` becomes `logs/app.log`, `output` becomes `output/run-1/report.md`, `.ipynb_checkpoints` becomes `.ipynb_checkpoints/system.md`. The bare names are REPLACED and not supplemented, because the gate requires every sample to be ignored and leaving one bare leaves the branch red. The justification is what the channel defends against: `git add -A` stages files, so the question "would this path be staged" is only ever asked about a file, and a path with a component after the slash is the one shape whose answer does not depend on what exists on disk. Measured both ways in a throwaway repository before choosing. Samples stay ROOT-LEVEL because the archive gate shares this list and its matcher is deliberately crude; demonstrating the `segment` match's depth is worth less than keeping that matcher from growing a second implementation of gitattributes matching |
+| **A64** | **A gate whose claim is about a fresh clone is measured in one, hermetically.** `_unignored_in_a_fresh_clone` builds a throwaway tree, copies the COMMITTED `.gitignore` into it and drives every `check-ignore` there, with `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` pointed at paths inside that tree which do not exist -- git reads a missing config file as empty. A non-existent path rather than `os.devnull`, because this suite also runs on win32 where that is `nul` and not a file git will open; verified from Python on both. This is the half that stops the defect recurring rather than the half that fixes it: with the samples reshaped the old ROOT-driven gate would be green again, and green for the same bad reason, because the three things that can answer for the committed file -- the working tree, `.git/info/exclude` and a global `core.excludesFile` -- are all still there. The gate also asserts the tree tracks exactly one `.gitignore`, since a nested one would mean the driver copies too little and under-tests in silence |
+| **A65** | **`__pycache__/` is a rule in its own right, and every declared pattern must be demonstrated by a sample.** The rule goes in next to `*.pyc` where a reader looks for it, and the relation -- every `value` in every entry reached by at least one of that entry's own `samples`, through the per-kind matcher the `match` field already names -- is what makes the omission findable rather than inferable. It found exactly one thing when it was written, and that thing was this section's second defect, which is the order B4 asks for: the consequence first, the check second. `test_every_never_distribute_entry_is_well_formed_and_drivable` already required samples to EXIST; this requires them to REACH, which is the difference between a list that can be driven and a list that is |
+
 ---
 
 ## §73. Three cuts the redactor ran after, and the one result path that never passed it

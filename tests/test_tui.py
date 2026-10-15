@@ -7226,11 +7226,17 @@ class TestTheQuitGesture:
     """Batch 57. Two presses to quit, and a copy is never one of them."""
 
     @pytest.mark.asyncio
-    async def test_ctrl_c_reaches_the_app_while_the_prompt_has_focus(self):
+    async def test_ctrl_c_reaches_the_app_while_the_prompt_has_focus(self, mocker):
         """The defect itself. `("ctrl+c", "quit")` was an ordinary app
         binding and `TextArea` binds ctrl+c to `copy`, so with the prompt
         focused -- which is where focus sits almost always -- the key did
         nothing at all when there was no selection to copy."""
+        # Pinned: the arm expires on a 2.0s WALL-CLOCK timer, and
+        # `pilot.pause()` costs 21ms idle against 1021ms with one busy
+        # sibling thread, so a loaded run can close the window before
+        # the assertion that looks for it reaches it (batch 157).
+        mocker.patch("tui.app.QUIT_CONFIRM_S", 30)
+
         app = VenastineApp("ANTHROPIC", "test-model", {})
         async with app.run_test() as pilot:
             await pilot.pause()
@@ -7246,7 +7252,13 @@ class TestTheQuitGesture:
             assert not app._shutting_down, "the first press quit outright"
 
     @pytest.mark.asyncio
-    async def test_a_second_press_inside_the_window_quits(self):
+    async def test_a_second_press_inside_the_window_quits(self, mocker):
+        # Pinned: the arm expires on a 2.0s WALL-CLOCK timer, and
+        # `pilot.pause()` costs 21ms idle against 1021ms with one busy
+        # sibling thread, so a loaded run can close the window before
+        # the assertion that looks for it reaches it (batch 157).
+        mocker.patch("tui.app.QUIT_CONFIRM_S", 30)
+
         app = VenastineApp("ANTHROPIC", "test-model", {})
         async with app.run_test() as pilot:
             await pilot.pause()
@@ -7309,11 +7321,17 @@ class TestTheQuitGesture:
 
     @pytest.mark.asyncio
     async def test_a_press_over_a_selection_while_armed_still_only_copies(
-            self):
+            self, mocker):
         """The other half of the same rule, and the one that makes it a
         rule rather than a first-press special case: no sequence of copies
         can end the session, however the gesture is standing."""
         from textual.widgets.text_area import Selection
+
+        # Pinned: the arm expires on a 2.0s WALL-CLOCK timer, and
+        # `pilot.pause()` costs 21ms idle against 1021ms with one busy
+        # sibling thread, so a loaded run can close the window before
+        # the assertion that looks for it reaches it (batch 157).
+        mocker.patch("tui.app.QUIT_CONFIRM_S", 30)
 
         app = VenastineApp("ANTHROPIC", "test-model", {})
         async with app.run_test() as pilot:
@@ -7338,9 +7356,15 @@ class TestTheQuitGesture:
             assert app._clipboard == "keep me", "the copy did not happen"
 
     @pytest.mark.asyncio
-    async def test_the_footer_says_what_a_second_press_will_do(self):
+    async def test_the_footer_says_what_a_second_press_will_do(self, mocker):
         """The armed state has exactly one visible consequence, so it is
         asserted where a person would read it."""
+        # Pinned: the arm expires on a 2.0s WALL-CLOCK timer, and
+        # `pilot.pause()` costs 21ms idle against 1021ms with one busy
+        # sibling thread, so a loaded run can close the window before
+        # the assertion that looks for it reaches it (batch 157).
+        mocker.patch("tui.app.QUIT_CONFIRM_S", 30)
+
         app = VenastineApp("ANTHROPIC", "test-model", {})
         async with app.run_test() as pilot:
             await pilot.pause()
@@ -7379,6 +7403,12 @@ class TestTheQuitGesture:
         out. `priority=True` is what reaches past it."""
         mocker.patch("tui.app.storage.list_threads",
                      return_value=_one_thread(uuid4()))
+
+        # Pinned: the arm expires on a 2.0s WALL-CLOCK timer, and
+        # `pilot.pause()` costs 21ms idle against 1021ms with one busy
+        # sibling thread, so a loaded run can close the window before
+        # the assertion that looks for it reaches it (batch 157).
+        mocker.patch("tui.app.QUIT_CONFIRM_S", 30)
 
         app = VenastineApp("ANTHROPIC", "test-model", {})
         async with app.run_test() as pilot:
