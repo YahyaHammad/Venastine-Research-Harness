@@ -1510,6 +1510,34 @@ def _reset_sudo_quarantine() -> None:
     _sudo_rejected.clear()
 
 
+def _session_auth_check(backend: str, *, used_ssh_secrets: bool,
+                        used_sudo_secret: bool):
+    """The `SessionProcess` auth check for a session on *backend*, or None
+    when it offered nothing a refusal could quarantine (TECHNICAL_DEBT 51,
+    batch 160).
+
+    The two matchers are the one-shot routes' own, called with the
+    session's first output where those routes pass stderr. EACH IS GATED ON
+    THE EXIT CODE HERE, which the one-shot routes do not need: their stderr
+    is one command's, while a session's merged stream is everything the
+    remote program printed for as long as it ran, and "Permission denied"
+    is an ordinary thing for a program to print. A refused SSH login ends
+    with 255 -- ssh's own status, the code `_run_ssh_process` already reads
+    as "never got there" -- and a refused sudo password ends the command
+    non-zero before it starts.
+    """
+    if not (used_ssh_secrets or used_sudo_secret):
+        return None
+
+    def check(code: int, first_output: str) -> None:
+        if used_ssh_secrets and code == 255:
+            _note_ssh_auth_failure(first_output, True)
+        if used_sudo_secret and code != 0:
+            _note_sudo_auth_failure(first_output, backend, True)
+
+    return check
+
+
 def _sudo_password_line(secret, binary: bool = False):
     """The one line written to a root command's stdin.
 
@@ -3621,7 +3649,8 @@ class SessionProcess:
 
     ran_on = ""
 
-    def __init__(self, proc, *, tier: str, credentials=None) -> None:
+    def __init__(self, proc, *, tier: str, credentials=None,
+                 auth_check=None) -> None:
         self._proc = proc
         self.tier = tier
         self._kill_lock = threading.Lock()
@@ -3631,6 +3660,35 @@ class SessionProcess:
         # it authenticated against cannot be scoped to that call
         # (batch 142). See `_popen_session_with_credentials`.
         self._credentials = credentials
+        # `(code, first_output) -> None`, or None when this session offered
+        # no stored credential. See `note_exit`.
+        self._auth_check = auth_check
+
+    def note_exit(self, code: Optional[int], first_output: str) -> None:
+        """Hand the quarantine a finished session's exit code and the start
+        of its output (TECHNICAL_DEBT 51, batch 160). Once; idempotent.
+
+        A REFUSED CREDENTIAL WAS QUARANTINED ONLY WHEN A ONE-SHOT COMMAND
+        OFFERED IT. Both matchers read the subprocess's stderr, and a
+        session has none to read: `_popen_session` merges it into stdout so
+        a monitor sees lines in the order they were written, and the stream
+        belongs to the session manager. So a model starting background
+        sessions against a host whose stored password is wrong was exactly
+        "a harness that retried on every command" -- two authentication
+        attempts a call, a lockout at four -- and the protection did not
+        reach it.
+
+        The manager calls this, because the manager holds the stream; the
+        MATCHING stays here, in the two functions the one-shot routes call,
+        so there is one copy of what a refusal looks like. The manager hands
+        over the session's first output and nothing else -- an
+        authentication failure is the first thing a session prints, because
+        nothing else has run yet.
+        """
+        with self._kill_lock:
+            check, self._auth_check = self._auth_check, None
+        if check is not None and code is not None:
+            check(code, first_output)
 
     @property
     def stdout(self):
@@ -3856,23 +3914,31 @@ def start_sandboxed(
                 raise SandboxUnavailable(
                     "wsl.exe was not found, so the WSL backend cannot run "
                     "anything.") from None
-            return WslSessionProcess(proc, tier=profile.tier)
+            return WslSessionProcess(
+                proc, tier=profile.tier,
+                auth_check=_session_auth_check(
+                    BACKEND_WSL, used_ssh_secrets=False,
+                    used_sudo_secret=sudo_secret is not None))
         if route == ROUTE_SSH:
             args = _ssh_argv(
                 command,
                 session_timeout_s=int(timeout_s) + SESSION_TIMEOUT_MARGIN_S,
                 as_root=needs_root)
+            stored = _ssh_stored_secrets()
             try:
                 proc, window = _popen_session_with_credentials(
                     args, env=_ssh_env(), sudo_secret=sudo_secret,
                     guard_reason="a root command over SSH",
-                    askpass_answers=_ssh_stored_secrets())
+                    askpass_answers=stored)
             except FileNotFoundError:
                 raise SandboxUnavailable(
                     f"{_ssh_binary()!r} was not found, so the SSH backend "
                     f"cannot run anything.") from None
-            return SshSessionProcess(proc, tier=profile.tier,
-                                     credentials=window)
+            return SshSessionProcess(
+                proc, tier=profile.tier, credentials=window,
+                auth_check=_session_auth_check(
+                    BACKEND_SSH, used_ssh_secrets=bool(stored),
+                    used_sudo_secret=sudo_secret is not None))
         if route == ROUTE_CONTAINER:
             runtime = known_runtime()
             _log_image_identity(runtime)

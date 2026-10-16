@@ -294,7 +294,7 @@ def _log_once(path, text: str) -> str:
 class TestEverySinkHasTheSameVocabulary:
     """The parity this file could not previously express.
 
-    `redact_secrets` is the seven vendor patterns. `_redact_credential_shapes`
+    `redact_secrets` is the vendor patterns. `_redact_credential_shapes`
     is the only thing in the project that matches a credential with no vendor
     prefix, and it had ONE caller -- so the harness's own diagnostics took a
     strictly smaller vocabulary than tool output, for forty-six days, with
@@ -338,7 +338,7 @@ class TestEverySinkHasTheSameVocabulary:
         assert needle not in redact_output_text(text), (
             f"{label}: the credential reached the model")
 
-    def test_the_three_shapes_are_all_still_in_the_list(self):
+    def test_the_shapes_are_all_still_in_the_list(self):
         """THE GUARD ON THE GUARD, and batch 145's mutation pass is why.
 
         The test below is parametrised over the rows whose labels are in
@@ -359,14 +359,15 @@ class TestEverySinkHasTheSameVocabulary:
             f"from REDACTION_CASES, so the test below has no cases and "
             f"SKIPS rather than guarding anything: "
             f"{sorted(set(SHAPE_CASE_LABELS) - present)}")
-        assert len(present) == 3, (
-            f"the three shapes are three: {sorted(present)}")
+        assert len(present) == 6, (
+            f"the shapes are six since batch 160 (TECHNICAL_DEBT 52 added "
+            f"the three structural ones): {sorted(present)}")
 
     @pytest.mark.parametrize(
         "label,text,needle",
         [c for c in REDACTION_CASES if c[0] in SHAPE_CASE_LABELS],
         ids=[c[0] for c in REDACTION_CASES if c[0] in SHAPE_CASE_LABELS])
-    def test_the_three_shapes_are_what_discriminates(
+    def test_the_shapes_are_what_discriminates(
             self, label, text, needle):
         """THE GUARD ON THE CASE LIST, and the reason this class is not
         just more of what was already here.

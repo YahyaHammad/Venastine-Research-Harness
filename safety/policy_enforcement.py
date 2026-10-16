@@ -205,6 +205,18 @@ def is_url_permitted(url: str, resolve: bool = True) -> str | None:
 # ---- Secret redaction -----------------------------------------------------
 # ---------------------------------------------------------------------------
 
+# A PEM body's line break: a real one, or the two-character escape a JSON
+# string carries -- a cloud service-account key file is exactly that shape.
+# Unambiguous on purpose: every repetition holds a mandatory break, so the
+# spaces between two breaks belong to exactly one repetition and a body
+# that fails to close backtracks in linear time, not exponential.
+_PEM_BREAK = r"(?:[ \t]*(?:\r?\n|\\r\\n|\\n))"
+_PEM_SEP = _PEM_BREAK + r"+[ \t]*"
+# One body line: base64, at least 16 characters, so a word of prose after a
+# quoted header is not one; or the two RFC 1421 headers a legacy encrypted
+# key carries before its base64.
+_PEM_UNIT = r"(?:[A-Za-z0-9+/=]{16,}|(?:Proc-Type|DEK-Info):[^\r\n\\]*)"
+
 _SECRET_PATTERNS = [
     # OpenAI-style keys
     re.compile(r"sk-[a-zA-Z0-9]{20,}"),
@@ -218,8 +230,40 @@ _SECRET_PATTERNS = [
     re.compile(r"AIza[0-9A-Za-z\-_]{35}"),
     # Slack tokens
     re.compile(r"xox[baprs]-[0-9A-Za-z\-]{10,}"),
-    # PEM private key headers
-    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+    # PEM private keys: the header, and the WHOLE BLOCK when it is there
+    # (TECHNICAL_DEBT 52, batch 160). This used to be the header line alone,
+    # so the base64 body -- the key material -- survived verbatim under a
+    # `[REDACTED]` that read as the key having been removed. The body is
+    # OPTIONAL in the pattern on purpose: `_input_leaf` uses `.search()`,
+    # and anything carrying the header still matches, so input refusals are
+    # exactly what they were. The body is LINES, each after a line break:
+    # a block with its END line goes whole, and one a cut ended goes as far
+    # as its lines do. Lines rather than "anything up to END" because prose
+    # quotes both markers -- "starts with -----BEGIN ... and ends with
+    # -----END ..." -- and a lazy match took the sentence between them.
+    # Measured: that sentence now loses its two markers and keeps its words.
+    re.compile(
+        r"-----BEGIN [A-Z ]*PRIVATE KEY-----"
+        r"(?:(?:" + _PEM_SEP + _PEM_UNIT + r")*"
+        r"(?:" + _PEM_SEP + r"[A-Za-z0-9+/=]{1,15})?"
+        r"(?:" + _PEM_BREAK + r"*[ \t]*)-----END [A-Z ]*PRIVATE KEY-----"
+        r"|(?:" + _PEM_SEP + _PEM_UNIT + r")*)"),
+    # --- Batch 160, TECHNICAL_DEBT 52: the CURRENT siblings of the vendor
+    # --- formats above, each of which the older pattern beside it misses
+    # --- by a character class -- a `_` or a second `-` the 2024 shapes
+    # --- never had. Measured through the real `redact_output_text` before
+    # --- this: every one survived. They refuse inputs too, as `ghp_` and
+    # --- `sk-` always have; one vendor list, one vocabulary.
+    # GitHub fine-grained PATs, the format `ghp_` is being retired for
+    re.compile(r"github_pat_[A-Za-z0-9_]{22,}"),
+    # GitHub OAuth, user-to-server, server-to-server and refresh tokens
+    re.compile(r"gh[ousr]_[A-Za-z0-9]{36}"),
+    # OpenAI project, service-account and admin keys: `sk-proj-...`
+    re.compile(r"sk-(?:proj|svcacct|admin)-[A-Za-z0-9_\-]{20,}"),
+    # Stripe live secret and restricted keys
+    re.compile(r"[sr]k_live_[A-Za-z0-9]{16,}"),
+    # npm access tokens
+    re.compile(r"npm_[A-Za-z0-9]{36}"),
 ]
 
 
@@ -245,7 +289,7 @@ def redact_secrets(text: str) -> str:
 # ---- Credential shapes (#167, batch 20) ------------------------------------
 # ---------------------------------------------------------------------------
 #
-# The seven patterns above are VENDOR TOKENS -- every one has a prefix some
+# The patterns above are VENDOR TOKENS -- every one has a prefix some
 # company mints, so a match is high-confidence and a bare `[REDACTED]` loses
 # nothing structural. A credential that is just a password in a field has no
 # prefix, and nothing matched it (#167): batch 14 added five build manifests
@@ -305,9 +349,102 @@ _ASSIGNMENT_RE = re.compile(
     r"(?i)\b(password|passwd)\b(\s*(?:[=:][ \t]*|[ \t]))"
     r"([\"'])([^\"'\n]{4,200})\3")
 
+# --- Batch 160, TECHNICAL_DEBT 52: three STRUCTURAL shapes, output only by
+# --- owner ruling. Each carries a credential with no vendor prefix, and
+# --- each anchors on structure a security paper does not produce by
+# --- accident, which is the false-positive argument the password shapes
+# --- above already make.
+
+# Authorization: Bearer abc... -> Authorization: Bearer [REDACTED]. Anchored
+# on the HEADER NAME, never on the scheme word: "Bearer tokens expire" is
+# prose and must survive, and that is the keyword-widening the comment above
+# refuses. The separator admits a header line, a JSON or dict key (`"..":`)
+# and `=`, so a curl line, a captured request and a logged dict all match.
+# The value's alphabet has no `$ < > { } [`, so `Bearer $TOKEN`,
+# `Bearer <token>` and an already-redacted value never match, and
+# `Digest username=...`, whose secret is not one value, is left alone. A
+# value with NO scheme word must also be 16 characters and carry a digit,
+# because API documentation writes "Authorization: required" and a bare
+# 8-character floor redacted the word.
+# Groups: 1 header name, 2 separator, 3 scheme (or None).
+_AUTH_HEADER_RE = re.compile(
+    r"(?i)\b((?:proxy-)?authorization)([\"']?\s*[:=]\s*[\"']?)"
+    r"(?:((?:bearer|basic|token)\s+)[A-Za-z0-9._~+/=\-]{8,}"
+    r"|(?=[A-Za-z._~+/=\-]*[0-9])[A-Za-z0-9._~+/=\-]{16,})")
+
+# A JSON Web Token, whole: three base64url segments, the first two of
+# which open with `eyJ` because both are JSON objects (`{"`). A bearer
+# credential wherever it appears, and the shape `_AUTH_HEADER_RE` cannot
+# reach when the token is pasted without its header.
+_JWT_RE = re.compile(
+    r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")
+
+# The END of a PEM key block whose BEGIN is not in this string: the footer
+# and the run of base64 lines above it. The vendor pattern takes a block
+# from its header; this is the other half, for text a cut started in the
+# middle of a block -- a page, a session's tail as its start sweeps through
+# the output. Found as a literal and walked BACKWARDS in code, because a
+# regex that has to start at the first body line is tried at every line
+# start of a long base64 blob and is quadratic on one with no footer.
+_PEM_END_RE = re.compile(r"-----END [A-Z ]*PRIVATE KEY-----")
+_PEM_BODY_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=")
+
+
+def _before_pem_break(text: str, i: int):
+    """The index before the line break(s) ending at *i*, or None.
+
+    `_PEM_SEP` read backwards: spaces, then one or more breaks (real, or
+    the JSON escape), each with its own spaces."""
+    k = i
+    while k and text[k - 1] in " \t":
+        k -= 1
+    seen = False
+    while True:
+        if k and text[k - 1] == "\n":
+            k -= 1
+            if k and text[k - 1] == "\r":
+                k -= 1
+        elif k >= 2 and text[k - 2:k] == "\\n":
+            k -= 2
+            if k >= 2 and text[k - 2:k] == "\\r":
+                k -= 2
+        else:
+            break
+        seen = True
+        while k and text[k - 1] in " \t":
+            k -= 1
+    return k if seen else None
+
+
+def _redact_pem_tails(text: str) -> str:
+    """Replace each orphan footer, and the base64 lines above it, whole.
+
+    Linear: each walk stops at the first character outside the body
+    alphabet, and a footer's own `-` is one, so no two walks share text."""
+    pieces, last = [], 0
+    for m in _PEM_END_RE.finditer(text):
+        start = i = m.start()
+        while True:
+            k = _before_pem_break(text, i)
+            if k is None:
+                break
+            r = k
+            while r > last and text[r - 1] in _PEM_BODY_CHARS:
+                r -= 1
+            if r == k:
+                break
+            start = i = r
+        pieces.append(text[last:start])
+        pieces.append(REDACTION_MARKER)
+        last = m.end()
+    pieces.append(text[last:])
+    return "".join(pieces)
+
 
 def _redact_credential_shapes(text: str) -> str:
-    """Apply the three context shapes, preserving surrounding structure.
+    """Apply the context and structural shapes, preserving surrounding
+    structure.
 
     Each replacer checks the captured VALUE against the placeholder shapes
     before substituting -- a template reference is exactly what docs and
@@ -328,7 +465,13 @@ def _redact_credential_shapes(text: str) -> str:
         return (f"{m.group(1)}{m.group(2)}{m.group(3)}"
                 f"{REDACTION_MARKER}{m.group(3)}")
 
-    return _ASSIGNMENT_RE.sub(_assign, text)
+    text = _ASSIGNMENT_RE.sub(_assign, text)
+
+    text = _AUTH_HEADER_RE.sub(
+        lambda m: (f"{m.group(1)}{m.group(2)}{m.group(3) or ''}"
+                   f"{REDACTION_MARKER}"), text)
+    text = _JWT_RE.sub(REDACTION_MARKER, text)
+    return _redact_pem_tails(text)
 
 
 def redaction_enabled() -> bool:

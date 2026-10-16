@@ -1948,6 +1948,45 @@ class TestTheWorkspaceCannotBeTheHarness:
     def test_an_unrelated_project_is_allowed(self, tmp_path):
         assert protected_paths.check_workspace(str(tmp_path)) is None
 
+    @pytest.mark.parametrize("empty", ["", "   "])
+    def test_an_empty_workspace_is_refused_before_it_is_resolved(self, empty):
+        """TECHNICAL_DEBT 93, batch 160. `os.path.realpath("")` is the
+        launch directory, so an empty name reached every containment test
+        below as an ordinary directory and was judged as one."""
+        reason = protected_paths.check_workspace(empty)
+        assert reason is not None
+        assert "AGENT_WORKSPACE" in reason
+        assert "empty" in reason
+
+    def test_an_empty_variable_reaches_the_guard_as_an_empty_path(
+            self, monkeypatch, tmp_path):
+        """The composition the register entry measured, end to end through
+        the real loader. `_overlay_env` honours a variable that is set at
+        all, so `AGENT_WORKSPACE=` arrives as `workspace_dir == ""`, and
+        `WORKSPACE_DIR_EXPLICIT` reads presence, so the same empty value
+        also names the project.
+
+        THE CHDIR IS LOAD-BEARING. Launched from the harness root, the
+        empty path resolves to the install tree and was refused before
+        batch 160 for that reason -- the entry's "what limits it today".
+        From an unrelated directory nothing refused it, which is the case
+        this pins: the launch directory itself is allowed, and its empty
+        spelling is not."""
+        import config_schema
+
+        monkeypatch.chdir(tmp_path)
+        with monkeypatch.context() as mp:
+            mp.setenv("AGENT_WORKSPACE", "")
+            cfg = config_schema.load(force=True)
+            explicit = config_schema.derived_values(cfg)[
+                "WORKSPACE_DIR_EXPLICIT"]
+        config_schema.load(force=True)
+
+        assert cfg.workspace_dir == ""
+        assert explicit is True
+        assert protected_paths.check_workspace(str(tmp_path)) is None
+        assert protected_paths.check_workspace(cfg.workspace_dir) is not None
+
     def test_a_sibling_sharing_a_prefix_is_not_inside(self):
         """`<harness>-evil` must not read as inside `<harness>`, which is
         what a bare startswith would say. test_file_ops.py:314 records the

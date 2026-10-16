@@ -1193,3 +1193,51 @@ class TestAgainstARealRootCommand:
                 "id -u", live, profile=_profile(),
                 docker_available=False, backend=BACKEND_SSH, needs_root=True)
         assert "could not be entered" in str(excinfo.value)
+
+
+class TestASessionsRefusedPasswordIsQuarantined:
+    """TECHNICAL_DEBT 51, batch 160. `_note_sudo_auth_failure` read a
+    one-shot's stderr, and a session has none: `_popen_session` merges it
+    into the stream the session manager owns. So a refused password was
+    quarantined only when a one-shot command offered it, and a model
+    retrying root SESSIONS walked the account towards `pam_faillock`.
+    The manager now hands the session's first output to `note_exit`."""
+
+    def _root_session(self, ws):
+        return sandbox.start_sandboxed(
+            "apt-get upgrade", ws, profile=_profile(), docker_available=True,
+            timeout_s=600, backend=BACKEND_WSL, needs_root=True)
+
+    def test_a_refused_password_quarantines_the_entry(self, store, wsl_on,
+                                                      popen, ws):
+        session = self._root_session(ws)
+        session.note_exit(1, "sudo: Authentication failed, try again.\n")
+        reason = sandbox.sudo_refusal(BACKEND_WSL)
+        assert reason is not None and WSL_ENTRY in reason
+
+    def test_a_session_that_exited_zero_quarantines_nothing(
+            self, store, wsl_on, popen, ws):
+        """The gate a session needs and a one-shot does not: the stream is
+        everything the command printed, and a command that SUCCEEDED got
+        past sudo, whatever it went on to print."""
+        session = self._root_session(ws)
+        session.note_exit(0, "grep found: authentication failure for bob\n")
+        assert sandbox.sudo_refusal(BACKEND_WSL) is None
+
+    def test_a_session_that_offered_no_password_has_nothing_to_quarantine(
+            self, store, wsl_on, popen, ws):
+        """A `sudo` the model typed fails the same way, and the harness
+        supplied nothing of its own to blame -- the one-shot rule."""
+        session = sandbox.start_sandboxed(
+            "pytest -x", ws, profile=_profile(), docker_available=True,
+            timeout_s=600, backend=BACKEND_WSL)
+        session.note_exit(1, "sudo: Authentication failed, try again.\n")
+        assert sandbox.sudo_refusal(BACKEND_WSL) is None
+
+    def test_the_note_is_taken_once(self, store, wsl_on, popen, ws):
+        """Idempotent, because a session ends once and the check holds a
+        decision about that end."""
+        session = self._root_session(ws)
+        session.note_exit(0, "")
+        session.note_exit(1, "sudo: Authentication failed, try again.\n")
+        assert sandbox.sudo_refusal(BACKEND_WSL) is None

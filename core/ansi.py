@@ -89,7 +89,9 @@ and its family can make a terminal draw text in an order the bytes do not
 have, which is the same class of problem -- but removing them is not the
 same kind of answer, because a bidi mark is legitimate content in Arabic
 and Hebrew text while a control character is never legitimate content at
-all. TECHNICAL_DEBT 104 carries it.
+all. TECHNICAL_DEBT 104 carried it, and batch 160 answered it where the
+answer is different: `reveal_invisible_counted` shows them as `<U+202E>`
+in the two approval prompts, and nowhere else.
 """
 
 from __future__ import annotations
@@ -247,6 +249,47 @@ def for_display(text) -> str:
     beside it, so there is one scanner and one answer.
     """
     return for_display_counted(text)[0]
+
+
+#: Characters that change how text is DRAWN without being drawn
+#: (TECHNICAL_DEBT 104, batch 160): the bidirectional embeddings, overrides
+#: and isolates, the marks, the zero-width characters and the byte-order
+#: mark, the invisible operators, and the TAG block -- which is ASCII
+#: spelled invisibly, and the published way to smuggle text past a reader.
+_INVISIBLE = frozenset(
+    [0x061C, 0x180E, 0xFEFF]
+    + list(range(0x200B, 0x2010))
+    + list(range(0x202A, 0x202F))
+    + list(range(0x2060, 0x2065))
+    + list(range(0x2066, 0x206A))
+    + list(range(0xE0000, 0xE0080)))
+_REVEALED = {code: f"<U+{code:04X}>" for code in _INVISIBLE}
+
+
+def reveal_invisible_counted(text) -> tuple[str, int]:
+    """*text* with each character in `_INVISIBLE` shown as `<U+XXXX>`, and
+    how many there were.
+
+    FOR CONSENT PROMPTS ONLY, by owner ruling (batch 160), and that scope
+    is the module docstring's reason applied rather than set aside. A bidi
+    mark is ordinary content in Arabic and Hebrew, a zero-width joiner
+    builds every family emoji, a non-joiner spells Persian -- so revealing
+    them in a transcript corrupts correct text. In an approval the trade
+    reverses: the text is a command a person is about to authorise, a
+    U+202E can draw it in an order its bytes do not have (the Trojan Source
+    class), and the reader needs the bytes. Revealed rather than removed,
+    because removing one is the corruption, and a reader shown
+    `<U+202E>` can see both what is there and that something was.
+
+    Takes anything, as `for_display_counted` does; meant to run on its
+    output, since a control character is removed and an invisible one is
+    shown, and the two never overlap.
+    """
+    text = str(text)
+    count = sum(1 for ch in text if ord(ch) in _INVISIBLE)
+    if not count:
+        return text, 0
+    return text.translate(_REVEALED), count
 
 
 def _sequence_end(s: str, i: int) -> int | None:

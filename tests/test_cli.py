@@ -1304,6 +1304,79 @@ class TestNothingUntrustedCanRedrawAConsentPrompt:
         assert "terminal control sequence" in out, out
 
 
+class TestAnApprovalShowsWhatDrawsTextOutOfOrder:
+    """TECHNICAL_DEBT 104, batch 160. `for_display` removes what a terminal
+    ACTS on and leaves what it draws, and a bidi override is drawn -- in an
+    order its bytes do not have, which is the Trojan Source class. In the
+    one prompt where a person authorises a command, the owner ruling is
+    that the bytes are shown: `<U+202E>`, and one line saying so.
+
+    Every character here is written as an escape, never literally, so this
+    file cannot itself be the thing a reader misreads.
+    """
+
+    _render = staticmethod(TestNothingUntrustedCanRedrawAConsentPrompt._render)
+
+    @pytest.mark.parametrize("char,mark", [
+        ("\u202e", "<U+202E>"),       # right-to-left override
+        ("\u2066", "<U+2066>"),       # left-to-right isolate
+        ("\u200b", "<U+200B>"),       # zero-width space
+        ("\ufeff", "<U+FEFF>"),       # zero-width no-break space
+        ("\U000e0041", "<U+E0041>"),  # TAG LATIN CAPITAL LETTER A
+    ])
+    def test_the_headline_shows_the_character_instead_of_drawing_it(
+            self, char, mark, capsys):
+        headline = "ls notes" + char + "txt.exe"
+        self._render("approval", {"tool_name": "shell", "headline": headline,
+                                  "params": {"command": headline}})
+        out = capsys.readouterr().out
+
+        assert char not in out
+        assert "  $ ls notes" + mark + "txt.exe" in out, out
+        assert "invisible or reordering character shown as <U+...>" in out
+
+    def test_the_reason_and_the_notice_are_covered_too(self, capsys):
+        """`_approval` runs every untrusted field through one `visible`,
+        so the reveal reaches what the CLI prints of the agent's claim and
+        of the tool's computed notice as well as the headline."""
+        self._render("approval",
+                     {"tool_name": "shell", "params": {"command": "ls"},
+                      "rationale": "safe\u202e"},
+                     notice="runs on the HOST\u2067")
+        out = capsys.readouterr().out
+        assert "safe<U+202E>" in out and "HOST<U+2067>" in out, out
+        assert "2 invisible or reordering characters" in out
+
+    def test_the_params_block_was_already_escaping_them(self, capsys):
+        """The other control: `_render_params` is `json.dumps`, whose
+        default `ensure_ascii` writes the character as `\\u202e`, so the
+        payload never drew out of order and needs nothing new."""
+        self._render("approval", {"tool_name": "shell", "headline": "ls",
+                                  "params": {"command": "ls\u202e"}})
+        out = capsys.readouterr().out
+        assert "\\u202e" in out and "\u202e" not in out, out
+        assert "invisible or reordering" not in out
+
+    def test_a_clean_approval_says_nothing(self, capsys):
+        """A warning on every prompt is a warning nobody reads."""
+        self._render("approval", {"tool_name": "shell", "headline": "ls -la",
+                                  "params": {"command": "ls -la"}})
+        assert "invisible or reordering" not in capsys.readouterr().out
+
+    def test_a_question_is_not_an_approval(self, capsys):
+        """THE SCOPE OF THE RULING, pinned from the side that keeps text
+        correct. A zero-width non-joiner spells Persian and a zero-width
+        joiner builds an emoji; a question is somebody's words, not a
+        command being authorised, so it is printed as written."""
+        persian = "\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645"
+        self._render("question", {"question": persian,
+                                  "options": ["\U0001f468\u200d\U0001f4bb"]},
+                     typed="1")
+        out = capsys.readouterr().out
+        assert persian in out
+        assert "<U+200C>" not in out and "<U+200D>" not in out
+
+
 class TestTheTerminalNamesTheAskingRun:
     """§47's asker line, in the shell that was dropping it (batch 76).
 

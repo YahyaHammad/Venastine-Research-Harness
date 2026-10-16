@@ -70,7 +70,7 @@ class TestRedactSecrets:
         result = redact_secrets(text)
         assert "-----BEGIN RSA PRIVATE KEY-----" not in result
         assert "[REDACTED]" in result
-        # The end marker is not a pattern, so it stays
+        # Stays: an ellipsis is no body, and a lone footer is a SHAPE (batch 160)
         assert "-----END RSA PRIVATE KEY-----" in result
 
     def test_clean_text_unchanged(self):
@@ -980,13 +980,17 @@ def _every_matcher():
     """Every regex that redacts, vendor patterns and shapes alike."""
     from safety.policy_enforcement import (
         _ASSIGNMENT_RE,
+        _AUTH_HEADER_RE,
+        _JWT_RE,
+        _PEM_END_RE,
         _SECRET_PATTERNS,
         _URL_USERINFO_RE,
         _XML_PASSWORD_RE,
     )
 
     return (list(_SECRET_PATTERNS)
-            + [_URL_USERINFO_RE, _XML_PASSWORD_RE, _ASSIGNMENT_RE])
+            + [_URL_USERINFO_RE, _XML_PASSWORD_RE, _ASSIGNMENT_RE,
+               _AUTH_HEADER_RE, _JWT_RE, _PEM_END_RE])
 
 
 def _cases():
@@ -1091,3 +1095,100 @@ class TestOneOrderForBothCompositions:
             "thing it is for")
         assert "s3cr3t-in-an-assignment" not in redact_diagnostic_text(text), (
             "the switch reached the harness's own diagnostics")
+
+
+# ===========================================================================
+# ---- Batch 160, TECHNICAL_DEBT 52: the vocabulary's current siblings ------
+# ===========================================================================
+
+class TestTheWidenedVocabularyKeepsItsBoundaries:
+    """Sixteen of twenty-two credential shapes survived `redact_output_text`
+    when S05-03 measured it. The rows in `conftest.REDACTION_CASES` pin
+    that each new shape is now redacted on every sink; these pin the three
+    lines the owner ruling drew around them, because each is the thing a
+    widened pattern set gets wrong first.
+    """
+
+    @pytest.mark.parametrize("text", [
+        "Bearer tokens expire after an hour.",
+        "Authorization: required for all endpoints",
+        "authorization: Bearer <token>",
+        'curl -H "Authorization: Bearer $TOKEN" https://api.example',
+        'Authorization: Digest username="bob", realm="x"',
+        "the npm_config_cache variable and gho_ prefixes are documented",
+        "eyJ is how a JSON object starts in base64",
+    ])
+    def test_prose_and_placeholders_survive(self, text):
+        """A research harness reads security literature, which is full of
+        the words these shapes anchor on. Anchoring on the HEADER NAME and
+        on structure is what keeps them out of it."""
+        from safety.policy_enforcement import redact_output_text
+
+        assert redact_output_text(text) == text
+
+    def test_a_sentence_quoting_both_pem_markers_keeps_its_words(self):
+        """The first version took everything from a quoted BEGIN to a
+        quoted END lazily, and so redacted the sentence between them. The
+        body is now LINES, so prose after a marker is not body."""
+        from safety.policy_enforcement import redact_output_text
+
+        text = ("a key file starts with -----BEGIN RSA " "PRIVATE KEY" "----- "
+                "and ends with -----END RSA " "PRIVATE KEY" "----- lines")
+        assert redact_output_text(text) == (
+            "a key file starts with [REDACTED] and ends with [REDACTED] "
+            "lines")
+
+    @pytest.mark.parametrize("text", [
+        "Authorization: Bearer " + "a1b2c3d4" * 3,
+        "eyJhbGciOiJIUzI1" + "NiJ9.eyJzdWIiOiIx" + "MjM0In0." + "a1b2c3d4" * 3,
+        "MIIEowIBAAKCAQEA" + "a1b2c3d4" * 6 + "\n-----END RSA "
+        + "PRIVATE KEY" "-----",
+    ])
+    def test_a_structural_shape_does_not_refuse_an_input(self, text):
+        """OUTPUT ONLY, by ruling: the structural shapes join the password
+        shapes, which never feed `check_input_policy` -- refusing a call
+        because its arguments carry a captured request would break every
+        legitimate call that quotes one."""
+        assert check_input_policy("spy", {"text": text}) is None
+
+    @pytest.mark.parametrize("token", [
+        "github_pat_" + "11A1B2C3D4" + "_a1b2c3d4" * 6,
+        "gho_" + "a1b2c3d4" * 4 + "a1b2",
+        "sk-proj-" + "a1b2c3d4_" * 3 + "a1b2",
+        "sk_" + "live_" + "a1b2c3d4" * 3,
+        "npm_" + "a1b2c3d4" * 4 + "a1b2",
+    ])
+    def test_a_new_vendor_token_refuses_an_input_like_its_siblings(
+            self, token):
+        """BOTH SIDES, by ruling: one vendor list, one vocabulary, as `ghp_`
+        and `sk-` have always been."""
+        assert check_input_policy("spy", {"text": f"use {token}"}) is not None
+
+    def test_a_pem_header_alone_still_refuses_an_input(self):
+        """The header pattern grew an optional body so output redaction
+        takes the whole block; `_input_leaf` uses `.search()`, so what it
+        refuses must not have narrowed to "a header WITH a body"."""
+        assert check_input_policy(
+            "spy", {"text": "-----BEGIN RSA " "PRIVATE KEY" "-----"}) is not None
+
+    @pytest.mark.parametrize("text", [
+        "-----BEGIN RSA " "PRIVATE KEY" "-----" + ("\n" + "q1W2e3R4" * 8) * 16000,
+        ("\n" + "q1W2e3R4" * 8) * 16000 + "\n-----END RSA " "PRIVATE KEY" "-----",
+        ("\n" + "q1W2e3R4" * 8) * 16000,
+        "-----BEGIN RSA " "PRIVATE KEY" "-----" + ("\n" + " " * 30) * 30000 + "x",
+    ], ids=["header-no-footer", "footer-no-header", "neither",
+            "blank-lines-of-spaces"])
+    def test_the_pem_shapes_are_linear_on_a_megabyte(self, text):
+        """A body regex that has to START at the first body line is tried
+        at every line start of a long base64 blob, and is quadratic on one
+        with no footer -- which is why the footer is found as a literal and
+        walked backwards in code. Measured at about 0.2s per megabyte on
+        each of these; the bound is far above that and far below what a
+        quadratic scan of a megabyte takes."""
+        import time
+
+        from safety.policy_enforcement import redact_output_text
+
+        started = time.perf_counter()
+        redact_output_text(text)
+        assert time.perf_counter() - started < 10

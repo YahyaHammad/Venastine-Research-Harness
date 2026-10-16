@@ -339,27 +339,52 @@ def test_the_env_file_is_found_from_the_working_directory(tmp_path):
     exactly the case under -c, and it sends find_dotenv down its os.getcwd()
     branch. A -c version of this test passes against the BUG -- it was
     written that way first and reported a false green. The subprocess also
-    has to be fresh, because load_dotenv runs at import and this suite has
-    already imported env_secrets.
+    has to be fresh, because the working directory a script runs in is the
+    thing under test.
+
+    The probe asks `get_env_secret` since batch 160, which is the only
+    reader now: the file is no longer loaded into `os.environ` at import
+    (TECHNICAL_DEBT 57). The name stopped being `VENASTINE_ENV_PROBE` for
+    the same batch's other half -- a .env may not supply a `VENASTINE_*`
+    name at all.
     """
     import subprocess
     import sys
 
-    (tmp_path / ".env").write_text("VENASTINE_ENV_PROBE=found\n", encoding="utf-8")
+    (tmp_path / ".env").write_text(
+        "TOOL_ENV_PROBE=found\n"
+        "VENASTINE_REDACT_OFF=1\n"
+        "AGENT_SECRETS_FILE=decoy.json\n", encoding="utf-8")
     script = tmp_path / "probe.py"
     script.write_text(
         "import os, sys\n"
         f"sys.path.insert(0, {_project_root()!r})\n"
         "import env_secrets\n"
-        "print(os.environ.get('VENASTINE_ENV_PROBE', 'MISSING'))\n",
+        "print(env_secrets.get_env_secret('TOOL_ENV_PROBE', required=False)"
+        " or 'MISSING')\n"
+        "for name in ('VENASTINE_REDACT_OFF', 'AGENT_SECRETS_FILE',\n"
+        "             'TOOL_ENV_PROBE'):\n"
+        "    print(os.environ.get(name, 'MISSING'))\n",
         encoding="utf-8")
 
+    # The decoys must not come from the parent either, or MISSING below
+    # would be a statement about this shell rather than about the import.
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("VENASTINE_REDACT_OFF", "AGENT_SECRETS_FILE",
+                        "TOOL_ENV_PROBE", "AGENT_ENV_FILE")}
     r = subprocess.run([sys.executable, str(script)], capture_output=True,
-                       text=True, cwd=str(tmp_path))
+                       text=True, cwd=str(tmp_path), env=env)
     assert r.returncode == 0, r.stderr
-    assert r.stdout.strip() == "found", (
+    found, *environ = r.stdout.split()
+    # ALSO, since batch 160 (TECHNICAL_DEBT 57): importing and reading wrote
+    # NOTHING into the process environment. In this test rather than a
+    # sibling because it needs a fresh interpreter too, and the old import
+    # printed `1`, the decoy path and `found` here.
+    assert environ == ["MISSING", "MISSING", "MISSING"], (
+        f"reading the .env loaded it into os.environ: {environ}")
+    assert found == "found", (
         f"a .env in the working directory was not loaded (got "
-        f"{r.stdout.strip()!r}). load_dotenv() must be given an explicit "
+        f"{found!r}). find_dotenv() must be given an explicit "
         f"path -- see this test's docstring; the bare call resolves from "
         f"env_secrets.py's directory and only looks right from a checkout.")
 
@@ -371,16 +396,17 @@ def test_agent_env_file_overrides_the_working_directory(tmp_path):
     import subprocess
     import sys
 
-    (tmp_path / ".env").write_text("VENASTINE_ENV_PROBE=from_cwd\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("TOOL_ENV_PROBE=from_cwd\n", encoding="utf-8")
     chosen = tmp_path / "elsewhere.env"
-    chosen.write_text("VENASTINE_ENV_PROBE=from_override\n", encoding="utf-8")
+    chosen.write_text("TOOL_ENV_PROBE=from_override\n", encoding="utf-8")
 
     script = tmp_path / "probe.py"
     script.write_text(
         "import os, sys\n"
         f"sys.path.insert(0, {_project_root()!r})\n"
         "import env_secrets\n"
-        "print(os.environ.get('VENASTINE_ENV_PROBE', 'MISSING'))\n",
+        "print(env_secrets.get_env_secret('TOOL_ENV_PROBE', required=False)"
+        " or 'MISSING')\n",
         encoding="utf-8")
 
     env = dict(os.environ, AGENT_ENV_FILE=str(chosen))
@@ -390,6 +416,57 @@ def test_agent_env_file_overrides_the_working_directory(tmp_path):
     assert r.stdout.strip() == "from_override", (
         f"AGENT_ENV_FILE did not win over the cwd .env (got "
         f"{r.stdout.strip()!r}).")
+
+
+class TestADotenvIsReadAndNeverLoaded:
+    """TECHNICAL_DEBT 57, batch 160. `env_secrets` called `load_dotenv()` at
+    IMPORT, which writes every name in the file into `os.environ` for the
+    whole process. A .env is an ordinary file in a repository, inside no
+    trust boundary, and `VENASTINE_REDACT_OFF` -- kept out of settings.json
+    so a cloned repository cannot turn redaction off -- is read from the
+    environment. Nothing imported the module yet, so this was a hazard
+    waiting for its first caller rather than a live leak.
+    """
+
+    def test_a_dotenv_cannot_supply_a_harness_name(
+            self, tmp_path, monkeypatch):
+        import env_secrets
+
+        env_file = tmp_path / "chosen.env"
+        env_file.write_text("VENASTINE_REDACT_OFF=1\n"
+                            "agent_secrets_file=decoy.json\n"
+                            "TOOL_ENV_PROBE=found\n", encoding="utf-8")
+        monkeypatch.setattr(env_secrets, "ENV_FILE", str(env_file))
+        for name in ("VENASTINE_REDACT_OFF", "AGENT_SECRETS_FILE",
+                     "agent_secrets_file", "TOOL_ENV_PROBE"):
+            monkeypatch.delenv(name, raising=False)
+
+        assert env_secrets.get_env_secret(
+            "VENASTINE_REDACT_OFF", required=False) == ""
+        # Case-folded: on Windows the environment is case-insensitive, so a
+        # lower-case spelling names the same variable.
+        assert env_secrets.get_env_secret(
+            "agent_secrets_file", required=False) == ""
+        assert env_secrets.get_env_secret("TOOL_ENV_PROBE") == "found"
+
+    def test_the_environment_still_answers_first(self, tmp_path, monkeypatch):
+        """`load_dotenv`'s default was `override=False`, so a variable the
+        process already had beat the file. Reading instead of loading keeps
+        that, and a harness name set in the real environment is still
+        answered -- the filter is about the FILE."""
+        import env_secrets
+
+        env_file = tmp_path / "chosen.env"
+        env_file.write_text("TOOL_ENV_PROBE=from_file\n"
+                            "VENASTINE_REDACT_OFF=from_file\n",
+                            encoding="utf-8")
+        monkeypatch.setattr(env_secrets, "ENV_FILE", str(env_file))
+        monkeypatch.setenv("TOOL_ENV_PROBE", "from_env")
+        monkeypatch.setenv("VENASTINE_REDACT_OFF", "from_env")
+
+        assert env_secrets.get_env_secret("TOOL_ENV_PROBE") == "from_env"
+        assert env_secrets.get_env_secret(
+            "VENASTINE_REDACT_OFF") == "from_env"
 
 
 def test_an_absolute_providers_path_does_not_name_a_directory_it_never_checked(

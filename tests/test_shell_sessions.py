@@ -212,8 +212,11 @@ class TestOutputBuffer:
         assert "gap" not in first and "gap" not in second
 
     def test_the_last_characters_and_whether_anything_is_missing(self):
+        # The space before the tail is what keeps `ghij` whole: a stream with
+        # no word break is one word, and a dropped middle that cuts a word
+        # moves the cut fragment into the gap (batch 160, TECHNICAL_DEBT 95).
         buffer = ss.OutputBuffer(head_chars=3, tail_chars=4)
-        buffer.append("abcdefghij")
+        buffer.append("abcdef ghij")
         assert buffer.last(3) == ("hij", True)
         small = ss.OutputBuffer(head_chars=100, tail_chars=100)
         small.append("short")
@@ -232,7 +235,7 @@ class TestOutputBuffer:
         assert whole.last() == ("abcdefghij", False)
 
         gapped = ss.OutputBuffer(head_chars=3, tail_chars=4)
-        gapped.append("abcdefghij")
+        gapped.append("abcdef ghij")
         assert gapped.last() == ("ghij", True)
 
     def test_and_everything_means_past_one_read(self, monkeypatch):
@@ -275,8 +278,9 @@ class TestOutputBuffer:
         def _shorten(text):
             return text.replace("SECRET", "X")
 
+        # A space before the tail, for the first test's reason above.
         buffer = ss.OutputBuffer(head_chars=5, tail_chars=6)
-        buffer.append("HEAD!" + "m" * 50 + "SECRET")
+        buffer.append("HEAD!" + "m" * 49 + " SECRET")
         shortened = buffer.page(0, 100, clean=_shorten)
         raw = buffer.page(0, 100)
 
@@ -285,6 +289,95 @@ class TestOutputBuffer:
         assert shortened["total_chars"] == 56, (
             "the redacted document's length is not what it says it is")
         assert buffer.page(55, 100, clean=_shorten)["text"] == "X"
+
+
+class TestTheDroppedMiddleShowsNoHalfOfAWord:
+    """TECHNICAL_DEBT 95, batch 160. The middle is discarded as it arrives,
+    so a credential straddling the eviction point had one half at the end
+    of the head and the other at the start of the tail -- each page clean on
+    its own, because the redactor never sees the pattern whole, and the pair
+    a leak, because `shell_output` pages to both. The word each side of the
+    gap now moves into it.
+
+    The stream: 13 characters of prose, a 40-character token, six more. A
+    head of 20 ends inside the token, a tail of 30 starts inside it, and the
+    nine characters between are the dropped middle.
+    """
+
+    TOKEN = "ghp_" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8"
+
+    def _buffer(self):
+        buffer = ss.OutputBuffer(head_chars=20, tail_chars=30)
+        buffer.append("prefix text: " + self.TOKEN + " rest!")
+        return buffer
+
+    def test_the_raw_parts_hold_both_halves_and_redaction_cannot_see_them(
+            self):
+        """The control, and the register entry's measurement: the two
+        fragments are there, and the real redactor run over each part --
+        which is what `clean` does -- leaves both standing."""
+        from safety.policy_enforcement import redact_output_text
+
+        raw = self._buffer()
+        head = raw.page(0, 100)["text"]
+        tail = raw.page(raw.page(0, 100)["next_offset"], 100)["text"]
+        assert head == "prefix text: ghp_a1B"
+        assert tail == self.TOKEN[16:] + " rest!"
+        assert redact_output_text(head) == head
+        assert redact_output_text(tail) == tail
+
+    def test_a_model_facing_page_shows_neither_half(self):
+        from safety.policy_enforcement import redact_output_text
+
+        buffer = self._buffer()
+        first = buffer.page(0, 100, clean=redact_output_text)
+        second = buffer.page(first["next_offset"], 100,
+                             clean=redact_output_text)
+
+        assert first["text"] == "prefix text: "
+        assert second["text"] == " rest!"
+        shown = first["text"] + second["text"]
+        assert not any(self.TOKEN[i:i + 4] in shown
+                       for i in range(len(self.TOKEN) - 3))
+
+    def test_the_gap_grows_by_what_moved_and_the_total_does_not(self):
+        """The arithmetic stays the reader's: the gap runs from where the
+        shown head ends to where the shown tail starts."""
+        buffer = self._buffer()
+        page = buffer.page(0, 100, clean=lambda text: text)
+
+        assert page["total_chars"] == 59
+        assert page["gap"] == {"from": 13, "to": 53}
+        assert buffer.page(53, 100, clean=lambda text: text)["text"] == (
+            " rest!")
+
+    def test_last_starts_the_tail_at_a_word_too(self):
+        """`last()` feeds the exit wake and the session view, both of which
+        reach the model or the screen."""
+        assert self._buffer().last() == (" rest!", True)
+
+    def test_a_cut_between_two_words_moves_nothing(self):
+        """The discriminating half: the trim is for a cut that SPLIT a
+        word. Here the character after the head and the last one evicted
+        are both spaces, so both sides are whole words and stay."""
+        buffer = ss.OutputBuffer(head_chars=5, tail_chars=9)
+        buffer.append("hello world and more text here")
+        page = buffer.page(0, 100, clean=lambda text: text)
+
+        assert page["text"] == "hello"
+        assert buffer.last() == ("text here", True)
+
+    def test_the_monitor_still_reads_every_raw_character(self):
+        """The monitor matches on raw output by design, through `page()`
+        with no `clean`, so the trim must not reach it."""
+        buffer = self._buffer()
+        assert buffer.page(0, 100)["text"] == "prefix text: ghp_a1B"
+
+    def test_with_nothing_dropped_nothing_moves(self):
+        buffer = ss.OutputBuffer(head_chars=20, tail_chars=100)
+        buffer.append("prefix text: " + self.TOKEN + " rest!")
+        assert buffer.last() == ("prefix text: " + self.TOKEN + " rest!",
+                                 False)
 
 
 class TestLifecycle:
@@ -823,3 +916,37 @@ class TestASessionsOutputIsRedactedBeforeItIsCut:
 
         assert "".join(pages) == written
         assert len(pages) == 4
+
+
+class TestTheExitIsHandedToTheCredentialQuarantine:
+    """TECHNICAL_DEBT 51, batch 160. The sandbox's quarantine matchers read
+    stderr, and a session's stderr is merged into the stream this manager
+    owns. So the manager hands the sandbox the exit code and the start of
+    the output, once, before the exit is reported -- the matching itself is
+    `security/sandbox.py`'s, and `test_ssh_backend.py` / `test_sudo.py` pin
+    what it does with this."""
+
+    def test_the_code_and_the_first_output_are_handed_over(
+            self, manager, session_starter):
+        _start(manager)
+        process = _process(session_starter)
+        process.write("agent@build: Permission denied (publickey,password).\n")
+        process.exit(255)
+        _wait_batch(manager, "t1")
+
+        assert process.exit_notes == [
+            (255, "agent@build: Permission denied (publickey,password).\n")]
+
+    def test_only_the_start_of_a_long_output_is_handed_over(
+            self, manager, session_starter):
+        """A refusal is the first thing a session prints, so the scan is
+        bounded rather than the whole buffer."""
+        _start(manager)
+        process = _process(session_starter)
+        process.write("x" * (ss._AUTH_SCAN_CHARS * 3))
+        process.exit(1)
+        _wait_batch(manager, "t1")
+
+        [(code, first)] = process.exit_notes
+        assert code == 1
+        assert first == "x" * ss._AUTH_SCAN_CHARS

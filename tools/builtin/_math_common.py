@@ -251,6 +251,20 @@ def _validate_ast(code: str, local_dict: dict) -> None:
                 f"{type(node).__name__} is not allowed in a math "
                 f"expression")
 
+        # `**` UNPACKING IS THE ONE CONSTRUCT A LISTED NODE SPELLS
+        # (TECHNICAL_DEBT 55, batch 160). `f(*args)` is `ast.Starred`,
+        # which is unlisted. `f(**mapping)` is `ast.keyword(arg=None)`, and
+        # `keyword` is listed for ordinary keyword arguments, so the second
+        # form walked past the node check and was refused only later, by
+        # SymPy ("sin takes exactly 1 argument"). It was inert, because no
+        # str-keyed mapping is reachable here, but inert because of what is
+        # unreachable is not what this allowlist claims. No legitimate
+        # expression needs it: measured, even ordinary keyword arguments do
+        # not survive `auto_symbol` (`prec=20` is refused as a name).
+        if isinstance(node, ast.keyword) and node.arg is None:
+            raise MathParseError(
+                "** unpacking is not allowed in a math expression")
+
         # Every name is resolved against _SAFE_GLOBALS at eval time, so
         # every name must be one we chose. Unknown names never reach here
         # -- auto_symbol has already rewritten them to Symbol('name') --

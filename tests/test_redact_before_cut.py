@@ -109,6 +109,26 @@ SECRETS = [
     ("password_xml", "<password>hunter2hunter2</password>", "hunter2hunter2"),
     ("url_userinfo",
      "https://admin:s3cr3tp4ss@internal.example.com/x", "s3cr3tp4ss"),
+    # Batch 160, TECHNICAL_DEBT 52: the current vendor siblings and the three
+    # structural shapes, each BUILT for conftest.REDACTION_CASES' reason.
+    ("github_fine_grained",
+     "github_pat_" + "11A1B2C3D4" + "_a1B2c3D4" * 6, None),
+    ("github_oauth", "gho_" + "a1B2c3D4" * 4 + "e5F6", None),
+    ("openai_project", "sk-proj-" + "a1B2c3D4_" * 3 + "e5F6", None),
+    ("stripe_live", "sk_" + "live_" + "a1B2c3D4" * 3, None),
+    ("npm_token", "npm_" + "a1B2c3D4" * 4 + "e5F6", None),
+    ("pem_block",
+     "-----BEGIN RSA " + "PRIVATE KEY" "-----\n" + "MIIEowIBAAKCAQEA"
+     + "q1W2e3R4" * 6 + "\n-----END RSA " + "PRIVATE KEY" "-----",
+     "q1W2e3R4" * 6),
+    ("pem_block_head",
+     "-----BEGIN RSA " + "PRIVATE KEY" "-----\n" + "MIIEowIBAAKCAQEA"
+     + "q1W2e3R4" * 6 + "\n" + "z9Y8x7W6" * 6, "q1W2e3R4" * 6),
+    ("authorization_header",
+     "Authorization: Bearer " + "a1B2c3D4" * 3, "a1B2c3D4" * 3),
+    ("json_web_token",
+     "eyJhbGciOiJIUzI1" + "NiJ9.eyJzdWIiOiIx" + "MjM0In0." + "a1B2c3D4" * 3,
+     None),
 ]
 
 PAGE = 5000

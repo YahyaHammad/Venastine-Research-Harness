@@ -25106,3 +25106,208 @@ stated in `docs/ARCHITECTURE.md`'s source tree; the suite total in
 `AGENTS.md`, `README.md` and `docs/ARCHITECTURE.md`. Controls 13 of 13.
 CodeQL itself cannot run here -- there is no CLI on this machine -- so the
 config's effect is measured by the next analysis of PR #200, after the push.
+
+## Batch 159 -- the marathon's tail filed as issues, and four entries that were no longer what they said (2026-10-16)
+
+**No code changed.** `docs/REVIEW_MARATHON.md` § *Filing a finding as a GitHub
+issue* makes a `DEFER` finding a register item at once and an issue after the
+merge. PR #200 merged on 2026-10-15, so this batch is the second half, and the
+two extras the owner asked for with it: a re-verification comment on each of
+the two `KNOWN` arrivals the register said were still an owner action, and an
+index issue.
+
+### What was filed
+
+- **59 issues, #203-#261**, one per register entry from 49 to 114
+  that was still open, except 88, 97, 102 and 106 (below); **#262** is the
+  index, grouped by surface. 17 `S3` and 42 `S4`; none is `S1` or `S2`.
+- **Labels by the marathon document's rule**, not the template's absence of
+  one: `bug` where behaviour is wrong today (23), `documentation` for drift
+  between code and docs (5), `enhancement` where nothing misbehaves yet
+  (31). Severity is independent of it.
+- **Items 49-82 converted mechanically** from the report's own `Where` / `What
+  happens` / `Why` / `Shape` / `Not doing` fields, as the marathon document
+  says they convert, with the `96de26e` base kept in each footer and a line
+  saying what was re-checked on `main`. Items 84 and 86-114 have no report
+  behind them and were written from the entry. Only 84, 86 and 95 state a
+  severity; the rest were assigned from the entry's text at filing, and the
+  index says to relabel freely.
+- **The nine `security`-area items were filed publicly, by owner ruling.** The
+  audit template routes vulnerabilities to `docs/SECURITY.md`, but all nine
+  (51, 52, 55, 57, 90, 93, 95, 100, 104) were already published in this
+  register on public `main`, and none is above `S3` -- an issue disclosed
+  nothing that was not already disclosed.
+- **#8 and #12** each carry the re-verification from the register's
+  *Review-marathon arrivals* section, re-measured against `f836602`; #8 also
+  points at item 71's issue, which is the same D12 debt from the other side.
+
+### What re-checking before filing found
+
+Every entry was re-checked against `main` before its issue was written --
+this file's own rule that an entry is evidence and not instruction. Four did
+not match, and **three of the four were made stale by a FIX-NOW batch fixing
+part of a DEFER entry without touching the entry**:
+
+- **49.** Batch 142 (S02-03) gave the insecure fallback `stdin=DEVNULL`, so the
+  third executor was closed seventeen batches ago. Filed for the two that
+  remain.
+- **77.** Batch 150 added three `integration` tests; "the suite's one" is four.
+- **80.** Batch 142 (S02-10) put `_sudo_rejected` into the autouse sandbox
+  fixture; five globals are four.
+- **106, closed.** Neither name is stale. `_replace_via_keyboard` is a method of
+  Textual's `TextArea`, and both `AGENTS.md` mentions of `_last_response` are
+  past tense about the attribute batch 48 removed. The entry was right that a
+  NAME-token gate would flag them and wrong that nothing explained them.
+
+That is shape 9 in the register itself: a fix on one surface falsifying a
+claim on another, in a document no gate reads. A register entry is corrected
+by the batch that closes it, and these three were never closed -- only
+narrowed, by batches whose subject was a different finding.
+
+### Not filed
+
+- **88**, closed as superseded: PR #200 put the six workflows on `main`.
+- **97**, the unreproduced secrets flake. The entry says the test must not be
+  touched until it recurs, and an issue invites exactly that change.
+- **102**, an environment note with nothing for an issue to close.
+- **76, 83, 85** were already closed; **S19-12** (`ACCEPTED`) keeps its
+  argument in *Accepted risks*, since the rule files it only if a later
+  decision is wanted.
+
+### Verification
+
+Docs only: `docs/TECHNICAL_DEBT.md` carries an `**Issue:**` line under each
+filed entry, the four corrections, both closures, the two not-filed notes, and
+an updated intro and *arrivals* section. `tests/test_docs_consistency.py`
+passes, and again with `AGENT_WORKSPACE` unset. Full suite green, at the 7214 batch 158 left it.
+No test added or changed, so no `tests/BREAKING_CHANGES.md` row.
+
+## Batch 160 -- nine security findings the marathon deferred, each given its answer (2026-10-16)
+
+**ROADMAP_v3 §76. Nine owner rulings, A68-A76.** The nine `security`-area
+issues batch 159 filed -- #205, #206, #209, #211, #240, #243, #245, #249 and
+#252, which are TECHNICAL_DEBT 51, 52, 55, 57, 90, 93, 95, 100 and 104. Every
+entry was re-checked against `main` at `f836602` first, and all nine were still
+there; most had been deferred as "a decision, not a patch", so each was put to
+the owner with options and a recommendation before anything was built, and each
+recommendation was taken.
+
+### What was built
+
+| item | issue | ruling | where |
+|---|---|---|---|
+| 55 | #209 | A68: `**` refused by the guard | `tools/builtin/_math_common._validate_ast` |
+| 93 | #243 | A69: an empty workspace refused before it resolves | `security/protected_paths.check_workspace` |
+| 57 | #211 | A70: `.env` read, never loaded; no harness names | `env_secrets` |
+| 52 | #206 | A71: vendor tokens both sides, structural shapes output only | `safety/policy_enforcement` |
+| 95 | #245 | A72: the word each side of the dropped middle goes into the gap | `core/shell_sessions.OutputBuffer._cut_parts` |
+| 90 | #240 | A73: a hardlink refused by `(st_dev, st_ino)` | `security/protected_paths.hardlinked_segment`, `file_ops` |
+| 51 | #205 | A74: a session's exit handed to the quarantine | `SessionProcess.note_exit`, `SessionManager._supervise` |
+| 104 | #252 | A75: approvals reveal bidi / zero-width / TAG characters | `core/ansi.reveal_invisible_counted`, `main._Visible`, `tui/app` |
+| 100 | #249 | A76: one provenance sentence when an MCP tool is offered | `prompts/system_prompts.with_catalogs` |
+
+### What measuring found that the entries did not say
+
+- **104 was wrong about the params block.** It said `json.dumps` "escapes
+  nothing in this range but does quote it". `json.dumps`'s default
+  `ensure_ascii` escapes every one of these characters as `\u202e`, in the CLI
+  and in the TUI, so the payload never drew out of order. The reveal is for the
+  text fields only, and a test pins the params block as the control.
+- **52's PEM shape, first version, ate prose.** A lazy `BEGIN ... END` match took
+  "a key file starts with -----BEGIN ... and ends with -----END ..." whole,
+  sentence included. The body is base64 LINES now, 16 characters or more each,
+  after a real line break or the `\n` escape a service-account JSON carries.
+- **The obvious orphan-footer regex is quadratic.** A pattern that must START at
+  the first body line is tried at every line start of a long base64 blob, and
+  on a megabyte with no footer that is hours. The footer is found as a literal
+  and walked backwards in code: 0.08-0.35 s per megabyte across seven
+  adversarial shapes, now pinned with a generous bound.
+- **52's two PEM rows could not tell the two PEM shapes apart.** With the header
+  pattern's body removed, every test stayed green: the footer walk redacts a
+  complete block from below. A row with NO footer -- a block a cut ended -- is
+  the one only the header pattern reaches, and it was added after this mutation
+  survived.
+- **95's fix needs to know what was on the far side of each cut.** Trimming the
+  head's last word unconditionally hides a complete word whenever the cut fell
+  on a space. The buffer keeps one character from each far side -- the first one
+  the head had no room for, the last one evicted -- and trims only when the cut
+  split a word. Three existing tests used letter-only streams, which are one
+  word; each gained a space and keeps its original point.
+- **51's matchers need a gate a one-shot does not.** A one-shot's stderr is one
+  command's; a session's stream is everything the remote program printed, and
+  "Permission denied" is an ordinary thing for one to print. The SSH match counts
+  only on exit 255, ssh's own status; the sudo match only on a non-zero exit.
+
+### What the gates caught in this batch's own work
+
+- **bandit B613, on a comment written in this batch.** The `tui/app.py` comment
+  explaining the params block was meant to say `\u202e` and held the character
+  itself: the edit tool decoded the escape. bandit's trojan-source check was the
+  only thing that could see it. Every changed file was then scanned for a
+  literal bidi, zero-width or TAG character, and that was the only one.
+- **bandit-count-check, on a new subprocess test.** A fresh-interpreter test for
+  A70 put a fifth `subprocess` call in `tests/test_credentials.py`, whose
+  baseline holds four, so `-b` would have absorbed it silently. The assertion
+  moved into the batch-35 subprocess test, which needs the same fresh
+  interpreter.
+- **gitleaks, twice, both of them line pinning.** The new PEM fixtures were
+  built by concatenation, and the `private-key` rule still ran from an OLDER
+  literal header in the same file down to the first contiguous `KEY-----` in a
+  new one; the markers are split as `"PRIVATE KEY" "-----"` now. Then a
+  four-line comment in `tests/test_policy_enforcement.py` moved four
+  `.gitleaksignore` fingerprints off their lines, and four fake credentials
+  reported. The comment is one line. That is TECHNICAL_DEBT 87 happening, in
+  the batch after it was filed.
+
+### The eight CodeQL alerts A66 said were dismissed, and were not
+
+ROADMAP_v3 §75 says the eight `py/clear-text-logging-sensitive-data` alerts
+in shipped code "are DISMISSED in GitHub, each with its reason". On
+2026-10-16 all eight were still OPEN on `main` -- #5, #7-#12 and #14 --
+because no token in batch 158 could write code scanning: the ruling was made
+and the click was not. The sentence was a claim about GitHub that nothing in
+the tree could check.
+
+Each was traced again on `main` at `f836602` before anything was dismissed,
+since the table in batch 158 is evidence and not instruction, and each still
+holds a NAME and never a value:
+
+| alert | site | what reaches the sink |
+|---|---|---|
+| #14 | `main.py:875` `readline` | "Also save the same value as {twin}?" -- `twin` from `_secret_twin_name()` |
+| #7 | `main.py:942` `readline_masked` | "Value for {name}: " or a fixed passphrase prompt |
+| #8, #9 | `main.py:1514`, `:1516` | `rest[0]`, the name typed after `--secrets delete` |
+| #10 | `main.py:1545` | the name typed after `--secrets set` |
+| #11 | `main.py:1556` | the login/sudo twin's name |
+| #5 | `security/askpass.py:215` | literals, an exception class name, or `classify()`'s label |
+| #12 | `security/secrets.py:562` | a literal at every `lock()` caller, or "askpass refused: ..." built from those |
+
+All eight were dismissed as **false positive**, with a one-line reason each
+citing A66, through the API under the owner's token once it was given
+code-scanning write access -- the first as a canary, then the other seven,
+each checked against its traced rule and location before the call. Open
+alerts afterwards: 0. A66's sentence is true from this batch on, and the
+token gap that made it false is the one batch 158 recorded for reading.
+
+### Verification
+
+`python -m pytest -q` is green: 7327 passed, 49 skipped -- 7376, up 162
+from batch 159's 7214, in 2:18. The FIRST full run took 10:52 on a loaded
+machine and also failed
+`tests/test_storage_e2e.py::test_eight_concurrent_writers_all_land` once, with
+`database is locked` from writer 5 of 8. It passed four times out of four
+alone and in the green run, and this batch changes nothing it reaches, so it
+is recorded here and not touched -- item 97's rule for a slow-run flake, and
+the measurement the next occurrence is compared against.
+
+`tests/test_docs_consistency.py` passes, 62 passed and 1 skipped, both with
+`AGENT_WORKSPACE` set and with it unset. `ruff check .` is clean. bandit
+with the CI job's own flags, against a Windows-path copy of the baseline, finds
+nothing new, and `scripts/bandit-count-check.py` reports no pair grew. gitleaks
+over the tree with `.github/gitleaks.toml` finds nothing.
+
+Every fix was checked against its own revert: with the production change
+stashed, its new tests fail, and the controls -- prose that must survive, a cut
+between two words, a session that exited zero, an ordinary multiply-linked
+file, a question that is not an approval, a prompt with no MCP tool -- pass both
+ways.
