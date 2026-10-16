@@ -25259,6 +25259,36 @@ recommendation was taken.
   reported. The comment is one line. That is TECHNICAL_DEBT 87 happening, in
   the batch after it was filed.
 
+### The eight CodeQL alerts A66 said were dismissed, and were not
+
+ROADMAP_v3 §75 says the eight `py/clear-text-logging-sensitive-data` alerts
+in shipped code "are DISMISSED in GitHub, each with its reason". On
+2026-10-16 all eight were still OPEN on `main` -- #5, #7-#12 and #14 --
+because no token in batch 158 could write code scanning: the ruling was made
+and the click was not. The sentence was a claim about GitHub that nothing in
+the tree could check.
+
+Each was traced again on `main` at `f836602` before anything was dismissed,
+since the table in batch 158 is evidence and not instruction, and each still
+holds a NAME and never a value:
+
+| alert | site | what reaches the sink |
+|---|---|---|
+| #14 | `main.py:875` `readline` | "Also save the same value as {twin}?" -- `twin` from `_secret_twin_name()` |
+| #7 | `main.py:942` `readline_masked` | "Value for {name}: " or a fixed passphrase prompt |
+| #8, #9 | `main.py:1514`, `:1516` | `rest[0]`, the name typed after `--secrets delete` |
+| #10 | `main.py:1545` | the name typed after `--secrets set` |
+| #11 | `main.py:1556` | the login/sudo twin's name |
+| #5 | `security/askpass.py:215` | literals, an exception class name, or `classify()`'s label |
+| #12 | `security/secrets.py:562` | a literal at every `lock()` caller, or "askpass refused: ..." built from those |
+
+All eight were dismissed as **false positive**, with a one-line reason each
+citing A66, through the API under the owner's token once it was given
+code-scanning write access -- the first as a canary, then the other seven,
+each checked against its traced rule and location before the call. Open
+alerts afterwards: 0. A66's sentence is true from this batch on, and the
+token gap that made it false is the one batch 158 recorded for reading.
+
 ### Verification
 
 `python -m pytest -q` is green: 7327 passed, 49 skipped -- 7376, up 162
