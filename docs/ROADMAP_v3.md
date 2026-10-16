@@ -43,6 +43,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
+- **§78. A release tag that named one version while the run packed another** - **(BUILT in batch 162)** (`v0.3.0` and `v0.3.1` were pushed on commits whose `package.json` and `pyproject.toml` both said 0.2.0, and the `v0.3.1` publish run packed `@yahyahammad/venastine@0.2.0` and reported the prepublish check passed, because that check compared the two files with each other and nothing read the tag; it uploaded nothing only because no `NPM_TOKEN` exists. The owner ruled both tags releases whose bump was missed, left the files and the tags where they are, and put the comparison first in `scripts/prepublish-check.mjs`, before anything is packed; A78)
 - **§77. The approval wait that gave up before the test that was answering it** - **(BUILT in batch 161)** (the `v0.3.1` tag run failed one pilot test, "tool never dispatched", after the same commit had passed twice: `conftest`'s autouse fixture shrank a modal's wait to 5s, half of `settle`'s 10s deadline, and 23 pilot tests act on an open modal inside that wait. Raised to 30s and pinned from below as well as from above; A77)
 - **§76. Nine security findings the marathon deferred, and the answer each was waiting for** - **(BUILT in batch 160)** (the nine `security`-area issues batch 159 filed, each put to the owner with options and a recommendation: `**` unpacking refused by the math guard, an empty workspace refused before it resolves, a `.env` read and never loaded, the redaction vocabulary widened to the current vendor formats and three structural shapes, the word on each side of a session buffer's dropped middle moved into the gap, a hardlink into `.venastine/` refused by inode, a session's refused credential quarantined, bidi and zero-width characters revealed in approvals, and an MCP tool's description ruled third-party data in the system prompt; A68-A76)
 - **§75. Thirteen alerts that read a name as a secret, and the gate nothing in the workflow could fail** - **(BUILT in batch 158)** (PR #200's first `CodeQL` check raised 13 high-severity alerts and every one was a false positive: ten came from a source heuristic that reads `args.secrets`, `_secret_twin_name()` and `KEY_PASSPHRASE` as secrets because of their names, and three were test assertions read as URL sanitizers; `tests/` is now skipped because it never ships, the eight in shipped code are dismissed with recorded reasons, and the same red check is the measurement TECHNICAL_DEBT 76 lacked -- the gate is GitHub's pull-request check, and the workflow header now says so)
@@ -2726,6 +2727,83 @@ leaked PID.
   because MCP is the only dynamic registrant and the composed name is its
   fact. A bound in the registry would be the fix-at-the-consumer shape
   `AGENTS.md` names by name.
+---
+
+## §78. A release tag that named one version while the run packed another
+
+**Built in batch 162**, from register item 115, which batch 161 filed while
+reading the `v0.3.1` tag's runs. `package.json` and `pyproject.toml` both say
+`0.2.0`. They said it under `v0.3.0` at `f836602` and under `v0.3.1` at
+`e50fe6e`. The `v0.3.1` `publish (npm)` run packed `@yahyahammad/venastine@0.2.0`,
+and `scripts/prepublish-check.mjs` reported "prepublish check passed: v0.2.0".
+It uploaded nothing, and only because no `NPM_TOKEN` is configured.
+
+**THE TAG WAS A THIRD COPY OF THE VERSION, AND NOTHING READ IT.** The script
+compares the two version files with each other. `tests/test_docs_consistency.py`
+pins the same pair. `publish.yml` reads no tag name at all. So once the channel
+is armed, a tag push publishes whatever the files say, whatever the tag says, and
+`publish.yml`'s own header says why that cannot be undone: a published npm
+version "can never be replaced -- only deprecated".
+
+**What npm holds, which the register entry did not measure.** `npm view
+@yahyahammad/venastine` lists `0.1.0` (2026-09-03) and `0.2.0` (2026-09-09,
+`gitHead` `41b4850`, the `v0.2.0` commit), and neither carries a provenance
+attestation, so neither came from this workflow's real publish step. So an armed
+`v0.3.1` run would not have published silently: npm refuses to publish over an
+existing version, and the step would have gone red. The silent case is the next
+one: a tag on a commit whose files name a version npm does not have yet, and
+that version goes out under the wrong tag for good. The entry's conclusion
+stands, and its example would have failed loudly.
+
+**What the tags were.** `v0.1.0` at `1e92f36` and `v0.2.0` at `41b4850` each
+matched their files. `v0.3.0` and `v0.3.1` are lightweight tags on two PR merges,
+#200 and #263, and nothing was bumped for either. Asked, the owner ruled them
+releases whose bump was missed.
+
+**The check, and where it runs.** `releaseTagProblem()` is the first thing the
+script does after reading `package.json`. When `GITHUB_REF_TYPE` is `tag`, it
+refuses unless `GITHUB_REF_NAME` is exactly `v` + `package.json`'s version, and it
+exits before `npm pack --dry-run`, the script's only packing. On the publish path
+it runs twice: at the explicit "Prepublish check" step, and again in `npm
+publish`'s `prepublishOnly`, which npm runs before it packs. When a tag was
+compared, the pass line now says "(the tag names it)". The `v0.3.1` log said
+"passed: v0.2.0" and nothing about the tag.
+
+**How it is tested, and why that is new here.** Every other test of this script
+reads its source, because the suite has no JS harness. A tag exists only on the
+run it started, so this one runs the real script under Node. A fake `npm` on
+`PATH` records that it was called and fails, so nothing is packed and nothing
+touches the network. "Refused before anything is packed" then becomes a file that
+does or does not exist. Three near misses must be refused without `npm` being
+called: a prerelease of the version, the version without its `v`, and an empty
+name. Three controls must reach `npm`: the right tag, a branch run, and a run
+with neither variable. Without Node the tests skip, except under `GITHUB_ACTIONS`,
+where they fail, because a revert check cannot see a test that skips.
+
+### What §78 deliberately does not change
+
+**The version files and the tags.** Both stay where they are, by ruling. npm
+received nothing from either `v0.3` tag. The next release bumps both files past
+0.3.1 and tags the commit that carries the bump, and a re-run of either old tag
+now refuses.
+
+**The channel.** No `NPM_TOKEN`, no retag, no push. Arming stays the owner's act,
+in the order `AGENTS.md` gives: public repository first, then the secret.
+
+**`publish.yml`'s steps.** Only its comments changed. A workflow step would fail
+before the suite rather than after it, minutes sooner. The owner chose one copy,
+in the file that already owns version parity, over a second call site.
+
+**The pair check.** `package.json` against `pyproject.toml` is unchanged, in the
+script and in the suite. The tag is compared with `package.json` alone, because
+the pair check, which runs next, makes them one fact.
+
+### Design Decisions Record — §78 (A78)
+
+| id | decision |
+|---|---|
+| **A78** | **On a run from a tag, the tag must name the version that would be published, and that is decided before anything is packed.** `scripts/prepublish-check.mjs`'s `releaseTagProblem()` reads `GITHUB_REF_TYPE` and, for `tag`, refuses unless `GITHUB_REF_NAME` is exactly `v` + `package.json`'s version. It exits before `npm pack --dry-run`. It is keyed on the ref and not the event, so a manual run started from a tag is held to the same rule as a tag push. A branch run or a local `npm publish` names no version and is not compared. The comparison is exact: a prerelease tag starts with the right version, and a tag without its `v` contains it. The owner ruled `v0.3.0` and `v0.3.1` releases whose bump was missed, and left the files and the tags alone. The owner chose the script over a workflow step, which would fail sooner, and over both, which would add a second call site |
+
 ---
 
 ## §77. The approval wait that gave up before the test that was answering it

@@ -37,7 +37,9 @@ on:
   # ARMED 2026-09-04. A pushed `v*` tag runs this workflow without a
   # dry_run input: with NPM_TOKEN set it publishes, without the secret it
   # rehearses. Tag the release commit (`git tag v0.1.0 && git push origin
-  # v0.1.0`) only when both preconditions above hold.
+  # v0.1.0`) only when both preconditions above hold, and only a commit
+  # whose package.json and pyproject.toml already say that version: the
+  # prepublish check refuses any other tag (A78).
   push:
     tags:
       - "v*"
@@ -142,6 +144,11 @@ jobs:
       # Version parity + secret/licence audit of the actual tarball. Also runs
       # automatically via prepublishOnly; running it explicitly means a failure
       # is reported as its own red step rather than inside npm's output.
+      #
+      # On a run from a tag it first refuses unless the tag is `v` +
+      # package.json's version, before it packs anything (batch 162,
+      # ROADMAP_v3 A78). This file reads no tag name itself, and v0.3.1 packed
+      # 0.2.0 here with nothing to say so.
       - name: Prepublish check
         run: node scripts/prepublish-check.mjs
 

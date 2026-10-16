@@ -1410,10 +1410,12 @@ def test_a_range_citation_does_not_report_its_own_endpoint():
 #
 # What is deliberately NOT here: an audit of the real tarball. That needs
 # `npm pack`, and npm is not a dependency of this suite -- the suite is
-# offline, Python-only, and runs in a container that has no Node. The tarball
+# offline, Python-only, and has to run where there is no Node. The tarball
 # audit lives in scripts/prepublish-check.mjs, which runs from
 # `prepublishOnly` on a machine that by definition has npm. These three check
 # the allowlist as TEXT, which is what a Python suite can honestly verify.
+# (The release-tag half below is the exception, batch 162: it runs that
+# script under Node with a fake npm, and skips where there is no Node.)
 
 _PACKAGE_JSON = os.path.join(ROOT, "package.json")
 
@@ -1444,6 +1446,132 @@ def test_the_npm_package_and_pyproject_state_the_same_version():
     assert _package_json()["version"] == versions[0], (
         f"package.json says {_package_json()['version']!r} and pyproject.toml "
         f"says {versions[0]!r}. They describe one release -- bump both.")
+
+
+# The release TAG is a third copy of the version, and the two tests above
+# cannot see it: a tag exists only on the run it started. So this half is
+# behavioural, and it is the one place this file runs Node -- the real
+# prepublish-check.mjs, with GITHUB_REF_TYPE/GITHUB_REF_NAME set the way the
+# runner sets them. It needs Node and NOT npm: the `npm` it finds is a fake
+# that records being called and fails, so nothing is ever packed, nothing
+# touches the network, and "refused before anything is packed" becomes a
+# file that does or does not exist.
+
+_PREPUBLISH_CHECK = os.path.join(ROOT, "scripts", "prepublish-check.mjs")
+
+
+def _run_prepublish_check(tmp_path, ref_type, ref_name):
+    """Run the real check as a run from `ref_type`/`ref_name` would.
+
+    Returns the finished process and whether the script reached `npm`, which
+    it calls for exactly one thing: `npm pack --dry-run`.
+
+    GITHUB_* is stripped from the inherited environment before the two are
+    set. This suite runs in CI, and on a tag push the runner's own
+    GITHUB_REF_TYPE is `tag` -- the publish job runs this test on exactly
+    that push.
+
+    A missing `node` skips here and FAILS in CI. A revert check cannot see a
+    test that skips (tests/BREAKING_CHANGES.md says why), and GitHub's
+    ubuntu image ships node, so a skip there would mean this guard had
+    quietly stopped running where it matters.
+    """
+    node = shutil.which("node")
+    if node is None:
+        if os.environ.get("GITHUB_ACTIONS"):
+            pytest.fail("node is not on PATH in CI, so the release-tag check "
+                        "in scripts/prepublish-check.mjs is untested")
+        pytest.skip("node is not on PATH; the release-tag check is JavaScript")
+
+    fake_bin = tmp_path / "fake-npm"
+    fake_bin.mkdir()
+    called = tmp_path / "npm-was-called"
+    if os.name == "nt":
+        # spawnSync(..., {shell: true}) on Windows: cmd finds npm.cmd by PATHEXT.
+        (fake_bin / "npm.cmd").write_text(
+            f'@echo called> "{called}"\r\n@exit /b 3\r\n', encoding="ascii")
+    else:
+        fake = fake_bin / "npm"
+        fake.write_text(f'#!/bin/sh\necho called > "{called}"\nexit 3\n',
+                        encoding="ascii")
+        fake.chmod(0o755)
+
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GITHUB_")}
+    env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
+    if ref_type is not None:
+        env["GITHUB_REF_TYPE"] = ref_type
+        env["GITHUB_REF_NAME"] = ref_name
+
+    proc = subprocess.run(  # nosec B603 - node, resolved to an absolute path, running this repo's own script
+        [node, _PREPUBLISH_CHECK], cwd=ROOT, env=env,
+        capture_output=True, text=True, timeout=120)
+    return proc, called.exists()
+
+
+@pytest.mark.parametrize("tag", [
+    pytest.param("v{version}-rc.1", id="a-prerelease-of-the-version"),
+    pytest.param("{version}", id="the-version-without-its-v"),
+    pytest.param("", id="no-tag-name"),
+])
+def test_a_release_tag_that_is_not_the_version_is_refused_before_packing(
+        tmp_path, tag):
+    """Register item 115, ROADMAP_v3 A78.
+
+    `v0.3.0` and `v0.3.1` were pushed on commits whose files said 0.2.0, and
+    the v0.3.1 `publish (npm)` run packed @yahyahammad/venastine@0.2.0 and
+    reported the check passed. Nothing compared the tag with anything.
+
+    Each tag here is a near miss, which is the point. A prerelease tag
+    begins with the right version, so a prefix comparison lets it through.
+    A tag without its `v` contains the right version, so a substring
+    comparison lets it through. An empty name has to refuse rather than
+    compare equal to nothing. And the refusal has to come before `npm` is
+    reached at all: with the call removed, the script goes on to pack.
+    """
+    version = _package_json()["version"]
+    tag = tag.format(version=version)
+
+    proc, packed = _run_prepublish_check(tmp_path, "tag", tag)
+
+    assert proc.returncode == 1, (
+        f"the check let tag {tag!r} through for package version {version}.\n"
+        f"stdout: {proc.stdout}\nstderr: {proc.stderr}")
+    assert f"so its tag is v{version}" in proc.stderr, (
+        f"the check failed for some other reason than the tag:\n{proc.stderr}")
+    assert not packed, (
+        f"the check refused tag {tag!r}, but only after calling npm. The "
+        f"comparison has to come before anything is packed.")
+
+
+@pytest.mark.parametrize("ref_type,ref_name", [
+    pytest.param("tag", "v{version}", id="the-tag-that-names-the-version"),
+    pytest.param("branch", "main", id="a-run-from-a-branch"),
+    pytest.param(None, None, id="a-local-npm-publish"),
+])
+def test_a_run_the_tag_check_has_no_quarrel_with_goes_on_to_pack(
+        tmp_path, ref_type, ref_name):
+    """The controls for the test above: the check refuses only what it is for.
+
+    A tag that is `v` + the version goes on to pack. So does a run from a
+    branch, which names no version, and a local `npm publish`, which has
+    neither variable. Each one reaches the fake `npm`, so each ends in that
+    fake's own failure and never in the tag refusal.
+    """
+    version = _package_json()["version"]
+    if ref_name is not None:
+        ref_name = ref_name.format(version=version)
+
+    proc, packed = _run_prepublish_check(tmp_path, ref_type, ref_name)
+
+    assert "so its tag is" not in proc.stderr, (
+        f"the check refused a {ref_type!r} run named {ref_name!r} for "
+        f"version {version}:\n{proc.stderr}")
+    assert packed, (
+        f"the check never reached `npm pack` for a {ref_type!r} run named "
+        f"{ref_name!r}.\nstdout: {proc.stdout}\nstderr: {proc.stderr}")
+    assert "`npm pack --dry-run` failed" in proc.stderr, (
+        f"the fake npm was called but its failure was not reported:\n"
+        f"{proc.stderr}")
 
 
 def test_the_test_extra_matches_requirements_test():

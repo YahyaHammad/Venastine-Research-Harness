@@ -25397,3 +25397,90 @@ Each mutation was measured against the shipped fixture:
 - the old 5s fails the floor;
 - `autouse=False` fails the ceiling, with "assert 600 <= 60";
 - a dropped answer fails all three AC2 tests.
+
+## Batch 162 -- a release tag that named one version while the run packed another (2026-10-16)
+
+### What was built
+
+ROADMAP_v3 §78, A78, closing TECHNICAL_DEBT 115, on branch
+`release-tag-matches-version` from batch 161's tip at `1668a39`. It stacks on
+that branch, which is not merged, because A77 and §77 exist only there. Branched
+from `main`, this batch's ids would collide with it.
+
+- `scripts/prepublish-check.mjs`: `releaseTagProblem()` is the first thing the
+  script does. When `GITHUB_REF_TYPE` is `tag`, it refuses unless
+  `GITHUB_REF_NAME` is exactly `v` + `package.json`'s version, and it exits
+  before `npm pack --dry-run`. The refusal message and the existing one share a
+  new `refuse()`. The pass line says "(the tag names it)" when a tag was compared.
+- `tests/test_docs_consistency.py`: six tests. Three are near misses, which must
+  be refused without `npm` being called. Three are controls, which must reach it.
+  They run the real script under Node with a fake `npm` on `PATH`.
+- `.github/workflows/publish.yml`: comments only. The trigger comment says to tag
+  a commit whose files already carry the version, and the prepublish step says
+  what it now refuses.
+- `AGENTS.md`'s Distribution section, its documentation map, the test counts in
+  three documents, `docs/ARCHITECTURE.md`'s tree entries for the script and the
+  test file, and three `tests/BREAKING_CHANGES.md` rows.
+
+### What the owner ruled
+
+Three questions, each asked with options and a recommendation. The owner took
+the recommendation every time.
+
+- **Were `v0.3.0` and `v0.3.1` meant as package versions?** Yes. They were
+  releases, and the bump was missed. `v0.1.0` and `v0.2.0` each matched their
+  files, and these two are lightweight tags on the merges of PRs #200 and #263.
+- **Bump the files to the tags, or leave the tags?** Leave both. Nothing from
+  either tag reached npm. The next release bumps both files past 0.3.1 and tags
+  the commit that carries the bump. Not chosen: bumping to 0.3.1 now, which
+  leaves `v0.3.1` pointing at a 0.2.0 commit, and retagging, which is the owner's
+  own act on the remote.
+- **Where does the check live?** In `prepublish-check.mjs`, first. Not chosen: a
+  workflow step, which fails before the suite rather than after it but is
+  testable only as YAML and is not carried by `prepublishOnly`; and both, which
+  adds a CLI mode and a second call site.
+
+### What measuring found
+
+- **The check refuses the real case.** With `GITHUB_REF_TYPE=tag` and
+  `GITHUB_REF_NAME=v0.3.1`, the script exits 1: "package.json says 0.2.0, so its
+  tag is v0.2.0", and "Nothing was packed". With `v0.2.0`, it packs (the real
+  `npm pack --dry-run`, 167 files) and passes.
+- **npm already holds 0.1.0 and 0.2.0, which the register entry did not
+  measure.** `npm view @yahyahammad/venastine` lists 0.1.0 (2026-09-03) and
+  0.2.0 (2026-09-09, `gitHead` `41b4850`, the `v0.2.0` commit). Neither has a
+  provenance attestation, so neither came from the workflow's real publish step.
+  So the entry's own example was wrong about its consequence: an armed `v0.3.1`
+  run would have been refused by npm as a republish of 0.2.0, red rather than
+  silent. The silent case is a tag on a commit whose files name a version npm
+  does not have yet. The entry and §78 both record the correction.
+- **Each weakening of the check fails a test.** Six mutations were applied to
+  the script, each one asserted to have applied, then run against the six tests:
+  - removing the call fails all three near misses;
+  - a prefix comparison fails the prerelease case;
+  - a substring comparison fails the prerelease and the missing-`v` cases;
+  - moving the call below the pack fails all three, on the `npm` marker file;
+  - keying on `GITHUB_EVENT_NAME` fails all three;
+  - refusing every tag fails the right-tag control.
+
+### What the gates caught
+
+Nothing in this batch's own work. One finding came from outside the code: the
+npm registry contradicted the register entry, as recorded above.
+
+### Verification
+
+`tests/test_docs_consistency.py` passes, 68 passed and 1 skipped, both with
+`AGENT_WORKSPACE` set and with it unset. The skip is the count check, which needs
+a full session. `ruff check .` is clean. bandit with the CI job's own flags,
+against a Windows-path copy of the baseline, exits 0 with nothing new, and
+`scripts/bandit-count-check.py` reports 62 pairs, none grown.
+gitleaks with `.github/gitleaks.toml`, over an export of the tracked files as
+they stood uncommitted, finds nothing.
+
+`python -m pytest -q` is green: 7333 passed, 49 skipped -- 7382, six more than
+batch 161 -- in 1:31. That run was on the tree before the last wording edit to
+`releaseTagProblem()`'s comment and this paragraph; the six new tests and the
+docs gate were re-run after it. Under WSL the six pass as well, which is the
+fake `npm`'s POSIX branch -- the one CI takes -- and its controls are what
+show that fake is reached there.
