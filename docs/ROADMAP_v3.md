@@ -43,6 +43,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
+- **§77. The approval wait that gave up before the test that was answering it** - **(BUILT in batch 161)** (the `v0.3.1` tag run failed one pilot test, "tool never dispatched", after the same commit had passed twice: `conftest`'s autouse fixture shrank a modal's wait to 5s, half of `settle`'s 10s deadline, and 23 pilot tests act on an open modal inside that wait. Raised to 30s and pinned from below as well as from above; A77)
 - **§76. Nine security findings the marathon deferred, and the answer each was waiting for** - **(BUILT in batch 160)** (the nine `security`-area issues batch 159 filed, each put to the owner with options and a recommendation: `**` unpacking refused by the math guard, an empty workspace refused before it resolves, a `.env` read and never loaded, the redaction vocabulary widened to the current vendor formats and three structural shapes, the word on each side of a session buffer's dropped middle moved into the gap, a hardlink into `.venastine/` refused by inode, a session's refused credential quarantined, bidi and zero-width characters revealed in approvals, and an MCP tool's description ruled third-party data in the system prompt; A68-A76)
 - **§75. Thirteen alerts that read a name as a secret, and the gate nothing in the workflow could fail** - **(BUILT in batch 158)** (PR #200's first `CodeQL` check raised 13 high-severity alerts and every one was a false positive: ten came from a source heuristic that reads `args.secrets`, `_secret_twin_name()` and `KEY_PASSPHRASE` as secrets because of their names, and three were test assertions read as URL sanitizers; `tests/` is now skipped because it never ships, the eight in shipped code are dismissed with recorded reasons, and the same red check is the measurement TECHNICAL_DEBT 76 lacked -- the gate is GitHub's pull-request check, and the workflow header now says so)
 - **§74. A gate that was green because of what one machine happened to contain** - **(BUILT in batch 157)** (CI's first run over batches 129-156 came back red on three check runs, and all three were one test: the push-channel gate drove `git check-ignore` in the WORKING TREE, where `logs/`, `output/` and `.ipynb_checkpoints/` exist because the harness creates them, so three directory-only patterns matched here and matched nothing in a fresh clone -- seventeen batches of green behind a branch whose gate had never met one; the same measurement found `__pycache__` declared for the git channel, carrying no rule in `.gitignore` at all, and the one value in the list that no sample could reach)
@@ -2725,6 +2726,69 @@ leaked PID.
   because MCP is the only dynamic registrant and the composed name is its
   fact. A bound in the registry would be the fix-at-the-consumer shape
   `AGENTS.md` names by name.
+---
+
+## §77. The approval wait that gave up before the test that was answering it
+
+**Built in batch 161**, from one red check. The `tests` run on the `v0.3.1` tag
+push, at `e50fe6e`, failed
+`tests/test_tui.py::TestThePermissionRoundTrip::test_ac2_approving_a_permission_prompt_resumes_the_same_generator`
+with "tool never dispatched" -- 1 of 7376 -- after the same commit had passed on
+`main`'s push and on PR #263. It was not an unusually slow run: 5:25, against
+5:12 for `main`'s.
+
+**WHAT FAILED IS A TIMER, AND SHRINKING IT SAYS SO.** `tests/conftest.py`'s
+autouse `shrink_approval_timeout` set `ATTENDED_APPROVAL_TIMEOUT_S` to 5s, so a
+modal that drops its answer fails instead of parking for 600. That makes the
+worker's `channel.get` a wall-clock window the test must answer inside, and the
+answer costs `settle`'s quiesce plus the four `pilot.pause()` calls in a click.
+Each measured 21ms idle and 1021ms beside one busy sibling thread, and only
+`_wait_for_screen`'s 30s bounds one at all. Forced to 0.1s by a
+plugin that sets the value after fixture setup, the test fails with the CI
+message exactly; at 0.2s it passes. Across the suite, 0.1s fails **23** tests in
+three files (`test_tui.py`, `test_question_tool.py`, `test_project_init.py`).
+Each is a pilot test that acts on an open modal, by answering it or by quitting
+or crashing with it up, and needs the worker still waiting when it does.
+TECHNICAL_DEBT 85's batch-157 note is this shape with a different timer.
+
+**The fixture said "nothing asserts on the value", and that was true from above
+only.** 5s was half of `settle`'s own deadline: the test was more patient than
+the worker it was answering.
+
+**WHAT THE 5s WAS ALSO HIDING.** Planting the bug the fixture exists for --
+`push_screen`'s callback no longer puts the answer -- failed ONE of the three AC2
+tests. The deny and Escape tests passed, because the timeout's decline arrived
+inside their wait and read as the denial they assert. At 30s all three fail, at
+`settle`'s deadline, about 11s each, and the shutdown release unparks the
+worker. `tests/BREAKING_CHANGES.md` said that mutation made "the AC2 tests"
+fail; it made one.
+
+**The limit of the diagnosis.** The CI log cannot tell an expired wait from a
+click that missed its button: both end "tool never dispatched". The timer is the
+cause a measurement reproduces. A missed click would still fail after this
+change, so a recurrence is evidence for the other cause rather than noise.
+
+### What §77 deliberately does not change
+
+**Production's 600s.** A77 changes only the value the suite sets;
+`config.ATTENDED_APPROVAL_TIMEOUT_S` ships unchanged.
+
+**The 23 tests.** None is edited. Pinning 30s in each, the `QUIT_CONFIRM_S`
+idiom from batch 157, was the alternative, and the owner ruled against it: the
+next test to act on a modal would inherit the window unless it remembered.
+
+**`settle`'s 10s.** The new floor reads that deadline off `settle`'s signature;
+it does not set it.
+
+**TECHNICAL_DEBT 82 stays open** (#235). Both bounds still assert the value, not
+that the production reader reads it at call time.
+
+### Design Decisions Record — §77 (A77)
+
+| id | decision |
+|---|---|
+| **A77** | **Under test, a modal's worker outwaits the test that answers it.** `shrink_approval_timeout` sets `ATTENDED_APPROVAL_TIMEOUT_S` to 30s -- three times `settle`'s default deadline -- instead of 5s. `test_the_approval_timeout_is_shrunk_for_tests` pins both bounds: at most 60s, so the fixture is still in effect, and more than `settle`'s `timeout` default, read off its signature. Chosen over pinning 30s in each of the 23 dependent tests, which leaves the next one exposed |
+
 ---
 
 ## §76. Nine security findings the marathon deferred, and the answer each was waiting for

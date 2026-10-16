@@ -295,11 +295,25 @@ def test_the_approval_timeout_is_shrunk_for_tests():
 
     `tui/app.py` reads this at call time, so patching the module
     attribute is enough to reach `_blocking_modal`'s `channel.get`.
+
+    The LOWER bound is batch 161's (A77), and it has no other pin for the
+    opposite reason: shrinking the value too far changes no outcome on an
+    idle machine either. It was 5s, under `settle`'s 10s deadline, and
+    the only symptom was a loaded run's click arriving after the worker
+    had declined -- once, on the v0.3.1 tag run. The relation is read off
+    `settle`'s signature, so a longer deadline there raises the floor
+    here instead of quietly reopening the window.
     """
     import config
-    assert config.ATTENDED_APPROVAL_TIMEOUT_S <= 10, (
+    assert config.ATTENDED_APPROVAL_TIMEOUT_S <= 60, (
         "an unanswered modal will stall the suite instead of failing it -- "
         "is the shrink_approval_timeout fixture still autouse?")
+    patience = inspect.signature(settle).parameters["timeout"].default
+    assert config.ATTENDED_APPROVAL_TIMEOUT_S > patience, (
+        f"a modal's worker gives up after "
+        f"{config.ATTENDED_APPROVAL_TIMEOUT_S}s and settle waits {patience}s, "
+        "so a loaded run's answer can land after the modal has already "
+        "declined -- keep the shrink above settle's deadline")
 
 
 # ---------------------------------------------------------------------------

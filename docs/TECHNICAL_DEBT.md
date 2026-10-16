@@ -4448,6 +4448,12 @@ message is the right one for that. If driving the modal is too heavy for
 rather than detecting it, which is the better trade and is already this project's
 chosen answer for the sibling reader.
 
+**Batch 161 moved the numbers this entry quotes** (ROADMAP_v3 §77, A77). The
+fixture sets 30, and the pin is `<= 60` plus a floor above `settle`'s deadline,
+because the 5s value was under it and a loaded tag run's click arrived after
+the worker had declined. The entry's point is untouched: both bounds assert the
+value, and neither asserts that `_blocking_modal` reads it at call time.
+
 **Not:** reviewing `_blocking_modal`'s dismissal paths, the `on_timeout`
 narration, or whether every dismissal produces a boolean -- item 5 is open as
 that brief. The `settle`/`pump` pair was read and is sound.
@@ -4837,6 +4843,18 @@ probe only clears the hypothesis it encodes.**
 Fixed in batch 157, with the control stated as a relation rather than a flip:
 with the ambient `QUIT_CONFIRM_S` forced to 0.001s -- which killed 5 of 10
 before -- all ten pass, because each of the five now pins its own.
+
+### A SECOND TIMER OF THE SAME SHAPE, found in batch 161
+
+`conftest`'s `shrink_approval_timeout` set `ATTENDED_APPROVAL_TIMEOUT_S` to 5s,
+and every pilot test that acts on an open modal needs the worker still parked
+on `channel.get` when it does. The `v0.3.1` tag run let more than 5s pass
+between the modal going up and the click arriving, and
+`test_ac2_approving_a_permission_prompt_resumes_the_same_generator` failed "tool
+never dispatched". This entry's lesson found it in one measurement: shrinking
+the value to 0.1s reproduced the message and named the population -- 23 tests
+in three files, where batch 157's timer had five. Fixed by raising the shrink
+above `settle`'s deadline rather than pinning each test (ROADMAP_v3 §77, A77).
 
 
 ## 86. The decision-id gate scans `.py` only, and this project ships `.mjs` (open, found and filed batch 141)
@@ -5716,6 +5734,13 @@ defined; batch 151 added A34-A39 and the same unchanged sentence became
 produced it, so the reader's first move is to check the family claim -- which
 is correct -- and find nothing wrong with it.
 
+**It fired again in batch 161**, on a sentence batch 160 wrote: `A68–A76 in §76`
+passed while A76 was the highest A, and failed as "map claims through A76,
+record defines A77" the moment §77 existed. It was fixed the way every
+previous cycle was, by enumerating the ids, which every other section's
+parenthetical already does. Two batches in a row is the measurement this
+entry's "one cycle per batch" predicted.
+
 **Why it is filed rather than fixed.** The fix is a one-line distinction and
 the question is which line:
 
@@ -6097,6 +6122,33 @@ comprehension rather than a message naming the field.
 demonstrated consequence -- and a second answer to a question the loader
 already answers is the fix-at-the-consumer shape AGENTS.md names. The
 measurement worth having first is whether any caller ever will.
+
+## 115. A release tag is not compared with the version it publishes (open, found batch 161)
+
+**Found reading the `v0.3.1` tag's runs**, while diagnosing the `tests` failure
+ROADMAP_v3 §77 fixes. Severity `S3`, `stability`: nothing is wrong yet, and the
+first time it is, it cannot be undone.
+
+**What was measured.** `package.json` and `pyproject.toml` both say `0.2.0` on
+`main` at `e50fe6e`, and they said `0.2.0` under the `v0.3.0` tag at `f836602`.
+The `v0.3.1` tag's `publish (npm)` run packed `@yahyahammad/venastine@0.2.0`, and
+`scripts/prepublish-check.mjs` reported "prepublish check passed: v0.2.0". It
+rehearsed and uploaded nothing, only because no `NPM_TOKEN` is configured.
+
+**Why it matters.** The check compares the two version files with each other and
+never with the tag that started the run, and `publish.yml` reads no tag name at
+all. Once the channel is armed, the next tag push publishes the version the
+files say, whatever the tag says, and the workflow's own header says why that
+is permanent: "a published npm version can never be replaced -- only
+deprecated".
+
+**Shape, not a patch.** Make the tag a third copy of the fact on the publish
+path: on a `v*` push, refuse unless `GITHUB_REF_NAME` is `v` + `package.json`'s
+version, before anything is packed. Which of the two moves first -- bumping the
+files to the tags, or retagging -- is the owner's call, and so is whether
+`v0.3.0`/`v0.3.1` were meant as package versions at all.
+
+**Not:** arming the channel, or bumping either file here.
 
 ## Review-marathon arrivals at open issues with no register entry
 

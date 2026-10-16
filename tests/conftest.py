@@ -362,13 +362,33 @@ def shrink_approval_timeout():
     "mutations present as a hung suite" note in ARCHITECTURE 11.
 
     Read at call time, so patching the module attribute is enough. Nothing
-    asserts on the value or on the rendered "600s" string, and the tests
-    that exercise the timeout path call `_timed_out_ask` directly rather
-    than through the wait.
+    asserts on the rendered "600s" string, and the tests that exercise the
+    timeout path call `_timed_out_ask` directly rather than through the
+    wait.
+
+    THE VALUE IS LOAD-BEARING FROM BELOW, TOO (batch 161, A77). This said
+    "nothing asserts on the value", and 23 pilot tests depend on it: every
+    test that acts on an open modal through the pilot -- the AC2 round
+    trip, the question modal, project init's two modals, the quit and
+    crash releases -- needs the worker still parked on `channel.get` when
+    it does. It was 5s, HALF of `settle`'s own 10s deadline, so a test was
+    more patient than the worker it was answering. The v0.3.1 tag run let
+    more than 5s pass between the modal going up and the click arriving,
+    the worker declined, and `test_ac2_approving_...` failed "tool never
+    dispatched". Forcing 0.1s reproduces that message and fails all 23.
+
+    30s is three times `settle`'s deadline. Green, it costs nothing
+    (measured: no approval test among the slowest, suite time unchanged).
+    A dropped answer still FAILS, at `settle`'s deadline -- about 11s a
+    test, with the shutdown release unparking the worker. And it is what
+    lets the deny and Escape AC2 tests see a dropped answer at all: at 5s
+    the timeout's decline arrived inside their wait and read as the denial
+    they assert, so dropping the `put` failed 1 of the 3; at 30s, 3 of 3.
+    `test_pilot_wait.py` pins both bounds.
     """
     import config
     original = config.ATTENDED_APPROVAL_TIMEOUT_S
-    config.ATTENDED_APPROVAL_TIMEOUT_S = 5
+    config.ATTENDED_APPROVAL_TIMEOUT_S = 30
     yield
     config.ATTENDED_APPROVAL_TIMEOUT_S = original
 
