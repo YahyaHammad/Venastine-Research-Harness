@@ -25106,3 +25106,78 @@ stated in `docs/ARCHITECTURE.md`'s source tree; the suite total in
 `AGENTS.md`, `README.md` and `docs/ARCHITECTURE.md`. Controls 13 of 13.
 CodeQL itself cannot run here -- there is no CLI on this machine -- so the
 config's effect is measured by the next analysis of PR #200, after the push.
+
+## Batch 159 -- the marathon's tail filed as issues, and four entries that were no longer what they said (2026-10-16)
+
+**No code changed.** `docs/REVIEW_MARATHON.md` § *Filing a finding as a GitHub
+issue* makes a `DEFER` finding a register item at once and an issue after the
+merge. PR #200 merged on 2026-10-15, so this batch is the second half, and the
+two extras the owner asked for with it: a re-verification comment on each of
+the two `KNOWN` arrivals the register said were still an owner action, and an
+index issue.
+
+### What was filed
+
+- **59 issues, #203-#261**, one per register entry from 49 to 114
+  that was still open, except 88, 97, 102 and 106 (below); **#262** is the
+  index, grouped by surface. 17 `S3` and 42 `S4`; none is `S1` or `S2`.
+- **Labels by the marathon document's rule**, not the template's absence of
+  one: `bug` where behaviour is wrong today (23), `documentation` for drift
+  between code and docs (5), `enhancement` where nothing misbehaves yet
+  (31). Severity is independent of it.
+- **Items 49-82 converted mechanically** from the report's own `Where` / `What
+  happens` / `Why` / `Shape` / `Not doing` fields, as the marathon document
+  says they convert, with the `96de26e` base kept in each footer and a line
+  saying what was re-checked on `main`. Items 84 and 86-114 have no report
+  behind them and were written from the entry. Only 84, 86 and 95 state a
+  severity; the rest were assigned from the entry's text at filing, and the
+  index says to relabel freely.
+- **The nine `security`-area items were filed publicly, by owner ruling.** The
+  audit template routes vulnerabilities to `docs/SECURITY.md`, but all nine
+  (51, 52, 55, 57, 90, 93, 95, 100, 104) were already published in this
+  register on public `main`, and none is above `S3` -- an issue disclosed
+  nothing that was not already disclosed.
+- **#8 and #12** each carry the re-verification from the register's
+  *Review-marathon arrivals* section, re-measured against `f836602`; #8 also
+  points at item 71's issue, which is the same D12 debt from the other side.
+
+### What re-checking before filing found
+
+Every entry was re-checked against `main` before its issue was written --
+this file's own rule that an entry is evidence and not instruction. Four did
+not match, and **three of the four were made stale by a FIX-NOW batch fixing
+part of a DEFER entry without touching the entry**:
+
+- **49.** Batch 142 (S02-03) gave the insecure fallback `stdin=DEVNULL`, so the
+  third executor was closed seventeen batches ago. Filed for the two that
+  remain.
+- **77.** Batch 150 added three `integration` tests; "the suite's one" is four.
+- **80.** Batch 142 (S02-10) put `_sudo_rejected` into the autouse sandbox
+  fixture; five globals are four.
+- **106, closed.** Neither name is stale. `_replace_via_keyboard` is a method of
+  Textual's `TextArea`, and both `AGENTS.md` mentions of `_last_response` are
+  past tense about the attribute batch 48 removed. The entry was right that a
+  NAME-token gate would flag them and wrong that nothing explained them.
+
+That is shape 9 in the register itself: a fix on one surface falsifying a
+claim on another, in a document no gate reads. A register entry is corrected
+by the batch that closes it, and these three were never closed -- only
+narrowed, by batches whose subject was a different finding.
+
+### Not filed
+
+- **88**, closed as superseded: PR #200 put the six workflows on `main`.
+- **97**, the unreproduced secrets flake. The entry says the test must not be
+  touched until it recurs, and an issue invites exactly that change.
+- **102**, an environment note with nothing for an issue to close.
+- **76, 83, 85** were already closed; **S19-12** (`ACCEPTED`) keeps its
+  argument in *Accepted risks*, since the rule files it only if a later
+  decision is wanted.
+
+### Verification
+
+Docs only: `docs/TECHNICAL_DEBT.md` carries an `**Issue:**` line under each
+filed entry, the four corrections, both closures, the two not-filed notes, and
+an updated intro and *arrivals* section. `tests/test_docs_consistency.py`
+passes, and again with `AGENT_WORKSPACE` unset. Full suite green, at the 7214 batch 158 left it.
+No test added or changed, so no `tests/BREAKING_CHANGES.md` row.

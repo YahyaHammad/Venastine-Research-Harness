@@ -2832,6 +2832,14 @@ full-suite run, from declining to re-run a flake until it went green, and
 **item 86** out of batch 141's own gate catching a mistake batch 140 had
 already shipped past it.
 
+**Filed as GitHub issues in batch 159**, after PR #200 merged, which is when
+`docs/REVIEW_MARATHON.md`'s disposition table says a `DEFER` finding becomes
+one. Every entry from 49 to 114 that was still open got an issue, and the number
+is under its heading; #262 is the index. Each was re-checked against `main`
+before filing, and four did not match: 49, 77 and 80 were partly out of date and
+carry a correction, and 106 is closed. 88 is closed as superseded, and 97 and
+102 were not filed, each for the reason in its entry.
+
 **Each entry below has to stand on its own, and that is deliberate.** The
 reports live in `review/`, which is gitignored -- so unlike every other item in
 this file, there is no durable document behind these to go back to. A `git clean
@@ -2855,6 +2863,14 @@ how an entry should be read:
   the entry.
 
 ## 49. Three one-shot executors inherit the harness's console stdin (open, deferred batch 138)
+
+**Issue:** #203.
+
+**Corrected when filed (batch 159).** Re-checked on `main` before filing: batch
+142 (S02-03's fix) already gave `_run_subprocess_fallback`
+`stdin=subprocess.DEVNULL`, so the insecure fallback is closed. Two executors
+remain -- `_run_inert` and the container one-shot in `_run_docker` -- and the
+issue is filed for those two. The paragraphs below are as measured in batch 138.
 
 **S01-02, severity S3, `stability`.** `security/sandbox.py:2124-2146`
 (`_run_inert`), `:2532-2547` (`_run_docker` one-shot), `:2851-2874`
@@ -2891,6 +2907,8 @@ decision).
 
 ## 50. `run_isolated` buffers the child's whole output before bounding it (open, deferred batch 138)
 
+**Issue:** #204.
+
 **S01-03, severity S4, `performance`.** `tools/isolation.py:257-284` runs the
 child with `capture_output=True` and no streaming cap; `:192-195` and `:220-226`
 length-check stdout and excerpt stderr only once both pipes are in memory.
@@ -2920,6 +2938,8 @@ read. `tools/isolation.py` only.
 thread-based collection (the module's process decision, H2, stands).
 
 ## 51. A session's refused credential is never quarantined (open, deferred batch 138)
+
+**Issue:** #205.
 
 **S02-05, severity S3, `security`.** `security/sandbox.py:1047`
 (`_note_ssh_auth_failure`) and `:1419` (`_note_sudo_auth_failure`) are called
@@ -2955,6 +2975,8 @@ quarantine in one place; a second copy of the matching in
 **Not:** changing the matching strings or the quarantine's one-way lifetime.
 
 ## 52. Sixteen of twenty-two credential shapes survive `redact_output_text` (open, deferred batch 138)
+
+**Issue:** #206.
 
 **S05-03, severity S3, `security`.** `safety/policy_enforcement.py:208-223`
 (`_SECRET_PATTERNS`), `:287-306` (the three credential shapes), `:382-398` (the
@@ -2994,6 +3016,8 @@ side's whole vocabulary by decision.
 
 ## 53. `resolve=False` checks dotted IP literals and no other numeric form (open for the BEHAVIOUR, comment corrected batch 156)
 
+**Issue:** #207.
+
 **S05-04, severity S4, `coherence`.** `tools/builtin/web_search.py:114-123`
 carries the comment "An IP LITERAL is still checked"; `resolve=False`'s semantics
 are at `safety/policy_enforcement.py:144-150`. Driven through the real
@@ -3030,6 +3054,8 @@ names, where the documented latency tradeoff stands; any change to
 
 ## 54. `probability_stats._build_distribution` is dead and is a second answer (open, deferred batch 138)
 
+**Issue:** #208.
+
 **S06-12, severity S4, `coherence`.** `tools/builtin/probability_stats.py:62-73`
 against `:76-107`. `_build_distribution` has no caller: the one call site
 (`:187`) is to `_build_distribution_with_warnings`. The two functions build the
@@ -3049,6 +3075,8 @@ it is `_build_distribution_with_warnings(...)[0]`.
 `_build_distribution_with_warnings`' signature.
 
 ## 55. `**`-unpacking is admitted by the math node allowlist (open, deferred batch 138)
+
+**Issue:** #209.
 
 **S06-13, severity S4, `security`, harm `suspected`.**
 `tools/builtin/_math_common.py:185` has `ast.keyword` in `_ALLOWED_NODES` for
@@ -3084,6 +3112,8 @@ decision about future expression support, which is why this is deferred.
 `_STRING_ARG_CONSTRUCTORS`.
 
 ## 56. Nothing imports `env_secrets`, so `.env` is read by nothing (open, deferred batch 138)
+
+**Issue:** #210.
 
 **S07-07, severity S4, `coherence`.** No production module imports
 `env_secrets`, so `get_env_secret` has no caller and the import-time
@@ -3123,6 +3153,8 @@ whose own `tests/BREAKING_CHANGES.md:2826` row explains what reverting them
 re-breaks; and the `usecwd=True` fix it carries is correct and worth keeping.
 
 ## 57. `env_secrets` turns an untrusted `.env` into process environment at import (open, deferred batch 138)
+
+**Issue:** #211.
 
 **S07-08, severity S3, `security`, harm `suspected`.** `env_secrets.py:55-57`:
 
@@ -3172,6 +3204,8 @@ content hash is a separate question for the trust layer and for the owner.
 
 ## 58. One env-var misconfiguration warns and the other raises (open, deferred batch 138)
 
+**Issue:** #212.
+
 **S07-10, severity S4, `ux`.** `logging_setup.py:93-107` (`_resolve_level`)
 against `:190-199` (the `OSError` fallback), reached from `main.py:2495`. An
 unwritable `AGENT_LOG_FILE` prints a warning and continues, with the stated
@@ -3208,6 +3242,8 @@ environment variable costs.
 **Not:** having `configure_logging` validate anything else.
 
 ## 59. The config schema checks shape where fitness also matters, unevenly (open, deferred batch 138)
+
+**Issue:** #213.
 
 **S08-04, severity S4, `coherence`.** `config_schema.py:392` (`ssh_port: int`,
 un-ranged), `:355`/`:361` (`db_path`, `workspace_dir`: bare `str`, no emptiness
@@ -3253,6 +3289,8 @@ downstream with a better error; `default_effort`, which is already cross-checked
 
 ## 60. The loader reads `.md` files the trust hash refuses to (open, deferred batch 138)
 
+**Issue:** #214.
+
 **S08-05, severity S4, `stability`, harm `suspected`.**
 `core/config_loader.py:363-364` is `open(path)` plus `f.read()` with no
 regular-file guard. `core/workspace_trust.py:114-126` -- on the same files --
@@ -3287,6 +3325,8 @@ subprocess timeout as the harness, since a removed guard hangs rather than fails
 inventing a cap would add a failure mode to the largest legitimate manifests.
 
 ## 61. A parallel batch widens the window between "the tool ran" and "the row is durable" (open, deferred batch 138)
+
+**Issue:** #215.
 
 **S10-06, severity S3, `stability`, harm `suspected`.**
 `core/loop.py:1196-1244` (`_dispatch_parallel`) against `:1286-1296`
@@ -3347,6 +3387,8 @@ it is a consequence of the same window.
 
 ## 62. A truncated fold is measured against the length it no longer has (open, deferred batch 138)
 
+**Issue:** #216.
+
 **S11-07, severity S4, `correctness`.** `core/compaction.py:1047-1049`, in
 `compact()`. `_truncate_oldest` shortens the span to the one-call input budget,
 and the two lines after it update `original` and leave `target` alone:
@@ -3386,6 +3428,8 @@ are already correct.
 
 ## 63. Batch 119's yield logs a standing condition per step (open, deferred batch 138)
 
+**Issue:** #217.
+
 **S11-09, severity S4, `ux`.** `core/compaction.py:701-705`, in
 `compactable_span()`. The yield is reported with `logger.info` inside a function
 called once per `compact()`, which `_maybe_compact` calls at the turn boundary
@@ -3420,6 +3464,8 @@ the line to DEBUG and let `_maybe_compact` say it once per run under the existin
 and is not a standing condition.
 
 ## 64. Two scoring helpers raise where the scope says nothing raises (open, deferred batch 138)
+
+**Issue:** #218.
 
 **S12-03, severity S3, `stability`, harm `suspected`.**
 `core/reasoning/scholar.py:329-345` (`author_standing`'s authorship loop) and
@@ -3468,6 +3514,8 @@ not fix itself on retry; changing the give-up-on-first-outage policy, which is
 load-bearing (SQ10).
 
 ## 65. A second `connect_all()` abandons a generation of MCP children silently (open, deferred batch 138)
+
+**Issue:** #219.
 
 **S13-09, severity S4, `stability`.** `mcp_client/client.py:355-384`
 (`connect_all`) and `:471-525` (`disconnect_all`). `connect_all()` rebinds
@@ -3520,6 +3568,8 @@ single-instance assumption and would be the same future section's problem.
 
 ## 66. A `_blocking_modal` comment states a park that does not happen (open, deferred batch 138)
 
+**Issue:** #220.
+
 **S14-07, severity S4, `coherence`, textual 8.2.8.** `tui/app.py:4214-4221`, the
 comment above `_blocking_modal`'s `set_blocked` call, states as a measurement:
 
@@ -3558,6 +3608,8 @@ D22 asks of every claim about the installed package.
 
 ## 67. `_cmd_secrets` says "would deadlock" where it would raise (open, deferred batch 138)
 
+**Issue:** #221.
+
 **S14-08, severity S4, `coherence`, textual 8.2.8.** `tui/app.py:6520-6524`,
 `_cmd_secrets()`'s docstring: "a command handler runs on the UI THREAD, and the
 blocking asks are drained by that same thread -- so calling one here would
@@ -3582,6 +3634,8 @@ loudly" versus "it would deadlock" changes whether they trust a test to catch it
 **Not:** restructuring `/secrets`, which is sound.
 
 ## 68. `AGENTS.md`'s `_blocking_modal` bullet is split by eight unrelated ones (open, deferred batch 138)
+
+**Issue:** #222.
 
 **S14-09, severity S4, `docs-drift`.** `AGENTS.md:2673-2674` and `:2708-2711`.
 The bullet in *The response channel* that documents the TUI's one
@@ -3610,6 +3664,8 @@ heading. A hand fix, not a new gate.
 **Not:** adding a check for it.
 
 ## 69. `_ask_lock`'s no-timeout argument covers half the critical section (open, deferred batch 138)
+
+**Issue:** #223.
 
 **S14-10, severity S4, `coherence`, harm `suspected`.**
 `core/interaction.py:70-77` against `tui/app.py:4223-4232`. NA12's lock
@@ -3646,6 +3702,8 @@ anything NA12 cares about, or the lock could be acquired around the park alone.
 into a leaf module that deliberately imports nothing first-party.
 
 ## 70. Three widgets measure the terminal in characters, not cells (open, deferred batch 138)
+
+**Issue:** #224.
 
 **S15-02, severity S4, `ux`.** `tui/diffs.py:95` (`wrap_source` breaks on
 `len(text)`), `tui/widgets.py:2535` (`Transcript._write_padded` pads with
@@ -3692,6 +3750,8 @@ the bound.
 
 ## 71. A live chat turn shows neither reasoning nor tool lines; a replay of it shows both (open, deferred batch 138)
 
+**Issue:** #225.
+
 **S16-04, severity S4, `ux`.** `main.py:384-415` (`run_chat` drains through
 `run_to_completion()` and prints notices plus `Agent:` text only), against
 `:100-112` (replay prints `Thinking:` and tool lines) and `:1706-1738` (the
@@ -3724,6 +3784,8 @@ handling in the CLI, explicitly not required; any TUI work. Do not leak thinking
 content into research-style volume lines.
 
 ## 72. The existing hub document is read, diffed, embedded and printed whole (open, deferred batch 138)
+
+**Issue:** #226.
 
 **S17-03, severity S3, `performance`.** `project_init/generator.py:171-186`
 (`_read_existing_context`), `:279-288` (`build_diff`), `:387-396` (`say(diff)`),
@@ -3766,6 +3828,8 @@ rather than by this file.
 
 ## 73. `_tree` is the one manifest section with no second screen (open, deferred batch 138)
 
+**Issue:** #227.
+
 **S17-04, severity S4, `coherence`.** `project_init/manifest.py:147-160`
 (`_SECRET_FILENAMES`, `_is_secret`), `:247-271` (`_tree`), `:231-236` (the
 comment). `_root_documents` asks the tool's own predicate; the tree asks only
@@ -3796,6 +3860,8 @@ narrow the comment to name exactly the set it covers.
 **Not:** changing what is readable; content redaction; `_DOC_EXTENSIONS`.
 
 ## 74. Two headless runs build prompts with the attended catalog defaults (open, deferred batch 138)
+
+**Issue:** #228.
 
 **S17-06, severity S4, `test-quality`.** `project_init/generator.py:235-237` and
 `core/compaction.py:1267-1268` call `system_prompt_for` with bare defaults, while
@@ -3828,6 +3894,8 @@ goes red. Test: build each prompt with `callable_only=True` and assert no
 changing either agent's tools.
 
 ## 75. The issue template and the prose that governs it are checked against neither (open, deferred batch 138)
+
+**Issue:** #229.
 
 **S18-10, severity S4, `docs-drift`.** `.github/ISSUE_TEMPLATE/audit-finding.yml`
 against `docs/CONTRIBUTING.md:78-82,140`. `:140` states the relationship and the
@@ -3933,6 +4001,12 @@ were cleared.
 
 ## 77. The suite's one `integration` test runs in no workflow (open, deferred batch 138)
 
+**Issue:** #230.
+
+**Corrected when filed (batch 159).** The `integration` marker has covered FOUR
+tests since batch 150, not one, and still nothing in `.github/workflows/` passes
+`-m integration`. The issue is filed with the plural.
+
 **S19-06, severity S3, `test-quality`.** `.github/workflows/tests.yml:20-23`
 against `pytest.ini:3-6`. The workflow says:
 
@@ -3996,6 +4070,8 @@ giving the real one.
 offline default is a locked decision and the marker is what implements it.
 
 ## 78. `FakeStorage` makes eleven mirror claims and two are compared (open, deferred batch 138)
+
+**Issue:** #231.
 
 **S19-07, severity S3, `test-quality`.** `tests/test_fake_storage_mirror.py:126`
 and `:167` against `tests/conftest.py:1251` (`pinned_through`) and `:1275`
@@ -4071,6 +4147,8 @@ compacted view. That argument is sound and is not reopened.
 
 ## 79. `test_the_tree_names_every_production_module` quantifies over a typed list (open, deferred batch 138)
 
+**Issue:** #232.
+
 **S19-08, severity S4, `test-quality`.** `tests/test_docs_consistency.py:378-430`.
 The gate iterates `_MAPPED_DIRS`, sixteen directory names someone typed:
 
@@ -4120,6 +4198,14 @@ which reads the document's first fenced block and would be a finding if the
 reformatted tree fails loudly.
 
 ## 80. Five once-per-process globals are reset only by local fixtures (open, deferred batch 138)
+
+**Issue:** #233.
+
+**Corrected when filed (batch 159).** `_sudo_rejected` has been reset generally
+since batch 142 (S02-10's fix: `isolate_sandbox_probes` calls
+`sandbox._reset_sudo_quarantine()`), so FOUR globals remain, not five. The
+sharpest instance -- `clear_client_cache` missing `_effort_levels_cache` -- is
+unchanged.
 
 **S19-09, severity S4, `test-quality`, harm `suspected`.**
 `tests/conftest.py:462` (`clear_client_cache`) and `:681`
@@ -4202,6 +4288,8 @@ so it cannot leak).
 
 ## 81. Twenty-four env-gated skips are the guarantees nobody here has observed (open, deferred batch 138)
 
+**Issue:** #234.
+
 **S19-10, severity S3, `test-quality`.** `tests/test_ssh_backend.py:72`,
 `tests/test_sudo.py:82`, `tests/test_wsl_backend.py:66`, against
 `.github/workflows/tests.yml` and `compat.yml`. Driven:
@@ -4261,6 +4349,8 @@ host must still be able to run the suite and the skip is the right mechanism;
 what is missing is that nothing in CI ever supplies the variables.
 
 ## 82. The approval-timeout fixture is pinned by its value, not its effect (open, deferred batch 138)
+
+**Issue:** #235.
 
 **S19-11, severity S4, `test-quality`.** `tests/conftest.py:353-373`
 (`shrink_approval_timeout`) and `tests/test_pilot_wait.py:287-302`, against
@@ -4472,6 +4562,8 @@ is that leaving them in "would make the sign-off notice promise authority the
 grant does not carry, which is worse than not offering it."
 
 ## 84. The test that pins R2's grant filter cannot fail from its removal (open, found and filed batch 138)
+
+**Issue:** #236.
 
 **Not from any report either.** Batch 138's mutation pass turned this up while
 scoring the guard for item 83. Severity `S4`, `test-quality`.
@@ -4706,6 +4798,8 @@ before -- all ten pass, because each of the five now pins its own.
 
 ## 86. The decision-id gate scans `.py` only, and this project ships `.mjs` (open, found and filed batch 141)
 
+**Issue:** #237.
+
 **Found by the gate catching me**, which is the useful half. Severity `S4`,
 `test-quality`.
 
@@ -4761,6 +4855,8 @@ domain.
 
 ## 87. `.gitleaksignore` pins its blessings by LINE NUMBER (open, found and filed batch 144, measured again batch 145)
 
+**Issue:** #238.
+
 The secret scan's allowlist is a list of fingerprints, and a fingerprint is
 `<path>:<rule>:<line>`. So a blessing is attached to a line number, not to the
 text it blesses, and **any edit that moves a blessed line re-fires the scan**.
@@ -4815,7 +4911,14 @@ an RSA header whose body is literally `MIIEpA...`. Worth recording because
 the wrong form is the one that looks MORE thorough, which is the same
 footgun `pip-audit` has (item 88's entry, and batch 148's correction).
 
-## 88. Six workflows are not on `main`, so a branch's CI is reconstructed by hand (open, filed batch 145)
+## 88. Six workflows are not on `main`, so a branch's CI is reconstructed by hand (closed, batch 159 -- superseded when PR #200 put the six workflows on `main`)
+
+**Closed in batch 159, superseded rather than fixed.** PR #200 merged on
+2026-10-15, and `main` now carries all six workflows, so a branch's lint, secret
+and dependency checks run on GitHub again (PR #200's own run passed all 20). The
+local reconstruction this entry asked for is no longer the only check. The flag
+trap it records still applies to a run by hand -- copy the invocation out of the
+workflow file, never from memory.
 
 `navigable-agents` carries six workflow files that `main` does not, so GitHub
 runs none of them for this branch and every batch's lint, secret and
@@ -4850,6 +4953,8 @@ reproduction, which is needed either way for the batches before the merge.
 
 ## 89. The transcript's ANSI strip is silent, and nothing reads the count it keeps (open, filed batch 145)
 
+**Issue:** #239.
+
 S15-01's fix removes every terminal control sequence at every transcript
 ingress, and the owner's ruling was that the text says nothing and the log
 says it once. Both halves shipped: `Transcript.take_stripped_count()` is
@@ -4879,6 +4984,8 @@ arriving by a route nobody chose, with a `[warning]` prefix on an ordinary
 coloured answer.
 
 ## 90. A hardlink is a second name for a file, and the one hard deny cannot see it (open, found and filed batch 146)
+
+**Issue:** #240.
 
 `file_ops._protected_path_error` resolves a path before testing it for a
 protected segment, which is what catches a symlink and a junction into
@@ -4924,6 +5031,8 @@ the deny working when the deny is what cannot see this.
 
 ## 91. A closed issue cited in a docstring has nothing keeping it honest (open, found and filed batch 146)
 
+**Issue:** #241.
+
 `tools/builtin/project_docs.py`'s module docstring stated a credential
 residual in the present tense -- a plaintext `<password>` element, a Gradle
 `password "..."` and a `user:token@host` URL are "NOT" redacted out of a
@@ -4962,6 +5071,8 @@ of citation in the tree -- the question is only what keeps them true.
 
 ## 92. An atomic doc write can fail where a truncating one succeeded (open, filed batch 146)
 
+**Issue:** #242.
+
 `write_project_doc`, `write` and `edit` write through
 `json_store.write_text_atomic` since batch 146, which is what stops a
 hardlinked name being written through (item 90). The rename it ends with has a
@@ -4991,6 +5102,8 @@ item 90 reintroduced on the platform where a case-insensitive filesystem makes
 the rest of this surface hardest to reason about.
 
 ## 93. An environment override that is SET BUT EMPTY is honoured as a value (open, found and filed batch 146)
+
+**Issue:** #243.
 
 `config_schema.py` merges the environment over the YAML with
 `override = os.environ.get(variable)` and `if override is not None`, so an
@@ -5061,6 +5174,8 @@ what moved is which directory the posture is ABOUT, one layer below it.
 
 ## 94. The CLI's Ctrl+C stops a turn on the FIRST press, with nothing between a stray press and a stopped turn (open, filed batch 147)
 
+**Issue:** #244.
+
 CN10 gave the CLI "Ctrl+C stops the turn", and the TUI's equivalent gesture
 has two protections that the CLI has neither of:
 
@@ -5105,6 +5220,8 @@ and writes every row it owes (CN4), so the cost of a stray press is a lost
 turn rather than an unresumable thread.
 
 ## 95. A credential straddling the output buffer's DROPPED MIDDLE is still recoverable from two pages (open, measured and filed batch 148)
+
+**Issue:** #245.
 
 A23 (ROADMAP_v3 §65) put the redactor above every cut a session's output
 goes through, and there is one cut it cannot be put above. `OutputBuffer`
@@ -5156,6 +5273,8 @@ close.
 
 ## 96. A window below ~50,000 tokens cannot hold one bounded read in its headroom (open, measured and filed batch 148)
 
+**Issue:** #246.
+
 A24 (ROADMAP_v3 §65) made `derived_trigger` say so when the DEPENDENT
 FLOOR leaves no usable headroom, and ruled deliberately against warning in
 the neighbouring case: a window where the floor does not bind but the
@@ -5206,6 +5325,11 @@ Recorded here rather than in a warning, so that the next person reading
 re-deriving it.
 
 ## 97. Two timing-sensitive tests failed in SLOW full-suite runs and neither reproduced (the resize half fixed batch 151; the secrets half open, and deliberately untouched)
+
+**Not filed as an issue (batch 159), deliberately.** The open half is an
+unreproduced flake that this entry says must not be touched until it recurs; an
+issue would invite exactly the change the entry warns against. This entry stays
+the measurement the next occurrence is compared against.
 
 Batch 148 ran the full suite five times. The three that finished in 85-100
 seconds were green. The two that were slowed by other work on the same box
@@ -5304,6 +5428,8 @@ if it does, the comparison is the measurement above.
 
 ## 98. Pass 3a is asked about the FACTUAL claims and applied to every claim (open, measured and filed batch 149)
 
+**Issue:** #247.
+
 Gate D0 routes claims by type: factual claims go to 3a/3b, synthesis and
 speculative claims go straight to Pass 4. `pass3a_input` is built from
 `factual_claims` alone and says so. But the payload is validated against
@@ -5337,6 +5463,8 @@ worth a corrective retry or a dropped-and-traced entry.
 
 ## 99. Pass 6a drops an unknown claim id in silence, where 6b now says so (open, filed batch 149)
 
+**Issue:** #248.
+
 §66 (A26) gave Pass 6b a trace line for an entry naming a claim outside the
 round's batch, on `review.py`'s rule: a finding a stage cannot apply is
 dropped AND traced, because dropping in silence is indistinguishable from
@@ -5364,6 +5492,8 @@ reworded for a revision, which is the same helper.
 
 ## 100. An MCP tool's description is read as harness-authored instruction (open, filed batch 150)
 
+**Issue:** #249.
+
 **What it is.** A tool schema's `description` is third-party text that the
 model reads as part of the harness's own instruction to it. Batch 150 bounded
 it at the producer (§67 A31) -- whitespace collapsed, capped, prefixed with
@@ -5388,6 +5518,8 @@ this item closes. Nobody has needed to decide yet because no shipped
 configuration has an MCP server at all.
 
 ## 101. `requires_approval` can still return a non-boolean (open, filed batch 150)
+
+**Issue:** #250.
 
 **What it is.** `security.permissions.requires_approval` ends in
 `return tool_level or context_level`, and `context_level` comes from
@@ -5415,6 +5547,10 @@ produces is a cost with no demonstrated consequence -- which is B4's rule,
 applied to this item rather than against it.
 
 ## 102. Under WSL, a test that spawns a subprocess cannot import this project's dependencies (open, measured and filed batch 150)
+
+**Not filed as an issue (batch 159), deliberately.** It is an environment note
+rather than a code defect, as stated above, and there is nothing for an issue to
+track to closure.
 
 **What happens.** `tests/test_config_loader.py::test_re_importing_config_re_reads_the_file`
 fails under WSL and passes on Windows and in CI. The subprocess it spawns
@@ -5471,6 +5607,8 @@ because a second WSL-only failure would be a different claim.
 
 ## 103. The range gate reads a per-section sub-range as a claim about the whole family (open, measured and filed batch 151)
 
+**Issue:** #251.
+
 **What happens.** `test_a_claimed_range_covers_its_whole_family` reads
 **every** `Xn-Xm` on `AGENTS.md`'s documentation-map line and compares each
 one's upper bound against the highest id that family defines. That line
@@ -5523,6 +5661,8 @@ line. Both give back the property E13 and E14 paid for.
 
 ## 104. Displayed untrusted text is filtered for controls and not for bidi or zero-width characters (open, filed batch 152)
 
+**Issue:** #252.
+
 **What is not covered.** `core/ansi.for_display` removes escape sequences
 in both encodings, every control below U+0020 except newline and tab, DEL,
 and the 8-bit range U+0080-U+009F. It does not touch the bidirectional
@@ -5555,6 +5695,8 @@ whose docstring states the cost of the C1 deletion it already does.
 
 ## 105. The decision-id gate reads a Unicode control-range name as a decision citation (open, measured batch 152)
 
+**Issue:** #253.
+
 **What happens.** `test_every_decision_id_cited_in_production_code_resolves`
 treats any `LETTER+NUMBER` token in production python as a citation of the
 decision record. `core/ansi.py` is prose about Unicode, so it says `C0`
@@ -5583,7 +5725,17 @@ bare id in production, which is a surface of its own rather than a line.
 the Unicode control ranges. The gate cannot tell, and a sentence about
 Unicode that trips it is not drift.
 
-## 106. Two private names AGENTS.md documents may be stale, and the gate that would say so costs too much here (open, measured batch 152)
+## 106. Two private names AGENTS.md documents may be stale, and the gate that would say so costs too much here (closed, batch 159 -- both names measured as explained)
+
+**Closed in batch 159: both names are explained, so neither is stale.**
+Re-checked before filing. `_replace_via_keyboard` is Textual's own symbol -- a
+method in `textual/widgets/_text_area.py` in the installed pin -- which puts it
+in the same class as `_check_bindings` and `_watch_theme` above. And both
+`AGENTS.md` mentions of `_last_response` (`:2643`, `:2745`) are past tense: they
+record the attribute batch 48 removed ("`_last_response` was the second
+buffer"), which a NAME index is right not to find. With no unexplained name
+left, nothing waits on the stronger gate, and the reason it was not built stands
+as written.
 
 **What was measured.** Section 69 A44's gate resolves a documented private
 identifier by substring match over every `.py`. The stronger candidate --
@@ -5623,6 +5775,8 @@ control that would turn red when somebody crosses it.
 
 ## 107. `is_trusted()` raises for an unreadable file, and every caller pays for that differently (open, measured batch 153)
 
+**Issue:** #254.
+
 **What was measured.** `core/workspace_trust.is_trusted` hashes every path
 `content_files()` lists -- the root `AGENTS.md` and everything under
 `.venastine/` -- and `_content_hash` opens each one with no guard. A file an
@@ -5657,6 +5811,8 @@ is a one-line change and does not touch the gate.
 
 ## 108. `generate()`'s other pre-write filesystem calls are still outside its `try` (open, measured batch 153)
 
+**Issue:** #255.
+
 **What was measured.** Batch 153 made the trust capture at
 `project_init/generator.py` total because it sits before the write `try`.
 Three siblings still do: `manifest.is_blank(root)` and `propose_kind(root)`
@@ -5686,6 +5842,8 @@ useful than a swallowed bug.
 
 ## 109. Nothing resolves the test names `tests/BREAKING_CHANGES.md` cites (open, measured batch 153)
 
+**Issue:** #256.
+
 **What was measured.** Every row in the guard log names the test that
 would break -- that is the column's whole job -- and no gate checks that
 the name exists. Batch 153 renamed three tests for S17-05 and found their
@@ -5714,6 +5872,8 @@ were correct until this batch renamed them. It catches the NEXT rename,
 which is the half nobody is present for.
 
 ## 110. The thread-kind NULL fallback is in three readers and pinned by none (open, measured batch 154)
+
+**Issue:** #257.
 
 **What was measured.** `get_thread`, `child_threads` and `list_threads`
 each read `getattr(t, "kind", None) or THREAD_KIND_CHAT`, and what that
@@ -5748,6 +5908,8 @@ back in the picker as `None`.
 
 ## 111. `pipeline_storage`'s write and read API has never run against real SQLite (open, measured batch 154)
 
+**Issue:** #258.
+
 **What was measured.** `tests/test_storage_e2e.py` is the one place with a
 real `sqlmodel`, and its `_SWAPPED` tuple is `("sqlmodel", "config",
 "database", "storage")`. `core.reasoning.pipeline_storage` is not in it,
@@ -5775,6 +5937,8 @@ the persistence layer's own tests prove the fake and the code agree.
 
 ## 112. The trust prompt says every project agent's description enters every system prompt, and most never do (open, measured batch 155)
 
+**Issue:** #259.
+
 **What was measured.** `_catalog_entries`' section header reads *"these
 descriptions enter EVERY system prompt in this project:"*, and
 `prompts/system_prompts.py` filters the agent catalog to `spawnable`
@@ -5798,6 +5962,8 @@ that header does not re-derive it.
 
 ## 113. A trust-prompt entry shadowed by a harness or user definition is displayed as the project's (open, measured batch 155)
 
+**Issue:** #260.
+
 **What was measured.** `_catalog_entries` parses every `.md` under the
 project's `.venastine/{agents,skills}` and shows each one's normalised
 name and description. `_tier_dirs`' precedence is harness > user > project
@@ -5817,6 +5983,8 @@ do. Over-disclosure again, like item 112.
 declines it for the same reason.
 
 ## 114. `AgentManager`'s two `set()` calls have no belt, where `max_steps` does (open, measured batch 155)
+
+**Issue:** #261.
 
 **What was measured.** `AgentManager.active_context` and `child_context`
 each build `set(agent.allowed_tools)`, which is the single place
@@ -5843,8 +6011,9 @@ measurement worth having first is whether any caller ever will.
 
 Two `KNOWN` findings landed on GitHub issues that are not mirrored here. Both
 were re-verified against the marathon's base commit; neither is a new defect.
-Recorded in the tree because `review/` is not, and because the issues
-themselves have not been updated -- that is an owner action.
+Recorded in the tree because `review/` is not. Both issues carry this
+re-verification as a comment since batch 159, made against `main` at
+`f836602`.
 
 - **Issue #12** `[S3][coherence]` *ensemble disagreement is scored rather than
   routed to verification*, from the research-pipeline scope. Verified still
