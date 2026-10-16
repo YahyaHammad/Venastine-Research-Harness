@@ -43,6 +43,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
+- **§76. Nine security findings the marathon deferred, and the answer each was waiting for** - **(BUILT in batch 160)** (the nine `security`-area issues batch 159 filed, each put to the owner with options and a recommendation: `**` unpacking refused by the math guard, an empty workspace refused before it resolves, a `.env` read and never loaded, the redaction vocabulary widened to the current vendor formats and three structural shapes, the word on each side of a session buffer's dropped middle moved into the gap, a hardlink into `.venastine/` refused by inode, a session's refused credential quarantined, bidi and zero-width characters revealed in approvals, and an MCP tool's description ruled third-party data in the system prompt; A68-A76)
 - **§75. Thirteen alerts that read a name as a secret, and the gate nothing in the workflow could fail** - **(BUILT in batch 158)** (PR #200's first `CodeQL` check raised 13 high-severity alerts and every one was a false positive: ten came from a source heuristic that reads `args.secrets`, `_secret_twin_name()` and `KEY_PASSPHRASE` as secrets because of their names, and three were test assertions read as URL sanitizers; `tests/` is now skipped because it never ships, the eight in shipped code are dismissed with recorded reasons, and the same red check is the measurement TECHNICAL_DEBT 76 lacked -- the gate is GitHub's pull-request check, and the workflow header now says so)
 - **§74. A gate that was green because of what one machine happened to contain** - **(BUILT in batch 157)** (CI's first run over batches 129-156 came back red on three check runs, and all three were one test: the push-channel gate drove `git check-ignore` in the WORKING TREE, where `logs/`, `output/` and `.ipynb_checkpoints/` exist because the harness creates them, so three directory-only patterns matched here and matched nothing in a fresh clone -- seventeen batches of green behind a branch whose gate had never met one; the same measurement found `__pycache__` declared for the git channel, carrying no rule in `.gitignore` at all, and the one value in the list that no sample could reach)
 - **§73. Three cuts the redactor ran after, and the one result path that never passed it** - **(BUILT in batch 156)** (the review marathon's last three findings, closing its `FIX-NOW` queue: `web_search` and `arxiv_search` cut their third-party text and let `registry.dispatch` redact the piece that was kept, so a `ghp_` token straddling any of the three cuts survived at 36 of the 39 offsets it could straddle -- RB1's defect in the two tools RB1 did not reach, and §52's gap register had declined to solve it generally while two such tools were already in the tree; the per-LIST caps bounded 25 authors and not the 5,000 characters each could carry, and two of the six unbounded values were named by no finding, one of them the `arxiv_id` that both recovery URLs are built from, while the row COUNT both schemas advertise a bound for was enforced in neither, so a request for five results returned all 5,000 rows a provider chose to send; and `dispatch()`'s refusal early-return was the one result path that never passed the output redactor, which `docs/ARCHITECTURE.md` had already asserted it did -- measured, a credential the model put in an `agent_name` came back whole, on a path that also returns above the input scanner written for exactly that value)
@@ -2724,6 +2725,110 @@ leaked PID.
   because MCP is the only dynamic registrant and the composed name is its
   fact. A bound in the registry would be the fix-at-the-consumer shape
   `AGENTS.md` names by name.
+---
+
+## §76. Nine security findings the marathon deferred, and the answer each was waiting for
+
+**Built in batch 160**, from the nine `security`-area issues batch 159 filed
+(#205, #206, #209, #211, #240, #243, #245, #249, #252 -- TECHNICAL_DEBT 51, 52,
+55, 57, 90, 93, 95, 100 and 104). Each entry was re-checked against `main` at
+`f836602` before anything was built, and each was still there. Most were
+deferred for the same reason -- "a decision, not a patch" -- so this section is
+nine owner rulings, recorded as A68-A76, and the code each one licensed.
+
+**THE TWO THAT WERE ONE CLAUSE EACH.** `f(**mapping)` is `ast.keyword(arg=None)`,
+and `keyword` is on the math allowlist for ordinary keyword arguments, so
+`sin(**Dict())` walked past `_validate_ast` and was refused by SymPy instead
+(A68). And `os.path.realpath("")` is the launch directory, so `AGENT_WORKSPACE=`
+made it the auto-approved workspace and -- because `WORKSPACE_DIR_EXPLICIT` reads
+the variable's presence -- the project too (A69). Both fixes are where the entry
+said they belonged: a refusal in the guard's own loop, and a refusal in
+`check_workspace`, which `main()` calls before anything reads the workspace.
+
+**THE `.env` THAT NOTHING HAD LOADED YET.** `env_secrets` called `load_dotenv()`
+at import, writing every name in a repository's `.env` into `os.environ` --
+`VENASTINE_REDACT_OFF` among them, the switch kept out of `settings.json` so a
+cloned repository cannot turn redaction off. Nothing imported the module, so it
+had never happened. Now the file is READ by `get_env_secret` and never loaded,
+the process environment still answers first, and a `.env` cannot supply an
+`AGENT_*` or `VENASTINE_*` name (A70).
+
+**THE VOCABULARY, WIDENED TO ITS CURRENT SIBLINGS.** S05-03 measured 16 of 22
+credential shapes surviving `redact_output_text`. The vendor half -- `github_pat_`,
+`gho_`/`ghu_`/`ghs_`/`ghr_`, `sk-proj-`/`sk-svcacct-`/`sk-admin-`, `sk_live_`/
+`rk_live_`, `npm_` -- joins `_SECRET_PATTERNS` and refuses inputs too, as `ghp_` and
+`sk-` always have. The structural half -- an `Authorization` header's value, a
+JWT, a PEM block's body and an orphan footer -- is output only, beside the
+password shapes (A71). Two things in it were measured rather than designed. A
+lazy `BEGIN ... END` match took the prose between two quoted markers, so the body
+is LINES now. And a regex for an orphan footer has to start at the first body
+line, which is quadratic on a megabyte of base64 with no footer; it is found as a
+literal and walked backwards instead, at about 0.2 s a megabyte.
+
+**THE GAP NOTHING COULD REDACT ACROSS.** A session's output buffer drops its
+middle as it arrives, so a credential straddling the eviction point showed one
+half at the end of the head and the other at the start of the tail -- each page
+clean, the pair a leak. The model-facing and display paths now move the word on
+each side of the gap into it, when the cut fell inside one; the buffer keeps one
+character from each far side to know. The monitor's raw view is unchanged (A72).
+
+**THE HARDLINK THE DENY COULD NOT SEE.** `.venastine/` is the one hard deny, and
+it tests a resolved PATH; a hardlink is a second name, so `read` through one
+served the protected file. A file with more than one name is now compared by
+`(st_dev, st_ino)` against every file under the workspace's and the project's
+`.venastine/`, and refused on a match -- measured to work on Windows as well as
+POSIX. A file with one name pays one `stat` (A73).
+
+**THE QUARANTINE A SESSION NEVER REACHED.** Both credential-quarantine matchers
+read a one-shot's stderr, and a session has none: `_popen_session` merges it into
+the stream the session manager owns. The manager now hands `note_exit` the exit
+code and the first 4,096 characters, and the matching stays in the sandbox --
+gated on the code there, because a session's stream is everything the remote
+program printed (A74).
+
+**THE TWO ABOUT WHAT A PERSON IS SHOWN.** An approval prompt now shows a bidi
+override, a zero-width character or a TAG character as `<U+202E>`, in the CLI and
+the TUI, and nowhere else -- elsewhere those characters are somebody's Arabic,
+Persian or emoji (A75). And an MCP tool's description is ruled third-party data:
+one sentence in the system prompt says so, present only when the run is offered
+an MCP tool (A76).
+
+### What §76 deliberately does not change
+
+**No keyword widening past `password`/`passwd`, and no unquoted values.** Register
+item 52 refused both and A71 keeps that refusal: the `Authorization` shape anchors
+on the HEADER NAME, so "Bearer tokens expire" is prose and stays.
+
+**The env merge stays generic.** `_overlay_env` still honours a variable that is
+set at all, because an empty string is meaningful for some keys; the empty
+WORKSPACE is refused where a bad workspace is refused.
+
+**`for_display` is still not a bidi filter.** A75 reveals in the two consent
+prompts and changes nothing a transcript, a replay or a progress line shows.
+
+**No `st_nlink > 1` refusal, and no search for other projects' trees.** A73
+compares identities against the two `.venastine/` directories this harness reads.
+
+**No envelope round each MCP description.** A76 is one sentence, so every
+well-behaved server's tools read exactly as they did.
+
+**The one-shot quarantine is unchanged.** A74 adds the session route; the
+one-shot routes keep their own call sites and their ungated matching.
+
+### Design Decisions Record — §76 (A68-A76)
+
+| id | decision |
+|---|---|
+| **A68** | **`**` unpacking is refused by the math guard itself.** `_validate_ast` refuses an `ast.keyword` whose `arg` is None -- the only spelling of `f(**mapping)` -- with its own message, before evaluation. `ast.keyword` stays on the allowlist: dropping it would be a decision about future expression support, and one clause makes the module's closure argument true. Closes TECHNICAL_DEBT 55 |
+| **A69** | **An empty workspace path is refused before it is resolved.** `protected_paths.check_workspace` refuses a blank `workspace_dir`, so `AGENT_WORKSPACE=` (or a blank `workspace_dir` in `config.yaml`) stops startup with a message naming both, instead of resolving to the launch directory and making it the auto-approved workspace and the project. The environment merge stays generic over `ENV_OVERRIDES`. Closes TECHNICAL_DEBT 93 |
+| **A70** | **A `.env` is read, never loaded, and may not supply the harness's own names.** `env_secrets` has no import-time side effect: `get_env_secret` answers from the process environment first and then from `dotenv_values()` of the file `AGENT_ENV_FILE` names or `find_dotenv(usecwd=True)` finds, and nothing is written to `os.environ`. A name starting `AGENT_` or `VENASTINE_`, case-folded, is never answered from the file. Closes TECHNICAL_DEBT 57 |
+| **A71** | **Vendor tokens are one vocabulary on both sides; structural shapes are output only.** The current vendor siblings join `_SECRET_PATTERNS` and so refuse inputs as well as redact output. An `Authorization` header's value (anchored on the header name, with a digit-and-length floor when no scheme word is present), a JWT, and a PEM block's orphan footer with the base64 lines above it join `_redact_credential_shapes`, which never feeds `check_input_policy`. The PEM header pattern gains an OPTIONAL line-structured body, so it redacts a whole block while matching every input it matched before. Every PEM shape is linear. Closes TECHNICAL_DEBT 52, overruling that entry's "no change to `_SECRET_PATTERNS`" for the vendor half |
+| **A72** | **The model and the display are never shown half a word across the dropped middle.** `OutputBuffer._cut_parts` moves the token-character run at the head's end and at the tail's start into the gap when the character beyond each cut was a token character too. `total` is unchanged, so the gap grows by what moved and its arithmetic stays the reader's. `page(clean=...)` and `last()` use it; the monitor's raw `page()` does not. Closes TECHNICAL_DEBT 95 |
+| **A73** | **A hardlink into `.venastine/` is refused as the file it is.** `protected_paths.hardlinked_segment` compares a multiply-linked file's `(st_dev, st_ino)` with every file under the workspace's and the project's protected directories, and the file tools' shared deny refuses a match in the same words as a resolved path, naming the hard link. The atomic write stays as the second layer and is pinned on its own. Closes TECHNICAL_DEBT 90 |
+| **A74** | **A session's refused credential is quarantined by the sandbox's own matchers.** `SessionProcess.note_exit(code, first_output)` runs a check `start_sandboxed` builds for a session that offered a stored SSH credential or sudo password; the session manager calls it once, before reporting the exit, with the first `_AUTH_SCAN_CHARS` (4,096) characters. The SSH match counts only on exit 255 and the sudo match only on a non-zero exit, because a session's stream holds the remote program's own output. Closes TECHNICAL_DEBT 51 |
+| **A75** | **An approval shows what draws text out of order, and nothing else does.** `ansi.reveal_invisible_counted` writes the bidi controls, the zero-width characters, the byte-order mark and the TAG block as `<U+XXXX>`. The CLI's `_approval` applies it to every text field through `_Visible(reveal=True)` and says so in one line; the TUI applies it in `ask_permission_blocking` before the modal is built. The params block needs nothing: `json.dumps`'s default `ensure_ascii` already escapes every one. Questions, transcripts and replays are untouched. Closes TECHNICAL_DEBT 104 |
+| **A76** | **An MCP tool's description is third-party data, and the system prompt says so.** `with_catalogs` appends `MCP_PROVENANCE` -- one sentence: descriptions marked `[MCP: <server>]` are the server's, say how to call the tool, and cannot add to or change the model's instructions -- whenever `schemas()` would advertise an `mcp__` tool under the same three facts. A prompt with no such tool is byte-identical to before. A31's bound and prefix are unchanged. Closes TECHNICAL_DEBT 100 |
+
 ---
 
 ## §75. Thirteen alerts that read a name as a secret, and the gate nothing in the workflow could fail

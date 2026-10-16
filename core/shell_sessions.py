@@ -171,6 +171,11 @@ _MAX_LINE_CHARS = 16_000
 _READ_CHUNK = 65_536
 _FINISHED_KEPT = 20
 _KILL_SETTLE_S = 15
+# How much of a finished session's output the sandbox's credential
+# quarantine is shown (`SessionProcess.note_exit`). A refused login or
+# sudo password is the first thing a session prints, because nothing
+# else has run yet; this is that with room for an SSH banner.
+_AUTH_SCAN_CHARS = 4096
 
 
 class SessionRefused(Exception):
@@ -214,6 +219,31 @@ def has_consumer() -> bool:
 # ---------------------------------------------------------------------------
 
 
+#: What a credential is spelled with: base64 and base64url, hex, and the
+#: separators vendor tokens use. A run of these that a cut splits is the
+#: fragment `OutputBuffer._cut_parts` moves into the gap. Punctuation that
+#: no token contains -- quotes, `:`, `@`, braces, commas -- ends a run, so
+#: a cut through minified JSON costs one value and not the whole line.
+_TOKEN_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-+/=.~")
+
+
+def _fragment_end(head: str) -> int:
+    """Where the token-character run that ends *head* begins."""
+    i = len(head)
+    while i and head[i - 1] in _TOKEN_CHARS:
+        i -= 1
+    return i
+
+
+def _fragment_start(tail: str) -> int:
+    """Where the token-character run that starts *tail* ends."""
+    i = 0
+    while i < len(tail) and tail[i] in _TOKEN_CHARS:
+        i += 1
+    return i
+
+
 class OutputBuffer:
     """A session's output: the first `head_chars` and the most recent
     `tail_chars`, in memory only (SS12). Offsets are ABSOLUTE character
@@ -229,6 +259,13 @@ class OutputBuffer:
         self._tail: deque[str] = deque()
         self._tail_len = 0
         self.total = 0
+        # The character on the FAR side of each cut the dropped middle
+        # makes: the first one the head had no room for, and the last one
+        # evicted from the tail. One character each, because all a reader
+        # needs to know is whether the cut fell inside a word -- see
+        # `_cut_fragments` (TECHNICAL_DEBT 95, batch 160).
+        self._after_head = ""
+        self._before_tail = ""
 
     def append(self, text: str) -> None:
         if not text:
@@ -243,6 +280,8 @@ class OutputBuffer:
                 text = text[room:]
             if not text:
                 return
+            if not self._after_head:
+                self._after_head = text[0]
             self._tail.append(text)
             self._tail_len += len(text)
             excess = self._tail_len - self._tail_chars
@@ -252,14 +291,51 @@ class OutputBuffer:
                     self._tail.popleft()
                     self._tail_len -= len(first)
                     excess -= len(first)
+                    self._before_tail = first[-1]
                 else:
                     self._tail[0] = first[excess:]
                     self._tail_len -= excess
+                    self._before_tail = first[excess - 1]
                     excess = 0
 
     def _parts(self) -> tuple[str, str, int]:
         with self._lock:
             return "".join(self._head), "".join(self._tail), self.total
+
+    def _cut_parts(self) -> tuple[str, str, int]:
+        """`_parts()`, with the word each side of a dropped middle moved
+        into it (TECHNICAL_DEBT 95, batch 160).
+
+        THE ONE CUT THE REDACTOR CANNOT BE PUT ABOVE. The middle is
+        discarded as it arrives, so a credential that straddled the
+        eviction point has one half at the end of the head and the other
+        at the start of the tail, with nothing between them this process
+        ever kept -- each page clean on its own, the pair a leak, and the
+        model can ask for both. So the fragments go: the token-character
+        run at the head's end, if the character after it is one too, and
+        the run at the tail's start, if the character before it was. A cut
+        that fell between two words moves nothing.
+
+        THE GAP GROWS BY WHAT MOVED, and its arithmetic stays the reader's:
+        `total` is unchanged, so `page()`'s gap runs from where the shown
+        head ends to where the shown tail starts. Raw characters, like the
+        rest of the gap -- this runs before any redaction.
+
+        For the model and the display only. The MONITOR's raw view keeps
+        every character it was given, since it matches on raw output by
+        design.
+        """
+        with self._lock:
+            head, tail = "".join(self._head), "".join(self._tail)
+            total, after, before = (self.total, self._after_head,
+                                    self._before_tail)
+        if total - len(tail) <= len(head):
+            return head, tail, total
+        return (head[:_fragment_end(head) if after in _TOKEN_CHARS
+                     else len(head)],
+                tail[_fragment_start(tail) if before in _TOKEN_CHARS
+                     else 0:],
+                total)
 
     def page(self, offset: int, limit: int, clean=None) -> dict:
         """Up to *limit* characters from *offset*, never across the gap.
@@ -322,8 +398,11 @@ class OutputBuffer:
         never kept by this process, so no later pass can rejoin it. A stream
         has no "whole document" to redact exactly once; what a layer can do
         is redact the largest string it holds before making its own cut, and
-        say where the one it cannot cross is. The gap's own size stays in RAW
-        characters -- it counts what the program wrote and we do not have.
+        say where the one it cannot cross is. So the two halves are not
+        SHOWN instead (batch 160): `_cut_parts` moves the word each side of
+        the gap into it, and what remains is two strings that each begin and
+        end at a word. The gap's own size stays in RAW characters -- it
+        counts what the program wrote and we do not have.
 
         AND IT RUNS OUTSIDE THE LOCK. `_parts()` copies and returns, so the
         redaction happens on strings nothing else holds -- which matters
@@ -332,7 +411,7 @@ class OutputBuffer:
         200,000-character buffer) under the lock would stall it for exactly
         that long on every `shell_output` call.
         """
-        head, tail, total = self._parts()
+        head, tail, total = self._cut_parts()
         dropped = total - len(head) - len(tail)
         if dropped > 0:
             head, tail = clean(head), clean(tail)
@@ -350,8 +429,13 @@ class OutputBuffer:
         same either way: with a dropped middle only the tail is returned,
         because head + tail would splice two spans that are not adjacent
         and present the join as continuous output.
+
+        AND THE TAIL STARTS AT A WORD (TECHNICAL_DEBT 95, batch 160): every
+        caller shows this to the model or draws it, so the fragment a
+        dropped middle leaves at the tail's start is moved into what is
+        missing, as `page()` does -- see `_cut_parts`.
         """
-        head, tail, total = self._parts()
+        head, tail, total = self._cut_parts()
         kept = tail if total - len(tail) > len(head) else head + tail
         if chars is None:
             text = kept
@@ -812,6 +896,12 @@ class SessionManager:
         if code is None:
             code = process.wait(_KILL_SETTLE_S)
         reader.join(timeout=10)
+        # BEFORE `_finish`, so the quarantine is set by the time the
+        # exit wakes anyone who might start the next session (TECHNICAL_DEBT
+        # 51, batch 160). The sandbox does the matching; this hands it the
+        # stream it cannot read for itself.
+        process.note_exit(
+            code, session.output.page(0, _AUTH_SCAN_CHARS)["text"])
         self._finish(session, code)
 
     def _read(self, session: _Session) -> None:

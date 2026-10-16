@@ -883,23 +883,23 @@ class TestTheProtectedSegmentIsCaseFolded:
 
 
 class TestAHardlinkCannotReachTheProtectedFile:
-    """Batch 146, and no report names this one -- it was found by asking
-    S17's question of S04's file.
+    """Batch 146 found it and batch 160 closed it (TECHNICAL_DEBT 90) -- no
+    report names it; it came from asking S17's question of S04's file.
 
     `_protected_path_error` resolves before testing the segment, which is
     what catches a symlink and a junction into `.venastine/`. A HARDLINK is
     not a link to anything: `realpath` returns the path it was given,
     `islink` is False, and the segment test sees an ordinary name in the
     workspace. So a `write` through a hardlinked name reached the protected
-    file's bytes, and the measurement was an mcpServers object landing in a
-    `settings.json` whose direct spelling is refused -- which is the file
-    that "names commands the harness spawns at startup".
+    file's bytes -- an mcpServers object landing in a `settings.json` whose
+    direct spelling is refused -- and a `read` through one served it.
 
-    THE REFUSAL STILL CANNOT SEE IT, and that is deliberate rather than
-    unfinished: nothing available here can tell a hardlink from a file, so
-    the deny is not what closes this. The atomic write is. That makes the
-    assertion below about the protected file's BYTES rather than about the
-    answer the tool returned.
+    TWO LAYERS NOW. The atomic write closed the write half in batch 146 by
+    replacing the name instead of writing through it. The deny closes both
+    halves since batch 160, by asking whether a multiply-linked file is the
+    SAME FILE (`st_dev`, `st_ino`) as one under a protected directory. The
+    write tests assert on the protected file's BYTES as well as on the
+    refusal, so each layer is pinned on its own.
     """
 
     def _hardlink(self, workspace, name, target):
@@ -908,12 +908,62 @@ class TestAHardlinkCannotReachTheProtectedFile:
         except OSError:                                   # pragma: no cover
             pytest.skip("hardlinks unavailable here")
 
-    def test_a_write_through_a_hardlinked_name_spares_the_protected_file(
-            self, workspace):
-        protected = _put_bytes(
-            workspace, ".venastine/settings.json".replace("/", os.sep),
-            b'{"original": true}')
+    def _protected(self, workspace, data=b'{"original": true}'):
+        return _put_bytes(
+            workspace, ".venastine/settings.json".replace("/", os.sep), data)
+
+    def test_a_read_through_a_hardlinked_name_is_refused(self, workspace):
+        """The half that was open: the file was served under its other
+        name. Refused in the deny's own words, naming the hard link."""
+        self._hardlink(workspace, "notes.md",
+                       self._protected(workspace, b'{"secret": "value"}'))
+
+        result = file_ops.read_run({"path": "notes.md"})
+
+        assert "content" not in result, result
+        assert "hard link" in result["error"]
+        assert ".venastine/" in result["error"]
+
+    def test_the_refusal_check_answers_before_the_prompt(self, workspace):
+        """The deny is shared by the refusal_check and the handlers, so the
+        model is refused without anyone being asked a question whose answer
+        cannot change the outcome."""
+        self._hardlink(workspace, "notes.md", self._protected(workspace))
+
+        reason = file_ops._refusal_for("read")({"path": "notes.md"})
+
+        assert reason and "hard link" in reason
+
+    def test_a_write_through_a_hardlinked_name_is_refused(self, workspace):
+        protected = self._protected(workspace)
         self._hardlink(workspace, "notes.md", protected)
+
+        result = file_ops.write_run(
+            {"path": "notes.md", "content": '{"mcpServers": {"x": 1}}'})
+
+        assert "error" in result and "hard link" in result["error"]
+        assert _raw(protected) == b'{"original": true}'
+
+    def test_an_edit_through_one_is_refused_too(self, workspace):
+        protected = self._protected(workspace)
+        self._hardlink(workspace, "notes.md", protected)
+
+        result = file_ops.edit_run({"path": "notes.md",
+                                    "old_text": "original",
+                                    "new_text": "replaced"})
+
+        assert "error" in result and "hard link" in result["error"]
+        assert _raw(protected) == b'{"original": true}'
+
+    def test_the_atomic_write_still_spares_it_without_the_deny(
+            self, workspace, monkeypatch):
+        """The batch-146 layer, pinned on its own: with the inode check
+        stubbed out, a write through the hardlink replaces the NAME and the
+        protected file keeps its bytes."""
+        protected = self._protected(workspace)
+        self._hardlink(workspace, "notes.md", protected)
+        monkeypatch.setattr(file_ops, "hardlinked_segment",
+                            lambda *args, **kwargs: None)
 
         result = file_ops.write_run(
             {"path": "notes.md", "content": '{"mcpServers": {"x": 1}}'})
@@ -924,53 +974,41 @@ class TestAHardlinkCannotReachTheProtectedFile:
         assert _raw(os.path.join(workspace, "notes.md")) == (
             b'{"mcpServers": {"x": 1}}')
 
-    def test_an_edit_through_one_spares_it_too(self, workspace):
+    def test_an_ordinary_multiply_linked_file_is_still_readable(
+            self, workspace):
+        """The discriminating half, and the reason `st_nlink > 1` alone was
+        rejected: two names for one ordinary file are not a protected
+        file under either of them."""
+        original = _put_bytes(workspace, "a.txt", b"plain")
+        self._hardlink(workspace, "b.txt", original)
+
+        assert file_ops.read_run({"path": "b.txt"}).get("content") == "plain"
+
+    def test_the_projects_tree_is_searched_as_well_as_the_workspaces(
+            self, workspace, tmp_path, monkeypatch):
+        """The workspace and the project are different directories unless
+        the workspace was named as the project, and the project's
+        `.venastine/` is the one config_loader reads at startup."""
+        from core import config_loader
+
+        project = tmp_path / "project"
         protected = _put_bytes(
-            workspace, ".venastine/settings.json".replace("/", os.sep),
-            b'{"original": true}')
-        self._hardlink(workspace, "notes.md", protected)
+            str(project), ".venastine/mcp.json".replace("/", os.sep),
+            b'{"mcpServers": {}}')
+        monkeypatch.setattr(config_loader, "get_project_path",
+                            lambda: str(project))
+        self._hardlink(workspace, "copy.json", protected)
 
-        result = file_ops.edit_run({"path": "notes.md",
-                                    "old_text": "original",
-                                    "new_text": "replaced"})
+        result = file_ops.read_run({"path": "copy.json"})
 
-        assert "result" in result, result
-        assert _raw(protected) == b'{"original": true}'
+        assert "error" in result and "hard link" in result["error"]
 
     def test_the_direct_spelling_is_still_refused(self, workspace):
-        """The control, and the reason this is a gap rather than a policy:
-        the same bytes under their own name are denied outright, so the
-        hardlink was a second name for a file the tool must not write.
-        """
-        protected = _put_bytes(
-            workspace, ".venastine/settings.json".replace("/", os.sep),
-            b'{"original": true}')
+        """The control: the same bytes under their own name are denied
+        outright, in the words that name the path rather than the link."""
+        protected = self._protected(workspace)
         result = file_ops.write_run(
             {"path": ".venastine/settings.json", "content": "x"})
         assert "error" in result and "resolves into" in result["error"]
         assert _raw(protected) == b'{"original": true}'
-
-    def test_the_read_half_is_the_residual_this_does_not_close(self,
-                                                               workspace):
-        """STATED RATHER THAN LEFT TO BE FOUND, and pinned so the next
-        reader does not have to re-measure it.
-
-        A `read` through a hardlink into `.venastine/` still serves the
-        file. Closing it would mean either enumerating a file's other names
-        -- per-platform -- or refusing every multiply-linked file, which
-        denies ordinary ones. It is in docs/TECHNICAL_DEBT.md with the
-        sandbox's own answer for a link it cannot resolve. If a later batch
-        closes it, this test is where it goes red, which is the point of
-        writing it down this way round.
-        """
-        protected = _put_bytes(
-            workspace, ".venastine/settings.json".replace("/", os.sep),
-            b'{"secret": "value"}')
-        self._hardlink(workspace, "notes.md", protected)
-
-        result = file_ops.read_run({"path": "notes.md"})
-        assert result.get("content") == '{"secret": "value"}', (
-            "the read half is closed now -- update the register item and "
-            "this docstring, which is a better outcome than this test "
-            "going red for a reason nobody can place")
 

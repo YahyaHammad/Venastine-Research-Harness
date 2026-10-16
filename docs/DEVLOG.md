@@ -25181,3 +25181,103 @@ filed entry, the four corrections, both closures, the two not-filed notes, and
 an updated intro and *arrivals* section. `tests/test_docs_consistency.py`
 passes, and again with `AGENT_WORKSPACE` unset. Full suite green, at the 7214 batch 158 left it.
 No test added or changed, so no `tests/BREAKING_CHANGES.md` row.
+
+## Batch 160 -- nine security findings the marathon deferred, each given its answer (2026-10-16)
+
+**ROADMAP_v3 §76. Nine owner rulings, A68-A76.** The nine `security`-area
+issues batch 159 filed -- #205, #206, #209, #211, #240, #243, #245, #249 and
+#252, which are TECHNICAL_DEBT 51, 52, 55, 57, 90, 93, 95, 100 and 104. Every
+entry was re-checked against `main` at `f836602` first, and all nine were still
+there; most had been deferred as "a decision, not a patch", so each was put to
+the owner with options and a recommendation before anything was built, and each
+recommendation was taken.
+
+### What was built
+
+| item | issue | ruling | where |
+|---|---|---|---|
+| 55 | #209 | A68: `**` refused by the guard | `tools/builtin/_math_common._validate_ast` |
+| 93 | #243 | A69: an empty workspace refused before it resolves | `security/protected_paths.check_workspace` |
+| 57 | #211 | A70: `.env` read, never loaded; no harness names | `env_secrets` |
+| 52 | #206 | A71: vendor tokens both sides, structural shapes output only | `safety/policy_enforcement` |
+| 95 | #245 | A72: the word each side of the dropped middle goes into the gap | `core/shell_sessions.OutputBuffer._cut_parts` |
+| 90 | #240 | A73: a hardlink refused by `(st_dev, st_ino)` | `security/protected_paths.hardlinked_segment`, `file_ops` |
+| 51 | #205 | A74: a session's exit handed to the quarantine | `SessionProcess.note_exit`, `SessionManager._supervise` |
+| 104 | #252 | A75: approvals reveal bidi / zero-width / TAG characters | `core/ansi.reveal_invisible_counted`, `main._Visible`, `tui/app` |
+| 100 | #249 | A76: one provenance sentence when an MCP tool is offered | `prompts/system_prompts.with_catalogs` |
+
+### What measuring found that the entries did not say
+
+- **104 was wrong about the params block.** It said `json.dumps` "escapes
+  nothing in this range but does quote it". `json.dumps`'s default
+  `ensure_ascii` escapes every one of these characters as `\u202e`, in the CLI
+  and in the TUI, so the payload never drew out of order. The reveal is for the
+  text fields only, and a test pins the params block as the control.
+- **52's PEM shape, first version, ate prose.** A lazy `BEGIN ... END` match took
+  "a key file starts with -----BEGIN ... and ends with -----END ..." whole,
+  sentence included. The body is base64 LINES now, 16 characters or more each,
+  after a real line break or the `\n` escape a service-account JSON carries.
+- **The obvious orphan-footer regex is quadratic.** A pattern that must START at
+  the first body line is tried at every line start of a long base64 blob, and
+  on a megabyte with no footer that is hours. The footer is found as a literal
+  and walked backwards in code: 0.08-0.35 s per megabyte across seven
+  adversarial shapes, now pinned with a generous bound.
+- **52's two PEM rows could not tell the two PEM shapes apart.** With the header
+  pattern's body removed, every test stayed green: the footer walk redacts a
+  complete block from below. A row with NO footer -- a block a cut ended -- is
+  the one only the header pattern reaches, and it was added after this mutation
+  survived.
+- **95's fix needs to know what was on the far side of each cut.** Trimming the
+  head's last word unconditionally hides a complete word whenever the cut fell
+  on a space. The buffer keeps one character from each far side -- the first one
+  the head had no room for, the last one evicted -- and trims only when the cut
+  split a word. Three existing tests used letter-only streams, which are one
+  word; each gained a space and keeps its original point.
+- **51's matchers need a gate a one-shot does not.** A one-shot's stderr is one
+  command's; a session's stream is everything the remote program printed, and
+  "Permission denied" is an ordinary thing for one to print. The SSH match counts
+  only on exit 255, ssh's own status; the sudo match only on a non-zero exit.
+
+### What the gates caught in this batch's own work
+
+- **bandit B613, on a comment written in this batch.** The `tui/app.py` comment
+  explaining the params block was meant to say `\u202e` and held the character
+  itself: the edit tool decoded the escape. bandit's trojan-source check was the
+  only thing that could see it. Every changed file was then scanned for a
+  literal bidi, zero-width or TAG character, and that was the only one.
+- **bandit-count-check, on a new subprocess test.** A fresh-interpreter test for
+  A70 put a fifth `subprocess` call in `tests/test_credentials.py`, whose
+  baseline holds four, so `-b` would have absorbed it silently. The assertion
+  moved into the batch-35 subprocess test, which needs the same fresh
+  interpreter.
+- **gitleaks, twice, both of them line pinning.** The new PEM fixtures were
+  built by concatenation, and the `private-key` rule still ran from an OLDER
+  literal header in the same file down to the first contiguous `KEY-----` in a
+  new one; the markers are split as `"PRIVATE KEY" "-----"` now. Then a
+  four-line comment in `tests/test_policy_enforcement.py` moved four
+  `.gitleaksignore` fingerprints off their lines, and four fake credentials
+  reported. The comment is one line. That is TECHNICAL_DEBT 87 happening, in
+  the batch after it was filed.
+
+### Verification
+
+`python -m pytest -q` is green: 7327 passed, 49 skipped -- 7376, up 162
+from batch 159's 7214, in 2:18. The FIRST full run took 10:52 on a loaded
+machine and also failed
+`tests/test_storage_e2e.py::test_eight_concurrent_writers_all_land` once, with
+`database is locked` from writer 5 of 8. It passed four times out of four
+alone and in the green run, and this batch changes nothing it reaches, so it
+is recorded here and not touched -- item 97's rule for a slow-run flake, and
+the measurement the next occurrence is compared against.
+
+`tests/test_docs_consistency.py` passes, 62 passed and 1 skipped, both with
+`AGENT_WORKSPACE` set and with it unset. `ruff check .` is clean. bandit
+with the CI job's own flags, against a Windows-path copy of the baseline, finds
+nothing new, and `scripts/bandit-count-check.py` reports no pair grew. gitleaks
+over the tree with `.github/gitleaks.toml` finds nothing.
+
+Every fix was checked against its own revert: with the production change
+stashed, its new tests fail, and the controls -- prose that must survive, a cut
+between two words, a session that exited zero, an ordinary multiply-linked
+file, a question that is not an approval, a prompt with no MCP tool -- pass both
+ways.

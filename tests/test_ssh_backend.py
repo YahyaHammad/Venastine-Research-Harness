@@ -1750,3 +1750,50 @@ class TestTheKnownHostsFileIsCleanedUp:
 
         sandbox._remove_known_hosts(path)       # must not raise
         sandbox._remove_known_hosts(path + "-never-existed")
+
+
+class TestASessionsRefusedLoginIsQuarantinedToo:
+    """TECHNICAL_DEBT 51, batch 160. `_note_ssh_auth_failure` read a
+    one-shot's stderr, and a session has none to read. One refused call is
+    two authentication attempts, so a model starting background sessions
+    against a host whose stored password is wrong was exactly "a harness
+    that retried on every command", and the quarantine did not reach it.
+    The session manager now hands the first output to `note_exit`, and the
+    matching stays in the sandbox."""
+
+    @staticmethod
+    def _session(monkeypatch, tmp_path):
+        monkeypatch.setattr(sandbox, "_popen_session",
+                            lambda args, **kwargs: _FakeSessionProc())
+        return sandbox.start_sandboxed(
+            "sleep 60", str(tmp_path), profile=_profile(),
+            docker_available=True, timeout_s=60, backend=BACKEND_SSH)
+
+    def test_a_refused_login_quarantines_the_stored_credentials(
+            self, ssh_on, ssh_secrets, monkeypatch, tmp_path):
+        session = self._session(monkeypatch, tmp_path)
+        try:
+            session.note_exit(
+                255, "agent@build: Permission denied (publickey,password).\n")
+        finally:
+            session.release_credentials()
+        assert not sandbox.ssh_available()
+        assert sandbox._ssh_stored_secrets() == {}
+
+    def test_a_remote_program_printing_it_does_not(
+            self, ssh_on, ssh_secrets, monkeypatch, tmp_path):
+        """The gate: a session's stream is everything the remote program
+        printed, and "Permission denied" is an ordinary thing for one to
+        print. Only 255 -- ssh's own status -- says the login failed."""
+        session = self._session(monkeypatch, tmp_path)
+        try:
+            session.note_exit(1, "cat: /root/notes: Permission denied\n")
+        finally:
+            session.release_credentials()
+        assert sandbox.ssh_available()
+
+    def test_a_session_that_offered_nothing_has_nothing_to_quarantine(
+            self, ssh_on, no_store, monkeypatch, tmp_path):
+        session = self._session(monkeypatch, tmp_path)
+        session.note_exit(255, "agent@build: Permission denied (publickey).\n")
+        assert sandbox.ssh_available()

@@ -1715,6 +1715,14 @@ class FakeSessionProcess:
         # writes to rather than a second class to keep in step.
         self.stdin = FakeSessionStdin()
         self.prompt_token = prompt_token
+        # What the manager handed `note_exit`: `(code, first_output)` per
+        # call. The real method feeds the sandbox's credential quarantine
+        # (TECHNICAL_DEBT 51); the double records, so "did the manager pass
+        # the stream on" is an assertion rather than a hope.
+        self.exit_notes = []
+
+    def note_exit(self, code, first_output):
+        self.exit_notes.append((code, first_output))
 
     def prompt(self):
         """What a shell does when it finishes a command and wants the
@@ -1873,8 +1881,8 @@ def rebind_posture(monkeypatch):
 # SHAPES reached `logs/app.log` in cleartext (S07-01). The first of the
 # protocol's four vacuity shapes: input that cannot discriminate.
 #
-# The last three rows are the discriminating ones, and
-# `test_the_three_shapes_are_what_discriminates` asserts that they are --
+# The SHAPE rows are the discriminating ones, and
+# `test_the_shapes_are_what_discriminates` asserts that they are --
 # that `redact_secrets` alone leaves them standing -- so this list cannot
 # quietly lose its teeth by having the shapes dropped from it.
 #
@@ -1923,10 +1931,56 @@ REDACTION_CASES = [
     ("quoted password assignment",
      'systemProp.gradle.password = "s3cr3t-in-an-assignment"',
      "s3cr3t-in-an-assignment"),
+    # --- Batch 160, TECHNICAL_DEBT 52. Every value below is BUILT, for the
+    # --- github-pat row's reason above: each is the shape of a gitleaks
+    # --- rule, and a contiguous fixture would need a line-pinned
+    # --- fingerprint that the next edit above it re-fires.
+    ("github fine-grained pat",
+     "clone failed for github_pat_" + "11A1B2C3D4" + "_a1b2c3d4" * 6,
+     "github_pat_" + "11A1B2C3D4" + "_a1b2c3d4" * 6),
+    ("github oauth token",
+     "token refresh returned gho_" + "a1b2c3d4" * 4 + "a1b2",
+     "gho_" + "a1b2c3d4" * 4 + "a1b2"),
+    ("openai project key",
+     "401 for sk-proj-" + "a1b2c3d4_" * 3 + "a1b2",
+     "sk-proj-" + "a1b2c3d4_" * 3 + "a1b2"),
+    ("stripe live key",
+     "charge failed with sk_" + "live_" + "a1b2c3d4" * 3,
+     "sk_" + "live_" + "a1b2c3d4" * 3),
+    ("npm token",
+     "publish failed with npm_" + "a1b2c3d4" * 4 + "a1b2",
+     "npm_" + "a1b2c3d4" * 4 + "a1b2"),
+    ("pem private key block",
+     "key: -----BEGIN RSA " + "PRIVATE KEY" "-----\n"
+     + "MIIEowIBAAKCAQEA" + "a1b2c3d4" * 6 + "\n-----END RSA "
+     + "PRIVATE KEY" "-----",
+     "a1b2c3d4" * 6),
+    # The row above is ALSO redacted from below, by the footer walk, so it
+    # cannot tell whether the header pattern took the body. This one has no
+    # footer -- a block a cut ended -- and only the header pattern reaches it.
+    ("pem private key block head",
+     "key: -----BEGIN RSA " + "PRIVATE KEY" "-----\n"
+     + "MIIEowIBAAKCAQEA" + "a1b2c3d4" * 6 + "\n" + "q1w2e3r4" * 6
+     + " (output truncated)",
+     "a1b2c3d4" * 6),
+    # --- The three STRUCTURAL shapes, output only: no vendor prefix, so
+    # --- `redact_secrets` leaves them standing and they discriminate.
+    ("authorization header",
+     "request failed: Authorization: Bearer " + "a1b2c3d4" * 3,
+     "a1b2c3d4" * 3),
+    ("json web token",
+     "session cookie eyJhbGciOiJIUzI1" + "NiJ9.eyJzdWIiOiIx" + "MjM0In0."
+     + "a1b2c3d4" * 3,
+     "a1b2c3d4" * 3),
+    ("pem block tail",
+     "MIIEowIBAAKCAQEA" + "a1b2c3d4" * 6 + "\n-----END RSA "
+     + "PRIVATE KEY" "----- was the rest of it",
+     "a1b2c3d4" * 6),
 ]
 
 #: The rows whose needle has no vendor prefix, so `redact_secrets` cannot
 #: see them. Named rather than sliced by index, because an index is a
 #: second fact about the order of the list above.
 SHAPE_CASE_LABELS = frozenset({
-    "url userinfo", "xml password element", "quoted password assignment"})
+    "url userinfo", "xml password element", "quoted password assignment",
+    "authorization header", "json web token", "pem block tail"})

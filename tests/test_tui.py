@@ -9645,3 +9645,42 @@ class TestTheStrippedSequencesAreRecordedOnce:
         assert not [r for r in caplog.records
                     if "control sequence" in r.getMessage()]
 
+
+class TestThePermissionModalShowsWhatDrawsTextOutOfOrder:
+    """TECHNICAL_DEBT 104, batch 160: the TUI half of the CLI's
+    `TestAnApprovalShowsWhatDrawsTextOutOfOrder`. `screens.py` imports
+    nothing from the project, so the reveal is applied where the modal is
+    built and the screen is handed text that is already safe to draw."""
+
+    def _screen(self, **kwargs):
+        app = _timeout_app()
+        app._shutting_down = False
+        captured = {}
+
+        def fake_blocking(screen, *, on_timeout):
+            captured["screen"] = screen
+            return False
+
+        app._blocking_modal = fake_blocking          # instance shadow, not a patch
+        app.ask_permission_blocking(
+            kwargs.get("tool_name", "shell"),
+            kwargs.get("params", {"command": "ls"}),
+            kwargs.get("notice"), kwargs.get("rationale"),
+            kwargs.get("headline"), kwargs.get("asked_by"), 0)
+        return captured["screen"]
+
+    def test_the_headline_and_every_text_field_are_revealed(self):
+        screen = self._screen(headline="ls notes\u202etxt.exe",
+                              rationale="safe\u2066",
+                              notice="host\u200b",
+                              asked_by="scout\ufeff")
+        assert screen._headline == "ls notes<U+202E>txt.exe"
+        assert screen._rationale == "safe<U+2066>"
+        assert screen._notice == "host<U+200B>"
+        assert screen._asked_by == "scout<U+FEFF>"
+
+    def test_ordinary_text_reaches_the_screen_unchanged(self):
+        """The control, including the None a tool with no headline sends."""
+        screen = self._screen(headline="ls -la", rationale=None)
+        assert screen._headline == "ls -la"
+        assert screen._rationale is None

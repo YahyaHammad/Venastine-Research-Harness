@@ -66,6 +66,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import stat
 
 import config
 import credentials
@@ -196,7 +197,29 @@ def check_workspace(workspace_dir: str) -> str | None:
     The message is written for the person who has to fix it, and names
     both what overlaps and what to do instead: a workspace refusal is
     always a configuration error, never something the model did.
+
+    AN EMPTY NAME IS REFUSED BEFORE IT IS RESOLVED (TECHNICAL_DEBT 93,
+    batch 160), because `os.path.realpath("")` is the LAUNCH DIRECTORY.
+    `config_schema._overlay_env` honours a variable that is set at all --
+    `if override is not None`, deliberately generic over its table -- so
+    `AGENT_WORKSPACE=` made the launch directory the auto-approved
+    workspace, and `WORKSPACE_DIR_EXPLICIT`, which reads the variable's
+    presence and never its value, made it the project as well. Measured
+    in batch 146: `_file_approval_check('write', ...)` answered no-prompt
+    for a file in the launch directory. Here rather than in the merge, so
+    the merge stays generic and the one place a bad workspace is refused
+    stays the one place; `main()` calls this before anything reads the
+    workspace or the project.
     """
+    if not workspace_dir or not workspace_dir.strip():
+        return (
+            "The workspace is an empty path -- AGENT_WORKSPACE is set to an "
+            "empty value, or workspace_dir in config.yaml is blank -- and an "
+            "empty path resolves to the directory this was launched from, "
+            "which would make it the auto-approved workspace and the "
+            "project. Unset AGENT_WORKSPACE, or name a directory; the "
+            "default is ./workspace."
+        )
     workspace_real = os.path.realpath(workspace_dir)
 
     for protected, label in critical_paths():
@@ -365,6 +388,58 @@ def readonly_mounts(workspace_real: str) -> list[str]:
 # where it always was -- outside a default workspace it is prompt-gated
 # by the workspace boundary, not denied.
 PROTECTED_SEGMENTS = frozenset({".venastine"})
+
+
+def hardlinked_segment(resolved_path: str, roots) -> str | None:
+    """The protected segment a HARD LINK at *resolved_path* is a second
+    name for, or None (TECHNICAL_DEBT 90, batch 160).
+
+    `protected_segment` reads a resolved PATH, and a hardlink is not a link
+    to anything: `realpath` returns the name it was given and `islink` is
+    False, so a second name for `.venastine/settings.json` sitting in the
+    workspace read as an ordinary file. A `read` through one served the
+    protected file -- measured in batch 146, along with the write half that
+    `write_text_atomic` already closed by replacing the name.
+
+    SAME FILE, NOT SAME NAME: a file with more than one name is compared by
+    `(st_dev, st_ino)` against every file under the `.venastine/` of each of
+    *roots* -- the project and the workspace, which are the directories that
+    tree is read from. Both fields are real on Windows as well as POSIX
+    (measured: an NTFS hardlink pair reports `st_nlink == 2` and one file
+    id). The two rejected alternatives are why it is this one: enumerating a
+    file's other names is per-platform, and refusing every `st_nlink > 1`
+    denies ordinary files to protect against a layout the write path
+    already handled. A file with one name pays one `stat`.
+
+    A `.venastine/` elsewhere on the disk is not looked for, so a hardlink
+    into some other project's tree is not caught; the deny exists for the
+    one this harness reads.
+    """
+    try:
+        target = os.stat(resolved_path)
+    except OSError:
+        return None
+    if not stat.S_ISREG(target.st_mode) or target.st_nlink < 2:
+        return None
+    identity = (target.st_dev, target.st_ino)
+    for root in roots:
+        try:
+            entries = os.listdir(root)
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.casefold() not in PROTECTED_SEGMENTS_FOLDED:
+                continue
+            for dirpath, _dirnames, filenames in os.walk(
+                    os.path.join(root, entry)):
+                for name in filenames:
+                    try:
+                        other = os.stat(os.path.join(dirpath, name))
+                    except OSError:
+                        continue
+                    if (other.st_dev, other.st_ino) == identity:
+                        return entry
+    return None
 
 
 def folded_segments(names) -> frozenset:

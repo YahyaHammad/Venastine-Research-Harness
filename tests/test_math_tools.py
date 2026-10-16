@@ -1559,6 +1559,62 @@ class TestABytesLiteralIsRefusedLikeAStringLiteral:
         assert safe_parse("1.5") == sympy.Float("1.5")
 
 
+class TestDoubleStarUnpackingIsRefusedByTheGuard:
+    """TECHNICAL_DEBT 55, batch 160. `f(**mapping)` is
+    `ast.keyword(arg=None)`, and `keyword` is on the node allowlist for
+    ordinary keyword arguments, so `sin(**Dict())` passed `_validate_ast`
+    and was refused by SymPy at evaluation instead ("sin takes exactly 1
+    argument (0 given)"). Inert -- no str-keyed mapping is reachable -- but
+    the house rule from `test_safe_parse_refuses_the_injection_payload_class`
+    is that a refusal from somewhere else is not the guard working.
+    """
+
+    @pytest.mark.parametrize("payload", [
+        "sin(**Dict())",
+        "Add(1, **Dict())",
+        "Max(x, **Dict())",
+    ])
+    def test_the_guard_refuses_before_anything_is_evaluated(
+            self, payload, monkeypatch):
+        """The double raises if evaluation is reached, so the only way this
+        passes is the guard answering first, with its own message."""
+        import tools.builtin._math_common as math_common
+        calls = []
+
+        def _must_not_run(*args, **kwargs):
+            calls.append(args)
+            raise AssertionError("evaluated before the guard refused")
+
+        monkeypatch.setattr(math_common, "eval_expr", _must_not_run)
+        with pytest.raises(MathParseError) as excinfo:
+            safe_parse(payload)
+        assert "** unpacking is not allowed" in str(excinfo.value)
+        assert calls == []
+
+    @pytest.mark.parametrize("payload", [
+        "sin(Dict())",
+        "Add(1, Dict())",
+        "Max(x, Dict())",
+    ])
+    def test_the_same_call_without_the_stars_reaches_evaluation(
+            self, payload, monkeypatch):
+        """The control the finding was measured against: the same call
+        shapes without `**` pass the guard, so the refusal above is about
+        the node and not the expression. Whatever SymPy then makes of a
+        `Dict` argument is evaluation's business, so the recorder stands
+        in for it."""
+        import tools.builtin._math_common as math_common
+        calls = []
+
+        def _recorder(*args, **kwargs):
+            calls.append(args)
+            return sympy.Integer(0)
+
+        monkeypatch.setattr(math_common, "eval_expr", _recorder)
+        safe_parse(payload)
+        assert len(calls) == 1
+
+
 # ===========================================================================
 # ---- S06-06 / S06-07: logic's parameter and logic's domain ---------------
 # ===========================================================================

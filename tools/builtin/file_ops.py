@@ -77,7 +77,7 @@ from pydantic import BaseModel, Field
 
 import config
 from json_store import write_text_atomic
-from security.protected_paths import protected_segment
+from security.protected_paths import hardlinked_segment, protected_segment
 from tools.base import invalid_params
 
 logger = logging.getLogger(__name__)
@@ -167,16 +167,41 @@ def _protected_path_error(user_path: str) -> Optional[str]:
     question here: with AGENT_WORKSPACE pointed at the project the
     directory is INSIDE the workspace and _file_approval_check would
     auto-approve every call against it.
+
+    A HARDLINK IS A SECOND NAME, NOT A PATH, so resolving cannot reach it
+    (TECHNICAL_DEBT 90, batch 160): `hardlinked_segment` asks whether a
+    multiply-linked file is the same file as one under the project's or the
+    workspace's protected directory, and the answer is refused in the same
+    words. Until then a `read` through one served the protected file.
     """
-    segment = protected_segment(resolve_path(user_path))
+    resolved = resolve_path(user_path)
+    segment = protected_segment(resolved)
+    via = "the path resolves into"
+    if segment is None:
+        segment = hardlinked_segment(resolved, _protected_roots())
+        via = "the path is a hard link to a file in"
     if segment is None:
         return None
     return (
-        f"Refused: the path resolves into '{segment}/', which holds this "
+        f"Refused: {via} '{segment}/', which holds this "
         "harness's own configuration and trust-gated content (settings.json, "
         "mcp.json, skills, agents). It is denied however the file tools are "
         "called."
     )
+
+
+def _protected_roots() -> list[str]:
+    """The directories whose `.venastine/` the file tools could otherwise
+    reach under another name: the workspace, and the project when one has
+    been initialised (they are the same directory when the workspace was
+    named as the project)."""
+    from core import config_loader
+
+    roots = [WORKSPACE_ROOT]
+    project = config_loader.get_project_path()
+    if project and os.path.realpath(project) != WORKSPACE_ROOT:
+        roots.append(project)
+    return roots
 
 
 def _refusal_for(tool_name: str):

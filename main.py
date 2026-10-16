@@ -85,22 +85,37 @@ class _Visible:
     decision for the warning to inform.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, reveal: bool = False) -> None:
         self.controls = 0
+        # AN APPROVAL ALSO REVEALS what draws text out of order or not at
+        # all -- bidi overrides, zero-width and tag characters -- as
+        # `<U+202E>` (TECHNICAL_DEBT 104, batch 160). Only an approval, by
+        # owner ruling: elsewhere those characters are somebody's Arabic,
+        # Persian or emoji, and `core/ansi.reveal_invisible_counted` says
+        # why the trade reverses where a person is authorising a command.
+        self._reveal = reveal
+        self.revealed = 0
 
     def __call__(self, text) -> str:
         clean, removed = ansi.for_display_counted(text)
         self.controls += removed
+        if self._reveal:
+            clean, shown = ansi.reveal_invisible_counted(clean)
+            self.revealed += shown
         return clean
 
     def warn(self) -> None:
-        """One line, immediately above the question, or nothing."""
-        if not self.controls:
-            return
-        plural = "" if self.controls == 1 else "s"
-        print(f"  [!] {self.controls} terminal control sequence{plural} "
-              f"removed from the text above: something in this call tried "
-              f"to redraw this prompt")
+        """One line per kind, immediately above the question, or nothing."""
+        if self.controls:
+            plural = "" if self.controls == 1 else "s"
+            print(f"  [!] {self.controls} terminal control sequence{plural} "
+                  f"removed from the text above: something in this call "
+                  f"tried to redraw this prompt")
+        if self.revealed:
+            plural = "" if self.revealed == 1 else "s"
+            print(f"  [!] {self.revealed} invisible or reordering "
+                  f"character{plural} shown as <U+...> in the text above: "
+                  f"read it as written, not as drawn")
 
 
 def _uuid_type(value: str) -> UUID:
@@ -1122,8 +1137,9 @@ def build_attended_provider(honour_run_scope: bool = False,
     def _approval(request) -> bool:
         # Every untrusted field below goes through one `visible`
         # (batch 152), and `visible.warn()` is what tells the user that
-        # something did.
-        visible = _Visible()
+        # something did. `reveal=True` since batch 160: this is the one
+        # prompt where a person authorises what the text says.
+        visible = _Visible(reveal=True)
         print(f"\n[approval] {visible(request.payload.get('tool_name'))}")
         # Under the header, above everything the agent wrote -- see
         # `_asker`, which is the one placement rule for the three kinds.

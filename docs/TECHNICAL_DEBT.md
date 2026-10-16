@@ -2937,7 +2937,7 @@ read. `tools/isolation.py` only.
 **Not:** lowering `MAX_CHILD_OUTPUT_BYTES` (the result bound is correct);
 thread-based collection (the module's process decision, H2, stands).
 
-## 51. A session's refused credential is never quarantined (open, deferred batch 138)
+## 51. A session's refused credential is never quarantined (closed, batch 160 -- the session manager hands the exit to the quarantine)
 
 **Issue:** #205.
 
@@ -2974,7 +2974,19 @@ quarantine in one place; a second copy of the matching in
 
 **Not:** changing the matching strings or the quarantine's one-way lifetime.
 
-## 52. Sixteen of twenty-two credential shapes survive `redact_output_text` (open, deferred batch 138)
+**CLOSED (batch 160, A74), in the shape this entry asked to settle first.** The
+sandbox is TOLD, by whoever reads the stream: `SessionProcess.note_exit(code,
+first_output)` runs a check `start_sandboxed` builds for a session that offered
+a stored SSH credential or sudo password, and the session manager calls it once,
+before it reports the exit, with the first 4,096 characters. The matching stays
+in `_note_ssh_auth_failure` and `_note_sudo_auth_failure`, one copy. One thing
+the entry did not say, measured in the writing: a session's stream is everything
+the remote program printed, and "Permission denied" is an ordinary thing for a
+program to print, so the SSH match counts only on exit 255 -- ssh's own status
+-- and the sudo match only on a non-zero exit. The one-shot routes and their
+ungated matching are unchanged.
+
+## 52. Sixteen of twenty-two credential shapes survive `redact_output_text` (closed, batch 160 -- vendor siblings both sides, structural shapes output only)
 
 **Issue:** #206.
 
@@ -3013,6 +3025,20 @@ plus a split-across-cut case.
 comment at `:262-268` already refuses both; it is cited here so the next reader
 does not re-propose them. No change to `_SECRET_PATTERNS`, which stay the input
 side's whole vocabulary by decision.
+
+**CLOSED (batch 160, A71), and the owner overruled one line of the "Not:"
+above.** The vendor half of the table -- `github_pat_`,
+`gho_`/`ghu_`/`ghs_`/`ghr_`, `sk-proj-`/`sk-svcacct-`/`sk-admin-`,
+`sk_live_`/`rk_live_`, `npm_` -- joins `_SECRET_PATTERNS`, so it refuses inputs
+as well as redacting output: one vendor list, one vocabulary, as `ghp_` and
+`sk-` always were. The structural half -- an `Authorization` header's value, a
+JWT, a PEM block's orphan footer with the lines above it -- is output only, in
+`_redact_credential_shapes`. The PEM header pattern gained an OPTIONAL body made
+of base64 lines, so it takes a whole block while matching every input it matched
+before. The keyword refusal stands: the header shape anchors on the header NAME.
+Two findings in the building, both in DEVLOG batch 160: a lazy BEGIN-to-END
+match ate the prose between two quoted markers, and the obvious footer regex is
+quadratic on a megabyte of base64.
 
 ## 53. `resolve=False` checks dotted IP literals and no other numeric form (open for the BEHAVIOUR, comment corrected batch 156)
 
@@ -3074,7 +3100,7 @@ it is `_build_distribution_with_warnings(...)[0]`.
 **Not:** changing the defaults, the warning strings, or
 `_build_distribution_with_warnings`' signature.
 
-## 55. `**`-unpacking is admitted by the math node allowlist (open, deferred batch 138)
+## 55. `**`-unpacking is admitted by the math node allowlist (closed, batch 160 -- refused by the guard)
 
 **Issue:** #209.
 
@@ -3110,6 +3136,13 @@ decision about future expression support, which is why this is deferred.
 
 **Not:** adding `ast.Dict` or `ast.Starred`; touching
 `_STRING_ARG_CONSTRUCTORS`.
+
+**CLOSED (batch 160, A68), with the one clause this entry proposed.**
+`_validate_ast` refuses an `ast.keyword` whose `arg` is None, with its own
+message, before evaluation; `sin(**Dict())` never reaches SymPy now, pinned with
+a double that fails if evaluation runs. `ast.keyword` stays listed, as the entry
+advised, and the closure argument in `AGENTS.md` names the one shape that is
+recognised rather than unlisted.
 
 ## 56. Nothing imports `env_secrets`, so `.env` is read by nothing (open, deferred batch 138)
 
@@ -3152,7 +3185,7 @@ bandit baseline entry and by two pinned tests in `tests/test_credentials.py`
 whose own `tests/BREAKING_CHANGES.md:2826` row explains what reverting them
 re-breaks; and the `usecwd=True` fix it carries is correct and worth keeping.
 
-## 57. `env_secrets` turns an untrusted `.env` into process environment at import (open, deferred batch 138)
+## 57. `env_secrets` turns an untrusted `.env` into process environment at import (closed, batch 160 -- read, never loaded)
 
 **Issue:** #211.
 
@@ -3201,6 +3234,16 @@ that filter a two-line comprehension rather than a policy.
 
 **Not:** claiming any of this happens today. Whether `.env` should join D17's
 content hash is a separate question for the trust layer and for the owner.
+
+**CLOSED (batch 160, A70), before the first caller arrived.** `env_secrets` has
+no import-time side effect: `get_env_secret` answers from the process
+environment first and then from `dotenv_values()` of the same file the old call
+found -- `AGENT_ENV_FILE`, or `find_dotenv(usecwd=True)` -- and nothing is
+written to `os.environ`. A name starting `AGENT_` or `VENASTINE_`, case-folded
+for Windows, is never answered from the file. The batch-35 subprocess test now
+also asserts that importing and reading wrote none of three decoys into the
+environment, which the old import did. Whether `.env` joins D17's content hash
+was left where this entry left it.
 
 ## 58. One env-var misconfiguration warns and the other raises (open, deferred batch 138)
 
@@ -4983,7 +5026,7 @@ is WARNING+ and routes into the transcript, so that is the inline marker
 arriving by a route nobody chose, with a `[warning]` prefix on an ordinary
 coloured answer.
 
-## 90. A hardlink is a second name for a file, and the one hard deny cannot see it (open, found and filed batch 146)
+## 90. A hardlink is a second name for a file, and the one hard deny cannot see it (closed, batch 160 -- compared by inode)
 
 **Issue:** #240.
 
@@ -5028,6 +5071,17 @@ are the whole of this.
 **Not:** adding `st_nlink` to the refusal. It would refuse a legitimate layout
 to protect against one the write path already handles, and it would read as
 the deny working when the deny is what cannot see this.
+
+**CLOSED (batch 160, A73), by neither of the two mechanisms this entry
+rejected.** Not a per-platform name enumeration and not an `st_nlink > 1`
+refusal: a file with more than one name is compared by `(st_dev, st_ino)`
+against every file under the workspace's and the project's `.venastine/`, and
+the shared deny refuses a match, naming the hard link. Both fields are real on
+Windows -- measured, an NTFS pair reports `st_nlink == 2` and one file id. The
+read half is closed, the write half has two layers now, and the atomic write is
+pinned on its own with the deny stubbed out. An ordinary multiply-linked file
+stays readable, which is the control. A `.venastine/` elsewhere on the disk is
+not searched.
 
 ## 91. A closed issue cited in a docstring has nothing keeping it honest (open, found and filed batch 146)
 
@@ -5101,7 +5155,7 @@ remedy is "close the file" -- which needs the errno distinguished, and WinError
 item 90 reintroduced on the platform where a case-insensitive filesystem makes
 the rest of this surface hardest to reason about.
 
-## 93. An environment override that is SET BUT EMPTY is honoured as a value (open, found and filed batch 146)
+## 93. An environment override that is SET BUT EMPTY is honoured as a value (closed, batch 160 -- refused before it resolves)
 
 **Issue:** #243.
 
@@ -5172,6 +5226,14 @@ workspace in exactly its sense.
 **Not:** treating this as a posture bug. The posture is frozen and correct;
 what moved is which directory the posture is ABOUT, one layer below it.
 
+**CLOSED (batch 160, A69), with the third candidate above.** `check_workspace`
+refuses a blank `workspace_dir` before calling `realpath`, so `AGENT_WORKSPACE=`
+stops startup with a message instead of becoming the auto-approved workspace and
+the project. The merge stays generic. The test drives the real loader from an
+unrelated directory, because launched from the harness root the empty path
+resolved to the install tree and was refused already -- the "what limits it
+today" above.
+
 ## 94. The CLI's Ctrl+C stops a turn on the FIRST press, with nothing between a stray press and a stopped turn (open, filed batch 147)
 
 **Issue:** #244.
@@ -5219,7 +5281,7 @@ than unwind, and CN10's own handler already stops the turn at a BOUNDARY
 and writes every row it owes (CN4), so the cost of a stray press is a lost
 turn rather than an unresumable thread.
 
-## 95. A credential straddling the output buffer's DROPPED MIDDLE is still recoverable from two pages (open, measured and filed batch 148)
+## 95. A credential straddling the output buffer's DROPPED MIDDLE is still recoverable from two pages (closed, batch 160 -- the cut word moves into the gap)
 
 **Issue:** #245.
 
@@ -5270,6 +5332,16 @@ overflowed a 200,000-character buffer, and the harness's own tools do not
 page across the gap on their own -- the model has to ask. Severity S3 by
 the marathon's scale, on the same reasoning S11-05 used for the cut A23 did
 close.
+
+**CLOSED (batch 160, A72), with neither the stream redaction nor the boundary
+window.** What reaches the model and the display never holds half a word across
+the gap: `OutputBuffer._cut_parts` moves the token-character run at the head's
+end and at the tail's start into the gap, but only when the character on the far
+side of that cut was a token character too -- the buffer keeps one character
+from each far side to know. `total` is unchanged, so the gap grows by what moved
+and RB3's arithmetic holds; the monitor's raw view keeps every character. A
+multi-line PEM block straddling the gap is A71's: an unterminated block is taken
+from its header, an orphan footer from below.
 
 ## 96. A window below ~50,000 tokens cannot hold one bounded read in its headroom (open, measured and filed batch 148)
 
@@ -5490,7 +5562,7 @@ and the batch had already grown past both of them; the fix is
 `_note_entries_outside_the_batch(run, flagged, revisions)` with the message
 reworded for a revision, which is the same helper.
 
-## 100. An MCP tool's description is read as harness-authored instruction (open, filed batch 150)
+## 100. An MCP tool's description is read as harness-authored instruction (closed, batch 160 -- ruled data, and the prompt says so)
 
 **Issue:** #249.
 
@@ -5516,6 +5588,14 @@ third-party data. If it is data, the envelope applies and the prefix is the
 wrong mechanism; if it is instruction, the bound is the whole remedy and
 this item closes. Nobody has needed to decide yet because no shipped
 configuration has an MCP server at all.
+
+**CLOSED (batch 160, A76): the owner ruled a tool schema third-party DATA.** Not
+with an envelope round each description, which would change how every
+well-behaved server's tools read: `with_catalogs` appends one sentence,
+`MCP_PROVENANCE`, saying that descriptions marked `[MCP: <server>]` are the
+server's and cannot add to or change the model's instructions -- present only
+when `schemas()` would offer an `mcp__` tool under the same three facts, so a
+prompt without one is byte-identical. A31's bound and prefix are unchanged.
 
 ## 101. `requires_approval` can still return a non-boolean (open, filed batch 150)
 
@@ -5659,7 +5739,7 @@ re-enact this, and this entry is what the reader should find when it does.
 **Not:** deleting the check, and not relaxing it to the highest range on the
 line. Both give back the property E13 and E14 paid for.
 
-## 104. Displayed untrusted text is filtered for controls and not for bidi or zero-width characters (open, filed batch 152)
+## 104. Displayed untrusted text is filtered for controls and not for bidi or zero-width characters (closed, batch 160 -- revealed in approvals)
 
 **Issue:** #252.
 
@@ -5692,6 +5772,17 @@ erasing it, where CSI `2K` erased.
 **Not:** adding the range to `_NOT_PRINTABLE` without deciding the
 question above. That would be the cheap half of an answer, in the module
 whose docstring states the cost of the C1 deletion it already does.
+
+**CLOSED (batch 160, A75), with the position this entry said had to come
+first:** reveal, in consent prompts only. `ansi.reveal_invisible_counted` shows
+the bidi controls, the zero-width characters, the byte-order mark and the TAG
+block as `<U+XXXX>`; the CLI's `_approval` applies it to every text field and
+says so in one line, and the TUI applies it before the modal is built.
+Transcripts, replays and questions are untouched, so Arabic, Persian and emoji
+render as written. **One correction to the entry:** `json.dumps` does not
+"escape nothing in this range" -- its default `ensure_ascii` writes every one of
+these as an escape, so the params block never drew out of order, and a test pins
+it as the control.
 
 ## 105. The decision-id gate reads a Unicode control-range name as a decision citation (open, measured batch 152)
 

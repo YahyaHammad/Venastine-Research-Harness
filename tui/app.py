@@ -4291,12 +4291,29 @@ class VenastineApp(App):
             # The one-shot release already fired; parking here would hang
             # the worker (and the interpreter) forever (review r1-1).
             return False
+        # BIDI, ZERO-WIDTH AND TAG CHARACTERS ARE SHOWN, NOT DRAWN
+        # (TECHNICAL_DEBT 104, batch 160): a U+202E can lay a command out
+        # in an order its bytes do not have, and this is the screen where
+        # a person authorises those bytes. Here and not in `screens.py`,
+        # which imports nothing from the rest of the project; and on the
+        # text fields only, because the params block is `json.dumps`, whose
+        # default `ensure_ascii` already writes every one of them as a
+        # `\u202e` escape. The CLI's `_approval` does the same through
+        # `_Visible`.
+        from core import ansi
+
+        def _shown(text):
+            if text is None:
+                return None
+            return ansi.reveal_invisible_counted(text)[0]
+
         # Deny and keep going on a timeout (R9). Leaving the modal on
         # screen would also leave the user answering a question whose
         # answer no longer goes anywhere.
         return self._blocking_modal(
-            PermissionScreen(tool_name, params, notice, rationale,
-                             headline, asked_by, depth),
+            PermissionScreen(_shown(tool_name), params, _shown(notice),
+                             _shown(rationale), _shown(headline),
+                             _shown(asked_by), depth),
             on_timeout=lambda screen: self._timed_out_ask(
                 screen,
                 dismiss_with=False,

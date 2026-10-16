@@ -477,3 +477,65 @@ class TestTheOneShotPromptSpeaksForTheRun:
             assert "## Available agents" not in prompt, (
                 "the prompt invites a spawn the schema list does not carry")
             assert "spawn_subagent" not in prompt
+
+
+# ===========================================================================
+# ---- Batch 160, TECHNICAL_DEBT 100: a server's text is said to be one -----
+# ===========================================================================
+
+class TestAnMcpToolsDescriptionIsSaidToBeTheServers:
+    """A tool schema's `description` is the server's text, read where
+    harness instruction sits. §67 A31 bounded it and prefixed
+    `[MCP: <server>]`; the owner ruling is that it is third-party data, so
+    the system prompt now says what the prefix means -- once, and only to a
+    run that is OFFERED an MCP tool, decided by the same three facts as
+    the schema list."""
+
+    NAME = "mcp__fixture__lookup"
+
+    @pytest.fixture
+    def mcp_tool(self):
+        spec = ToolSpec(
+            name=self.NAME,
+            schema={"name": self.NAME,
+                    "description": "[MCP: fixture] Look something up.",
+                    "input_schema": {"type": "object", "properties": {}}},
+            handler=lambda params: {"result": "ok"},
+            grant_policy=GRANT_ANYWHERE,
+            budget=BUDGET_IO,
+        )
+        registry.register(spec)
+        try:
+            yield spec
+        finally:
+            registry.unregister(self.NAME)
+
+    def test_a_run_offered_an_mcp_tool_is_told_whose_text_it_is(
+            self, roots, mcp_tool):
+        prompt = system_prompts.with_catalogs("BASE")
+        assert prompt.count(system_prompts.MCP_PROVENANCE) == 1
+        assert "[MCP: <server>]" in system_prompts.MCP_PROVENANCE
+
+    def test_a_prompt_with_no_mcp_tool_is_unchanged(self, roots):
+        """Byte-identical to before for every install without a server,
+        which is every shipped configuration."""
+        assert system_prompts.MCP_PROVENANCE not in (
+            system_prompts.with_catalogs("BASE"))
+
+    def test_a_tool_the_run_cannot_call_brings_no_line(self, roots, mcp_tool):
+        """An MCP tool defaults to needing approval (§17 decision D), so a
+        headless run with no grant is not offered it -- and a sentence
+        about descriptions the model was never shown would be noise. The
+        grant is the discriminating half: the same run with the tool
+        granted IS offered it, and is told."""
+        assert registry.approval_needed(self.NAME, {}, None)
+        assert system_prompts.MCP_PROVENANCE not in system_prompts.with_catalogs(
+            "BASE", callable_only=True)
+        assert system_prompts.MCP_PROVENANCE in system_prompts.with_catalogs(
+            "BASE", callable_only=True, granted={self.NAME})
+
+    def test_every_research_pass_carries_it_too(self, roots, mcp_tool):
+        """`with_catalogs` feeds `pass_prompt`, so a pass offered a granted
+        MCP tool (§25) is told the same thing a chat turn is."""
+        assert system_prompts.MCP_PROVENANCE in system_prompts.pass_prompt(
+            "Pass 1", callable_only=True, granted={self.NAME})
