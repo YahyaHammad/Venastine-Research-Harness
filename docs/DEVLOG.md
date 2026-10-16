@@ -25311,3 +25311,89 @@ stashed, its new tests fail, and the controls -- prose that must survive, a cut
 between two words, a session that exited zero, an ordinary multiply-linked
 file, a question that is not an approval, a prompt with no MCP tool -- pass both
 ways.
+
+## Batch 161 -- the approval wait that gave up before the test that was answering it (2026-10-16)
+
+### What was built
+
+ROADMAP_v3 §77, A77, on branch `approval-timeout-outlasts-settle` from `main` at
+`e50fe6e`. One value and one assertion:
+
+- `tests/conftest.py`: `shrink_approval_timeout` sets
+  `ATTENDED_APPROVAL_TIMEOUT_S` to 30s, not 5s. Its docstring no longer says
+  "nothing asserts on the value" and says which tests do.
+- `tests/test_pilot_wait.py`: `test_the_approval_timeout_is_shrunk_for_tests`
+  keeps its ceiling, now `<= 60`, and gains a floor -- more than `settle`'s
+  `timeout` default, read off its signature.
+- `tests/BREAKING_CHANGES.md` §11: the dropped-`put` row says what that
+  mutation really does now and did before, and a new row covers shrinking the
+  value below `settle`'s deadline.
+- `docs/TECHNICAL_DEBT.md`: notes on items 82 and 85, and item 115, below.
+
+The owner chose this over pinning 30s in each of the 23 tests, and over only
+re-running the job.
+
+### What measuring found
+
+The failure was the `tests` run on the `v0.3.1` tag push:
+`test_ac2_approving_a_permission_prompt_resumes_the_same_generator`, "tool never
+dispatched", 1 of 7376 in 5:25. The same commit had passed on `main`'s push in
+5:12 and on PR #263.
+
+- **The timer reproduces it.** `scratchpad/approvalprobe.py` is a pytest plugin
+  that sets the timeout in `pytest_runtest_call`, after every fixture, and the
+  value decides where the test fails. At 0.001s and 0.05s it failed earlier,
+  "permission modal never appeared". At 0.1s it failed with the CI message exactly. At 0.2s
+  and 0.3s it passed.
+- **The population is 23.** The full suite at 0.1s: 23 failed, 7304 passed, every
+  failure a pilot test that acts on an open modal. There were 10 in
+  `test_tui.py`, 7 in `test_project_init.py` and 6 in `test_question_tool.py`'s
+  `TestTheTuiModal`.
+- **30s costs nothing green.** The full suite at 30s: 7326 passed. The one
+  failure was the old `<= 10` ceiling, which is the expected one. The run took
+  1:35, and no approval test appeared among the 15 slowest.
+- **The 5s was hiding a mutation.** Dropping the answer, by changing
+  `push_screen`'s callback to `lambda answer: None`, failed 1 of the 3 AC2 tests
+  at 5s, in 23.8s. At 30s it failed 3 of 3, in 37.4s. The deny and Escape tests
+  had been passing on the timeout's decline. Re-run against the shipped
+  fixture, it failed 3 of 3 in 33.7s.
+- **Found on the way, not fixed: item 115.** The tag's `publish (npm)` run
+  packed `@yahyahammad/venastine@0.2.0` under `v0.3.1`. Both version files still
+  say 0.2.0, and nothing compares them with the tag. It uploaded nothing, only
+  because no `NPM_TOKEN` exists.
+
+### What the gates caught
+
+**One of my mutations never happened, and it read as a pass.** The first
+"restore 5s" mutation was a `sed` whose pattern did not match the CRLF line. The
+file was unchanged, the floor test passed, and that pass looked like a mutation
+the floor could not see. `grep` on the value showed 30 still in place. Redone as
+a byte-level replace that asserts its anchor exists once, the floor failed with
+its own message: "gives up after 5s and settle waits 10.0s". The other three
+were confirmed applied: two by an anchor assertion, and the dropped `put` by
+its own red result against a green control.
+
+**The range gate caught my own batch-160 sentence**, which is register item 103
+(#251) firing on schedule. `AGENTS.md`'s map said `A68–A76 in §76`, the only
+per-section parenthetical written as a range. That passed while A76 was the
+family's top, and it read as a short family claim once A77 existed. It is now
+enumerated like the others, and item 103 records the second cycle.
+
+### Verification
+
+`python -m pytest -q` is green: 7327 passed, 49 skipped -- 7376, unchanged,
+because no test was added -- in 1:31 on the final tree. It was also green, in
+1:34, on the tree before the last docstring and wording edits.
+
+`tests/test_docs_consistency.py` passes, 62 passed and 1 skipped, both with
+`AGENT_WORKSPACE` set and with it unset. `ruff check .` is clean. bandit with the CI job's
+own flags, against batch 160's Windows-path copy of the baseline (unchanged
+since batch 142), finds nothing new, and `scripts/bandit-count-check.py`
+reports 62 pairs, none grown. gitleaks with `.github/gitleaks.toml` finds
+nothing in the tree.
+
+Each mutation was measured against the shipped fixture:
+
+- the old 5s fails the floor;
+- `autouse=False` fails the ceiling, with "assert 600 <= 60";
+- a dropped answer fails all three AC2 tests.
