@@ -87,7 +87,7 @@ from safety.policy_enforcement import (
     redact_diagnostic_text,
     redact_output_text,
 )
-from security import posture
+from security import hosted, posture
 from skills.manager import manager as skills
 from skills.tui_commands import register_skill_commands
 from tools.base import OPENS_SESSION, OPENS_THREAD
@@ -882,6 +882,11 @@ class VenastineApp(App):
         from credentials import provider_startup_issues
 
         self._startup_warnings = provider_startup_issues(self.provider_name)
+        # §79. A hosted session starts with nothing connected BY DESIGN,
+        # and its remedy is a command rather than a file, so the file-shaped
+        # warnings give way to the banner `_hosted_banner` writes.
+        if hosted.is_hosted() and not model_connect.connected_providers():
+            self._startup_warnings = []
         tui_settings = self._settings.get("tui", {})
         # RAW, not themes.resolve()'d, because this is half the staleness
         # key the remembered theme is recorded against (see
@@ -1264,6 +1269,8 @@ class VenastineApp(App):
         # provider or a missing key is the same fact at both moments.
         for warning in self._startup_warnings:
             self._transcript.write_error(warning)
+        for line in _hosted_banner():
+            self._transcript.write_system(line)
         # Batch 121. Beside batch 87's for the same reason, and ABOVE it
         # because these are facts about this launch rather than about the
         # install: "I created your user-level mcp.json" is the first thing
@@ -6155,6 +6162,20 @@ def _cmd_copy(app: VenastineApp, args: str) -> None:
         app._transcript.write_error(f"Nothing to copy: {described}.")
         return
 
+    if path is not None and (app.is_web or hosted.is_shared()):
+        # ROADMAP_v3 §79. In a browser tab the reader's disk is the one
+        # that matters, and a path here would name the SERVER's -- in a
+        # shared deployment, a server every visitor shares. Textual hands
+        # the text to the browser as a download instead, under the file's
+        # NAME only, so no directory the visitor typed is ever touched.
+        import io
+
+        name = Path(path).name or "venastine.txt"
+        app.deliver_text(io.StringIO(text), save_filename=name)
+        app._transcript.write_system(
+            f"Sent {described} ({len(text)} chars) as a download: {name}.")
+        return
+
     if path is not None:
         try:
             written = Path(path).expanduser()
@@ -6635,6 +6656,16 @@ def _cmd_config(app: VenastineApp, args: str) -> None:
     import and `security/posture.py` depends on that (UN1), so there is no
     honest way to move a value in a running process.
     """
+    # ROADMAP_v3 §79 (HD4). config.yaml is ONE file in the install tree,
+    # and in a shared deployment every visitor's session reads it -- a
+    # write here would change the harness under all of them, and it is
+    # also how a disabled tool would be turned back on.
+    if hosted.is_shared():
+        app._transcript.write_error(
+            "/config is off in this shared demo: config.yaml is one file "
+            "that every visitor's session reads. It works in a local "
+            "install and in a private single-user deployment.")
+        return
     text = args.strip()
     if not text:
         _config_orientation(app)
@@ -7072,7 +7103,45 @@ def _connect_policy(app: "VenastineApp") -> tuple:
     """
     from credentials import LLM_PROVIDERS_FILE
 
+    if hosted.is_shared():
+        return (False, False,
+                "This shared demo keeps a connected key in this session's "
+                "memory only: it is never written, and it is gone when you "
+                "close the tab.")
     return True, True, f"Keys are saved to {LLM_PROVIDERS_FILE} (0600)."
+
+
+def _hosted_banner() -> list:
+    """What a hosted session says before anything is typed (§79, HD4).
+
+    Nothing for a local install. A shared deployment says the session is
+    temporary, how to connect a model, where the key lives and where to
+    revoke it, because a sign-in hands this server a credential and the
+    person deserves to know what happens to it.
+    """
+    if not hosted.is_hosted():
+        return []
+    if hosted.is_shared():
+        lines = [
+            "This is a shared demo of the Venastine Research Harness. Nothing "
+            "here is kept: the session ends when you close the tab.",
+            "Connect a model with /connect huggingface or /connect openrouter "
+            "(each signs in on the provider's own page). The key stays in "
+            "this session's memory and is never written; you can revoke it "
+            "afterwards at https://huggingface.co/settings/connected-applications "
+            "or https://openrouter.ai/keys.",
+            "Shell and file tools are off here. Install the harness, or run a "
+            "private copy, for the full set.",
+        ]
+    else:
+        lines = [
+            "Private single-user deployment: /connect takes a sign-in or a "
+            "key, and what you make lives in this container until it "
+            "restarts.",
+        ]
+    if not model_connect.connected_providers():
+        lines.append("No model is connected yet. Type /connect to choose one.")
+    return lines
 
 
 def _connect_rows(argument: str) -> list:

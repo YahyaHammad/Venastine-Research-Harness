@@ -2692,6 +2692,15 @@ def main(argv=None) -> int:
     raises it with code 2, and run_research with code 1 on a failed
     pipeline. This returns a code only where it decides one.
     """
+    # ROADMAP_v3 §79 (HD6). FIRST, before anything reads a credential: a
+    # hosted session marks itself non-dumpable, so another visitor's process
+    # in the same container cannot read its memory or environment. Here and
+    # not in the bridge, because an exec resets the flag.
+    from security import hosted
+
+    if hosted.is_hosted():
+        hosted.make_undumpable()
+
     parser = build_parser()
     args = parser.parse_args(argv)
 

@@ -25581,3 +25581,57 @@ sibling process of the same user READ an ordinary process's
 `/proc/<pid>/environ`, secret included; once the target called
 `prctl(PR_SET_DUMPABLE, 0)` the same read was refused with EACCES, and so was
 `/proc/<pid>/mem`. That is HD6's premise, measured rather than assumed.
+
+## Batch 164 -- what a hosted deployment changes inside the harness (2026-10-19)
+
+### What was built
+
+ROADMAP_v3 §79's second slice (HD4, HD6), on `hosted-demo` after batch 163.
+
+- `security/hosted.py` (new): the mode, read once from `VENASTINE_HOSTED` --
+  unset is a local install, `single-user` is one that says it is hosted, and
+  `shared` or anything unrecognised takes capability away; the
+  container-reaching tools a shared deployment refuses; and
+  `make_undumpable()`.
+- `security/permissions.py`: `is_tool_allowed` consults that refusal second to
+  the global check and before any context, so a deployment whose `config.yaml`
+  turns `shell` on is still not a shell when it is shared, and no agent or
+  skill can re-enable one.
+- `main.py`: a hosted session calls `prctl(PR_SET_DUMPABLE, 0)` first, before
+  `parse_args`.
+- `tui/app.py`: in a shared deployment `/config` is refused, `/connect`
+  refuses a pasted key and keeps a sign-in in memory, `/copy --file` becomes a
+  browser download under the file's name alone (in any browser tab, shared or
+  not, since a path there names the server's disk), and the launch's
+  file-shaped provider warnings give way to a banner saying the session is
+  temporary, what the server holds and where to revoke it. Single-user mode
+  says it is hosted and otherwise behaves like a local install.
+- `docs/SECURITY.md`: the hosted threat model -- one container, one user, and
+  the three things that stand between one visitor and another -- with what is
+  in scope and what is not.
+
+### What measuring found
+
+- **The revoke link was checked before it was printed.** Every
+  `huggingface.co/settings/*` path redirects an anonymous request to the login
+  page, so a status code proves nothing; Hugging Face's own blog sends readers
+  to `https://huggingface.co/settings/connected-applications` to reset an app's
+  connection, and `huggingface.js` names the same page for creating one.
+- **`env_secrets.get_env_secret` raises on a missing name by default**, which
+  the first draft of the `.env` test met; it reads `required=False` now.
+
+### What the gates caught
+
+bandit, on the new test file's `subprocess` (B404, B603): one test runs
+`prctl` in a child so the worker itself stays dumpable. Annotated with the
+reason, in `test_docs_consistency.py`'s style.
+
+### Verification
+
+`python -m pytest -q` is green: 7441 passed, 51 skipped -- 7492, 43 more than
+batch 163, all in `tests/test_hosted_mode.py` -- in 1:56. The new and touched
+suites pass again with `AGENT_WORKSPACE` unset, and under WSL, where the
+Linux-only `prctl` test runs and passes. `ruff check .` is clean; bandit with
+the CI flags against the rewritten baseline copy exits 0 after the annotation,
+and the count check reports 62 pairs, none grown; gitleaks over an export of the
+tracked and new files finds nothing.

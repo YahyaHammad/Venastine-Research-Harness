@@ -43,7 +43,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
-- **§79. A demo nobody has to install** - **(IN PROGRESS: slice 1, `/connect`, BUILT in batch 163; slices 2-4 designed, not yet built)** (the harness ran only where someone installed it, and connecting a model meant copying a template and editing JSON by hand; the owner asked for a public Hugging Face Space and ModelScope Studio kept current from `main`, a sign-in where a provider's own documentation invites one, and a private single-user mode with the full harness; HD1-HD10)
+- **§79. A demo nobody has to install** - **(IN PROGRESS: slice 1, `/connect`, BUILT in batch 163; slice 2, hosted modes, BUILT in batch 164; slices 3-4 designed, not yet built)** (the harness ran only where someone installed it, and connecting a model meant copying a template and editing JSON by hand; the owner asked for a public Hugging Face Space and ModelScope Studio kept current from `main`, a sign-in where a provider's own documentation invites one, and a private single-user mode with the full harness; HD1-HD10)
 - **§78. A release tag that named one version while the run packed another** - **(BUILT in batch 162)** (`v0.3.0` and `v0.3.1` were pushed on commits whose `package.json` and `pyproject.toml` both said 0.2.0, and the `v0.3.1` publish run packed `@yahyahammad/venastine@0.2.0` and reported the prepublish check passed, because that check compared the two files with each other and nothing read the tag; it uploaded nothing only because no `NPM_TOKEN` exists. The owner ruled both tags releases whose bump was missed, left the files and the tags where they are, and put the comparison first in `scripts/prepublish-check.mjs`, before anything is packed; A78)
 - **§77. The approval wait that gave up before the test that was answering it** - **(BUILT in batch 161)** (the `v0.3.1` tag run failed one pilot test, "tool never dispatched", after the same commit had passed twice: `conftest`'s autouse fixture shrank a modal's wait to 5s, half of `settle`'s 10s deadline, and 23 pilot tests act on an open modal inside that wait. Raised to 30s and pinned from below as well as from above; A77)
 - **§76. Nine security findings the marathon deferred, and the answer each was waiting for** - **(BUILT in batch 160)** (the nine `security`-area issues batch 159 filed, each put to the owner with options and a recommendation: `**` unpacking refused by the math guard, an empty workspace refused before it resolves, a `.env` read and never loaded, the redaction vocabulary widened to the current vendor formats and three structural shapes, the word on each side of a session buffer's dropped middle moved into the gap, a hardlink into `.venastine/` refused by inode, a session's refused credential quarantined, bidi and zero-width characters revealed in approvals, and an MCP tool's description ruled third-party data in the system prompt; A68-A76)
@@ -2792,7 +2792,17 @@ the owner with options and a recommendation before any code was written.
    every connect, a link that opens in the reader's own browser under the web
    driver, and the three new credential shapes redacted. Useful to every
    install, which is why it came first.
-2. **Hosted modes inside the harness, batch 164.**
+2. **Hosted modes inside the harness, batch 164.** `security/hosted.py` reads
+   `VENASTINE_HOSTED` once; a shared deployment refuses the container-reaching
+   tools in `is_tool_allowed` whatever `config.yaml` says, refuses `/config`
+   and a pasted key, keeps a connected key in memory, turns `/copy --file` into
+   a browser download under the file's name alone, and replaces the launch's
+   file-shaped provider warnings with a banner that says what the server holds
+   and where to revoke it. Every hosted session calls `prctl(PR_SET_DUMPABLE,
+   0)` first thing in `main()`. Measured under WSL before that was relied on: a
+   sibling process of the same user read an ordinary process's
+   `/proc/<pid>/environ`, secret included, and was refused the same read with
+   EACCES once the target had made the call.
 3. **The bridge and the bundle, batch 165.**
 4. **The deploy workflow and the rest of the record, batch 166.**
 
