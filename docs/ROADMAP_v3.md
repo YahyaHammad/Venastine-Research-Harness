@@ -43,6 +43,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
+- **§79. A demo nobody has to install** - **(IN PROGRESS: slice 1, `/connect`, BUILT in batch 163; slices 2-4 designed, not yet built)** (the harness ran only where someone installed it, and connecting a model meant copying a template and editing JSON by hand; the owner asked for a public Hugging Face Space and ModelScope Studio kept current from `main`, a sign-in where a provider's own documentation invites one, and a private single-user mode with the full harness; HD1-HD10)
 - **§78. A release tag that named one version while the run packed another** - **(BUILT in batch 162)** (`v0.3.0` and `v0.3.1` were pushed on commits whose `package.json` and `pyproject.toml` both said 0.2.0, and the `v0.3.1` publish run packed `@yahyahammad/venastine@0.2.0` and reported the prepublish check passed, because that check compared the two files with each other and nothing read the tag; it uploaded nothing only because no `NPM_TOKEN` exists. The owner ruled both tags releases whose bump was missed, left the files and the tags where they are, and put the comparison first in `scripts/prepublish-check.mjs`, before anything is packed; A78)
 - **§77. The approval wait that gave up before the test that was answering it** - **(BUILT in batch 161)** (the `v0.3.1` tag run failed one pilot test, "tool never dispatched", after the same commit had passed twice: `conftest`'s autouse fixture shrank a modal's wait to 5s, half of `settle`'s 10s deadline, and 23 pilot tests act on an open modal inside that wait. Raised to 30s and pinned from below as well as from above; A77)
 - **§76. Nine security findings the marathon deferred, and the answer each was waiting for** - **(BUILT in batch 160)** (the nine `security`-area issues batch 159 filed, each put to the owner with options and a recommendation: `**` unpacking refused by the math guard, an empty workspace refused before it resolves, a `.env` read and never loaded, the redaction vocabulary widened to the current vendor formats and three structural shapes, the word on each side of a session buffer's dropped middle moved into the gap, a hardlink into `.venastine/` refused by inode, a session's refused credential quarantined, bidi and zero-width characters revealed in approvals, and an MCP tool's description ruled third-party data in the system prompt; A68-A76)
@@ -2727,6 +2728,100 @@ leaked PID.
   because MCP is the only dynamic registrant and the composed name is its
   fact. A bound in the registry would be the fix-at-the-consumer shape
   `AGENTS.md` names by name.
+---
+
+## §79. A demo nobody has to install
+
+**Requested and designed in batch 163, built across batches 163-166.** The
+harness ran where someone installed it -- a clone or the npm package -- and
+connecting a model meant copying `providers.json.example` and editing JSON,
+which README called "the one setup step they cannot do for you". The owner asked
+for a public demo on Hugging Face Spaces and ModelScope Studios, kept current
+from `main`, where a visitor can try the harness without installing anything
+and connect a model without touching a file. Every decision below was put to
+the owner with options and a recommendation before any code was written.
+
+### What was measured or read before anything was designed (2026-10-19)
+
+- **The owner's Hugging Face account is free**, and on a free account the only
+  hostable compute Space is a Gradio-SDK app on ZeroGPU, two per account.
+  Docker Spaces and the plain CPU tier need a paid plan. ZeroGPU refuses to
+  start without at least one `@spaces.GPU` function; a no-op one burns no quota.
+  `gr.Server` is a FastAPI subclass, so a Gradio Space can carry custom routes
+  and a websocket beside Gradio's own.
+- **ModelScope is the international site**, `modelscope.ai`, under the
+  organisation `Venastine-Research`. A Studio is fed by a git push to `master`
+  (force push prohibited) and redeployed by `POST /openapi/v1/studios/{o}/{r}/deploy`.
+  Its free tier is a CPU instance. API-Inference there is
+  `https://api-inference.modelscope.ai/v1`, OpenAI-compatible: `/v1/models`
+  answered 200 with a live list. A ModelScope access token is account-wide --
+  the same token pushes code to the account's repositories.
+- **Textual already renders in a browser.** Its web driver
+  (`textual.drivers.web_driver:WebDriver`) is what `textual-serve` runs: one
+  app subprocess per websocket, framed packets after a `__GANGLION__` line, an
+  xterm.js page on the other end. `textual-serve`'s own server is aiohttp-only
+  and builds the child's environment with `os.environ.copy()`, so every Space
+  secret would reach the child and, through it, the model's tools.
+- **Only two providers explicitly invite third-party OAuth in their own
+  documentation.** Hugging Face (`https://huggingface.co/docs/hub/oauth`): a
+  "Sign in with HF" flow "in any website or App", the `inference-api` scope,
+  public apps with no secret, and a device code flow. OpenRouter
+  (`https://openrouter.ai/docs/guides/overview/auth/oauth`): "Use OAuth to let
+  your users bring their own OpenRouter API key to your app", PKCE, and a mode
+  with no callback URL in which the code is shown to copy. Nothing comparable
+  was found for ModelScope, Anthropic, OpenAI or Google.
+- **A credential used by the harness lives on the server.** The process that
+  calls the model runs in the container; the browser only draws the terminal.
+  Every visitor shares that container and one Unix user, and a Space has no
+  root with which to give each session its own.
+- **The code**: no in-app way to add a provider existed, and
+  `credentials.save_credentials()` had no production caller. Any
+  OpenAI-compatible endpoint already worked as a hand-written entry. The client
+  cache is keyed by provider name for the life of the process, so a key added
+  mid-session was ignored until a restart. Shell, `read`, `write` and `edit`
+  ship disabled and the host fallback ships off. `/config` writes the
+  install tree's `config.yaml`, which every session in a container shares, and
+  `/copy --file` writes any path. Every piece of state is redirectable per
+  process, which is §60 UH3's supervisor shape exactly.
+
+### Slices
+
+1. **`/connect`, batch 163.** A preset catalogue, the two sign-in flows, a
+   pasted key for everything else, a key stored in `providers.json` or -- for
+   the shared demo -- in the process alone, the client cache forgotten on
+   every connect, a link that opens in the reader's own browser under the web
+   driver, and the three new credential shapes redacted. Useful to every
+   install, which is why it came first.
+2. **Hosted modes inside the harness, batch 164.**
+3. **The bridge and the bundle, batch 165.**
+4. **The deploy workflow and the rest of the record, batch 166.**
+
+### What §79 deliberately does not change
+
+**The credential split.** Provider keys still live in `providers.json` and
+nowhere else on disk; `/connect` is a writer for that file, not a second store.
+The session-only overlay holds a key in memory and is never written.
+
+**The shipped tool defaults.** A shared demo offers what a fresh install offers.
+
+**Who may call the model.** `/connect` is a slash command, typed by a person;
+nothing in a context window can reach it.
+
+### Design Decisions Record — §79 (HD1-HD10)
+
+| id | decision |
+|---|---|
+| **HD1** | **The browser draws the TUI through Textual's web driver, and the bridge is ours.** A Starlette bridge speaks `textual-serve`'s framed protocol to one `main.py --tui` child per websocket. The `textual-serve` package, pinned exactly and installed only by the deploy, supplies its xterm.js client assets and nothing else; its aiohttp server is never run, because it copies the whole parent environment into the child. A pseudo-terminal emulator was the alternative and loses Textual's browser-side link opening and file delivery |
+| **HD2** | **One app serves both platforms**: Gradio SDK with `gr.Server` mounting the bridge's routes. On Hugging Face the Space runs on ZeroGPU, the only compute a free account can host, with one no-op `@spaces.GPU(duration=1)` function registered through `@app.api` and never stacked on it; no provider call is ever made inside a GPU function. On ModelScope the Studio runs on the free CPU tier |
+| **HD3** | **One process per browser tab, isolated by its environment**: a fresh session directory per connection, and `HOME`, `APP_DB_PATH`, `AGENT_LOG_FILE`, `AGENT_WORKSPACE`, `AGENT_OUTPUT_DIR`, `AGENT_PROVIDERS_FILE` and `AGENT_SECRETS_FILE` all inside it. The environment is built from an allowlist, never copied, and never carries `PYTHONPATH`. The directory is deleted when the tab closes, so nothing a visitor did outlives the session. Setting `AGENT_WORKSPACE` here does not contradict the npm launcher's rule against it: that rule exists because a shared directory would become an auto-approved write boundary for every project, and a per-session temporary directory is the opposite |
+| **HD4** | **Two hosted modes, read from the real environment only**: `VENASTINE_HOSTED=shared` and `VENASTINE_HOSTED=single-user`. A `.env` cannot set either, by A70. Shared mode only REMOVES capability: `/config` is refused, because it writes a file every session in the container shares; `/copy --file` delivers to the reader's browser instead of writing a server path; and a banner says the session is temporary |
+| **HD5** | **In a shared deployment a credential comes only from a scoped sign-in and lives only in the session's process.** `/connect` offers Hugging Face's device code flow -- through a public OAuth app the project owns, its client id in `config.yaml` as `hf_oauth_client_id`, its scopes `openid profile inference-api` on the app's registration -- and OpenRouter's PKCE flow with the code shown to copy. A pasted key is refused there. The credential is held in an in-memory overlay in `credentials.py`, never written, and dropped when the session ends. In a local install, and in single-user mode, both sign-ins are offered and a pasted key is accepted and saved to `providers.json`. OAuth is offered for exactly these two providers because they are the two whose official documentation explicitly invites a third-party app to use it; that list grows only by the same test |
+| **HD6** | **A session cannot read another session's memory.** Every hosted session process marks itself non-dumpable (`prctl(PR_SET_DUMPABLE, 0)`) at startup, after exec, which resets it, so another process of the same user is refused its `/proc/<pid>/mem`, `/proc/<pid>/environ` and a debugger attach. The Hugging Face token arrives from Hugging Face directly into the session and is never typed, so it never crosses the websocket |
+| **HD7** | **Single-user mode is honoured only when the app is not reachable anonymously**, and fails closed. The bridge requests its own public URL with no credentials -- `SPACE_HOST` on Hugging Face, `VENASTINE_PUBLIC_URL` on ModelScope, where its absence refuses -- at startup and before each session, and an anonymous answer refuses every session with a page saying why. When honoured, a pasted key and a ModelScope token are accepted, an optional `VENASTINE_PROVIDERS_JSON` secret seeds the session's `providers.json`, `/config` and `/copy --file` work, and at bridge start `config.yaml` -- the one location, written with `config_edit`'s comment-preserving writer -- enables `read`, `write`, `edit` and `shell` and the host fallback, because the private container is the sandbox and a `/config` edit would be lost at the next restart. The owner asked for the tools explicitly. Interactive shell sessions still need Docker or Podman and stay unavailable |
+| **HD8** | **The bridge bounds what it runs**: a maximum number of concurrent sessions (4 shared, 2 single-user), an idle timeout, a hard lifetime, address-space and CPU limits on the child, and the whole process group killed on stop. A websocket must carry a same-origin `Origin` header and a one-time ticket, and session creation is rate-limited per address |
+| **HD9** | **What deploys is a built bundle, only from `main`, only after the tests pass.** The bundle is the npm `files` allowlist -- what an end user runs, already checked against `neverDistribute` -- plus the deploy overlay, a generated per-platform README and requirements, and `BUILD_INFO.json` naming the commit, which the page shows. Never a git mirror: the Space README needs frontmatter the repository's must not carry, and ModelScope forbids the force push a mirror needs. The workflow runs on `workflow_run` of `tests.yml` completing with success, for a `push` event, from this repository, on `main`; a manual run is a dry run unless it is on `main`; a missing secret turns that platform's step into a dry run; gitleaks scans the bundle before anything is uploaded; every action is pinned by commit. Whoever can merge to `main` decides the code that runs beside every live visitor's credential, and this section says so in as many words |
+| **HD10** | **Deferred: a model hosted on ZeroGPU, and keys held in the browser.** A ZeroGPU model would spend the visitor's few daily GPU minutes one agent step at a time, each a separate allocation with queueing and a possible cold start, and charging the visitor rather than the Space would mean forwarding their identity header from a subprocess; the no-op GPU function keeps the Space ready for it. Keys held in the browser would mean relaying every model call through the page, which only some providers permit from a browser at all |
+
 ---
 
 ## §78. A release tag that named one version while the run packed another

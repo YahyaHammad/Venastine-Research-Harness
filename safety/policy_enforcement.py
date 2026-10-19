@@ -264,6 +264,21 @@ _SECRET_PATTERNS = [
     re.compile(r"[sr]k_live_[A-Za-z0-9]{16,}"),
     # npm access tokens
     re.compile(r"npm_[A-Za-z0-9]{36}"),
+    # --- ROADMAP_v3 §79 (HD5): the three credentials `/connect` hands the
+    # --- harness that no pattern above can see. A sign-in puts them in a
+    # --- session the model shares, so they are redacted and refused like
+    # --- the rest of the list.
+    # Hugging Face user access tokens and OAuth access tokens. An
+    # identifier like `hf_hub_download` breaks the run of word characters
+    # at its second underscore and is not matched.
+    re.compile(r"(?<![A-Za-z0-9])hf_(?:oauth_)?[A-Za-z0-9]{30,}"),
+    # OpenRouter keys, which `sk-` above misses at the second hyphen
+    re.compile(r"sk-or-v1-[A-Za-z0-9]{32,}"),
+    # ModelScope access tokens in their prefixed form: `ms-` and a UUID. A
+    # bare UUID is NOT matched -- thread ids are UUIDs -- and neither is one
+    # that merely ENDS a word like `items-<uuid>`.
+    re.compile(r"(?<![A-Za-z0-9])ms-[0-9a-f]{8}-[0-9a-f]{4}"
+               r"-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"),
 ]
 
 

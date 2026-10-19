@@ -1626,6 +1626,25 @@ deployment, whose operator knows the number and can say it once with
 to. Erring low here would compact every unknown model early forever to
 protect the rarer case that has an owner who can answer.
 
+## Connecting a model (ROADMAP_v3 §79)
+
+### `hf_oauth_client_id`
+
+ROADMAP_v3 §79 (HD5). The Hugging Face OAuth app `/connect huggingface` signs
+in through. Empty by default, which hides the sign-in and leaves a pasted token
+working, because an install has no app until someone registers one.
+
+**A client id is public, and that is what makes it a `config.yaml` value.** The
+app is registered with NO secret (Hugging Face calls this a public app), with
+the device code flow enabled, so nothing about it needs hiding: it names which
+app asks, and the person approving the request sees that name on Hugging
+Face's own page. The scopes live on the app's registration (`openid profile
+inference-api`), not here, so editing this value can change WHICH app asks but
+not what it may do.
+
+**Not an authority key.** It cannot widen a tool permission or an approval, and
+`settings.json` cannot set it at all, like every other key in this file.
+
 ## Tool permissions and approvals (ROADMAP_v2 §15, D24)
 
 ### `tool_permissions`

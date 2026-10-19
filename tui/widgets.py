@@ -2892,6 +2892,15 @@ class Transcript(RichLog):
         if not markdown.clickable(url):
             return
 
+        # ROADMAP_v3 §79. In a browser tab (Textual's web driver) the
+        # platform's browser is the SERVER's: `webbrowser.open` there opens
+        # nothing the reader can see and reports failure. The driver sends
+        # the URL to the reader's own browser instead, and the tab opening is
+        # the confirmation, as it is here.
+        if self.app.is_web:
+            self.app.open_url(url)
+            return
+
         def work() -> None:
             try:
                 opened = webbrowser.open(url)

@@ -60,11 +60,46 @@ def unknown_provider_message(provider_name: str, providers: dict) -> str:
     )
 
 
-def load_provider_data() -> dict:
+# ROADMAP_v3 §79 (HD5). Providers connected for THIS PROCESS ONLY, never
+# written anywhere. A shared hosted demo runs every visitor in one container
+# as one Unix user, so a key in a file is a key one bug away from the next
+# visitor; a key in this dict lives as long as the session's process does.
+# Entries here win over the file's, and the file is never told about them.
+_SESSION_PROVIDERS: dict = {}
+
+
+def set_session_provider(provider_name: str, entry: dict) -> None:
+    """Connect a provider for this process without writing it to disk (HD5).
+
+    A COPY is stored, so the caller's dict cannot change it afterwards.
+    """
+    _SESSION_PROVIDERS[provider_name] = dict(entry)
+
+
+def clear_session_providers() -> None:
+    _SESSION_PROVIDERS.clear()
+
+
+def _load_file_data() -> dict:
     if not os.path.exists(LLM_PROVIDERS_FILE):
         return {}
     with open(LLM_PROVIDERS_FILE, encoding="utf-8") as file:
         return json.load(file)
+
+
+def load_provider_data() -> dict:
+    """Every configured provider: the file's entries, with any connected for
+    this session only laid over them (HD5).
+
+    Callers get fresh dicts each time, so mutating the answer changes
+    neither the file nor the session's entries. `save_credentials` reads the
+    FILE alone, which is what keeps a session-only key from being written
+    back by the next save of some other provider.
+    """
+    data = _load_file_data()
+    for name, entry in _SESSION_PROVIDERS.items():
+        data[name] = dict(entry)
+    return data
 
 
 # 0600 -- owner read/write, nobody else. This file holds every LLM
@@ -120,7 +155,9 @@ def save_credentials(
     is_v1_compatible: bool = True,
     supports_stream_usage: bool = False,
 ) -> None:
-    provider_data = load_provider_data()
+    # The FILE, never the merged view: a session-only entry (HD5) read here
+    # would be written to disk by this save.
+    provider_data = _load_file_data()
 
     if provider_name in provider_data:
         provider_data[provider_name]["API_KEY"] = api_key

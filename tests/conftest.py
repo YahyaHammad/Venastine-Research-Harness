@@ -497,11 +497,18 @@ def clear_client_cache():
     import core.session
 
     core.session.clear()
+    # ROADMAP_v3 §79 (HD5): providers `/connect` kept in memory for one
+    # session are module state for the same reason, and a key one test
+    # connected must not answer another test's api_initialization.
+    import credentials
+
+    credentials.clear_session_providers()
     yield
     core.client._client_cache.clear()
     core.client._context_window_cache.clear()
     core.client._context_window_failures.clear()
     core.session.clear()
+    credentials.clear_session_providers()
 
 
 @pytest.fixture(autouse=True)
@@ -1970,6 +1977,16 @@ REDACTION_CASES = [
     ("npm token",
      "publish failed with npm_" + "a1b2c3d4" * 4 + "a1b2",
      "npm_" + "a1b2c3d4" * 4 + "a1b2"),
+    # ROADMAP_v3 §79 (HD5): the three credentials /connect introduces.
+    ("hugging face token",
+     "router said 401 for hf_" + "a1b2c3d4" * 4 + "a1",
+     "hf_" + "a1b2c3d4" * 4 + "a1"),
+    ("openrouter key",
+     "401 for sk-or-v1-" + "a1b2c3d4" * 8,
+     "sk-or-v1-" + "a1b2c3d4" * 8),
+    ("modelscope token",
+     "auth failed: ms-" + "a1b2c3d4-a1b2-a1b2-a1b2-" + "a1b2c3d4" + "a1b2",
+     "ms-" + "a1b2c3d4-a1b2-a1b2-a1b2-" + "a1b2c3d4" + "a1b2"),
     ("pem private key block",
      "key: -----BEGIN RSA " + "PRIVATE KEY" "-----\n"
      + "MIIEowIBAAKCAQEA" + "a1b2c3d4" * 6 + "\n-----END RSA "

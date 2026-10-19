@@ -301,7 +301,8 @@ class TestTheRoundTripIsLossless:
         # 145 since batch 119: `compaction_min_headroom_tokens` and
         # `compaction_max_headroom_fraction`, which clamp the headroom the
         # trigger fraction names (TECHNICAL_DEBT 39).
-        assert touched == 145, f"{touched} settable scalars, expected 145"
+        # 146 since batch 163: `hf_oauth_client_id` (ROADMAP_v3 §79, HD5).
+        assert touched == 146, f"{touched} settable scalars, expected 146"
         assert config_edit._dump(tree) == text
 
     def test_a_one_value_change_is_a_one_line_diff(self, tmp_path,

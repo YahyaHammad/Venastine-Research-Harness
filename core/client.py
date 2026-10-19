@@ -78,6 +78,18 @@ def api_initialization(provider_name: str):
     return client
 
 
+def forget_client(provider_name: str) -> None:
+    """Drop the cached client for `provider_name`, so the next call builds a
+    new one from what `providers.json` (or the session) says NOW.
+
+    `/connect` is the caller (ROADMAP_v3 §79, HD5): the cache above is keyed
+    by provider name for the life of the process, so a key added or replaced
+    mid-session was otherwise ignored until a restart, with every call still
+    going out under the old one.
+    """
+    _client_cache.pop(provider_name, None)
+
+
 # ============================================================================
 # ---- Normalized response shape ---------------------------------------------
 # ============================================================================

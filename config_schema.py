@@ -463,6 +463,10 @@ class HarnessConfig(_Model):
     model_context_windows: dict[str, PositiveInt]
     default_context_window: PositiveInt
 
+    # -- Connecting a model (ROADMAP_v3 §79, HD5) --------------------------
+    # A public client id; empty hides the sign-in.
+    hf_oauth_client_id: str
+
     # -- Tool permissions and approvals -----------------------------------
     tool_permissions: ToolPermissionsModel
     tool_approvals: ToolApprovalsModel

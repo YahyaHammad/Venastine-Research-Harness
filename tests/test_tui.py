@@ -5886,7 +5886,7 @@ class TestMatchingIsTheListHelpReads:
 
     def test_a_prefix_offers_the_commands_that_start_with_it(self):
         names = [c.name for c in commands.matching("/co")]
-        assert names == ["compact", "config", "copy"], (
+        assert names == ["compact", "config", "connect", "copy"], (
             f"/co offered {names}; prefix matching on the NAME is what a "
             f"user typing a command is doing")
 
@@ -5981,15 +5981,15 @@ class TestThePanelOpensOnWhatIsTyped:
             await pilot.press("slash", "c")
             assert await settle(pilot, lambda: panel.shown == 4)
             names = [c.name for c in panel._matches]
-            assert names == ["claims", "compact", "config", "copy",
-                             "critic"], (
-                "five commands start with c since batch 84 added "
-                "/config; four of them fit")
+            assert names == ["claims", "compact", "config", "connect",
+                             "copy", "critic"], (
+                "six commands start with c since batch 163 added "
+                "/connect (batch 84 had added /config); four of them fit")
 
             await pilot.press("o")
             assert await settle(
                 pilot, lambda: [c.name for c in panel._matches] ==
-                ["compact", "config", "copy"])
+                ["compact", "config", "connect", "copy"])
 
     @pytest.mark.asyncio
     async def test_a_space_closes_it_and_a_backspace_brings_it_back(self):
@@ -6233,10 +6233,10 @@ class TestThePanelFitsTheRowsItHas:
 
             await pilot.press("c")
             assert await settle(pilot, lambda: panel.shown == 4)
-            assert panel.border_title.startswith("1-4 of 5 "), (
-                f"the title reads {panel.border_title!r}; four commands "
-                f"start with c and all four are on screen, so claiming "
-                f"twenty-six candidates would be a lie about the filter")
+            assert panel.border_title.startswith("1-4 of 6 "), (
+                f"the title reads {panel.border_title!r}; six commands "
+                f"start with c and four are on screen, so claiming every "
+                f"command as a candidate would be a lie about the filter")
 
     @pytest.mark.asyncio
     async def test_the_transcript_survives_the_panel_at_the_floor(self):
@@ -6704,13 +6704,13 @@ class TestTheWindowSlidesOverTheMatches:
 
             for _ in range(4):
                 await pilot.press("down")
-            assert await settle(pilot, lambda: panel.chosen.name == "copy")
+            assert await settle(pilot, lambda: panel.chosen.name == "connect")
 
             assert [c.name for c in panel.visible] == [
-                "claims", "compact", "config", "copy"], (
+                "claims", "compact", "config", "connect"], (
                 f"the window is {[c.name for c in panel.visible]}; a fourth "
                 f"down should have dropped /agent off the top and brought "
-                f"/copy in at the bottom, not cycled back to the start")
+                f"/connect in at the bottom, not cycled back to the start")
 
     @pytest.mark.asyncio
     async def test_the_window_can_drop_one_and_gain_two(self):
@@ -6728,7 +6728,7 @@ class TestTheWindowSlidesOverTheMatches:
             await pilot.press("slash")
             assert await settle(pilot, lambda: panel.display)
 
-            for _ in range(7):
+            for _ in range(8):
                 await pilot.press("down")
             assert await settle(pilot, lambda: panel.chosen.name == "embedder")
 
@@ -6752,7 +6752,7 @@ class TestTheWindowSlidesOverTheMatches:
             await pilot.press("slash")
             assert await settle(pilot, lambda: panel.display)
 
-            for _ in range(7):
+            for _ in range(8):
                 await pilot.press("down")
             assert await settle(pilot, lambda: panel.chosen.name == "embedder")
             scrolled = [c.name for c in panel.visible]
@@ -6767,7 +6767,7 @@ class TestTheWindowSlidesOverTheMatches:
                 f"the window moved to {[c.name for c in panel.visible]} for "
                 f"a selection it was already showing")
 
-            for _ in range(6):
+            for _ in range(7):
                 await pilot.press("up")
             assert await settle(pilot, lambda: panel.chosen.name == "agent")
 
@@ -6811,7 +6811,7 @@ class TestTheWindowSlidesOverTheMatches:
             panel = app.query_one("#slash-suggest")
             await pilot.press("slash")
             assert await settle(pilot, lambda: panel.display)
-            for _ in range(7):
+            for _ in range(8):
                 await pilot.press("down")
             assert await settle(pilot, lambda: panel.chosen.name == "embedder")
 
@@ -6834,7 +6834,7 @@ class TestTheWindowSlidesOverTheMatches:
 
             for _ in range(4):
                 await pilot.press("down")
-            assert await settle(pilot, lambda: panel.chosen.name == "copy")
+            assert await settle(pilot, lambda: panel.chosen.name == "connect")
             assert panel.border_title.startswith(
                 f"2-5 of {len(commands.all())} "), (
                 f"the title reads {panel.border_title!r}; once the window "
@@ -6848,8 +6848,8 @@ class TestTheWindowSlidesOverTheMatches:
             await pilot.pause()
             panel = app.query_one("#slash-suggest")
 
-            # /t, not /c: batch 84 made the c list five long, and this
-            # case needs a prefix whose matches all fit.
+            # /t, not /c: batch 84 made the c list five long and batch 163
+            # six, and this case needs a prefix whose matches all fit.
             await pilot.press("slash", "t")
             assert await settle(pilot, lambda: panel.shown == 4)
             assert panel.border_title.startswith("4 of 4 "), (

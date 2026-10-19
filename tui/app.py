@@ -54,6 +54,7 @@ import storage
 from agents.manager import manager
 from agents.tui_commands import register_agent_commands
 from core import config_loader, session_wake, shell_sessions
+from core import connect as model_connect
 from core.agent_activity import AgentActivity
 from core.approval import RunAuthorization
 from core.call_view import call_entries
@@ -330,6 +331,36 @@ class SessionNote(Message):
         self.role = role
         self.text = text
         super().__init__()
+
+
+class ConnectCodeReady(Message):
+    """`/connect huggingface` has a device code to show (ROADMAP_v3 §79, HD5).
+
+    Posted from the sign-in worker the moment Hugging Face answers, so the
+    code is on screen while the same worker goes on to wait for approval.
+    """
+
+    def __init__(self, user_code, open_url, expires_in):
+        super().__init__()
+        self.user_code = user_code
+        self.open_url = open_url
+        self.expires_in = expires_in
+
+
+class ConnectFinished(Message):
+    """A sign-in ended, off the UI thread (ROADMAP_v3 §79, HD5).
+
+    The credential travels to the UI thread so that ONE function --
+    `_finish_connect` -- stores every key, beside the `/model` switch that
+    follows it. It is never logged: the debug breadcrumbs name message
+    types and never their fields (batch 78).
+    """
+
+    def __init__(self, preset, credential, error):
+        super().__init__()
+        self.preset = preset
+        self.credential = credential
+        self.error = error
 
 
 class EmbedderProbeReady(Message):
@@ -767,6 +798,12 @@ class VenastineApp(App):
     # setter runs on bare-built apps across the suite.
     _pending_restart = None
 
+    # §79 (HD5). The stop signal of the one sign-in that may be waiting for
+    # approval, or None. A CLASS attribute for `_shutting_down`'s reason:
+    # `on_unmount` and `exit()` stop it, and both run on bare-built apps
+    # across the suite.
+    _connect_wait = None
+
     # Batch 61. CLASS-level defaults, so an app built with __new__ and
     # no __init__ -- four tests do exactly that, to exercise one method
     # against a handful of injected attributes -- can assign `_busy`
@@ -803,6 +840,10 @@ class VenastineApp(App):
         # still being appended to right up to the run() call and a shared
         # reference would read whatever it ended as.
         self._startup_notices = list(startup_notices or ())
+        # §79 (HD5). Per instance; `/connect cancel`, the unmount and every
+        # exit stop it, because the wait runs on a non-daemon worker thread
+        # that would otherwise hold the process open until the code expired.
+        self._connect_wait = None
         self.provider_name = provider_name
         self.model = model or config.MODEL_NAME
         self._settings = settings or {}
@@ -1391,6 +1432,7 @@ class VenastineApp(App):
         # guards are for.
         self._shutting_down = True
         self._release_permission_channel()
+        self.stop_connect_wait()
         handler = getattr(self, "_log_handler", None)
         if handler is not None:
             logging.getLogger().removeHandler(handler)
@@ -1698,6 +1740,30 @@ class VenastineApp(App):
         if pipeline_models.remember(
                 "embedder", message.provider_name, message.model):
             self._transcript.write_system("Remembered for the next launch.")
+
+    def stop_connect_wait(self) -> bool:
+        """End a sign-in that is waiting for approval; True if one was."""
+        wait, self._connect_wait = self._connect_wait, None
+        if wait is None:
+            return False
+        wait.set()
+        return True
+
+    def on_connect_code_ready(self, message: ConnectCodeReady) -> None:
+        minutes = max(1, message.expires_in // 60)
+        self._transcript.write_system(
+            f"Sign in to Hugging Face: open {message.open_url} and confirm "
+            f"the code {message.user_code}. Waiting for your approval (the "
+            f"code lasts about {minutes} min; /connect cancel stops "
+            f"waiting).")
+        self._transcript.open_url(message.open_url)
+
+    def on_connect_finished(self, message: ConnectFinished) -> None:
+        self._connect_wait = None
+        if message.error is not None:
+            self._transcript.write_error(message.error)
+            return
+        _finish_connect(self, message.preset, message.credential)
 
     def on_effort_levels_ready(self, message: EffortLevelsReady) -> None:
         if message.validate_only:
@@ -4157,6 +4223,7 @@ class VenastineApp(App):
             except NoMatches:
                 pass
         self._shutting_down = True
+        self.stop_connect_wait()
         # BATCH 145. AFTER the flag, so a worker that can see the
         # cancellation can already see the flag -- `_wait_for_sessions`
         # tests the two in that order and the message it posts depends on
@@ -6996,6 +7063,243 @@ def _secret_twin(name: str):
     return None
 
 
+def _connect_policy(app: "VenastineApp") -> tuple:
+    """`(persist, paste_allowed, where)` for `/connect` in this session.
+
+    `persist` writes the key to `providers.json`; otherwise it lives in this
+    process alone (HD5). `paste_allowed` is whether a typed key is accepted
+    at all. `where` is the sentence that tells the person which.
+    """
+    from credentials import LLM_PROVIDERS_FILE
+
+    return True, True, f"Keys are saved to {LLM_PROVIDERS_FILE} (0600)."
+
+
+def _connect_rows(argument: str) -> list:
+    """The panel's offers after `/connect `: the presets, then `custom`."""
+    typed = argument.lstrip().lower()
+    if " " in typed:
+        return []
+    rows = [SlashCommand(f"connect {p.name}", p.label, _cmd_connect)
+            for p in model_connect.PRESETS.values()
+            if p.name.startswith(typed)]
+    for extra, summary in (("custom", "any OpenAI-compatible endpoint: "
+                                      "custom <NAME> <url>"),
+                           ("cancel", "stop waiting for a sign-in")):
+        if extra.startswith(typed):
+            rows.append(SlashCommand(f"connect {extra}", summary, _cmd_connect))
+    return rows
+
+
+def _cmd_connect(app: "VenastineApp", args: str) -> None:
+    """Connect a model provider without editing providers.json (ROADMAP_v3
+    §79, HD5).
+
+    `/connect` lists what can be connected; `/connect <name>` signs in where
+    the provider offers it (Hugging Face, OpenRouter) and otherwise asks for
+    a key; `--key` asks for a key even where a sign-in exists; `/connect
+    custom <NAME> <url>` connects any OpenAI-compatible endpoint; and
+    `/connect cancel` stops a sign-in that is waiting.
+
+    CALLBACKS AND WORKERS, NOT BLOCKING ASKS, for `/secrets`' reason: a
+    command handler runs on the UI thread, which is the thread that would
+    have to draw the answer. The network halves -- starting a device code,
+    waiting for it, trading a code for a key -- run in a worker and come
+    back as messages.
+
+    NOT MODEL-REACHABLE, which is the property that lets it hold a key at
+    all: slash commands are typed by a person, and nothing in a context
+    window can drive one.
+    """
+    say = app._transcript.write_system
+    err = app._transcript.write_error
+    persist, paste_allowed, where = _connect_policy(app)
+    parts = args.split()
+
+    if not parts:
+        connected = model_connect.connected_providers()
+        width = max(len(p.name) for p in model_connect.PRESETS.values())
+        lines = ["Connect a model — /connect <name>:"]
+        for preset in model_connect.PRESETS.values():
+            how = "sign in, or --key" if preset.sign_in else "paste a key"
+            mark = "  (connected)" if preset.provider in connected else ""
+            lines.append(f"  {preset.name.ljust(width)}  {preset.label} — "
+                         f"{how}{mark}")
+        lines.append(f"  {'custom'.ljust(width)}  /connect custom <NAME> "
+                     f"<url> — any OpenAI-compatible endpoint")
+        say("\n".join(lines))
+        say(where)
+        return
+
+    verb = parts[0].lower()
+    if verb == "cancel":
+        say("Stopped waiting for the sign-in." if app.stop_connect_wait()
+            else "No sign-in is waiting.")
+        return
+
+    if app.refuse_if_occupied("connect a model"):
+        return
+    if app._connect_wait is not None:
+        err("A sign-in is already waiting for approval. /connect cancel "
+            "stops it.")
+        return
+
+    if verb == "custom":
+        if len(parts) != 3:
+            err("Usage: /connect custom <NAME> <url>")
+            return
+        try:
+            preset = model_connect.custom_preset(parts[1], parts[2])
+        except model_connect.ConnectError as exc:
+            err(str(exc))
+            return
+        _ask_connect_key(app, preset, paste_allowed, where)
+        return
+
+    preset = model_connect.PRESETS.get(verb)
+    if preset is None:
+        err(f"Unknown provider {parts[0]!r}. /connect lists the choices.")
+        return
+    flags = {p.lower() for p in parts[1:]}
+    if flags - {"--key"}:
+        err(f"Usage: /connect {preset.name} [--key]")
+        return
+
+    if preset.sign_in and "--key" not in flags:
+        if preset.sign_in == "openrouter":
+            _sign_in_openrouter(app, preset)
+            return
+        if config.HF_OAUTH_CLIENT_ID:
+            _sign_in_huggingface(app, preset)
+            return
+        say("Hugging Face sign-in is not set up in this install "
+            "(hf_oauth_client_id is empty), so a token it is.")
+    _ask_connect_key(app, preset, paste_allowed, where)
+
+
+def _ask_connect_key(app: "VenastineApp", preset, paste_allowed: bool,
+                     where: str) -> None:
+    if not paste_allowed:
+        app._transcript.write_error(
+            "This shared demo does not take pasted keys — a key typed here "
+            "would sit on a server other visitors share. /connect "
+            "huggingface and /connect openrouter sign in instead.")
+        return
+    body = f"Create one at {preset.key_url}. " if preset.key_url else ""
+
+    def answered(raw) -> None:
+        if raw is None:
+            app._transcript.write_system("Nothing was connected.")
+            return
+        try:
+            key = model_connect.clean_key(raw)
+        except model_connect.ConnectError as exc:
+            app._transcript.write_error(str(exc))
+            return
+        _finish_connect(app, preset, key)
+
+    app.push_screen(SecretScreen(f"{preset.label} API key", body + where,
+                                 confirm_label="Connect"), answered)
+
+
+def _sign_in_openrouter(app: "VenastineApp", preset) -> None:
+    """PKCE with the code shown on OpenRouter's own page (HD5).
+
+    The verifier lives in this closure and nowhere else, so it reaches the
+    exchange and no log, screen or file on the way.
+    """
+    start = model_connect.openrouter_start()
+    app._transcript.write_system(
+        f"Sign in to OpenRouter: {start.url} — it shows a code; paste it "
+        f"here. The key it makes is yours, labelled "
+        f"\"{model_connect.OPENROUTER_KEY_LABEL}\", and you can delete it at "
+        f"https://openrouter.ai/keys.")
+    app._transcript.open_url(start.url)
+
+    def answered(code) -> None:
+        if not code:
+            app._transcript.write_system("Nothing was connected.")
+            return
+
+        def work() -> None:
+            try:
+                key = model_connect.openrouter_exchange(code, start.verifier)
+            except model_connect.ConnectError as exc:
+                app.post_message(ConnectFinished(preset, None, str(exc)))
+                return
+            except Exception as exc:  # noqa: BLE001 -- reported, never fatal
+                app.post_message(ConnectFinished(
+                    preset, None, f"OpenRouter sign-in failed: "
+                                  f"{type(exc).__name__}."))
+                return
+            app.post_message(ConnectFinished(preset, key, None))
+
+        app.run_worker(work, thread=True, exit_on_error=False,
+                       name="connect")
+
+    app.push_screen(SecretScreen(
+        "Paste the code OpenRouter showed you",
+        f"If no page opened: {start.url}", confirm_label="Connect"), answered)
+
+
+def _sign_in_huggingface(app: "VenastineApp", preset) -> None:
+    """The device code flow, in a worker that waits for approval (HD5).
+
+    The token arrives from Hugging Face straight into this process: it is
+    never typed, so it never crosses the keyboard or a browser connection.
+    """
+    client_id = config.HF_OAUTH_CLIENT_ID
+    stop = threading.Event()
+    app._connect_wait = stop
+
+    def work() -> None:
+        try:
+            code = model_connect.hf_device_start(client_id)
+            app.post_message(ConnectCodeReady(
+                code.user_code, code.open_url, code.expires_in))
+            token = model_connect.hf_device_poll(client_id, code,
+                                                 wait=stop.wait)
+        except model_connect.ConnectCancelled:
+            return
+        except model_connect.ConnectError as exc:
+            app.post_message(ConnectFinished(preset, None, str(exc)))
+            return
+        except Exception as exc:  # noqa: BLE001 -- reported, never fatal
+            app.post_message(ConnectFinished(
+                preset, None, f"Hugging Face sign-in failed: "
+                              f"{type(exc).__name__}."))
+            return
+        app.post_message(ConnectFinished(preset, token, None))
+
+    app.run_worker(work, thread=True, exit_on_error=False, name="connect")
+
+
+def _finish_connect(app: "VenastineApp", preset, key: str) -> None:
+    """Store `key`, say so, and move to the preset's model when it names one.
+
+    The `/model` switch is the existing command, not a copy of it, so the
+    unknown-provider check, the remembered pair and the effort revalidation
+    all happen exactly as they do when the switch is typed.
+    """
+    persist, _paste_allowed, _where = _connect_policy(app)
+    try:
+        model_connect.store(preset, key, persist=persist)
+    except (OSError, ValueError) as exc:
+        app._transcript.write_error(f"Could not save the key: {exc}")
+        return
+    from credentials import LLM_PROVIDERS_FILE
+
+    kept = (f"saved to {LLM_PROVIDERS_FILE}" if persist
+            else "kept in this session only")
+    app._transcript.write_system(
+        f"Connected {preset.label} as {preset.provider} ({kept}).")
+    if preset.default_model:
+        _cmd_model(app, f"{preset.provider} {preset.default_model}")
+    elif app.provider_name != preset.provider:
+        app._transcript.write_system(
+            f"Choose a model: /model {preset.provider} <name>.")
+
+
 def register_builtin_commands() -> None:
     """Idempotent — registering by name overwrites, so a re-import or a
     second app instance in the test suite does not duplicate entries."""
@@ -7007,6 +7311,9 @@ def register_builtin_commands() -> None:
                      _cmd_thinking, "[on|off]"),
         SlashCommand("model", "switch provider and/or model for this session",
                      _cmd_model, "[[PROVIDER] name]"),
+        SlashCommand("connect", "connect a model provider: sign in or paste a key",
+                     _cmd_connect, "[name [--key]|custom <NAME> <url>|cancel]",
+                     complete=_connect_rows),
         SlashCommand("critic", "route the grounding and critic passes to another model",
                      _cmd_critic, "[[PROVIDER] name|off]"),
         SlashCommand("embedder", "choose the model that scores source similarity",

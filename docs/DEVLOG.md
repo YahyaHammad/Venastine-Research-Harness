@@ -25484,3 +25484,100 @@ batch 161 -- in 1:31. That run was on the tree before the last wording edit to
 docs gate were re-run after it. Under WSL the six pass as well, which is the
 fake `npm`'s POSIX branch -- the one CI takes -- and its controls are what
 show that fake is reached there.
+
+## Batch 163 -- `/connect`, and a key that never has to be typed into a file (2026-10-19)
+
+### What was built
+
+ROADMAP_v3 §79's first slice (HD5), on a new branch `hosted-demo` cut from
+batch 162's tip at `d208274`, because §77 and §78 exist only on that unmerged
+branch and §79's index row sits beside theirs. §79 itself was designed with the
+owner in this batch, and all ten decisions are recorded now so every id the code
+cites resolves from the first commit.
+
+- `core/connect.py` (new): the preset catalogue -- Hugging Face Inference
+  Providers, OpenRouter, ModelScope on both sites, OpenAI, Anthropic, Google,
+  DeepSeek, Groq, Mistral, and `custom` for any OpenAI-compatible URL -- the
+  Hugging Face device code flow, the OpenRouter PKCE flow with the code shown to
+  copy, `clean_key`, and `store()`, the one way a key is kept. No HTTP library
+  at module scope; every request goes through a replaceable `post`.
+- `credentials.py`: a session-only overlay laid over the file by
+  `load_provider_data()` and never written. `save_credentials` now reads the
+  FILE alone, which is what keeps a session key off the disk when some other
+  provider is saved later.
+- `core/client.py`: `forget_client(name)`, because the client cache is keyed by
+  provider name for the life of the process and a reconnect otherwise kept the
+  old key until a restart.
+- `tui/app.py`: `/connect`, `/connect <name> [--key]`, `/connect custom <NAME>
+  <url>`, `/connect cancel`; two worker messages; the waiting sign-in stopped by
+  the unmount and by every exit. The `/model` switch after a connect is the
+  existing command, called rather than copied.
+- `tui/widgets.py`: a ctrl+clicked link goes to `App.open_url` under the web
+  driver, where `webbrowser.open` would open the SERVER's browser.
+- `safety/policy_enforcement.py`: Hugging Face, OpenRouter and prefixed
+  ModelScope token patterns, bounded at the start of a word so a thread id or
+  `items-<uuid>` is never touched.
+- `config.yaml` / `config_schema.py` / `CONFIG_ARCHITECTURE.md`:
+  `hf_oauth_client_id`, empty, in a new "Connecting a model" section placed
+  before the tool tables -- after them would have moved every line number the
+  `/config` diff tests pin.
+
+### What the owner ruled
+
+- **OAuth only where the provider's own guidance explicitly permits a
+  third-party app.** Two qualified: Hugging Face's OAuth page (a "Sign in with
+  HF" flow "in any website or App", the `inference-api` scope, public apps, a
+  device code flow) and OpenRouter's PKCE guide ("Use OAuth to let your users
+  bring their own OpenRouter API key to your app"). The owner reviews the OAuth
+  details before anything is pushed, so these commits stay local.
+- **Hybrid credentials for the hosted demo**: sign-ins only on a shared
+  deployment, with the key held in memory; pasted keys and the full tool set in
+  a private single-user deployment. This batch builds the mechanism; batch 164
+  wires the modes.
+- **A pseudo-terminal was not needed.** Textual's web driver is the browser
+  route (HD1).
+
+### What measuring found
+
+- **`tools: null` was NOT changed.** An exploration flagged that the
+  OpenAI-compatible branch sends `tools: null` on a tool-less turn and that some
+  endpoints might reject it. Nothing here could measure an endpoint without a
+  key, and the Anthropic branch sends the same `None` on the default provider
+  every research pass, so the change would have been a guess. It is a live
+  verification item for the deploy instead.
+- **The ModelScope token shape is not confirmed.** The pattern covers the `ms-`
+  prefixed form; the owner's real token is the measurement still owed.
+- **Eight suggestion-panel tests moved, and that was the established route.**
+  `/connect` is a sixth command under `/c`, between `/config` and `/copy`.
+  Batch 84 moved the same tests when `/config` arrived. The windows were
+  re-measured through a probe before the tests were edited, and every test keeps
+  its claim: a fourth down still scrolls, `/embedder` still drops one and gains
+  two, one more press away.
+- **A bare-built app has no `__init__`**, so `_connect_wait` is a class
+  attribute beside `_shutting_down`, for the reason that one is.
+
+### What the gates caught
+
+The docs gate, four times, all mechanical: the unresolved `HD5` citations
+before §79 existed, the module and test trees, the settable-scalar figure (145
+to 146) and `test_logging_setup.py`'s count, which the three new
+`REDACTION_CASES` rows parametrise.
+
+### Verification
+
+`python -m pytest -q` is green: 7399 passed, 50 skipped -- 7449, 67 more than
+batch 162 (61 in `tests/test_connect.py`, six from the three new
+`REDACTION_CASES` rows) -- in 1:56. The touched suites pass again with
+`AGENT_WORKSPACE` unset, and under WSL `tests/test_connect.py` runs all 61,
+the 0600 check included. `ruff check .` is clean. bandit with the CI job's own
+flags, against a copy of the baseline whose leading `./` became `.\`, exits 0
+with nothing new, and `scripts/bandit-count-check.py` reports 62 pairs, none
+grown. gitleaks with `.github/gitleaks.toml`, over an export of the tracked and
+new files as they stood uncommitted and scanned with a relative source, finds
+nothing.
+
+Measured for batch 164 while the suite ran, under WSL (`ptrace_scope` 1): a
+sibling process of the same user READ an ordinary process's
+`/proc/<pid>/environ`, secret included; once the target called
+`prctl(PR_SET_DUMPABLE, 0)` the same read was refused with EACCES, and so was
+`/proc/<pid>/mem`. That is HD6's premise, measured rather than assumed.

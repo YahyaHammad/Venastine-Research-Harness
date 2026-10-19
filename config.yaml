@@ -943,6 +943,17 @@ model_context_windows:
 default_context_window: 256000
 
 # ======================================================================
+# Connecting a model
+# ======================================================================
+
+# The Hugging Face OAuth app /connect huggingface signs in through, by its
+# client id -- a PUBLIC value, not a secret. Empty: the sign-in is not
+# offered and a pasted token still is. The app is registered without a
+# secret, with the device code flow and the scopes `openid profile
+# inference-api` (ROADMAP_v3 §79, HD5).
+hf_oauth_client_id: ""
+
+# ======================================================================
 # Tool permissions and approvals
 # ======================================================================
 
