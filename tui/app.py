@@ -7111,6 +7111,27 @@ def _connect_policy(app: "VenastineApp") -> tuple:
     return True, True, f"Keys are saved to {LLM_PROVIDERS_FILE} (0600)."
 
 
+def _signs_in_here(preset) -> bool:
+    """Whether `/connect <name>` can sign in on this install, rather than
+    only take a key: OpenRouter's PKCE needs no registered app, Hugging
+    Face's device code needs `hf_oauth_client_id`."""
+    if preset.sign_in == "huggingface":
+        return bool(config.HF_OAUTH_CLIENT_ID)
+    return preset.sign_in is not None
+
+
+def _shared_offers() -> list:
+    """The presets a shared deployment offers: the ones that sign in here,
+    because it takes no pasted key (HD5)."""
+    return [p for p in model_connect.PRESETS.values() if _signs_in_here(p)]
+
+
+_REVOKE_PAGES = {
+    "huggingface": "https://huggingface.co/settings/connected-applications",
+    "openrouter": "https://openrouter.ai/keys",
+}
+
+
 def _hosted_banner() -> list:
     """What a hosted session says before anything is typed (§79, HD4).
 
@@ -7122,14 +7143,18 @@ def _hosted_banner() -> list:
     if not hosted.is_hosted():
         return []
     if hosted.is_shared():
+        # Only what works HERE: a deployment without hf_oauth_client_id
+        # cannot sign anyone in to Hugging Face, and this demo takes no
+        # pasted token, so naming /connect huggingface would be a dead end.
+        offers = _shared_offers()
+        commands = " or ".join(f"/connect {p.name}" for p in offers)
+        revoke = " or ".join(_REVOKE_PAGES[p.sign_in] for p in offers)
         lines = [
             "This is a shared demo of the Venastine Research Harness. Nothing "
             "here is kept: the session ends when you close the tab.",
-            "Connect a model with /connect huggingface or /connect openrouter "
-            "(each signs in on the provider's own page). The key stays in "
-            "this session's memory and is never written; you can revoke it "
-            "afterwards at https://huggingface.co/settings/connected-applications "
-            "or https://openrouter.ai/keys.",
+            f"Connect a model with {commands} (signing in on the provider's "
+            f"own page). The key stays in this session's memory and is never "
+            f"written; you can revoke it afterwards at {revoke}.",
             "Shell and file tools are off here. Install the harness, or run a "
             "private copy, for the full set.",
         ]
@@ -7149,12 +7174,15 @@ def _connect_rows(argument: str) -> list:
     typed = argument.lstrip().lower()
     if " " in typed:
         return []
+    shared = hosted.is_shared()
+    presets = _shared_offers() if shared else model_connect.PRESETS.values()
     rows = [SlashCommand(f"connect {p.name}", p.label, _cmd_connect)
-            for p in model_connect.PRESETS.values()
-            if p.name.startswith(typed)]
-    for extra, summary in (("custom", "any OpenAI-compatible endpoint: "
-                                      "custom <NAME> <url>"),
-                           ("cancel", "stop waiting for a sign-in")):
+            for p in presets if p.name.startswith(typed)]
+    extras = [("cancel", "stop waiting for a sign-in")]
+    if not shared:  # `custom` asks for a key, which a shared demo refuses
+        extras.insert(0, ("custom", "any OpenAI-compatible endpoint: "
+                                    "custom <NAME> <url>"))
+    for extra, summary in extras:
         if extra.startswith(typed):
             rows.append(SlashCommand(f"connect {extra}", summary, _cmd_connect))
     return rows
@@ -7187,15 +7215,29 @@ def _cmd_connect(app: "VenastineApp", args: str) -> None:
 
     if not parts:
         connected = model_connect.connected_providers()
-        width = max(len(p.name) for p in model_connect.PRESETS.values())
+        # A shared demo lists only what signs in there (HD5): every other
+        # row would end in "does not take pasted keys".
+        presets = (_shared_offers() if not paste_allowed
+                   else list(model_connect.PRESETS.values()))
+        width = max([len(p.name) for p in presets] + [len("custom")])
         lines = ["Connect a model — /connect <name>:"]
-        for preset in model_connect.PRESETS.values():
-            how = "sign in, or --key" if preset.sign_in else "paste a key"
+        for preset in presets:
+            if not paste_allowed:
+                how = "sign in"
+            elif _signs_in_here(preset):
+                how = "sign in, or --key"
+            else:
+                how = "paste a key"
             mark = "  (connected)" if preset.provider in connected else ""
             lines.append(f"  {preset.name.ljust(width)}  {preset.label} — "
                          f"{how}{mark}")
-        lines.append(f"  {'custom'.ljust(width)}  /connect custom <NAME> "
-                     f"<url> — any OpenAI-compatible endpoint")
+        if paste_allowed:
+            lines.append(f"  {'custom'.ljust(width)}  /connect custom <NAME> "
+                         f"<url> — any OpenAI-compatible endpoint")
+        else:
+            lines.append("Other providers need a pasted key, which this "
+                         "shared demo does not take. Install the harness, or "
+                         "run a private copy, to use them.")
         say("\n".join(lines))
         say(where)
         return
@@ -7240,6 +7282,13 @@ def _cmd_connect(app: "VenastineApp", args: str) -> None:
             return
         if config.HF_OAUTH_CLIENT_ID:
             _sign_in_huggingface(app, preset)
+            return
+        if not paste_allowed:
+            # One sentence, not the token fallback followed by its refusal.
+            err("Hugging Face sign-in is not set up on this deployment (it "
+                "needs an OAuth app's client id), and this shared demo does "
+                "not take pasted tokens. /connect openrouter signs in "
+                "instead.")
             return
         say("Hugging Face sign-in is not set up in this install "
             "(hf_oauth_client_id is empty), so a token it is.")

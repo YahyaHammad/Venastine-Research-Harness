@@ -139,7 +139,8 @@ def is_tool_allowed(
     # visitor shares that container and one Unix user. Second to the global
     # check and before any context, for the same reason that check is
     # first -- no agent or skill may re-enable what this layer refuses.
-    if hosted.is_shared() and tool_name in hosted.SHARED_REFUSED_TOOLS:
+    # HD11 adds the math tools, unless the bridge verified their confinement.
+    if tool_name in hosted.refused_tools():
         return False
     if context is not None and context.allowed_tools is not None:
         return tool_name in context.allowed_tools

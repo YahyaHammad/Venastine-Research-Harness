@@ -2695,11 +2695,13 @@ def main(argv=None) -> int:
     # ROADMAP_v3 §79 (HD6). FIRST, before anything reads a credential: a
     # hosted session marks itself non-dumpable, so another visitor's process
     # in the same container cannot read its memory or environment. Here and
-    # not in the bridge, because an exec resets the flag.
+    # not in the bridge, because an exec resets the flag. And it ends with
+    # the bridge (HD8) rather than outliving it as an orphan.
     from security import hosted
 
     if hosted.is_hosted():
         hosted.make_undumpable()
+        hosted.die_with_parent()
 
     parser = build_parser()
     args = parser.parse_args(argv)

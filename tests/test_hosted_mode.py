@@ -14,8 +14,10 @@ constants -- rather than re-importing under a changed environment.
 
 import json
 import os
+import signal
 import subprocess  # nosec B404 - one test runs prctl in a child so the worker stays dumpable
 import sys
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -137,10 +139,14 @@ class TestAHostedSessionHardensItself:
         calls = []
         monkeypatch.setattr(hosted, "MODE", hosted.SHARED)
         monkeypatch.setattr(hosted, "make_undumpable",
-                            lambda: calls.append(True) or True)
+                            lambda: calls.append("undumpable") or True)
+        # Stubbed for a second reason too: for real, it would tie THIS test
+        # worker's life to the thread that started it.
+        monkeypatch.setattr(hosted, "die_with_parent",
+                            lambda: calls.append("die_with_parent") or True)
         with pytest.raises(SystemExit):
             main.main(["--help"])
-        assert calls == [True]
+        assert calls == ["undumpable", "die_with_parent"]
 
     def test_a_local_launch_does_not(self, monkeypatch):
         import main
@@ -149,9 +155,51 @@ class TestAHostedSessionHardensItself:
         monkeypatch.setattr(hosted, "MODE", hosted.OFF)
         monkeypatch.setattr(hosted, "make_undumpable",
                             lambda: calls.append(True) or True)
+        monkeypatch.setattr(hosted, "die_with_parent",
+                            lambda: calls.append(True) or True)
         with pytest.raises(SystemExit):
             main.main(["--help"])
         assert calls == []
+
+    @pytest.mark.skipif(not sys.platform.startswith("linux"),
+                        reason="prctl is Linux's; off Linux it returns False")
+    def test_a_session_does_not_outlive_its_bridge(self):
+        """The orphan measured on 2026-10-20, driven: a middle process starts
+        a session-shaped grandchild in a new process group, as the bridge
+        does, and exits. The grandchild must go with it."""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        session = ("import os, time; from security import hosted; "
+                   "print(hosted.die_with_parent(), os.getpid(), flush=True); "
+                   "time.sleep(60)")
+        bridge = ("import subprocess, sys; "
+                  "p = subprocess.Popen([sys.executable, '-c', sys.argv[1]], "  # nosec B603 - this interpreter
+                  "stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, "
+                  "text=True, start_new_session=True); "
+                  "print(p.stdout.readline().strip(), flush=True)")
+        out = subprocess.run(  # nosec B603 - this interpreter, fixed -c strings
+            [sys.executable, "-c", bridge, session], capture_output=True,
+            text=True, cwd=root, check=True, timeout=30)
+        ok, pid = out.stdout.split()
+        assert ok == "True"
+
+        def alive() -> bool:
+            try:
+                with open(f"/proc/{pid}/status", encoding="utf-8") as handle:
+                    return "\nState:\tZ" not in handle.read()
+            except FileNotFoundError:
+                return False
+
+        deadline = time.monotonic() + 10
+        while alive() and time.monotonic() < deadline:
+            time.sleep(0.1)
+        if alive():
+            os.kill(int(pid), signal.SIGKILL)
+            pytest.fail("the session outlived the process that started it")
+
+    @pytest.mark.skipif(sys.platform.startswith("linux"),
+                        reason="the non-Linux answer")
+    def test_off_linux_dying_with_the_parent_does_nothing(self):
+        assert hosted.die_with_parent() is False
 
     @pytest.mark.skipif(not sys.platform.startswith("linux"),
                         reason="prctl is Linux's; off Linux it returns False")
@@ -176,18 +224,64 @@ class TestAHostedSessionHardensItself:
 class TestTheSharedTui:
     @pytest.mark.asyncio
     async def test_the_banner_replaces_the_file_shaped_warnings(
-            self, shared, providers_file):
+            self, shared, providers_file, monkeypatch):
         from tui.app import VenastineApp
 
+        monkeypatch.setattr(config, "HF_OAUTH_CLIENT_ID", "client-1")
         app = VenastineApp("ANTHROPIC", "test-model", {})
         assert app._startup_warnings == []
         async with app.run_test():
             text = app._transcript.as_text()
         assert "shared demo" in text
-        assert "/connect huggingface" in text
+        assert "/connect huggingface or /connect openrouter" in text
         assert "https://huggingface.co/settings/connected-applications" in text
         assert "No model is connected yet" in text
         assert "providers.json.example" not in text
+
+    @pytest.mark.asyncio
+    async def test_without_a_hugging_face_app_only_openrouter_is_offered(
+            self, shared, providers_file, monkeypatch):
+        """Measured on the live Space, 2026-10-20: with no client id, the
+        banner named /connect huggingface, which then printed the token
+        fallback and, straight after it, the refusal of a pasted token."""
+        from tui.app import VenastineApp, _cmd_connect, _connect_rows
+        from tui.screens import SecretScreen
+
+        monkeypatch.setattr(config, "HF_OAUTH_CLIENT_ID", "")
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            banner = app._transcript.as_text()
+            _cmd_connect(app, "")
+            listed = app._transcript.as_text()
+            _cmd_connect(app, "huggingface")
+            await pilot.pause()
+            assert not isinstance(app.screen, SecretScreen)
+            answered = app._transcript.as_text()
+        assert "/connect openrouter" in banner
+        assert "huggingface" not in banner
+        assert "connected-applications" not in banner
+        # The listing names no provider this demo cannot connect.
+        assert "huggingface" not in listed
+        assert "connect custom" not in listed and "paste a key" not in listed
+        assert "OpenRouter — sign in" in listed
+        assert "Other providers need a pasted key" in listed
+        # One sentence that says both halves, not the token fallback followed
+        # by the pasted-key refusal.
+        assert "not set up on this deployment" in answered
+        assert "does not take pasted tokens" in answered
+        assert "a token it is" not in answered
+        assert "does not take pasted keys" not in answered
+        assert {row.name for row in _connect_rows("")} \
+            == {"connect openrouter", "connect cancel"}
+
+    @pytest.mark.asyncio
+    async def test_with_a_hugging_face_app_both_sign_ins_are_offered(
+            self, shared, monkeypatch):
+        from tui.app import _connect_rows
+
+        monkeypatch.setattr(config, "HF_OAUTH_CLIENT_ID", "client-1")
+        assert {row.name for row in _connect_rows("")} == {
+            "connect huggingface", "connect openrouter", "connect cancel"}
 
     @pytest.mark.asyncio
     async def test_config_is_refused(self, shared, providers_file):

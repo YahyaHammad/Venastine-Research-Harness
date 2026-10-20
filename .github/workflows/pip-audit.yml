@@ -34,6 +34,12 @@
 # objection that "running it per push would tax every PR": a dependency
 # change is the one push where the cost is the point.
 #
+# THREE FILES SINCE BATCH 165 (ROADMAP_v3 §79): deploy/hosted/requirements.txt
+# is what the hosted demo's bridge installs beside Gradio on a Space -- the
+# Space's own pip install, not a harness install. Its sessions run on
+# requirements.txt itself (compiled with hashes into the bundle's
+# session.lock), which the first step already audits.
+#
 # Threshold note: pip-audit 2.x has no severity filter, only per-ID
 # `--ignore-vuln`. The tree is clean at ALL levels as of rollout
 # (verified locally), so fail-on-any is the posture: a future LOW is
@@ -51,6 +57,7 @@ on:
     paths:
       - requirements.txt
       - requirements-test.txt
+      - deploy/hosted/requirements.txt
 
 permissions:
   contents: read
@@ -76,6 +83,7 @@ jobs:
           cache-dependency-path: |
             requirements.txt
             requirements-test.txt
+            deploy/hosted/requirements.txt
 
       - name: Install pip-audit
         run: |
@@ -87,3 +95,6 @@ jobs:
 
       - name: Audit requirements-test.txt
         run: pip-audit -r requirements-test.txt --desc
+
+      - name: Audit deploy/hosted/requirements.txt
+        run: pip-audit -r deploy/hosted/requirements.txt --desc

@@ -1,0 +1,30 @@
+# ROADMAP_v3 §79 (HD2, HD9). What the BRIDGE needs -- the Gradio process
+# that serves the page and relays each session. The harness itself does not
+# run here: scripts/build_demo_bundle.py compiles the harness's own
+# requirements.txt into deploy/hosted/session.lock, and session_env.py
+# builds a separate environment from that when the container starts.
+#
+# WHY SEPARATE, measured 2026-10-20: a Space installs `gradio[oauth,mcp]` in
+# the same pip command as this file, and that extra wants mcp<2 and
+# pydantic<=2.12.5 against the harness's mcp==2.0.0 and pydantic==2.13.4.
+# (Gradio 4.x is no way out either: its client wants websockets<13, the
+# harness's google-genai wants >=13, and it has no `gr.Server`.)
+#
+# NOT listed, on purpose: gradio, spaces and huggingface_hub. A Space
+# installs all three itself -- gradio at the README's `sdk_version`, which is
+# GRADIO_VERSION in build_demo_bundle.py -- and listing them fails the
+# build's resolve or replaces the ZeroGPU runtime. The ModelScope bundle adds
+# `spaces` back, because app.py imports it and ModelScope does not
+# preinstall it.
+#
+# ALSO NOT listed: textual. The builder copies the harness's own textual pin
+# in, because supervisor.py decodes the sessions' binary packets with
+# textual's encoder, and the two ends must be the same version.
+#
+# textual-serve: EXACT, for the reason textual is, and only for its browser
+# assets (textual.js and xterm's CSS). Its server is never started;
+# supervisor.py's docstring says why. MIT.
+textual-serve==1.1.3
+# uv: builds the session environment at container start (session_env.py).
+# The version that did the measured 18 s cold install. MIT OR Apache-2.0.
+uv==0.12.23

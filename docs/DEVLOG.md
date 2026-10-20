@@ -25635,3 +25635,135 @@ Linux-only `prctl` test runs and passes. `ruff check .` is clean; bandit with
 the CI flags against the rewritten baseline copy exits 0 after the annotation,
 and the count check reports 62 pairs, none grown; gitleaks over an export of the
 tracked and new files finds nothing.
+
+## Batch 165 -- the bridge, the bundle, and a math child that walls itself in (2026-10-20)
+
+### What was built
+
+ROADMAP_v3 §79's third slice (HD1-HD3, HD7-HD9, and HD11, new), on
+`hosted-demo` after batch 164. Deployed by hand to the owner's private Space
+and measured there before most of it was decided.
+
+- `deploy/hosted/` (new), the bridge a Space runs. `app.py` is Gradio's
+  `gr.Server` with the bridge's routes and the one no-op `@spaces.GPU`
+  function, and builds the session environment and writes the isolation
+  report before it listens. `web.py` is the Starlette routes: the landing
+  page, `/terminal` with a one-time ticket, `/ws/{ticket}` with a same-origin
+  `Origin`, `/download/{key}` and `/healthz`, rate-limited per address.
+  `supervisor.py` runs one `main.py --tui` per tab over Textual's web-driver
+  framing with an environment built from an allowlist, and owns the limits,
+  the timeouts, the process-group kill, the directory's deletion and file
+  delivery to the browser. `session_env.py` builds the sessions' own
+  environment from the bundle's `session.lock`, `--require-hashes
+  --no-build`. `single_user.py` is HD7's gate and its one `config.yaml`
+  write. `isolation_report.py` logs what the container lets a process do, then
+  the math tools' confinement verdict.
+- `scripts/build_demo_bundle.py` (new): the bundle, from the npm `files`
+  allowlist plus `deploy/`, with the generated shim, README, requirements,
+  `.gitattributes`, `BUILD_INFO.json` and `session.lock`.
+- `security/confine.py` (new): HD11's four walls and the self-test that
+  proves them. `tools/isolation.py` turns them on in a shared deployment: the
+  child locks itself down after importing the tool and before reading its
+  params, and a wall that will not go up means the call does not run.
+  `security/hosted.py` refuses the six math tools in a shared session unless
+  the bridge set `VENASTINE_CONFINEMENT=verified`, through `refused_tools()`,
+  which `is_tool_allowed` now consults; and gains `die_with_parent()`, which
+  `main.py` calls after `make_undumpable()`.
+- `tui/app.py`: a shared deployment offers -- banner, `/connect`'s list, the
+  command panel -- only the sign-ins that work there, and `/connect
+  huggingface` without a client id says so in one sentence.
+- `config.yaml`: `hf_oauth_client_id` names the project's own public app,
+  registered by the owner today. `.github/gitleaks.toml` allowlists that one
+  line by its shape.
+- `.github/workflows/pip-audit.yml` audits `deploy/hosted/requirements.txt`;
+  `requirements-test.txt` and pyproject's `test` extra name `starlette`, which
+  the new bridge tests import directly.
+
+### What measuring found
+
+- **The Space's build installs `gradio[oauth,mcp]` beside the bundle's
+  requirements.** The first deploy failed on 4.44.0 (its client's
+  `websockets<13` against `google-genai`'s `>=13`), the second on 6.30.0's
+  `mcp` extra (`mcp<2`, `pydantic<=2.12.5` against the harness's pins). The
+  owner chose a second environment, built at container start: 3 s on the
+  Space, 18 s from an empty cache under WSL.
+- **The Space runs sessions as root**, with Docker's default capabilities less
+  `NET_RAW` -- no `SYS_PTRACE`, so HD6 holds, but `DAC_OVERRIDE`. Landlock is
+  at ABI 7 and a seccomp filter installs. `HOME` is `/root` at mode 700, and a
+  probe that dropped to `nobody` could not import SymPy from the session
+  environment beneath it, so the environment moved to `/opt` as root.
+- **The proxy appends to `X-Forwarded-For`**: a hand-sent TEST-NET-2 entry
+  arrived first and the real address last. The rate limit had keyed on the
+  first.
+- **A session outlived its bridge** under WSL: a SIGTERM to the bridge left
+  `main.py --tui` re-parented to init. `PR_SET_PDEATHSIG` fixes it, and the
+  new test was checked to fail without it.
+- **An unread stderr pipe would stall a chatty session at 64 KB**; stderr
+  goes to a file in the session, whose tail is logged when a session never
+  starts.
+- **An upload with `delete_patterns=["*"]` keeps a Space's `.gitattributes`**,
+  which still listed stray files from an earlier upload; the builder writes a
+  clean one, and the Space's history was squashed with the owner's go-ahead.
+- **The new bundle tests found three refusal gaps** before anything shipped:
+  `core/providers.json`, `deploy/hosted/logs/app.log` and a nested
+  `.venastine/mcp.json` would have been bundled, because the builder matched
+  `exact` and `dir` patterns at the root only. A build of the real repository
+  shows nothing legitimate is refused by the stricter matchers.
+- **On the Space, `/connect huggingface` printed the token fallback and then
+  refused the token**, because the banner offered a sign-in that had no client
+  id. Fixed in the UI before the client id arrived.
+- **gitleaks' `generic-api-key` reads the client id as a key** (`oauth`
+  contains `auth`). Allowlisted by shape -- rule, root `config.yaml`, and the
+  exact `hf_oauth_client_id: "<uuid>"` line -- and probed: a non-UUID value on
+  that line, a similar key name and the same line in another file all still
+  fire. A first draft anchored on `^hf_` matched only a first-line copy,
+  because the line gitleaks matches carries the newline before it.
+- **A cancelled handler left a session's whole directory behind**: the
+  end-to-end test found it, because Starlette's test client cancels the
+  websocket handler when the socket closes. The stop is shielded now and the
+  session forgotten only once stopped.
+- **Under WSL, `/mnt/c` failed a 2-second budget test three times out of three**
+  that passed on a `git archive HEAD` export and on a working-tree export in
+  the Linux filesystem, so the WSL runs below use such a copy.
+
+### What the gates caught
+
+- bandit: eight B108s on `/tmp` literals -- confine.py's list of places the
+  child may NOT read, the test that asserts it, and the single-user state
+  directory's default -- annotated with why.
+- `test_every_test_name_cited_in_production_code_resolves` read
+  "Starlette's TestClient" in a supervisor comment as a test citation;
+  reworded.
+- `test_the_documented_doc_read_bound_is_not_understated` went to 63 once the
+  new files were listed by `git ls-files` (marked intent-to-add, so the gates
+  saw what will ship rather than an untracked tree); AGENTS.md names the 63rd.
+- **pip-audit: CVE-2026-59951 in `mcp==2.0.0`**, the harness's existing pin
+  (fixed in 2.2.0). The advisory is about an MCP SERVER on Streamable HTTP
+  keeping unbounded session state; the harness is an MCP client and the bridge
+  never starts Gradio's MCP server, so neither is exposed by the advisory's own
+  test. Not ignored and not upgraded here: the workflow's rule is a fix or an
+  inline `--ignore-vuln` with its reason, and that is the owner's choice. Until
+  then the scheduled run, and any pull request touching a dependency file,
+  goes red on it.
+
+### Verification
+
+`python -m pytest -q` is green on Windows: 7627 passed, 64 skipped -- 7691,
+199 more than batch 164 -- in 1:49. The touched suites pass again with
+`AGENT_WORKSPACE` unset (407 passed, 21 skipped). Under WSL, on a working-tree
+export in the Linux filesystem with `providers.json` made from the example as
+CI makes it: 7653 passed and 5 failed -- the two matplotlib charts and
+`test_config_loader`'s HOME redirection, which fail there on every run, and two
+tests that need the git repository an export is not. The wall tests run there
+with Landlock and seccomp applied, and fourteen mutations -- each wall, each
+switch, and each bridge fix in this batch -- were each killed. `ruff check .`
+is clean; bandit with the CI flags over 262 files against the rewritten
+baseline copy finds nothing new, and the count check reports 62 pairs, none
+grown; pip-audit is clean for `requirements-test.txt` and
+`deploy/hosted/requirements.txt` and finds the one advisory above in
+`requirements.txt`; gitleaks is clean over the repository and over a built
+bundle scanned from its root. On the owner's private Space: the session
+environment builds in 3 s in `/opt`, the self-test verifies the walls as uid
+65534 with eleven escapes and the way back to root all refused, a session
+opens through Hugging Face's proxy, `/connect huggingface` issues a device
+code, and the proxy's shape is logged without an address in it.

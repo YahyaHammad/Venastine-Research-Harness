@@ -1631,8 +1631,10 @@ protect the rarer case that has an owner who can answer.
 ### `hf_oauth_client_id`
 
 ROADMAP_v3 §79 (HD5). The Hugging Face OAuth app `/connect huggingface` signs
-in through. Empty by default, which hides the sign-in and leaves a pasted token
-working, because an install has no app until someone registers one.
+in through. The default is the project's own app, registered by the owner on
+2026-10-20, so the sign-in works in every install and every hosted deployment
+without anyone registering another. Another app's id signs in through that app
+instead; empty hides the sign-in and leaves a pasted token working.
 
 **A client id is public, and that is what makes it a `config.yaml` value.** The
 app is registered with NO secret (Hugging Face calls this a public app), with

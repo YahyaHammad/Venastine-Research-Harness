@@ -39,4 +39,10 @@ pytest-asyncio>=1.0
 # rather than by a version. Brings `execnet` (MIT), which is its only
 # transitive.
 pytest-xdist>=3.6
+# Batch 165, ROADMAP_v3 §79. tests/test_hosted_bridge.py drives the hosted
+# bridge's routes -- a Starlette app -- through Starlette's own TestClient.
+# Already installed by every harness install, because mcp requires it; named
+# here because the suite imports it directly, and an import the suite makes
+# should not rest on a transitive of a package that could drop it. BSD-3.
+starlette>=0.40
 

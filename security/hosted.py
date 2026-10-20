@@ -25,6 +25,7 @@ container.
 
 import ctypes
 import os
+import signal
 import sys
 
 OFF = ""
@@ -43,6 +44,20 @@ SHARED_REFUSED_TOOLS = frozenset({
 })
 
 
+# HD11. The tools whose child evaluates what the model sent: SymPy's parser
+# ends in `eval`. A shared deployment runs them only inside the walls
+# security/confine.py puts up, and only once the bridge's self-test has
+# shown those walls standing on this host -- `VENASTINE_CONFINEMENT` is set
+# to `verified` by the bridge after a clean pass, and by nothing else.
+# Unset, they are refused like the tools above. (These are exactly the
+# registry's BUDGET_COMPUTE tools; a test pins that.)
+CONFINED_TOOLS = frozenset({
+    "symbolic_math", "linear_algebra", "probability_stats",
+    "discrete_math", "logic", "geometry",
+})
+CONFINEMENT_VERIFIED = "verified"
+
+
 def _mode_from_env() -> str:
     raw = os.environ.get("VENASTINE_HOSTED", "").strip().lower()
     if not raw:
@@ -53,10 +68,23 @@ def _mode_from_env() -> str:
 
 
 MODE = _mode_from_env()
+# Bound at import for MODE's reason. Only a value the bridge set counts.
+CONFINEMENT = os.environ.get("VENASTINE_CONFINEMENT", "").strip()
 
 
 def mode() -> str:
     return MODE
+
+
+def refused_tools() -> frozenset:
+    """What this deployment refuses whatever config.yaml says: nothing
+    unless it is shared; then the container tools always, and the math
+    tools unless their confinement was verified on this host (HD4, HD11)."""
+    if MODE != SHARED:
+        return frozenset()
+    if CONFINEMENT == CONFINEMENT_VERIFIED:
+        return SHARED_REFUSED_TOOLS
+    return SHARED_REFUSED_TOOLS | CONFINED_TOOLS
 
 
 def is_hosted() -> bool:
@@ -91,3 +119,36 @@ def make_undumpable() -> bool:
         return libc.prctl(4, 0, 0, 0, 0) == 0  # PR_SET_DUMPABLE == 4
     except (OSError, AttributeError):
         return False
+
+
+def die_with_parent() -> bool:
+    """Ask the kernel for SIGTERM when the bridge that started this session
+    goes away (HD8). True when it took effect.
+
+    The bridge starts every session in a NEW process group, so that stopping
+    one reaches what it started; the cost is that a signal to the bridge
+    reaches no session. Measured 2026-10-20 under WSL: a SIGTERM to the
+    bridge left the open session running, orphaned, with its directory, and
+    nothing would ever have stopped it -- it holds a visitor's key in memory
+    and counts against the container's. `prctl(PR_SET_PDEATHSIG)` closes
+    that, in the session, because like PR_SET_DUMPABLE it does not survive
+    the exec that starts one.
+
+    The signal comes when the THREAD that forked this process exits; the
+    bridge spawns from its event loop's thread, which lives as long as the
+    server does. If the bridge died before this call, the signal is already
+    missed, so a changed parent pid ends the session here instead.
+
+    Linux only, and never raises, for make_undumpable's reasons.
+    """
+    if not sys.platform.startswith("linux"):
+        return False
+    parent = os.getppid()
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        ok = libc.prctl(1, int(signal.SIGTERM), 0, 0, 0) == 0  # PR_SET_PDEATHSIG == 1
+    except (OSError, AttributeError):
+        return False
+    if ok and os.getppid() != parent:
+        os.kill(os.getpid(), signal.SIGTERM)
+    return ok
