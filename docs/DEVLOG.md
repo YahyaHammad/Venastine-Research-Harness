@@ -25744,7 +25744,7 @@ and measured there before most of it was decided.
   test. Not ignored and not upgraded here: the workflow's rule is a fix or an
   inline `--ignore-vuln` with its reason, and that is the owner's choice. Until
   then the scheduled run, and any pull request touching a dependency file,
-  goes red on it.
+  goes red on it. **The owner chose the fix; see the follow-up below.**
 
 ### Verification
 
@@ -25767,3 +25767,33 @@ environment builds in 3 s in `/opt`, the self-test verifies the walls as uid
 65534 with eleven escapes and the way back to root all refused, a session
 opens through Hugging Face's proxy, `/connect huggingface` issues a device
 code, and the proxy's shape is logged without an address in it.
+
+### Follow-up: `mcp` 2.2.0, for CVE-2026-59951 (its own commit)
+
+The owner chose the upgrade over an ignore. `mcp==2.0.0` -> `mcp==2.2.0`, and
+`mcp-types` moves with it in lockstep. The advisory is a Streamable HTTP
+SERVER keeping every session with no expiry and no cap; this harness is an
+MCP client, so the bump is for the audit gate rather than for an exposure.
+
+Taken the way `requirements.txt` says a move must be: the split read first,
+from the SDK's release notes. 2.1.0 withholds a crashed tool's text from the
+client (what batch 32 pinned away from, and `test_mcp_client.py` was written to
+hold on both sides of it) and stops advertising `outputSchema` for tools that
+return content blocks; 2.2.0 follows redirects only within one origin and no
+longer honours a passed-in client's `follow_redirects`. No runtime dependency
+changed. The one version-tied claim in the code was re-measured rather than
+renumbered: `Tool.model_fields["name"]` is still a bare required `str` with no
+metadata, so `registration.py`'s 64-character bound still has nothing upstream
+doing its job. `THIRD_PARTY_NOTICES.md`, AGENTS.md's pin sentence, the two
+BREAKING_CHANGES rows about loosening it and the hosted bridge's two notes name
+2.2.0; the dated records of what was measured on 2.0.0 keep saying 2.0.0.
+
+Verified on 2.2.0: pip-audit finds no known vulnerability in any of the three
+files; `python -m pytest -q` is green on Windows, 7627 passed and 64 skipped,
+in 1:48; the MCP suites, the doc gates and the bridge's tests pass again with
+`AGENT_WORKSPACE` unset; the three `integration` tests, which start real stdio
+servers, pass on Windows and under WSL; and the WSL suite on a working-tree
+export fails the same five it failed on 2.0.0 and nothing else. `ruff check .`
+is clean, bandit finds nothing new across 262 files with the count check at
+62 pairs, none grown, and gitleaks is clean. The Space still runs 2.0.0 in its
+session environment until the next bundle compiles a new lock.

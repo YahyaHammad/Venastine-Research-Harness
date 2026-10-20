@@ -7,7 +7,7 @@ from the one Gradio runs in, built when the container starts.
 WHY TWO ENVIRONMENTS. A Hugging Face Space installs `gradio[oauth,mcp]` in
 the same pip command as the bundle's requirements, and that extra wants
 `mcp<2` and `pydantic<=2.12.5` -- measured 2026-10-20 -- while the harness
-pins `mcp==2.0.0` and `pydantic==2.13.4`, and both pins are deliberate. One
+pins `mcp==2.2.0` and `pydantic==2.13.4`, and both pins are deliberate. One
 environment would mean running the hosted harness on versions CI never
 tests. So the Space's own install carries only the bridge, and the harness
 gets what CI tests: `session.lock`, the harness's requirements.txt compiled

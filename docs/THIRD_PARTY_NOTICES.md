@@ -6,7 +6,7 @@ The dependencies listed below are **not** part of the project's own source but a
 
 > **Scope.** Two things are covered here: the project's **declared direct** dependencies — the pins in `requirements.txt` and the extras in `pyproject.toml` — and, under *Non-code third-party material* below, the third-party **text** the repository reproduces.
 >
-> The transitive dependency closure is *not* enumerated: `matplotlib` alone pulls numpy, pillow, kiwisolver and fonttools, and `mcp==2.0.0` brings `httpx2` (see the note beside the `mcp` pin in `requirements.txt`). For the full closure, run `pip-licenses` against a resolved environment — see *How to regenerate* below.
+> The transitive dependency closure is *not* enumerated: `matplotlib` alone pulls numpy, pillow, kiwisolver and fonttools, and `mcp==2.2.0` brings `httpx2` (see the note beside the `mcp` pin in `requirements.txt`). For the full closure, run `pip-licenses` against a resolved environment — see *How to regenerate* below.
 
 > Versions shown are the pins from `requirements.txt` / `pyproject.toml` at the time this file was created. Where a range is used (e.g. `rich>=14.2,<16`) the exact resolved version will vary.
 
@@ -28,7 +28,7 @@ The dependencies listed below are **not** part of the project's own source but a
 | ruamel.yaml | `==0.19.1` | MIT | Yes | https://pypi.org/project/ruamel.yaml/ |
 | textual | `==8.2.8` | MIT | Yes | https://pypi.org/project/textual/ |
 | rich | `>=14.2,<16` | MIT | Yes | https://pypi.org/project/rich/ |
-| mcp | `==2.0.0` | MIT | Yes | https://pypi.org/project/mcp/ |
+| mcp | `==2.2.0` | MIT | Yes | https://pypi.org/project/mcp/ |
 | google-re2 | `==1.1.20251105` | BSD-3-Clause | Yes | https://pypi.org/project/google-re2/ |
 | cryptography | `>=42.0,<52` | Apache-2.0 OR BSD-3-Clause | Yes | https://pypi.org/project/cryptography/ |
 

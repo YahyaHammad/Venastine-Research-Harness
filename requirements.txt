@@ -114,7 +114,20 @@ rich>=14.2,<16
 # raising ToolError on purpose keeps its message, a tool that CRASHES has
 # its text withheld -- and re-run tests/test_mcp_client.py, which is written
 # to hold on both versions.
-mcp==2.0.0
+#
+# 2.2.0 SINCE BATCH 165's follow-up, for CVE-2026-59951: a Streamable HTTP
+# SERVER kept every session's state with no expiry and no cap, so a client
+# could grow its memory without bound. This harness is an MCP client and
+# serves nothing, so it was never exposed -- the bump is because pip-audit
+# fails on any advisory, and a fix existed. Taken the deliberate way, the
+# split read first: 2.1.0 withholds a crashed tool's text and drops
+# outputSchema/structuredContent for tools that return content blocks;
+# 2.2.0 follows redirects only within the same origin (or http -> https on
+# one host) and no longer honours a passed-in client's follow_redirects.
+# Neither touches what this client does. test_mcp_client.py,
+# test_mcp_config.py and the integration servers all pass on it, and
+# mcp-types moves with it in lockstep.
+mcp==2.2.0
 
 # ROADMAP_v3 §49 (SS8). The engine for a monitor session's pattern -- a
 # regex the MODEL wrote, matched against program output nobody controls,
