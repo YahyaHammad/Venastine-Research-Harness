@@ -25819,3 +25819,112 @@ harness's imports load from it. The Space's own install line and the
 ModelScope bridge lock both still resolve with it. pip-audit is clean for
 `deploy/hosted/requirements.txt`; the unit suite never runs a real uv, so its
 green run beside batch 166 says nothing about this pin either way.
+
+## Batch 166 -- ModelScope as a Docker Studio, and no pasted keys on a shared deployment (2026-10-22)
+
+### What was built
+
+ROADMAP_v3 §79's fourth slice (HD2, HD8, HD9 and HD11 amended; HD12, new), on
+`hosted-demo` after the `mcp` and `uv` follow-ups. Measured on a private
+ModelScope Studio, `Venastine-Research/VenastineHarnessDemo`, before anything
+here was written, and the plan put to the owner with the measurements.
+
+- `scripts/build_demo_bundle.py`: the ModelScope bundle is a Docker image. It
+  carries a generated `Dockerfile` (`python:3.12-slim` by digest, the bridge
+  installed `--require-hashes --no-deps --only-binary=:all:` from
+  `deploy/hosted/bridge.lock`, the session environment built INTO the image,
+  port 7860), `bridge.lock` itself (Gradio at the Space's version and the
+  bridge's requirements, compiled by uv with hashes), and a `.dockerignore`
+  generated from the bundle's own file list as an allowlist -- everything
+  left out, exactly the bundle's files let back in, caches left out again --
+  which refuses a path it cannot name literally. No root `requirements.txt`,
+  which nothing on a Docker Studio would install. `compile_lock` runs uv
+  from its input's folder, because uv writes that path into the lock's
+  `# via -r` notes and the bridge lock is compiled from a temporary file.
+  The start-up shim sets `GRADIO_ANALYTICS_ENABLED=False` unless the operator
+  already has, on both platforms.
+- `deploy/hosted/requirements.txt` declares `websockets==17.3`.
+- `deploy/hosted/web.py`: the rate limit keys on the `X-Forwarded-For` entry
+  each platform's proxy writes, `FORWARDED_FOR_ENTRY` by the platform in
+  `BUILD_INFO.json` -- the last on Hugging Face, the first on ModelScope --
+  and the landing page says where a key can go in each mode.
+- `tui/app.py`: a shared deployment's refusal of a pasted key, and
+  `/connect`'s listing there, say why and name the installed harness and a
+  private single-user duplicate, in Hugging Face's own steps. The refusal
+  offers only the sign-ins that work on that deployment.
+- `deploy/hosted/session_env.py`'s docstring: where the environment is built
+  on each platform.
+
+### What measuring found
+
+- **A Gradio-SDK Studio passes no websocket and owns `/`.** ModelScope's
+  gateway -- Envoy in front of Alibaba Function Compute -- answered every
+  upgrade, on every path, with an empty HTTP 200, and served its own Gradio
+  front end at `/` even to an anonymous visitor of a private Studio. The same
+  Studio on the Docker SDK passed both: our page at `/`, the bridge's own
+  refusal for a bad ticket, and a full session -- banner, `/connect`, a
+  Hugging Face device code -- with an idle websocket still open after 16
+  minutes. ModelScope's builder pulled the slim base from Docker Hub by
+  digest and installed from pypi.org; nothing asked for a linked cloud
+  account.
+- **The bridge never declared its websocket library.** A clean image answered
+  every upgrade 404: uvicorn upgrades nothing without one. A Space's install
+  line adds `websockets>=10.4`, and ModelScope's image ships it, which is the
+  only reason it had worked.
+- **ModelScope's proxy replaces `X-Forwarded-For`**, twice measured with a
+  TEST-NET-2 entry that never arrived; the header is `[client, hop, hop]`.
+  Keyed on the last entry, every visitor shared one of ModelScope's hops.
+- **No Landlock on ModelScope** (Alibaba's 5.10 kernel), so the math tools'
+  self-test fails there and a shared Studio refuses them -- HD11 as written.
+- **Gradio's analytics called huggingface.co and api.gradio.app at every
+  start**; with them off, none of the three calls was made.
+- **The `.dockerignore`**, built by hand from the bundle's list first, was
+  proved on a real image with `.git`, `providers.json`, a stray file and two
+  caches planted in the context: 184 files in, exactly the bundle's, none of
+  the planted ones.
+
+### The pasted-key decision (HD12)
+
+The owner asked whether a provider without a sign-in could take a pasted key
+securely on a shared deployment, and to add it only if so. Holding one is not
+the problem -- a sign-in's key is already held in memory, non-dumpable, and
+dropped at disconnect. What no code here can fix: the deployment's
+controllers can use whatever a session holds, which a sign-in bounds through
+the provider and a pasted key does not; a public Space can be duplicated to
+look identical, and would then collect pasted keys where a sign-in happens on
+the provider's own page; the providers' key guidance stops short of the bar
+HD5 set; and typed keys cross the platform's TLS-terminating proxy. So the
+refusal stays, as a recorded decision, and now says where a key belongs. The
+OpenAI article was read from a search excerpt; the page refused a direct
+fetch.
+
+### What the gates caught
+
+- **My own deploy step pushed past a gitleaks finding.** Scanning the
+  prototype from outside its folder flagged the public client id in
+  `config.yaml`, which the allowlist matches only from the bundle root, and
+  the one-off command went on to push. Nothing secret was in it -- from the
+  root the scan is clean -- but batch 167's deploy script scans from the root
+  and refuses to push on any finding.
+- **uv's lock notes name their input relative to where uv runs.** A bridge
+  lock compiled from a temporary file from the repository root would have
+  carried a path of the build machine; `compile_lock` now runs from the
+  input's folder, and a test holds it there.
+
+### Verification
+
+`python -m pytest -q` is green on Windows: 7655 passed, 64 skipped -- 7719,
+the count the three documents state. The changed suites, the doc gates and
+`test_connect.py` pass again with `AGENT_WORKSPACE` unset (276 passed, 7
+skipped). Under WSL, from a working-tree export, the suite fails the same five
+causes it failed before and nothing else; the repository-build test now
+counts twice, once per platform, and both cases pass under WSL against the
+git checkout. The `integration` test built the real ModelScope image, with
+uv 0.13.4 inside it, from a context with `.git`, `providers.json`, a stray
+file and a cache planted, and the image held exactly the bundle's files.
+Thirteen mutations, one per rule this batch added, were each killed.
+`ruff check .` is clean; bandit finds nothing new across 262 files and the
+count check holds at 62 pairs, none grown; pip-audit is clean for all three
+dependency files; gitleaks, run as CI runs it, is clean. The Space's own
+install line and the ModelScope bridge lock both resolve with
+`websockets==17.3`.

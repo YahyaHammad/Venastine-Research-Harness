@@ -59,6 +59,15 @@ _SECURITY_HEADERS = {
 # TEST-NET-2, RFC 5737: never a real client, so an entry in it is a probe's.
 _PROBE_NET = ipaddress.ip_network("198.51.100.0/24")
 
+# Which X-Forwarded-For entry each platform's proxy writes ITSELF, so the one
+# a client cannot choose (§79 HD8), each measured with a TEST-NET-2 entry
+# sent by hand. Hugging Face APPENDS the real address (2026-10-20): the
+# probe arrived first. ModelScope REPLACES the header (2026-10-22, twice):
+# the probe never arrived, and the header came as [client, hop, hop] -- so
+# there the LAST entry is a proxy of ModelScope's own, and keying on it put
+# every visitor behind one counter. A platform not measured keeps the last.
+FORWARDED_FOR_ENTRY = {"hf": "last", "modelscope": "first"}
+
 
 def _address_kind(value: str) -> str:
     """What an address IS, without saying which one."""
@@ -82,10 +91,18 @@ def _page(name: str, **values) -> str:
         {key: html.escape(str(value)) for key, value in values.items()})
 
 
-def _build_info(root: Path) -> str:
+def _read_build_info(root: Path) -> dict:
+    """BUILD_INFO.json, which build_demo_bundle.py writes; {} in a checkout."""
     try:
         data = json.loads((root / "BUILD_INFO.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _build_info(root: Path) -> str:
+    data = _read_build_info(root)
+    if not data:
         return "local build"
     sha = str(data.get("commit", ""))[:12] or "unknown"
     return f"build {sha}" + (" with local changes" if data.get("dirty") else "")
@@ -132,7 +149,11 @@ class Bridge:
                  static_dir: Optional[Path] = None,
                  build: str = "local build",
                  tickets_per_minute: int = 10,
+                 forwarded_for: str = "last",
                  unlock=single_user.unlock_config) -> None:
+        if forwarded_for not in ("first", "last"):
+            raise ValueError(f"forwarded_for is 'first' or 'last', not "
+                             f"{forwarded_for!r}")
         self.supervisor = supervisor
         self.single_user_requested = single_user_requested
         self.gate = gate
@@ -140,6 +161,7 @@ class Bridge:
         self.static_dir = static_dir
         self.build = build
         self.tickets_per_minute = tickets_per_minute
+        self.forwarded_for = forwarded_for
         self._unlock = unlock
         self._unlocked = False
         self._tickets: dict = {}
@@ -230,12 +252,24 @@ class Bridge:
                              "tools are on, /connect takes a sign-in or a key, "
                              "and what you make lives in this container until "
                              "it restarts.",
+                "keys_text": "Here /connect also takes a key for any other "
+                             "provider, or put them all in this Space's "
+                             "VENASTINE_PROVIDERS_JSON secret.",
             }
+        # §79 HD12: the routes where a pasted key is the person's own
+        # business, in the words tui/app.py's /connect uses.
         return {
             "mode_title": "Shared demo",
             "mode_text": "A temporary session in your browser. Nothing is kept "
                          "when you close the tab, and shell and file tools are "
                          "off here.",
+            "keys_text": "Other providers take a key only in a copy you own: a "
+                         "key typed into a shared demo would be held by a "
+                         "server you cannot inspect, behind a page anyone can "
+                         "copy. Install the harness, or duplicate this Space "
+                         "on Hugging Face (keep it private, pick ZeroGPU on a "
+                         "free account) with the variable "
+                         "VENASTINE_SINGLE_USER=1.",
         }
 
     def note_proxy_shape(self, request) -> None:
@@ -262,22 +296,22 @@ class Bridge:
                     [_address_kind(entry) for entry in entries],
                     _address_kind(peer))
 
-    @staticmethod
-    def _client(request) -> str:
-        """The address the rate limit counts against: the LAST
-        X-Forwarded-For entry, the one the platform's proxy appended.
+    def _client(self, request) -> str:
+        """The address the rate limit counts against: the X-Forwarded-For
+        entry this platform's proxy wrote itself (FORWARDED_FOR_ENTRY).
 
-        The first entry is whatever the client sent. Measured on the Space
-        (2026-10-20) with a TEST-NET-2 entry sent by hand: it arrived first
-        and the proxy's own entry after it, so keying on the first let a
-        script name a fresh address per request and open sessions without
-        limit (note_proxy_shape logs the shape on every deployment).
+        Keying on an entry a client can write lets a script name a fresh
+        address per request and open sessions without limit -- on Hugging
+        Face that is the first, where the proxy appends; on ModelScope the
+        proxy rewrites the whole header, so its first entry is the client's
+        own and its last a hop of ModelScope's. note_proxy_shape logs the
+        shape on every deployment.
         """
         forwarded = request.headers.get("x-forwarded-for")
         entries = [entry.strip() for entry in (forwarded or "").split(",")
                    if entry.strip()]
         if entries:
-            return entries[-1]
+            return entries[0] if self.forwarded_for == "first" else entries[-1]
         return request.client.host if request.client else "unknown"
 
     def _html(self, body: str, status: int = 200):
@@ -398,9 +432,11 @@ def build_bridge(env=None, root: Optional[Path] = None,
     hosts = [env.get("SPACE_HOST", "")]
     if url:
         hosts.append(urlsplit(url).netloc)
+    platform = str(_read_build_info(root).get("platform", ""))
     bridge = Bridge(supervisor, single_user_requested=requested, gate=gate,
                     allowed_hosts=tuple(hosts), static_dir=_static_dir(),
-                    build=_build_info(root))
+                    build=_build_info(root),
+                    forwarded_for=FORWARDED_FOR_ENTRY.get(platform, "last"))
     # Decide at start, so a public deployment that asked for single-user
     # says so in its log before anyone visits, and a private one has its
     # config.yaml written before the first session imports it.

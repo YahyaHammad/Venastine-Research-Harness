@@ -205,23 +205,66 @@ def _request(xff=None, peer="10.0.0.5"):
         "client": type("Client", (), {"host": peer})()})()
 
 
+def _keyed(forwarded_for="last"):
+    return web.Bridge(SimpleNamespace(), forwarded_for=forwarded_for)
+
+
 class TestTheAddressTheRateLimitCounts:
     def test_the_proxys_entry_not_the_clients(self):
         """Measured on the Space (2026-10-20): Hugging Face's proxy APPENDS
         the real address, so the first entry is whatever the client sent."""
-        assert web.Bridge._client(_request("198.51.100.23, 203.0.113.9")) \
+        hf = _keyed("last")
+        assert hf._client(_request("198.51.100.23, 203.0.113.9")) \
             == "203.0.113.9"
-        assert web.Bridge._client(_request("203.0.113.9")) == "203.0.113.9"
+        assert hf._client(_request("203.0.113.9")) == "203.0.113.9"
 
-    def test_without_the_header_it_is_the_peer(self):
-        assert web.Bridge._client(_request()) == "10.0.0.5"
-        assert web.Bridge._client(_request(" , ")) == "10.0.0.5"
+    def test_on_modelscope_the_first_entry_is_the_client(self):
+        """Measured on the Studio (2026-10-22, twice): ModelScope's proxy
+        REPLACES the header -- a TEST-NET-2 entry sent by hand never arrived
+        -- and rebuilds it as [client, hop, hop], so the last entry is a
+        proxy of ModelScope's, the same for every visitor."""
+        modelscope = _keyed("first")
+        assert modelscope._client(_request("8.8.8.8, 10.1.0.7, 10.2.0.9")) \
+            == "8.8.8.8"
+
+    @pytest.mark.parametrize("forwarded_for", ["first", "last"])
+    def test_without_the_header_it_is_the_peer(self, forwarded_for):
+        bridge = _keyed(forwarded_for)
+        assert bridge._client(_request()) == "10.0.0.5"
+        assert bridge._client(_request(" , ")) == "10.0.0.5"
 
     def test_a_forged_first_entry_cannot_dodge_the_limit(self, tmp_path):
         bridge = web.build_bridge(env={}, root=tmp_path)
         issued = [bridge.issue_ticket(bridge._client(_request(
             f"198.51.100.{n}, 203.0.113.9"))) for n in range(30)]
         assert issued.count(None) == 30 - bridge.tickets_per_minute
+
+    def test_on_modelscope_its_own_hops_do_not_split_one_visitor(self, tmp_path):
+        """The hops differ request to request; the visitor does not."""
+        (tmp_path / "BUILD_INFO.json").write_text(
+            json.dumps({"platform": "modelscope"}), encoding="utf-8")
+        bridge = web.build_bridge(env={}, root=tmp_path)
+        issued = [bridge.issue_ticket(bridge._client(_request(
+            f"8.8.8.8, 10.0.{n}.1, 10.0.{n}.2"))) for n in range(30)]
+        assert issued.count(None) == 30 - bridge.tickets_per_minute
+
+    @pytest.mark.parametrize("info, expected", [
+        ({"platform": "modelscope"}, "first"),
+        ({"platform": "hf"}, "last"),
+        ({"platform": "somewhere-unmeasured"}, "last"),
+        (None, "last"),
+    ])
+    def test_the_platform_comes_from_the_bundle(self, tmp_path, info,
+                                                expected):
+        if info is not None:
+            (tmp_path / "BUILD_INFO.json").write_text(json.dumps(info),
+                                                      encoding="utf-8")
+        assert web.build_bridge(env={}, root=tmp_path).forwarded_for \
+            == expected
+
+    def test_any_other_choice_is_refused(self):
+        with pytest.raises(ValueError, match="forwarded_for"):
+            _keyed("middle")
 
     def test_the_proxy_shape_names_kinds_never_addresses(self, tmp_path,
                                                          caplog):
@@ -559,6 +602,11 @@ class TestTheRoutes:
             landing = client.get("/")
             assert landing.status_code == 200
             assert landing.headers["x-content-type-options"] == "nosniff"
+            # HD12: a shared demo names where a key CAN go, and every
+            # placeholder is filled.
+            assert "VENASTINE_SINGLE_USER=1" in landing.text
+            assert "Install the harness" in landing.text
+            assert "$" not in landing.text
             assert client.get("/healthz").json() == {
                 "app": single_user.HEALTH_MARKER, "ok": True}
             assert client.get("/download/nope").status_code == 404
@@ -601,6 +649,14 @@ class TestTheRoutes:
                           for p in sessions.rglob("*"))
         assert bridge.supervisor.sessions == {}
         assert left == [], left
+
+    def test_a_private_deployment_says_its_keys_go_here(self, tmp_path):
+        bridge = web.Bridge(_supervisor(tmp_path), single_user_requested=True)
+        with self._client(bridge) as client:
+            landing = client.get("/").text
+        assert "VENASTINE_PROVIDERS_JSON" in landing
+        assert "VENASTINE_SINGLE_USER=1" not in landing
+        assert "$" not in landing
 
     @pytest.mark.parametrize("answer, status", [
         ((200, single_user.HEALTH_MARKER), 403),

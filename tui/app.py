@@ -7131,6 +7131,15 @@ _REVOKE_PAGES = {
     "openrouter": "https://openrouter.ai/keys",
 }
 
+# Where a key for a provider with no sign-in CAN go (§79 HD12): a copy the
+# person owns, never a shared demo. The steps are Hugging Face's own: a
+# duplicate is private by default, its dialog takes variables, and a free
+# account must pick ZeroGPU there because CPU Basic needs a paid plan.
+_OWN_COPY = ("install the harness (npm install -g @yahyahammad/venastine), or "
+             "duplicate this Space on Hugging Face (its menu → Duplicate this "
+             "Space; keep it private, pick ZeroGPU on a free account) with "
+             "the variable VENASTINE_SINGLE_USER=1, where /connect takes keys")
+
 
 def _hosted_banner() -> list:
     """What a hosted session says before anything is typed (§79, HD4).
@@ -7235,9 +7244,8 @@ def _cmd_connect(app: "VenastineApp", args: str) -> None:
             lines.append(f"  {'custom'.ljust(width)}  /connect custom <NAME> "
                          f"<url> — any OpenAI-compatible endpoint")
         else:
-            lines.append("Other providers need a pasted key, which this "
-                         "shared demo does not take. Install the harness, or "
-                         "run a private copy, to use them.")
+            lines.append("Other providers need a key, which this shared demo "
+                         f"does not take. To use one, {_OWN_COPY}.")
         say("\n".join(lines))
         say(where)
         return
@@ -7298,10 +7306,17 @@ def _cmd_connect(app: "VenastineApp", args: str) -> None:
 def _ask_connect_key(app: "VenastineApp", preset, paste_allowed: bool,
                      where: str) -> None:
     if not paste_allowed:
+        # HD12: not for want of a safe place in memory -- a sign-in's key is
+        # held exactly that way -- but because a pasted key is the account's
+        # own, unbounded and unexpiring, handed to a server the person cannot
+        # inspect, on a page anyone can copy to look the same.
+        offers = " or ".join(f"/connect {p.name}" for p in _shared_offers())
         app._transcript.write_error(
-            "This shared demo does not take pasted keys — a key typed here "
-            "would sit on a server other visitors share. /connect "
-            "huggingface and /connect openrouter sign in instead.")
+            "This shared demo does not take pasted keys: a key typed here "
+            "would be held by a server you cannot inspect, behind a page "
+            "anyone can copy to look exactly like this one. "
+            + (f"Sign in instead with {offers}. " if offers else "")
+            + f"To use {preset.label} with a key, {_OWN_COPY}.")
         return
     body = f"Create one at {preset.key_url}. " if preset.key_url else ""
 

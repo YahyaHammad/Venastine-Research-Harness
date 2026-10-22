@@ -2,7 +2,7 @@
 
 **No telemetry. No analytics. No tracking.**
 
-This harness runs entirely on your machine, from a checkout or from an npm install. It does not phone home, does not collect usage data, and has no hosted backend.
+This harness runs entirely on your machine, from a checkout or from an npm install. It does not phone home, does not collect usage data, and needs no hosted backend. The optional hosted demo, which is a server, is described in its own section below.
 
 ## What is stored locally
 
@@ -53,6 +53,14 @@ No automatic expiry — a thread lives until you delete it.
 * **Durable memories:** `python main.py --memories` to list, `python main.py --forget <id>` to delete one by id (never by substring, by design).
 * **Settings/trust:** delete `~/.config/venastine/settings.json` or `trusted_projects.json` entries directly. The same folder holds `ui_preferences.json`, `model_windows.json` and `pipeline_models.json` — remembered UI and model choices, no keys and no content.
 * **Fetched page text only:** `rm -rf output/*/sources/` removes the retrieved text while leaving each run's report, claims and scores in place. The scores stay, but nothing can re-derive them afterwards.
+
+## The hosted demo (ROADMAP_v3 §79)
+
+Everything above describes the harness on your machine. The hosted demo -- a Hugging Face Space or ModelScope Studio running the same harness, its terminal drawn in your browser -- is a server, and it changes three things.
+
+* **Your session runs on the server.** Each browser tab gets its own harness process and session directory, deleted when the tab closes; nothing you type, and nothing the model answers, outlives the session in a shared demo. The platform that hosts it (Hugging Face, or ModelScope on Alibaba Cloud) carries the connection and can see what crosses it, as any host can.
+* **A sign-in's key is held in that process's memory only**, never written, and dropped when the session ends. You can revoke it at any time at https://huggingface.co/settings/connected-applications or https://openrouter.ai/keys. A shared demo takes no pasted key (§79 HD12); a private copy of your own does, and keeps what you give it in that copy until it restarts.
+* **Gradio's analytics are off.** The page is served by Gradio, which by default reports each start to huggingface.co and api.gradio.app; the demo sets `GRADIO_ANALYTICS_ENABLED=False` unless its operator turns them back on, and with it off none of those calls was made (measured 2026-10-22). ModelScope also mounts persistent storage into every Studio (`/mnt/workspace`, and `/tmp/gradio`); no session writes to either.
 
 ## If you publish a report
 

@@ -24,20 +24,27 @@ WHAT GOES IN, from lists that already exist rather than a new one:
     is a fourth channel that runs the code beside live tokens, so it takes
     the union of the other three.
 
-WHAT IS GENERATED: `app.py` (the platforms' entry point, which hands over to
-deploy/hosted/app.py); `requirements.txt` (the BRIDGE's needs, from
-deploy/hosted/requirements.txt plus the harness's textual pin -- the file
-the platform installs beside its own Gradio); `deploy/hosted/session.lock`
-(the harness's requirements.txt compiled by uv, every file hashed, which
-session_env.py installs into a separate environment at container start, so
-the harness runs on exactly the pins CI tests); `README.md` (on Hugging
-Face its YAML frontmatter IS the Space's configuration); `.gitattributes`;
-and `BUILD_INFO.json` (the commit the page footer shows). The lock needs
-`uv` and the network, as any resolve does.
+WHAT IS GENERATED, on both platforms: `app.py` (the entry point, which hands
+over to deploy/hosted/app.py); `deploy/hosted/session.lock` (the harness's
+requirements.txt compiled by uv, every file hashed, which session_env.py
+installs into a separate environment, so the harness runs on exactly the
+pins CI tests); `README.md`; `.gitattributes`; and `BUILD_INFO.json` (the
+commit the page footer shows, and the platform the bridge reads). The locks
+need `uv` and the network, as any resolve does.
 
-ModelScope takes its Gradio version, image and hardware through its settings
-API rather than the README, so its README carries no frontmatter; batch 166's
-deploy script sets those.
+ON HUGGING FACE the bundle is a Gradio-SDK Space: the README's YAML
+frontmatter IS its configuration, and `requirements.txt` (the BRIDGE's
+needs, from deploy/hosted/requirements.txt plus the harness's textual pin)
+is what the Space installs beside its own Gradio.
+
+ON MODELSCOPE it is a Docker-SDK Studio (§79 HD2, amended in batch 166),
+because a Gradio-SDK Studio's gateway answered every websocket upgrade with
+an empty 200 and served its own Gradio page at `/` -- measured 2026-10-22,
+when no session could open. So it carries a `Dockerfile`, a `.dockerignore`
+that lets in exactly the bundle's own files, and `deploy/hosted/bridge.lock`
+(Gradio plus the bridge's requirements, hashed) in place of a
+requirements.txt nothing there would install. The README has no frontmatter;
+the deploy script sets the SDK and hardware through ModelScope's API.
 """
 
 from __future__ import annotations
@@ -49,6 +56,7 @@ import re
 import shutil
 import subprocess  # nosec B404 - runs git with a fixed argument list, below
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -63,9 +71,8 @@ ROOT = Path(__file__).resolve().parents[1]
 # (`uv pip compile` reproduces it; deploy/hosted/requirements.txt says why
 # the harness's own pins are not in that command).
 GRADIO_VERSION = "6.30.0"
-# ModelScope does not preinstall `spaces`, and app.py imports it; off
-# ZeroGPU it is a no-op. The version a Hugging Face ZeroGPU build installed
-# on 2026-10-20.
+# ModelScope's image is ours, and app.py imports `spaces`; off ZeroGPU it is
+# a no-op. The version a Hugging Face ZeroGPU build installed on 2026-10-20.
 SPACES_VERSION = "0.51.3"
 PYTHON_VERSION = "3.12"
 
@@ -73,11 +80,29 @@ PYTHON_VERSION = "3.12"
 # machine, so a Windows build locks what the Space installs.
 LOCK_PLATFORM = "x86_64-manylinux_2_28"
 
+# The image a ModelScope Studio is built FROM, by digest, so a deploy is
+# reproducible and moving it is a commit: Python 3.12.15, pulled from Docker
+# Hub by ModelScope's own builder on 2026-10-22. What to re-measure when it
+# moves: bridge.lock still installs with --only-binary (a wheel for every
+# pin on that Python), the session environment still builds, and a session
+# still opens through the Studio's gateway.
+DOCKER_BASE = ("python:3.12-slim@sha256:"
+               "cb33f7f771ecec2ef1225cf39b159591a040391bd73e4c01f00fdfc4c47611d2")
+
 PLATFORMS = ("hf", "modelscope")
 OVERLAY = ("deploy/",)
 SESSION_LOCK = "deploy/hosted/session.lock"
+BRIDGE_LOCK = "deploy/hosted/bridge.lock"
+# Every name the builder writes on either platform. A repository file with
+# one of these names is never copied, so it cannot stand in for the
+# generated one.
 GENERATED = ("app.py", "requirements.txt", "README.md", "BUILD_INFO.json",
-             ".gitattributes", SESSION_LOCK)
+             ".gitattributes", SESSION_LOCK, BRIDGE_LOCK, "Dockerfile",
+             ".dockerignore")
+# In a ModelScope bundle for the platform or for people, never needed inside
+# the image, so the .dockerignore does not let them in.
+NOT_IN_IMAGE = frozenset({"Dockerfile", ".dockerignore", ".gitattributes",
+                          "README.md"})
 # Installed by the platform itself; a pin of any of them in the bundle fails
 # the Space's resolve or replaces its ZeroGPU runtime.
 PLATFORM_MANAGED = frozenset({"gradio", "spaces", "huggingface-hub"})
@@ -91,15 +116,49 @@ APP_SHIM = '''\
 Generated by scripts/build_demo_bundle.py; the work is deploy/hosted/app.py.
 `spaces` comes first because ZeroGPU's rule is that it is imported before
 anything that could touch CUDA -- nothing here does, and the rule is cheap.
+
+Gradio's analytics are off unless the operator sets the variable: with them
+on, every start called huggingface.co and api.gradio.app (measured
+2026-10-22), and nothing a visitor does needs either.
 """
 
-import spaces  # noqa: F401
+import os
 
-from deploy.hosted.app import main
+os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "False")
+
+import spaces  # noqa: E402,F401
+
+from deploy.hosted.app import main  # noqa: E402
 
 if __name__ == "__main__":
     main()
 '''
+
+# A ModelScope Studio's image (§79 HD2, HD9). The bridge's own packages come
+# from bridge.lock, hashed, wheels only; the session environment is built
+# INTO the image, so a container start installs nothing and needs no package
+# index (session_env.ensure() finds its marker and returns). It runs as
+# root, as both platforms measured: confine.py's drop to `nobody` and
+# session_env's /opt rule are written for that. Port 7860 is ModelScope's.
+DOCKERFILE = f"""\
+# Generated by scripts/build_demo_bundle.py (ROADMAP_v3 §79 HD2, HD9).
+FROM {DOCKER_BASE}
+ENV PYTHONDONTWRITEBYTECODE=1 \\
+    PYTHONUNBUFFERED=1 \\
+    PIP_NO_CACHE_DIR=1 \\
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \\
+    GRADIO_SERVER_NAME=0.0.0.0 \\
+    GRADIO_SERVER_PORT=7860
+WORKDIR /app
+COPY {BRIDGE_LOCK} /tmp/bridge.lock
+RUN pip install --require-hashes --no-deps --only-binary=:all: \\
+        -r /tmp/bridge.lock \\
+    && rm /tmp/bridge.lock
+COPY . .
+RUN python -c "from deploy.hosted import session_env; session_env.ensure()"
+EXPOSE 7860
+CMD ["python", "app.py"]
+"""
 
 # Written rather than inherited: a Space keeps `.gitattributes` across every
 # deploy, because huggingface_hub's `delete_patterns` never removes it, so
@@ -268,10 +327,11 @@ def _pin_line(text: str, name: str) -> str:
 
 
 def requirements(root: Path, platform: str) -> str:
-    """The bundle's requirements.txt: what the BRIDGE needs, installed by the
-    platform beside its own Gradio. The harness's pins are not here -- they
-    are the session lock -- except textual's, which the bridge must share
-    with the sessions to decode their packets."""
+    """What the BRIDGE needs: on Hugging Face the bundle's requirements.txt,
+    installed by the Space beside its own Gradio; on ModelScope the input of
+    bridge.lock. The harness's pins are not here -- they are the session
+    lock -- except textual's, which the bridge must share with the sessions
+    to decode their packets."""
     harness = (root / "requirements.txt").read_text(encoding="utf-8")
     deploy = (root / "deploy" / "hosted" / "requirements.txt").read_text(
         encoding="utf-8")
@@ -292,7 +352,7 @@ def requirements(root: Path, platform: str) -> str:
         _pin_line(harness, "textual") + "\n",
     ]
     if platform == "modelscope":
-        parts.append("\n# ModelScope does not preinstall it; app.py imports it.\n"
+        parts.append("\n# The image is ours, and app.py imports it.\n"
                      f"spaces=={SPACES_VERSION}\n")
     return "".join(parts)
 
@@ -308,24 +368,78 @@ def _uv() -> list:
     return [sys.executable, "-m", "uv"]
 
 
-def compile_lock(requirements_file: Path, run=subprocess.run) -> str:
-    """The harness's requirements.txt resolved for the platforms' Linux and
-    Python, with a hash for every file (session_env.py installs it with
-    --require-hashes)."""
-    args = [*_uv(), "pip", "compile", str(requirements_file),
+def compile_lock(requirements_file: Path, run=subprocess.run,
+                 source: str = "requirements.txt") -> str:
+    """A requirements file resolved for the platforms' Linux and Python,
+    with a hash for every file (both locks are installed with
+    --require-hashes). `source` says in the header what was locked.
+
+    uv runs FROM the file's own folder, because it writes the file's path,
+    relative to where it runs, into its `# via -r` notes: from anywhere else
+    the bridge lock, compiled from a temporary file, would carry a path of
+    the machine that built it."""
+    args = [*_uv(), "pip", "compile", requirements_file.name,
             "--python-version", PYTHON_VERSION,
             "--python-platform", LOCK_PLATFORM,
             "--generate-hashes", "--no-header", "--quiet"]
-    result = run(args, capture_output=True, check=False)  # nosec B603 - fixed arguments, no shell
+    result = run(args, capture_output=True, check=False,  # nosec B603 - fixed arguments, no shell
+                 cwd=str(requirements_file.parent))
     if result.returncode != 0:
-        raise BundleError("uv could not lock requirements.txt:\n"
+        raise BundleError(f"uv could not lock {source}:\n"
                           + result.stderr.decode("utf-8", "replace")[-3000:])
     text = result.stdout.decode("utf-8")
     if "--hash=sha256:" not in text:
         raise BundleError("uv produced a lock with no hashes")
-    return ("# Generated by scripts/build_demo_bundle.py from requirements.txt:\n"
+    return (f"# Generated by scripts/build_demo_bundle.py from {source}:\n"
             f"# Python {PYTHON_VERSION}, {LOCK_PLATFORM}, every file hashed.\n"
             + text)
+
+
+def bridge_requirements(root: Path) -> str:
+    """What bridge.lock is compiled from: Gradio at the version both
+    platforms run, and the ModelScope bridge's requirements -- the image
+    installs both, since no platform installs anything for it."""
+    return (requirements(root, "modelscope")
+            + f"\n# The Gradio both platforms run.\ngradio=={GRADIO_VERSION}\n")
+
+
+# Characters with a meaning in a .dockerignore line (Go's filepath.Match
+# plus the `!` and `#` that start one, and the whitespace Docker trims).
+_PATTERN_CHARS = re.compile(r"[*?\[\]\\]|^[!#]|^\s|\s$")
+
+
+def dockerignore(paths: list) -> str:
+    """The ModelScope bundle's .dockerignore: everything left out, then
+    exactly the bundle's own files let back in.
+
+    AN ALLOWLIST, NOT A DENYLIST, because ModelScope builds the image from a
+    git clone of the Studio, and that context carries the clone's `.git` and
+    whatever else the platform put there; a denylist would have to know
+    every such name in advance. Measured 2026-10-22 with `.git`,
+    `providers.json`, a stray file and `__pycache__` planted in the context:
+    the image held exactly the bundle's files.
+
+    A path this file cannot name LITERALLY is a refusal: an escaped pattern
+    would be one more syntax to get right, and the repository has no such
+    name today."""
+    lines = [
+        "# Generated by scripts/build_demo_bundle.py (ROADMAP_v3 §79 HD9).",
+        "# Everything is left out, then exactly the bundle's own files are let",
+        "# back in, so nothing else in the build context -- the Studio's .git,",
+        "# a stray cache -- reaches the image. The last matching line decides.",
+        "*",
+    ]
+    for path in sorted(paths):
+        if path in NOT_IN_IMAGE:
+            continue
+        if _PATTERN_CHARS.search(path):
+            raise BundleError(f"{path!r} cannot be named literally in a "
+                              f".dockerignore; rename it")
+        lines.append(f"!{path}")
+    lines += ["# Never, even inside a directory let back in above.",
+              "**/__pycache__",
+              "**/*.py[cod]"]
+    return "\n".join(lines) + "\n"
 
 
 def readme(platform: str, pkg: dict, info: dict) -> str:
@@ -390,7 +504,8 @@ def build_info(root: Path, platform: str, files: list,
 def build(platform: str, out: Path, *, root: Path = ROOT, force: bool = False,
           run=subprocess.run, lock=compile_lock) -> list:
     """Write the bundle to `out` and return the relative paths written.
-    `lock` turns the harness's requirements.txt into the session lock."""
+    `lock` turns a requirements file into a hashed lock: the harness's into
+    the session lock, and on ModelScope the bridge's into bridge.lock."""
     if platform not in PLATFORMS:
         raise BundleError(f"unknown platform {platform!r}; one of {PLATFORMS}")
     out = out.resolve()
@@ -407,12 +522,22 @@ def build(platform: str, out: Path, *, root: Path = ROOT, force: bool = False,
     info = build_info(root, platform, files, run)
     generated = {
         "app.py": APP_SHIM,
-        "requirements.txt": requirements(root, platform),
         "README.md": readme(platform, pkg, info),
         "BUILD_INFO.json": json.dumps(info, indent=2) + "\n",
         ".gitattributes": GITATTRIBUTES,
         SESSION_LOCK: lock(root / "requirements.txt"),
     }
+    if platform == "hf":
+        generated["requirements.txt"] = requirements(root, platform)
+    else:
+        with tempfile.TemporaryDirectory() as scratch:
+            source = Path(scratch) / "bridge.in"
+            source.write_text(bridge_requirements(root), encoding="utf-8")
+            generated[BRIDGE_LOCK] = lock(
+                source, source=f"gradio=={GRADIO_VERSION} and the bridge's "
+                               f"requirements")
+        generated["Dockerfile"] = DOCKERFILE
+        generated[".dockerignore"] = dockerignore([*files, *generated])
 
     out.mkdir(parents=True, exist_ok=True)
     for rel in files:

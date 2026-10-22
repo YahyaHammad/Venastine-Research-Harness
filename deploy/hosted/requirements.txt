@@ -13,9 +13,9 @@
 # NOT listed, on purpose: gradio, spaces and huggingface_hub. A Space
 # installs all three itself -- gradio at the README's `sdk_version`, which is
 # GRADIO_VERSION in build_demo_bundle.py -- and listing them fails the
-# build's resolve or replaces the ZeroGPU runtime. The ModelScope bundle adds
-# `spaces` back, because app.py imports it and ModelScope does not
-# preinstall it.
+# build's resolve or replaces the ZeroGPU runtime. The ModelScope bundle is
+# a Docker image of our own, so the builder compiles gradio and `spaces`
+# into its bridge.lock with everything here.
 #
 # ALSO NOT listed: textual. The builder copies the harness's own textual pin
 # in, because supervisor.py decodes the sessions' binary packets with
@@ -33,3 +33,9 @@ textual-serve==1.1.3
 # the session lock installed in 18 s from an empty cache, as on 0.12.23.
 # MIT OR Apache-2.0.
 uv==0.13.4
+# websockets: what lets uvicorn -- Gradio's server -- upgrade a connection to
+# a websocket at all, and every session is one. It was never declared, and
+# worked only by accident: a Space's own install line adds
+# `websockets>=10.4`, and ModelScope's image had it preinstalled. In a clean
+# image (2026-10-22) every upgrade was answered 404. EXACT. BSD-3-Clause.
+websockets==17.3

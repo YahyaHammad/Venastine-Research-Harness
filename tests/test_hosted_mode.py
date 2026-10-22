@@ -264,7 +264,10 @@ class TestTheSharedTui:
         assert "huggingface" not in listed
         assert "connect custom" not in listed and "paste a key" not in listed
         assert "OpenRouter — sign in" in listed
-        assert "Other providers need a pasted key" in listed
+        # HD12: where a key CAN go, by name.
+        assert "Other providers need a key" in listed
+        assert "npm install -g @yahyahammad/venastine" in listed
+        assert "VENASTINE_SINGLE_USER=1" in listed
         # One sentence that says both halves, not the token fallback followed
         # by the pasted-key refusal.
         assert "not set up on this deployment" in answered
@@ -308,6 +311,13 @@ class TestTheSharedTui:
             text = app._transcript.as_text()
         assert text.count("does not take pasted keys") == 2
         assert not providers_file.exists()
+        # HD12: the refusal says why, offers the sign-ins that work here, and
+        # names the routes where the key is the person's own business.
+        flat = " ".join(text.split())
+        assert "a server you cannot inspect" in flat
+        assert "Sign in instead with /connect" in flat
+        assert "To use OpenAI with a key, install the harness" in flat
+        assert flat.count("VENASTINE_SINGLE_USER=1") == 2
 
     @pytest.mark.asyncio
     async def test_a_sign_in_is_kept_in_memory_only(self, shared,

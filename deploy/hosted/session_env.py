@@ -2,7 +2,10 @@
 deploy/hosted/session_env.py
 
 ROADMAP_v3 §79 (HD2, HD9). The environment every session runs in, separate
-from the one Gradio runs in, built when the container starts.
+from the one Gradio runs in: built when the container starts on Hugging
+Face, and when the IMAGE is built on ModelScope, whose Dockerfile calls
+ensure() -- so a Studio's container start finds the marker and installs
+nothing.
 
 WHY TWO ENVIRONMENTS. A Hugging Face Space installs `gradio[oauth,mcp]` in
 the same pip command as the bundle's requirements, and that extra wants
