@@ -78,13 +78,35 @@ class TestThePresets:
             assert preset.is_v1_compatible == entry["is_v1_compatible"]
             assert preset.supports_stream_usage == entry["supports_stream_usage"]
 
-    def test_only_the_two_permitted_providers_sign_in(self):
-        """The owner's ruling, as data: OAuth only where the provider's own
-        documentation explicitly invites a third-party app (HD5)."""
+    def test_only_the_permitted_providers_sign_in(self):
+        """The owner's ruling, as data: OAuth only where the provider
+        explicitly invites a third-party app (HD5, HD13)."""
         signing = {p.name: p.sign_in for p in connect.PRESETS.values()
                    if p.sign_in}
         assert signing == {"huggingface": "huggingface",
-                           "openrouter": "openrouter"}
+                           "openrouter": "openrouter",
+                           "modelscope": "modelscope"}
+
+    @pytest.mark.asyncio
+    async def test_a_local_install_connects_modelscope_with_a_key(
+            self, providers_file):
+        """HD13: ModelScope's sign-in needs a bridge to keep its app's
+        secret, so with none it is the pasted key it always was."""
+        from tui.app import VenastineApp, _cmd_connect
+        from tui.screens import SecretScreen
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            _cmd_connect(app, "")
+            listed = app._transcript.as_text()
+            _cmd_connect(app, "modelscope")
+            assert await settle(pilot, lambda: isinstance(app.screen,
+                                                          SecretScreen))
+            app.screen.dismiss(FAKE_MS_TOKEN)
+            assert await settle(pilot, providers_file.exists)
+        assert "ModelScope API-Inference (modelscope.ai) — paste a key" in listed
+        assert json.loads(providers_file.read_text(encoding="utf-8")) \
+            ["MODELSCOPE"]["API_KEY"] == FAKE_MS_TOKEN
 
 
 class TestACustomEndpoint:

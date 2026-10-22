@@ -5,14 +5,17 @@ ROADMAP_v3 §79 (HD1, HD3, HD8). One harness process per browser tab, and the
 relay between that process and the tab.
 
 THE PROTOCOL IS TEXTUAL'S, AND THE BRIDGE IS OURS (HD1). `main.py --tui`
-under `TEXTUAL_DRIVER=textual.drivers.web_driver:WebDriver` writes one line,
-`__GANGLION__`, and then framed packets to stdout -- a type byte (`D` screen
-data, `M` JSON meta, `P` binary-encoded), a four-byte big-endian length, the
-payload -- and reads the same framing on stdin. `textual-serve` speaks it, and
-its server builds the child's environment with `os.environ.copy()`, which on a
-Space is every secret the deployment holds; so the protocol is spoken here,
-over an environment built from an allowlist, and `textual-serve` contributes
-only the browser half (its `textual.js`).
+under Textual's web driver writes one line, `__GANGLION__`, and then framed
+packets to stdout -- a type byte (`D` screen data, `M` JSON meta, `P`
+binary-encoded), a four-byte big-endian length, the payload -- and reads the
+same framing on stdin. `textual-serve` speaks it, and its server builds the
+child's environment with `os.environ.copy()`, which on a Space is every
+secret the deployment holds; so the protocol is spoken here, over an
+environment built from an allowlist, and `textual-serve` contributes only the
+browser half (its `textual.js`). The driver is `tui/hosted_driver.py`'s
+subclass of Textual's, which also carries the ModelScope sign-in's packets
+(HD13): only this process writes a session's stdin, and everything a browser
+sends reaches it as a `D` packet, so a meta packet there is always ours.
 
 ISOLATION IS THE ENVIRONMENT (HD3). Every piece of state the harness keeps is
 redirectable per process -- §60 UH3 measured it -- so a session is a
@@ -46,6 +49,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from deploy.hosted.sign_in import SignInError
+
 logger = logging.getLogger(__name__)
 
 HARNESS_ROOT = Path(__file__).resolve().parents[2]
@@ -61,6 +66,13 @@ CHUNK_SIZE = 64 * 1024
 # Never a secret: what a Python process needs to start at all on the two
 # platforms this runs on. Everything else is set below or left out.
 _PASSTHROUGH = ("PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT")
+
+HOSTED_DRIVER = "tui.hosted_driver:HostedWebDriver"
+
+# HD13. What a session may ask of the bridge's ModelScope sign-in: start one,
+# hand back the code its page showed, or stop waiting.
+_SIGN_IN_REQUESTS = frozenset({"venastine_sign_in", "venastine_sign_in_code",
+                               "venastine_sign_in_cancel"})
 
 
 class SocketClosed(Exception):
@@ -160,13 +172,14 @@ class SessionPaths:
 
 def session_environment(base_env, paths: SessionPaths, mode: str,
                         width: int = 80, height: int = 24,
-                        confinement: str = "") -> dict:
+                        confinement: str = "", sign_ins: str = "") -> dict:
     """The child's whole environment: an allowlist, never a copy (HD3).
 
     The deployment's secrets -- `HF_TOKEN`, `OAUTH_CLIENT_SECRET`, a
-    ModelScope token, `VENASTINE_PROVIDERS_JSON`, anything an operator added
-    -- reach no session, because nothing here reads the base environment
-    except the five names a Python process needs to start. `PYTHONPATH` is
+    ModelScope token, the ModelScope app's client secret,
+    `VENASTINE_PROVIDERS_JSON`, anything an operator added -- reach no
+    session, because nothing here reads the base environment except the five
+    names a Python process needs to start. `PYTHONPATH` is
     never set (`tools/isolation.py` builds its own child's from this
     process's resolved `sys.path`), and `PYTHONUSERBASE` is: HOME moves into
     the session, and a user-site install found through HOME would vanish
@@ -187,7 +200,7 @@ def session_environment(base_env, paths: SessionPaths, mode: str,
         "PYTHONIOENCODING": "utf-8",
         "TERM": "xterm-256color",
         "TERM_PROGRAM": "textual",
-        "TEXTUAL_DRIVER": "textual.drivers.web_driver:WebDriver",
+        "TEXTUAL_DRIVER": HOSTED_DRIVER,
         "TEXTUAL_FPS": "60",
         "TEXTUAL_COLOR_SYSTEM": "truecolor",
         "COLUMNS": str(width),
@@ -207,6 +220,10 @@ def session_environment(base_env, paths: SessionPaths, mode: str,
     # shared session run the math tools (security/hosted.py).
     if confinement:
         env["VENASTINE_CONFINEMENT"] = confinement
+    # HD13: the sign-ins this bridge completes for a session -- the names,
+    # never what they need.
+    if sign_ins:
+        env["VENASTINE_BRIDGE_SIGN_IN"] = sign_ins
     return env
 
 
@@ -255,11 +272,13 @@ class Session:
         self.started = time.monotonic()
         self.last_activity = self.started
         self.ended_because: Optional[str] = None
+        self._exchange: Optional[asyncio.Future] = None
 
     async def spawn(self, width: int, height: int) -> None:
         sup = self.supervisor
         env = session_environment(sup.base_env, self.paths, sup.mode,
-                                  width, height, sup.confinement)
+                                  width, height, sup.confinement,
+                                  "modelscope" if sup.sign_in else "")
         command = sup.command or [sys.executable,
                                   str(HARNESS_ROOT / "main.py"), "--tui"]
         # STDERR GOES TO A FILE IN THE SESSION, not a pipe: a pipe nobody
@@ -379,6 +398,9 @@ class Session:
         if kind == "exit":
             self.ended_because = "the session ended"
             return True
+        if kind in _SIGN_IN_REQUESTS:
+            await self._on_sign_in(kind, meta)
+            return False
         if kind == "open_url":
             url = str(meta.get("url", ""))
             # The browser runs window.open() on this. Only a web address
@@ -399,6 +421,63 @@ class Session:
                     open_method=str(meta.get("open_method") or "download"))
                 await socket.send_text(json.dumps(["deliver_file_start", key]))
         return False
+
+    async def _on_sign_in(self, kind: str, meta: dict) -> None:
+        """HD13: a session's request to the bridge's ModelScope sign-in.
+
+        Every flow is keyed by THIS session's id, which comes from here and
+        not from the packet, so a session can only ever reach its own.
+        """
+        sign_in = self.supervisor.sign_in
+        request = str(meta.get("id", ""))[:64]
+        if kind == "venastine_sign_in_cancel":
+            if sign_in is not None:
+                sign_in.forget(self.id)
+            return
+        if sign_in is None:
+            await self._sign_in_failed(
+                request, "ModelScope sign-in is not set up on this deployment.")
+            return
+        if kind == "venastine_sign_in":
+            await self.send_meta({"type": "venastine_sign_in_url",
+                                  "id": request,
+                                  "url": sign_in.start(self.id, request)})
+            return
+        claim = sign_in.claim(self.id, str(meta.get("code", "")))
+        if claim.code is None:
+            await self._sign_in_failed(claim.request or request, claim.reason,
+                                       claim.retry)
+            return
+        # A TASK, so this session's screen keeps flowing while ModelScope
+        # answers, and a THREAD inside it, so no other session waits either.
+        self._exchange = asyncio.ensure_future(self._exchange_code(claim))
+
+    async def _exchange_code(self, claim) -> None:
+        try:
+            token = await asyncio.to_thread(self.supervisor.sign_in.exchange,
+                                            claim.code)
+        except SignInError as exc:
+            # The words are built from ModelScope's error CODE (sign_in.py),
+            # so they are safe to log, and the operator needs them.
+            logger.info("ModelScope sign-in for session %s did not finish: %s",
+                        self.id, exc)
+            await self._sign_in_failed(claim.request, str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001 -- reported, never fatal
+            logger.warning("ModelScope sign-in failed for session %s: %s",
+                           self.id, type(exc).__name__)
+            await self._sign_in_failed(
+                claim.request,
+                f"ModelScope sign-in failed: {type(exc).__name__}.")
+            return
+        await self.send_meta({"type": "venastine_credential",
+                              "id": claim.request, "token": token})
+
+    async def _sign_in_failed(self, request: str, reason: str,
+                              retry: bool = False) -> None:
+        await self.send_meta({"type": "venastine_sign_in_failed",
+                              "id": request, "reason": reason,
+                              "retry": retry})
 
     def _on_packed(self, payload: bytes) -> None:
         from textual._binary_encode import load as binary_load
@@ -470,6 +549,10 @@ class Session:
 
     async def stop(self) -> None:
         """Ask the session to quit, then make sure it has; delete its state."""
+        if self.supervisor.sign_in is not None:
+            self.supervisor.sign_in.forget(self.id)
+        if self._exchange is not None:
+            self._exchange.cancel()
         process = self.process
         if process is not None and process.returncode is None:
             await self.send_meta({"type": "quit"})
@@ -521,6 +604,8 @@ class Supervisor:
     deployment shares and nothing deletes -- the owner's threads survive a
     reloaded tab until the container restarts. A shared deployment gives
     every tab a fresh directory and deletes it when the tab closes.
+    `sign_in` is the ModelScope sign-in this deployment offers, or None
+    (sign_in.py; HD13).
     """
 
     def __init__(self, limits: Limits, mode: str, *,
@@ -529,10 +614,12 @@ class Supervisor:
                  base_env=None, command: Optional[list] = None,
                  providers_seed: Optional[str] = None,
                  confinement: str = "",
+                 sign_in=None,
                  tick_s: float = 5.0) -> None:
         self.limits = limits
         self.mode = mode
         self.confinement = confinement
+        self.sign_in = sign_in
         self.session_root = Path(session_root or tempfile.gettempdir())
         self.state_dir = state_dir
         self.base_env = dict(os.environ if base_env is None else base_env)

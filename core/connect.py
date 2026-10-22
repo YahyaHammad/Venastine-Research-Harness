@@ -1,14 +1,14 @@
-"""`/connect`'s catalogue, its two sign-in flows, and the one way a key is
-stored (ROADMAP_v3 §79, HD5).
+"""`/connect`'s catalogue, its sign-in flows, and the one way a key is stored
+(ROADMAP_v3 §79, HD5, HD13).
 
 Connecting a model used to mean copying `providers.json.example` and editing
 JSON by hand -- the one setup step README said nothing could do for you. This
 module is everything about it that is not drawing: which providers there are,
-the two OAuth flows whose providers' own documentation explicitly invites a
-third-party app to use them, and where a key ends up. The TUI owns the asking.
+the OAuth flows whose providers explicitly invite a third-party app to use
+them, and where a key ends up. The TUI owns the asking.
 
-ONLY TWO PROVIDERS SIGN IN, AND THAT IS A RULING RATHER THAN A GAP. The owner
-asked for OAuth only where the provider's official guidance gives a
+ONLY THREE PROVIDERS SIGN IN, AND THAT IS A RULING RATHER THAN A GAP. The
+owner asked for OAuth only where the provider's official guidance gives a
 third-party app explicit permission:
 
   * Hugging Face, https://huggingface.co/docs/hub/oauth -- a "Sign in with HF"
@@ -19,10 +19,19 @@ third-party app explicit permission:
     OAuth to let your users bring their own OpenRouter API key to your app",
     PKCE, and a mode with no callback URL in which the code is shown to the
     user to copy.
+  * ModelScope, whose app registration (modelscope.ai, Access Control, OAuth
+    Connected App) says "Users can authorize your application through
+    ModelScope OAuth to obtain ModelScope-related permissions associated with
+    the user" and offers the scope `api-inference` ("Invoke API Inference").
 
-Everything else is a pasted key. Neither flow needs a server of ours to
-receive a redirect, which is why both work the same in a local terminal and
-in a browser tab.
+Hugging Face's and OpenRouter's flows need no server of ours to receive a
+redirect, which is why both work the same in a local terminal and in a
+browser tab. ModelScope's does not work that way: its token endpoint takes
+only a confidential client (`client_secret_basic` / `client_secret_post` in
+its discovery document, read 2026-10-22), so only a hosted bridge, which can
+keep the secret, completes it -- `deploy/hosted/sign_in.py` -- and a local
+install connects ModelScope with a pasted key. Everything else is a pasted
+key everywhere.
 
 NO HTTP LIBRARY IS IMPORTED AT MODULE SCOPE. Every network call goes through a
 `post` callable the caller may replace, and the default imports `httpx` when
@@ -78,7 +87,9 @@ class Preset:
     writes, upper-case because `/model` upper-cases what it is given.
     `default_model` is switched to after connecting when it is set, and left
     alone when it is not -- a guessed model name is a 404 on the first turn.
-    `sign_in` names the OAuth flow, or None where only a pasted key works.
+    `sign_in` names the OAuth flow, or None where only a pasted key works;
+    `modelscope`'s is completed by a hosted bridge, so it is offered only
+    where the session's bridge says it can (security/hosted.py).
     """
 
     name: str
@@ -105,6 +116,7 @@ PRESETS: dict[str, Preset] = {p.name: p for p in (
            sign_in="openrouter", key_url="https://openrouter.ai/keys"),
     Preset("modelscope", "MODELSCOPE", "ModelScope API-Inference (modelscope.ai)",
            "https://api-inference.modelscope.ai/v1", True, False,
+           sign_in="modelscope",
            key_url="https://www.modelscope.ai/my/myaccesstoken"),
     Preset("modelscope-cn", "MODELSCOPE_CN",
            "ModelScope API-Inference (modelscope.cn)",

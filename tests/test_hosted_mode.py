@@ -416,3 +416,279 @@ class TestALocalInstallIsUnchanged:
         assert not persist and not paste
         assert "never written" in where
 
+
+# ---------------------------------------------------------------------------
+# HD13: ModelScope's sign-in, which the session's bridge completes
+# ---------------------------------------------------------------------------
+
+FAKE_MS_TOKEN = "ms_oauth_" + "7c1e" * 10
+CONSENT = "https://www.modelscope.ai/oauth/authorize?client_id=c&state=s"
+REVOKE = "https://www.modelscope.ai/my/settings/apps"
+
+
+@pytest.fixture
+def offered(monkeypatch):
+    monkeypatch.setattr(hosted, "BRIDGE_SIGN_INS", frozenset({"modelscope"}))
+
+
+@pytest.fixture
+def bridge(mocker):
+    """What the session sends its bridge, recorded; the bridge's answers
+    are posted by each test the way the driver would post them."""
+    sent = []
+    mocker.patch("tui.hosted_driver.send_to_bridge",
+                 side_effect=lambda app, meta: sent.append(meta) or True)
+    return sent
+
+
+@pytest.fixture
+def opened(mocker):
+    from tui.widgets import Transcript
+
+    urls = []
+    mocker.patch.object(Transcript, "open_url",
+                        lambda self, url: urls.append(url))
+    return urls
+
+
+class TestTheBridgeOffersASignIn:
+    @pytest.mark.parametrize("mode, raw, expected", [
+        (hosted.SHARED, "modelscope", {"modelscope"}),
+        (hosted.SINGLE_USER, " ModelScope ,nonsense", {"modelscope"}),
+        (hosted.SHARED, "", set()),
+        (hosted.OFF, "modelscope", set()),
+    ])
+    def test_only_a_hosted_session_takes_it_and_only_known_names(
+            self, monkeypatch, mode, raw, expected):
+        """A local install has no bridge to finish the sign-in, whatever
+        its environment says."""
+        monkeypatch.setattr(hosted, "MODE", mode)
+        monkeypatch.setenv("VENASTINE_BRIDGE_SIGN_IN", raw)
+        assert hosted._bridge_sign_ins_from_env() == expected
+
+    def test_a_dotenv_cannot_set_it(self, tmp_path, monkeypatch):
+        import env_secrets
+
+        (tmp_path / ".env").write_text("VENASTINE_BRIDGE_SIGN_IN=modelscope\n",
+                                       encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("VENASTINE_BRIDGE_SIGN_IN", raising=False)
+        monkeypatch.delenv("AGENT_ENV_FILE", raising=False)
+        monkeypatch.setattr(hosted, "MODE", hosted.SHARED)
+        assert hosted._bridge_sign_ins_from_env() == frozenset()
+        assert not env_secrets.get_env_secret("VENASTINE_BRIDGE_SIGN_IN",
+                                              required=False)
+
+
+class TestTheHostedDriver:
+    """The three packets tui/hosted_driver.py turns into app messages."""
+
+    @pytest.mark.parametrize("packet, payload, kind", [
+        ("venastine_sign_in_url", {"id": "r", "url": CONSENT}, "BridgeSignInUrl"),
+        ("venastine_credential", {"id": "r", "token": FAKE_MS_TOKEN},
+         "BridgeCredential"),
+        ("venastine_sign_in_failed", {"id": "r", "reason": "no", "retry": True},
+         "BridgeSignInFailed"),
+    ])
+    def test_each_of_the_bridges_packets_becomes_its_message(
+            self, packet, payload, kind):
+        from tui.hosted_driver import bridge_message
+
+        message = bridge_message(packet, payload)
+        assert type(message).__name__ == kind and message.request == "r"
+
+    @pytest.mark.parametrize("packet, payload", [
+        ("venastine_sign_in_url", {"url": CONSENT}),
+        ("venastine_sign_in_url", {"id": "r", "url": "javascript:alert(1)"}),
+        ("venastine_credential", {"id": "r", "token": ""}),
+        ("venastine_credential", {"id": 7, "token": FAKE_MS_TOKEN}),
+        ("resize", {"id": "r", "width": 80, "height": 24}),
+    ])
+    def test_anything_else_is_not_one_of_them(self, packet, payload):
+        from tui.hosted_driver import bridge_message
+
+        assert bridge_message(packet, payload) is None
+
+    def test_a_failure_retries_only_when_told_to_exactly(self):
+        from tui.hosted_driver import bridge_message
+
+        assert bridge_message("venastine_sign_in_failed",
+                              {"id": "r", "retry": "yes"}).retry is False
+
+    def test_the_driver_posts_ours_and_hands_the_rest_to_textual(self):
+        from textual import events
+
+        from tui.hosted_driver import BridgeCredential, HostedWebDriver
+
+        posted = []
+        driver = HostedWebDriver.__new__(HostedWebDriver)
+        driver._app = SimpleNamespace(post_message=posted.append)
+        driver.on_meta("venastine_credential", {"id": "r",
+                                                "token": FAKE_MS_TOKEN})
+        driver.on_meta("focus", {"type": "focus"})
+        assert isinstance(posted[0], BridgeCredential)
+        assert isinstance(posted[1], events.AppFocus)
+
+    def test_sending_needs_the_hosted_driver(self):
+        from tui import hosted_driver
+
+        written = []
+        driver = hosted_driver.HostedWebDriver.__new__(
+            hosted_driver.HostedWebDriver)
+        driver.write_meta = written.append
+        assert hosted_driver.send_to_bridge(SimpleNamespace(_driver=driver),
+                                            {"type": "x"}) is True
+        assert written == [{"type": "x"}]
+        assert hosted_driver.send_to_bridge(SimpleNamespace(_driver=object()),
+                                            {"type": "x"}) is False
+
+
+class TestTheModelScopeSignInTui:
+    @pytest.mark.asyncio
+    async def test_a_shared_demo_whose_bridge_offers_it_says_so(
+            self, shared, offered, providers_file):
+        from tui.app import VenastineApp, _cmd_connect, _connect_rows
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test():
+            banner = app._transcript.as_text()
+            _cmd_connect(app, "")
+            listed = app._transcript.as_text()
+        assert "/connect modelscope" in banner and REVOKE in banner
+        assert "ModelScope API-Inference (modelscope.ai) — sign in" in listed
+        assert "connect modelscope" in {row.name for row in _connect_rows("")}
+
+    @pytest.mark.asyncio
+    async def test_without_the_offer_a_shared_demo_refuses_it_as_a_key(
+            self, shared, providers_file, bridge):
+        from tui.app import VenastineApp, _cmd_connect
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test():
+            _cmd_connect(app, "modelscope")
+            text = app._transcript.as_text()
+        assert "does not take pasted keys" in text
+        assert bridge == []
+
+    @pytest.mark.asyncio
+    async def test_the_bridge_signs_in_and_the_token_stays_in_memory(
+            self, shared, offered, providers_file, bridge, opened):
+        from tui.app import VenastineApp, _cmd_connect
+        from tui.hosted_driver import BridgeCredential, BridgeSignInUrl
+        from tui.screens import SecretScreen
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            _cmd_connect(app, "modelscope")
+            request = app._connect_wait.request
+            assert bridge == [{"type": "venastine_sign_in",
+                               "provider": "modelscope", "id": request}]
+            app.post_message(BridgeSignInUrl(request, CONSENT))
+            assert await settle(pilot, lambda: isinstance(app.screen,
+                                                          SecretScreen))
+            app.screen.dismiss("  handle-1 ")
+            assert await settle(pilot, lambda: len(bridge) == 2)
+            # An answer about any other sign-in connects nothing.
+            app.post_message(BridgeCredential("another", FAKE_MS_TOKEN))
+            await pilot.pause()
+            assert app._connect_wait is not None
+            app.post_message(BridgeCredential(request, FAKE_MS_TOKEN))
+            assert await settle(pilot, lambda: app._connect_wait is None)
+            text = app._transcript.as_text()
+        assert bridge[1] == {"type": "venastine_sign_in_code", "id": request,
+                             "code": "handle-1"}
+        assert opened == [CONSENT]
+        assert "Sign in to ModelScope" in text and REVOKE in text
+        assert "Connected ModelScope API-Inference (modelscope.ai) as " \
+               "MODELSCOPE (kept in this session only)" in text
+        assert credentials.load_provider_data()["MODELSCOPE"]["API_KEY"] \
+            == FAKE_MS_TOKEN
+        assert not providers_file.exists()
+        assert FAKE_MS_TOKEN not in text
+
+    @pytest.mark.asyncio
+    async def test_a_wrong_code_is_asked_again_until_the_bridge_stops(
+            self, shared, offered, providers_file, bridge, opened):
+        from tui.app import VenastineApp, _cmd_connect
+        from tui.hosted_driver import BridgeSignInFailed, BridgeSignInUrl
+        from tui.screens import SecretScreen
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            _cmd_connect(app, "modelscope")
+            request = app._connect_wait.request
+            app.post_message(BridgeSignInUrl(request, CONSENT))
+            assert await settle(pilot, lambda: isinstance(app.screen,
+                                                          SecretScreen))
+            app.screen.dismiss("wrong")
+            assert await settle(pilot, lambda: not isinstance(app.screen,
+                                                              SecretScreen))
+            app.post_message(BridgeSignInFailed(request, "Not that one.", True))
+            assert await settle(pilot, lambda: isinstance(app.screen,
+                                                          SecretScreen))
+            app.screen.dismiss("wrong again")
+            assert await settle(pilot, lambda: len(bridge) == 3)
+            app.post_message(BridgeSignInFailed(request, "Stopped.", False))
+            assert await settle(pilot, lambda: app._connect_wait is None)
+            text = app._transcript.as_text()
+        assert "Not that one." in text and "Stopped." in text
+        assert "MODELSCOPE" not in credentials.load_provider_data()
+
+    @pytest.mark.asyncio
+    async def test_cancelling_tells_the_bridge(self, shared, offered,
+                                               providers_file, bridge, opened):
+        from tui.app import VenastineApp, _cmd_connect
+        from tui.hosted_driver import BridgeSignInUrl
+        from tui.screens import SecretScreen
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            _cmd_connect(app, "modelscope")
+            first = app._connect_wait.request
+            _cmd_connect(app, "cancel")
+            _cmd_connect(app, "modelscope")
+            second = app._connect_wait.request
+            app.post_message(BridgeSignInUrl(second, CONSENT))
+            assert await settle(pilot, lambda: isinstance(app.screen,
+                                                          SecretScreen))
+            app.screen.dismiss(None)
+            assert await settle(
+                pilot, lambda: "Nothing was connected." in app._transcript.as_text())
+        assert {"type": "venastine_sign_in_cancel", "id": first} in bridge
+        assert bridge[-1] == {"type": "venastine_sign_in_cancel", "id": second}
+        assert app._connect_wait is None
+
+    @pytest.mark.asyncio
+    async def test_a_bridge_that_never_answers_ends_the_wait(
+            self, shared, offered, providers_file, bridge, opened, monkeypatch):
+        import tui.app as tui_app
+        from tui.hosted_driver import BridgeSignInUrl
+        from tui.screens import SecretScreen
+
+        monkeypatch.setattr(tui_app, "_BRIDGE_ANSWER_S", 0.2)
+        app = tui_app.VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            tui_app._cmd_connect(app, "modelscope")
+            request = app._connect_wait.request
+            app.post_message(BridgeSignInUrl(request, CONSENT))
+            assert await settle(pilot, lambda: isinstance(app.screen,
+                                                          SecretScreen))
+            app.screen.dismiss("handle-1")
+            assert await settle(pilot, lambda: app._connect_wait is None)
+            text = app._transcript.as_text()
+        assert "did not answer within a minute" in text
+        assert bridge[-1] == {"type": "venastine_sign_in_cancel", "id": request}
+
+    @pytest.mark.asyncio
+    async def test_with_no_bridge_under_it_it_says_so(self, shared, offered,
+                                                     providers_file):
+        """The real send_to_bridge: a test app runs no hosted driver."""
+        from tui.app import VenastineApp, _cmd_connect
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test():
+            _cmd_connect(app, "modelscope")
+            text = app._transcript.as_text()
+        assert "not running under one" in text
+        assert app._connect_wait is None
+

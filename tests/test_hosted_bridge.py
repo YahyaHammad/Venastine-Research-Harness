@@ -1,12 +1,15 @@
 """
 test_hosted_bridge.py
 
-ROADMAP_v3 §79 (HD1-HD3, HD7-HD9, HD11): the bridge under deploy/hosted/ --
-the process a Space runs, which builds the sessions' environment, starts one
-harness per browser tab and relays it.
+ROADMAP_v3 §79 (HD1-HD3, HD7-HD9, HD11, HD13): the bridge under
+deploy/hosted/ -- the process a Space runs, which builds the sessions'
+environment, starts one harness per browser tab, relays it, and completes
+ModelScope's sign-in for it.
 
 Nothing here imports gradio or spaces: app.py is the only module that does,
-and everything it wires together is reachable without it. The relay is
+and everything it wires together is reachable without it -- its own tests
+give it a stand-in for `spaces` and never call the part that imports
+gradio. The relay is
 driven over a real pipe against tests/_bridge_child.py, a scripted stand-in
 for `main.py --tui` that speaks the same framing, so a session's whole life
 -- spawn, handshake, both directions, the tab closing, the directory going
@@ -28,9 +31,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from deploy.hosted import session_env, single_user, supervisor, web
+from deploy.hosted import session_env, sign_in, single_user, supervisor, web
+from deploy.hosted.sign_in import ModelScopeSignIn
 
 CHILD = Path(__file__).resolve().parent / "_bridge_child.py"
+
+# Runtime-assembled fakes, for test_connect.py's reason.
+MS_SECRET = "ms-secret-" + "4f9a" * 6
+MS_TOKEN = "ms_oauth_" + "7c1e" * 10
 
 
 def _lock(tmp_path: Path, text: str = "x==1 --hash=sha256:00\n") -> Path:
@@ -384,10 +392,13 @@ class TestTheChildsEnvironment:
                 "SPACE_ID": "a/b", "SPACE_HOST": "x.hf.space",
                 "VENASTINE_PROVIDERS_JSON": "{}", "OPENAI_API_KEY": "sk",
                 "AWS_SECRET_ACCESS_KEY": "a", "PYTHONPATH": "/evil",
-                "VENASTINE_SINGLE_USER": "1", "VENASTINE_CONFINEMENT": "verified"}
+                "VENASTINE_SINGLE_USER": "1", "VENASTINE_CONFINEMENT": "verified",
+                sign_in.SECRET_ENV: MS_SECRET, sign_in.CLIENT_ID_ENV: "c",
+                "VENASTINE_BRIDGE_SIGN_IN": "modelscope"}
         env = supervisor.session_environment(
             base, supervisor.SessionPaths.under(tmp_path), "shared")
         assert set(env) & set(base) == {"PATH"}
+        assert MS_SECRET not in env.values()
         assert "PYTHONPATH" not in env
         assert env["VENASTINE_HOSTED"] == "shared"
         for name in ("HOME", "TMPDIR", "APP_DB_PATH", "AGENT_LOG_FILE",
@@ -395,6 +406,27 @@ class TestTheChildsEnvironment:
                      "AGENT_PROVIDERS_FILE", "AGENT_SECRETS_FILE",
                      "AGENT_ENV_FILE"):
             assert Path(env[name]).is_relative_to(tmp_path), name
+
+    def test_it_runs_the_hosted_driver_and_names_only_the_offer(self, tmp_path):
+        """HD13: the session learns WHICH sign-in its bridge completes,
+        never what the bridge needs to complete it."""
+        paths = supervisor.SessionPaths.under(tmp_path)
+        plain = supervisor.session_environment({}, paths, "shared")
+        offered = supervisor.session_environment({}, paths, "shared",
+                                                 sign_ins="modelscope")
+        assert plain["TEXTUAL_DRIVER"] == "tui.hosted_driver:HostedWebDriver"
+        assert "VENASTINE_BRIDGE_SIGN_IN" not in plain
+        assert offered["VENASTINE_BRIDGE_SIGN_IN"] == "modelscope"
+        assert set(offered) - set(plain) == {"VENASTINE_BRIDGE_SIGN_IN"}
+
+    def test_the_driver_it_names_is_importable_and_a_web_driver(self):
+        import importlib
+
+        from textual.drivers.web_driver import WebDriver
+
+        module, _, name = supervisor.HOSTED_DRIVER.partition(":")
+        assert issubclass(getattr(importlib.import_module(module), name),
+                          WebDriver)
 
     def test_the_session_directories_are_private(self, tmp_path):
         paths = supervisor.SessionPaths.under(tmp_path / "s")
@@ -678,3 +710,258 @@ class TestTheRoutes:
             assert unlocked == []
         else:
             assert unlocked == [1], "config.yaml is unlocked once, not per tab"
+
+
+# ---------------------------------------------------------------------------
+# HD13: ModelScope's sign-in, completed by the bridge
+# ---------------------------------------------------------------------------
+
+class _Transport:
+    def __init__(self, *answers) -> None:
+        self.answers = list(answers)
+        self.requests: list = []
+
+    def __call__(self, url, body):
+        self.requests.append((url, dict(body)))
+        return self.answers.pop(0)
+
+
+_GRANTED = (200, {"access_token": MS_TOKEN, "scope": "openid api-inference",
+                  "expires_in": 86400})
+
+
+def _flow(*answers, redirect="http://testserver/oauth/modelscope/callback"):
+    transport = _Transport(*answers)
+    return ModelScopeSignIn("client-1", MS_SECRET, redirect,
+                            post=transport), transport
+
+
+def _state(url: str) -> str:
+    from urllib.parse import parse_qs, urlsplit
+
+    return parse_qs(urlsplit(url).query)["state"][0]
+
+
+class TestASessionsSignInRequests:
+    """Session._on_meta's half, with no process behind it: what each
+    packet asks, and that every flow is keyed by the session's own id."""
+
+    def _session(self, tmp_path, flow, name="s"):
+        sup = _supervisor(tmp_path)
+        sup.sign_in = flow
+        session = supervisor.Session(
+            sup, supervisor.SessionPaths.under(tmp_path / name), keep_dir=True)
+        session.sent = []
+
+        async def send_meta(meta):
+            session.sent.append(meta)
+
+        session.send_meta = send_meta
+        return session
+
+    @staticmethod
+    async def _meta(session, meta):
+        return await session._on_meta(None, json.dumps(meta).encode())
+
+    @pytest.mark.asyncio
+    async def test_without_a_sign_in_the_answer_says_so(self, tmp_path):
+        session = self._session(tmp_path, None)
+        assert await self._meta(session, {"type": "venastine_sign_in",
+                                          "id": "r1"}) is False
+        assert session.sent == [{
+            "type": "venastine_sign_in_failed", "id": "r1", "retry": False,
+            "reason": "ModelScope sign-in is not set up on this deployment."}]
+
+    @pytest.mark.asyncio
+    async def test_a_start_answers_with_the_consent_page(self, tmp_path):
+        flow, _ = _flow()
+        session = self._session(tmp_path, flow)
+        await self._meta(session, {"type": "venastine_sign_in", "id": "r1",
+                                   "provider": "modelscope"})
+        (answer,) = session.sent
+        assert answer["type"] == "venastine_sign_in_url"
+        assert answer["id"] == "r1"
+        assert answer["url"].startswith(sign_in.AUTHORIZE_URL)
+        assert flow._by_session[session.id].state == _state(answer["url"])
+
+    @pytest.mark.asyncio
+    async def test_the_code_is_traded_and_the_token_goes_back(self, tmp_path):
+        flow, transport = _flow(_GRANTED)
+        session = self._session(tmp_path, flow)
+        await self._meta(session, {"type": "venastine_sign_in", "id": "r1"})
+        page = flow.callback({"code": "code-C",
+                              "state": _state(session.sent[0]["url"])})
+        await self._meta(session, {"type": "venastine_sign_in_code",
+                                   "id": "r1", "code": page.handle})
+        await session._exchange
+        assert session.sent[-1] == {"type": "venastine_credential",
+                                    "id": "r1", "token": MS_TOKEN}
+        assert transport.requests[0][1]["code"] == "code-C"
+
+    @pytest.mark.asyncio
+    async def test_another_sessions_handle_is_refused(self, tmp_path):
+        flow, transport = _flow(_GRANTED)
+        owner = self._session(tmp_path, flow, "a")
+        other = self._session(tmp_path, flow, "b")
+        await self._meta(owner, {"type": "venastine_sign_in", "id": "r1"})
+        page = flow.callback({"code": "code-C",
+                              "state": _state(owner.sent[0]["url"])})
+        await self._meta(other, {"type": "venastine_sign_in_code",
+                                 "id": "r9", "code": page.handle})
+        assert other.sent[-1]["type"] == "venastine_sign_in_failed"
+        assert other._exchange is None and transport.requests == []
+
+    @pytest.mark.asyncio
+    async def test_a_refused_trade_is_reported_by_its_code(self, tmp_path,
+                                                           caplog):
+        caplog.set_level(logging.INFO, logger="deploy.hosted.supervisor")
+        flow, _ = _flow((200, {"error": "invalid_grant"}))
+        session = self._session(tmp_path, flow)
+        await self._meta(session, {"type": "venastine_sign_in", "id": "r1"})
+        page = flow.callback({"code": "c",
+                              "state": _state(session.sent[0]["url"])})
+        await self._meta(session, {"type": "venastine_sign_in_code",
+                                   "id": "r1", "code": page.handle})
+        await session._exchange
+        assert session.sent[-1]["type"] == "venastine_sign_in_failed"
+        assert "invalid_grant" in session.sent[-1]["reason"]
+        # The operator sees why, by the code alone.
+        assert f"session {session.id} did not finish" in caplog.text
+        assert "invalid_grant" in caplog.text
+        assert page.handle not in caplog.text and MS_SECRET not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_cancel_and_stop_both_drop_the_flow(self, tmp_path):
+        flow, _ = _flow()
+        session = self._session(tmp_path, flow)
+        await self._meta(session, {"type": "venastine_sign_in", "id": "r1"})
+        await self._meta(session, {"type": "venastine_sign_in_cancel",
+                                   "id": "r1"})
+        assert session.id not in flow._by_session
+        await self._meta(session, {"type": "venastine_sign_in", "id": "r2"})
+        await session.stop()
+        assert session.id not in flow._by_session
+
+
+class TestTheModelScopeCallback:
+    def _client(self, bridge):
+        from starlette.applications import Starlette
+        from starlette.testclient import TestClient
+
+        return TestClient(Starlette(routes=bridge.routes()))
+
+    def test_a_deployment_without_it_has_no_such_page(self, tmp_path):
+        bridge = web.Bridge(_supervisor(tmp_path))
+        with self._client(bridge) as client:
+            assert client.get(sign_in.CALLBACK_PATH).status_code == 404
+
+    def test_a_forged_state_is_refused_without_repeating_it(self, tmp_path):
+        bridge = web.Bridge(_supervisor(tmp_path))
+        bridge.supervisor.sign_in, _ = _flow()
+        with self._client(bridge) as client:
+            page = client.get(sign_in.CALLBACK_PATH,
+                              params={"state": "<b>forged</b>", "code": "x"})
+        assert page.status_code == 400
+        assert "forged" not in page.text and "$" not in page.text
+        assert page.headers["cache-control"] == "no-store"
+
+    def test_the_callbacks_from_one_address_are_limited(self, tmp_path):
+        bridge = web.Bridge(_supervisor(tmp_path))
+        bridge.supervisor.sign_in, _ = _flow()
+        with self._client(bridge) as client:
+            codes = [client.get(sign_in.CALLBACK_PATH).status_code
+                     for _ in range(web.SIGN_IN_CALLBACKS_PER_MINUTE + 1)]
+        assert codes[:-1] == [400] * web.SIGN_IN_CALLBACKS_PER_MINUTE
+        assert codes[-1] == 429
+
+    def test_end_to_end_over_a_real_session(self, tmp_path):
+        """The whole round, through the routes and a real pipe: the session
+        asks, the bridge answers with the consent page, ModelScope's
+        redirect gets a handle, the handle typed into the terminal comes
+        back to the bridge, and the token goes to that session alone."""
+        flow, transport = _flow(_GRANTED)
+        bridge = web.Bridge(_supervisor(tmp_path, "sign-in"))
+        bridge.supervisor.sign_in = flow
+        with self._client(bridge) as client:
+            ticket = re.search(r'data-ticket="([^"]+)"',
+                               client.get("/terminal").text).group(1)
+            with client.websocket_connect(
+                    f"/ws/{ticket}", headers={"origin": "http://testserver"}) as ws:
+                screen = b""
+                while b"venastine_sign_in_url:" not in screen:
+                    screen += ws.receive().get("bytes") or b""
+                answer = json.loads(re.search(
+                    rb"venastine_sign_in_url:(\{.*?\})\|", screen).group(1))
+                assert answer["id"] == "req-1"
+
+                page = client.get(sign_in.CALLBACK_PATH, params={
+                    "code": "code-C", "state": _state(answer["url"])})
+                assert page.status_code == 200
+                csp = page.headers["content-security-policy"]
+                assert "default-src 'none'" in csp
+                assert "frame-ancestors 'none'" in csp
+                assert page.headers["referrer-policy"] == "no-referrer"
+                assert page.headers["cache-control"] == "no-store"
+                assert "code-C" not in page.text
+                handle = re.search(r'<p class="handle">([^<]+)</p>',
+                                   page.text).group(1)
+
+                ws.send_text(json.dumps(["stdin", f"code:{handle}"]))
+                while b"venastine_credential:" not in screen:
+                    screen += ws.receive().get("bytes") or b""
+                credential = json.loads(re.search(
+                    rb"venastine_credential:(\{.*?\})\|", screen).group(1))
+            # TestTheRoutes.test_end_to_end's reason: the shielded stop has
+            # to finish while the client's loop still runs.
+            deadline = time.monotonic() + 30
+            while bridge.supervisor.sessions and time.monotonic() < deadline:
+                time.sleep(0.05)
+        assert bridge.supervisor.sessions == {}
+        assert credential == {"id": "req-1", "token": MS_TOKEN}
+        (url, body), = transport.requests
+        assert url == sign_in.TOKEN_URL
+        assert body["code"] == "code-C" and body["client_secret"] == MS_SECRET
+        assert body["redirect_uri"] == flow.redirect_uri
+
+
+class TestTheBridgeKeepsItsSecret:
+    """app.py's part (HD13): the secret leaves the environment before
+    anything can inherit it, and the bridge makes itself non-dumpable."""
+
+    @pytest.fixture
+    def app_module(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "spaces", SimpleNamespace(
+            GPU=lambda **kw: (lambda function: function)))
+        from deploy.hosted import app
+
+        return app
+
+    def test_taking_it_removes_it(self, app_module):
+        environ = {sign_in.SECRET_ENV: f" {MS_SECRET}\n", "PATH": "/bin"}
+        assert app_module.take_secret(environ) == MS_SECRET
+        assert environ == {"PATH": "/bin"}
+
+    def test_main_takes_it_first_and_hands_it_to_the_bridge(
+            self, app_module, monkeypatch, tmp_path):
+        import security.hosted
+        from deploy.hosted import isolation_report
+
+        events = []
+        monkeypatch.setenv(sign_in.SECRET_ENV, MS_SECRET)
+        monkeypatch.setattr(security.hosted, "make_undumpable", lambda: events.append(
+            ("undumpable", sign_in.SECRET_ENV in os.environ)) or True)
+        monkeypatch.setattr(session_env, "LOCK", tmp_path / "absent.lock")
+        monkeypatch.setattr(isolation_report, "log", lambda *a: events.append(
+            ("report", sign_in.SECRET_ENV in os.environ)))
+        monkeypatch.setattr(isolation_report, "verify_confinement",
+                            lambda *a: "")
+
+        def build(python, confinement, secret):
+            events.append(("build", secret))
+            return SimpleNamespace(launch=lambda **kw: events.append(("launch",)))
+
+        monkeypatch.setattr(app_module, "build", build)
+        app_module.main()
+        assert events == [("undumpable", False), ("report", False),
+                          ("build", MS_SECRET), ("launch",)]
+        assert sign_in.SECRET_ENV not in os.environ

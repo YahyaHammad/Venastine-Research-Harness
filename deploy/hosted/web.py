@@ -37,6 +37,7 @@ from typing import Optional
 from urllib.parse import urlsplit
 
 from deploy.hosted import single_user
+from deploy.hosted.sign_in import CALLBACK_PATH, ModelScopeSignIn
 from deploy.hosted.supervisor import (
     CapacityError,
     Limits,
@@ -55,6 +56,17 @@ _SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
 }
+
+# HD13. The page ModelScope's redirect gets carries a one-time handle: never
+# cached, never framed, and with nothing in it that could run or send.
+_SIGN_IN_HEADERS = {
+    **_SECURITY_HEADERS,
+    "Cache-Control": "no-store",
+    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; "
+                               "base-uri 'none'; form-action 'none'; "
+                               "frame-ancestors 'none'",
+}
+SIGN_IN_CALLBACKS_PER_MINUTE = 10
 
 # TEST-NET-2, RFC 5737: never a real client, so an entry in it is a probe's.
 _PROBE_NET = ipaddress.ip_network("198.51.100.0/24")
@@ -166,6 +178,7 @@ class Bridge:
         self._unlocked = False
         self._tickets: dict = {}
         self._issued: dict = {}
+        self._callbacks: dict = {}
         self._proxy_shapes_left = PROXY_SHAPES_LOGGED
 
     # -- the single-user gate ------------------------------------------------
@@ -190,14 +203,22 @@ class Bridge:
 
     # -- tickets -------------------------------------------------------------
 
-    def issue_ticket(self, client: str) -> Optional[str]:
+    @staticmethod
+    def _within_rate(book: dict, client: str, per_minute: int) -> bool:
+        """Count one request from `client` in `book`; False past the limit."""
         now = time.monotonic()
-        recent = [t for t in self._issued.get(client, []) if now - t < 60]
-        if len(recent) >= self.tickets_per_minute:
-            self._issued[client] = recent
-            return None
+        recent = [t for t in book.get(client, []) if now - t < 60]
+        if len(recent) >= per_minute:
+            book[client] = recent
+            return False
         recent.append(now)
-        self._issued[client] = recent
+        book[client] = recent
+        return True
+
+    def issue_ticket(self, client: str) -> Optional[str]:
+        if not self._within_rate(self._issued, client, self.tickets_per_minute):
+            return None
+        now = time.monotonic()
         self._tickets = {t: at for t, at in self._tickets.items()
                          if now - at < TICKET_TTL_S}
         ticket = secrets.token_urlsafe(24)
@@ -234,6 +255,7 @@ class Bridge:
             Route("/terminal", self.terminal, methods=["GET"]),
             Route("/healthz", self.healthz, methods=["GET"]),
             Route("/download/{key}", self.download, methods=["GET"]),
+            Route(CALLBACK_PATH, self.sign_in_callback, methods=["GET"]),
             WebSocketRoute("/ws/{ticket}", self.websocket),
         ]
         if self.static_dir is not None:
@@ -347,6 +369,29 @@ class Bridge:
         return self._html(_page("terminal.html", ticket=ticket,
                                 static=STATIC_PREFIX, build=self.build))
 
+    async def sign_in_callback(self, request):
+        """Where ModelScope sends the person back after its consent page
+        (HD13). The page shows a handle to paste, or why there is none; it
+        never repeats anything the request carried."""
+        from starlette.responses import HTMLResponse, Response
+
+        sign_in = self.supervisor.sign_in
+        if sign_in is None:
+            return Response("Not found", status_code=404)
+        if not self._within_rate(self._callbacks, self._client(request),
+                                 SIGN_IN_CALLBACKS_PER_MINUTE):
+            title, text, handle, status = (
+                "Too many sign-ins from here",
+                "Wait a minute, then run /connect modelscope again.", "", 429)
+        else:
+            page = sign_in.callback(request.query_params)
+            title, text, handle, status = (page.title, page.text,
+                                           page.handle or "", page.status)
+        return HTMLResponse(
+            _page("sign_in.html", title=title, text=text, handle=handle,
+                  build=self.build),
+            status_code=status, headers=_SIGN_IN_HEADERS)
+
     async def healthz(self, request):
         from starlette.responses import JSONResponse
 
@@ -405,11 +450,14 @@ def _static_dir() -> Optional[Path]:
 
 def build_bridge(env=None, root: Optional[Path] = None,
                  python: Optional[Path] = None,
-                 confinement: str = "") -> Bridge:
+                 confinement: str = "",
+                 modelscope_secret: Optional[str] = None) -> Bridge:
     """The bridge a deployment runs, configured from its environment.
     `python` is the interpreter sessions run on (session_env.py); None
     means this one. `confinement` is the math tools' self-test verdict,
-    handed to every session (HD11)."""
+    handed to every session (HD11). `modelscope_secret` is the ModelScope
+    app's client secret, which app.py has already taken out of the
+    environment (HD13)."""
     env = os.environ if env is None else env
     root = root or Path(__file__).resolve().parents[2]
     command = [str(python), str(root / "main.py"), "--tui"] if python else None
@@ -428,6 +476,7 @@ def build_bridge(env=None, root: Optional[Path] = None,
         command=command,
         providers_seed=env.get("VENASTINE_PROVIDERS_JSON") if requested else None,
         confinement=confinement,
+        sign_in=ModelScopeSignIn.from_env(env, modelscope_secret),
     )
     hosts = [env.get("SPACE_HOST", "")]
     if url:

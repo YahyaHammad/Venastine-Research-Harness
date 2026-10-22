@@ -25928,3 +25928,119 @@ count check holds at 62 pairs, none grown; pip-audit is clean for all three
 dependency files; gitleaks, run as CI runs it, is clean. The Space's own
 install line and the ModelScope bridge lock both resolve with
 `websockets==17.3`.
+
+## Batch 167 -- ModelScope's sign-in, completed by the bridge (2026-10-22)
+
+### What was built
+
+ROADMAP_v3 §79's fifth slice (HD5 and HD6 amended; HD13, new), on
+`hosted-demo`, planned with the owner before any of it was written. The
+owner, opening ModelScope's form for registering an OAuth app, found the
+scope this needed, `api-inference`, which ModelScope's published metadata
+leaves out; the owner chose how the token reaches a session, and that both
+platforms offer it.
+
+- `deploy/hosted/sign_in.py`: ModelScope's authorization-code flow, completed
+  by the bridge with the app's client secret. One flow per session; a 256-bit
+  state bound to it for ten minutes and spent at its first use; a callback
+  page that shows a one-time handle and repeats nothing it was sent; a handle
+  redeemed only by the session that started the flow, five tries at most; an
+  exchange that refuses an `error` in an HTTP 200 and a token without
+  `api-inference`, and drops the refresh and id tokens. The public client id
+  is a constant there, `VENASTINE_MODELSCOPE_CLIENT_ID` for a fork's own app.
+- `deploy/hosted/supervisor.py`: a session's three requests to it (start,
+  the pasted handle, cancel), every flow keyed by the session's own id; the
+  exchange in a thread inside a task, so neither this session's screen nor
+  any other session waits on ModelScope. Sessions run under
+  `tui/hosted_driver.py`'s driver and are told `VENASTINE_BRIDGE_SIGN_IN` --
+  the name of the offer, never the secret.
+- `deploy/hosted/web.py`: `GET /oauth/modelscope/callback`, rate-limited per
+  address with the ticket limiter's counting, served `no-store`,
+  `no-referrer` and under a CSP that lets nothing run or frame it, from a new
+  `sign_in.html`.
+- `deploy/hosted/app.py`: `main()` takes `VENASTINE_MODELSCOPE_CLIENT_SECRET`
+  out of the environment before anything starts, then makes the bridge
+  non-dumpable.
+- `tui/hosted_driver.py`: Textual's web driver plus the bridge's three answer
+  packets, turned into app messages. `security/hosted.py` binds the offer at
+  import and honours it only in a hosted session. `core/connect.py`: the
+  `modelscope` preset signs in, and the module's ruling names a third
+  provider. `tui/app.py`: `/connect modelscope` through the bridge where it is
+  offered -- an answer for any request but the one waiting ignored, a wrong
+  handle asked again while the bridge allows it, a cancel and a minute of
+  silence both telling the bridge to drop the flow -- and a pasted key
+  everywhere else, as before; the revoke page is ModelScope's own "OAuth
+  connected apps" route.
+
+### What reading found
+
+- **ModelScope's discovery document** (`/.well-known/openid-configuration`
+  on modelscope.ai) lists the authorization-code grant and nothing else, and
+  a token endpoint that authenticates the app only by `client_secret_basic`
+  or `client_secret_post` -- so the secret is mandatory and the sign-in is
+  hosted-only. Its `oauth-protected-resource` document lists four scopes and
+  not `api-inference`; the app form offers it.
+- **The redirect URL is where the code arrives**, so it is a route of ours on
+  each app host, `/oauth/modelscope/callback` -- not the Studio's page on
+  modelscope.ai, which is ModelScope's own and would receive the code
+  instead. Gradio reserves `/login/*` and `/logout`, not `/oauth/*`.
+- **Where a user revokes an app** is ModelScope's route `/my/settings/apps`,
+  labelled "OAuth互联应用" in its page bundle; the docs page itself renders
+  only in a browser, and the browser pane is not allowed either ModelScope
+  host.
+- **The Space, redeployed with batch 166** at the owner's go-ahead: no
+  analytics call in its start-up log, Gradio's MCP server not started,
+  confinement verified (Landlock ABI 7), and a full session through to the
+  Hugging Face device code.
+
+### Delivery: copied, not delivered (HD13)
+
+Delivering the token straight to the session that started the sign-in would
+save one paste. It would also let anyone start a sign-in, send the consent
+link to someone else, and receive that person's token in their own session
+when they approved -- ModelScope's consent page would show this project's
+real app, so nothing would look wrong. A cookie binding the approving browser
+to the session would stop that, but the Space is embedded in huggingface.co,
+where Safari and Firefox partition the cookie away from the tab the sign-in
+opens. The owner chose the copy: the callback shows a handle only the
+starting session can redeem, so a forwarded link leaves its approver with a
+code they have nowhere to paste. Hugging Face's device code flow has the
+remote-phishing exposure RFC 8628 §5.4 describes; SECURITY.md says so, and
+changing it is the owner's call.
+
+### What the gates caught
+
+- **Bandit flagged three empty-string defaults on secret-named parameters**
+  (B107: `build`, `build_bridge` and `from_env`). They default to `None` now
+  rather than being baselined; the count check holds at 62 pairs.
+- **The new end-to-end test left a pipe open on Windows.** It closed its
+  client before the shielded stop had finished the session; it now waits
+  inside the client, the way `TestTheRoutes.test_end_to_end` already did.
+- **The local container showed a refused trade nowhere but the visitor's
+  screen.** The bridge now logs it, by ModelScope's error code alone, and a
+  test holds the line free of the handle and the secret.
+
+### Verification
+
+`python -m pytest -q` is green on Windows: 7726 passed, 64 skipped -- 7790,
+the count the three documents state. The changed suites, the doc gates and
+the bundle tests pass again with `AGENT_WORKSPACE` unset (347 passed, 7
+skipped). Under WSL, from a Linux-filesystem export, the suite fails the same
+five causes as batch 166 (six tests, one counted per platform) and nothing
+else. Eighteen mutations, one per rule this batch added, were each killed.
+`ruff check .` is clean; bandit finds nothing new across 265 files and the
+count check holds at 62 pairs, none grown; pip-audit is clean for all three
+dependency files; gitleaks, run as CI runs it, is clean.
+
+The ModelScope bundle's real image ran locally with a made-up client id and
+secret. The bridge reported itself non-dumpable, and another root process in
+the container was refused its `/proc/1/environ`; the math self-test still
+passed beside it. A session under the hosted driver showed the offer and its
+revoke page and opened the consent URL with exactly `openid api-inference`,
+this deployment's callback and a 43-character state. A forged state, and the
+real one used twice, got 400. The callback page showed a 22-character handle
+and not the code, `no-store`, `no-referrer` and the CSP. A wrong handle was
+refused and asked for again, and the right one reached ModelScope's real
+token endpoint, which refused the made-up app (`invalid_grant`); the session
+showed that by its code, and the log named no secret, code or state. Not
+done yet: a real approval and a model turn, which wait on the owner's app.

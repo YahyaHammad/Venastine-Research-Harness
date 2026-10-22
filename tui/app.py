@@ -36,7 +36,7 @@ import threading
 from dataclasses import replace
 from pathlib import Path
 from time import monotonic, time
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -93,7 +93,7 @@ from skills.tui_commands import register_skill_commands
 from tools.base import OPENS_SESSION, OPENS_THREAD
 from tools.builtin import file_ops
 from tools.registry import registry as tool_registry
-from tui import diffs, history, meters, preferences, ravens, themes
+from tui import diffs, history, hosted_driver, meters, preferences, ravens, themes
 from tui.commands import SlashCommand
 from tui.commands import registry as commands
 from tui.screens import (
@@ -1771,6 +1771,41 @@ class VenastineApp(App):
             self._transcript.write_error(message.error)
             return
         _finish_connect(self, message.preset, message.credential)
+
+    # -- the bridge's ModelScope sign-in (HD13); each answer counts only
+    # for the sign-in this session is waiting for ---------------------------
+
+    def on_bridge_sign_in_url(self, message: hosted_driver.BridgeSignInUrl) -> None:
+        wait = self._connect_wait
+        if not isinstance(wait, _BridgeSignIn) or not wait.matches(message.request):
+            return
+        wait.url = message.url
+        self._transcript.write_system(
+            f"Sign in to ModelScope: {message.url} — after you approve, the "
+            f"page it returns to shows a code; paste it here. The token stays "
+            f"in this session, and you can revoke it at "
+            f"{_REVOKE_PAGES['modelscope']}.")
+        self._transcript.open_url(message.url)
+        _ask_modelscope_code(self, wait)
+
+    def on_bridge_credential(self, message: hosted_driver.BridgeCredential) -> None:
+        wait = self._connect_wait
+        if not isinstance(wait, _BridgeSignIn) or not wait.matches(message.request):
+            return
+        wait.stop_timer()
+        self._connect_wait = None
+        _finish_connect(self, wait.preset, message.token)
+
+    def on_bridge_sign_in_failed(self, message: hosted_driver.BridgeSignInFailed) -> None:
+        wait = self._connect_wait
+        if not isinstance(wait, _BridgeSignIn) or not wait.matches(message.request):
+            return
+        wait.stop_timer()
+        self._transcript.write_error(message.reason)
+        if message.retry and wait.url:
+            _ask_modelscope_code(self, wait)
+            return
+        self._connect_wait = None
 
     def on_effort_levels_ready(self, message: EffortLevelsReady) -> None:
         if message.validate_only:
@@ -7114,9 +7149,12 @@ def _connect_policy(app: "VenastineApp") -> tuple:
 def _signs_in_here(preset) -> bool:
     """Whether `/connect <name>` can sign in on this install, rather than
     only take a key: OpenRouter's PKCE needs no registered app, Hugging
-    Face's device code needs `hf_oauth_client_id`."""
+    Face's device code needs `hf_oauth_client_id`, and ModelScope's needs a
+    hosted bridge that holds its app's secret (HD13)."""
     if preset.sign_in == "huggingface":
         return bool(config.HF_OAUTH_CLIENT_ID)
+    if preset.sign_in == "modelscope":
+        return hosted.bridge_signs_in("modelscope")
     return preset.sign_in is not None
 
 
@@ -7129,6 +7167,9 @@ def _shared_offers() -> list:
 _REVOKE_PAGES = {
     "huggingface": "https://huggingface.co/settings/connected-applications",
     "openrouter": "https://openrouter.ai/keys",
+    # ModelScope's own route for it is labelled "OAuth互联应用" (OAuth
+    # connected apps), read from its page bundle 2026-10-22.
+    "modelscope": "https://www.modelscope.ai/my/settings/apps",
 }
 
 # Where a key for a provider with no sign-in CAN go (§79 HD12): a copy the
@@ -7284,7 +7325,13 @@ def _cmd_connect(app: "VenastineApp", args: str) -> None:
         err(f"Usage: /connect {preset.name} [--key]")
         return
 
-    if preset.sign_in and "--key" not in flags:
+    if preset.sign_in == "modelscope" and "--key" not in flags:
+        # Completed by the bridge, where there is one that can (HD13);
+        # everywhere else ModelScope is a pasted key, as it always was.
+        if _signs_in_here(preset):
+            _sign_in_modelscope(app, preset)
+            return
+    elif preset.sign_in and "--key" not in flags:
         if preset.sign_in == "openrouter":
             _sign_in_openrouter(app, preset)
             return
@@ -7405,6 +7452,92 @@ def _sign_in_huggingface(app: "VenastineApp", preset) -> None:
         app.post_message(ConnectFinished(preset, token, None))
 
     app.run_worker(work, thread=True, exit_on_error=False, name="connect")
+
+
+# How long the bridge may take to trade a pasted code for a token.
+_BRIDGE_ANSWER_S = 60
+
+
+class _BridgeSignIn:
+    """`_connect_wait` for a sign-in the bridge completes (HD13).
+
+    `request` is this sign-in's own id: the bridge echoes it, and an answer
+    carrying any other is ignored, so a packet about some earlier or other
+    sign-in can never connect a key. Setting it -- `/connect cancel`, the
+    app closing -- tells the bridge to drop the flow.
+    """
+
+    def __init__(self, app: "VenastineApp", preset) -> None:
+        self.app = app
+        self.preset = preset
+        self.request = uuid4().hex
+        self.url = ""
+        self.timer = None
+
+    def matches(self, request) -> bool:
+        return self.app._connect_wait is self and request == self.request
+
+    def stop_timer(self) -> None:
+        if self.timer is not None:
+            self.timer.stop()
+            self.timer = None
+
+    def set(self) -> None:
+        self.stop_timer()
+        try:
+            hosted_driver.send_to_bridge(self.app, {
+                "type": "venastine_sign_in_cancel", "id": self.request})
+        except OSError:
+            pass  # the bridge has gone; so has the flow
+
+
+def _sign_in_modelscope(app: "VenastineApp", preset) -> None:
+    """ModelScope's sign-in, which the bridge completes (HD13).
+
+    The bridge holds the app's client secret and makes the trade; this
+    session asks it to start, shows ModelScope's consent page, and hands
+    back the code the page after it showed. The token then comes from the
+    bridge straight into this process, kept exactly as a pasted one would
+    be (HD5).
+    """
+    wait = _BridgeSignIn(app, preset)
+    if not hosted_driver.send_to_bridge(app, {
+            "type": "venastine_sign_in", "provider": "modelscope",
+            "id": wait.request}):
+        app._transcript.write_error(
+            "ModelScope sign-in is completed by this deployment's bridge, "
+            "and this session is not running under one.")
+        return
+    app._connect_wait = wait
+
+
+def _ask_modelscope_code(app: "VenastineApp", wait: _BridgeSignIn) -> None:
+    def answered(code) -> None:
+        if app._connect_wait is not wait:
+            return
+        code = (code or "").strip()
+        if not code:
+            app.stop_connect_wait()
+            app._transcript.write_system("Nothing was connected.")
+            return
+        hosted_driver.send_to_bridge(app, {
+            "type": "venastine_sign_in_code", "id": wait.request,
+            "code": code})
+        wait.stop_timer()
+        wait.timer = app.set_timer(_BRIDGE_ANSWER_S,
+                                   lambda: _modelscope_unanswered(app, wait))
+
+    app.push_screen(SecretScreen(
+        "Paste the code the sign-in page showed you",
+        f"If no page opened: {wait.url}", confirm_label="Connect"), answered)
+
+
+def _modelscope_unanswered(app: "VenastineApp", wait: _BridgeSignIn) -> None:
+    if app._connect_wait is wait:
+        app.stop_connect_wait()
+        app._transcript.write_error(
+            "The sign-in did not answer within a minute, so nothing was "
+            "connected. Run /connect modelscope again.")
 
 
 def _finish_connect(app: "VenastineApp", preset, key: str) -> None:

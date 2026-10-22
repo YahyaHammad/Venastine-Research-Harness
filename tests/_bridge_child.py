@@ -8,6 +8,9 @@ packets each way (deploy/hosted/supervisor.py's docstring has the protocol).
 
     python tests/_bridge_child.py echo          -- answers, then quits on "quit"
     python tests/_bridge_child.py no-handshake  -- complains on stderr, exits
+    python tests/_bridge_child.py sign-in       -- echo, and asks the bridge for
+        a ModelScope sign-in (HD13): typing `code:<handle>` hands the handle
+        back, and each answer the bridge sends is printed as screen data
 
 The leading underscore keeps pytest from collecting it.
 """
@@ -44,6 +47,9 @@ def main(mode: str) -> int:
     out.write(_packet(b"D", b"hello"))
     out.write(_meta({"type": "open_url", "url": "javascript:alert(1)"}))
     out.write(_meta({"type": "open_url", "url": "https://example.org/x"}))
+    if mode == "sign-in":
+        out.write(_meta({"type": "venastine_sign_in", "provider": "modelscope",
+                         "id": "req-1"}))
     out.flush()
     stdin = sys.stdin.buffer
     while True:
@@ -53,7 +59,10 @@ def main(mode: str) -> int:
         except EOFError:
             return 0
         kind = header[:1]
-        if kind == b"D":
+        if kind == b"D" and mode == "sign-in" and payload.startswith(b"code:"):
+            out.write(_meta({"type": "venastine_sign_in_code", "id": "req-1",
+                             "code": payload[5:].decode()}))
+        elif kind == b"D":
             out.write(_packet(b"D", b"echo:" + payload))
         elif kind == b"M":
             meta = json.loads(payload)
@@ -61,6 +70,11 @@ def main(mode: str) -> int:
                 return 0
             if meta.get("type") == "resize":
                 out.write(_packet(b"D", f"size:{meta['width']}x{meta['height']}"
+                                  .encode()))
+            if str(meta.get("type", "")).startswith("venastine_"):
+                shown = {key: value for key, value in meta.items()
+                         if key != "type"}
+                out.write(_packet(b"D", f"{meta['type']}:{json.dumps(shown)}|"
                                   .encode()))
         out.flush()
 

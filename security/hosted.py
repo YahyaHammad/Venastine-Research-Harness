@@ -1,10 +1,10 @@
 """
 security/hosted.py
 
-ROADMAP_v3 §79 (HD4, HD6). What a hosted deployment changes inside the
+ROADMAP_v3 §79 (HD4, HD6, HD13). What a hosted deployment changes inside the
 harness, and nothing else: the mode it runs in, the tools a shared deployment
-refuses whatever `config.yaml` says, and the one hardening call a hosted
-session process makes about itself.
+refuses whatever `config.yaml` says, the sign-ins its bridge completes, and
+the hardening calls a hosted process makes about itself.
 
 THE MODE COMES FROM THE REAL ENVIRONMENT, ONCE, AT IMPORT. The web bridge
 (`deploy/hosted/`) starts every session's process with `VENASTINE_HOSTED`
@@ -71,6 +71,24 @@ MODE = _mode_from_env()
 # Bound at import for MODE's reason. Only a value the bridge set counts.
 CONFINEMENT = os.environ.get("VENASTINE_CONFINEMENT", "").strip()
 
+# HD13. The sign-ins the BRIDGE completes for this session -- today only
+# ModelScope's, whose app needs a client secret that only the bridge holds.
+# Bound at import for MODE's reason, and honoured only in a hosted session:
+# the bridge sets it when it can finish the sign-in, and a local install has
+# no bridge to finish it, however this variable reads.
+BRIDGE_SIGN_IN_NAMES = frozenset({"modelscope"})
+
+
+def _bridge_sign_ins_from_env() -> frozenset:
+    if MODE == OFF:
+        return frozenset()
+    raw = os.environ.get("VENASTINE_BRIDGE_SIGN_IN", "")
+    return frozenset(name.strip().lower() for name in raw.split(",")) \
+        & BRIDGE_SIGN_IN_NAMES
+
+
+BRIDGE_SIGN_INS = _bridge_sign_ins_from_env()
+
 
 def mode() -> str:
     return MODE
@@ -93,6 +111,11 @@ def is_hosted() -> bool:
 
 def is_shared() -> bool:
     return MODE == SHARED
+
+
+def bridge_signs_in(name: str) -> bool:
+    """Whether this session's bridge completes `name`'s sign-in (HD13)."""
+    return name in BRIDGE_SIGN_INS
 
 
 def make_undumpable() -> bool:

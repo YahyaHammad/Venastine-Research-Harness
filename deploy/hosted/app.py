@@ -29,16 +29,19 @@ def _zerogpu_placeholder() -> str:
     return "unused"
 
 
-def build(python=None, confinement: str = ""):
+def build(python=None, confinement: str = "",
+          modelscope_secret: str | None = None):
     """The Gradio server with the bridge mounted; not yet launched.
     `python` is the session interpreter (session_env.py), or None to run
     sessions on this one, as a local checkout does. `confinement` is the
-    math tools' self-test verdict (isolation_report.py)."""
+    math tools' self-test verdict (isolation_report.py). `modelscope_secret`
+    is the ModelScope app's client secret, out of the environment (HD13)."""
     import gradio as gr
 
     from deploy.hosted.web import build_bridge
 
-    bridge = build_bridge(python=python, confinement=confinement)
+    bridge = build_bridge(python=python, confinement=confinement,
+                          modelscope_secret=modelscope_secret)
     server = gr.Server(title="Venastine Research Harness")
 
     @server.api(name="status")
@@ -56,9 +59,31 @@ def build(python=None, confinement: str = ""):
     return server
 
 
+def take_secret(environ=None) -> str:
+    """The ModelScope app's client secret, REMOVED from the environment
+    (HD13), so no process this one starts inherits it -- not uv building the
+    session environment, not the isolation probes, not a session, whose
+    environment is an allowlist anyway. `/proc/<pid>/environ` still shows
+    the block this process started with, which is why main() also makes it
+    non-dumpable."""
+    from deploy.hosted.sign_in import SECRET_ENV
+
+    environ = os.environ if environ is None else environ
+    return environ.pop(SECRET_ENV, "").strip()
+
+
 def main() -> None:
+    # FIRST, before anything can be started with this environment or read
+    # it: the bridge is the one process that holds a deployment's secret,
+    # and a session runs as the same user, so the bridge's memory and
+    # environ are refused to it the way a session's are to another (HD6).
+    secret = take_secret()
+    from security.hosted import make_undumpable
+
+    undumpable = make_undumpable()
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    logging.getLogger(__name__).info("bridge non-dumpable: %s", undumpable)
     from deploy.hosted import session_env
 
     # BEFORE the server listens, so the platform shows the Space as starting
@@ -75,7 +100,7 @@ def main() -> None:
     root = Path(__file__).resolve().parents[2]
     isolation_report.log(python, root)
     confinement = isolation_report.verify_confinement(python, root)
-    server = build(python, confinement)
+    server = build(python, confinement, secret)
     # `ssr_mode` is ignored on Hugging Face, where the deployment sets
     # GRADIO_SSR_MODE=false instead; it is passed for a local run.
     server.launch(ssr_mode=False,
