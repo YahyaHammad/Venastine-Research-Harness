@@ -58,15 +58,24 @@ _SECURITY_HEADERS = {
 }
 
 # HD13. The page ModelScope's redirect gets carries a one-time handle: never
-# cached, never framed, and with nothing in it that could run or send.
+# cached, with nothing in it that could run or send, and framed by no site
+# but the platform's own.
 _SIGN_IN_HEADERS = {
     **_SECURITY_HEADERS,
     "Cache-Control": "no-store",
-    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; "
-                               "base-uri 'none'; form-action 'none'; "
-                               "frame-ancestors 'none'",
 }
+_SIGN_IN_CSP = ("default-src 'none'; style-src 'unsafe-inline'; "
+                "base-uri 'none'; form-action 'none'; frame-ancestors {}")
 SIGN_IN_CALLBACKS_PER_MINUTE = 10
+
+# The one site that may frame that page on each platform: the platform's
+# own, which frames every page of the app. Measured on ModelScope
+# (2026-10-22): its redirect to the Studio's host came back as
+# www.modelscope.ai's Studio page with the callback in an iframe, and
+# `frame-ancestors 'none'` left the handle unshown. A Space's page on
+# huggingface.co frames its app the same way. Anywhere else, no site.
+FRAMED_BY = {"hf": "https://huggingface.co",
+             "modelscope": "https://www.modelscope.ai"}
 
 # TEST-NET-2, RFC 5737: never a real client, so an entry in it is a probe's.
 _PROBE_NET = ipaddress.ip_network("198.51.100.0/24")
@@ -162,6 +171,7 @@ class Bridge:
                  build: str = "local build",
                  tickets_per_minute: int = 10,
                  forwarded_for: str = "last",
+                 framed_by: str = "'none'",
                  unlock=single_user.unlock_config) -> None:
         if forwarded_for not in ("first", "last"):
             raise ValueError(f"forwarded_for is 'first' or 'last', not "
@@ -174,6 +184,7 @@ class Bridge:
         self.build = build
         self.tickets_per_minute = tickets_per_minute
         self.forwarded_for = forwarded_for
+        self.framed_by = framed_by
         self._unlock = unlock
         self._unlocked = False
         self._tickets: dict = {}
@@ -390,7 +401,9 @@ class Bridge:
         return HTMLResponse(
             _page("sign_in.html", title=title, text=text, handle=handle,
                   build=self.build),
-            status_code=status, headers=_SIGN_IN_HEADERS)
+            status_code=status, headers={
+                **_SIGN_IN_HEADERS,
+                "Content-Security-Policy": _SIGN_IN_CSP.format(self.framed_by)})
 
     async def healthz(self, request):
         from starlette.responses import JSONResponse
@@ -485,7 +498,8 @@ def build_bridge(env=None, root: Optional[Path] = None,
     bridge = Bridge(supervisor, single_user_requested=requested, gate=gate,
                     allowed_hosts=tuple(hosts), static_dir=_static_dir(),
                     build=_build_info(root),
-                    forwarded_for=FORWARDED_FOR_ENTRY.get(platform, "last"))
+                    forwarded_for=FORWARDED_FOR_ENTRY.get(platform, "last"),
+                    framed_by=FRAMED_BY.get(platform, "'none'"))
     # Decide at start, so a public deployment that asked for single-user
     # says so in its log before anyone visits, and a private one has its
     # config.yaml written before the first session imports it.

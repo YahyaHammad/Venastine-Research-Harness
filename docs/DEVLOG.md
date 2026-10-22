@@ -26057,3 +26057,22 @@ https://www.modelscope.ai/my/settings/apps as where a user removes an app
 they authorized, the page the banner and `/connect` name. gitleaks, run as
 CI runs it and from a bundle's root, finds nothing in the new line, so no
 allowlist entry was added for it.
+
+### Follow-up: the callback page, framed by the platform's own site
+
+The owner's first live sign-in, on the private Studio, reached ModelScope's
+consent page only after the app's redirect URL was corrected -- the form had
+kept the Studio's own page there, and ModelScope refused the bridge's
+`redirect_uri` as unregistered; read back through ModelScope's app API with
+the secret field never printed, then confirmed exact for both deployments.
+Approved, the redirect to the Studio's host came back as
+`www.modelscope.ai/studios/...?mode=full&app_path=/oauth/modelscope/callback?...`,
+ModelScope's Studio page with the callback in an iframe, and the callback's
+`frame-ancestors 'none'` left Firefox showing nothing. The bridge had run it
+-- "approved" is in the Studio's log -- so the handle existed and nobody
+could see it. The page may now be framed by the platform's own site and no
+other, from `BUILD_INFO.json`'s platform as the rate limit's entry is:
+`https://www.modelscope.ai` on a Studio, `https://huggingface.co` on a
+Space, whose page frames its app the same way, and no site anywhere else.
+The page has nothing to click and nothing that runs, so a frame can take
+nothing from it. Four tests hold the choice per platform; the suite is 7794.

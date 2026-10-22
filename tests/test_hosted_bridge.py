@@ -865,6 +865,28 @@ class TestTheModelScopeCallback:
         assert "forged" not in page.text and "$" not in page.text
         assert page.headers["cache-control"] == "no-store"
 
+    @pytest.mark.parametrize("info, framed_by", [
+        ({"platform": "modelscope"}, "https://www.modelscope.ai"),
+        ({"platform": "hf"}, "https://huggingface.co"),
+        ({"platform": "somewhere-unmeasured"}, "'none'"),
+        (None, "'none'"),
+    ])
+    def test_only_the_platforms_own_site_may_frame_it(self, tmp_path, info,
+                                                      framed_by):
+        """Measured on ModelScope: the redirect to the Studio's host came
+        back inside www.modelscope.ai's Studio page, and a page no site may
+        frame showed the person nothing (HD13)."""
+        if info is not None:
+            (tmp_path / "BUILD_INFO.json").write_text(json.dumps(info),
+                                                      encoding="utf-8")
+        bridge = web.build_bridge(env={}, root=tmp_path)
+        bridge.supervisor.sign_in, _ = _flow()
+        with self._client(bridge) as client:
+            csp = client.get(sign_in.CALLBACK_PATH).headers[
+                "content-security-policy"]
+        assert csp.endswith(f"frame-ancestors {framed_by}")
+        assert "default-src 'none'" in csp and "form-action 'none'" in csp
+
     def test_the_callbacks_from_one_address_are_limited(self, tmp_path):
         bridge = web.Bridge(_supervisor(tmp_path))
         bridge.supervisor.sign_in, _ = _flow()
