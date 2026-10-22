@@ -25797,3 +25797,25 @@ export fails the same five it failed on 2.0.0 and nothing else. `ruff check .`
 is clean, bandit finds nothing new across 262 files with the count check at
 62 pairs, none grown, and gitleaks is clean. The Space still runs 2.0.0 in its
 session environment until the next bundle compiles a new lock.
+
+### Follow-up: `uv` 0.13.4, for PYSEC-2026-4321 (its own commit)
+
+Found by batch 166's pip-audit run, two days after batch 165's was clean:
+`uv` before 0.13.4 trusts a root certificate whose intermediates' keys were
+compromised and revoked (GHSA-hq85-5cpj-mr62), so a holder of one could stand
+in for any host uv talks to. In the bridge, uv's one network job is
+installing the session lock, and it does that `--require-hashes`: a forged
+connection could make the install fail, not change what it installs. The bump
+is for the audit gate, the choice the owner made for `mcp`.
+
+Taken as `mcp` was, with the release notes read first. 0.13.0's breaking
+changes touch none of the two commands `session_env.py` runs -- `uv venv`
+names its interpreter, and the install reads no constraints file -- and a new
+environment on Python 3.10+ no longer carries the `_virtualenv` distutils
+patch, which nothing here uses. Measured rather than inferred: in a clean
+`python:3.12-slim` container, uv 0.13.4 built the session environment from the
+real `session.lock` in 18 s from an empty cache, as 0.12.23 did, and the
+harness's imports load from it. The Space's own install line and the
+ModelScope bridge lock both still resolve with it. pip-audit is clean for
+`deploy/hosted/requirements.txt`; the unit suite never runs a real uv, so its
+green run beside batch 166 says nothing about this pin either way.
