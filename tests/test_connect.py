@@ -78,6 +78,16 @@ class TestThePresets:
             assert preset.is_v1_compatible == entry["is_v1_compatible"]
             assert preset.supports_stream_usage == entry["supports_stream_usage"]
 
+    def test_only_measured_presets_promise_streaming_usage(self):
+        """D21: the flag is a promise that a stream ends with usage, and a
+        broken one fails every turn, so it is set only where it was
+        measured. ModelScope's was, on four models (2026-10-22); OpenRouter
+        sends usage without being asked, and Hugging Face's router could not
+        be measured with the token at hand."""
+        promising = {p.name for p in connect.PRESETS.values()
+                     if p.supports_stream_usage}
+        assert promising == {"openai", "anthropic", "modelscope"}
+
     def test_only_the_permitted_providers_sign_in(self):
         """The owner's ruling, as data: OAuth only where the provider
         explicitly invites a third-party app (HD5, HD13)."""

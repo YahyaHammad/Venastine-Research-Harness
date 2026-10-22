@@ -114,8 +114,13 @@ PRESETS: dict[str, Preset] = {p.name: p for p in (
            "https://openrouter.ai/api/v1", True, False,
            default_model="nvidia/nemotron-3-super-120b-a12b:free",
            sign_in="openrouter", key_url="https://openrouter.ai/keys"),
+    # Reports streaming usage, measured 2026-10-22 on four models
+    # (DeepSeek-V4-Pro-0813, Qwen3.5-27B, Qwen3.8-27B, Nex-N2.5-mini): with
+    # `stream_options` every one sent real counts, the last in a chunk with
+    # no choices; without it three of the four sent all-zero usage, so the
+    # meter could never show. modelscope.cn's endpoint was not measured.
     Preset("modelscope", "MODELSCOPE", "ModelScope API-Inference (modelscope.ai)",
-           "https://api-inference.modelscope.ai/v1", True, False,
+           "https://api-inference.modelscope.ai/v1", True, True,
            sign_in="modelscope",
            key_url="https://www.modelscope.ai/my/myaccesstoken"),
     Preset("modelscope-cn", "MODELSCOPE_CN",

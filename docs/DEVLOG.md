@@ -26076,3 +26076,36 @@ other, from `BUILD_INFO.json`'s platform as the rate limit's entry is:
 Space, whose page frames its app the same way, and no site anywhere else.
 The page has nothing to click and nothing that runs, so a frame can take
 nothing from it. Four tests hold the choice per platform; the suite is 7794.
+
+### Follow-up: ModelScope's preset promises streaming usage
+
+The first live turn through the ModelScope sign-in (DeepSeek-V4-Pro-0813 on
+the private Studio) showed its duration and no token counts. Not a defect in
+the meter: the preset said ModelScope does not report streaming usage, so the
+harness asked for none and claimed none. Measured with the owner's own
+credentials, tiny streamed calls through the `openai` SDK as `core/client.py`
+makes them, each with and without `stream_options: {"include_usage": true}`:
+
+- **ModelScope API-Inference (modelscope.ai)**, four models answered
+  (DeepSeek-V4-Pro-0813, Qwen3.5-27B, Qwen3.8-27B, Nex-N2.5-mini). With the
+  option, every one sent real counts on every chunk, the last in a chunk with
+  no choices. Without it, three of the four sent usage of zero on every chunk
+  -- which is what the meter saw. Four others are listed but were refused to
+  this account or have "no provider supported".
+- **OpenRouter**, two free models answered (minimax-m3.1-flash,
+  nemotron-3.5-lightning): one usage chunk at the end, asked for or not.
+  Three free models were rate-limited upstream. The preset's own default,
+  `nvidia/nemotron-3-super-120b-a12b:free`, answered 404 three times in ten
+  minutes, and OpenRouter's endpoint list showed its single endpoint
+  (Nvidia) at no uptime over the last thirty -- an outage upstream, recorded
+  here because a default resting on one free endpoint is fragile.
+- **Hugging Face's router** could not be measured: the local CLI token lacks
+  the Inference Providers permission (403 on every call).
+
+So the `modelscope` preset now sets `supports_stream_usage` (the owner's
+choice, ModelScope only); OpenRouter and Hugging Face keep theirs off. D21
+applies from here: a ModelScope model whose stream ended without usage would
+fail its turn with "completed without usage data" rather than account zero,
+and that message would name the provider. The template has no ModelScope
+entry, so only the preset changed; modelscope.cn's endpoint was not measured
+and keeps the flag off. A test pins which presets carry the promise.

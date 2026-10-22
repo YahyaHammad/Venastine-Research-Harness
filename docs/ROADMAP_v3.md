@@ -2755,7 +2755,10 @@ the owner with options and a recommendation before any code was written.
   Its free tier is a CPU instance. API-Inference there is
   `https://api-inference.modelscope.ai/v1`, OpenAI-compatible: `/v1/models`
   answered 200 with a live list. A ModelScope access token is account-wide --
-  the same token pushes code to the account's repositories.
+  the same token pushes code to the account's repositories. It reports
+  streaming usage when `stream_options.include_usage` is sent -- on every
+  one of four models measured in batch 167 -- and without it most models
+  send usage of zero, so the `/connect` preset sets `supports_stream_usage`.
 - **Textual already renders in a browser.** Its web driver
   (`textual.drivers.web_driver:WebDriver`) is what `textual-serve` runs: one
   app subprocess per websocket, framed packets after a `__GANGLION__` line, an
