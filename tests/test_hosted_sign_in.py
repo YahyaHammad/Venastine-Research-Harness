@@ -13,6 +13,7 @@ says why).
 """
 
 import logging
+import re
 from itertools import count
 from urllib.parse import parse_qs, urlsplit
 
@@ -256,6 +257,11 @@ class TestWhatADeploymentOffers:
         assert flow.client_id == "client-9"
         assert flow.redirect_uri == \
             "https://x.hf.space/oauth/modelscope/callback"
+        # Unless a fork names its own, it is the project's registered app.
+        default = ModelScopeSignIn.from_env(self.ENV, SECRET)
+        assert default.client_id == sign_in.MODELSCOPE_CLIENT_ID
+        assert re.fullmatch(r"[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}",
+                            sign_in.MODELSCOPE_CLIENT_ID)
 
     def test_modelscope_names_itself(self):
         flow = ModelScopeSignIn.from_env(

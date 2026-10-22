@@ -7168,7 +7168,8 @@ _REVOKE_PAGES = {
     "huggingface": "https://huggingface.co/settings/connected-applications",
     "openrouter": "https://openrouter.ai/keys",
     # ModelScope's own route for it is labelled "OAuth互联应用" (OAuth
-    # connected apps), read from its page bundle 2026-10-22.
+    # connected apps), read from its page bundle and confirmed by the owner
+    # as where a user removes an app they authorized, 2026-10-22.
     "modelscope": "https://www.modelscope.ai/my/settings/apps",
 }
 

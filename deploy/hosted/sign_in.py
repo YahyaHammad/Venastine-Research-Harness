@@ -58,11 +58,12 @@ INFERENCE_SCOPE = "api-inference"
 # `openid` is not ours to leave out: ModelScope's app form requires it.
 SCOPE = f"openid {INFERENCE_SCOPE}"
 
-# The project's own ModelScope OAuth app, registered by the owner with the
-# scopes above and both deployments' callback URLs. A client id is public,
-# like `hf_oauth_client_id` in config.yaml; a fork names its own app with the
-# variable below, and the secret is only ever a platform secret.
-MODELSCOPE_CLIENT_ID = ""
+# The project's own ModelScope OAuth app, registered by the owner on
+# 2026-10-22 with the scopes above and both deployments' callback URLs. A
+# client id is public, like `hf_oauth_client_id` in config.yaml; a fork names
+# its own app with the variable below, and the secret is only ever a platform
+# secret.
+MODELSCOPE_CLIENT_ID = "210c1e09-6772-41e7-8844-5876230969f5"
 CLIENT_ID_ENV = "VENASTINE_MODELSCOPE_CLIENT_ID"
 SECRET_ENV = "VENASTINE_MODELSCOPE_CLIENT_SECRET"
 

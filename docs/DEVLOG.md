@@ -26044,3 +26044,16 @@ refused and asked for again, and the right one reached ModelScope's real
 token endpoint, which refused the made-up app (`invalid_grant`); the session
 showed that by its code, and the log named no secret, code or state. Not
 done yet: a real approval and a model turn, which wait on the owner's app.
+
+### Follow-up: the project's ModelScope app (its own commit)
+
+The owner registered the app on modelscope.ai -- scopes `openid` and
+`api-inference`, both deployments' `/oauth/modelscope/callback` -- and its
+public client id is now `MODELSCOPE_CLIENT_ID` in `deploy/hosted/sign_in.py`;
+a test holds a deployment with no override to it. The secret is the owner's,
+set by the owner as a platform secret on both deployments and never in the
+repository or a conversation. The owner also confirmed
+https://www.modelscope.ai/my/settings/apps as where a user removes an app
+they authorized, the page the banner and `/connect` name. gitleaks, run as
+CI runs it and from a bundle's root, finds nothing in the new line, so no
+allowlist entry was added for it.
