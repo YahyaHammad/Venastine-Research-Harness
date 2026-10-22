@@ -354,7 +354,12 @@ class Bridge:
                             headers=_SECURITY_HEADERS)
 
     async def landing(self, request):
+        # HD13: ModelScope's line only where this bridge can complete its
+        # sign-in. A duplicated Space copies variables but not secrets, and
+        # there the command would only explain why it cannot.
+        offered = self.supervisor.sign_in is not None
         return self._html(_page("landing.html", build=self.build,
+                                modelscope_hidden="" if offered else " hidden",
                                 **self._mode_words()))
 
     def _notice(self, title: str, text: str, status: int):

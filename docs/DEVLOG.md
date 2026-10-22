@@ -26109,3 +26109,110 @@ fail its turn with "completed without usage data" rather than account zero,
 and that message would name the provider. The template has no ModelScope
 entry, so only the preset changed; modelscope.cn's endpoint was not measured
 and keeps the flag off. A test pins which presets carry the promise.
+
+---
+## Batch 168 -- the pre-public fixes (2026-10-22)
+
+### What was built
+
+ROADMAP_v3 §79's sixth slice (HD4, HD8 and HD13 amended), on `hosted-demo`,
+planned with the owner first. Two items the owner approved in batch 166
+(`/secrets` refused when shared, stale session directories swept), the
+landing page's missing `/connect modelscope`, and what the owner chose for
+the rest: idle redraws stopped in hosted sessions only, OpenRouter's default
+measured before the owner picked one, and both cosmetics.
+
+- **`/secrets` is refused in a shared deployment**, mirroring `/config`. The
+  store holds SSH and sudo passwords for the shell tools, which shared mode
+  refuses, so a secret set there has no use, and typing a password into a
+  server every visitor shares is what HD12 refuses for keys. Nothing else in
+  a shared session reaches the store: its consumers are the sandbox, askpass
+  and SSH paths of the refused shell tools, and `policy_enforcement` only
+  redacts with it. Single-user and local are unchanged.
+- **An idle hosted session draws nothing.** `RavenPanel(still_when_idle=)`
+  holds the first frame with its timer paused while idle, and never undoes
+  a pause the app asked for during a token stream; `PromptInput` does not
+  blink. A local install keeps both.
+- **`sweep_stale_sessions`** (`deploy/hosted/supervisor.py`), called by
+  `app.py`'s `main()` once before the server listens, deletes the
+  `venastine-session-*` directories a killed bridge left: directories only,
+  never a link, never another user's on POSIX, never the single-user state.
+  It is a module function rather than a Supervisor method because `build()`
+  keeps the bridge to itself, and it shares `SESSION_PREFIX` and
+  `default_session_root()` with the Supervisor so the two cannot drift.
+- **The landing page names `/connect modelscope`** -- with a revoke link on
+  every provider's line now -- only when the bridge holds the ModelScope
+  secret. The line is hidden with the `hidden` attribute through `_page`'s
+  escaping, so no raw-HTML path was added to the page renderer.
+- **The header and the session banner** say `no model connected | type
+  /connect` in a hosted session until a provider is connected, then `no
+  model chosen | type /model` until the pair in use is; both said
+  `ANTHROPIC | claude-sonnet-5`, a pair the session held no key for. The
+  banner was found by the live check below, after the header alone had
+  been fixed and tested; one helper, `_unconnected_hint`, now feeds both.
+- **The `[mcp] created ...` startup notice** is not shown in a shared
+  deployment, where it printed a temporary session path about a file
+  nothing there can edit. The file is still created.
+- **OpenRouter's default is `minimax/minimax-m3.1-flash:free`**, the
+  owner's pick.
+
+### What was measured, and what it found
+
+**The idle bandwidth was one widget, and it had broken the idle limit.** A
+real session through the bridge's `Supervisor` in WSL, with a socket stub
+counting the bytes relayed to the browser, idle for a minute at 160x45:
+
+| variant | idle bytes/s | packets/s |
+|---|---|---|
+| as shipped | 6,872 | 5.0 |
+| raven still | 0 | 0 |
+| cursor still | 6,872 | 5.0 |
+| both | 0 | 0 |
+| raven still, tab focused | 566 | 2.0 |
+| both, tab focused | 0 | 0 |
+
+The 6.9 KB/s matches what a silent tab received on the live Studio in
+batch 166. The cursor blinks only once the browser sends `focus`, which the
+first runs' stub did not -- so the first table said the cursor cost nothing,
+and a second run with the focus event sent found its 0.6 KB/s. Reading the
+relay while looking for the source showed the larger consequence:
+`_pump_child` stamps `last_activity` on every chunk the session writes, so a
+blinking raven kept every abandoned tab "active", and the 20-minute idle
+limit never fired -- a tab held one of the four slots for the full two-hour
+lifetime. Counting output as activity is right (a research run the person is
+watching must not be cut off), so the fix is the quiet screen, not the
+relay. The browser side was already fine: `textual.js` pings once, when the
+socket opens.
+
+**OpenRouter's free models each have one endpoint.** The public models list
+had 18 free models, and the endpoints API gave every one of them exactly one,
+so "two or more endpoints" found nothing. The previous default,
+`nvidia/nemotron-3-super-120b-a12b:free`, had 0% uptime over both the last 30
+minutes and the last day and answered 404 to both calls. Four candidates at
+100% over a day answered a plain call and made a correct tool call with the
+owner's credential: minimax-m3.1-flash (served by MiniMax itself, 1M
+context, the fastest), nemotron-3.5-lightning and nemotron-3-ultra-550b
+(Nvidia), and flint-v1.0 (Recursive). The two Thinking Machines models
+answered 403, "only available on agentic harnesses". The owner chose
+minimax-m3.1-flash.
+
+### Verified
+
+- Every new test was checked against a mutation of the fix it pins: 20 of 20
+  killed on an export copy of the working tree, with green controls on
+  Windows and under WSL (the ownership and symlink rows run only on POSIX).
+- The idle measurement re-run on the fixed code, with no patch of the
+  measurement's own: 0 bytes in a minute, with and without the focus event.
+- A live check against the ModelScope bundle in a local container: a
+  planted `venastine-session-*` directory gone at start ("swept 1 stale
+  session directories"), the landing page's ModelScope line hidden with no
+  secret and shown with one, and a real session through the websocket
+  showing the header's hint, no mcp.json notice, 0 bytes in 30 idle seconds
+  with the tab focused, and `/secrets` refused. That session also showed
+  the banner still naming the unconnected pair, fixed above.
+- ModelScope's discovery document, re-read for the OAuth report, now also
+  lists `client_id_metadata_supported: true` and a `registration_endpoint`.
+  Its token endpoint still names only `client_secret_basic` and
+  `client_secret_post` and it advertises no PKCE method, so HD13's reason
+  stands; a public client is what would reopen it, and this is where one
+  would first show.

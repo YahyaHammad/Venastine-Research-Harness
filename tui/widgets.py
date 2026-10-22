@@ -261,7 +261,19 @@ LINKED_ROLES = frozenset({"tool", "pipeline_tool", "tool_error"})
 
 
 class RavenPanel(Static):
-    """Corner raven: what the harness is doing right now."""
+    """Corner raven: what the harness is doing right now.
+
+    `still_when_idle` (ROADMAP_v3 §79, batch 168) is for a hosted session,
+    whose screen is relayed to a browser. There the idle blink was the whole
+    of what a silent tab received -- 6.9 KB/s, five packets a second,
+    measured through the bridge -- and the bridge counts a session's output
+    as activity, so the 20-minute idle limit could never fire and an
+    abandoned tab held its slot for the full two-hour lifetime. Idle, the
+    raven draws its first frame and its timer stays paused; every other
+    state animates as before, and a pause the app asked for (a token
+    stream) is never undone by a state change. A local install keeps the
+    blink.
+    """
 
     # NOT always_update=True. Every token_delta reassigns state to
     # THINKING, so always_update fired watch_state once per token for the
@@ -270,15 +282,19 @@ class RavenPanel(Static):
     # pause_animation exists to eliminate. Genuine transitions still fire.
     state = reactive(ravens.IDLE)
 
-    def __init__(self, animations: bool = True, **kwargs):
+    def __init__(self, animations: bool = True, still_when_idle: bool = False,
+                 **kwargs):
         super().__init__(**kwargs)
         self._animations = animations
+        self._still_when_idle = still_when_idle
+        self._held = False  # the app paused it, for a token stream
         self._frame = 0
         self._timer = None
 
     def on_mount(self) -> None:
         if self._animations:
             self._timer = self.set_interval(ANIMATION_INTERVAL, self._advance)
+            self._hold_still_if_idle()
         self._render_state()
 
     def _advance(self) -> None:
@@ -288,6 +304,18 @@ class RavenPanel(Static):
     def watch_state(self) -> None:
         self._frame = 0
         self._render_state()
+        self._hold_still_if_idle()
+
+    def _idle_and_still(self) -> bool:
+        return self._still_when_idle and self.state is ravens.IDLE
+
+    def _hold_still_if_idle(self) -> None:
+        if self._timer is None or not self._still_when_idle:
+            return
+        if self._idle_and_still():
+            self._timer.pause()
+        elif not self._held:
+            self._timer.resume()
 
     def _render_state(self) -> None:
         frames = self.state.frames
@@ -296,11 +324,13 @@ class RavenPanel(Static):
 
     def pause_animation(self) -> None:
         """Called while a token stream is active. Idempotent."""
+        self._held = True
         if self._timer is not None:
             self._timer.pause()
 
     def resume_animation(self) -> None:
-        if self._timer is not None:
+        self._held = False
+        if self._timer is not None and not self._idle_and_still():
             self._timer.resume()
 
 

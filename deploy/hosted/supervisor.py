@@ -69,6 +69,10 @@ _PASSTHROUGH = ("PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT")
 
 HOSTED_DRIVER = "tui.hosted_driver:HostedWebDriver"
 
+# A shared session's directory, under `session_root`. sweep_stale_sessions
+# removes leftovers by this prefix, so the two cannot drift apart.
+SESSION_PREFIX = "venastine-session-"
+
 # HD13. What a session may ask of the bridge's ModelScope sign-in: start one,
 # hand back the code its page showed, or stop waiting.
 _SIGN_IN_REQUESTS = frozenset({"venastine_sign_in", "venastine_sign_in_code",
@@ -596,6 +600,55 @@ class CapacityError(Exception):
     """Every session slot is taken."""
 
 
+def default_session_root() -> Path:
+    return Path(tempfile.gettempdir())
+
+
+def sweep_stale_sessions(root: Optional[Path] = None,
+                         keep: Optional[Path] = None) -> int:
+    """Delete shared-session directories a previous bridge left behind;
+    the count, never a path, goes to the log.
+
+    A session deletes its own directory when it stops, but a bridge that is
+    killed outright -- out of memory, a hard restart in the same container
+    -- stops nothing, and what a visitor left there (a thread, a workspace)
+    would stay on disk. So app.py's main() calls this ONCE, before the
+    server listens, when the container's one bridge has no sessions yet.
+    Never from build_bridge: the suite builds bridges in parallel over one
+    temporary directory, and a sweep there could delete another's live
+    session.
+
+    Only directories named with SESSION_PREFIX directly under `root`; never
+    a symlink, never `keep` (a single-user deployment's state, which
+    nothing deletes), and on POSIX never one another user owns.
+    """
+    root = Path(root or default_session_root())
+    keep = Path(keep).resolve() if keep else None
+    try:
+        entries = list(os.scandir(root))
+    except OSError:
+        return 0
+    swept = 0
+    for entry in entries:
+        if not entry.name.startswith(SESSION_PREFIX) or entry.is_symlink():
+            continue
+        try:
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+            if hasattr(os, "getuid") and \
+                    entry.stat(follow_symlinks=False).st_uid != os.getuid():
+                continue
+        except OSError:
+            continue
+        if keep is not None and Path(entry.path).resolve() == keep:
+            continue
+        shutil.rmtree(entry.path, ignore_errors=True)
+        swept += 1
+    if swept:
+        logger.info("swept %d stale session directories", swept)
+    return swept
+
+
 class Supervisor:
     """The bridge's sessions, their limits, and their downloads.
 
@@ -620,7 +673,7 @@ class Supervisor:
         self.mode = mode
         self.confinement = confinement
         self.sign_in = sign_in
-        self.session_root = Path(session_root or tempfile.gettempdir())
+        self.session_root = Path(session_root or default_session_root())
         self.state_dir = state_dir
         self.base_env = dict(os.environ if base_env is None else base_env)
         self.command = command
@@ -636,7 +689,7 @@ class Supervisor:
         if self.state_dir is not None:
             return SessionPaths.under(Path(self.state_dir)), True
         self.session_root.mkdir(parents=True, exist_ok=True)
-        root = Path(tempfile.mkdtemp(prefix="venastine-session-",
+        root = Path(tempfile.mkdtemp(prefix=SESSION_PREFIX,
                                      dir=str(self.session_root)))
         return SessionPaths.under(root), False
 

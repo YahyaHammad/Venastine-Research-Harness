@@ -1172,7 +1172,9 @@ class VenastineApp(App):
                 # is a TextArea and what `priority=True` buys on enter.
                 yield PromptInput(placeholder="Message, or /help", id="prompt")
             with Vertical(id="sidebar"):
-                yield RavenPanel(animations=self._animations, id="raven")
+                yield RavenPanel(animations=self._animations,
+                                 still_when_idle=hosted.is_hosted(),
+                                 id="raven")
                 yield EffortRaven(id="effort-raven")
                 # §40. Above the ravens' siblings and always in view: a
                 # posture is not a transient, so it does not belong in the
@@ -1251,6 +1253,12 @@ class VenastineApp(App):
         self.refresh_todo_panel()
         self.refresh_agent_panel()
         self.refresh_status()
+        # §79. A hosted session's screen goes to a browser over the
+        # network, and a blinking cursor is two redraws a second to a tab
+        # nobody is typing in (RavenPanel's `still_when_idle` says what that
+        # costs and what else it broke). Measured in batch 168.
+        if hosted.is_hosted():
+            self.query_one("#prompt", PromptInput).cursor_blink = False
         # Batch 61. HERE and not in __init__: "up" means the shell
         # has been on screen, not that an object was constructed.
         self._meter.begin_session(monotonic())
@@ -1482,10 +1490,9 @@ class VenastineApp(App):
         the next launch."
         """
         remembered = " (remembered)" if self._model_restored else ""
-        self._transcript.write_system(
-            f"{self.provider_name} | {self.model}{remembered} "
-            f"| theme {self._theme_name}"
-        )
+        pair = (self._unconnected_hint()
+                or f"{self.provider_name} | {self.model}{remembered}")
+        self._transcript.write_system(f"{pair} | theme {self._theme_name}")
 
     # -- the turn meter (batch 61) ------------------------------------------
 
@@ -1683,8 +1690,31 @@ class VenastineApp(App):
         nothing on screen saying what the next turn would actually call --
         and getting that wrong is the difference between a working turn
         and an auth error.
+
+        §79: until a hosted session holds a key for the pair, it says what
+        to type instead (`_unconnected_hint`).
         """
-        self.sub_title = f"{self.provider_name} | {self.model}"
+        self.sub_title = (self._unconnected_hint()
+                          or f"{self.provider_name} | {self.model}")
+
+    def _unconnected_hint(self) -> "str | None":
+        """What to type, while a hosted session holds no key for the pair
+        in use; None once it does, and always in a local install (§79).
+
+        A hosted session starts with nothing connected, so the pair
+        config.yaml names is one it holds no key for: the header AND the
+        session banner said `ANTHROPIC | claude-sonnet-5` to a visitor who
+        could use neither (batch 168; the banner was found on the live
+        bridge after the header was fixed). One helper for both, for the
+        reason `_write_session_banner` gives.
+        """
+        if not hosted.is_hosted():
+            return None
+        connected = model_connect.connected_providers()
+        if self.provider_name in connected:
+            return None
+        return ("no model chosen | type /model" if connected
+                else "no model connected | type /connect")
 
     def start_effort_lookup(self, requested, validate_only=False) -> None:
         """Fetch this model's accepted effort levels in a worker."""
@@ -6945,6 +6975,17 @@ def _cmd_secrets(app: "VenastineApp", args: str) -> None:
     surface that matters is the one reachable AFTER untrusted content is
     already in the window.
     """
+    # ROADMAP_v3 §79 (HD4, HD12). The store holds SSH and sudo passwords
+    # for the shell tools, which a shared deployment refuses -- so a secret
+    # set here has no use, and typing a password into a server every
+    # visitor shares is the habit HD12 refuses for keys.
+    if hosted.is_shared():
+        app._transcript.write_error(
+            "/secrets is off in this shared demo: it holds SSH and sudo "
+            "passwords for the shell tools, which are off here, and a "
+            "shared server is no place to type a password. It works in a "
+            "local install and in a private single-user deployment.")
+        return
     from security import secrets
 
     parts = args.split()
@@ -7565,6 +7606,9 @@ def _finish_connect(app: "VenastineApp", preset, key: str) -> None:
     elif app.provider_name != preset.provider:
         app._transcript.write_system(
             f"Choose a model: /model {preset.provider} <name>.")
+    # A hosted header moves from "no model connected" to "no model chosen"
+    # when the preset names no model; after /model it is the pair again.
+    app.refresh_status()
 
 
 def register_builtin_commands() -> None:

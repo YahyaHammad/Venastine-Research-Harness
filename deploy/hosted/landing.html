@@ -41,17 +41,23 @@
   <h2>Connecting a model</h2>
   <ul>
     <li><code>/connect huggingface</code> -- sign in with your Hugging Face
-      account; requests use your own Inference Providers allowance.</li>
+      account; requests use your own Inference Providers allowance. Revoke it
+      at <a href="https://huggingface.co/settings/connected-applications"
+      target="_blank" rel="noopener">huggingface.co</a>.</li>
     <li><code>/connect openrouter</code> -- sign in with OpenRouter; its free
-      models need no credit.</li>
+      models need no credit. Revoke it at
+      <a href="https://openrouter.ai/keys" target="_blank" rel="noopener">openrouter.ai</a>.</li>
+    <li id="connect-modelscope"$modelscope_hidden><code>/connect modelscope</code>
+      -- sign in with your ModelScope account; its page shows a code to paste
+      back into the terminal, and requests use your own API-Inference
+      allowance. Revoke it at
+      <a href="https://www.modelscope.ai/my/settings/apps" target="_blank"
+      rel="noopener">modelscope.ai</a>.</li>
     <li><code>/connect</code> lists everything else.</li>
   </ul>
   <p>A sign-in hands this server a key for the length of your session. It is
-  held in memory, never written, and gone when the tab closes; you can revoke
-  it at <a href="https://huggingface.co/settings/connected-applications"
-  target="_blank" rel="noopener">huggingface.co</a> or
-  <a href="https://openrouter.ai/keys" target="_blank" rel="noopener">openrouter.ai</a>
-  whenever you like.</p>
+  held in memory, never written, and gone when the tab closes; the link
+  beside each provider revokes it whenever you like.</p>
   <p>$keys_text</p>
 
   <h2>Keys a browser keeps for itself</h2>

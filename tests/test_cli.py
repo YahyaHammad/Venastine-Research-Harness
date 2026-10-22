@@ -870,6 +870,34 @@ class TestTheUserTierFileIsAnnouncedOnBothShells:
             "the notice names the user tier without distinguishing it from "
             "the project tier, which is the confusion it exists to end")
 
+    @pytest.mark.parametrize("mode, announced", [("SHARED", False),
+                                                 ("SINGLE_USER", True)])
+    def test_a_shared_deployment_creates_it_without_a_word(
+            self, startup, monkeypatch, mode, announced):
+        """Batch 168. There the file is in a session directory deleted with
+        the tab, and no tool can edit it; the notice only printed a
+        temporary path at every visitor. A private deployment can edit it."""
+        import os
+
+        import main
+        import tui.app
+        from security import hosted
+
+        monkeypatch.setattr(hosted, "MODE", getattr(hosted, mode))
+        monkeypatch.setattr(hosted, "make_undumpable", lambda: True)
+        monkeypatch.setattr(hosted, "die_with_parent", lambda: True)
+        seen = {}
+        monkeypatch.setattr(
+            tui.app, "run",
+            lambda *a, **k: seen.update(notices=list(
+                k.get("startup_notices") or ())))
+
+        main.main(["--tui"])
+
+        assert os.path.exists(self._user_mcp()), "no file was created"
+        assert bool([line for line in seen["notices"]
+                     if "mcp.json" in line]) is announced, seen
+
     def test_the_cli_prints_it_to_a_stdout_nothing_erases(
             self, startup, capsys):
         import main

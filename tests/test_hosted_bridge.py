@@ -544,6 +544,66 @@ class TestASession:
         assert "k1" not in sup.downloads
 
 
+class TestStaleSessionsAreSwept:
+    """Batch 168. What a killed bridge left of its visitors' sessions goes
+    when the next one starts -- and nothing else does."""
+
+    def test_only_leftover_session_directories_go(self, tmp_path):
+        root = tmp_path / "tmp"
+        stale = root / f"{supervisor.SESSION_PREFIX}abc"
+        (stale / "home").mkdir(parents=True)
+        (stale / "home" / "app.db").write_text("x", encoding="utf-8")
+        kept = root / f"{supervisor.SESSION_PREFIX}kept"
+        kept.mkdir()
+        a_file = root / f"{supervisor.SESSION_PREFIX}file"
+        a_file.write_text("x", encoding="utf-8")
+        state = root / "venastine-state"
+        state.mkdir()
+        assert supervisor.sweep_stale_sessions(root, keep=kept) == 1
+        assert not stale.exists()
+        assert kept.is_dir() and a_file.is_file() and state.is_dir()
+
+    def test_a_link_is_never_followed(self, tmp_path):
+        root = tmp_path / "tmp"
+        root.mkdir()
+        target = tmp_path / "elsewhere"
+        target.mkdir()
+        (target / "keep.txt").write_text("x", encoding="utf-8")
+        link = root / f"{supervisor.SESSION_PREFIX}link"
+        try:
+            link.symlink_to(target, target_is_directory=True)
+        except OSError:
+            pytest.skip("this account cannot create a symlink")
+        assert supervisor.sweep_stale_sessions(root) == 0
+        assert link.is_symlink() and (target / "keep.txt").exists()
+
+    @pytest.mark.skipif(not hasattr(os, "getuid"), reason="POSIX ownership")
+    def test_another_users_directory_is_left(self, tmp_path, monkeypatch):
+        root = tmp_path / "tmp"
+        theirs = root / f"{supervisor.SESSION_PREFIX}theirs"
+        theirs.mkdir(parents=True)
+        real = os.getuid()
+        monkeypatch.setattr(os, "getuid", lambda: real + 1)
+        assert supervisor.sweep_stale_sessions(root) == 0
+        assert theirs.is_dir()
+
+    def test_a_missing_root_sweeps_nothing(self, tmp_path):
+        assert supervisor.sweep_stale_sessions(tmp_path / "absent") == 0
+
+    def test_building_a_bridge_sweeps_nothing(self, tmp_path, monkeypatch):
+        """The suite builds bridges in parallel over one temporary
+        directory, so only app.py's main() may sweep."""
+        import tempfile
+
+        monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+        live = tmp_path / f"{supervisor.SESSION_PREFIX}live"
+        live.mkdir()
+        bridge = web.build_bridge(env={}, root=tmp_path)
+        assert live.is_dir()
+        assert bridge.supervisor.session_root \
+            == supervisor.default_session_root() == tmp_path
+
+
 class TestWhoMayOpenASession:
     def test_a_websocket_must_come_from_this_page(self, tmp_path):
         bridge = web.build_bridge(env={"SPACE_HOST": "demo.hf.space"},
@@ -681,6 +741,21 @@ class TestTheRoutes:
                           for p in sessions.rglob("*"))
         assert bridge.supervisor.sessions == {}
         assert left == [], left
+
+    def test_the_landing_page_names_modelscope_only_where_it_signs_in(
+            self, tmp_path):
+        """Batch 168 (HD13). A duplicated Space copies variables but not
+        the secret, and there the command could only refuse."""
+        bridge = web.Bridge(_supervisor(tmp_path))
+        with self._client(bridge) as client:
+            without = client.get("/").text
+            bridge.supervisor.sign_in = _flow()
+            offered = client.get("/").text
+        assert '<li id="connect-modelscope" hidden>' in without
+        assert '<li id="connect-modelscope">' in offered
+        assert "/connect modelscope" in offered
+        assert "https://www.modelscope.ai/my/settings/apps" in offered
+        assert "$" not in without and "$" not in offered
 
     def test_a_private_deployment_says_its_keys_go_here(self, tmp_path):
         bridge = web.Bridge(_supervisor(tmp_path), single_user_requested=True)
@@ -977,6 +1052,10 @@ class TestTheBridgeKeepsItsSecret:
             ("report", sign_in.SECRET_ENV in os.environ)))
         monkeypatch.setattr(isolation_report, "verify_confinement",
                             lambda *a: "")
+        # Batch 168: a killed predecessor's sessions go before anything
+        # listens.
+        monkeypatch.setattr(supervisor, "sweep_stale_sessions",
+                            lambda: events.append(("sweep",)))
 
         def build(python, confinement, secret):
             events.append(("build", secret))
@@ -984,6 +1063,6 @@ class TestTheBridgeKeepsItsSecret:
 
         monkeypatch.setattr(app_module, "build", build)
         app_module.main()
-        assert events == [("undumpable", False), ("report", False),
+        assert events == [("undumpable", False), ("sweep",), ("report", False),
                           ("build", MS_SECRET), ("launch",)]
         assert sign_in.SECRET_ENV not in os.environ

@@ -84,6 +84,11 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
     logging.getLogger(__name__).info("bridge non-dumpable: %s", undumpable)
+    # Before anything listens: what a killed predecessor left of its
+    # visitors' sessions (supervisor.py says why only here).
+    from deploy.hosted.supervisor import sweep_stale_sessions
+
+    sweep_stale_sessions()
     from deploy.hosted import session_env
 
     # BEFORE the server listens, so the platform shows the Space as starting

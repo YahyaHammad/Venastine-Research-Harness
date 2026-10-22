@@ -110,9 +110,14 @@ PRESETS: dict[str, Preset] = {p.name: p for p in (
            "https://router.huggingface.co/v1", True, False,
            default_model="openai/gpt-oss-120b", sign_in="huggingface",
            key_url="https://huggingface.co/settings/tokens"),
+    # The default is free and served by its own maker. Chosen by the owner
+    # in batch 168 after a survey on 2026-10-22: every free model listed
+    # had ONE endpoint, and the previous default's (Nvidia's, for
+    # nemotron-3-super-120b-a12b:free) had answered 404 for a day at 0%
+    # uptime, while this one answered a plain call and a tool call.
     Preset("openrouter", "OPENROUTER", "OpenRouter",
            "https://openrouter.ai/api/v1", True, False,
-           default_model="nvidia/nemotron-3-super-120b-a12b:free",
+           default_model="minimax/minimax-m3.1-flash:free",
            sign_in="openrouter", key_url="https://openrouter.ai/keys"),
     # Reports streaming usage, measured 2026-10-22 on four models
     # (DeepSeek-V4-Pro-0813, Qwen3.5-27B, Qwen3.8-27B, Nex-N2.5-mini): with

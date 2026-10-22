@@ -365,6 +365,108 @@ class TestTheSharedTui:
         assert "something to copy" in delivered[0][0]
         assert "as a download: out.md" in text
 
+    @pytest.mark.asyncio
+    async def test_secrets_is_refused(self, shared, providers_file):
+        """Batch 168. The store holds the shell tools' SSH and sudo
+        passwords, which have no use where those tools are refused, and a
+        password typed into a shared server is what HD12 refuses for keys."""
+        from tui.app import VenastineApp, _cmd_secrets
+        from tui.screens import SecretScreen
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            _cmd_secrets(app, "set sudo")
+            await pilot.pause()
+            assert not isinstance(app.screen, SecretScreen)
+            text = " ".join(app._transcript.as_text().split())
+        assert "/secrets is off in this shared demo" in text
+        assert "private single-user deployment" in text
+
+    @pytest.mark.asyncio
+    async def test_the_header_says_what_to_type_until_a_model_is_connected(
+            self, shared, providers_file):
+        """Batch 168. It said `ANTHROPIC | test-model`: config.yaml's pair,
+        for which a shared session holds no key -- and so did the session
+        banner, found on the live bridge after the header was fixed."""
+        from core import connect as model_connect
+        from tui.app import VenastineApp, _finish_connect
+
+        openrouter = model_connect.PRESETS["openrouter"]
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            assert app.sub_title == "no model connected | type /connect"
+            banner = app._transcript.as_text()
+            assert "no model connected | type /connect | theme" in banner
+            assert "ANTHROPIC | test-model" not in banner
+            # ModelScope's preset names no model, so one is still to choose.
+            _finish_connect(app, model_connect.PRESETS["modelscope"], "ms-key-1")
+            await pilot.pause()
+            assert app.sub_title == "no model chosen | type /model"
+            _finish_connect(app, openrouter, FAKE_OR_KEY)
+            await pilot.pause()
+            assert app.sub_title == f"OPENROUTER | {openrouter.default_model}"
+
+
+class TestAnIdleHostedSessionDrawsNothing:
+    """Batch 168. A silent tab received 6.9 KB/s from the idle raven's blink
+    and 0.6 KB/s more from the cursor's once focused, measured through the
+    bridge -- and the bridge counts a session's output as activity, so its
+    idle limit never fired. A local install keeps both."""
+
+    @staticmethod
+    def _ticking(app) -> bool:
+        return app._raven._timer._active.is_set()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", ["SHARED", "SINGLE_USER"])
+    async def test_the_raven_is_still_except_during_a_turn(
+            self, monkeypatch, providers_file, mode):
+        from tui import ravens
+        from tui.app import VenastineApp
+
+        monkeypatch.setattr(hosted, "MODE", getattr(hosted, mode))
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            raven = app._raven
+            assert not self._ticking(app)
+            raven.state = ravens.THINKING
+            await pilot.pause()
+            assert self._ticking(app)
+            # A token stream's pause outlives a change of state ...
+            raven.pause_animation()
+            raven.state = ravens.SEARCHING
+            await pilot.pause()
+            assert not self._ticking(app)
+            raven.resume_animation()
+            assert self._ticking(app)
+            # ... and a turn's end, as the app writes it, leaves it still.
+            raven.resume_animation()
+            raven.state = ravens.IDLE
+            await pilot.pause()
+            assert not self._ticking(app)
+            raven.resume_animation()
+            assert not self._ticking(app)
+            assert raven._frame == 0
+
+    @pytest.mark.asyncio
+    async def test_the_cursor_does_not_blink(self, shared, providers_file):
+        from tui.app import VenastineApp
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test():
+            assert app.query_one("#prompt").cursor_blink is False
+
+    @pytest.mark.asyncio
+    async def test_a_local_install_still_blinks(self, monkeypatch,
+                                                providers_file):
+        from tui.app import VenastineApp
+
+        monkeypatch.setattr(hosted, "MODE", hosted.OFF)
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test():
+            assert self._ticking(app)
+            assert app.query_one("#prompt").cursor_blink is True
+
 
 class TestTheSingleUserTui:
     @pytest.mark.asyncio
@@ -386,6 +488,19 @@ class TestTheSingleUserTui:
         assert json.loads(providers_file.read_text(encoding="utf-8")) \
             ["OPENAI"]["API_KEY"] == "k-openai-123"
 
+    @pytest.mark.asyncio
+    async def test_secrets_works_here(self, single_user, providers_file,
+                                      tmp_path, monkeypatch):
+        from tui.app import VenastineApp, _cmd_secrets
+
+        monkeypatch.setenv("AGENT_SECRETS_FILE", str(tmp_path / "secrets.json"))
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test():
+            _cmd_secrets(app, "status")
+            text = app._transcript.as_text()
+        assert "/secrets is off" not in text
+        assert "secret" in text.lower()
+
 
 class TestALocalInstallIsUnchanged:
     @pytest.mark.asyncio
@@ -400,6 +515,17 @@ class TestALocalInstallIsUnchanged:
             text = app._transcript.as_text()
         assert "shared demo" not in text
         assert "single-user" not in text
+
+    @pytest.mark.asyncio
+    async def test_the_header_names_the_configured_pair(self, monkeypatch,
+                                                         providers_file):
+        from tui.app import VenastineApp
+
+        monkeypatch.setattr(hosted, "MODE", hosted.OFF)
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test():
+            assert app.sub_title == "ANTHROPIC | test-model"
+            assert "ANTHROPIC | test-model | theme" in app._transcript.as_text()
 
     def test_the_connect_policy_persists_and_takes_keys(self, monkeypatch):
         from tui.app import _connect_policy

@@ -2939,7 +2939,10 @@ def main(argv=None) -> int:
     # request: create the real one, empty, and name it. The skeleton is
     # §24's own render_mcp(), not a second copy of it.
     created = _ensure_user_mcp_config()
-    if created:
+    # §79 (batch 168): not in a shared deployment, where the file is in a
+    # session directory deleted with the tab and no tool there can edit it
+    # -- the notice only printed a temporary path at every visitor.
+    if created and not hosted.is_shared():
         startup_notices.append(
             f'[mcp] created {created} -- your own MCP servers go in this '
             f'file, under "mcpServers". Project servers stay in '
