@@ -1039,7 +1039,7 @@ class TestTheBridgeKeepsItsSecret:
         assert environ == {"PATH": "/bin"}
 
     def test_main_takes_it_first_and_hands_it_to_the_bridge(
-            self, app_module, monkeypatch, tmp_path):
+            self, app_module, monkeypatch, tmp_path, caplog):
         import security.hosted
         from deploy.hosted import isolation_report
 
@@ -1056,13 +1056,21 @@ class TestTheBridgeKeepsItsSecret:
         # listens.
         monkeypatch.setattr(supervisor, "sweep_stale_sessions",
                             lambda: events.append(("sweep",)))
+        # Batch 169: which build this is goes in the log, before anything
+        # slow, because a private Studio's log is where a deploy is seen.
+        monkeypatch.setattr(web, "build_label", lambda root: events.append(
+            ("label", root == Path(app_module.__file__).resolve().parents[2]))
+            or "build 0123456789ab")
 
         def build(python, confinement, secret):
             events.append(("build", secret))
             return SimpleNamespace(launch=lambda **kw: events.append(("launch",)))
 
         monkeypatch.setattr(app_module, "build", build)
-        app_module.main()
-        assert events == [("undumpable", False), ("sweep",), ("report", False),
-                          ("build", MS_SECRET), ("launch",)]
+        with caplog.at_level(logging.INFO, logger=app_module.__name__):
+            app_module.main()
+        assert events == [("undumpable", False), ("label", True), ("sweep",),
+                          ("report", False), ("build", MS_SECRET),
+                          ("launch",)]
         assert sign_in.SECRET_ENV not in os.environ
+        assert "serving build 0123456789ab" in caplog.messages

@@ -40,6 +40,15 @@
 # requirements.txt itself (compiled with hashes into the bundle's
 # session.lock), which the first step already audits.
 #
+# A PUSH TO MAIN RUNS IT TOO SINCE BATCH 169 (ROADMAP_v3 §79 HD9, amended):
+# the hosted demo deploys a commit only when every CI check on it passed
+# (scripts/deploy_gate.py), the owner asked for this audit to be one of
+# them, and the deploy installs these pins beside live visitors' sign-ins.
+# Only main, so a feature branch's pushes still pay nothing, and no paths
+# filter on it, because the gate waits for this run on every push and a
+# filtered-out run would never come. The deploy also audits the hashed
+# locks it actually ships (scripts/deploy_demo.py).
+#
 # Threshold note: pip-audit 2.x has no severity filter, only per-ID
 # `--ignore-vuln`. The tree is clean at ALL levels as of rollout
 # (verified locally), so fail-on-any is the posture: a future LOW is
@@ -58,12 +67,17 @@ on:
       - requirements.txt
       - requirements-test.txt
       - deploy/hosted/requirements.txt
+  push:
+    branches: [main]
 
 permissions:
   contents: read
 
+# The event is in the group: keyed on the ref alone, the Monday schedule and
+# a push to main would cancel each other, and a cancelled push run holds
+# that commit's deploy.
 concurrency:
-  group: pip-audit-${{ github.ref }}
+  group: pip-audit-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:

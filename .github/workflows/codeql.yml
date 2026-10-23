@@ -56,8 +56,12 @@ permissions:
   contents: read
   security-events: write
 
+# The event is in the group since batch 169: keyed on the ref alone, the
+# Monday schedule and a push to main shared a group, and whichever started
+# second cancelled the other -- and a cancelled push run is a failed check
+# to the deploy gate (scripts/deploy_gate.py), which holds that deploy.
 concurrency:
-  group: codeql-${{ github.ref }}
+  group: codeql-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:

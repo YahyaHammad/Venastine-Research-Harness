@@ -57,7 +57,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 7811 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
+pytest                                            # 7947 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -176,6 +176,39 @@ place, so **a release bumps `package.json` and `pyproject.toml` first and tags t
 carries the bump**. npm already holds 0.1.0 and 0.2.0, neither with provenance, so both were
 published outside the workflow, and the next version has to be past 0.3.1.
 
+**The hosted demo is a third channel, and it deploys only a commit every CI check passed**
+(ROADMAP_v3 §79 HD9, amended in batch 169 -- the owner's rule). What deploys is a bundle
+(`scripts/build_demo_bundle.py`), never the tree. `.github/workflows/deploy-demo.yml` wakes each time
+a CI workflow finishes on a push to `main`; its first job holds no secret and runs
+`scripts/deploy_gate.py`, which reads GitHub's record of the commit: every check run must be success
+or skipped -- a job its workflow lets fail (compat's `py313-info`) and a scheduled run on the same
+commit included -- every workflow a push to main runs must have passed, and the commit must still be
+the tip. Only then does `deploy-hf`, the one job in environment `demo`, run `scripts/deploy_demo.py`:
+build, gitleaks from the bundle's root, pip-audit of the locks it installs, the gate once more,
+upload, and wait until the page names the build. **Three rules here are load-bearing.** The
+`workflow_run` list must equal the workflows a push to main runs (`deploy_gate.required_workflows()`
+reads them from the files; `test_docs_consistency.py` holds the two together), and no such workflow
+may filter its push by path, or the gate waits forever. The gate re-checks that the trigger was a
+push to `main` in this repository, because a `workflow_run` job's `github.ref` is always the default
+branch and an environment's branch rule therefore cannot. And event values reach a script through
+`env:`, never pasted into `run:`. pip-audit runs on a push to main for this (batch 169), and codeql
+and pip-audit key their concurrency on the event too, so a schedule cannot cancel the push run the
+gate waits for. **ModelScope is deployed by the owner** with the same script and the same gate
+(`--platform modelscope`): it has no fine-grained tokens and no trusted CI. `--unverified` skips the
+gate for a private test deploy and the workflow never passes it. Audit findings are accepted only BY
+ID in `deploy_demo.ACCEPTED`, each entry applying only while its version is pinned -- pillow 12.3.0
+is the first, held there by Gradio 6.30.0's `pillow<13`. The owner's one-time setup: environment
+`demo` with deployment branches `main` only, the secret `HF_TOKEN` (a fine-grained token with write
+access to the one Space) and the variable `DEMO_HF_SPACE`; until both exist, every deploy is a dry
+run.
+
+**The copyright year keeps itself** (ROADMAP_v3 §80, batch 169). `.github/workflows/copyright-year.yml`
+runs `scripts/bump_copyright_year.py` at 23:59 UTC on December 31 and again early on January 1, in
+case GitHub delayed or dropped the first run. It writes a range from the first year
+(`Copyright 2026-2027`), to LICENSE's appendix and NOTICE together, and is the only workflow with
+`contents: write`. Its push uses `GITHUB_TOKEN`, which starts no workflow, so that commit gets no CI
+and no demo deploy. Edit the two copyright lines together or the job refuses.
+
 ## Documentation map
 
 Read these before changing anything non-trivial — they carry design decisions that are locked, not defaults to re-derive.
@@ -192,7 +225,7 @@ made the move free: no import changed, and `tests/test_docs_consistency.py` is t
 opens any of these files (its `DOCS` constant is where the path now comes from).
 
 - **docs/ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49–§52, §55, §61, §62, §63, §64, §65, §66, §67, §68, §69, §70, §71, §72, §73, §74, §75, §76, §77 and §78 built; §53, §54 and §56–§60 recorded from the owner's requests in batches 122 and 123, specified and not yet designed; §79 designed with the owner in batch 163 and built in slices from it) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A78 from §32 (A16 in ROADMAP_v3 §62, A17, A18 and A19 in §63, A20 and A21 in §64, A22, A23 and A24 in §65, A25, A26 and A27 in §66, A28, A29, A30, A31, A32 and A33 in §67, A34, A35, A36, A37, A38 and A39 in §68, A40, A41, A42, A43, A44 and A45 in §69, A46, A47, A48 and A49 in §70, A50, A51, A52 and A53 in §71, A54, A55, A56 and A57 in §72, A58, A59, A60, A61 and A62 in §73, A63, A64 and A65 in §74, A66 and A67 in §75, A68, A69, A70, A71, A72, A73, A74, A75 and A76 in §76, A77 in §77, A78 in §78), W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 SS1–SS72 from §49, NW1–NW5 from §50, PG1–PG9 from §51, RB1–RB7 from §52, IO1–IO7 from §53, AT1–AT8 from §54, TR1–TR15 from §55, JV1–JV10 from §56, SM1–SM4 from §57, PR1–PR5 from §58 UI1–UI4 from §59, UH1–UH12 from §60, CN1–CN12 from §61 and HD1–HD13 from §79). Section and D-numbers are stable and cross-referenced everywhere.
+- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49–§52, §55, §61, §62, §63, §64, §65, §66, §67, §68, §69, §70, §71, §72, §73, §74, §75, §76, §77, §78, §79 and §80 built; §53, §54 and §56–§60 recorded from the owner's requests in batches 122 and 123, specified and not yet designed; §79 designed with the owner in batch 163 and built in seven slices through batch 169) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A78 from §32 (A16 in ROADMAP_v3 §62, A17, A18 and A19 in §63, A20 and A21 in §64, A22, A23 and A24 in §65, A25, A26 and A27 in §66, A28, A29, A30, A31, A32 and A33 in §67, A34, A35, A36, A37, A38 and A39 in §68, A40, A41, A42, A43, A44 and A45 in §69, A46, A47, A48 and A49 in §70, A50, A51, A52 and A53 in §71, A54, A55, A56 and A57 in §72, A58, A59, A60, A61 and A62 in §73, A63, A64 and A65 in §74, A66 and A67 in §75, A68, A69, A70, A71, A72, A73, A74, A75 and A76 in §76, A77 in §77, A78 in §78), W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 SS1–SS72 from §49, NW1–NW5 from §50, PG1–PG9 from §51, RB1–RB7 from §52, IO1–IO7 from §53, AT1–AT8 from §54, TR1–TR15 from §55, JV1–JV10 from §56, SM1–SM4 from §57, PR1–PR5 from §58 UI1–UI4 from §59, UH1–UH12 from §60, CN1–CN12 from §61, HD1–HD13 from §79 and LY1–LY3 from §80). Section and D-numbers are stable and cross-referenced everywhere.
 
 **Six namespaces use the same `LETTER+NUMBER` shape, and only the first is the
 record.** An id that resolves to two places is a cross-reference that fails

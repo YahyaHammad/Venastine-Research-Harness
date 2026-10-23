@@ -121,7 +121,9 @@ def _read_build_info(root: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def _build_info(root: Path) -> str:
+def build_label(root: Path) -> str:
+    """What the page's footer shows, and what app.py logs at start so a
+    deploy can be confirmed where the page cannot be fetched."""
     data = _read_build_info(root)
     if not data:
         return "local build"
@@ -502,7 +504,7 @@ def build_bridge(env=None, root: Optional[Path] = None,
     platform = str(_read_build_info(root).get("platform", ""))
     bridge = Bridge(supervisor, single_user_requested=requested, gate=gate,
                     allowed_hosts=tuple(hosts), static_dir=_static_dir(),
-                    build=_build_info(root),
+                    build=build_label(root),
                     forwarded_for=FORWARDED_FOR_ENTRY.get(platform, "last"),
                     framed_by=FRAMED_BY.get(platform, "'none'"))
     # Decide at start, so a public deployment that asked for single-user

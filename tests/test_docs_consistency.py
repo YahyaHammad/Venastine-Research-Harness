@@ -2276,6 +2276,149 @@ def test_pip_audit_covers_every_declared_dependency_file():
         f"the whole point of this job is that it is the only one.")
 
 
+# ---------------------------------------------------------------------------
+# ROADMAP_v3 §79 HD9, amended in batch 169: the hosted demo deploys a commit
+# only when EVERY CI check on it passed (the owner's rule), and §80's
+# New Year job is the one workflow that writes to the repository. Each test
+# below is a property of the workflow files that a later edit could break
+# without any run noticing until it mattered.
+# ---------------------------------------------------------------------------
+
+def _workflow_yaml(name: str) -> dict:
+    import yaml
+
+    return yaml.safe_load(_workflow_text()[name])
+
+
+def _deploy_gate():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "deploy_gate_for_docs", os.path.join(ROOT, "scripts", "deploy_gate.py"))
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _on(doc: dict) -> dict:
+    # PyYAML reads the bare key `on` as True.
+    return doc.get("on", doc.get(True)) or {}
+
+
+def test_the_deploy_waits_for_every_workflow_a_push_to_main_runs():
+    """deploy-demo.yml wakes when one of the workflows it lists finishes,
+    and its gate waits for every workflow a push to main runs. A CI
+    workflow missing from the list cannot wake it: if that one finished
+    last, nothing would ever deploy that commit; a list naming a workflow
+    that no push runs wakes the gate for nothing."""
+    gate = _deploy_gate()
+    listed = sorted(_on(_workflow_yaml("deploy-demo.yml"))["workflow_run"]
+                    ["workflows"])
+    required = sorted(wf.name for wf in gate.required_workflows())
+    assert listed == required, (
+        f"deploy-demo.yml's workflow_run list {listed} is not the set of "
+        f"workflows a push to main runs, {required}. Make them the same.")
+    assert {"tests", "pip-audit"} <= set(required), (
+        "the suite and the audit are among the checks the owner named")
+
+
+def test_only_the_deploy_job_holds_a_secret_and_only_after_the_gate():
+    jobs = _workflow_yaml("deploy-demo.yml")["jobs"]
+    holders = sorted(name for name, job in jobs.items()
+                     if "secrets." in json.dumps(job)
+                     or job.get("environment"))
+    assert holders == ["deploy-hf"], (
+        f"jobs that can read a secret or enter an environment: {holders}. "
+        f"Only the deploy job may, and only after the gate.")
+    deploy = jobs["deploy-hf"]
+    assert deploy["needs"] == "gate"
+    assert deploy["if"] == "needs.gate.outputs.verdict == 'deploy'"
+    assert deploy["environment"] == "demo"
+    assert deploy["concurrency"]["cancel-in-progress"] is False
+    assert jobs["gate"]["permissions"] == {
+        "actions": "read", "checks": "read", "contents": "read"}
+    assert _workflow_yaml("deploy-demo.yml")["permissions"] == {}
+
+
+def test_the_gate_judges_only_a_push_to_main_from_this_repository():
+    """A workflow_run job's github.ref is the default branch whatever woke
+    it, so an environment's branch rule cannot make this check; the job's
+    `if:` and deploy_gate.py both do. A fork's pull request from a branch
+    it named `main` matches `branches: [main]`; its event is not push."""
+    condition = " ".join(
+        _workflow_yaml("deploy-demo.yml")["jobs"]["gate"]["if"].split())
+    for clause in ("github.event.workflow_run.event == 'push'",
+                   "github.event.workflow_run.head_branch == 'main'",
+                   "github.event.workflow_run.head_repository.full_name == "
+                   "github.repository"):
+        assert clause in condition, f"the gate's `if:` lost {clause!r}"
+
+
+@pytest.mark.parametrize("name", ["deploy-demo.yml", "copyright-year.yml"])
+def test_no_expression_is_pasted_into_a_shell_line(name):
+    """A branch name is chosen by whoever pushed it. Values reach these
+    workflows' scripts through `env:`, where the shell cannot read them as
+    code."""
+    for job_name, job in _workflow_yaml(name)["jobs"].items():
+        for step in job.get("steps", []):
+            assert "${{" not in step.get("run", ""), (
+                f"{name}:{job_name}: an expression inside `run:` -- move it "
+                f"to the step's `env:`")
+
+
+def test_the_workflow_never_deploys_unverified():
+    assert "--unverified" not in _workflow_text()["deploy-demo.yml"], (
+        "`--unverified` skips the CI gate; it exists for the owner's private "
+        "test deploys and never for the workflow")
+
+
+def test_a_schedule_cannot_cancel_a_push_run_the_gate_waits_for():
+    """codeql and pip-audit run on a push and on a schedule. Keyed on the
+    ref alone, the two share a cancel-in-progress group, and a cancelled
+    push run is a failed check to the deploy gate."""
+    for name in _workflow_text():
+        doc = _workflow_yaml(name)
+        on = _on(doc)
+        concurrency = doc.get("concurrency") or {}
+        if not (isinstance(on, dict) and "push" in on and "schedule" in on
+                and concurrency.get("cancel-in-progress")):
+            continue
+        assert "github.event_name" in concurrency["group"], (
+            f"{name}: push and schedule share the group "
+            f"{concurrency['group']!r}")
+
+
+def test_license_and_notice_carry_the_same_copyright():
+    """§80: copyright-year.yml rewrites both or neither, and refuses when
+    they disagree -- so a hand edit to one would stop it every New Year."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "bump_copyright_year_for_docs",
+        os.path.join(ROOT, "scripts", "bump_copyright_year.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    lines = {}
+    for name in module.FILES:
+        with open(os.path.join(ROOT, name), encoding="utf-8",
+                  newline="") as f:
+            m = module._notice(f.read(), name)
+        lines[name] = (m["first"], m["last"], m["holder"])
+    assert len(set(lines.values())) == 1, lines
+
+
+def test_the_copyright_job_is_the_only_workflow_that_writes():
+    doc = _workflow_yaml("copyright-year.yml")
+    crons = [entry["cron"] for entry in _on(doc)["schedule"]]
+    assert crons == ["59 23 31 12 *", "7 6 1 1 *"], (
+        "23:59 UTC on Dec 31 is the owner's time; the Jan 1 run is the "
+        "catch-up for a delayed or dropped first one")
+    writers = sorted(name for name, text in _workflow_text().items()
+                     if "contents: write" in text)
+    assert writers == ["copyright-year.yml"], writers
+
+
 def test_the_launcher_never_sets_the_two_variables_that_would_break_it():
     """bin/venastine.mjs composes the child's environment, and there are two
     variables it must never put in there. Both are load-bearing and neither is

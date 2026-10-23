@@ -59,6 +59,27 @@ The dependencies listed below are **not** part of the project's own source but a
 
 `weasyprint` is BSD-3-Clause itself; the caveat is its **system** dependencies (`pango`, `cairo`, `harfbuzz`), which are LGPL and are linked at runtime rather than vendored into this project. If `markdown` or `weasyprint` is later pinned, update the version column above.
 
+## Hosted demo (`deploy/`, ROADMAP_v3 §79)
+
+What the bridge -- the process that serves a Space's or Studio's page and relays each session -- runs beside Gradio. None of it is installed by `pip install` or npm: `deploy/` ships in neither, and a deployment installs these from PyPI when the platform builds it, so nothing here is redistributed. Licences read from each version's PyPI metadata (2026-10-23).
+
+| Package | Version (as pinned) | Primary License | Apache 2.0 Compatible | Where |
+|---|---|---|---|---|
+| textual-serve | `==1.1.3` | MIT | Yes | `deploy/hosted/requirements.txt`; its browser assets only, its server never runs |
+| uv | `==0.13.4` | MIT OR Apache-2.0 | Yes | `deploy/hosted/requirements.txt`; builds the session environment |
+| websockets | `==17.3` | BSD-3-Clause | Yes | `deploy/hosted/requirements.txt`; the websocket upgrade every session is |
+| gradio | `==6.30.0` | Apache-2.0 | Yes | installed by the Space at the README's `sdk_version`; in the Studio's `bridge.lock` |
+| spaces | `==0.51.3` | Apache-2.0 | Yes | installed by the Space itself; in the Studio's `bridge.lock` |
+
+## Deploy tooling (CI only)
+
+Installed by `.github/workflows/deploy-demo.yml` to build, audit and upload a bundle (batch 169), and by the owner to deploy the Studio by hand. Never part of any install or bundle.
+
+| Package | Version (as pinned) | Primary License | Apache 2.0 Compatible |
+|---|---|---|---|
+| huggingface_hub | `==2.2.0` | Apache-2.0 | Yes |
+| pip-audit | `==2.10.1` | Apache-2.0 | Yes |
+
 ## Non-code third-party material
 
 **No third-party source code is included in this repository.** Measured, not assumed: all 200 tracked

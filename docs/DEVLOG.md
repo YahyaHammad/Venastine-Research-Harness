@@ -26216,3 +26216,122 @@ minimax-m3.1-flash.
   `client_secret_post` and it advertises no PKCE method, so HD13's reason
   stands; a public client is what would reopen it, and this is where one
   would first show.
+
+---
+## Batch 169 -- the deploy workflow, gated on every CI check (2026-10-23)
+
+### What was built
+
+ROADMAP_v3 §79's seventh and last slice (HD9 amended) and a new §80, on
+`hosted-demo`, planned with the owner first. The owner's requirement for the
+deploy: every CI check passes before the deployment ever runs. Their choices:
+a gate job where the last CI workflow to finish triggers the deploy; "every
+check" meaning every check run on the commit; pip-audit run on pushes to
+`main` as well, and the deploy auditing the locks it ships; ModelScope kept
+manual, because it has no fine-grained tokens or trusted CI; and, added this
+batch, a workflow that keeps the copyright year current, written as a range.
+
+- **`scripts/deploy_gate.py`** decides from GitHub's record of the commit.
+  Every check run must be success or skipped, except the deploy workflow's
+  own and GitHub's `dynamic` runs; every workflow a push to `main` runs --
+  read from the workflow files, refusing a path-filtered push trigger --
+  must have a successful push run; the commit must be `main`'s tip; and a
+  `workflow_run` trigger must be a push to `main` in this repository. It
+  asks about the tip first, because GitHub answers 422 for a commit it has
+  never seen. Verdicts: deploy, rehearse, wait, superseded, refuse.
+- **`.github/workflows/deploy-demo.yml`** wakes on each of the seven CI
+  workflows finishing on `main`. Its `gate` job holds no secret; `deploy-hf`
+  is the only job in environment `demo` and runs only on the gate's deploy
+  verdict, one at a time; `rehearse` builds, scans and audits both bundles
+  for a manual dry run or a run off `main`. Event values reach scripts only
+  through `env:`.
+- **`scripts/deploy_demo.py`** is the one path for both platforms: build
+  from a clean commit, gitleaks from the bundle's root, pip-audit of the
+  locks it installs, the gate once more, then the send. A Space is done
+  when its page names the build; a Studio when its run log shows the
+  bridge serving it. A missing secret or target makes a dry run.
+  `VENASTINE_SINGLE_USER` is declared empty on the Space for duplicates and
+  never overwritten. ModelScope's git token rides in a header through
+  `GIT_CONFIG_*`, and the push is never forced. `--unverified` skips the
+  gate for a private test deploy; the workflow never passes it.
+- **The bridge logs `serving build <sha>` at start** (`app.py`, through
+  `web.build_label`, which the page footer already used), so a private
+  Studio -- which answers an anonymous request with 403 -- can be confirmed
+  from its log. This session's own redeploy poller had waited on that 403.
+- **pip-audit runs on a push to `main`**, and codeql and pip-audit key
+  their concurrency on the event, so a scheduled run can no longer cancel
+  the push run the gate waits for.
+- **`.github/workflows/copyright-year.yml` and
+  `scripts/bump_copyright_year.py`** (§80, LY1-LY3): at 23:59 UTC on
+  December 31 and again at 06:07 on January 1, a range from the first
+  year, written to LICENSE's appendix and NOTICE together.
+
+### What was measured, and what it found
+
+**`main` requires nothing.** Its ruleset blocks deletion and force pushes
+only, so no pull request's checks can be leaned on; the gate judges the
+commit that landed.
+
+**The gate refused main's real tip, for the right reason.** Run read-only
+against the API for 819848f, it answered `refuse` naming one check:
+pip-audit's Monday run, which failed on mcp 2.0.0 (CVE-2026-59951, fixed on
+this branch). Every push check on that commit had passed, so a gate that
+read workflow verdicts only, or push runs only, would have deployed it.
+Dependabot's five `dynamic` runs on the same commit were ignored and
+codeql's skipped jobs accepted. The first attempt at a commit that was never
+pushed got a 422, which is why the tip is now asked about first.
+
+**The first audit of what a bundle installs found what nothing had
+audited.** pip-audit.yml audits the bridge's own requirements but never
+Gradio's dependencies, because a Space installs Gradio itself. Resolved for
+the platform, they pin pillow 12.3.0 -- Gradio 6.30.0, the latest release,
+requires `pillow<13` -- and pillow 12.3.0 has 35 advisories, all fixed in
+13.0.0. Both live deployments already run it. Read in Gradio's source: the
+upload route copies a file without decoding it, pillow opens only the
+deployment's own favicon, and image decoding lives in components and the
+MCP server, neither of which the bridge registers or starts. The owner
+accepted the 35 by ID; each entry applies only while a lock pins 12.3.0,
+and a new ID still refuses. `session.lock`, which runs the harness, pins
+13.0.0 and was clean.
+
+**The copyright script's first run against the real files refused.**
+LICENSE is CRLF in this worktree and NOTICE LF, and the holder pattern read
+LICENSE's CR, so the two "disagreed". Its own CRLF test had written both
+files CRLF and agreed with itself; the test now writes the real mix.
+
+**A known gap, stated rather than closed:** CodeQL on a push uploads its
+alerts and fails nothing -- the `CodeQL` check is posted on pull requests
+only -- so a new alert on a direct push to `main` does not hold a deploy.
+
+### Verified
+
+- Every new test was checked against a mutation of the fix it pins: 65 of
+  65 killed on an export copy of the working tree, across the gate, the
+  deploy script, the copyright script, the workflow files and the bridge's
+  start-up log. The first pass killed 64: the copyright test for UTC had
+  picked two times where local and UTC gave the same year, so dropping the
+  conversion changed nothing; it now uses two where they differ.
+- The ModelScope token test first checked only for the raw token in an
+  argument; it now also refuses its Basic form, which a mutation passing
+  the header as `git -c http.extraheader=...` would have put in every
+  process listing.
+- Both platforms' paths, for real and with nothing sent:
+  `deploy_demo.py --platform hf --dry-run` and `--platform modelscope
+  --dry-run` built the bundle, found no leaks from its root and audited
+  both locks clean, with the 35 accepted pillow IDs named as accepted. The
+  first HF dry run is what found pillow.
+- The gate against the real API, read-only: main's tip refused for its
+  scheduled pip-audit failure alone; this branch's commit superseded; a
+  fork's pull request from a branch called main refused.
+- The full suite is green on Windows (7881 passed, 66 skipped, 7947); the
+  changed suites again with AGENT_WORKSPACE unset (273 passed, 6 skipped),
+  and the new and changed hosted suites under WSL (201 passed). The first
+  full run failed one test: AGENTS.md's map of decision families did not
+  name LY, which it now does.
+- ruff, bandit and its count check (62 pairs, none grew), pip-audit over the
+  three requirements files, and gitleaks (`--no-git`) are clean.
+- Not verifiable here: the workflow runs only from the default branch, so
+  its first real run is the merge, and it rehearses until the owner creates
+  environment `demo` with `HF_TOKEN` and `DEMO_HF_SPACE`. The copyright
+  job's first scheduled run is 2026-12-31; a manual dispatch can rehearse it
+  after the merge.

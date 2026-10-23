@@ -1,0 +1,64 @@
+# ROADMAP_v3 §80 (batch 169): the copyright year in LICENSE and NOTICE,
+# kept current so nobody has to remember it. scripts/bump_copyright_year.py
+# does the work and says why each choice is what it is: a range from the
+# first year, both files together, and next year's number on December 31.
+#
+# TWO SCHEDULES, both UTC. 23:59 on December 31 is the owner's time. The
+# second, early on January 1, is there because GitHub delays scheduled runs
+# at busy hours and can drop them outright, and midnight UTC on New Year is
+# the busiest hour of the year; a run that finds the year current changes
+# nothing, so the second is free when the first worked.
+#
+# WHAT IT CANNOT DO, by GitHub's design: a push made with GITHUB_TOKEN
+# starts no workflows, so the commit this makes gets no CI run and no demo
+# deploy (deploy-demo.yml); the demo's copy of LICENSE catches up with the
+# next human push. If `main` ever requires pull requests or signed commits,
+# the push below fails and says so. GitHub also disables every schedule in
+# a repository after 60 days without activity there.
+
+name: copyright-year
+
+on:
+  schedule:
+    - cron: "59 23 31 12 *"
+    - cron: "7 6 1 1 *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: copyright-year
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    # A schedule always runs on the default branch; a manual run elsewhere
+    # has nothing to write to.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # The one workflow here that writes to the repository, and only this.
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          ref: main
+          fetch-depth: 1
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - name: Bring the year up to date
+        id: bump
+        run: python scripts/bump_copyright_year.py
+
+      - name: Commit and push
+        if: steps.bump.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -q -m "The copyright year, kept current" -- LICENSE NOTICE
+          git push origin HEAD:main

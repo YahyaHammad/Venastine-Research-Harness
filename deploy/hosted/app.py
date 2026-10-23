@@ -84,6 +84,15 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
     logging.getLogger(__name__).info("bridge non-dumpable: %s", undumpable)
+    from pathlib import Path
+
+    from deploy.hosted.web import build_label
+
+    # Which commit this is, where the operator can read it: a private Studio
+    # answers an anonymous request with 403, so its log is where a deploy is
+    # confirmed (scripts/deploy_demo.py looks for this line; batch 169).
+    root = Path(__file__).resolve().parents[2]
+    logging.getLogger(__name__).info("serving %s", build_label(root))
     # Before anything listens: what a killed predecessor left of its
     # visitors' sessions (supervisor.py says why only here).
     from deploy.hosted.supervisor import sweep_stale_sessions
@@ -98,11 +107,8 @@ def main() -> None:
     # What this container lets a session confine itself with, in the log
     # where the operator can read it, then the math tools' self-test on the
     # session interpreter (isolation_report.py says why; HD11).
-    from pathlib import Path
-
     from deploy.hosted import isolation_report
 
-    root = Path(__file__).resolve().parents[2]
     isolation_report.log(python, root)
     confinement = isolation_report.verify_confinement(python, root)
     server = build(python, confinement, secret)

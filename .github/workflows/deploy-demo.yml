@@ -1,0 +1,223 @@
+# ROADMAP_v3 §79 slice 7 (HD9, amended in batch 169): the hosted demo,
+# kept current from `main` -- and only once EVERY CI check on the commit has
+# passed, which is the owner's rule.
+#
+# HOW IT WAITS. `main` has no required checks to lean on (its ruleset
+# refuses deletion and force pushes, nothing else), so this workflow judges
+# the commit that landed, by GitHub's own record of it. It wakes each time
+# one of the CI workflows below finishes on that commit. Its first job holds
+# no secret and asks scripts/deploy_gate.py for a verdict: most runs find a
+# workflow still going and WAIT; the run woken by the last one to finish
+# finds everything done and says DEPLOY. "Every check" is literal -- every
+# job of every workflow, including compat's py313-info, which its own
+# workflow lets fail, and any scheduled run on the same commit -- except
+# this workflow's own and GitHub's `dynamic` runs (Dependabot's version
+# updates). deploy_gate.py's docstring has the full rule.
+#
+# The list under `workflows:` must be EXACTLY the workflows a push to main
+# runs. deploy_gate.py derives that list from the files themselves, and
+# test_docs_consistency.py fails when the two disagree, so a new CI
+# workflow cannot be left out of the gate.
+#
+# WHY THE GATE RE-CHECKS THE TRIGGER ITSELF. A `workflow_run` job's
+# `github.ref` is always the default branch, whatever branch the CI run was
+# for -- so the `demo` environment's branch rule cannot tell a push to main
+# from a fork's pull request whose branch is called main. The job-level
+# `if:` below and the script both require a PUSH, to `main`, in THIS
+# repository. Everything an event carries reaches a script through `env:`,
+# never pasted into a `run:` line, because a branch name is chosen by
+# whoever pushed it.
+#
+# WHAT DEPLOYS: Hugging Face, from here. scripts/deploy_demo.py builds the
+# bundle, scans it with gitleaks from its own root, audits the locks it
+# installs, asks the gate once more, uploads, and waits until the page
+# itself names the build. ModelScope is deployed by the owner with the same
+# script, because ModelScope has no fine-grained tokens and no trusted CI
+# (the owner's call, batch 169).
+#
+# WHAT THE OWNER SETS UP, once, in Settings -> Environments -> `demo`:
+# deployment branches `main` only; the secret HF_TOKEN, a fine-grained
+# token with write access to the one Space; the variable DEMO_HF_SPACE
+# (OWNER/NAME). A required reviewer there would add a click before every
+# deploy, with no change here. Until the secret and the variable exist,
+# every deploy is a dry run.
+#
+# Whoever can merge to `main` decides the code that runs beside every live
+# visitor's sign-in (HD9).
+
+name: deploy-demo
+
+on:
+  workflow_run:
+    workflows: [bandit, codeql, compat, gitleaks, lint, pip-audit, tests]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build, scan and audit without sending (leave checked unless you mean it)"
+        type: boolean
+        default: true
+        required: true
+
+# Nothing by default; each job asks for what it reads.
+permissions: {}
+
+jobs:
+  gate:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+    outputs:
+      verdict: ${{ steps.gate.outputs.verdict }}
+      sha: ${{ steps.sha.outputs.sha }}
+
+    steps:
+      - name: Which commit
+        id: sha
+        env:
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          DISPATCH_SHA: ${{ github.sha }}
+        run: echo "sha=${RUN_SHA:-$DISPATCH_SHA}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          ref: ${{ steps.sha.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: "3.11"
+
+      # requirements.txt's pin; the gate reads the workflow files with it.
+      - name: Install the gate's one dependency
+        run: python -m pip install "pyyaml==6.0.3"
+
+      - name: Ask GitHub whether every check passed
+        id: gate
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.sha.outputs.sha }}
+          TRIGGER: ${{ github.event_name }}
+          RUN_EVENT: ${{ github.event.workflow_run.event }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
+          REF: ${{ github.ref }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: >-
+          python scripts/deploy_gate.py
+          --repo "$GITHUB_REPOSITORY" --sha "$SHA" --trigger "$TRIGGER"
+          --run-event "$RUN_EVENT" --head-branch "$HEAD_BRANCH"
+          --head-repo "$HEAD_REPO" --ref "$REF" --dry-run "${DRY_RUN:-false}"
+
+  deploy-hf:
+    needs: gate
+    if: needs.gate.outputs.verdict == 'deploy'
+    runs-on: ubuntu-latest
+    # Build and audit ~2 min, upload, then up to 20 min for the Space to
+    # serve the build.
+    timeout-minutes: 45
+    # The only job that can read HF_TOKEN or DEMO_HF_SPACE.
+    environment: demo
+    # The gate is asked once more right before the upload, so this job
+    # reads the checks too.
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+    # Two last finishers can both see green. Queued, not cancelled: the
+    # second finds the commit already live and sends nothing.
+    concurrency:
+      group: deploy-demo-hf
+      cancel-in-progress: false
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: "3.11"
+
+      # Exact: huggingface_hub for the upload, uv to compile the locks
+      # (deploy/hosted/requirements.txt's pin), pip-audit at pip-audit.yml's
+      # pin, pyyaml for the gate.
+      - name: Install the deploy's tools
+        run: >-
+          python -m pip install "huggingface_hub==2.2.0" "uv==0.13.4"
+          "pip-audit==2.10.1" "pyyaml==6.0.3"
+
+      # gitleaks.yml's pin and digest, outside the checkout.
+      - name: Install Gitleaks
+        run: |
+          curl -sSL --fail -o "$RUNNER_TEMP/gitleaks.tar.gz" \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum -c -
+          tar xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP" gitleaks
+          rm "$RUNNER_TEMP/gitleaks.tar.gz"
+
+      - name: Build, scan, audit, ask the gate, upload, wait for the page
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          DEMO_HF_SPACE: ${{ vars.DEMO_HF_SPACE }}
+          GITHUB_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.gate.outputs.sha }}
+        run: >-
+          python scripts/deploy_demo.py --platform hf --commit "$SHA"
+          --gitleaks "$RUNNER_TEMP/gitleaks"
+
+  # A manual run asked for a dry run, or ran off main: both bundles are
+  # built, scanned and audited, with no environment and no secret.
+  rehearse:
+    needs: gate
+    if: needs.gate.outputs.verdict == 'rehearse'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [hf, modelscope]
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - name: Install the deploy's tools
+        run: python -m pip install "uv==0.13.4" "pip-audit==2.10.1" "pyyaml==6.0.3"
+
+      - name: Install Gitleaks
+        run: |
+          curl -sSL --fail -o "$RUNNER_TEMP/gitleaks.tar.gz" \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum -c -
+          tar xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP" gitleaks
+          rm "$RUNNER_TEMP/gitleaks.tar.gz"
+
+      - name: Build, scan and audit
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          SHA: ${{ needs.gate.outputs.sha }}
+        run: >-
+          python scripts/deploy_demo.py --platform "$PLATFORM" --commit "$SHA"
+          --gitleaks "$RUNNER_TEMP/gitleaks" --dry-run
