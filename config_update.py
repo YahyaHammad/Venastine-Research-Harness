@@ -659,7 +659,7 @@ def _forget(path: str) -> None:
     try:
         os.unlink(path)
     except OSError:
-        pass
+        pass  # already missing, which is the state wanted
 
 
 # ---------------------------------------------------------------------------

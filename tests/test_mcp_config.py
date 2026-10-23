@@ -6,6 +6,8 @@ No SDK involved: this is pure file parsing and merge policy.
 """
 
 import json
+import os
+import stat
 
 import pytest
 
@@ -279,6 +281,26 @@ def test_improving_describe_alone_never_reasks_an_acknowledged_server(roots, mon
     monkeypatch.setattr(mcp_config.ServerConfig, "describe",
                         lambda self: "COMPLETELY DIFFERENT WORDING")
     assert mcp_config.is_known(cfg) is True
+
+
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason="POSIX mode bits; os.open's mode only sets read-only on Windows")
+def test_a_consent_is_writable_by_this_user_alone(roots):
+    """Batch 170. This store decides whether a server starts without asking
+    -- the same class of data as the trust store, which was already 0o600 --
+    and it took open()'s mode less the umask, so under a umask of 002 anyone
+    in the user's group could write a consent. Under the most permissive
+    umask there is, nobody else may write one here, or read one."""
+    _write(roots["user"] / "mcp.json", {"x": {"command": "a"}})
+    cfg = mcp_config.load_server_configs(str(roots["project"]), trusted=False)["x"]
+    old = os.umask(0)
+    try:
+        mcp_config.remember_server(cfg)
+    finally:
+        os.umask(old)
+    mode = stat.S_IMODE(os.stat(roots["user"] / "known_mcp_servers.json").st_mode)
+    assert mode == 0o600, oct(mode)
 
 
 # ---------------------------------------------------------------------------

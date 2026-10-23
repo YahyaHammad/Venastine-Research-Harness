@@ -57,8 +57,21 @@ def _green():
     return runs, checks
 
 
-def _decide(runs, checks, *, sha=SHA, main_sha=SHA, trigger=PUSH):
-    return gate.decide(sha, main_sha, REQUIRED, runs, checks, trigger)
+def _alert(number, level, *, state="open"):
+    """A code scanning alert as the API answers it, trimmed. A quality
+    note's rule has no `security_severity_level` at all."""
+    rule = {"id": "py/rule"}
+    if level is not None:
+        rule["security_severity_level"] = level
+    return {"number": number, "state": state, "rule": rule,
+            "most_recent_instance": {"location": {
+                "path": "json_store.py", "start_line": 217}}}
+
+
+def _decide(runs, checks, *, sha=SHA, main_sha=SHA, trigger=PUSH,
+            alerts=()):
+    return gate.decide(sha, main_sha, REQUIRED, runs, checks, trigger,
+                       alerts=alerts)
 
 
 class TestTheVerdict:
@@ -176,6 +189,35 @@ class TestTheVerdict:
         runs, checks = _green()
         runs.append(_run("tests", 1, run_id=50, conclusion="failure"))
         assert _decide(runs, checks).verdict == gate.REFUSE
+
+    @pytest.mark.parametrize("level", ["high", "critical"])
+    def test_an_open_high_or_critical_code_scanning_alert_refuses(self, level):
+        """Batch 170. CodeQL on a push uploads its alerts and fails nothing,
+        so every check above can be green beside a new high alert. Measured
+        on main's tip: #15, py/overly-permissive-file, high."""
+        verdict = _decide(*_green(), alerts=[_alert(15, level)])
+        assert verdict.verdict == gate.REFUSE
+        assert verdict.reasons == [
+            f"code scanning #15: py/rule ({level}) at json_store.py:217"]
+
+    @pytest.mark.parametrize("level", ["medium", "low", None])
+    def test_lesser_alerts_and_quality_notes_do_not_hold_it(self, level):
+        """Quality notes carry no security severity at all; medium and low
+        security alerts are triaged rather than gated (the owner's
+        choice)."""
+        verdict = _decide(*_green(), alerts=[_alert(16, level)])
+        assert verdict.verdict == gate.DEPLOY
+        assert "(1 open in all)" in verdict.reasons[1]
+
+    def test_a_dismissed_alert_is_not_open(self):
+        dismissed = dict(_alert(15, "high"), state="dismissed")
+        assert _decide(*_green(), alerts=[dismissed]).verdict == gate.DEPLOY
+
+    def test_an_alert_refuses_even_while_checks_still_run(self):
+        runs, checks = _green()
+        checks[3]["status"] = "queued"
+        verdict = _decide(runs, checks, alerts=[_alert(15, "high")])
+        assert verdict.verdict == gate.REFUSE
 
     def test_a_commit_that_is_no_longer_the_tip_is_superseded(self):
         verdict = _decide(*_green(), main_sha=OTHER)
@@ -331,6 +373,44 @@ class TestAskingGitHub:
         runs, checks = gate.fetch_record(REPO, SHA, "t")
         assert len(runs) == 101 and checks == []
         assert any("filter=latest" in url for url in asked)
+
+    def test_the_alerts_are_read_for_main_open_only_page_by_page(
+            self, monkeypatch):
+        asked = []
+        pages = {1: [_alert(n, None) for n in range(100)],
+                 2: [_alert(100, "high")]}
+
+        def fake_get(url, token):
+            asked.append(url)
+            return pages.get(int(url.rsplit("page=", 1)[1]), [])
+
+        monkeypatch.setattr(gate, "_get", fake_get)
+        alerts = gate.fetch_alerts(REPO, "t")
+        assert len(alerts) == 101
+        assert asked[0].startswith(
+            f"{gate.API}/repos/{REPO}/code-scanning/alerts"
+            f"?ref=refs/heads/main&state=open&")
+
+    def test_alerts_that_cannot_be_read_stop_the_deploy(self, monkeypatch):
+        """Code scanning off, or a token without security-events: read,
+        answers 403 or 404 -- which must not read as 'no alerts'."""
+        def fake_get(url, token):
+            raise gate.GateError(f"GitHub API {url}: HTTP Error 403")
+
+        monkeypatch.setattr(gate, "_get", fake_get)
+        with pytest.raises(gate.GateError, match="nothing may deploy"):
+            gate.fetch_alerts(REPO, "t")
+
+    def test_the_tip_is_judged_with_its_alerts(self, monkeypatch):
+        runs, checks = _green()
+        monkeypatch.setattr(gate, "required_workflows", lambda d: REQUIRED)
+        monkeypatch.setattr(gate, "fetch_tip", lambda *a: SHA)
+        monkeypatch.setattr(gate, "fetch_record", lambda *a: (runs, checks))
+        monkeypatch.setattr(gate, "fetch_alerts",
+                            lambda *a: [_alert(15, "high")])
+        verdict = gate.evaluate(gate.Trigger("local", REPO), SHA, "t")
+        assert verdict.verdict == gate.REFUSE
+        assert verdict.reasons[0].startswith("code scanning #15")
 
     def test_a_plain_http_address_is_refused(self):
         with pytest.raises(gate.GateError, match="non-https"):

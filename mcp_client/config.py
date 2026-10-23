@@ -472,5 +472,12 @@ def remember_server(cfg: ServerConfig) -> None:
     # is the sibling that argues hardest for the guarantee. Sharing the
     # write is what stops a convention four comments long from having a
     # fourth copy that does not follow it.
+    #
+    # AND ITS MODE, since batch 170: 0o600, as the trust store has. Without
+    # one this took open()'s 0o666 less the umask, so under a umask of 002
+    # anyone in the user's group could write a consent here and a server
+    # would start without asking. Found by triaging CodeQL's alert on
+    # json_store's default mode; the default itself is right for the files
+    # the agent writes in a workspace.
     write_json_atomic(path, {"version": KNOWN_STORE_VERSION,
-                             "servers": servers})
+                             "servers": servers}, mode=0o600)

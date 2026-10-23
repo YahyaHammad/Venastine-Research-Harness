@@ -803,7 +803,7 @@ def _remove_known_hosts(path: str) -> None:
     try:
         os.unlink(path)
     except OSError:
-        pass
+        pass  # already gone; nothing worth reporting at shutdown
 
 
 def _ssh_config_reason() -> str:
@@ -990,7 +990,7 @@ def _reset_ssh_probe() -> None:
             try:
                 os.unlink(_ssh_known_hosts_path)
             except OSError:
-                pass
+                pass  # already gone; the path is forgotten below either way
             _ssh_known_hosts_path = None
 
 
@@ -1572,7 +1572,7 @@ def _feed_sudo_password(proc, secret) -> None:
         try:
             proc.stdin.close()
         except OSError:
-            pass
+            pass  # the child already closed its end
 
 
 # ---------------------------------------------------------------------------
@@ -2747,7 +2747,7 @@ def _run_docker(
                 capture_output=True, timeout=10,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass
+            pass  # the runtime is gone or hung; the process kill below still runs
         if proc is not None:
             proc.kill()
             proc.wait()
@@ -3744,7 +3744,7 @@ class SessionProcess:
                 self._proc.wait(timeout=_KILL_GRACE_S)
                 return
             except subprocess.TimeoutExpired:
-                pass
+                pass  # it outlived the grace period; forced below
             self._force()
             try:
                 self._proc.wait(timeout=_KILL_GRACE_S)
@@ -3793,7 +3793,7 @@ class DockerSessionProcess(SessionProcess):
             subprocess.run([self.runtime, "kill", self.name],  # nosec B603 - kills this session's own container; runtime and name are this module's
                            capture_output=True, timeout=10)
         except (OSError, subprocess.TimeoutExpired):
-            pass
+            pass  # the runtime is gone or hung; best effort on the way out
 
 
 class HostSessionProcess(SessionProcess):

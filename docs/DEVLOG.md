@@ -26335,3 +26335,81 @@ only -- so a new alert on a direct push to `main` does not hold a deploy.
   environment `demo` with `HF_TOKEN` and `DEMO_HF_SPACE`. The copyright
   job's first scheduled run is 2026-12-31; a manual dispatch can rehearse it
   after the merge.
+
+---
+## Batch 170 -- a code scanning gate, and every open alert triaged (2026-10-23)
+
+### What was built
+
+The gap batch 169 stated rather than closed, closed, and the owner's
+follow-on request: check every open code scanning alert, fix the ones that
+need it, close the false positives. The owner chose the gate's threshold,
+how to handle the one high alert, and comments over dismissal for the empty
+`except` blocks.
+
+- **The deploy gate reads the code scanning alerts on `main`**
+  (`deploy_gate.fetch_alerts`) and refuses while one of security severity
+  high or critical is open. CodeQL on a push uploads its alerts and fails
+  nothing -- the `CodeQL` check is posted on pull requests only -- so this
+  is the only place a new alert on a direct push is seen. A list it cannot
+  read (code scanning off, or a token without `security-events: read`)
+  stops the deploy instead of reading as empty. Both jobs that run the gate
+  gained `security-events: read`, pinned by test.
+- **The MCP consent store is `0o600`.** `known_mcp_servers.json` decides
+  whether a server starts without asking -- the same class of data as the
+  trust store, which was already `0o600` -- and it took `open()`'s mode less
+  the umask, so under a umask of 002 anyone in the user's group could write
+  a consent.
+- **Seventeen empty `except` blocks say why**, on the `pass` line: closing
+  what is already closed, unlinking what may not exist, a widget that is not
+  mounted at shutdown, a numeric form that does not exist for an exact
+  answer. No behaviour changed.
+- **Two dead values are gone**: an assignment to `used` after the last
+  read of it in `file_ops`' paging loop, and `config_edit._NULL_WORDS`, the
+  private name `NULL_WORDS` had before it was made public, which nothing
+  read.
+
+### What the triage found
+
+51 alerts were open, all on `main`, and only one was a security alert: #15,
+high, `py/overly-permissive-file` on `json_store`'s `0o666` default. That
+default is deliberate and documented -- it is the mode `open()` passes, so
+the umask decides, which is right for the files the agent writes in a
+workspace -- and every store holding a secret passes `0o600`. Following its
+callers is what found the consent store without a mode. #15 was dismissed as
+won't fix, with that reason.
+
+The other 50 came from the weekly security-and-quality run. Nineteen are
+fixed in code above and close themselves when `main` is next scanned after
+the merge. Thirty-one more were dismissed, each with its reason: twelve false
+positives (a sentence wrapped across lines in a list, read as a missing
+comma; `BaseException` caught and re-raised; two globals the rule thought
+unread, both read in the function that declares them; a probe import and a
+side-effect import), seventeen won't-fix (twelve cyclic imports, each closed
+by a function-level import that breaks the cycle at call time, and five
+modules imported both ways for different jobs), and two used-in-tests
+(`inner` in place of `self` in conftest, so the enclosing `self` stays in
+view). Four of the dismissal comments were wrong in the first draft --
+two named the wrong mechanism, one the wrong branch, one the wrong scope --
+and were corrected against the code before anything was sent.
+
+Run read-only against the API after the dismissals, the gate refuses main's
+tip for one reason only: pip-audit's scheduled failure on mcp 2.0.0, which
+this branch fixes.
+
+### Verified
+
+- Every behaviour change was checked against a mutation of it: 8 of 8
+  killed -- the alert threshold both ways, a dismissed alert, an unreadable
+  list read as empty, alerts that never reach the verdict, the `ref` query,
+  the workflow's `security-events` permission, and the consent store's mode,
+  that last one under WSL, where POSIX modes exist.
+- The gate, read-only against the real API, before and after the
+  dismissals: main's tip refused for #15 and pip-audit's scheduled failure,
+  then for the pip-audit failure alone.
+- The full suite is green on Windows (7891 passed, 67 skipped, 7958); the
+  changed suites again with AGENT_WORKSPACE unset (372 passed, 6 skipped);
+  ruff, bandit and its count check, pip-audit over the three requirements
+  files, and gitleaks (`--no-git`) are clean.
+- Not verifiable here: the 19 alerts fixed in code close only when CodeQL
+  next scans `main`, which is after the merge.

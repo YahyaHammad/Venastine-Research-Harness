@@ -12,7 +12,10 @@
 # job of every workflow, including compat's py313-info, which its own
 # workflow lets fail, and any scheduled run on the same commit -- except
 # this workflow's own and GitHub's `dynamic` runs (Dependabot's version
-# updates). deploy_gate.py's docstring has the full rule.
+# updates). And since batch 170 no code scanning alert of high or critical
+# severity may be open on main: CodeQL on a push uploads its alerts and
+# fails nothing, so without that a new alert passed every check above.
+# deploy_gate.py's docstring has the full rule.
 #
 # The list under `workflows:` must be EXACTLY the workflows a push to main
 # runs. deploy_gate.py derives that list from the files themselves, and
@@ -72,10 +75,13 @@ jobs:
        github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # security-events: read is the code scanning alerts on main (batch 170):
+    # an open high or critical one holds the deploy.
     permissions:
       actions: read
       checks: read
       contents: read
+      security-events: read
     outputs:
       verdict: ${{ steps.gate.outputs.verdict }}
       sha: ${{ steps.sha.outputs.sha }}
@@ -129,11 +135,12 @@ jobs:
     # The only job that can read HF_TOKEN or DEMO_HF_SPACE.
     environment: demo
     # The gate is asked once more right before the upload, so this job
-    # reads the checks too.
+    # reads the checks and the code scanning alerts too.
     permissions:
       actions: read
       checks: read
       contents: read
+      security-events: read
     # Two last finishers can both see green. Queued, not cancelled: the
     # second finds the commit already live and sends nothing.
     concurrency:

@@ -29,6 +29,13 @@ THE VERDICTS, in the order they are decided:
     `dynamic` runs (Dependabot's version updates), which check nothing about
     the code. So a job a workflow lets fail (compat's py313-info) refuses,
     and so does a scheduled run that failed on the same commit.
+  * refuse -- code scanning has an open alert on `main` of security
+    severity high or critical (batch 170, the owner's choice). CodeQL on a
+    push uploads its alerts and fails nothing -- the `CodeQL` check is
+    posted on pull requests only -- so without this a new alert on a direct
+    push passed every check above. The alerts are read for `main`, whose
+    latest analysis is this commit's once its codeql run has finished, and
+    an alert list that cannot be read stops the deploy rather than passing.
   * wait -- a required workflow has no push run yet, or a counted check run
     has not finished.
   * deploy -- none of the above.
@@ -65,6 +72,10 @@ PASSED = frozenset({"success", "skipped"})
 # GitHub's own runs (Dependabot's version updates, Pages builds). They show
 # on the commit as check runs and say nothing about whether its code passes.
 IGNORED_EVENTS = frozenset({"dynamic"})
+# An open code scanning alert at one of these security severities holds the
+# deploy. Medium and low security alerts, and quality notes, which carry no
+# security severity at all, are triaged rather than gated.
+BLOCKING_SEVERITIES = frozenset({"critical", "high"})
 
 
 class GateError(Exception):
@@ -186,9 +197,11 @@ def _trigger_verdict(trigger: Trigger, branch: str):
 
 
 def decide(sha: str, main_sha: str, required: list, runs: list,
-           check_runs: list, trigger: Trigger, branch: str = BRANCH) -> Verdict:
+           check_runs: list, trigger: Trigger, branch: str = BRANCH,
+           alerts: list = ()) -> Verdict:
     """`runs` is the Actions runs API's list for the commit; `check_runs`
-    the check-runs API's latest list for it."""
+    the check-runs API's latest list for it; `alerts` the open code
+    scanning alerts on `branch`."""
     early = _trigger_verdict(trigger, branch)
     if early is not None:
         return early
@@ -228,13 +241,26 @@ def decide(sha: str, main_sha: str, required: list, runs: list,
         elif check.get("conclusion") not in PASSED:
             failed.append(f"{label}: {check.get('conclusion')}")
 
+    for alert in alerts:
+        rule = alert.get("rule") or {}
+        level = rule.get("security_severity_level")
+        if (alert.get("state", "open") != "open"
+                or level not in BLOCKING_SEVERITIES):
+            continue
+        where = (alert.get("most_recent_instance") or {}).get("location") or {}
+        failed.append(f"code scanning #{alert.get('number')}: {rule.get('id')} "
+                      f"({level}) at {where.get('path', '?')}:"
+                      f"{where.get('start_line', '?')}")
+
     if failed:
         return Verdict(REFUSE, failed)
     if pending:
         return Verdict(WAIT, pending)
     return Verdict(DEPLOY, [
         f"{len(required)} workflows and {counted} check runs on "
-        f"{sha[:12]}, every one passed"])
+        f"{sha[:12]}, every one passed",
+        f"no open code scanning alert of high or critical severity on "
+        f"{branch} ({len(alerts)} open in all)"])
 
 
 # ---------------------------------------------------------------------------
@@ -258,11 +284,14 @@ def _get(url: str, token: str) -> dict:
         raise GateError(f"GitHub API {url}: {exc}") from None
 
 
-def _pages(url: str, key: str, token: str) -> list:
+def _pages(url: str, key, token: str) -> list:
+    """Every page of a list endpoint; `key` names the list in an answer
+    that wraps it, and None means the answer is the list."""
     out, page = [], 1
     while True:
         sep = "&" if "?" in url else "?"
-        batch = _get(f"{url}{sep}per_page=100&page={page}", token).get(key, [])
+        answer = _get(f"{url}{sep}per_page=100&page={page}", token)
+        batch = answer if key is None else answer.get(key, [])
         out.extend(batch)
         if len(batch) < 100:
             return out
@@ -287,6 +316,20 @@ def fetch_record(repo: str, sha: str, token: str, api: str = API) -> tuple:
     return runs, checks
 
 
+def fetch_alerts(repo: str, token: str, api: str = API,
+                 branch: str = BRANCH) -> list:
+    """The open code scanning alerts on `branch`. Unreadable is a stop, not
+    an empty list: a repository with code scanning off, or a token without
+    `security-events: read`, answers 403 or 404, and either would otherwise
+    read as "no alerts"."""
+    try:
+        return _pages(f"{api}/repos/{repo}/code-scanning/alerts"
+                      f"?ref=refs/heads/{branch}&state=open", None, token)
+    except GateError as exc:
+        raise GateError(f"the code scanning alerts on {branch} could not be "
+                        f"read, so nothing may deploy: {exc}") from None
+
+
 def evaluate(trigger: Trigger, sha: str, token: str, api: str = API,
              workflow_dir: Path = WORKFLOW_DIR) -> Verdict:
     """The verdict for `sha`, asking GitHub only what is left to ask."""
@@ -298,7 +341,9 @@ def evaluate(trigger: Trigger, sha: str, token: str, api: str = API,
     if sha != main_sha:
         return decide(sha, main_sha, required, [], [], trigger)
     runs, checks = fetch_record(trigger.repository, sha, token, api)
-    return decide(sha, main_sha, required, runs, checks, trigger)
+    alerts = fetch_alerts(trigger.repository, token, api)
+    return decide(sha, main_sha, required, runs, checks, trigger,
+                  alerts=alerts)
 
 
 def _report(verdict: Verdict, sha: str) -> None:

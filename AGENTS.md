@@ -57,7 +57,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 7947 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
+pytest                                            # 7958 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -182,8 +182,9 @@ published outside the workflow, and the next version has to be past 0.3.1.
 a CI workflow finishes on a push to `main`; its first job holds no secret and runs
 `scripts/deploy_gate.py`, which reads GitHub's record of the commit: every check run must be success
 or skipped -- a job its workflow lets fail (compat's `py313-info`) and a scheduled run on the same
-commit included -- every workflow a push to main runs must have passed, and the commit must still be
-the tip. Only then does `deploy-hf`, the one job in environment `demo`, run `scripts/deploy_demo.py`:
+commit included -- every workflow a push to main runs must have passed, the commit must still be
+the tip, and since batch 170 no code scanning alert of high or critical security severity may be
+open on `main` (CodeQL on a push fails nothing, so the gate reads the alerts itself). Only then does `deploy-hf`, the one job in environment `demo`, run `scripts/deploy_demo.py`:
 build, gitleaks from the bundle's root, pip-audit of the locks it installs, the gate once more,
 upload, and wait until the page names the build. **Three rules here are load-bearing.** The
 `workflow_run` list must equal the workflows a push to main runs (`deploy_gate.required_workflows()`
@@ -365,7 +366,10 @@ separately. **Batch 108 added the two that hold credentials** -- `credentials.py
 over the live file, so a crash mid-write destroyed every stored API key or secret; the
 helper's own docstring had argued that exact case since batch 45. That extraction is also what made `known_mcp_servers.json` atomic — it was
 the one of the four writing a CONSENT record through a bare `open(path, "w")`, while its
-three siblings each explained at length why that is unacceptable. `/effort` and `/thinking` are unchanged.
+three siblings each explained at length why that is unacceptable. **And it is `0o600` since batch 170**, like
+the trust store: it took `open()`'s mode less the umask, so a group-writable umask let someone else
+write a consent. Triaging CodeQL's alert on `json_store`'s default mode found it; that default stays
+`0o666`, which is right for the files the agent writes in a workspace. `/effort` and `/thinking` are unchanged.
 
 **The model has a second reason not to be written into that file** (RM3): a project's
 `.venastine/settings.json` is inside D17's trust content hash, so a session writing

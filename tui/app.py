@@ -2870,7 +2870,7 @@ class VenastineApp(App):
             self._transcript.end_thinking()
             self._thinking_indicator.stop()
         except NoMatches:
-            pass
+            pass  # nothing mounted to stop: shutdown, or a screen on top
 
     # -- input ---------------------------------------------------------------
 
@@ -3659,7 +3659,7 @@ class VenastineApp(App):
             try:
                 self._thinking_indicator.stop()
             except NoMatches:
-                pass
+                pass  # nothing mounted to stop; the retraction above already happened
             # The mascot goes back to moving. The deltas paused it, and
             # what follows is several seconds of a backoff wait with
             # nothing arriving -- batch 61's worry about a figure going
@@ -4293,7 +4293,7 @@ class VenastineApp(App):
                     "boundary; anything already running finishes, and "
                     "what it did is kept.]")
             except NoMatches:
-                pass
+                pass  # the transcript is already gone; quitting goes on without the note
         self._shutting_down = True
         self.stop_connect_wait()
         # BATCH 145. AFTER the flag, so a worker that can see the

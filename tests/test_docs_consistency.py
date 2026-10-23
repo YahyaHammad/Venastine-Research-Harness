@@ -2336,8 +2336,12 @@ def test_only_the_deploy_job_holds_a_secret_and_only_after_the_gate():
     assert deploy["if"] == "needs.gate.outputs.verdict == 'deploy'"
     assert deploy["environment"] == "demo"
     assert deploy["concurrency"]["cancel-in-progress"] is False
-    assert jobs["gate"]["permissions"] == {
-        "actions": "read", "checks": "read", "contents": "read"}
+    # security-events: read is the code scanning alerts (batch 170); the
+    # gate stops when it cannot read them, so losing it holds every deploy.
+    reads = {"actions": "read", "checks": "read", "contents": "read",
+             "security-events": "read"}
+    assert jobs["gate"]["permissions"] == reads
+    assert deploy["permissions"] == reads
     assert _workflow_yaml("deploy-demo.yml")["permissions"] == {}
 
 

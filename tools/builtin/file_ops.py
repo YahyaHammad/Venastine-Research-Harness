@@ -341,7 +341,6 @@ def _truncate_lines(
                 # next line, and the rest of this one is not reachable
                 # through a tool whose paging unit is a line.
                 kept.append(line[:config.MAX_READ_CHARS])
-                used = len(kept[0])
                 cut_inside_a_line = True
             break
         kept.append(line)

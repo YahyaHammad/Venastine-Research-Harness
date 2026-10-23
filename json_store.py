@@ -223,7 +223,7 @@ def _replace_through_temp(path: str, write_body, *,
         try:
             os.unlink(tmp)
         except OSError:
-            pass
+            pass  # the temp file may not exist; the original error is what is raised
         raise
 
 

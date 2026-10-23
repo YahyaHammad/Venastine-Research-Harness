@@ -577,7 +577,7 @@ def write(text: str, newline: str = "\n") -> None:
         try:
             os.unlink(tmp)
         except OSError:
-            pass
+            pass  # the temp file may not exist; the original error is what is raised
         raise
     # See `document()`: a one-value change can leave the size identical, so
     # the stamp alone would not always notice our own write.
@@ -1093,7 +1093,6 @@ def authority_key(name: str) -> Optional[str]:
 #: which branch a key happened to take. The value grammar lives here by this
 #: module's own rule; the terminal reads it.
 NULL_WORDS = ("null", "none", "off", "clear", "auto")
-_NULL_WORDS = NULL_WORDS
 
 
 def _unquoted(text: str) -> str:

@@ -1026,7 +1026,7 @@ def _echo_off():
         try:
             termios.tcsetattr(fd, termios.TCSADRAIN, before)
         except (OSError, termios.error):
-            pass
+            pass  # the terminal is gone or no longer a tty; nothing to restore
 
     return restore
 
