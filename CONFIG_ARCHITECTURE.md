@@ -760,8 +760,9 @@ ROADMAP_v3 §81 (IM7). The largest image file `view_image` will attach:
 
 The number is derived, not chosen. An image travels as base64, which is 4/3
 the size of the file, so 3.75 MiB of file is 5 MiB on the wire. 5 MiB is
-Anthropic's per-image limit, the smaller of the two wires §81 delivers to;
-OpenAI's is larger. A cap at 5 MiB of FILE would put a 6.7 MiB payload
+Anthropic's per-image limit, the smallest of the wires §81 delivers to;
+OpenAI's is larger, and Google's limit (a wire since batch 173) is on the whole
+request rather than per image. A cap at 5 MiB of FILE would put a 6.7 MiB payload
 on the wire, and Anthropic would reject it with a 400 that names neither the
 file nor this key.
 

@@ -14,7 +14,6 @@ sqlmodel swap; these are the pure halves.
 import base64
 import dataclasses
 import json
-import logging
 import os
 from unittest.mock import patch
 
@@ -298,16 +297,16 @@ class TestAcceptsImagesIsOptInAndStrict:
         monkeypatch.setattr(client_mod, "load_provider_data", lambda: {})
         assert accepts_images("NOPE") is False
 
-    def test_google_is_deferred_and_says_so_once(self, monkeypatch, caplog):
+    def test_google_is_opted_in_like_any_other(self, monkeypatch):
+        """Batch 173 (IM9). GOOGLE was refused whatever its entry said,
+        and a flag on it was warned about once; it is honoured now, on the
+        same strict test as every other provider."""
         monkeypatch.setattr(client_mod, "load_provider_data",
                             lambda: {"GOOGLE": {"accepts_images": True}})
-        monkeypatch.setattr(client_mod, "_images_ignored_warned", set())
-        with caplog.at_level(logging.WARNING, logger="core.client"):
-            assert accepts_images("GOOGLE") is False
-            assert accepts_images("GOOGLE") is False
-        assert [r.getMessage() for r in caplog.records].count(
-            caplog.records[0].getMessage()) == 1
-        assert "GOOGLE" in caplog.records[0].getMessage()
+        assert accepts_images("GOOGLE") is True
+        monkeypatch.setattr(client_mod, "load_provider_data",
+                            lambda: {"GOOGLE": {"accepts_images": "true"}})
+        assert accepts_images("GOOGLE") is False
 
 
 class TestTheRunDecidesOnce:
@@ -442,14 +441,106 @@ class TestOpenAICarriesTheImageAfterTheBatch:
         assert IMAGE["data"] not in json.dumps(wire)
 
 
-class TestGoogleIsDeferred:
+GIF_IMAGE = {"media_type": "image/gif", "data": base64.b64encode(GIF).decode()}
 
-    def test_google_gets_the_note_even_when_asked_to_deliver(self):
+
+def _parts(content):
+    """A Google Content's parts as (kind, value), readable in an assert."""
+    out = []
+    for part in content.parts:
+        if part.function_response is not None:
+            out.append(("response", part.function_response.response["result"]))
+        elif part.inline_data is not None:
+            out.append(("image", (part.inline_data.mime_type,
+                                  part.inline_data.data)))
+        elif part.function_call is not None:
+            out.append(("call", part.function_call.id))
+        else:
+            out.append(("text", part.text))
+    return out
+
+
+class TestGoogleCarriesTheImageAfterTheBatch:
+    """IM9 (batch 173). A FunctionResponse cannot carry an image on the
+    models a new account can call, so one harness turn after the WHOLE batch
+    does: the shape Google's ADK uses, measured on two Gemini 3 models."""
+
+    def test_one_harness_turn_after_every_function_response(self):
         wire = _messages_for_provider(
-            "GOOGLE", _turn(("c1", [IMAGE])), images=True)
-        response = wire[-1].parts[0].function_response.response
-        assert "not sent" in response["result"]
-        assert IMAGE["data"] not in str(response)
+            "GOOGLE", _turn(("c1", [IMAGE]), ("c2", None)), images=True)
+        assert [c.role for c in wire] == ["user", "model", "user", "user"]
+        responses = _parts(wire[2])
+        assert [kind for kind, _ in responses] == ["response", "response"]
+        assert "follow these tool results" in responses[0][1]
+        assert responses[1][1] == "Attached."
+        turn = _parts(wire[3])
+        assert turn[0][0] == "text"
+        assert "c1" in turn[0][1] and "Harness" in turn[0][1]
+        # DECODED: Blob.data is bytes, and the base64 text would arrive as
+        # the picture of a string.
+        assert turn[1] == ("image", ("image/png", PNG))
+
+    def test_two_results_with_images_share_one_turn(self):
+        wire = _messages_for_provider(
+            "GOOGLE", _turn(("c1", [IMAGE]), ("c2", [IMAGE])), images=True)
+        assert [c.role for c in wire] == ["user", "model", "user", "user"]
+        assert [kind for kind, _ in _parts(wire[-1])] == [
+            "text", "image", "text", "image"]
+
+    def test_the_turn_lands_before_the_next_turn(self):
+        rows = _turn(("c1", [IMAGE])) + [
+            {"role": "assistant", "text": "A cat.", "tool_calls": []},
+            {"role": "user", "content": "thanks"}]
+        wire = _messages_for_provider("GOOGLE", rows, images=True)
+        assert [c.role for c in wire] == [
+            "user", "model", "user", "user", "model", "user"]
+        assert _parts(wire[3])[1][0] == "image"
+
+    def test_not_delivered_is_a_note_and_no_extra_turn(self):
+        wire = _messages_for_provider(
+            "GOOGLE", _turn(("c1", [IMAGE])), images=False)
+        assert [c.role for c in wire] == ["user", "model", "user"]
+        assert "not set up to receive images" in _parts(wire[-1])[0][1]
+        assert all(kind != "image" for c in wire for kind, _ in _parts(c))
+
+    def test_a_gif_is_a_note_and_the_png_beside_it_still_goes(self):
+        """IM10, the owner's choice. Gemini does not document GIF -- two
+        Gemini 3 models read one when measured -- and an image the endpoint
+        refused would stay in the thread and fail every later request."""
+        wire = _messages_for_provider(
+            "GOOGLE", _turn(("c1", [GIF_IMAGE]), ("c2", [IMAGE])), images=True)
+        gif_result, png_result = [value for _, value in _parts(wire[2])]
+        assert "image/gif" in gif_result and "not sent" in gif_result
+        assert "follow" not in gif_result
+        assert "follow" in png_result
+        turn = _parts(wire[3])
+        assert [kind for kind, _ in turn] == ["text", "image"]
+        assert "c2" in turn[0][1] and "c1" not in turn[0][1]
+        assert turn[1] == ("image", ("image/png", PNG))
+
+    def test_a_gif_alone_adds_no_turn(self):
+        wire = _messages_for_provider(
+            "GOOGLE", _turn(("c1", [GIF_IMAGE])), images=True)
+        assert [c.role for c in wire] == ["user", "model", "user"]
+
+    @pytest.mark.parametrize("media_type, data", [
+        ("image/jpeg", JPEG), ("image/webp", WEBP)])
+    def test_jpeg_and_webp_are_sent(self, media_type, data):
+        image = {"media_type": media_type,
+                 "data": base64.b64encode(data).decode()}
+        wire = _messages_for_provider(
+            "GOOGLE", _turn(("c1", [image])), images=True)
+        assert _parts(wire[-1])[1] == ("image", (media_type, data))
+
+    def test_an_unreadable_copy_costs_that_image_alone(self):
+        """`_decode_thinking`'s rule: one entry that cannot be read costs
+        that entry, never the request."""
+        broken = {"media_type": "image/png", "data": "not base64!"}
+        wire = _messages_for_provider(
+            "GOOGLE", _turn(("c1", [broken, IMAGE])), images=True)
+        result = _parts(wire[2])[0][1]
+        assert "could not be read" in result and "follow" in result
+        assert [kind for kind, _ in _parts(wire[3])] == ["text", "image"]
 
 
 class TestARowWithoutImagesIsUnchanged:
@@ -459,6 +550,14 @@ class TestARowWithoutImagesIsUnchanged:
         rows = _turn(("c1", None))
         assert (_messages_for_provider(provider, rows, images=True)
                 == _messages_for_provider(provider, rows, images=False))
+
+    def test_nor_for_google(self):
+        """Compared part by part: the fake types have no equality."""
+        rows = _turn(("c1", None))
+        on = _messages_for_provider("GOOGLE", rows, images=True)
+        off = _messages_for_provider("GOOGLE", rows, images=False)
+        assert ([(c.role, _parts(c)) for c in on]
+                == [(c.role, _parts(c)) for c in off])
 
 
 class TestTheCallReadsTheFlag:
@@ -479,6 +578,23 @@ class TestTheCallReadsTheFlag:
         list(client_mod.call_model_stream(
             fake, "OPENAI", "gpt-test", _turn(("c1", [IMAGE])), "", []))
         assert captured["messages"][-1]["content"][1]["type"] == "image_url"
+
+    def test_call_model_stream_delivers_to_a_flagged_google(self, monkeypatch):
+        captured = {}
+
+        def stream(**kw):
+            captured.update(kw)
+            return iter([])
+
+        fake = type("C", (), {})()
+        fake.models = type("M", (), {
+            "generate_content_stream": staticmethod(stream)})()
+        monkeypatch.setattr(client_mod, "load_provider_data",
+                            lambda: {"GOOGLE": {"accepts_images": True}})
+        list(client_mod.call_model_stream(
+            fake, "GOOGLE", "gemini-test", _turn(("c1", [IMAGE])), "", []))
+        assert _parts(captured["contents"][-1])[1] == (
+            "image", ("image/png", PNG))
 
 
 # ---------------------------------------------------------------------------

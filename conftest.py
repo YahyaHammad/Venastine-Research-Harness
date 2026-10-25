@@ -236,7 +236,7 @@ def _build_fake_anthropic_module():
 def _build_fake_google_module():
     """Two-level fake: `google` and `google.genai`. Includes a `types`
     submodule with the classes core/client.py's GOOGLE branch constructs
-    (Tool, FunctionDeclaration, FunctionCall, FunctionResponse, Part,
+    (Tool, FunctionDeclaration, FunctionCall, FunctionResponse, Part, Blob,
     Content, GenerateContentConfig) and a fake `models.generate_content`
     on the client so call_model's GOOGLE branch can be tested offline."""
 
@@ -268,14 +268,22 @@ def _build_fake_google_module():
             self.response = response
             self.id = id
 
+    class _FakeBlob:
+        """ROADMAP_v3 §81 (IM9): `data` is bytes, as on the pinned Blob."""
+
+        def __init__(self, mime_type=None, data=None, **kw):
+            self.mime_type = mime_type
+            self.data = data
+
     class _FakePart:
         def __init__(self, text=None, function_call=None, function_response=None,
-                     thought_signature=None, **kw):
+                     thought_signature=None, inline_data=None, **kw):
             self.text = text
             self.function_call = function_call
             self.function_response = function_response
             # ROADMAP_v3 §82 (GS2): bytes, as on the pinned Part.
             self.thought_signature = thought_signature
+            self.inline_data = inline_data
 
     class _FakeContent:
         def __init__(self, role=None, parts=None, **kw):
@@ -362,6 +370,7 @@ def _build_fake_google_module():
     types_mod.FunctionCall = _FakeFunctionCall
     types_mod.FunctionResponse = _FakeFunctionResponse
     types_mod.Part = _FakePart
+    types_mod.Blob = _FakeBlob
     types_mod.Content = _FakeContent
     types_mod.GenerateContentConfig = _FakeGenerateContentConfig
 

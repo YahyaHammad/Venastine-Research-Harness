@@ -25274,3 +25274,69 @@ Over raw REST and through the SDK, 2026-10-25:
 - ruff clean; bandit 0 new, and its count check shows no pair grew; gitleaks
   8.30.1 found no leaks; pip-audit finds only mcp 2.0.0's CVE-2026-59951,
   which hosted-demo already fixed and the merge brings in.
+
+---
+## Batch 173 -- a tool's image, delivered to Gemini (2026-10-25)
+
+**ROADMAP_v3 §81 amended, IM9-IM10.** The owner's request: image support
+for Google, on the branch that had built it for Anthropic and the
+OpenAI-compatible wire (batch 171) and left Google deferred behind IM5's note.
+Batch 172 had to come first, because no GOOGLE tool loop could finish.
+
+### The owner's rulings
+
+- **The wire: a separate user turn on the pinned SDK** (IM9), over bumping
+  for `FunctionResponse.parts`, which Gemini 2.5 refuses.
+- **Measured before it ships**, with the owner's free-tier key, and with the
+  owner's instruction to tell a billing or quota failure apart from a real one.
+- **GIF: a note instead of the image** (IM10). The owner chose it on the
+  documented type list, and kept it after the measurement showed two Gemini 3
+  models reading a GIF correctly.
+
+### What was measured
+
+On gemini-3.1-flash-lite and gemini-3.8-flash, over raw REST: a tool's PNG in
+a user turn after the function response is read correctly ("red fills the
+left half, blue the right"); so is one placed as a sibling part inside the
+function-response Content; so are JPEG, WEBP and GIF. Gemini 2.5 refusing
+`FunctionResponse.parts` is Google's own forum (2025-09-30), not measured
+here: 2.5 is closed to new accounts. Google's ADK delivers a loaded artifact
+as a separate user Content after the function response.
+
+### What was built
+
+- `accepts_images("GOOGLE")` is honoured on the same strict test as every
+  other provider; the once-only warning went with the deferral.
+- The GOOGLE translation holds each tool row's images until the batch ends and
+  then sends one harness-labelled user turn: a text part naming the call, then
+  `inline_data` parts with the bytes DECODED, because `Blob.data` is bytes.
+  The result text says the images follow, like the OpenAI-compatible wire's.
+- `_GOOGLE_IMAGE_TYPES` is PNG, JPEG and WEBP. A GIF becomes IM5's note naming
+  its type, and a PNG beside it in the same batch is still delivered.
+- A stored copy that will not decode becomes a note for that image alone.
+- `providers.json.example` flags GOOGLE, on the reasoning that flags ANTHROPIC:
+  every Gemini chat model takes images. OPENAI stays unflagged, because there it
+  depends on the model.
+
+### Recorded, not handled
+
+A thread's images all travel with every request, and nothing bounds their
+sum. Google documents a 20 MB request limit (a later announcement raises
+inline data to 100 MB) and Anthropic's is 32 MB, so a thread of several
+maximum-size images can outgrow a request on any wire.
+
+### Verified
+
+- Live through the harness's own translation and `call_model_stream` on
+  gemini-3.5-flash-lite (flash-lite answered 503 "high demand" for several
+  minutes): the model called `view_image`; with the PNG delivered it answered
+  "Red fills the left half and blue fills the right half"; with a GIF, and with
+  the provider unflagged, it reported receiving no image.
+- Full suite 7304 -> 7315 (`test_image_input.py` 67 -> 77,
+  `test_sdk_conformance.py` 21 -> 22): 7266 passed and 49 skipped on Windows.
+- Mutations: 13 of 13 killed -- delivery off, base64 text for bytes, GIF sent,
+  WEBP dropped, the last turn or the mid-thread turn not sent, the "follow"
+  sentence or the GIF note missing, an unreadable copy failing the request, the
+  GOOGLE flag ignored, the label not naming the call, an unflagged provider
+  delivered to, and the real types handed text.
+- ruff clean; bandit 0 new and no pair grew; gitleaks found no leaks.

@@ -391,6 +391,41 @@ def test_a_GOOGLE_thought_signature_survives_the_REAL_types_both_ways(
             b"skip_thought_signature_validator", None]
 
 
+def test_a_GOOGLE_image_turn_builds_from_the_REAL_types():
+    """ROADMAP_v3 §81 (IM9). The harness turn that carries a tool's image on
+    GOOGLE, built by the real translation from the real pinned types.
+
+    The fake Blob keeps whatever it is handed, so only the real one can say
+    that `data` takes the DECODED bytes and that the turn validates as a
+    Content -- the half of IM9 the offline suite cannot see. The SDK
+    re-encodes the bytes for the wire, which is what the live check in
+    batch 173 sent to Gemini.
+    """
+    import base64
+
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+    rows = [
+        {"role": "user", "content": "look"},
+        {"role": "assistant", "text": "", "tool_calls": [
+            {"id": "c1", "name": "view_image", "input": {"path": "a.png"}}]},
+        {"role": "tool", "tool_call_id": "c1", "content": "Attached.",
+         "images": [{"media_type": "image/png",
+                     "data": base64.b64encode(png).decode("ascii")}]}]
+    with real_package("google", "httpx"):
+        from google.genai import types as gt
+
+        import core.client as client
+
+        wire = client._messages_for_provider("GOOGLE", rows, "m", images=True)
+        assert all(isinstance(content, gt.Content) for content in wire)
+        assert [content.role for content in wire] == [
+            "user", "model", "user", "user"]
+        label, image = wire[-1].parts
+        assert "c1" in label.text
+        assert image.inline_data.mime_type == "image/png"
+        assert image.inline_data.data == png
+
+
 # ---------------------------------------------------------------------------
 # ---- anthropic -------------------------------------------------------------
 # ---------------------------------------------------------------------------

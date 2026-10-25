@@ -568,7 +568,8 @@ def edit_run(params: dict) -> dict:
 # ===========================================================================
 
 #: What both wires §81 delivers to accept as a base64 image: Anthropic's
-#: image block and the OpenAI-compatible `image_url` part (IM7). Judged from
+#: image block and the OpenAI-compatible `image_url` part (IM7). Google, a wire
+#: since batch 173, is sent three of them and gets a note for GIF (IM10). Judged from
 #: the file's own leading bytes, never its extension -- a PNG renamed `.jpg`
 #: is a PNG, and declaring the wrong media type is a request the provider
 #: rejects.

@@ -80,11 +80,6 @@ def api_initialization(provider_name: str):
     return client
 
 
-# Providers already warned that `accepts_images` is ignored for them, so the
-# notice is said once per provider per process rather than on every call.
-_images_ignored_warned: set = set()
-
-
 def accepts_images(provider_name: str) -> bool:
     """ROADMAP_v3 §81 (IM4). Whether an image in a tool result is DELIVERED
     to this provider, as opposed to replaced by a note saying it was not.
@@ -96,23 +91,13 @@ def accepts_images(provider_name: str) -> bool:
     conservative answer. The test is `is True`, never truthiness:
     `bool("false")` is True, and a quoted flag is a hand edit away (A29).
 
-    GOOGLE is never delivered to, whatever its entry says. The pinned
-    google-genai's FunctionResponse has no field an image can go in, so
-    that wire is deferred, and a flag set on it is warned about once
-    rather than honoured or ignored in silence.
+    GOOGLE is honoured like the others since batch 173 (IM9). Until then it
+    was never delivered to and a flag on it was warned about: the old pin's
+    FunctionResponse had no field an image could go in, and the wire that
+    does work -- a harness turn after the batch -- had not been measured.
     """
     entry = load_provider_data().get(provider_name, {})
-    if not isinstance(entry, dict) or entry.get("accepts_images") is not True:
-        return False
-    if provider_name == "GOOGLE":
-        if provider_name not in _images_ignored_warned:
-            _images_ignored_warned.add(provider_name)
-            logger.warning(
-                "providers.json marks GOOGLE `accepts_images`, which this "
-                "harness does not deliver yet: images in tool results reach "
-                "GOOGLE as a note saying they were omitted.")
-        return False
-    return True
+    return isinstance(entry, dict) and entry.get("accepts_images") is True
 
 
 # ============================================================================
@@ -682,16 +667,32 @@ def _google_signatures(model: Optional[str], msg: dict) -> Optional[dict]:
     return signatures
 
 
-def _image_note(images: list) -> str:
+#: ROADMAP_v3 §81 (IM10). The image types GOOGLE is sent: Gemini's documented
+#: list (PNG, JPEG, WEBP, HEIC, HEIF) met with what `view_image` attaches.
+#: GIF is left out, the owner's choice. Two Gemini 3 models read one correctly
+#: when measured, but it is not documented, and an image the endpoint refused
+#: would stay in the thread and fail every request after it.
+_GOOGLE_IMAGE_TYPES = frozenset({"image/png", "image/jpeg", "image/webp"})
+
+#: What a tool message says on the two wires that deliver images after the
+#: batch, so the model meets the images knowing whose they are (IM4, IM9).
+_IMAGES_FOLLOW = ("[The attached image(s) follow these tool results, in a "
+                  "harness message.]")
+
+
+def _image_note(images: list,
+                reason: str = "this provider is not set up to receive images"
+                ) -> str:
     """What a tool result's images become on a wire that does not receive
     them (ROADMAP_v3 §81, IM5): a sentence saying so, never the bytes and
-    never silence. One rule for every way to get here -- GOOGLE, a provider
-    not marked `accepts_images`, and a thread that switched to either after
-    the image was attached. A model told nothing would answer from a result
-    that reads as complete, which is A32's lesson about MCP's placeholder."""
+    never silence. One rule for every way to get here -- a provider not
+    marked `accepts_images`, a thread that switched to one after the image
+    was attached, and since batch 173 an image GOOGLE is not sent (IM10). A
+    model told nothing would answer from a result that reads as complete,
+    which is A32's lesson about MCP's placeholder."""
     kinds = ", ".join(sorted({image["media_type"] for image in images}))
     return (f"[{len(images)} image(s) attached to this result ({kinds}) were "
-            f"not sent: this provider is not set up to receive images.]")
+            f"not sent: {reason}.]")
 
 
 def _with_image_note(msg: dict) -> str:
@@ -729,6 +730,67 @@ def _openai_image_turn(pending: list) -> dict:
     return {"role": "user", "content": parts}
 
 
+def _google_tool_images(msg: dict, images: bool) -> tuple:
+    """(result text, [(media_type, bytes)]) for one tool row on GOOGLE
+    (ROADMAP_v3 §81, IM9/IM10).
+
+    The bytes go out DECODED: `Blob.data` is bytes on the pinned type, and
+    a base64 string handed to it would be sent as the text of the base64.
+    Each image that is not sent says why in the result: the provider is not
+    marked (IM5), the type is not one Google is sent (IM10), or the stored
+    copy will not decode -- `_decode_thinking`'s rule, so one unreadable
+    image costs that image, never the request."""
+    attached = msg.get("images") or []
+    if not attached:
+        return msg["content"], []
+    if not images:
+        return _with_image_note(msg), []
+    sent, refused, unreadable = [], [], []
+    for image in attached:
+        if image["media_type"] not in _GOOGLE_IMAGE_TYPES:
+            refused.append(image)
+            continue
+        try:
+            sent.append((image["media_type"],
+                         base64.b64decode(image["data"], validate=True)))
+        except (binascii.Error, TypeError, ValueError):
+            unreadable.append(image)
+    text = msg["content"]
+    if refused:
+        kinds = ", ".join(sorted({image["media_type"] for image in refused}))
+        text += "\n" + _image_note(refused, f"this provider is not sent {kinds}")
+    if unreadable:
+        text += "\n" + _image_note(unreadable,
+                                   "the stored copy could not be read")
+    if sent:
+        text += "\n" + _IMAGES_FOLLOW
+    return text, sent
+
+
+def _google_image_turn(pending: list, genai_types):
+    """The user-role Content that carries a tool batch's images on GOOGLE
+    (ROADMAP_v3 §81, IM9).
+
+    A FunctionResponse cannot carry them on the models a new account can
+    call: Gemini 2.5 answers "multimodal function responses are not
+    supported", and only Gemini 3 takes `FunctionResponse.parts`. A harness
+    turn after the WHOLE batch can, measured on two Gemini 3 models, and it
+    is the shape Google's own ADK uses for an artifact a tool loads. After
+    the batch, so the function responses still answer the call turn
+    directly; derived per request and never persisted, `_openai_image_turn`'s
+    rule; and it says it is the harness speaking."""
+    parts: list = []
+    for tool_call_id, images in pending:
+        parts.append(genai_types.Part(text=(
+            f"[Harness: the image(s) attached to the result of tool call "
+            f"{tool_call_id}. A function response on this API carries no "
+            f"image, so they are delivered here.]")))
+        for media_type, data in images:
+            parts.append(genai_types.Part(inline_data=genai_types.Blob(
+                mime_type=media_type, data=data)))
+    return genai_types.Content(role="user", parts=parts)
+
+
 def _messages_for_provider(provider_name: str, neutral_messages: list[dict],
                            model: Optional[str] = None,
                            echo_reasoning: bool = False,
@@ -746,7 +808,8 @@ def _messages_for_provider(provider_name: str, neutral_messages: list[dict],
     `images` is ROADMAP_v3 §81's (IM4): whether a tool row's images are
     delivered to this provider, or replaced by `_image_note`. It defaults
     to the note, so a caller that does not pass it sends no bytes. GOOGLE
-    ignores it -- that wire is deferred and always gets the note.
+    reads it too since batch 173 (IM9); it ignored it while that wire was
+    deferred.
     """
     # One rule, above the split (#13, #36). Note this can leave two
     # consecutive user turns -- which is the shape Google's branch has
@@ -768,8 +831,17 @@ def _messages_for_provider(provider_name: str, neutral_messages: list[dict],
                     call_id_to_name[tc["id"]] = tc["name"]
 
         translated = []
+        # §81 (IM9). (tool_call_id, [(media_type, bytes)]) for the tool
+        # batch being translated, sent as one harness turn when the batch
+        # ends -- see _google_image_turn.
+        pending_images: list = []
         for msg in neutral_messages:
             role = msg["role"]
+
+            if role != "tool" and pending_images:
+                translated.append(
+                    _google_image_turn(pending_images, genai_types))
+                pending_images = []
 
             if role == "user":
                 translated.append(genai_types.Content(
@@ -810,15 +882,21 @@ def _messages_for_provider(provider_name: str, neutral_messages: list[dict],
                         f"Tool result references tool_call_id={msg['tool_call_id']!r} "
                         f"but no assistant message in the history made that call"
                     )
+                # §81 (IM9/IM10). The images wait for the harness turn after
+                # the batch; the result says they follow, or why not.
+                result, sent = _google_tool_images(msg, images)
+                if sent:
+                    pending_images.append((msg["tool_call_id"], sent))
                 part = genai_types.Part(
                     function_response=genai_types.FunctionResponse(
                         name=name,
-                        # §81 (IM4/IM5): never the image on this wire.
-                        response={"result": _with_image_note(msg)},
+                        response={"result": result},
                     )
                 )
                 # Batch consecutive tool results into a single user
                 # Content — Google requires strict user/model alternation.
+                # The harness image turn comes only after the batch, so it
+                # never sits between two of them.
                 if (translated
                         and translated[-1].role == "user"
                         and all(p.function_response is not None for p in translated[-1].parts)):
@@ -826,6 +904,8 @@ def _messages_for_provider(provider_name: str, neutral_messages: list[dict],
                 else:
                     translated.append(genai_types.Content(role="user", parts=[part]))
 
+        if pending_images:
+            translated.append(_google_image_turn(pending_images, genai_types))
         return translated
 
     if provider_name == "ANTHROPIC":
@@ -936,8 +1016,7 @@ def _messages_for_provider(provider_name: str, neutral_messages: list[dict],
                 if images:
                     pending_images.append(
                         (msg["tool_call_id"], msg["images"]))
-                    content = (f"{content}\n[The attached image(s) follow "
-                               f"these tool results, in a harness message.]")
+                    content = f"{content}\n{_IMAGES_FOLLOW}"
                 else:
                     content = _with_image_note(msg)
             translated.append({
