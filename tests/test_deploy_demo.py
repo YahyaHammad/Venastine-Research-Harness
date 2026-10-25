@@ -163,6 +163,35 @@ class TestTheAudit:
             assert all(i.startswith(("CVE-", "GHSA-", "PYSEC-"))
                        for i in entry["ids"])
 
+    def test_no_id_is_accepted_twice(self):
+        """Batch 175: one entry per triage, so a version can carry several.
+        An ID in two of them would be two reasons for one decision, and
+        removing one entry would leave it accepted by the other."""
+        ids = [i for entry in deploy.ACCEPTED for i in entry["ids"]]
+        assert len(ids) == len(set(ids))
+
+    def test_every_entry_for_a_pinned_version_is_passed(self, tmp_path):
+        """Two entries for pillow 12.3.0 must BOTH reach pip-audit; an
+        audit that stopped at the first would refuse the second's IDs."""
+        lock = tmp_path / "bridge.lock"
+        lock.write_text("pillow==12.3.0 \\\n    --hash=sha256:00\n",
+                        encoding="utf-8")
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        accepted = (
+            {"package": "pillow", "version": "12.3.0", "reason": "first",
+             "ids": ("CVE-1",)},
+            {"package": "pillow", "version": "12.3.0", "reason": "second",
+             "ids": ("CVE-2",)})
+        deploy.audit([lock], ["pip-audit"], run=run, accepted=accepted)
+        ignored = [calls[0][i + 1] for i, arg in enumerate(calls[0])
+                   if arg == "--ignore-vuln"]
+        assert ignored == ["CVE-1", "CVE-2"]
+
     def test_hugging_face_audits_its_bridge_as_resolved_for_the_platform(
             self, tmp_path):
         """The Space installs Gradio itself, so its bundle carries no lock

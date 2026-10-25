@@ -26694,3 +26694,41 @@ cannot arrive the same way.
 - Mutations: 2 of 2 killed -- `view_image` and `write` each removed from the set.
 - ruff clean; bandit 0 new and no pair grew; gitleaks found no leaks; pip-audit
   clean on all three requirement files.
+
+---
+## Batch 175 -- two pillow advisories accepted by ID, after the same reading (2026-10-25)
+
+**ROADMAP_v3 §79, HD9; the owner's call.** The deploy dry runs after the image
+merge refused `bridge.lock`: pillow 12.3.0 had two advisories published after
+batch 169 accepted its 35, CVE-2026-114501 (GHSA-654x-cwwv-5j9c) and
+CVE-2026-112398 (GHSA-5x8w-8jj5-q52h), both fixed in 13.0.0. That is the
+mechanism working -- a new ID for an accepted version refuses until someone
+triages it. The owner chose to accept both by ID with a reason, like the 35.
+
+### What was read
+
+- Gradio 6.30.0 is still the latest release and still requires `pillow<13`.
+- CVE-2026-114501 leaks heap memory into an Arrow export when
+  `PILLOW_ALIGNMENT` is above 1. Nothing in `deploy/` sets the variable, and
+  neither the bridge nor Gradio's source exports an image to Arrow.
+- CVE-2026-112398 overflows the FlashPix decoder, reached by `Image.open` on an
+  untrusted file with `olefile` installed. `olefile` is not in `bridge.lock`
+  (built 2026-10-25), so pillow cannot open FlashPix at all; and the bridge
+  opens no uploaded file -- Gradio's `Image.open` calls it could reach are the
+  favicon and `gr.Workflow`, which the bridge does not use.
+
+### What was built
+
+A second `ACCEPTED` entry for pillow 12.3.0 with those reasons, rather than two
+IDs added to the first: one entry per triage, so each reason says what was
+read and when. `audit` already passed every entry that pins the version; two
+tests now hold that, and that no ID is accepted twice.
+
+### Verified
+
+- Both deploy dry runs: built, gitleaks clean, `session.lock` clean,
+  `bridge.lock` clean with 37 accepted by ID, nothing sent.
+- Full suite 8061 -> 8063 (`test_deploy_demo.py` 60 -> 62): 7996 passed and 67 skipped on Windows.
+- Mutations: 2 of 2 killed -- the audit passing only the first entry for a
+  version, and an ID duplicated across entries.
+- ruff clean; bandit 0 new and no pair grew; gitleaks found no leaks.

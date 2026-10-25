@@ -57,7 +57,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 8061 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
+pytest                                            # 8063 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -198,7 +198,8 @@ gate waits for. **ModelScope is deployed by the owner** with the same script and
 (`--platform modelscope`): it has no fine-grained tokens and no trusted CI. `--unverified` skips the
 gate for a private test deploy and the workflow never passes it. Audit findings are accepted only BY
 ID in `deploy_demo.ACCEPTED`, each entry applying only while its version is pinned -- pillow 12.3.0
-is the first, held there by Gradio 6.30.0's `pillow<13`. The owner's one-time setup: environment
+is the first, held there by Gradio 6.30.0's `pillow<13`, with one entry per triage (35 IDs in
+batch 169, two in batch 175), so a new advisory refuses until someone reads it. The owner's one-time setup: environment
 `demo` with deployment branches `main` only, the secret `HF_TOKEN` (a fine-grained token with write
 access to the one Space) and the variable `DEMO_HF_SPACE`; until both exist, every deploy is a dry
 run.
