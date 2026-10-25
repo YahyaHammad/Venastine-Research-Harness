@@ -1,5 +1,5 @@
 """
-ROADMAP_v3 §76: an image a tool reads reaches a model that can see it.
+ROADMAP_v3 §81: an image a tool reads reaches a model that can see it.
 
 `view_image` reads an image off disk and attaches it to its own result. The
 bytes do not ride in the result dict -- they go to the memory, into the same

@@ -100,7 +100,7 @@ class RunInfo:
     # sign-off carries the SUBSET the child may use. Merging them would
     # force a set to hold both a name and a name-plus-subset.
     signoffs: dict = field(default_factory=dict)
-    # ROADMAP_v3 §76 (IM6). Whether an image in a tool result can reach the
+    # ROADMAP_v3 §81 (IM6). Whether an image in a tool result can reach the
     # model in this run: the provider is marked `accepts_images` and the
     # thread is not a research pass. Computed ONCE, by the loop, and read
     # twice -- by the schema list, to leave `view_image` out, and by the

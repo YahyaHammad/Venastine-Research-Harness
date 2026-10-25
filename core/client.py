@@ -84,7 +84,7 @@ _images_ignored_warned: set = set()
 
 
 def accepts_images(provider_name: str) -> bool:
-    """ROADMAP_v3 §76 (IM4). Whether an image in a tool result is DELIVERED
+    """ROADMAP_v3 §81 (IM4). Whether an image in a tool result is DELIVERED
     to this provider, as opposed to replaced by a note saying it was not.
 
     Opt-in per provider through `accepts_images` in providers.json, on
@@ -606,7 +606,7 @@ def _echoed_blocks(provider_name: str, model: Optional[str],
 
 def _image_note(images: list) -> str:
     """What a tool result's images become on a wire that does not receive
-    them (ROADMAP_v3 §76, IM5): a sentence saying so, never the bytes and
+    them (ROADMAP_v3 §81, IM5): a sentence saying so, never the bytes and
     never silence. One rule for every way to get here -- GOOGLE, a provider
     not marked `accepts_images`, and a thread that switched to either after
     the image was attached. A model told nothing would answer from a result
@@ -663,7 +663,7 @@ def _messages_for_provider(provider_name: str, neutral_messages: list[dict],
     provider -- so a caller that does not pass them gets exactly the
     translation this function produced before.
 
-    `images` is ROADMAP_v3 §76's (IM4): whether a tool row's images are
+    `images` is ROADMAP_v3 §81's (IM4): whether a tool row's images are
     delivered to this provider, or replaced by `_image_note`. It defaults
     to the note, so a caller that does not pass it sends no bytes. GOOGLE
     ignores it -- that wire is deferred and always gets the note.
@@ -725,7 +725,7 @@ def _messages_for_provider(provider_name: str, neutral_messages: list[dict],
                 part = genai_types.Part(
                     function_response=genai_types.FunctionResponse(
                         name=name,
-                        # §76 (IM4/IM5): never the image on this wire.
+                        # §81 (IM4/IM5): never the image on this wire.
                         response={"result": _with_image_note(msg)},
                     )
                 )
@@ -769,7 +769,7 @@ def _messages_for_provider(provider_name: str, neutral_messages: list[dict],
                 # tool-role entries into the same message rather than
                 # appending a new one each time.
                 #
-                # §76 (IM4). An image travels INSIDE its tool_result here --
+                # §81 (IM4). An image travels INSIDE its tool_result here --
                 # the one wire of the three whose tool result takes an image
                 # block -- after the text, as a content array. The text
                 # block is omitted when empty, because the API rejects an
@@ -802,7 +802,7 @@ def _messages_for_provider(provider_name: str, neutral_messages: list[dict],
 
     # OpenAI-compatible: close to 1:1, each tool result is its own message
     translated = []
-    # §76 (IM4). (tool_call_id, images) for the tool batch being translated,
+    # §81 (IM4). (tool_call_id, images) for the tool batch being translated,
     # sent as one user message when the batch ends -- see _openai_image_turn.
     pending_images: list = []
     for msg in neutral_messages:

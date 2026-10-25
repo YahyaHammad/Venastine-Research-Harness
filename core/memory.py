@@ -16,7 +16,7 @@ Neutral shapes stored in self._messages:
   tool:      {"role": "tool", "tool_call_id": "...", "content": "..."}
              (one entry per individual tool result; plus "images": [
               {"media_type": "...", "data": "<base64>"}, ...] only when a
-              tool attached one -- ROADMAP_v3 §76)
+              tool attached one -- ROADMAP_v3 §81)
 
 PERSISTENCE, AND WHY THERE'S NO NORMALIZATION STEP HERE:
   Each add_* method passes storage.save_message() only the PAYLOAD that
@@ -126,7 +126,7 @@ class ConversationMemory:
         # resumed -- see record_billed for why this one is deliberately not
         # extra_data like its neighbour.
         self.billed_tokens = 0
-        # ROADMAP_v3 §76 (IM3). Images a tool attached for a call whose
+        # ROADMAP_v3 §81 (IM3). Images a tool attached for a call whose
         # result has not been written yet, keyed by the call's id.
         # add_tool_result takes them into the row it writes; nothing else
         # reads this, and it is never persisted on its own.
@@ -443,7 +443,7 @@ class ConversationMemory:
 
     def attach_image(self, tool_call_id: str, media_type: str,
                      data: str) -> None:
-        """ROADMAP_v3 §76 (IM3). Hold an image for the result of
+        """ROADMAP_v3 §81 (IM3). Hold an image for the result of
         `tool_call_id`, to be written WITH that result's row.
 
         The bytes reach the thread this way rather than inside the tool's
@@ -464,7 +464,7 @@ class ConversationMemory:
     def add_tool_result(self, tool_call_id: str, result: dict) -> None:
         result_text = str(result)
         entry = {"role": "tool", "tool_call_id": tool_call_id, "content": result_text}
-        # §76 (IM2). Taken whatever the result says: the tool attaches only
+        # §81 (IM2). Taken whatever the result says: the tool attaches only
         # on its success path, immediately before returning, so an image
         # pending here belongs to this result.
         images = self._pending_images.pop(tool_call_id, None)

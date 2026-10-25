@@ -7,7 +7,7 @@ to match config.ToolPermissions' three separate boolean fields (read /
 write / edit), so review/audit agents can be given read access without
 write or edit.
 
-A fourth, view_image (ROADMAP_v3 §76), reads an image and attaches it
+A fourth, view_image (ROADMAP_v3 §81), reads an image and attaches it
 to its own result rather than returning text. It follows read's path
 rules exactly, with its own permission row so it can be enabled apart
 from read. See view_image_run for where the bytes go.
@@ -564,10 +564,10 @@ def edit_run(params: dict) -> dict:
 
 
 # ===========================================================================
-# ---- VIEW_IMAGE (ROADMAP_v3 §76) ------------------------------------------
+# ---- VIEW_IMAGE (ROADMAP_v3 §81) ------------------------------------------
 # ===========================================================================
 
-#: What both wires §76 delivers to accept as a base64 image: Anthropic's
+#: What both wires §81 delivers to accept as a base64 image: Anthropic's
 #: image block and the OpenAI-compatible `image_url` part (IM7). Judged from
 #: the file's own leading bytes, never its extension -- a PNG renamed `.jpg`
 #: is a PNG, and declaring the wrong media type is a request the provider

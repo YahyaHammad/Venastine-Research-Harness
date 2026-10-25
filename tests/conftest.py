@@ -1042,7 +1042,7 @@ class FakeMemory:
         self.tool_results.append((tool_call_id, result))
 
     def attach_image(self, tool_call_id, media_type, data):
-        # ROADMAP_v3 §76 (IM3). Recorded, never paired with a result: this
+        # ROADMAP_v3 §81 (IM3). Recorded, never paired with a result: this
         # double has no rows, and what a loop test asks is what was held.
         self.attached_images.append((tool_call_id, media_type, data))
 
@@ -1268,7 +1268,7 @@ class FakeStorage:
             # the round trip is identity, and the reconstruction is what
             # has to mirror production.
             "harness": harness,
-            # ROADMAP_v3 §76 (IM2). The list, as `harness` holds its dict.
+            # ROADMAP_v3 §81 (IM2). The list, as `harness` holds its dict.
             "images": images,
         })
         # (#32) Mirrors production: any archived row stamps the thread,
@@ -1494,7 +1494,7 @@ class FakeStorage:
                     payload["thinking"] = thinking
             elif role == "tool":
                 payload = {"role": "tool", "tool_call_id": row["tool_call_id"], "content": content}
-                # ROADMAP_v3 §76 (IM2), mirroring storage._decode_images
+                # ROADMAP_v3 §81 (IM2), mirroring storage._decode_images
                 # against the list this fake holds: only usable entries, and
                 # the key only when one survives.
                 images = [entry for entry in (row.get("images") or [])

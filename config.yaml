@@ -517,7 +517,7 @@ max_read_lines: 500
 # stdout and stderr.
 max_read_chars: 50000
 
-# ROADMAP_v3 §76 (IM7). The largest image `view_image` attaches, in bytes of
+# ROADMAP_v3 §81 (IM7). The largest image `view_image` attaches, in bytes of
 # the file (3.75 MiB). Base64 inflates it by 4/3, so the encoded payload stays
 # under 5 MiB -- the smaller per-image limit of the two wires that carry it --
 # and the image is resent with every request for as long as it stays in view.
@@ -961,7 +961,7 @@ default_context_window: 256000
 # shell command that keeps running, and enabling one without the others is
 # allowed but rarely useful. view_image follows read because it reads a file
 # off disk the same way; it also needs a provider marked `accepts_images` in
-# providers.json before it is offered at all (ROADMAP_v3 §76, IM6).
+# providers.json before it is offered at all (ROADMAP_v3 §81, IM6).
 # Every registered tool must appear in BOTH tables or the harness refuses
 # to start (D24).
 tool_permissions:

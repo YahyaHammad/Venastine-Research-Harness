@@ -95,7 +95,7 @@ DEFAULT_PROVIDER = "ANTHROPIC"
 # logged -- the quiet invisibility this notice exists to prevent.
 _headless_notices_shown: set = set()
 
-# ROADMAP_v3 §76 (IM6), on the headless notice's terms: a tool the user
+# ROADMAP_v3 §81 (IM6), on the headless notice's terms: a tool the user
 # enabled and this run leaves out because no image could reach the model is
 # named once, deduplicated on (provider, thread kind, hidden set) -- the three
 # things the answer depends on, so a later run that differs in any of them
@@ -109,7 +109,7 @@ def _images_deliverable(provider_name: str, memory) -> bool:
     pass. A property of WHAT THE THREAD IS, for
     `_derived_compaction_mode`'s reason: a pass re-entered by a JSON retry
     or the reviewer is still a pass. Its sources, claims and grounding are
-    all text, so a pass is never offered an image tool (§76 leaves the
+    all text, so a pass is never offered an image tool (§81 leaves the
     pipeline out of scope)."""
     kind = getattr(memory, "kind", THREAD_KIND_CHAT)
     return kind != THREAD_KIND_RESEARCH_PASS and accepts_images(provider_name)

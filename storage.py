@@ -148,7 +148,7 @@ class MessageLog(SQLModel, table=True):
     # start call id would hide the real tool_result -- the HTTP 400 M4
     # exists to prevent. The call id lives inside this JSON instead.
     harness: Optional[str] = None
-    # ROADMAP_v3 §76 (IM2). The images a tool result carried, as a JSON list
+    # ROADMAP_v3 §81 (IM2). The images a tool result carried, as a JSON list
     # of {"media_type", "data"} with `data` base64 -- tool rows only, and only
     # where `view_image` attached one. NULL everywhere else.
     #
@@ -459,7 +459,7 @@ def save_message(
             # ROADMAP_v3 §49 (SS5), on `thinking`'s terms: NULL for every
             # row a person or the model wrote, which is nearly all of them.
             harness=json.dumps(harness) if harness else None,
-            # ROADMAP_v3 §76 (IM2), on `thinking`'s terms again: NULL for
+            # ROADMAP_v3 §81 (IM2), on `thinking`'s terms again: NULL for
             # every row that attached no image.
             images=json.dumps(images) if images else None,
         )
@@ -649,7 +649,7 @@ def _decode_harness(raw):
 
 
 def _decode_images(raw):
-    """A tool row's stored images (ROADMAP_v3 §76, IM2), or None.
+    """A tool row's stored images (ROADMAP_v3 §81, IM2), or None.
 
     `_decode_thinking`'s rule: an entry that cannot be read costs that
     entry, never the thread. An entry is usable when it names a media type
@@ -708,7 +708,7 @@ def _to_neutral(msg: dict) -> dict:
     elif role == "tool":
         # decoded is the plain result string add_tool_result persisted.
         payload = {"role": "tool", "tool_call_id": msg["tool_call_id"], "content": decoded}
-        # ROADMAP_v3 §76 (IM2), on §44's terms for `thinking`: present ONLY
+        # ROADMAP_v3 §81 (IM2), on §44's terms for `thinking`: present ONLY
         # when the row attached an image, so every tool row written before
         # reconstructs to exactly the shape it did. Read by translation and
         # the compactor's size proxy; never by anything that renders text.
@@ -780,7 +780,7 @@ def _ordered_rows(thread_id: UUID) -> list[dict]:
                 # ROADMAP_v3 §49 (SS5). NULL for every row a person or the
                 # model wrote.
                 "harness": m.harness,
-                # ROADMAP_v3 §76 (IM2). NULL for every row that attached no
+                # ROADMAP_v3 §81 (IM2). NULL for every row that attached no
                 # image; the compactor's size proxy reads it (IM8).
                 "images": m.images,
             }

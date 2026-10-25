@@ -165,7 +165,7 @@ class ToolRegistry:
                     images: bool = False) -> bool:
         """The two §15 filters, shared by schemas() and
         headless_hidden(): policy allowability plus the tool's own
-        "nothing to act on" signal -- and, since ROADMAP_v3 §76 (IM6), a
+        "nothing to act on" signal -- and, since ROADMAP_v3 §81 (IM6), a
         third: a tool whose result carries an image is offered only where
         the caller says images can be delivered.
 
@@ -303,7 +303,7 @@ class ToolRegistry:
           * granted (§25 R15) -- names a pre-flight grant already answered
             for. Those stay advertised even with no channel, because the
             approval question HAS an answer; see _answered_by_grant.
-          * images (ROADMAP_v3 §76, IM6) -- whether an image in a tool
+          * images (ROADMAP_v3 §81, IM6) -- whether an image in a tool
             result can reach the model in this run. A tool that declares
             `returns_images` is dropped when it cannot; see _advertised.
 
@@ -354,7 +354,7 @@ class ToolRegistry:
         self, context: Optional["ToolContext"] = None,
         granted: Optional[set] = None,
     ) -> list[str]:
-        """ROADMAP_v3 §76 (IM6). Names that would be advertised if images
+        """ROADMAP_v3 §81 (IM6). Names that would be advertised if images
         could be delivered, and are dropped because they cannot. The loop
         logs exactly this list, once, for headless_hidden()'s reason: a
         tool the user enabled and the model never sees is named and
@@ -978,7 +978,7 @@ registry.register(ToolSpec("geometry", geometry.TOOL_SCHEMA, geometry.run, grant
 # anyway. The handlers re-test -- the refusal_check is the
 # prompt-suppression half, not the enforcement.
 registry.register(ToolSpec("read", file_ops.READ_TOOL_SCHEMA, file_ops.read_run, approval_check=file_ops._file_approval_check, refusal_check=file_ops._refusal_for("read"), grant_policy=GRANT_NEVER, budget=BUDGET_IO))
-# ROADMAP_v3 §76 (IM1, IM6). `read`'s path rules exactly -- the same approval
+# ROADMAP_v3 §81 (IM1, IM6). `read`'s path rules exactly -- the same approval
 # check and the same refusal shape -- plus `returns_images`, which keeps it
 # off the schema list wherever the image could not reach the model.
 registry.register(ToolSpec("view_image", file_ops.VIEW_IMAGE_TOOL_SCHEMA, file_ops.view_image_run, approval_check=file_ops._file_approval_check, refusal_check=file_ops._refusal_for("view_image"), grant_policy=GRANT_NEVER, budget=BUDGET_IO, returns_images=True))

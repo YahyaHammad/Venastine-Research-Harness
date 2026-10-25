@@ -301,7 +301,7 @@ class TestTheRoundTripIsLossless:
         # 145 since batch 119: `compaction_min_headroom_tokens` and
         # `compaction_max_headroom_fraction`, which clamp the headroom the
         # trigger fraction names (TECHNICAL_DEBT 39).
-        # 148 since ROADMAP_v3 §76: `max_image_bytes`, and `view_image`'s
+        # 148 since ROADMAP_v3 §81: `max_image_bytes`, and `view_image`'s
         # flag in each tool table (IM1, IM7).
         assert touched == 148, f"{touched} settable scalars, expected 148"
         assert config_edit._dump(tree) == text

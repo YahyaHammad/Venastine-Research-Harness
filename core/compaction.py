@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 # compare a value derived from it against a provider's token count.
 CHARS_PER_TOKEN = 4
 
-# ROADMAP_v3 §76 (IM8). What one image weighs in that proxy, in tokens.
+# ROADMAP_v3 §81 (IM8). What one image weighs in that proxy, in tokens.
 #
 # A FIXED number, because the alternative is decoding every image to learn
 # its dimensions, which would take an imaging dependency this harness does

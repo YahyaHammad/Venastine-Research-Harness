@@ -89,7 +89,7 @@ def _logical_rows():
          "harness": {"kind": "session_wake",
                      "sessions": [{"id": "s1", "call_id": "c1",
                                    "shape": "exited"}]}},
-        # ROADMAP_v3 §76 (IM2): a tool row with images in their own column,
+        # ROADMAP_v3 §81 (IM2): a tool row with images in their own column,
         # one entry unusable -- both sides drop that entry and keep the rest
         {"role": "tool", "content": "Attached s.png",
          "name": None, "tool_call_id": "call_3",

@@ -43,7 +43,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
-- **§76. An image a tool reads, delivered to a model that can see it** - **(BUILT in batch 159)** (nothing a model could read from the workspace reached it as anything but text: a tool result was `str(result)`, `read` decoded bytes with `errors="replace"`, and MCP dropped image blocks by decision. `view_image` attaches an image to its own result through the memory, into a new column, never through the redactor; Anthropic carries it inside the `tool_result`, the OpenAI-compatible wire in a harness message after the tool batch because its tool messages take text only, and Google is deferred behind a note; opt-in per provider with `accepts_images`, never in a research pass, and counted at a fixed weight by the compactor)
+- **§81. An image a tool reads, delivered to a model that can see it** - **(BUILT in batch 171)** (nothing a model could read from the workspace reached it as anything but text: a tool result was `str(result)`, `read` decoded bytes with `errors="replace"`, and MCP dropped image blocks by decision. `view_image` attaches an image to its own result through the memory, into a new column, never through the redactor; Anthropic carries it inside the `tool_result`, the OpenAI-compatible wire in a harness message after the tool batch because its tool messages take text only, and Google is deferred behind a note; opt-in per provider with `accepts_images`, never in a research pass, and counted at a fixed weight by the compactor)
 - **§75. Thirteen alerts that read a name as a secret, and the gate nothing in the workflow could fail** - **(BUILT in batch 158)** (PR #200's first `CodeQL` check raised 13 high-severity alerts and every one was a false positive: ten came from a source heuristic that reads `args.secrets`, `_secret_twin_name()` and `KEY_PASSPHRASE` as secrets because of their names, and three were test assertions read as URL sanitizers; `tests/` is now skipped because it never ships, the eight in shipped code are dismissed with recorded reasons, and the same red check is the measurement TECHNICAL_DEBT 76 lacked -- the gate is GitHub's pull-request check, and the workflow header now says so)
 - **§74. A gate that was green because of what one machine happened to contain** - **(BUILT in batch 157)** (CI's first run over batches 129-156 came back red on three check runs, and all three were one test: the push-channel gate drove `git check-ignore` in the WORKING TREE, where `logs/`, `output/` and `.ipynb_checkpoints/` exist because the harness creates them, so three directory-only patterns matched here and matched nothing in a fresh clone -- seventeen batches of green behind a branch whose gate had never met one; the same measurement found `__pycache__` declared for the git channel, carrying no rule in `.gitignore` at all, and the one value in the list that no sample could reach)
 - **§73. Three cuts the redactor ran after, and the one result path that never passed it** - **(BUILT in batch 156)** (the review marathon's last three findings, closing its `FIX-NOW` queue: `web_search` and `arxiv_search` cut their third-party text and let `registry.dispatch` redact the piece that was kept, so a `ghp_` token straddling any of the three cuts survived at 36 of the 39 offsets it could straddle -- RB1's defect in the two tools RB1 did not reach, and §52's gap register had declined to solve it generally while two such tools were already in the tree; the per-LIST caps bounded 25 authors and not the 5,000 characters each could carry, and two of the six unbounded values were named by no finding, one of them the `arxiv_id` that both recovery URLs are built from, while the row COUNT both schemas advertise a bound for was enforced in neither, so a request for five results returned all 5,000 rows a provider chose to send; and `dispatch()`'s refusal early-return was the one result path that never passed the output redactor, which `docs/ARCHITECTURE.md` had already asserted it did -- measured, a credential the model put in an `agent_name` came back whole, on a path that also returns above the input scanner written for exactly that value)
@@ -2727,9 +2727,11 @@ leaked PID.
   `AGENTS.md` names by name.
 ---
 
-## §76. An image a tool reads, delivered to a model that can see it
+## §81. An image a tool reads, delivered to a model that can see it
 
-**Built in batch 159**, from the owner's question whether a multimodal model
+**Built in batch 171** -- on its own branch, as batch 159 and §76, which `main`
+used for other work before the branch merged; renumbered on 2026-10-25, the
+owner's choice -- from the owner's question whether a multimodal model
 behind a compatible API could take non-text input by reading it from the
 workspace. It could not. Every path into a conversation was text: a user row
 was a string, a tool result was `str(result)`, `read` either ran markitdown or
@@ -2768,7 +2770,7 @@ cannot disagree (IM6). A provider opts in with `accepts_images: true` in
 `providers.json`, on `echoes_reasoning`'s terms. A research pass never gets
 the tool, because the pipeline's sources, claims and grounding are all text.
 
-### What §76 deliberately does not change
+### What §81 deliberately does not change
 
 **MCP image blocks are still dropped.** A32's decline stands, and its in-band
 placeholder still tells the model. Passing them through is a separate step, now
@@ -2792,7 +2794,7 @@ in for them.
 **`read` is unchanged.** Its result is pages of text lines with offset and count.
 An image is neither, so it gets its own tool and its own permission row.
 
-### Design Decisions Record — §76 (IM1-IM8)
+### Design Decisions Record — §81 (IM1-IM8)
 
 | id | decision |
 |---|---|

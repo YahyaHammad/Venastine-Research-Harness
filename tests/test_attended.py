@@ -67,7 +67,7 @@ def _drive(tool_name, *, provider=None, granted=None,
 
     mocker.patch("core.loop.api_initialization", return_value=object())
     mocker.patch("core.loop.effort_for", return_value=None)
-    # ROADMAP_v3 §76 (IM6): whether the run can deliver an image reads
+    # ROADMAP_v3 §81 (IM6): whether the run can deliver an image reads
     # providers.json, and the copy CI makes of the example marks ANTHROPIC.
     # Pinned off so what the spies record does not depend on that file.
     mocker.patch("core.loop.accepts_images", return_value=False)
@@ -117,7 +117,7 @@ class TestHeadlessIsAboutBeingUNABLEToAsk:
                      images=False:
                          calls.append((callable_only, granted, images)) or [])
         _drive("mcp__a__gated", mocker=mocker)
-        # ROADMAP_v3 §76 (IM6): `images` is recorded too. `_drive` pins the
+        # ROADMAP_v3 §81 (IM6): `images` is recorded too. `_drive` pins the
         # provider's answer off, so it must arrive False.
         assert calls == [(True, set(), False)], "headless filter did not run"
 

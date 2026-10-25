@@ -793,7 +793,7 @@ def test_an_unreadable_record_costs_the_reasoning_not_the_thread(real_storage):
 
 
 def test_an_attached_image_survives_a_write_and_a_read(real_storage):
-    """ROADMAP_v3 §76 (IM2), end to end on real SQLite, for the reason the
+    """ROADMAP_v3 §81 (IM2), end to end on real SQLite, for the reason the
     reasoning test above gives: the claim is about a COLUMN added to a table
     that already exists on disk, and the fake would only prove a dict key.
 
@@ -821,7 +821,7 @@ def test_an_attached_image_survives_a_write_and_a_read(real_storage):
         thread_id=memory.thread_id).messages[-1]["images"] == [image]
 
     # NULL for a row that attached nothing, so every tool row written
-    # before §76 reconstructs to exactly the shape it did.
+    # before §81 reconstructs to exactly the shape it did.
     memory.add_tool_result("call_2", {"content": "x"})
     assert "images" not in real_storage.archive_history(
         memory.thread_id)[-1]

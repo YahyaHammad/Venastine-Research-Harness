@@ -25107,9 +25107,9 @@ stated in `docs/ARCHITECTURE.md`'s source tree; the suite total in
 CodeQL itself cannot run here -- there is no CLI on this machine -- so the
 config's effect is measured by the next analysis of PR #200, after the push.
 
-## Batch 159 -- an image a tool reads, delivered to a model that can see it (2026-10-15)
+## Batch 171 -- an image a tool reads, delivered to a model that can see it (2026-10-15; numbered 159 until 2026-10-25)
 
-**ROADMAP_v3 §76. Owner rulings, IM1-IM8.** The owner asked whether a
+**ROADMAP_v3 §81. Owner rulings, IM1-IM8.** The owner asked whether a
 multimodal model behind a compatible API could take non-text input by reading
 it from the workspace, with no attachment channel in the harness. It could not,
 and every path was checked rather than assumed: `add_user_message(text: str)`,

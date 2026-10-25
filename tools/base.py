@@ -356,7 +356,7 @@ class ToolSpec:
     # NO IMPORT-TIME GUARD, for rationale_param's reason: None is the
     # correct answer for every tool but one.
     headline_param: Optional[str] = None
-    # ROADMAP_v3 §76 (IM6). Whether this tool's result carries an IMAGE --
+    # ROADMAP_v3 §81 (IM6). Whether this tool's result carries an IMAGE --
     # which reaches the model only from a provider marked `accepts_images`,
     # and never in a research pass. registry.schemas() drops such a tool
     # unless its caller says images can be delivered in this run.
