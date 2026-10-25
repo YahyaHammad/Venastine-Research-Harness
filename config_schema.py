@@ -201,6 +201,7 @@ class ToolPermissionsModel(_Model):
     logic: StrictBool
     geometry: StrictBool
     read: StrictBool
+    view_image: StrictBool
     write: StrictBool
     edit: StrictBool
     shell: StrictBool
@@ -247,6 +248,7 @@ class ToolApprovalsModel(_Model):
     logic: StrictBool
     geometry: StrictBool
     read: StrictBool
+    view_image: StrictBool
     write: StrictBool
     edit: StrictBool
     shell_input: StrictBool
@@ -363,6 +365,7 @@ class HarnessConfig(_Model):
     max_file_size_bytes: PositiveInt
     max_read_lines: PositiveInt
     max_read_chars: PositiveInt
+    max_image_bytes: PositiveInt
 
     # -- /init -------------------------------------------------------------
     initializer_agent: str

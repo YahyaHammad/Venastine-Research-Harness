@@ -26413,3 +26413,238 @@ this branch fixes.
   files, and gitleaks (`--no-git`) are clean.
 - Not verifiable here: the 19 alerts fixed in code close only when CodeQL
   next scans `main`, which is after the merge.
+
+---
+## Batch 171 -- an image a tool reads, delivered to a model that can see it (2026-10-15; numbered 159 until 2026-10-25)
+
+**ROADMAP_v3 §81. Owner rulings, IM1-IM8.** The owner asked whether a
+multimodal model behind a compatible API could take non-text input by reading
+it from the workspace, with no attachment channel in the harness. It could not,
+and every path was checked rather than assumed: `add_user_message(text: str)`,
+`add_tool_result`'s `str(result)`, `read`'s markitdown-or-`errors="replace"`,
+`fetch_url`'s `raw.decode(..., errors="replace")`, and MCP's `_normalize`, which
+drops image blocks by recorded decision (A32).
+
+### The question asked first
+
+The owner asked whether this was a small-blast-radius change, to be built at
+once, or one with design decisions to discuss. It was the second. The pinned
+SDKs were installed in a scratch venv and their types read, rather than recalled:
+
+- anthropic 0.116.0: `ToolResultBlockParam.content` is
+  `Union[str, Iterable[Content]]`, where Content covers text, image, search
+  result, document and tool reference blocks.
+- openai 2.45.0: `ChatCompletionToolMessageParam.content` is
+  `Required[Union[str, Iterable[ChatCompletionContentPartTextParam]]]`, text
+  parts only.
+- google-genai 1.0.0: `FunctionResponse` fields are `id`, `name` and
+  `response`.
+
+Seven decisions were put to the owner with a recommendation each. The owner
+agreed the channel (a dedicated tool) and the storage (a column, in the
+database). They limited delivery to Anthropic and the OpenAI-compatible wire,
+deferred Google, and confirmed the recommendations for compaction, redaction,
+MCP and the pipeline.
+
+### What was built
+
+- `tools/builtin/file_ops.py`: `view_image`, with `read`'s path rules, format
+  read from magic bytes, the `max_image_bytes` cap, and the bytes handed to
+  `memory.attach_image`. It returns one sentence.
+- `core/memory.py` / `storage.py`: `attach_image` holds images by call id, and
+  `add_tool_result` writes them into the new `MessageLog.images` column of the
+  same row. `_decode_images` follows `_decode_thinking`'s degrade rule.
+  `ensure_columns()` migrates existing databases with no new code, because it
+  reads the metadata.
+- `tools/base.py` / `tools/registry.py` / `tools/context.py` / `core/loop.py`:
+  `ToolSpec.returns_images`; `schemas`, `is_advertised` and `headless_hidden`
+  take `images=` (default False); `image_hidden()` feeds a once-only WARNING;
+  `RunInfo.images` is computed once by `_images_deliverable`.
+- `core/client.py`: `accepts_images()` (strict `is True`, GOOGLE never, warned
+  once). `_messages_for_provider` takes `images=`. Anthropic gets image blocks
+  inside the `tool_result`. The OpenAI-compatible wire gets one harness user
+  message after the tool batch. Google, and any provider not flagged, gets
+  `_image_note`.
+- `core/compaction.py`: `IMAGE_TOKEN_ESTIMATE` = 1,600, with `_row_chars`
+  behind every row-size sum and the images counted in `_chars` too.
+- Config: `max_image_bytes: 3932160`, and `view_image: false` in both tool
+  tables. `providers.json.example` sets `accepts_images: true` for ANTHROPIC
+  only.
+
+### Why not a ContextVar, the SS17 precedent
+
+The shell-session tools are hidden in research passes by an argument-less
+`available_check` reading a ContextVar that the CALLERS set around a run. That
+did not transfer. The answer here depends on the run's provider and its
+thread's kind, both of which only `_run_steps` holds, and setting a ContextVar
+inside a generator leaks it across yields into whoever is iterating. So the
+answer travels explicitly: `RunInfo.images` for the handler, and
+`schemas(images=)` for the list.
+
+### Deviations
+
+None from the owner's rulings. Two calls were made inside them and recorded as
+decisions rather than left implicit:
+
+- The OpenAI-compatible note on the tool message ("the attached image(s)
+  follow") is part of IM4. Without it the model meets a tool result naming an
+  attachment and an unrelated-looking user message.
+- `providers.json.example` flags ANTHROPIC and not OPENAI. On Anthropic,
+  `accepts_images` is true for every model. On OpenAI it depends on the model,
+  and `echoes_reasoning`'s precedent is to ship a per-model fact off.
+
+### Verification
+
+Full suite 7214 -> 7283, stated in `AGENTS.md`, `README.md` and
+`docs/ARCHITECTURE.md`. New `tests/test_image_input.py`, 67 tests. `test_storage_e2e.py` gains the
+real-SQLite round trip (53 -> 54), and `test_fake_storage_mirror.py` gains the
+image row (17 -> 18). The pinned counts moved: tools 30 -> 31, authority
+leaves 56 -> 58, settable scalars 145 -> 148, registered tools 30 -> 31 in
+ARCHITECTURE's headless paragraph. A mutation pass reverted each of thirteen
+fixes in place; every one turned a test red, including the two that
+disconnect `RunInfo.images` from the loop's schema list.
+
+---
+## Batch 172 -- Gemini 3's thought signatures, and a pin that could not carry them (2026-10-25)
+
+**ROADMAP_v3 §82, GS1-GS4.** The owner asked for Google image input on this
+branch. The shape that needed had to be measured against the real API, and the
+owner added a free-tier key for it. The measurement found a defect under the
+request: no GOOGLE tool loop could finish. The owner chose to fix it first, as
+its own batch, by moving the SDK pin (GS1). The images are batch 173.
+
+### What was measured
+
+Over raw REST and through the SDK, 2026-10-25:
+
+- `gemini-2.5-flash` answers 404, "no longer available to new users". Every
+  model this key can call is Gemini 3.
+- A Gemini 3 function call carries a `thoughtSignature` on its part, on the
+  first call of a parallel batch only.
+- Replayed without it, the call is refused: 400, "Function call is missing a
+  thought_signature in functionCall parts", on gemini-3.1-flash-lite and
+  gemini-3.8-flash alike. Only the current turn is checked.
+- google-genai 1.0.0 drops the signature in the parse, because its `Part` has
+  no field for it. Plain chat and streaming worked on 1.0.0.
+- Google's placeholder `skip_thought_signature_validator` is accepted in place
+  of a real signature.
+
+### What was built
+
+- **The pin**: google-genai 1.0.0 -> 2.29.0 (GS1), the newest release at least
+  two weeks old. It installs google-auth 2.62.0, which still requires
+  `cryptography`. Its transport is httpx, which the error classifier already
+  named, and with no `retry_options` it still makes one attempt.
+- **The signature**: the GOOGLE stream records one block per function call in
+  `ModelResponse.thinking`, §44's reasoning record, with the signature in
+  base64 or null (GS2). `_messages_for_provider` hands each call back exactly
+  what it came with when the record is this model's, and Google's placeholder
+  on the first call of a turn it did not write (GS3). The record already had a
+  column and already bypassed the redactor, so nothing new is stored anywhere
+  new, and replay renders nothing for it.
+- **The schema keys**: the first live tool request on 2.29.0 was refused, 400
+  `Unknown name "additional_properties"`. The new SDK's `Schema` carries Vertex
+  AI fields, and `_google_schema_keys` read every field as sendable.
+  `_GOOGLE_SCHEMA_VERIFIED` narrows it to the 22 fields 1.0.0 had, the ones
+  verified on the wire (GS4). A new SDK field is now a decision to measure.
+- **Google effort is on**: 2.29.0 carries `ThinkingConfig.thinking_budget`, so
+  `_google_supports_thinking_budget()` answers True. The owner accepted this
+  when choosing the bump. Every configured budget, and 0, was accepted by
+  gemini-3.1-flash-lite.
+- **A chunk with no parts** no longer raises: `Content.parts` is Optional on
+  the pinned type.
+
+### Verified
+
+- Live, through the harness's own `call_model_stream` on gemini-3.1-flash-lite,
+  with the real registry's 16 declarations: a tool call, then the second
+  request three ways -- this model's own signature, the placeholder for
+  another model's turn, and no record at all (a row from before this batch).
+  All three returned the tool's value. The same run with effort `high` passed.
+- gemini-3.8-flash took the first request and its signature was recorded (356
+  characters). The second request met the free tier's limit of 20 requests a
+  day for that model (429 RESOURCE_EXHAUSTED), so it is unverified there. Its
+  budget probe returned 200 for low, medium and max and 503 "high demand" for
+  the rest, which is capacity, not a refusal.
+- Full suite 7283 -> 7304 (new `tests/test_thought_signatures.py`, 19;
+  `test_sdk_conformance.py` 19 -> 21): 7255 passed and 49 skipped on Windows.
+  One test, `test_a_crlf_checkout_stays_crlf`, failed first because the branch
+  switch had left `config.yaml` CRLF in the worktree, and that test makes its
+  own CRLF copy. With the worktree copy back to LF, which git stores anyway,
+  all 98 in that file pass.
+- The changed suites with `AGENT_WORKSPACE` unset: 426 passed, 4 skipped.
+- Mutations: 16 of 16 killed. The first run let two survive and both were real
+  gaps -- a `-k` that missed hyphenated parameter ids, and a test whose foreign
+  turn did not record its own call, so bypassing the provider/model gate
+  changed nothing. The test now records it. A third row was re-aimed at
+  `description`, because `nullable` is added after the reduction whatever the
+  key list says.
+- ruff clean; bandit 0 new, and its count check shows no pair grew; gitleaks
+  8.30.1 found no leaks; pip-audit finds only mcp 2.0.0's CVE-2026-59951,
+  which hosted-demo already fixed and the merge brings in.
+
+---
+## Batch 173 -- a tool's image, delivered to Gemini (2026-10-25)
+
+**ROADMAP_v3 §81 amended, IM9-IM10.** The owner's request: image support
+for Google, on the branch that had built it for Anthropic and the
+OpenAI-compatible wire (batch 171) and left Google deferred behind IM5's note.
+Batch 172 had to come first, because no GOOGLE tool loop could finish.
+
+### The owner's rulings
+
+- **The wire: a separate user turn on the pinned SDK** (IM9), over bumping
+  for `FunctionResponse.parts`, which Gemini 2.5 refuses.
+- **Measured before it ships**, with the owner's free-tier key, and with the
+  owner's instruction to tell a billing or quota failure apart from a real one.
+- **GIF: a note instead of the image** (IM10). The owner chose it on the
+  documented type list, and kept it after the measurement showed two Gemini 3
+  models reading a GIF correctly.
+
+### What was measured
+
+On gemini-3.1-flash-lite and gemini-3.8-flash, over raw REST: a tool's PNG in
+a user turn after the function response is read correctly ("red fills the
+left half, blue the right"); so is one placed as a sibling part inside the
+function-response Content; so are JPEG, WEBP and GIF. Gemini 2.5 refusing
+`FunctionResponse.parts` is Google's own forum (2025-09-30), not measured
+here: 2.5 is closed to new accounts. Google's ADK delivers a loaded artifact
+as a separate user Content after the function response.
+
+### What was built
+
+- `accepts_images("GOOGLE")` is honoured on the same strict test as every
+  other provider; the once-only warning went with the deferral.
+- The GOOGLE translation holds each tool row's images until the batch ends and
+  then sends one harness-labelled user turn: a text part naming the call, then
+  `inline_data` parts with the bytes DECODED, because `Blob.data` is bytes.
+  The result text says the images follow, like the OpenAI-compatible wire's.
+- `_GOOGLE_IMAGE_TYPES` is PNG, JPEG and WEBP. A GIF becomes IM5's note naming
+  its type, and a PNG beside it in the same batch is still delivered.
+- A stored copy that will not decode becomes a note for that image alone.
+- `providers.json.example` flags GOOGLE, on the reasoning that flags ANTHROPIC:
+  every Gemini chat model takes images. OPENAI stays unflagged, because there it
+  depends on the model.
+
+### Recorded, not handled
+
+A thread's images all travel with every request, and nothing bounds their
+sum. Google documents a 20 MB request limit (a later announcement raises
+inline data to 100 MB) and Anthropic's is 32 MB, so a thread of several
+maximum-size images can outgrow a request on any wire.
+
+### Verified
+
+- Live through the harness's own translation and `call_model_stream` on
+  gemini-3.5-flash-lite (flash-lite answered 503 "high demand" for several
+  minutes): the model called `view_image`; with the PNG delivered it answered
+  "Red fills the left half and blue fills the right half"; with a GIF, and with
+  the provider unflagged, it reported receiving no image.
+- Full suite 7304 -> 7315 (`test_image_input.py` 67 -> 77,
+  `test_sdk_conformance.py` 21 -> 22): 7266 passed and 49 skipped on Windows.
+- Mutations: 13 of 13 killed -- delivery off, base64 text for bytes, GIF sent,
+  WEBP dropped, the last turn or the mid-thread turn not sent, the "follow"
+  sentence or the GIF note missing, an unreadable copy failing the request, the
+  GOOGLE flag ignored, the label not naming the call, an unflagged provider
+  delivered to, and the real types handed text.
+- ruff clean; bandit 0 new and no pair grew; gitleaks found no leaks.

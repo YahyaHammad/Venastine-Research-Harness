@@ -43,6 +43,8 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
+- **§82. Gemini 3's thought signatures, and a pin that could not carry them** - **(BUILT in batch 172)** (every model a new Google account can call is Gemini 3, which refuses a function call replayed without the signature it came with, and google-genai 1.0.0 had no field to hold one, so every GOOGLE tool loop failed on its second request. The pin moves to 2.29.0, each call's signature rides in §44's reasoning record, a turn another model wrote gets Google's placeholder, and the Schema keys sent are a verified list since 2.29.0's Vertex-only `additional_properties` was refused. Google effort is on as a consequence)
+- **§81. An image a tool reads, delivered to a model that can see it** - **(BUILT in batch 171; Google added in batch 173)** (nothing a model could read from the workspace reached it as anything but text: a tool result was `str(result)`, `read` decoded bytes with `errors="replace"`, and MCP dropped image blocks by decision. `view_image` attaches an image to its own result through the memory, into a new column, never through the redactor; Anthropic carries it inside the `tool_result`, the OpenAI-compatible wire in a harness message after the tool batch because its tool messages take text only, and since batch 173 Google in a harness turn after the batch too, because its function responses take no image on the models a new account can call (a GIF stays a note there); opt-in per provider with `accepts_images`, never in a research pass, and counted at a fixed weight by the compactor)
 - **§80. The copyright year, kept by a workflow** - **(BUILT in batch 169)** (the owner asked not to have to remember it: LICENSE's appendix and NOTICE both said `Copyright 2026`, and nothing would move either; a workflow at 23:59 UTC on December 31, and again on January 1 in case GitHub delayed or dropped that run, writes a range from the first year to both files together; LY1-LY3)
 - **§79. A demo nobody has to install** - **(BUILT across batches 163-169: slice 1, `/connect`, BUILT in batch 163; slice 2, hosted modes, BUILT in batch 164; slice 3, the bridge, the bundle and the math tools' confinement, BUILT in batch 165; slice 4, ModelScope as a Docker Studio and no pasted keys on a shared deployment, BUILT in batch 166; slice 5, ModelScope sign-in completed by the bridge, BUILT in batch 167; slice 6, the pre-public fixes, BUILT in batch 168; slice 7, the deploy workflow, gated on every CI check, BUILT in batch 169)** (the harness ran only where someone installed it, and connecting a model meant copying a template and editing JSON by hand; the owner asked for a public Hugging Face Space and ModelScope Studio kept current from `main`, a sign-in where a provider's own documentation invites one, and a private single-user mode with the full harness; HD1-HD13)
 - **§78. A release tag that named one version while the run packed another** - **(BUILT in batch 162)** (`v0.3.0` and `v0.3.1` were pushed on commits whose `package.json` and `pyproject.toml` both said 0.2.0, and the `v0.3.1` publish run packed `@yahyahammad/venastine@0.2.0` and reported the prepublish check passed, because that check compared the two files with each other and nothing read the tag; it uploaded nothing only because no `NPM_TOKEN` exists. The owner ruled both tags releases whose bump was missed, left the files and the tags where they are, and put the comparison first in `scripts/prepublish-check.mjs`, before anything is packed; A78)
@@ -2729,6 +2731,176 @@ leaked PID.
   because MCP is the only dynamic registrant and the composed name is its
   fact. A bound in the registry would be the fix-at-the-consumer shape
   `AGENTS.md` names by name.
+---
+
+## §82. Gemini 3's thought signatures, and a pin that could not carry them
+
+**Built in batch 172**, found while adding Google to §81's image input. The
+owner asked for images on Google, and the live measurement that shape needed
+turned up a defect underneath it: no GOOGLE tool loop could finish. Four
+decisions, GS1-GS4; the first is the owner's.
+
+**WHAT WAS MEASURED** on 2026-10-25, with the owner's free-tier key, over raw
+REST and through the SDK:
+
+- Every model a new account can call is Gemini 3: `gemini-2.5-flash` answers
+  404, "no longer available to new users".
+- A Gemini 3 response puts a `thoughtSignature` on its function-call part, and
+  only on the first call of a parallel batch.
+- Replaying that call without it is a 400 -- "Function call is missing a
+  thought_signature in functionCall parts" -- on gemini-3.1-flash-lite and
+  gemini-3.8-flash alike. Only the CURRENT turn is checked: a call before the
+  latest user text passes unsigned.
+- google-genai 1.0.0's `Part` has no `thought_signature` field, so the parse
+  dropped it. Plain chat and streaming worked; the second request of every
+  tool loop failed.
+- Google's placeholder, `skip_thought_signature_validator`, is accepted in
+  place of a real signature.
+
+**THE SHAPE.** The stream reads each call's signature off the part that carried
+it and records it in §44's reasoning record, `ModelResponse.thinking`, one
+block per call. The translation hands each call back exactly what it came
+with when the turn's record is this model's (§44's pair), and Google's
+placeholder on the first call of a turn it did not write. Nothing new is
+persisted anywhere new: the record already had a column, and it already
+bypassed the redactor, which a base64 signature needs as much as an
+Anthropic signed block does.
+
+**WHAT THE BUMP CHANGED BESIDES.**
+
+- `ThinkingConfig.thinking_budget` exists on 2.29.0, so
+  `_google_supports_thinking_budget()` answers True and Google effort is on.
+  Every budget in `google_thinking_budgets`, 0 included, was accepted on
+  gemini-3.1-flash-lite. On gemini-3.8-flash low, medium and max returned 200
+  and the rest met 503 "high demand", which is capacity, not a refusal.
+  §9's Google implementation was retested live: chat, streaming, the tool
+  loop with the real registry's 16 declarations, and effort `high`.
+- `Schema` gained `additional_properties`, `defs` and `ref`. The Gemini API
+  refused the first -- 400, `Unknown name "additional_properties"` -- and took
+  every declaration with it (GS4).
+- The transport is httpx, not requests. The classifier already named httpx's
+  `TransportError` and `TimeoutException`, so a GOOGLE connection failure is
+  still transient. Retries stay the harness's: with no `retry_options`,
+  2.29.0 makes one attempt, as 1.0.0 did.
+
+### What §82 deliberately does not change
+
+**Text-part signatures are not kept.** A response without calls may carry a
+signature on its last text part. It is not validated, and the neutral
+assistant shape holds one text, so there is no part to hand it back on.
+Google recommends it for reasoning quality; it does not require it.
+
+**Thought summaries stay off** (§38 O2). `include_thoughts` is unchanged.
+
+**Thinking tokens are still not counted as output.** Gemini reports
+`thoughts_token_count` apart from `candidates_token_count`, and the GOOGLE
+usage read takes the latter. That was true before this batch; with effort on
+it is larger. Recorded here, not fixed here.
+
+**`thinking_level`**, Gemini 3's native control, is not used. Budgets are what
+the map sends, and they were accepted.
+
+### Design Decisions Record — §82 (GS1-GS4)
+
+| id | decision |
+|---|---|
+| **GS1** | **The google-genai pin moves from 1.0.0 to 2.29.0, the owner's choice, exact like every SDK pin.** 2.29.0 (2026-10-07) was the newest release at least two weeks old on the day it was chosen, and it carries `Part.thought_signature`. The alternative was to ship image input on the old pin and leave GOOGLE tool use failing on its second request. The side effect, accepted by the owner: Google effort is on, because 2.29.0 also carries `thinking_budget`. `test_the_thinking_budget_guard_still_describes_the_pin` is inverted rather than deleted, as its own message asked |
+| **GS2** | **A call's signature lives in §44's reasoning record, one block per call, including a call that carried none.** `{"type": "thought_signature", "call_id": ..., "signature": base64 or null}` in `ModelResponse.thinking`, persisted in the `thinking` column like Anthropic's signed blocks and never through the redactor. Per call, because Gemini 3 signs only the first call of a parallel batch. Null is recorded because a model that does not think signs nothing, and "this model attached nothing" must not read as "nothing is known", which would earn the placeholder. No `text` or `thinking` key, so replay renders nothing for it |
+| **GS3** | **A turn the target model did not write gets Google's placeholder on its first call, and nothing on the rest.** That covers another provider's turn, another Google model's after a /model switch, a row written before this batch, and a signature that will not decode. Gemini 3 validates only the current turn, so this matters after a mid-turn switch and costs nothing elsewhere. A real signature always wins. Measured accepted (`skip_thought_signature_validator`) |
+| **GS4** | **The Schema keys sent to Google are a verified list narrowed to the installed SDK, not every field the SDK has.** `_google_schema_keys` read every `Schema` field so that a new one would be carried with no change. 2.29.0 disproved the premise: its `additional_properties` is a Vertex AI field the Gemini API refuses, and because the declarations travel together, one refused key fails every GOOGLE call. `_GOOGLE_SCHEMA_VERIFIED` is the 22 fields 1.0.0 had, verified on the wire by batch 132 and §9. `test_every_VERIFIED_schema_key_is_still_a_field_on_the_pinned_type` names the SDK's extra three, so a new field is a decision to measure rather than a silent omission or a 400 |
+
+---
+
+## §81. An image a tool reads, delivered to a model that can see it
+
+**Built in batch 171** -- on its own branch, as batch 159 and §76, which `main`
+used for other work before the branch merged; renumbered on 2026-10-25, the
+owner's choice -- from the owner's question whether a multimodal model
+behind a compatible API could take non-text input by reading it from the
+workspace. It could not. Every path into a conversation was text: a user row
+was a string, a tool result was `str(result)`, `read` either ran markitdown or
+decoded with `errors="replace"`, `fetch_url` decoded the body, and MCP's
+`_normalize` dropped image blocks by decision (A32). The owner asked for the
+smallest change that gives a model eyes, with no attachment UI in the harness,
+and ruled on the shape before any code was written. Eight decisions, IM1-IM8.
+
+**WHAT MADE IT MORE THAN ONE FUNCTION.** Measured before designing, against the
+three pinned SDKs. Anthropic 0.116.0's `tool_result` content is
+`str | Iterable[TextBlock | ImageBlock | ...]`, so an image fits inside its own
+result. openai 2.45.0's tool message content is
+`str | Iterable[ChatCompletionContentPartTextParam]`: text parts ONLY, so an image
+from a tool can reach that wire only in a user message. google-genai 1.0.0's
+`FunctionResponse` has `id`, `name` and `response` and nothing an image could go
+in (batch 173 measured the next pin: 2.29.0 has `FunctionResponse.parts`, and
+Gemini 2.5 refuses it -- IM9). So the neutral shape no longer translated nearly 1:1. Separately, every layer
+that measures or rewrites the conversation assumed text: the compactor sizes
+by characters, the output redactor runs its patterns over every string value,
+and thirty-five sites in sixteen modules read a message's `content` as a
+string.
+
+**THE SHAPE.** A new tool, `view_image(path)` (IM1), reads the file, judges its
+format from its leading bytes (IM7), and hands the base64 to the memory with
+`attach_image(call_id, ...)` (IM3). The loop's ordinary `add_tool_result` then
+writes the image into a new nullable `MessageLog.images` column of that same
+row (IM2). The tool's RESULT is one sentence naming what was attached. So the
+bytes never pass the redactor, the `tool_result` event, the transcript, replay
+or `/copy`, and `content` stays the string all thirty-five readers expect.
+Two readers know the column exists: provider translation (IM4, IM5) and the
+compactor's size proxy (IM8).
+
+**WHO IS OFFERED IT.** Whether an image can reach the model is a property of
+the run: its provider, and what its thread is. `RunInfo.images` is computed once
+by the loop and read twice, by the schema list and by the handler, so the two
+cannot disagree (IM6). A provider opts in with `accepts_images: true` in
+`providers.json`, on `echoes_reasoning`'s terms. A research pass never gets
+the tool, because the pipeline's sources, claims and grounding are all text.
+
+### What §81 deliberately does not change
+
+**MCP image blocks are still dropped.** A32's decline stands, and its in-band
+placeholder still tells the model. Passing them through is a separate step, now
+a small one: `_normalize` would attach rather than drop, through the memory, as
+`view_image` does.
+
+**Google was deferred until batch 173.** Its wire got IM5's note whatever its
+entry said, and a flag set on it was warned about once. Batch 172 (§82) made
+a GOOGLE tool loop work at all; batch 173 measured the shape and built it: a
+harness turn after the batch, like the OpenAI-compatible wire, with a GIF left
+as a note (IM9, IM10). The sibling `inline_data` part this paragraph guessed at
+was accepted too, and not chosen.
+
+**A thread's images all travel with every request, and nothing bounds their
+sum.** The cap (IM7) is per image. Google documents a 20 MB limit on the whole
+request (a later Google announcement raises inline data to 100 MB), and
+Anthropic's is 32 MB, so a thread holding several maximum-size images can
+outgrow a request on every wire. Recorded in batch 173, not handled.
+
+**No attachment UI and no `@` image.** The owner ruled the harness gets no
+attachment channel for now, so the only producer is the tool. §54's `@` names a
+FILE in the prompt and is unbuilt. When it is built, an image named that way
+would reuse IM2's column on a user row rather than invent a second one.
+
+**No downscaling and no dimension parsing.** Both need an imaging dependency the
+harness does not carry. The cap (IM7) and the fixed weight (IM8) are what stand
+in for them.
+
+**`read` is unchanged.** Its result is pages of text lines with offset and count.
+An image is neither, so it gets its own tool and its own permission row.
+
+### Design Decisions Record — §81 (IM1-IM10)
+
+| id | decision |
+|---|---|
+| **IM1** | **The channel is a dedicated `view_image` tool, not `read`, and it ships disabled like `read`.** `read`'s contract is pages of text lines with `offset` and `count`, which an image has neither of. A separate tool keeps that contract and gets its own rows in both permission tables (D24), so it can be enabled apart from `read`. Both rows ship `false`, because a tool that reads arbitrary workspace files while `read` is off would be a way around that default. The path rules are `read`'s exactly: the same `_file_approval_check`, so outside the workspace asks; the same `_refusal_for` shape; and the protected segment re-tested in the handler, as every file tool re-tests it |
+| **IM2** | **The bytes live in a nullable `MessageLog.images` column, in the database, and `content` stays a string.** `thinking`'s precedent: a different kind of thing with different rules, read by two consumers and invisible to the rest, added to existing databases by `ensure_columns()`. Present in the neutral shape ONLY when a row attached one, so every row written before reconstructs exactly as it did, and an unreadable entry costs that entry, never the thread (`_decode_thinking`'s rule). In `app.db` rather than a blob store or a reference to the workspace file. A reference would make a resumed thread send whatever the file holds now. A second store would be a second place `docs/PRIVACY.md`'s "wipe everything" has to name |
+| **IM3** | **The image goes from the tool to the memory, never through the tool result.** `view_image` takes the injected `memory` and `call_id`. `attach_image` holds the image under that call id, and `add_tool_result` takes it into the row it writes. So the exemption from redaction that images need is structural rather than a rule. A base64 string run through the secret patterns can be altered, and an altered image is a request the provider rejects. The bytes never enter that path, so the redactor is unchanged and still scans every value of every result. Only first-party code holding the memory can attach; an MCP server's result is a dict and cannot. A call that never gets a result row never gets its image |
+| **IM4** | **Delivery is opt-in per provider, and each wire carries the image where its SDK allows.** `accepts_images` in `providers.json`, tested `is True` (A29's reason). Anthropic: image blocks after the text inside the `tool_result`, the text block omitted when empty because the API rejects an empty one. OpenAI-compatible: the tool message keeps its text and says the image follows. One harness-labelled user message carries every image of the batch AFTER the last tool message, because each tool message must directly follow the assistant turn that called it. That message is derived on every request and never persisted, the compaction summary's rule (M8). Google: never, deferred -- until batch 173, which gave it IM9's harness turn. `accepts_images()` in `core/client.py` is the one predicate, read by the loop and by `call_model_stream` |
+| **IM5** | **A wire that does not receive an image gets a sentence saying so, never the bytes and never silence.** One rule for a provider not marked `accepts_images`, for a thread that switched to one after the image was attached, and since batch 173 for an image type Google is not sent (IM10). Until then it covered Google whole. A model told nothing answers from a result that reads as complete, which is A32's lesson about MCP's placeholder |
+| **IM6** | **Whether a run can deliver an image is decided once, and both the schema list and the handler read that answer.** `RunInfo.images` = the provider accepts images AND the thread is not a research pass (a property of what the thread is, `_derived_compaction_mode`'s argument). `ToolSpec.returns_images` declares the tool. `registry.schemas()` drops it unless told `images=True`, and the parameter DEFAULTS FALSE, so a caller that never heard of images hides the tool rather than offering a result the model cannot see. It is not an `available_check`, which takes no arguments and cannot see the run. A tool the user enabled and the run leaves out is named once in a WARNING (`image_hidden()`, the headless notice's rule). The handler refuses a call made anyway |
+| **IM7** | **Format from the bytes, and a cap derived from the smaller wire.** PNG, JPEG, GIF and WEBP, the formats both wires accept, judged by signature and never by extension: a PNG named `.jpg` declared as JPEG is a rejected request. `max_image_bytes` is 3,932,160 (3.75 MiB). Base64 makes that 5 MiB on the wire, which is Anthropic's per-image limit; `CONFIG_ARCHITECTURE.md` carries the arithmetic. A file that grows between the size check and the read is refused, because the read stops one byte past the cap. Google, a wire since batch 173, is sent three of the four (IM10), and its limit is on the whole request rather than per image |
+| **IM8** | **The compactor counts an image as a fixed 1,600 tokens, and the summarizer never sees its bytes.** `IMAGE_TOKEN_ESTIMATE` in `core/compaction.py`, beside `CHARS_PER_TOKEN`. Every row-size sum goes through `_row_chars`, and the neutral-shape estimate counts images too, so no floor and no pin cap disagrees about an image. 1,600 is the top of Anthropic's own estimate for an image it has scaled to about 1.15 megapixels, so a large image is counted near its cost and a small one is overcounted. Overcounting folds a little early, where undercounting would let a thread of screenshots run past the window. Counting the base64 LENGTH would read a 1 MB file as 330,000 tokens. `_as_text` reads `content` alone, so a folded image leaves its sentence in the summary and its bytes with the row |
+| **IM9** | **Google gets a harness turn after the batch, measured, and the shape Google's own ADK uses (batch 173).** A `FunctionResponse` cannot carry the image on the models a new account can call: google-genai 2.29.0 has `FunctionResponse.parts`, Gemini 2.5 answers "multimodal function responses are not supported for this model", and only Gemini 3 takes it. So one user Content follows the WHOLE batch: per call, a harness-labelled text part, then `inline_data` parts with the DECODED bytes, because `Blob.data` is bytes and a base64 string would be sent as text. Measured on gemini-3.1-flash-lite and gemini-3.8-flash, and through the harness on gemini-3.5-flash-lite. A sibling part inside the function-response Content was accepted too; the turn after the batch was chosen because it leaves the batching predicate alone and is the other wire's rule. Derived per request, never persisted (M8). The owner chose it over bumping the SDK for `FunctionResponse.parts`. A stored copy that will not decode costs that image a note, never the request |
+| **IM10** | **On Google, PNG, JPEG and WEBP are sent and a GIF is a note, the owner's choice (batch 173).** Gemini documents PNG, JPEG, WEBP, HEIC and HEIF. Two Gemini 3 models read a GIF correctly when measured, but an undocumented type is not a contract, and an image the endpoint refused would stay in the thread and fail every request after it. `_GOOGLE_IMAGE_TYPES`; the note names the type, and a GIF beside a PNG in one batch leaves the PNG delivered |
 ---
 
 ## §80. The copyright year, kept by a workflow

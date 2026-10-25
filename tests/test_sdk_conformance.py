@@ -101,8 +101,11 @@ def test_every_genai_keyword_is_a_field_on_the_pinned_class():
     to all of them.
 
     Green today: the Google translation is conformant against
-    google-genai==1.0.0. That is worth pinning rather than assuming, because
-    §9's Google implementation is verified nowhere else in the suite.
+    google-genai==2.29.0. That is worth pinning rather than assuming, because
+    §9's Google implementation is verified nowhere else in the suite. Since
+    batch 172 the walk also covers `Part(thought_signature=...)` (§82), and
+    no keyword is exempt: `thinking_budget` was, while the 1.0.0 pin lacked
+    it.
     """
     calls = _genai_kwargs()
     # GUARD THE GUARD. Everything below is "collect problems, assert none",
@@ -116,7 +119,7 @@ def test_every_genai_keyword_is_a_field_on_the_pinned_class():
         "anything and needs repointing, not deleting.")
 
     problems = []
-    with real_package("google"):
+    with real_package("google", "httpx"):
         from google.genai import types as types_mod
         for cls_name, kwargs in calls.items():
             cls = getattr(types_mod, cls_name, None)
@@ -124,10 +127,7 @@ def test_every_genai_keyword_is_a_field_on_the_pinned_class():
                 problems.append(f"{cls_name}: absent from the pinned package")
                 continue
             fields = set(getattr(cls, "model_fields", {}) or {})
-            # thinking_budget is KNOWN absent on the 1.0.0 pin and guarded at
-            # runtime by _google_supports_thinking_budget -- see the note on
-            # the pin in requirements.txt, and the test below.
-            unknown = kwargs - fields - {"thinking_budget"}
+            unknown = kwargs - fields
             if unknown:
                 problems.append(
                     f"{cls_name}: {sorted(unknown)} are not fields "
@@ -159,7 +159,7 @@ def test_every_advertised_SCHEMA_constructs_against_the_REAL_pinned_types():
     through the real translation against the real pinned types, which is
     the only arrangement in which the defect is visible.
     """
-    with real_package("google"):
+    with real_package("google", "httpx"):
         import core.client as client
         from tools.registry import registry
 
@@ -193,10 +193,14 @@ def test_the_google_reduction_keeps_the_shape_it_is_allowed_to_keep():
     Three claims: an ordinary field is untouched, `Optional[X]` becomes X
     plus `nullable` rather than disappearing, and the key that cannot be
     carried is the only thing lost. `additionalProperties` is a real loss
-    -- the pinned `Schema` cannot express "a dict whose values are
-    numbers" at all -- so it is recorded here rather than papered over.
+    -- the Gemini API cannot take "a dict whose values are numbers" -- so
+    it is recorded here rather than papered over. On google-genai 1.0.0 the
+    `Schema` had no field for it. The 2.29.0 pin HAS one, which the Gemini
+    API refused when measured (400, `Unknown name "additional_properties"`,
+    ROADMAP_v3 §82), so it is still dropped: the accepted set is the
+    verified one, narrowed from the SDK's.
     """
-    with real_package("google"):
+    with real_package("google", "httpx"):
         from google.genai import types as genai_types
 
         import core.client as client
@@ -207,6 +211,7 @@ def test_the_google_reduction_keeps_the_shape_it_is_allowed_to_keep():
             "the accepted-key set is read off the SDK and must carry both "
             "the field names and their camelCase aliases, since JSON Schema "
             "spells it anyOf and the model declares any_of")
+        assert "additional_properties" in genai_types.Schema.model_fields
         assert "additionalProperties" not in accepted
 
         raw = ProbabilityStatsParams.model_json_schema()
@@ -255,7 +260,7 @@ def test_the_FAKE_schema_carries_the_same_keys_as_the_REAL_one():
     from google.genai import types as fake_types
     fake = keyset(fake_types.Schema)
 
-    with real_package("google"):
+    with real_package("google", "httpx"):
         from google.genai import types as real_types
         real = keyset(real_types.Schema)
 
@@ -266,30 +271,159 @@ def test_the_FAKE_schema_carries_the_same_keys_as_the_REAL_one():
         % (sorted(real - fake), sorted(fake - real)))
 
 
-def test_the_thinking_budget_guard_still_describes_the_pin():
-    """`requirements.txt` pins google-genai==1.0.0 with a note saying
-    ThinkingConfig has no `thinking_budget`, and `core/client.py` branches on
-    exactly that. The note was accurate when checked; nothing re-checks it.
-
-    If this goes red the pin has moved, `_google_supports_thinking_budget`
-    starts returning True, Google effort turns on, and §9's implementation
-    comes back into scope for retest. That is a decision, not a regression --
-    which is why the message says so rather than just failing.
+def test_every_VERIFIED_schema_key_is_still_a_field_on_the_pinned_type():
+    """ROADMAP_v3 §82 (GS4). The keys sent to Google are the verified set
+    narrowed to what the installed `Schema` has, so a verified field the SDK
+    dropped would quietly stop being sent. This says so instead -- the list
+    in `core/client.py` must describe the pin, in both directions: nothing in
+    it the SDK lacks, and the SDK's extra fields named, so a new one is a
+    decision to measure rather than a silent omission.
     """
-    with real_package("google"):
+    import core.client as client
+
+    with real_package("google", "httpx"):
+        from google.genai import types as genai_types
+        fields = set(genai_types.Schema.model_fields)
+
+    assert client._GOOGLE_SCHEMA_VERIFIED <= fields, (
+        "verified Schema keys the pinned SDK no longer has: %s"
+        % sorted(client._GOOGLE_SCHEMA_VERIFIED - fields))
+    assert fields - client._GOOGLE_SCHEMA_VERIFIED == {
+        "additional_properties", "defs", "ref"}, (
+        "the pinned Schema has fields that are neither verified on the "
+        "Gemini API nor recorded as held back: %s. Measure them and add them "
+        "to _GOOGLE_SCHEMA_VERIFIED, or record why not (ROADMAP_v3 §82)."
+        % sorted(fields - client._GOOGLE_SCHEMA_VERIFIED
+                 - {"additional_properties", "defs", "ref"}))
+
+
+def test_the_thinking_budget_guard_still_describes_the_pin():
+    """`requirements.txt` pins google-genai with a note on whether
+    ThinkingConfig has `thinking_budget`, and `core/client.py` branches on
+    exactly that. The note was accurate when checked; this re-checks it.
+
+    INVERTED IN BATCH 172, as this test's own message said it would be. It
+    asserted the field was ABSENT on 1.0.0, so Google effort stayed off. The
+    pin moved to 2.29.0 for thought signatures (ROADMAP_v3 §82, GS1), the
+    field arrived with it, and Google effort is on -- the owner accepted
+    that, and the configured budgets were measured live on Gemini 3. Red now
+    means the field went away again, which turns Google effort OFF.
+    """
+    import core.client as client
+
+    with real_package("google", "httpx"):
         from google.genai import types as types_mod
         fields = set(getattr(types_mod.ThinkingConfig, "model_fields", {}) or {})
-    # Guard the guard: an absent or empty `model_fields` satisfies "not in"
-    # trivially, so this would pass loudest at exactly the moment the type
-    # stopped being readable.
-    assert fields, ("ThinkingConfig exposed no model_fields at all. That is "
-                    "not 'thinking_budget is absent' -- it means this check "
-                    "can no longer see the type it is asking about.")
-    assert "thinking_budget" not in fields, (
-        "google-genai now HAS ThinkingConfig.thinking_budget. "
-        "_google_supports_thinking_budget will start returning True, which "
-        "enables Google reasoning effort. Update requirements.txt's note on "
-        "the pin and retest §9's Google implementation.")
+        saved = client._google_budget_support
+        client._google_budget_support = None
+        try:
+            supported = client._google_supports_thinking_budget()
+        finally:
+            client._google_budget_support = saved
+    # Guard the guard: an absent or empty `model_fields` reads as "absent",
+    # which would turn effort off for a reason that is not the SDK's shape.
+    assert fields, ("ThinkingConfig exposed no model_fields at all -- this "
+                    "check can no longer see the type it is asking about.")
+    assert "thinking_budget" in fields and supported is True, (
+        "google-genai no longer has ThinkingConfig.thinking_budget, so "
+        "_google_supports_thinking_budget answers False and Google reasoning "
+        "effort turns OFF. requirements.txt's note on the pin says 2.29.0 "
+        "carries it (ROADMAP_v3 §82).")
+
+
+def test_a_GOOGLE_thought_signature_survives_the_REAL_types_both_ways(
+        monkeypatch):
+    """ROADMAP_v3 §82 (GS2, GS3). Gemini 3 refuses the next request unless
+    each function call goes back with the signature it came with, and the
+    old pin could not even hold one: 1.0.0's Part had no field for it, so
+    the parse dropped it and every second tool request answered 400.
+
+    Real types both ways, for this file's reason: the fake Part keeps any
+    keyword it is given, so only the real one can say the field exists, that
+    the stream reads it, and that the translation hands it back -- the
+    signed call's own bytes to the model that wrote it, nothing added to the
+    unsigned second call, and the placeholder on the first call for any
+    other model.
+    """
+    import base64
+
+    monkeypatch.setattr("core.client.load_provider_data", lambda: {})
+    with real_package("google", "httpx"):
+        from google.genai import types as gt
+
+        import core.client as client
+
+        def call(call_id, **kw):
+            return gt.Part(function_call=gt.FunctionCall(
+                id=call_id, name="view_image", args={"path": "a.png"}), **kw)
+
+        chunk = gt.GenerateContentResponse(
+            candidates=[gt.Candidate(content=gt.Content(role="model", parts=[
+                call("c1", thought_signature=b"\x01sig"), call("c2")]))],
+            usage_metadata=gt.GenerateContentResponseUsageMetadata(
+                prompt_token_count=5, candidates_token_count=3))
+        stream = _SimpleNamespace(models=_SimpleNamespace(
+            generate_content_stream=lambda **kw: iter([chunk])))
+        final = [token.final_response for token in client.call_model_stream(
+            stream, "GOOGLE", "gemini-x", [], "sys", [])
+            if token.final_response is not None][0]
+        assert final.thinking == {"provider": "GOOGLE", "model": "gemini-x",
+                                  "blocks": [
+            {"type": "thought_signature", "call_id": "c1",
+             "signature": base64.b64encode(b"\x01sig").decode("ascii")},
+            {"type": "thought_signature", "call_id": "c2", "signature": None}]}
+
+        history = [
+            {"role": "user", "content": "look"},
+            {"role": "assistant", "text": "", "thinking": final.thinking,
+             "tool_calls": [{"id": tc.id, "name": tc.name, "input": tc.input}
+                            for tc in final.tool_calls]},
+            {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+            {"role": "tool", "tool_call_id": "c2", "content": "ok"}]
+
+        def signatures(model):
+            turn = client._messages_for_provider("GOOGLE", history, model)[1]
+            assert isinstance(turn, gt.Content) and turn.role == "model"
+            return [part.thought_signature for part in turn.parts]
+
+        assert signatures("gemini-x") == [b"\x01sig", None]
+        assert signatures("gemini-y") == [
+            b"skip_thought_signature_validator", None]
+
+
+def test_a_GOOGLE_image_turn_builds_from_the_REAL_types():
+    """ROADMAP_v3 §81 (IM9). The harness turn that carries a tool's image on
+    GOOGLE, built by the real translation from the real pinned types.
+
+    The fake Blob keeps whatever it is handed, so only the real one can say
+    that `data` takes the DECODED bytes and that the turn validates as a
+    Content -- the half of IM9 the offline suite cannot see. The SDK
+    re-encodes the bytes for the wire, which is what the live check in
+    batch 173 sent to Gemini.
+    """
+    import base64
+
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+    rows = [
+        {"role": "user", "content": "look"},
+        {"role": "assistant", "text": "", "tool_calls": [
+            {"id": "c1", "name": "view_image", "input": {"path": "a.png"}}]},
+        {"role": "tool", "tool_call_id": "c1", "content": "Attached.",
+         "images": [{"media_type": "image/png",
+                     "data": base64.b64encode(png).decode("ascii")}]}]
+    with real_package("google", "httpx"):
+        from google.genai import types as gt
+
+        import core.client as client
+
+        wire = client._messages_for_provider("GOOGLE", rows, "m", images=True)
+        assert all(isinstance(content, gt.Content) for content in wire)
+        assert [content.role for content in wire] == [
+            "user", "model", "user", "user"]
+        label, image = wire[-1].parts
+        assert "c1" in label.text
+        assert image.inline_data.mime_type == "image/png"
+        assert image.inline_data.data == png
 
 
 # ---------------------------------------------------------------------------
@@ -662,7 +796,7 @@ def test_the_openai_delta_keeps_unmodelled_reasoning_fields():
 def test_the_google_usage_fields_are_all_nullable():
     """The reason the GOOGLE branch's `getattr(obj, field, 0)` never fired
     its default: the attribute exists and holds None."""
-    with real_package("google"):
+    with real_package("google", "httpx"):
         from google.genai import types as types_mod
 
         fields = types_mod.GenerateContentResponseUsageMetadata.model_fields
@@ -754,7 +888,7 @@ def test_the_GOOGLE_usage_read_against_a_REAL_nullable_usage_object(
     """
     monkeypatch.setattr("core.client.load_provider_data",
                         lambda: {"GOOGLE": {"supports_stream_usage": True}})
-    with real_package("google"):
+    with real_package("google", "httpx"):
         from google.genai import types as gt
 
         import core.client as client

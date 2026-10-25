@@ -1,3 +1,5 @@
+import base64
+import binascii
 import json
 import logging
 import os
@@ -88,6 +90,26 @@ def forget_client(provider_name: str) -> None:
     going out under the old one.
     """
     _client_cache.pop(provider_name, None)
+
+
+def accepts_images(provider_name: str) -> bool:
+    """ROADMAP_v3 §81 (IM4). Whether an image in a tool result is DELIVERED
+    to this provider, as opposed to replaced by a note saying it was not.
+
+    Opt-in per provider through `accepts_images` in providers.json, on
+    `echoes_reasoning`'s terms: whether a provider takes an image depends on
+    the endpoint and often the model, cannot be discovered, and must not be
+    guessed, so it lives beside the endpoint and defaults to the
+    conservative answer. The test is `is True`, never truthiness:
+    `bool("false")` is True, and a quoted flag is a hand edit away (A29).
+
+    GOOGLE is honoured like the others since batch 173 (IM9). Until then it
+    was never delivered to and a flag on it was warned about: the old pin's
+    FunctionResponse had no field an image could go in, and the wire that
+    does work -- a harness turn after the batch -- had not been measured.
+    """
+    entry = load_provider_data().get(provider_name, {})
+    return isinstance(entry, dict) and entry.get("accepts_images") is True
 
 
 # ============================================================================
@@ -294,7 +316,7 @@ def _token_count(usage_obj, field: str) -> Optional[int]:
     (batch 147), because the three reasons are different and only one of
     them is visible in a type annotation:
 
-      google-genai 1.0.0   every field of
+      google-genai 2.29.0  every field of (as on 1.0.0 before it)
                            GenerateContentResponseUsageMetadata is
                            Optional[int] = None, and a bare instance is
                            TRUTHY -- so `if usage_meta:` passes and then
@@ -382,23 +404,47 @@ def _stream_usage(provider_name: str, counts: dict,
 # ---- Tool schema translation ------------------------------------------------
 # ============================================================================
 
+#: ROADMAP_v3 §82 (GS4). The `Schema` fields the Gemini API is known to take:
+#: the 22 google-genai 1.0.0 had, which batch 132 and §9 verified on the
+#: wire. The SDK serves Vertex AI as well, and 2.29.0 added three fields for
+#: it -- `additional_properties`, which the Gemini API refused when measured
+#: in batch 172 (400, `Unknown name "additional_properties"`), `defs` and
+#: `ref`. One refused key fails every GOOGLE call, because the declarations
+#: travel together, so a new SDK field waits to be measured.
+_GOOGLE_SCHEMA_VERIFIED = frozenset({
+    "any_of", "default", "description", "enum", "example", "format",
+    "items", "max_items", "max_length", "max_properties", "maximum",
+    "min_items", "min_length", "min_properties", "minimum",
+    "nullable", "pattern", "properties", "property_ordering",
+    "required", "title", "type",
+})
+
+
 def _google_schema_keys(genai_types) -> set:
-    """Every key the pinned `types.Schema` will accept, read OFF the SDK.
+    """Every key the pinned `types.Schema` will accept AND the Gemini API is
+    known to take, read off the SDK.
 
     Field names plus their camelCase aliases, because `Schema` sets
     `populate_by_name` and JSON Schema spells things `anyOf`/`maxItems`
-    while the model declares `any_of`/`max_items`. Computed from the SDK
-    rather than written down so that a version which adds a field starts
-    carrying it with no change here -- and read at CALL time, not import
-    time, because the root `conftest.py` puts a fake `google.genai` in
-    `sys.modules` before collection and an import-time constant would bind
-    the fake's fields for the whole test session.
+    while the model declares `any_of`/`max_items`. Read off the SDK so that
+    a field the installed version lacks is never sent -- and read at CALL
+    time, not import time, because the root `conftest.py` puts a fake
+    `google.genai` in `sys.modules` before collection and an import-time
+    constant would bind the fake's fields for the whole test session.
+
+    It used to take EVERY field, on the reasoning that a version which adds
+    one should carry it with no change here. The 2.29.0 pin disproved that
+    (§82): a field on the type is not a field the Gemini API accepts. So the
+    SDK's set is narrowed to `_GOOGLE_SCHEMA_VERIFIED`.
     """
-    keys = set(genai_types.Schema.model_fields)
+    keys = set()
     # NOT `field`: this module imports dataclasses.field at the top, and
     # shadowing it here is what ruff F402 flagged in batch 141 -- found only
     # then, because the lint job is not on main and so has never run.
-    for model_field in genai_types.Schema.model_fields.values():
+    for name, model_field in genai_types.Schema.model_fields.items():
+        if name not in _GOOGLE_SCHEMA_VERIFIED:
+            continue
+        keys.add(name)
         alias = getattr(model_field, "alias", None)
         if alias:
             keys.add(alias)
@@ -433,6 +479,10 @@ def _reduce_for_google(node, accepted: set):
 
     `docs/ARCHITECTURE.md` 4.7 said the raw dict "auto-converts to
     `types.Schema`". It does not; it validates, and refuses.
+
+    Since batch 172 (§82) the pin is 2.29.0, whose `Schema` HAS
+    `additional_properties` -- and the Gemini API refuses it, so it is
+    still dropped: `accepted` is the verified set, not the SDK's.
     """
     if isinstance(node, list):
         return [_reduce_for_google(item, accepted) for item in node]
@@ -581,16 +631,197 @@ def _echoed_blocks(provider_name: str, model: Optional[str],
     return [b for b in record.get("blocks") or [] if isinstance(b, dict)]
 
 
+#: ROADMAP_v3 §82 (GS3). Google's stand-in for a thought signature, for a
+#: function call the target model did not write. Gemini 3 refuses a request
+#: whose current turn holds an unsigned call, and a thread that switched
+#: provider or model mid-turn has exactly that. Measured accepted on
+#: gemini-3.1-flash-lite (batch 172); a real signature is always preferred.
+_GOOGLE_FOREIGN_SIGNATURE = b"skip_thought_signature_validator"
+
+
+def _google_signature_block(call_id: str, signature: Optional[bytes]) -> dict:
+    """One function call's thought signature, as §44's record holds it
+    (§82, GS2). One block per call, INCLUDING a call that carried none --
+    Gemini 3 signs only the first of a parallel batch, and a model that
+    does not think signs nothing -- so "this model wrote the turn and
+    attached nothing" stays distinguishable from "nothing is known". Base64
+    in the record, because the record is JSON; and no `text` or `thinking`
+    key, so replay renders nothing for it."""
+    return {"type": "thought_signature", "call_id": call_id,
+            "signature": (base64.b64encode(signature).decode("ascii")
+                          if signature else None)}
+
+
+def _google_signatures(model: Optional[str], msg: dict) -> Optional[dict]:
+    """{call_id: signature bytes or None} for a turn THIS model wrote, or
+    None when it wrote nothing here (§82, GS2/GS3).
+
+    The gate is §44's pair, read through `_echoed_blocks`: a signature goes
+    back unchanged to the model that produced it and to nothing else. A
+    stored value that will not decode costs that call its signature and
+    gets the placeholder instead, `_decode_thinking`'s rule: an unreadable
+    entry costs the entry, never the request."""
+    blocks = [b for b in _echoed_blocks("GOOGLE", model, msg)
+              if b.get("type") == "thought_signature"]
+    if not blocks:
+        return None
+    signatures: dict = {}
+    for block in blocks:
+        value = block.get("signature")
+        if value is None:
+            signatures[block.get("call_id")] = None
+            continue
+        try:
+            signatures[block.get("call_id")] = base64.b64decode(
+                value, validate=True)
+        except (binascii.Error, TypeError, ValueError):
+            signatures[block.get("call_id")] = _GOOGLE_FOREIGN_SIGNATURE
+    return signatures
+
+
+#: ROADMAP_v3 §81 (IM10). The image types GOOGLE is sent: Gemini's documented
+#: list (PNG, JPEG, WEBP, HEIC, HEIF) met with what `view_image` attaches.
+#: GIF is left out, the owner's choice. Two Gemini 3 models read one correctly
+#: when measured, but it is not documented, and an image the endpoint refused
+#: would stay in the thread and fail every request after it.
+_GOOGLE_IMAGE_TYPES = frozenset({"image/png", "image/jpeg", "image/webp"})
+
+#: What a tool message says on the two wires that deliver images after the
+#: batch, so the model meets the images knowing whose they are (IM4, IM9).
+_IMAGES_FOLLOW = ("[The attached image(s) follow these tool results, in a "
+                  "harness message.]")
+
+
+def _image_note(images: list,
+                reason: str = "this provider is not set up to receive images"
+                ) -> str:
+    """What a tool result's images become on a wire that does not receive
+    them (ROADMAP_v3 §81, IM5): a sentence saying so, never the bytes and
+    never silence. One rule for every way to get here -- a provider not
+    marked `accepts_images`, a thread that switched to one after the image
+    was attached, and since batch 173 an image GOOGLE is not sent (IM10). A
+    model told nothing would answer from a result that reads as complete,
+    which is A32's lesson about MCP's placeholder."""
+    kinds = ", ".join(sorted({image["media_type"] for image in images}))
+    return (f"[{len(images)} image(s) attached to this result ({kinds}) were "
+            f"not sent: {reason}.]")
+
+
+def _with_image_note(msg: dict) -> str:
+    """A tool row's text, with the IM5 note appended when it carries images
+    this wire will not receive."""
+    images = msg.get("images")
+    if not images:
+        return msg["content"]
+    return f"{msg['content']}\n{_image_note(images)}"
+
+
+def _openai_image_turn(pending: list) -> dict:
+    """The user-role message that carries a tool batch's images on the
+    OpenAI-compatible wire (IM4).
+
+    A tool message there holds TEXT PARTS ONLY -- the installed SDK types its
+    content as text parts, and the API rejects an image part in it -- so an
+    image a tool returned can only travel in a user message. It goes AFTER
+    the whole batch: every tool message must directly follow the assistant
+    turn that called it, so one placed between two of them would break the
+    pairing. Built here and never persisted, like the compaction summary
+    (M8): the archive keeps the tool row with its images, and each request
+    derives this message from it again. It says it is the harness speaking,
+    so the model does not read the images as something the user sent.
+    """
+    parts: list = []
+    for tool_call_id, images in pending:
+        parts.append({"type": "text", "text": (
+            f"[Harness: the image(s) attached to the result of tool call "
+            f"{tool_call_id}. A tool message on this API carries text only, "
+            f"so they are delivered here.]")})
+        for image in images:
+            parts.append({"type": "image_url", "image_url": {
+                "url": f"data:{image['media_type']};base64,{image['data']}"}})
+    return {"role": "user", "content": parts}
+
+
+def _google_tool_images(msg: dict, images: bool) -> tuple:
+    """(result text, [(media_type, bytes)]) for one tool row on GOOGLE
+    (ROADMAP_v3 §81, IM9/IM10).
+
+    The bytes go out DECODED: `Blob.data` is bytes on the pinned type, and
+    a base64 string handed to it would be sent as the text of the base64.
+    Each image that is not sent says why in the result: the provider is not
+    marked (IM5), the type is not one Google is sent (IM10), or the stored
+    copy will not decode -- `_decode_thinking`'s rule, so one unreadable
+    image costs that image, never the request."""
+    attached = msg.get("images") or []
+    if not attached:
+        return msg["content"], []
+    if not images:
+        return _with_image_note(msg), []
+    sent, refused, unreadable = [], [], []
+    for image in attached:
+        if image["media_type"] not in _GOOGLE_IMAGE_TYPES:
+            refused.append(image)
+            continue
+        try:
+            sent.append((image["media_type"],
+                         base64.b64decode(image["data"], validate=True)))
+        except (binascii.Error, TypeError, ValueError):
+            unreadable.append(image)
+    text = msg["content"]
+    if refused:
+        kinds = ", ".join(sorted({image["media_type"] for image in refused}))
+        text += "\n" + _image_note(refused, f"this provider is not sent {kinds}")
+    if unreadable:
+        text += "\n" + _image_note(unreadable,
+                                   "the stored copy could not be read")
+    if sent:
+        text += "\n" + _IMAGES_FOLLOW
+    return text, sent
+
+
+def _google_image_turn(pending: list, genai_types):
+    """The user-role Content that carries a tool batch's images on GOOGLE
+    (ROADMAP_v3 §81, IM9).
+
+    A FunctionResponse cannot carry them on the models a new account can
+    call: Gemini 2.5 answers "multimodal function responses are not
+    supported", and only Gemini 3 takes `FunctionResponse.parts`. A harness
+    turn after the WHOLE batch can, measured on two Gemini 3 models, and it
+    is the shape Google's own ADK uses for an artifact a tool loads. After
+    the batch, so the function responses still answer the call turn
+    directly; derived per request and never persisted, `_openai_image_turn`'s
+    rule; and it says it is the harness speaking."""
+    parts: list = []
+    for tool_call_id, images in pending:
+        parts.append(genai_types.Part(text=(
+            f"[Harness: the image(s) attached to the result of tool call "
+            f"{tool_call_id}. A function response on this API carries no "
+            f"image, so they are delivered here.]")))
+        for media_type, data in images:
+            parts.append(genai_types.Part(inline_data=genai_types.Blob(
+                mime_type=media_type, data=data)))
+    return genai_types.Content(role="user", parts=parts)
+
+
 def _messages_for_provider(provider_name: str, neutral_messages: list[dict],
                            model: Optional[str] = None,
-                           echo_reasoning: bool = False) -> list:
+                           echo_reasoning: bool = False,
+                           images: bool = False) -> list:
     """The wire shape for one provider.
 
     `model` and `echo_reasoning` are §44's: they decide whether a stored
     thinking record may travel. Both DEFAULT to the pre-§44 behaviour --
     no model means no echo, and the OpenAI-compatible side is opt-in per
     provider -- so a caller that does not pass them gets exactly the
-    translation this function produced before.
+    translation this function produced before. On GOOGLE `model` also
+    decides whether a function call's thought signature goes back (§82),
+    and the echo is not opt-in there: Gemini 3 refuses a turn without one.
+
+    `images` is ROADMAP_v3 §81's (IM4): whether a tool row's images are
+    delivered to this provider, or replaced by `_image_note`. It defaults
+    to the note, so a caller that does not pass it sends no bytes. GOOGLE
+    reads it too since batch 173 (IM9); it ignored it while that wire was
+    deferred.
     """
     # One rule, above the split (#13, #36). Note this can leave two
     # consecutive user turns -- which is the shape Google's branch has
@@ -612,8 +843,17 @@ def _messages_for_provider(provider_name: str, neutral_messages: list[dict],
                     call_id_to_name[tc["id"]] = tc["name"]
 
         translated = []
+        # §81 (IM9). (tool_call_id, [(media_type, bytes)]) for the tool
+        # batch being translated, sent as one harness turn when the batch
+        # ends -- see _google_image_turn.
+        pending_images: list = []
         for msg in neutral_messages:
             role = msg["role"]
+
+            if role != "tool" and pending_images:
+                translated.append(
+                    _google_image_turn(pending_images, genai_types))
+                pending_images = []
 
             if role == "user":
                 translated.append(genai_types.Content(
@@ -625,13 +865,21 @@ def _messages_for_provider(provider_name: str, neutral_messages: list[dict],
                 parts = []
                 if msg.get("text"):
                     parts.append(genai_types.Part(text=msg["text"]))
-                for tc in msg.get("tool_calls", []):
+                # §82 (GS2/GS3). Each call goes back with exactly what this
+                # model attached to it. A turn it did not write gets the
+                # placeholder on its FIRST call -- the one Gemini 3 checks --
+                # and nothing on the rest, which is how it signs its own.
+                own = _google_signatures(model, msg)
+                for index, tc in enumerate(msg.get("tool_calls", [])):
+                    fallback = _GOOGLE_FOREIGN_SIGNATURE if index == 0 else None
                     parts.append(genai_types.Part(
                         function_call=genai_types.FunctionCall(
                             name=tc["name"],
                             args=tc["input"],
                             id=tc["id"],
-                        )
+                        ),
+                        thought_signature=(fallback if own is None
+                                           else own.get(tc["id"], fallback)),
                     ))
                 # Google rejects Content with empty parts. The turn that
                 # produced them is now dropped above the branch split, so
@@ -646,14 +894,21 @@ def _messages_for_provider(provider_name: str, neutral_messages: list[dict],
                         f"Tool result references tool_call_id={msg['tool_call_id']!r} "
                         f"but no assistant message in the history made that call"
                     )
+                # §81 (IM9/IM10). The images wait for the harness turn after
+                # the batch; the result says they follow, or why not.
+                result, sent = _google_tool_images(msg, images)
+                if sent:
+                    pending_images.append((msg["tool_call_id"], sent))
                 part = genai_types.Part(
                     function_response=genai_types.FunctionResponse(
                         name=name,
-                        response={"result": msg["content"]},
+                        response={"result": result},
                     )
                 )
                 # Batch consecutive tool results into a single user
                 # Content — Google requires strict user/model alternation.
+                # The harness image turn comes only after the batch, so it
+                # never sits between two of them.
                 if (translated
                         and translated[-1].role == "user"
                         and all(p.function_response is not None for p in translated[-1].parts)):
@@ -661,6 +916,8 @@ def _messages_for_provider(provider_name: str, neutral_messages: list[dict],
                 else:
                     translated.append(genai_types.Content(role="user", parts=[part]))
 
+        if pending_images:
+            translated.append(_google_image_turn(pending_images, genai_types))
         return translated
 
     if provider_name == "ANTHROPIC":
@@ -691,10 +948,30 @@ def _messages_for_provider(provider_name: str, neutral_messages: list[dict],
                 # blocks, not one message per result -- merge consecutive
                 # tool-role entries into the same message rather than
                 # appending a new one each time.
+                #
+                # §81 (IM4). An image travels INSIDE its tool_result here --
+                # the one wire of the three whose tool result takes an image
+                # block -- after the text, as a content array. The text
+                # block is omitted when empty, because the API rejects an
+                # empty text block.
+                content = msg["content"]
+                if msg.get("images"):
+                    if images:
+                        content = (
+                            [{"type": "text", "text": msg["content"]}]
+                            if msg["content"] else [])
+                        content += [{
+                            "type": "image",
+                            "source": {"type": "base64",
+                                       "media_type": image["media_type"],
+                                       "data": image["data"]},
+                        } for image in msg["images"]]
+                    else:
+                        content = _with_image_note(msg)
                 block = {
                     "type": "tool_result",
                     "tool_use_id": msg["tool_call_id"],
-                    "content": msg["content"],
+                    "content": content,
                 }
                 if translated and translated[-1]["role"] == "user" and _is_tool_result_message(translated[-1]):
                     translated[-1]["content"].append(block)
@@ -705,8 +982,15 @@ def _messages_for_provider(provider_name: str, neutral_messages: list[dict],
 
     # OpenAI-compatible: close to 1:1, each tool result is its own message
     translated = []
+    # §81 (IM4). (tool_call_id, images) for the tool batch being translated,
+    # sent as one user message when the batch ends -- see _openai_image_turn.
+    pending_images: list = []
     for msg in neutral_messages:
         role = msg["role"]
+
+        if role != "tool" and pending_images:
+            translated.append(_openai_image_turn(pending_images))
+            pending_images = []
 
         if role == "user":
             translated.append({"role": "user", "content": msg["content"]})
@@ -739,10 +1023,20 @@ def _messages_for_provider(provider_name: str, neutral_messages: list[dict],
             translated.append(entry)
 
         elif role == "tool":
+            content = msg["content"]
+            if msg.get("images"):
+                if images:
+                    pending_images.append(
+                        (msg["tool_call_id"], msg["images"]))
+                    content = f"{content}\n{_IMAGES_FOLLOW}"
+                else:
+                    content = _with_image_note(msg)
             translated.append({
-                "role": "tool", "tool_call_id": msg["tool_call_id"], "content": msg["content"],
+                "role": "tool", "tool_call_id": msg["tool_call_id"], "content": content,
             })
 
+    if pending_images:
+        translated.append(_openai_image_turn(pending_images))
     return translated
 
 
@@ -1181,16 +1475,16 @@ _google_budget_support: Optional[bool] = None
 def _google_supports_thinking_budget() -> bool:
     """Whether the INSTALLED google-genai can express a thinking budget.
 
-    Checked rather than assumed, and the check earns its keep: the pinned
-    google-genai (1.0.0) ships a ThinkingConfig whose only field is
-    `include_thoughts` -- `thinking_budget` arrived in a later release. So
-    the obvious implementation, ThinkingConfig(thinking_budget=N), raises a
-    TypeError against the version this repo actually pins.
+    Checked rather than assumed, and the check earned its keep: the old pin,
+    google-genai 1.0.0, shipped a ThinkingConfig whose only field was
+    `include_thoughts`, so ThinkingConfig(thinking_budget=N) raised a
+    TypeError and reasoning effort was unavailable on Google.
 
-    Rather than bump the pin (which would put §9's verified Google
-    implementation back in play for a feature Google users can do without),
-    reasoning effort is simply unavailable on Google until the pin moves.
-    D22's rule, applied: check the dependency's real shape, don't assume it.
+    The pin moved in batch 172 (ROADMAP_v3 §82, GS1) -- for thought
+    signatures, not for effort -- and 2.29.0 carries the field, so this now
+    answers True and Google effort is on. The check stays: it is still the
+    dependency's real shape that decides, D22's rule, and a downgrade would
+    turn effort off again rather than send a field the SDK cannot carry.
     """
     from google.genai import types as genai_types
 
@@ -1319,7 +1613,8 @@ def call_model_stream(
     )
 
     translated_messages = _messages_for_provider(
-        provider_name, messages, model, echoes_reasoning)
+        provider_name, messages, model, echoes_reasoning,
+        images=accepts_images(provider_name))
     sampling = _sampling_kwargs(provider_name, model, temperature)
     thinking = _thinking_for_provider(provider_name, effort)
 
@@ -1423,6 +1718,10 @@ def call_model_stream(
 
         text_parts = []
         calls = []
+        # §82 (GS2). One block per function call, read off the part that
+        # carried the call: Gemini 3 refuses the next request unless each
+        # call goes back with the signature it came with.
+        signatures = []
         # None rather than 0: "not reported" has to stay distinguishable
         # from "reported as zero" until D21 has looked at it, or the
         # partial-report case the widened rule exists for arrives here
@@ -1436,18 +1735,26 @@ def call_model_stream(
         ):
             candidate = chunk.candidates[0] if chunk.candidates else None
             content = candidate.content if candidate else None
-            parts = content.parts if content else []
+            # `or []`: Content.parts is Optional on the pinned type, and a
+            # chunk can carry a content with no parts at all.
+            parts = (content.parts if content else None) or []
             for p in parts:
                 if p.text is not None:
                     text_parts.append(p.text)
                     yield StreamToken(text_delta=p.text)
                 if p.function_call is not None:
                     fc = p.function_call
+                    call_id = fc.id or str(uuid4())
                     calls.append(ToolCallRequest(
-                        id=fc.id or str(uuid4()),
+                        id=call_id,
                         name=fc.name,
                         input=fc.args or {},
                     ))
+                    # getattr: the field is on every pinned Part
+                    # (test_sdk_conformance asks the real one), but not on
+                    # the bare namespaces the stream tests build parts from.
+                    signatures.append(_google_signature_block(
+                        call_id, getattr(p, "thought_signature", None)))
             # PER FIELD, and only when the field was reported. The
             # guard used to be `if usage_meta:` -- which passes for a bare
             # instance, because every field is Optional and the object is
@@ -1475,6 +1782,7 @@ def call_model_stream(
 
         yield StreamToken(final_response=ModelResponse(
             text="".join(text_parts), tool_calls=calls, usage=usage,
+            thinking=_thinking_record(provider_name, model, signatures),
         ))
         return
 

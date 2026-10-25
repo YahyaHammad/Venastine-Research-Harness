@@ -81,12 +81,14 @@
     "API_URL": "",
     "API_KEY": "",
     "is_v1_compatible": false,
-    "supports_stream_usage": true
+    "supports_stream_usage": true,
+    "accepts_images": true
   },
   "GOOGLE": {
     "API_URL": "",
     "API_KEY": "",
     "is_v1_compatible": false,
-    "supports_stream_usage": false
+    "supports_stream_usage": false,
+    "accepts_images": true
   }
 }
