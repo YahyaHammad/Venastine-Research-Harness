@@ -25,8 +25,9 @@ WHAT COUNTS AS TRANSIENT (owner decision, batch 91):
 
   * a connection failure or a timeout -- openai / anthropic
     APIConnectionError and APITimeoutError, an httpx transport error raised
-    raw while a stream is being read, a requests ConnectionError / Timeout
-    (google-genai's transport), and the builtin ConnectionError /
+    raw while a stream is being read (and by google-genai, whose transport
+    httpx is since 2.x), a requests ConnectionError / Timeout (google-auth's
+    token refresh; google-genai 1.0's transport), and the builtin ConnectionError /
     TimeoutError;
   * HTTP 408, 409, 429 and any 5xx -- the statuses the openai and anthropic
     SDKs already retry for themselves before a stream opens;
@@ -65,8 +66,8 @@ DESCRIBE_LIMIT = 500
 
 _CONNECTION_NAMES = frozenset({
     "APIConnectionError", "APITimeoutError",   # openai, anthropic
-    "TransportError", "TimeoutException",      # httpx, raw mid-stream
-    "ConnectionError", "Timeout",              # requests (google-genai); builtin
+    "TransportError", "TimeoutException",      # httpx: raw mid-stream; google-genai
+    "ConnectionError", "Timeout",              # requests (google-auth); builtin
     "ChunkedEncodingError",                    # requests, a body cut off mid-read
     "TimeoutError",                            # builtin
 })

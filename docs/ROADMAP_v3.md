@@ -43,6 +43,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
+- **§82. Gemini 3's thought signatures, and a pin that could not carry them** - **(BUILT in batch 172)** (every model a new Google account can call is Gemini 3, which refuses a function call replayed without the signature it came with, and google-genai 1.0.0 had no field to hold one, so every GOOGLE tool loop failed on its second request. The pin moves to 2.29.0, each call's signature rides in §44's reasoning record, a turn another model wrote gets Google's placeholder, and the Schema keys sent are a verified list since 2.29.0's Vertex-only `additional_properties` was refused. Google effort is on as a consequence)
 - **§81. An image a tool reads, delivered to a model that can see it** - **(BUILT in batch 171)** (nothing a model could read from the workspace reached it as anything but text: a tool result was `str(result)`, `read` decoded bytes with `errors="replace"`, and MCP dropped image blocks by decision. `view_image` attaches an image to its own result through the memory, into a new column, never through the redactor; Anthropic carries it inside the `tool_result`, the OpenAI-compatible wire in a harness message after the tool batch because its tool messages take text only, and Google is deferred behind a note; opt-in per provider with `accepts_images`, never in a research pass, and counted at a fixed weight by the compactor)
 - **§75. Thirteen alerts that read a name as a secret, and the gate nothing in the workflow could fail** - **(BUILT in batch 158)** (PR #200's first `CodeQL` check raised 13 high-severity alerts and every one was a false positive: ten came from a source heuristic that reads `args.secrets`, `_secret_twin_name()` and `KEY_PASSPHRASE` as secrets because of their names, and three were test assertions read as URL sanitizers; `tests/` is now skipped because it never ships, the eight in shipped code are dismissed with recorded reasons, and the same red check is the measurement TECHNICAL_DEBT 76 lacked -- the gate is GitHub's pull-request check, and the workflow header now says so)
 - **§74. A gate that was green because of what one machine happened to contain** - **(BUILT in batch 157)** (CI's first run over batches 129-156 came back red on three check runs, and all three were one test: the push-channel gate drove `git check-ignore` in the WORKING TREE, where `logs/`, `output/` and `.ipynb_checkpoints/` exist because the harness creates them, so three directory-only patterns matched here and matched nothing in a fresh clone -- seventeen batches of green behind a branch whose gate had never met one; the same measurement found `__pycache__` declared for the git channel, carrying no rule in `.gitignore` at all, and the one value in the list that no sample could reach)
@@ -2725,6 +2726,84 @@ leaked PID.
   because MCP is the only dynamic registrant and the composed name is its
   fact. A bound in the registry would be the fix-at-the-consumer shape
   `AGENTS.md` names by name.
+---
+
+## §82. Gemini 3's thought signatures, and a pin that could not carry them
+
+**Built in batch 172**, found while adding Google to §81's image input. The
+owner asked for images on Google, and the live measurement that shape needed
+turned up a defect underneath it: no GOOGLE tool loop could finish. Four
+decisions, GS1-GS4; the first is the owner's.
+
+**WHAT WAS MEASURED** on 2026-10-25, with the owner's free-tier key, over raw
+REST and through the SDK:
+
+- Every model a new account can call is Gemini 3: `gemini-2.5-flash` answers
+  404, "no longer available to new users".
+- A Gemini 3 response puts a `thoughtSignature` on its function-call part, and
+  only on the first call of a parallel batch.
+- Replaying that call without it is a 400 -- "Function call is missing a
+  thought_signature in functionCall parts" -- on gemini-3.1-flash-lite and
+  gemini-3.8-flash alike. Only the CURRENT turn is checked: a call before the
+  latest user text passes unsigned.
+- google-genai 1.0.0's `Part` has no `thought_signature` field, so the parse
+  dropped it. Plain chat and streaming worked; the second request of every
+  tool loop failed.
+- Google's placeholder, `skip_thought_signature_validator`, is accepted in
+  place of a real signature.
+
+**THE SHAPE.** The stream reads each call's signature off the part that carried
+it and records it in §44's reasoning record, `ModelResponse.thinking`, one
+block per call. The translation hands each call back exactly what it came
+with when the turn's record is this model's (§44's pair), and Google's
+placeholder on the first call of a turn it did not write. Nothing new is
+persisted anywhere new: the record already had a column, and it already
+bypassed the redactor, which a base64 signature needs as much as an
+Anthropic signed block does.
+
+**WHAT THE BUMP CHANGED BESIDES.**
+
+- `ThinkingConfig.thinking_budget` exists on 2.29.0, so
+  `_google_supports_thinking_budget()` answers True and Google effort is on.
+  Every budget in `google_thinking_budgets`, 0 included, was accepted on
+  gemini-3.1-flash-lite. On gemini-3.8-flash low, medium and max returned 200
+  and the rest met 503 "high demand", which is capacity, not a refusal.
+  §9's Google implementation was retested live: chat, streaming, the tool
+  loop with the real registry's 16 declarations, and effort `high`.
+- `Schema` gained `additional_properties`, `defs` and `ref`. The Gemini API
+  refused the first -- 400, `Unknown name "additional_properties"` -- and took
+  every declaration with it (GS4).
+- The transport is httpx, not requests. The classifier already named httpx's
+  `TransportError` and `TimeoutException`, so a GOOGLE connection failure is
+  still transient. Retries stay the harness's: with no `retry_options`,
+  2.29.0 makes one attempt, as 1.0.0 did.
+
+### What §82 deliberately does not change
+
+**Text-part signatures are not kept.** A response without calls may carry a
+signature on its last text part. It is not validated, and the neutral
+assistant shape holds one text, so there is no part to hand it back on.
+Google recommends it for reasoning quality; it does not require it.
+
+**Thought summaries stay off** (§38 O2). `include_thoughts` is unchanged.
+
+**Thinking tokens are still not counted as output.** Gemini reports
+`thoughts_token_count` apart from `candidates_token_count`, and the GOOGLE
+usage read takes the latter. That was true before this batch; with effort on
+it is larger. Recorded here, not fixed here.
+
+**`thinking_level`**, Gemini 3's native control, is not used. Budgets are what
+the map sends, and they were accepted.
+
+### Design Decisions Record — §82 (GS1-GS4)
+
+| id | decision |
+|---|---|
+| **GS1** | **The google-genai pin moves from 1.0.0 to 2.29.0, the owner's choice, exact like every SDK pin.** 2.29.0 (2026-10-07) was the newest release at least two weeks old on the day it was chosen, and it carries `Part.thought_signature`. The alternative was to ship image input on the old pin and leave GOOGLE tool use failing on its second request. The side effect, accepted by the owner: Google effort is on, because 2.29.0 also carries `thinking_budget`. `test_the_thinking_budget_guard_still_describes_the_pin` is inverted rather than deleted, as its own message asked |
+| **GS2** | **A call's signature lives in §44's reasoning record, one block per call, including a call that carried none.** `{"type": "thought_signature", "call_id": ..., "signature": base64 or null}` in `ModelResponse.thinking`, persisted in the `thinking` column like Anthropic's signed blocks and never through the redactor. Per call, because Gemini 3 signs only the first call of a parallel batch. Null is recorded because a model that does not think signs nothing, and "this model attached nothing" must not read as "nothing is known", which would earn the placeholder. No `text` or `thinking` key, so replay renders nothing for it |
+| **GS3** | **A turn the target model did not write gets Google's placeholder on its first call, and nothing on the rest.** That covers another provider's turn, another Google model's after a /model switch, a row written before this batch, and a signature that will not decode. Gemini 3 validates only the current turn, so this matters after a mid-turn switch and costs nothing elsewhere. A real signature always wins. Measured accepted (`skip_thought_signature_validator`) |
+| **GS4** | **The Schema keys sent to Google are a verified list narrowed to the installed SDK, not every field the SDK has.** `_google_schema_keys` read every `Schema` field so that a new one would be carried with no change. 2.29.0 disproved the premise: its `additional_properties` is a Vertex AI field the Gemini API refuses, and because the declarations travel together, one refused key fails every GOOGLE call. `_GOOGLE_SCHEMA_VERIFIED` is the 22 fields 1.0.0 had, verified on the wire by batch 132 and §9. `test_every_VERIFIED_schema_key_is_still_a_field_on_the_pinned_type` names the SDK's extra three, so a new field is a decision to measure rather than a silent omission or a 400 |
+
 ---
 
 ## §81. An image a tool reads, delivered to a model that can see it

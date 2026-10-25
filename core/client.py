@@ -1,3 +1,5 @@
+import base64
+import binascii
 import json
 import logging
 import os
@@ -317,7 +319,7 @@ def _token_count(usage_obj, field: str) -> Optional[int]:
     (batch 147), because the three reasons are different and only one of
     them is visible in a type annotation:
 
-      google-genai 1.0.0   every field of
+      google-genai 2.29.0  every field of (as on 1.0.0 before it)
                            GenerateContentResponseUsageMetadata is
                            Optional[int] = None, and a bare instance is
                            TRUTHY -- so `if usage_meta:` passes and then
@@ -405,23 +407,47 @@ def _stream_usage(provider_name: str, counts: dict,
 # ---- Tool schema translation ------------------------------------------------
 # ============================================================================
 
+#: ROADMAP_v3 §82 (GS4). The `Schema` fields the Gemini API is known to take:
+#: the 22 google-genai 1.0.0 had, which batch 132 and §9 verified on the
+#: wire. The SDK serves Vertex AI as well, and 2.29.0 added three fields for
+#: it -- `additional_properties`, which the Gemini API refused when measured
+#: in batch 172 (400, `Unknown name "additional_properties"`), `defs` and
+#: `ref`. One refused key fails every GOOGLE call, because the declarations
+#: travel together, so a new SDK field waits to be measured.
+_GOOGLE_SCHEMA_VERIFIED = frozenset({
+    "any_of", "default", "description", "enum", "example", "format",
+    "items", "max_items", "max_length", "max_properties", "maximum",
+    "min_items", "min_length", "min_properties", "minimum",
+    "nullable", "pattern", "properties", "property_ordering",
+    "required", "title", "type",
+})
+
+
 def _google_schema_keys(genai_types) -> set:
-    """Every key the pinned `types.Schema` will accept, read OFF the SDK.
+    """Every key the pinned `types.Schema` will accept AND the Gemini API is
+    known to take, read off the SDK.
 
     Field names plus their camelCase aliases, because `Schema` sets
     `populate_by_name` and JSON Schema spells things `anyOf`/`maxItems`
-    while the model declares `any_of`/`max_items`. Computed from the SDK
-    rather than written down so that a version which adds a field starts
-    carrying it with no change here -- and read at CALL time, not import
-    time, because the root `conftest.py` puts a fake `google.genai` in
-    `sys.modules` before collection and an import-time constant would bind
-    the fake's fields for the whole test session.
+    while the model declares `any_of`/`max_items`. Read off the SDK so that
+    a field the installed version lacks is never sent -- and read at CALL
+    time, not import time, because the root `conftest.py` puts a fake
+    `google.genai` in `sys.modules` before collection and an import-time
+    constant would bind the fake's fields for the whole test session.
+
+    It used to take EVERY field, on the reasoning that a version which adds
+    one should carry it with no change here. The 2.29.0 pin disproved that
+    (§82): a field on the type is not a field the Gemini API accepts. So the
+    SDK's set is narrowed to `_GOOGLE_SCHEMA_VERIFIED`.
     """
-    keys = set(genai_types.Schema.model_fields)
+    keys = set()
     # NOT `field`: this module imports dataclasses.field at the top, and
     # shadowing it here is what ruff F402 flagged in batch 141 -- found only
     # then, because the lint job is not on main and so has never run.
-    for model_field in genai_types.Schema.model_fields.values():
+    for name, model_field in genai_types.Schema.model_fields.items():
+        if name not in _GOOGLE_SCHEMA_VERIFIED:
+            continue
+        keys.add(name)
         alias = getattr(model_field, "alias", None)
         if alias:
             keys.add(alias)
@@ -456,6 +482,10 @@ def _reduce_for_google(node, accepted: set):
 
     `docs/ARCHITECTURE.md` 4.7 said the raw dict "auto-converts to
     `types.Schema`". It does not; it validates, and refuses.
+
+    Since batch 172 (§82) the pin is 2.29.0, whose `Schema` HAS
+    `additional_properties` -- and the Gemini API refuses it, so it is
+    still dropped: `accepted` is the verified set, not the SDK's.
     """
     if isinstance(node, list):
         return [_reduce_for_google(item, accepted) for item in node]
@@ -604,6 +634,54 @@ def _echoed_blocks(provider_name: str, model: Optional[str],
     return [b for b in record.get("blocks") or [] if isinstance(b, dict)]
 
 
+#: ROADMAP_v3 §82 (GS3). Google's stand-in for a thought signature, for a
+#: function call the target model did not write. Gemini 3 refuses a request
+#: whose current turn holds an unsigned call, and a thread that switched
+#: provider or model mid-turn has exactly that. Measured accepted on
+#: gemini-3.1-flash-lite (batch 172); a real signature is always preferred.
+_GOOGLE_FOREIGN_SIGNATURE = b"skip_thought_signature_validator"
+
+
+def _google_signature_block(call_id: str, signature: Optional[bytes]) -> dict:
+    """One function call's thought signature, as §44's record holds it
+    (§82, GS2). One block per call, INCLUDING a call that carried none --
+    Gemini 3 signs only the first of a parallel batch, and a model that
+    does not think signs nothing -- so "this model wrote the turn and
+    attached nothing" stays distinguishable from "nothing is known". Base64
+    in the record, because the record is JSON; and no `text` or `thinking`
+    key, so replay renders nothing for it."""
+    return {"type": "thought_signature", "call_id": call_id,
+            "signature": (base64.b64encode(signature).decode("ascii")
+                          if signature else None)}
+
+
+def _google_signatures(model: Optional[str], msg: dict) -> Optional[dict]:
+    """{call_id: signature bytes or None} for a turn THIS model wrote, or
+    None when it wrote nothing here (§82, GS2/GS3).
+
+    The gate is §44's pair, read through `_echoed_blocks`: a signature goes
+    back unchanged to the model that produced it and to nothing else. A
+    stored value that will not decode costs that call its signature and
+    gets the placeholder instead, `_decode_thinking`'s rule: an unreadable
+    entry costs the entry, never the request."""
+    blocks = [b for b in _echoed_blocks("GOOGLE", model, msg)
+              if b.get("type") == "thought_signature"]
+    if not blocks:
+        return None
+    signatures: dict = {}
+    for block in blocks:
+        value = block.get("signature")
+        if value is None:
+            signatures[block.get("call_id")] = None
+            continue
+        try:
+            signatures[block.get("call_id")] = base64.b64decode(
+                value, validate=True)
+        except (binascii.Error, TypeError, ValueError):
+            signatures[block.get("call_id")] = _GOOGLE_FOREIGN_SIGNATURE
+    return signatures
+
+
 def _image_note(images: list) -> str:
     """What a tool result's images become on a wire that does not receive
     them (ROADMAP_v3 §81, IM5): a sentence saying so, never the bytes and
@@ -661,7 +739,9 @@ def _messages_for_provider(provider_name: str, neutral_messages: list[dict],
     thinking record may travel. Both DEFAULT to the pre-§44 behaviour --
     no model means no echo, and the OpenAI-compatible side is opt-in per
     provider -- so a caller that does not pass them gets exactly the
-    translation this function produced before.
+    translation this function produced before. On GOOGLE `model` also
+    decides whether a function call's thought signature goes back (§82),
+    and the echo is not opt-in there: Gemini 3 refuses a turn without one.
 
     `images` is ROADMAP_v3 §81's (IM4): whether a tool row's images are
     delivered to this provider, or replaced by `_image_note`. It defaults
@@ -701,13 +781,21 @@ def _messages_for_provider(provider_name: str, neutral_messages: list[dict],
                 parts = []
                 if msg.get("text"):
                     parts.append(genai_types.Part(text=msg["text"]))
-                for tc in msg.get("tool_calls", []):
+                # §82 (GS2/GS3). Each call goes back with exactly what this
+                # model attached to it. A turn it did not write gets the
+                # placeholder on its FIRST call -- the one Gemini 3 checks --
+                # and nothing on the rest, which is how it signs its own.
+                own = _google_signatures(model, msg)
+                for index, tc in enumerate(msg.get("tool_calls", [])):
+                    fallback = _GOOGLE_FOREIGN_SIGNATURE if index == 0 else None
                     parts.append(genai_types.Part(
                         function_call=genai_types.FunctionCall(
                             name=tc["name"],
                             args=tc["input"],
                             id=tc["id"],
-                        )
+                        ),
+                        thought_signature=(fallback if own is None
+                                           else own.get(tc["id"], fallback)),
                     ))
                 # Google rejects Content with empty parts. The turn that
                 # produced them is now dropped above the branch split, so
@@ -1296,16 +1384,16 @@ _google_budget_support: Optional[bool] = None
 def _google_supports_thinking_budget() -> bool:
     """Whether the INSTALLED google-genai can express a thinking budget.
 
-    Checked rather than assumed, and the check earns its keep: the pinned
-    google-genai (1.0.0) ships a ThinkingConfig whose only field is
-    `include_thoughts` -- `thinking_budget` arrived in a later release. So
-    the obvious implementation, ThinkingConfig(thinking_budget=N), raises a
-    TypeError against the version this repo actually pins.
+    Checked rather than assumed, and the check earned its keep: the old pin,
+    google-genai 1.0.0, shipped a ThinkingConfig whose only field was
+    `include_thoughts`, so ThinkingConfig(thinking_budget=N) raised a
+    TypeError and reasoning effort was unavailable on Google.
 
-    Rather than bump the pin (which would put §9's verified Google
-    implementation back in play for a feature Google users can do without),
-    reasoning effort is simply unavailable on Google until the pin moves.
-    D22's rule, applied: check the dependency's real shape, don't assume it.
+    The pin moved in batch 172 (ROADMAP_v3 §82, GS1) -- for thought
+    signatures, not for effort -- and 2.29.0 carries the field, so this now
+    answers True and Google effort is on. The check stays: it is still the
+    dependency's real shape that decides, D22's rule, and a downgrade would
+    turn effort off again rather than send a field the SDK cannot carry.
     """
     from google.genai import types as genai_types
 
@@ -1539,6 +1627,10 @@ def call_model_stream(
 
         text_parts = []
         calls = []
+        # §82 (GS2). One block per function call, read off the part that
+        # carried the call: Gemini 3 refuses the next request unless each
+        # call goes back with the signature it came with.
+        signatures = []
         # None rather than 0: "not reported" has to stay distinguishable
         # from "reported as zero" until D21 has looked at it, or the
         # partial-report case the widened rule exists for arrives here
@@ -1552,18 +1644,26 @@ def call_model_stream(
         ):
             candidate = chunk.candidates[0] if chunk.candidates else None
             content = candidate.content if candidate else None
-            parts = content.parts if content else []
+            # `or []`: Content.parts is Optional on the pinned type, and a
+            # chunk can carry a content with no parts at all.
+            parts = (content.parts if content else None) or []
             for p in parts:
                 if p.text is not None:
                     text_parts.append(p.text)
                     yield StreamToken(text_delta=p.text)
                 if p.function_call is not None:
                     fc = p.function_call
+                    call_id = fc.id or str(uuid4())
                     calls.append(ToolCallRequest(
-                        id=fc.id or str(uuid4()),
+                        id=call_id,
                         name=fc.name,
                         input=fc.args or {},
                     ))
+                    # getattr: the field is on every pinned Part
+                    # (test_sdk_conformance asks the real one), but not on
+                    # the bare namespaces the stream tests build parts from.
+                    signatures.append(_google_signature_block(
+                        call_id, getattr(p, "thought_signature", None)))
             # PER FIELD, and only when the field was reported. The
             # guard used to be `if usage_meta:` -- which passes for a bare
             # instance, because every field is Optional and the object is
@@ -1591,6 +1691,7 @@ def call_model_stream(
 
         yield StreamToken(final_response=ModelResponse(
             text="".join(text_parts), tool_calls=calls, usage=usage,
+            thinking=_thinking_record(provider_name, model, signatures),
         ))
         return
 

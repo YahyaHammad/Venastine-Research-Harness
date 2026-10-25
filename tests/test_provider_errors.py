@@ -11,7 +11,8 @@ suite -- and core/provider_errors.py never imports them either, for
 client.py's lazy-import reason. It reads an exception by the class names in
 its MRO and by the attributes the SDKs define, so each lookalike below
 reproduces exactly that: the class name and the attributes, as the installed
-SDK spells them (openai 2.45, anthropic 0.116, google-genai 1.0). Batch 91
+SDK spells them (openai 2.45, anthropic 0.116, google-genai 1.0 then, 2.29
+since batch 172, whose APIError still carries an int `code`). Batch 91
 also ran the classifier against the REAL classes outside pytest; see
 DEVLOG.md.
 """

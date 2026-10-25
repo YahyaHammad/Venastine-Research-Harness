@@ -25195,3 +25195,82 @@ leaves 56 -> 58, settable scalars 145 -> 148, registered tools 30 -> 31 in
 ARCHITECTURE's headless paragraph. A mutation pass reverted each of thirteen
 fixes in place; every one turned a test red, including the two that
 disconnect `RunInfo.images` from the loop's schema list.
+
+---
+## Batch 172 -- Gemini 3's thought signatures, and a pin that could not carry them (2026-10-25)
+
+**ROADMAP_v3 §82, GS1-GS4.** The owner asked for Google image input on this
+branch. The shape that needed had to be measured against the real API, and the
+owner added a free-tier key for it. The measurement found a defect under the
+request: no GOOGLE tool loop could finish. The owner chose to fix it first, as
+its own batch, by moving the SDK pin (GS1). The images are batch 173.
+
+### What was measured
+
+Over raw REST and through the SDK, 2026-10-25:
+
+- `gemini-2.5-flash` answers 404, "no longer available to new users". Every
+  model this key can call is Gemini 3.
+- A Gemini 3 function call carries a `thoughtSignature` on its part, on the
+  first call of a parallel batch only.
+- Replayed without it, the call is refused: 400, "Function call is missing a
+  thought_signature in functionCall parts", on gemini-3.1-flash-lite and
+  gemini-3.8-flash alike. Only the current turn is checked.
+- google-genai 1.0.0 drops the signature in the parse, because its `Part` has
+  no field for it. Plain chat and streaming worked on 1.0.0.
+- Google's placeholder `skip_thought_signature_validator` is accepted in place
+  of a real signature.
+
+### What was built
+
+- **The pin**: google-genai 1.0.0 -> 2.29.0 (GS1), the newest release at least
+  two weeks old. It installs google-auth 2.62.0, which still requires
+  `cryptography`. Its transport is httpx, which the error classifier already
+  named, and with no `retry_options` it still makes one attempt.
+- **The signature**: the GOOGLE stream records one block per function call in
+  `ModelResponse.thinking`, §44's reasoning record, with the signature in
+  base64 or null (GS2). `_messages_for_provider` hands each call back exactly
+  what it came with when the record is this model's, and Google's placeholder
+  on the first call of a turn it did not write (GS3). The record already had a
+  column and already bypassed the redactor, so nothing new is stored anywhere
+  new, and replay renders nothing for it.
+- **The schema keys**: the first live tool request on 2.29.0 was refused, 400
+  `Unknown name "additional_properties"`. The new SDK's `Schema` carries Vertex
+  AI fields, and `_google_schema_keys` read every field as sendable.
+  `_GOOGLE_SCHEMA_VERIFIED` narrows it to the 22 fields 1.0.0 had, the ones
+  verified on the wire (GS4). A new SDK field is now a decision to measure.
+- **Google effort is on**: 2.29.0 carries `ThinkingConfig.thinking_budget`, so
+  `_google_supports_thinking_budget()` answers True. The owner accepted this
+  when choosing the bump. Every configured budget, and 0, was accepted by
+  gemini-3.1-flash-lite.
+- **A chunk with no parts** no longer raises: `Content.parts` is Optional on
+  the pinned type.
+
+### Verified
+
+- Live, through the harness's own `call_model_stream` on gemini-3.1-flash-lite,
+  with the real registry's 16 declarations: a tool call, then the second
+  request three ways -- this model's own signature, the placeholder for
+  another model's turn, and no record at all (a row from before this batch).
+  All three returned the tool's value. The same run with effort `high` passed.
+- gemini-3.8-flash took the first request and its signature was recorded (356
+  characters). The second request met the free tier's limit of 20 requests a
+  day for that model (429 RESOURCE_EXHAUSTED), so it is unverified there. Its
+  budget probe returned 200 for low, medium and max and 503 "high demand" for
+  the rest, which is capacity, not a refusal.
+- Full suite 7283 -> 7304 (new `tests/test_thought_signatures.py`, 19;
+  `test_sdk_conformance.py` 19 -> 21): 7255 passed and 49 skipped on Windows.
+  One test, `test_a_crlf_checkout_stays_crlf`, failed first because the branch
+  switch had left `config.yaml` CRLF in the worktree, and that test makes its
+  own CRLF copy. With the worktree copy back to LF, which git stores anyway,
+  all 98 in that file pass.
+- The changed suites with `AGENT_WORKSPACE` unset: 426 passed, 4 skipped.
+- Mutations: 16 of 16 killed. The first run let two survive and both were real
+  gaps -- a `-k` that missed hyphenated parameter ids, and a test whose foreign
+  turn did not record its own call, so bypassing the provider/model gate
+  changed nothing. The test now records it. A third row was re-aimed at
+  `description`, because `nullable` is added after the reduction whatever the
+  key list says.
+- ruff clean; bandit 0 new, and its count check shows no pair grew; gitleaks
+  8.30.1 found no leaks; pip-audit finds only mcp 2.0.0's CVE-2026-59951,
+  which hosted-demo already fixed and the merge brings in.

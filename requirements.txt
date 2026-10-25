@@ -11,12 +11,17 @@ anthropic==0.116.0
 ddgs==9.14.4
 httpx==0.28.1
 openai==2.45.0
-# NOTE (ROADMAP_v2 §16): this pin has no ThinkingConfig.thinking_budget --
-# that field arrived in a later release. core/client.py checks for it at
-# runtime and reports no effort levels on GOOGLE rather than sending a
-# field the SDK cannot carry. Moving this pin enables Google effort; it
-# also puts §9's verified Google implementation back in scope for retest.
-google-genai==1.0.0
+# ROADMAP_v3 §82 (GS1), batch 172: 1.0.0 -> 2.29.0, the owner's choice.
+# Gemini 3 refuses a request whose current turn holds a function call
+# without the thought signature it came with; 1.0.0's Part had no field
+# to hold one, and every model a new Google account can call is Gemini 3,
+# so every GOOGLE tool loop failed on its second request. 2.29.0 was the
+# newest release at least two weeks old when chosen. It also carries
+# ThinkingConfig.thinking_budget, which core/client.py checks for at
+# runtime, so Google reasoning effort is ON now (ROADMAP_v2 §16), and
+# §9's Google implementation was retested live against it. Its
+# transport is httpx now, not requests.
+google-genai==2.29.0
 pydantic==2.13.4
 sympy==1.13.3
 sqlmodel==0.0.39
@@ -150,6 +155,8 @@ google-re2==1.1.20251105
 # DECLARING IT ADDS NOTHING TO AN INSTALL, measured rather than assumed:
 # google-genai==1.0.0 -> google-auth>=2.14.1 -> cryptography>=38.0.3, with
 # no extra marker, so it is already in the hard closure of the line above.
+# Re-measured on the 2.29.0 pin (batch 172): google-auth>=2.56.0 ->
+# cryptography>=38.0.3 (>=41.0.5 on Python 3.14), still no extra marker.
 # What the declaration buys is that a dependency this project's SECURITY
 # rests on is pinned by this project rather than by whatever google-auth
 # happens to resolve to.

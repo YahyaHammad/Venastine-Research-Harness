@@ -269,10 +269,13 @@ def _build_fake_google_module():
             self.id = id
 
     class _FakePart:
-        def __init__(self, text=None, function_call=None, function_response=None, **kw):
+        def __init__(self, text=None, function_call=None, function_response=None,
+                     thought_signature=None, **kw):
             self.text = text
             self.function_call = function_call
             self.function_response = function_response
+            # ROADMAP_v3 §82 (GS2): bytes, as on the pinned Part.
+            self.thought_signature = thought_signature
 
     class _FakeContent:
         def __init__(self, role=None, parts=None, **kw):
@@ -289,18 +292,21 @@ def _build_fake_google_module():
             self.thinking_config = thinking_config
 
     class _FakeThinkingConfig:
-        """Mirrors the REAL google-genai's ThinkingConfig, which exists on the
-        pinned 1.0.0 -- but note the real one there carries only
-        `include_thoughts`; `thinking_budget` arrived in a later release.
-        The fake accepts both so tests can exercise either side of
-        core.client._google_supports_thinking_budget(), which is the gate
-        that keeps §16 from sending a field the pinned SDK cannot carry."""
+        """Mirrors the REAL google-genai's ThinkingConfig on the pinned
+        2.29.0: `include_thoughts`, `thinking_budget` and `thinking_level`.
+        The old pin (1.0.0) carried only `include_thoughts`, which is why
+        core.client._google_supports_thinking_budget() exists -- the gate
+        that keeps §16 from sending a field the installed SDK cannot carry.
+        Tests reach its other side by patching it."""
 
-        model_fields = {"include_thoughts": None, "thinking_budget": None}
+        model_fields = {"include_thoughts": None, "thinking_budget": None,
+                        "thinking_level": None}
 
-        def __init__(self, include_thoughts=None, thinking_budget=None, **kw):
+        def __init__(self, include_thoughts=None, thinking_budget=None,
+                     thinking_level=None, **kw):
             self.include_thoughts = include_thoughts
             self.thinking_budget = thinking_budget
+            self.thinking_level = thinking_level
 
     class _FakeSchemaField:
         """Just the `.alias` that `_google_schema_keys` reads."""
@@ -321,18 +327,20 @@ def _build_fake_google_module():
         worse -- the reduction would strip every key and the tests here would
         pass against schemas that are not what production sends.
 
-        These are the 22 fields of `google-genai==1.0.0`. The alias is the
-        camelCase spelling, which is how JSON Schema writes them and is the
-        half that makes `anyOf` recognisable at all. This fake is NOT
+        These are the 25 fields of `google-genai==2.29.0` (1.0.0 had 22;
+        `additional_properties`, `defs` and `ref` arrived since). The alias
+        is the camelCase spelling, which is how JSON Schema writes them and
+        is the half that makes `anyOf` recognisable at all. This fake is NOT
         `extra="forbid"` and does not validate -- it cannot, and that is what
         `tests/test_sdk_conformance.py` drives the REAL package for.
         """
 
         _NAMES = (
-            "any_of", "default", "description", "enum", "example", "format",
+            "additional_properties", "any_of", "default", "defs",
+            "description", "enum", "example", "format",
             "items", "max_items", "max_length", "max_properties", "maximum",
             "min_items", "min_length", "min_properties", "minimum",
-            "nullable", "pattern", "properties", "property_ordering",
+            "nullable", "pattern", "properties", "property_ordering", "ref",
             "required", "title", "type",
         )
 
