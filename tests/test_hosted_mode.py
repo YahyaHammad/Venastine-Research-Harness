@@ -125,6 +125,25 @@ class TestASharedDeploymentRefusesTheContainerTools:
         assert is_tool_allowed("shell")
         assert is_tool_allowed("read")
 
+    def test_every_tool_that_takes_the_file_approval_check_is_refused(self):
+        """Batch 174. `view_image` was built on its own branch with `read`'s
+        path rules (ROADMAP_v3 §81, IM1), and merged into this one without
+        joining the set above: nothing tied "reads a workspace file" to
+        "refused when shared". This does. A tool registered with the file
+        tools' approval check reaches the container's files, whatever it is
+        called, and one visitor could read another's session through it."""
+        from tools.builtin import file_ops
+        from tools.registry import registry
+
+        file_tools = {name for name, spec in registry._tools.items()
+                      if spec.approval_check is file_ops._file_approval_check}
+        # Vacuity guard: the four known file tools, so a renamed check
+        # cannot make this pass over an empty set.
+        assert {"read", "write", "edit", "view_image"} <= file_tools
+        assert file_tools <= hosted.SHARED_REFUSED_TOOLS, (
+            "file tools a shared deployment would run: %s"
+            % sorted(file_tools - hosted.SHARED_REFUSED_TOOLS))
+
     def test_every_refused_name_is_a_real_tool(self):
         """A misspelt entry would refuse nothing and read as protection."""
         assert hosted.SHARED_REFUSED_TOOLS <= set(vars(config.ToolPermissions()))

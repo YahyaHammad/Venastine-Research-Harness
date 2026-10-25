@@ -39,6 +39,8 @@ SINGLE_USER = "single-user"
 # whose config.yaml says otherwise.
 SHARED_REFUSED_TOOLS = frozenset({
     "read", "write", "edit",
+    # Batch 174: an image file, read under `read`'s rules (§81, IM1).
+    "view_image",
     "shell", "shell_background", "shell_monitor", "shell_interactive",
     "shell_input", "shell_sessions", "shell_output", "shell_kill",
 })

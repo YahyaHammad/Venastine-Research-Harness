@@ -26648,3 +26648,49 @@ maximum-size images can outgrow a request on any wire.
   GOOGLE flag ignored, the label not naming the call, an unflagged provider
   delivered to, and the real types handed text.
 - ruff clean; bandit 0 new and no pair grew; gitleaks found no leaks.
+
+---
+## Batch 174 -- image input merged into the hosted demo's branch, and the tool the merge left reachable (2026-10-25)
+
+**ROADMAP_v3 §79, HD4 amended.** The owner asked for `image-input` to be
+merged into `hosted-demo` locally rather than both reaching `main` through pull
+requests. The merge commit carries batches 171-173 and resolves the conflicts;
+this batch is the one thing the merge needed that no conflict showed.
+
+### The merge
+
+Eight files conflicted, and every resolution kept both sides:
+`core/client.py`, where `forget_client` (§79) and `accepts_images` (§81)
+had both been added after `api_initialization`; `test_config_edit.py`'s count
+of settable scalars, now 149 (146 here plus §81's three); and six records
+whose new entries sat at the same place -- DEVLOG and BREAKING_CHANGES in batch
+order, ROADMAP_v3's §82 and §81 above §80, AGENTS' map naming §79-§82
+and the HD, LY, IM and GS families together. `requirements.txt` merged without
+conflict and pins both mcp 2.2.0 (this branch) and google-genai 2.29.0 (the
+image branch), so pip-audit's one finding on the image branch, mcp 2.0.0's
+CVE-2026-59951, is gone.
+
+### What no conflict showed
+
+`SHARED_REFUSED_TOOLS` (HD4) lists the tools that reach the container itself,
+because a shared deployment runs every visitor in one container as one user.
+`view_image` reads a workspace file under `read`'s rules (§81, IM1) and was
+built on a branch that had no hosted mode, so it merged without joining the
+list. It ships disabled, and no hosted provider is marked `accepts_images`, so
+nothing offered it -- but HD4's layer exists for the deployment whose
+`config.yaml` says otherwise, and for that deployment the merged tree would
+have run it. It is in the set now, and
+`test_every_tool_that_takes_the_file_approval_check_is_refused` ties the set to
+`file_ops._file_approval_check` rather than to names, so the next file tool
+cannot arrive the same way.
+
+### Verified
+
+- Full suite 8059 -> 8061 (`test_hosted_mode.py` 78 -> 80): 7994 passed and 67 skipped on Windows.
+  On the merge commit itself the suite was 7992 passed and 67 skipped; one docs
+  test there first counted 75 readable documents instead of 63, because the
+  index still held the six conflicted docs' three stages each, and passed once
+  they were staged.
+- Mutations: 2 of 2 killed -- `view_image` and `write` each removed from the set.
+- ruff clean; bandit 0 new and no pair grew; gitleaks found no leaks; pip-audit
+  clean on all three requirement files.
