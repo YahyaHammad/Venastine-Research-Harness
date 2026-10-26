@@ -30,18 +30,19 @@ def _zerogpu_placeholder() -> str:
 
 
 def build(python=None, confinement: str = "",
-          modelscope_secret: str | None = None):
+          sign_in_secrets: dict | None = None):
     """The Gradio server with the bridge mounted; not yet launched.
     `python` is the session interpreter (session_env.py), or None to run
     sessions on this one, as a local checkout does. `confinement` is the
-    math tools' self-test verdict (isolation_report.py). `modelscope_secret`
-    is the ModelScope app's client secret, out of the environment (HD13)."""
+    math tools' self-test verdict (isolation_report.py). `sign_in_secrets`
+    are the ModelScope apps' client secrets by site, out of the environment
+    (HD13)."""
     import gradio as gr
 
     from deploy.hosted.web import build_bridge
 
     bridge = build_bridge(python=python, confinement=confinement,
-                          modelscope_secret=modelscope_secret)
+                          sign_in_secrets=sign_in_secrets)
     server = gr.Server(title="Venastine Research Harness")
 
     @server.api(name="status")
@@ -59,25 +60,26 @@ def build(python=None, confinement: str = "",
     return server
 
 
-def take_secret(environ=None) -> str:
-    """The ModelScope app's client secret, REMOVED from the environment
-    (HD13), so no process this one starts inherits it -- not uv building the
-    session environment, not the isolation probes, not a session, whose
-    environment is an allowlist anyway. `/proc/<pid>/environ` still shows
-    the block this process started with, which is why main() also makes it
-    non-dumpable."""
-    from deploy.hosted.sign_in import SECRET_ENV
+def take_secrets(environ=None) -> dict:
+    """Each ModelScope site's app secret by site name, every one REMOVED
+    from the environment (HD13), so no process this one starts inherits it
+    -- not uv building the session environment, not the isolation probes,
+    not a session, whose environment is an allowlist anyway. A site with no
+    secret set maps to "". `/proc/<pid>/environ` still shows the block this
+    process started with, which is why main() also makes it non-dumpable."""
+    from deploy.hosted.sign_in import SITES
 
     environ = os.environ if environ is None else environ
-    return environ.pop(SECRET_ENV, "").strip()
+    return {site.name: environ.pop(site.secret_env, "").strip()
+            for site in SITES}
 
 
 def main() -> None:
     # FIRST, before anything can be started with this environment or read
-    # it: the bridge is the one process that holds a deployment's secret,
+    # it: the bridge is the one process that holds a deployment's secrets,
     # and a session runs as the same user, so the bridge's memory and
     # environ are refused to it the way a session's are to another (HD6).
-    secret = take_secret()
+    secrets = take_secrets()
     from security.hosted import make_undumpable
 
     undumpable = make_undumpable()
@@ -111,7 +113,7 @@ def main() -> None:
 
     isolation_report.log(python, root)
     confinement = isolation_report.verify_confinement(python, root)
-    server = build(python, confinement, secret)
+    server = build(python, confinement, secrets)
     # `ssr_mode` is ignored on Hugging Face, where the deployment sets
     # GRADIO_SSR_MODE=false instead; it is passed for a local run.
     server.launch(ssr_mode=False,

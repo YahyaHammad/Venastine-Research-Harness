@@ -90,12 +90,14 @@ class TestThePresets:
 
     def test_only_the_permitted_providers_sign_in(self):
         """The owner's ruling, as data: OAuth only where the provider
-        explicitly invites a third-party app (HD5, HD13)."""
+        explicitly invites a third-party app (HD5, HD13) -- ModelScope on
+        each of its two sites since batch 176, by the same invitation."""
         signing = {p.name: p.sign_in for p in connect.PRESETS.values()
                    if p.sign_in}
         assert signing == {"huggingface": "huggingface",
                            "openrouter": "openrouter",
-                           "modelscope": "modelscope"}
+                           "modelscope": "modelscope",
+                           "modelscope-cn": "modelscope-cn"}
 
     @pytest.mark.asyncio
     async def test_a_local_install_connects_modelscope_with_a_key(

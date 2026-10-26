@@ -33,7 +33,8 @@ python main.py --provider OPENAI --model gpt-5.1  # override provider/model
 python main.py --tui                              # Textual TUI (§16); the CLI stays the default (D12)
 python main.py --tui --provider OPENAI --model gpt-4o   # or switch in-session with /model
 # §79 in the TUI: /connect [name [--key]|custom <NAME> <url>|cancel] -- connect a provider
-#   without editing providers.json: HF and OpenRouter sign in (HD5), the rest take a key
+#   without editing providers.json: HF and OpenRouter sign in (HD5), and each ModelScope
+#   site (modelscope, modelscope-cn) where a hosted bridge holds its app (HD13); the rest take a key
 python main.py --trust-project                    # grant D17 workspace trust non-interactively
 python main.py --mode research --grant "q"        # §25: pick gated tools to authorise for this run
 python main.py --mode research --attended "q"     # §25: approve every gated call as it happens
@@ -57,7 +58,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 8063 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
+pytest                                            # 8094 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure

@@ -1802,7 +1802,7 @@ class VenastineApp(App):
             return
         _finish_connect(self, message.preset, message.credential)
 
-    # -- the bridge's ModelScope sign-in (HD13); each answer counts only
+    # -- the bridge's ModelScope sign-ins (HD13); each answer counts only
     # for the sign-in this session is waiting for ---------------------------
 
     def on_bridge_sign_in_url(self, message: hosted_driver.BridgeSignInUrl) -> None:
@@ -1811,12 +1811,12 @@ class VenastineApp(App):
             return
         wait.url = message.url
         self._transcript.write_system(
-            f"Sign in to ModelScope: {message.url} — after you approve, the "
-            f"page it returns to shows a code; paste it here. The token stays "
-            f"in this session, and you can revoke it at "
-            f"{_REVOKE_PAGES['modelscope']}.")
+            f"Sign in to {wait.preset.label}: {message.url} — after you "
+            f"approve, the page it returns to shows a code; paste it here. The "
+            f"token stays in this session, and you can revoke it at "
+            f"{_REVOKE_PAGES[wait.preset.sign_in]}.")
         self._transcript.open_url(message.url)
-        _ask_modelscope_code(self, wait)
+        _ask_bridge_code(self, wait)
 
     def on_bridge_credential(self, message: hosted_driver.BridgeCredential) -> None:
         wait = self._connect_wait
@@ -1833,7 +1833,7 @@ class VenastineApp(App):
         wait.stop_timer()
         self._transcript.write_error(message.reason)
         if message.retry and wait.url:
-            _ask_modelscope_code(self, wait)
+            _ask_bridge_code(self, wait)
             return
         self._connect_wait = None
 
@@ -7190,12 +7190,12 @@ def _connect_policy(app: "VenastineApp") -> tuple:
 def _signs_in_here(preset) -> bool:
     """Whether `/connect <name>` can sign in on this install, rather than
     only take a key: OpenRouter's PKCE needs no registered app, Hugging
-    Face's device code needs `hf_oauth_client_id`, and ModelScope's needs a
-    hosted bridge that holds its app's secret (HD13)."""
+    Face's device code needs `hf_oauth_client_id`, and each ModelScope
+    site's needs a hosted bridge that holds its app's secret (HD13)."""
     if preset.sign_in == "huggingface":
         return bool(config.HF_OAUTH_CLIENT_ID)
-    if preset.sign_in == "modelscope":
-        return hosted.bridge_signs_in("modelscope")
+    if preset.sign_in in hosted.BRIDGE_SIGN_IN_NAMES:
+        return hosted.bridge_signs_in(preset.sign_in)
     return preset.sign_in is not None
 
 
@@ -7210,8 +7210,11 @@ _REVOKE_PAGES = {
     "openrouter": "https://openrouter.ai/keys",
     # ModelScope's own route for it is labelled "OAuth互联应用" (OAuth
     # connected apps), read from its page bundle and confirmed by the owner
-    # as where a user removes an app they authorized, 2026-10-22.
+    # as where a user removes an app they authorized, 2026-10-22. Both
+    # sites serve the same bundle (read 2026-10-26), so .cn's is the same
+    # route on its own host.
     "modelscope": "https://www.modelscope.ai/my/settings/apps",
+    "modelscope-cn": "https://www.modelscope.cn/my/settings/apps",
 }
 
 # Where a key for a provider with no sign-in CAN go (§79 HD12): a copy the
@@ -7367,11 +7370,11 @@ def _cmd_connect(app: "VenastineApp", args: str) -> None:
         err(f"Usage: /connect {preset.name} [--key]")
         return
 
-    if preset.sign_in == "modelscope" and "--key" not in flags:
+    if preset.sign_in in hosted.BRIDGE_SIGN_IN_NAMES and "--key" not in flags:
         # Completed by the bridge, where there is one that can (HD13);
         # everywhere else ModelScope is a pasted key, as it always was.
         if _signs_in_here(preset):
-            _sign_in_modelscope(app, preset)
+            _sign_in_through_bridge(app, preset)
             return
     elif preset.sign_in and "--key" not in flags:
         if preset.sign_in == "openrouter":
@@ -7533,27 +7536,27 @@ class _BridgeSignIn:
             pass  # the bridge has gone; so has the flow
 
 
-def _sign_in_modelscope(app: "VenastineApp", preset) -> None:
-    """ModelScope's sign-in, which the bridge completes (HD13).
+def _sign_in_through_bridge(app: "VenastineApp", preset) -> None:
+    """A ModelScope site's sign-in, which the bridge completes (HD13).
 
     The bridge holds the app's client secret and makes the trade; this
-    session asks it to start, shows ModelScope's consent page, and hands
+    session asks it to start, shows the site's consent page, and hands
     back the code the page after it showed. The token then comes from the
     bridge straight into this process, kept exactly as a pasted one would
     be (HD5).
     """
     wait = _BridgeSignIn(app, preset)
     if not hosted_driver.send_to_bridge(app, {
-            "type": "venastine_sign_in", "provider": "modelscope",
+            "type": "venastine_sign_in", "provider": preset.sign_in,
             "id": wait.request}):
         app._transcript.write_error(
-            "ModelScope sign-in is completed by this deployment's bridge, "
-            "and this session is not running under one.")
+            f"{preset.label} sign-in is completed by this deployment's "
+            f"bridge, and this session is not running under one.")
         return
     app._connect_wait = wait
 
 
-def _ask_modelscope_code(app: "VenastineApp", wait: _BridgeSignIn) -> None:
+def _ask_bridge_code(app: "VenastineApp", wait: _BridgeSignIn) -> None:
     def answered(code) -> None:
         if app._connect_wait is not wait:
             return
@@ -7567,19 +7570,19 @@ def _ask_modelscope_code(app: "VenastineApp", wait: _BridgeSignIn) -> None:
             "code": code})
         wait.stop_timer()
         wait.timer = app.set_timer(_BRIDGE_ANSWER_S,
-                                   lambda: _modelscope_unanswered(app, wait))
+                                   lambda: _bridge_unanswered(app, wait))
 
     app.push_screen(SecretScreen(
         "Paste the code the sign-in page showed you",
         f"If no page opened: {wait.url}", confirm_label="Connect"), answered)
 
 
-def _modelscope_unanswered(app: "VenastineApp", wait: _BridgeSignIn) -> None:
+def _bridge_unanswered(app: "VenastineApp", wait: _BridgeSignIn) -> None:
     if app._connect_wait is wait:
         app.stop_connect_wait()
         app._transcript.write_error(
-            "The sign-in did not answer within a minute, so nothing was "
-            "connected. Run /connect modelscope again.")
+            f"The sign-in did not answer within a minute, so nothing was "
+            f"connected. Run /connect {wait.preset.name} again.")
 
 
 def _finish_connect(app: "VenastineApp", preset, key: str) -> None:

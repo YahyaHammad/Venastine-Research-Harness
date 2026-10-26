@@ -49,7 +49,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from deploy.hosted.sign_in import SignInError
+from deploy.hosted.sign_in import SITE_BY_NAME, SignInError
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +73,7 @@ HOSTED_DRIVER = "tui.hosted_driver:HostedWebDriver"
 # removes leftovers by this prefix, so the two cannot drift apart.
 SESSION_PREFIX = "venastine-session-"
 
-# HD13. What a session may ask of the bridge's ModelScope sign-in: start one,
+# HD13. What a session may ask of the bridge's ModelScope sign-ins: start one,
 # hand back the code its page showed, or stop waiting.
 _SIGN_IN_REQUESTS = frozenset({"venastine_sign_in", "venastine_sign_in_code",
                                "venastine_sign_in_cancel"})
@@ -180,7 +180,7 @@ def session_environment(base_env, paths: SessionPaths, mode: str,
     """The child's whole environment: an allowlist, never a copy (HD3).
 
     The deployment's secrets -- `HF_TOKEN`, `OAUTH_CLIENT_SECRET`, a
-    ModelScope token, the ModelScope app's client secret,
+    ModelScope token, the ModelScope apps' client secrets,
     `VENASTINE_PROVIDERS_JSON`, anything an operator added -- reach no
     session, because nothing here reads the base environment except the five
     names a Python process needs to start. `PYTHONPATH` is
@@ -277,12 +277,15 @@ class Session:
         self.last_activity = self.started
         self.ended_because: Optional[str] = None
         self._exchange: Optional[asyncio.Future] = None
+        # The site whose sign-in this session last started: a session waits
+        # for one sign-in at a time (tui/app.py), so its code goes there.
+        self._signing_in: Optional[str] = None
 
     async def spawn(self, width: int, height: int) -> None:
         sup = self.supervisor
         env = session_environment(sup.base_env, self.paths, sup.mode,
                                   width, height, sup.confinement,
-                                  "modelscope" if sup.sign_in else "")
+                                  ",".join(sorted(sup.sign_ins)))
         command = sup.command or [sys.executable,
                                   str(HARNESS_ROOT / "main.py"), "--tui"]
         # STDERR GOES TO A FILE IN THE SESSION, not a pipe: a pipe nobody
@@ -427,52 +430,71 @@ class Session:
         return False
 
     async def _on_sign_in(self, kind: str, meta: dict) -> None:
-        """HD13: a session's request to the bridge's ModelScope sign-in.
+        """HD13: a session's request to one of the bridge's ModelScope
+        sign-ins -- the site a start packet names, and for a code, the site
+        this session last started.
 
         Every flow is keyed by THIS session's id, which comes from here and
         not from the packet, so a session can only ever reach its own.
         """
-        sign_in = self.supervisor.sign_in
+        sign_ins = self.supervisor.sign_ins
         request = str(meta.get("id", ""))[:64]
         if kind == "venastine_sign_in_cancel":
-            if sign_in is not None:
-                sign_in.forget(self.id)
-            return
-        if sign_in is None:
-            await self._sign_in_failed(
-                request, "ModelScope sign-in is not set up on this deployment.")
+            self._forget_sign_ins()
             return
         if kind == "venastine_sign_in":
+            name = str(meta.get("provider", ""))
+            sign_in = sign_ins.get(name)
+            if sign_in is None:
+                site = SITE_BY_NAME.get(name)
+                await self._sign_in_failed(
+                    request, f"{site.label if site else 'That'} sign-in is "
+                             f"not set up on this deployment.")
+                return
+            # One at a time, as the session waits for one: a flow left open
+            # on the other site could otherwise still be approved.
+            self._forget_sign_ins()
+            self._signing_in = name
             await self.send_meta({"type": "venastine_sign_in_url",
                                   "id": request,
                                   "url": sign_in.start(self.id, request)})
+            return
+        sign_in = sign_ins.get(self._signing_in or "")
+        if sign_in is None:
+            await self._sign_in_failed(
+                request, "No sign-in in this session is waiting for a code.")
             return
         claim = sign_in.claim(self.id, str(meta.get("code", "")))
         if claim.code is None:
             await self._sign_in_failed(claim.request or request, claim.reason,
                                        claim.retry)
             return
-        # A TASK, so this session's screen keeps flowing while ModelScope
+        # A TASK, so this session's screen keeps flowing while the site
         # answers, and a THREAD inside it, so no other session waits either.
-        self._exchange = asyncio.ensure_future(self._exchange_code(claim))
+        self._exchange = asyncio.ensure_future(
+            self._exchange_code(sign_in, claim))
 
-    async def _exchange_code(self, claim) -> None:
+    def _forget_sign_ins(self) -> None:
+        for sign_in in self.supervisor.sign_ins.values():
+            sign_in.forget(self.id)
+
+    async def _exchange_code(self, sign_in, claim) -> None:
+        label = sign_in.site.label
         try:
-            token = await asyncio.to_thread(self.supervisor.sign_in.exchange,
-                                            claim.code)
+            token = await asyncio.to_thread(sign_in.exchange, claim.code)
         except SignInError as exc:
-            # The words are built from ModelScope's error CODE (sign_in.py),
+            # The words are built from the site's error CODE (sign_in.py),
             # so they are safe to log, and the operator needs them.
-            logger.info("ModelScope sign-in for session %s did not finish: %s",
-                        self.id, exc)
+            logger.info("%s sign-in for session %s did not finish: %s",
+                        label, self.id, exc)
             await self._sign_in_failed(claim.request, str(exc))
             return
         except Exception as exc:  # noqa: BLE001 -- reported, never fatal
-            logger.warning("ModelScope sign-in failed for session %s: %s",
-                           self.id, type(exc).__name__)
+            logger.warning("%s sign-in failed for session %s: %s",
+                           label, self.id, type(exc).__name__)
             await self._sign_in_failed(
                 claim.request,
-                f"ModelScope sign-in failed: {type(exc).__name__}.")
+                f"{label} sign-in failed: {type(exc).__name__}.")
             return
         await self.send_meta({"type": "venastine_credential",
                               "id": claim.request, "token": token})
@@ -553,8 +575,7 @@ class Session:
 
     async def stop(self) -> None:
         """Ask the session to quit, then make sure it has; delete its state."""
-        if self.supervisor.sign_in is not None:
-            self.supervisor.sign_in.forget(self.id)
+        self._forget_sign_ins()
         if self._exchange is not None:
             self._exchange.cancel()
         process = self.process
@@ -657,8 +678,8 @@ class Supervisor:
     deployment shares and nothing deletes -- the owner's threads survive a
     reloaded tab until the container restarts. A shared deployment gives
     every tab a fresh directory and deletes it when the tab closes.
-    `sign_in` is the ModelScope sign-in this deployment offers, or None
-    (sign_in.py; HD13).
+    `sign_ins` are the ModelScope sign-ins this deployment offers, by site
+    name -- none, one or both (sign_in.py; HD13).
     """
 
     def __init__(self, limits: Limits, mode: str, *,
@@ -667,12 +688,12 @@ class Supervisor:
                  base_env=None, command: Optional[list] = None,
                  providers_seed: Optional[str] = None,
                  confinement: str = "",
-                 sign_in=None,
+                 sign_ins: Optional[dict] = None,
                  tick_s: float = 5.0) -> None:
         self.limits = limits
         self.mode = mode
         self.confinement = confinement
-        self.sign_in = sign_in
+        self.sign_ins = dict(sign_ins or {})
         self.session_root = Path(session_root or default_session_root())
         self.state_dir = state_dir
         self.base_env = dict(os.environ if base_env is None else base_env)

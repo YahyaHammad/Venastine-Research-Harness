@@ -38,6 +38,7 @@ CHILD = Path(__file__).resolve().parent / "_bridge_child.py"
 
 # Runtime-assembled fakes, for test_connect.py's reason.
 MS_SECRET = "ms-secret-" + "4f9a" * 6
+MS_CN_SECRET = "ms-cn-secret-" + "b3d8" * 6
 MS_TOKEN = "ms_oauth_" + "7c1e" * 10
 
 
@@ -393,12 +394,16 @@ class TestTheChildsEnvironment:
                 "VENASTINE_PROVIDERS_JSON": "{}", "OPENAI_API_KEY": "sk",
                 "AWS_SECRET_ACCESS_KEY": "a", "PYTHONPATH": "/evil",
                 "VENASTINE_SINGLE_USER": "1", "VENASTINE_CONFINEMENT": "verified",
-                sign_in.SECRET_ENV: MS_SECRET, sign_in.CLIENT_ID_ENV: "c",
-                "VENASTINE_BRIDGE_SIGN_IN": "modelscope"}
+                sign_in.MODELSCOPE.secret_env: MS_SECRET,
+                sign_in.MODELSCOPE.client_id_env: "c",
+                sign_in.MODELSCOPE_CN.secret_env: MS_CN_SECRET,
+                sign_in.MODELSCOPE_CN.client_id_env: "c",
+                "VENASTINE_BRIDGE_SIGN_IN": "modelscope,modelscope-cn"}
         env = supervisor.session_environment(
             base, supervisor.SessionPaths.under(tmp_path), "shared")
         assert set(env) & set(base) == {"PATH"}
         assert MS_SECRET not in env.values()
+        assert MS_CN_SECRET not in env.values()
         assert "PYTHONPATH" not in env
         assert env["VENASTINE_HOSTED"] == "shared"
         for name in ("HOME", "TMPDIR", "APP_DB_PATH", "AGENT_LOG_FILE",
@@ -742,20 +747,31 @@ class TestTheRoutes:
         assert bridge.supervisor.sessions == {}
         assert left == [], left
 
-    def test_the_landing_page_names_modelscope_only_where_it_signs_in(
+    def test_the_landing_page_names_each_modelscope_site_where_it_signs_in(
             self, tmp_path):
         """Batch 168 (HD13). A duplicated Space copies variables but not
-        the secret, and there the command could only refuse."""
+        the secret, and there the command could only refuse. Batch 176:
+        each site's line on its own, since a deployment may have one app's
+        secret and not the other's."""
         bridge = web.Bridge(_supervisor(tmp_path))
         with self._client(bridge) as client:
             without = client.get("/").text
-            bridge.supervisor.sign_in = _flow()
-            offered = client.get("/").text
+            bridge.supervisor.sign_ins = {"modelscope": _flow()[0]}
+            ai_only = client.get("/").text
+            bridge.supervisor.sign_ins = {
+                "modelscope-cn": _flow(site=sign_in.MODELSCOPE_CN)[0]}
+            cn_only = client.get("/").text
         assert '<li id="connect-modelscope" hidden>' in without
-        assert '<li id="connect-modelscope">' in offered
-        assert "/connect modelscope" in offered
-        assert "https://www.modelscope.ai/my/settings/apps" in offered
-        assert "$" not in without and "$" not in offered
+        assert '<li id="connect-modelscope-cn" hidden>' in without
+        assert '<li id="connect-modelscope">' in ai_only
+        assert '<li id="connect-modelscope-cn" hidden>' in ai_only
+        assert '<li id="connect-modelscope" hidden>' in cn_only
+        assert '<li id="connect-modelscope-cn">' in cn_only
+        assert "https://www.modelscope.ai/my/settings/apps" in ai_only
+        assert "/connect modelscope-cn" in cn_only
+        assert "https://www.modelscope.cn/my/settings/apps" in cn_only
+        for page in (without, ai_only, cn_only):
+            assert "$" not in page
 
     def test_a_private_deployment_says_its_keys_go_here(self, tmp_path):
         bridge = web.Bridge(_supervisor(tmp_path), single_user_requested=True)
@@ -805,9 +821,10 @@ _GRANTED = (200, {"access_token": MS_TOKEN, "scope": "openid api-inference",
                   "expires_in": 86400})
 
 
-def _flow(*answers, redirect="http://testserver/oauth/modelscope/callback"):
+def _flow(*answers, site=sign_in.MODELSCOPE):
     transport = _Transport(*answers)
-    return ModelScopeSignIn("client-1", MS_SECRET, redirect,
+    return ModelScopeSignIn(site, "client-1", MS_SECRET,
+                            f"http://testserver{site.callback_path}",
                             post=transport), transport
 
 
@@ -821,9 +838,9 @@ class TestASessionsSignInRequests:
     """Session._on_meta's half, with no process behind it: what each
     packet asks, and that every flow is keyed by the session's own id."""
 
-    def _session(self, tmp_path, flow, name="s"):
+    def _session(self, tmp_path, sign_ins, name="s"):
         sup = _supervisor(tmp_path)
-        sup.sign_in = flow
+        sup.sign_ins = sign_ins
         session = supervisor.Session(
             sup, supervisor.SessionPaths.under(tmp_path / name), keep_dir=True)
         session.sent = []
@@ -838,32 +855,49 @@ class TestASessionsSignInRequests:
     async def _meta(session, meta):
         return await session._on_meta(None, json.dumps(meta).encode())
 
+    @staticmethod
+    def _start(provider="modelscope", request="r1"):
+        return {"type": "venastine_sign_in", "id": request,
+                "provider": provider}
+
     @pytest.mark.asyncio
-    async def test_without_a_sign_in_the_answer_says_so(self, tmp_path):
-        session = self._session(tmp_path, None)
-        assert await self._meta(session, {"type": "venastine_sign_in",
-                                          "id": "r1"}) is False
+    @pytest.mark.parametrize("provider, named", [
+        ("modelscope", "ModelScope"),
+        ("modelscope-cn", "ModelScope (modelscope.cn)"),
+        ("huggingface", "That"),
+        (None, "That"),
+    ])
+    async def test_a_sign_in_not_offered_here_says_so(self, tmp_path,
+                                                      provider, named):
+        """Batch 176: the site comes from the packet, and only a site this
+        bridge offers is started -- another or a made-up name is refused
+        in words that never repeat it."""
+        offered = {"modelscope": _flow()[0]} if provider != "modelscope" else {}
+        session = self._session(tmp_path, offered)
+        start = self._start(provider)
+        if provider is None:
+            del start["provider"]
+        assert await self._meta(session, start) is False
         assert session.sent == [{
             "type": "venastine_sign_in_failed", "id": "r1", "retry": False,
-            "reason": "ModelScope sign-in is not set up on this deployment."}]
+            "reason": f"{named} sign-in is not set up on this deployment."}]
 
     @pytest.mark.asyncio
     async def test_a_start_answers_with_the_consent_page(self, tmp_path):
         flow, _ = _flow()
-        session = self._session(tmp_path, flow)
-        await self._meta(session, {"type": "venastine_sign_in", "id": "r1",
-                                   "provider": "modelscope"})
+        session = self._session(tmp_path, {"modelscope": flow})
+        await self._meta(session, self._start())
         (answer,) = session.sent
         assert answer["type"] == "venastine_sign_in_url"
         assert answer["id"] == "r1"
-        assert answer["url"].startswith(sign_in.AUTHORIZE_URL)
+        assert answer["url"].startswith(sign_in.MODELSCOPE.authorize_url)
         assert flow._by_session[session.id].state == _state(answer["url"])
 
     @pytest.mark.asyncio
     async def test_the_code_is_traded_and_the_token_goes_back(self, tmp_path):
         flow, transport = _flow(_GRANTED)
-        session = self._session(tmp_path, flow)
-        await self._meta(session, {"type": "venastine_sign_in", "id": "r1"})
+        session = self._session(tmp_path, {"modelscope": flow})
+        await self._meta(session, self._start())
         page = flow.callback({"code": "code-C",
                               "state": _state(session.sent[0]["url"])})
         await self._meta(session, {"type": "venastine_sign_in_code",
@@ -874,13 +908,63 @@ class TestASessionsSignInRequests:
         assert transport.requests[0][1]["code"] == "code-C"
 
     @pytest.mark.asyncio
+    async def test_a_cn_sign_in_goes_to_modelscope_cn_alone(self, tmp_path):
+        """Batch 176: the consent page, the code and the trade all belong
+        to the site the session asked for, and the other site's app is
+        never touched."""
+        ai, ai_transport = _flow(_GRANTED)
+        cn, cn_transport = _flow(_GRANTED, site=sign_in.MODELSCOPE_CN)
+        session = self._session(tmp_path, {"modelscope": ai,
+                                           "modelscope-cn": cn})
+        await self._meta(session, self._start("modelscope-cn"))
+        url = session.sent[0]["url"]
+        assert url.startswith("https://www.modelscope.cn/oauth/authorize?")
+        page = cn.callback({"code": "code-CN", "state": _state(url)})
+        await self._meta(session, {"type": "venastine_sign_in_code",
+                                   "id": "r1", "code": page.handle})
+        await session._exchange
+        assert session.sent[-1] == {"type": "venastine_credential",
+                                    "id": "r1", "token": MS_TOKEN}
+        (token_url, body), = cn_transport.requests
+        assert token_url == "https://www.modelscope.cn/oauth/token"
+        assert body["code"] == "code-CN"
+        assert ai_transport.requests == [] and ai._by_session == {}
+
+    @pytest.mark.asyncio
+    async def test_starting_one_site_drops_the_others_flow(self, tmp_path):
+        """A session waits for one sign-in at a time, so a flow left open
+        on the other site could only be approved by mistake."""
+        ai, _ = _flow()
+        cn, _ = _flow(site=sign_in.MODELSCOPE_CN)
+        session = self._session(tmp_path, {"modelscope": ai,
+                                           "modelscope-cn": cn})
+        await self._meta(session, self._start("modelscope"))
+        first = _state(session.sent[0]["url"])
+        await self._meta(session, self._start("modelscope-cn", "r2"))
+        assert session.id not in ai._by_session
+        assert session.id in cn._by_session
+        assert ai.callback({"code": "c", "state": first}).status == 400
+
+    @pytest.mark.asyncio
+    async def test_a_code_with_nothing_started_is_refused(self, tmp_path):
+        flow, transport = _flow(_GRANTED)
+        session = self._session(tmp_path, {"modelscope": flow})
+        await self._meta(session, {"type": "venastine_sign_in_code",
+                                   "id": "r1", "code": "anything"})
+        assert session.sent == [{
+            "type": "venastine_sign_in_failed", "id": "r1", "retry": False,
+            "reason": "No sign-in in this session is waiting for a code."}]
+        assert session._exchange is None and transport.requests == []
+
+    @pytest.mark.asyncio
     async def test_another_sessions_handle_is_refused(self, tmp_path):
         flow, transport = _flow(_GRANTED)
-        owner = self._session(tmp_path, flow, "a")
-        other = self._session(tmp_path, flow, "b")
-        await self._meta(owner, {"type": "venastine_sign_in", "id": "r1"})
+        owner = self._session(tmp_path, {"modelscope": flow}, "a")
+        other = self._session(tmp_path, {"modelscope": flow}, "b")
+        await self._meta(owner, self._start())
         page = flow.callback({"code": "code-C",
                               "state": _state(owner.sent[0]["url"])})
+        await self._meta(other, self._start(request="r9"))
         await self._meta(other, {"type": "venastine_sign_in_code",
                                  "id": "r9", "code": page.handle})
         assert other.sent[-1]["type"] == "venastine_sign_in_failed"
@@ -890,32 +974,40 @@ class TestASessionsSignInRequests:
     async def test_a_refused_trade_is_reported_by_its_code(self, tmp_path,
                                                            caplog):
         caplog.set_level(logging.INFO, logger="deploy.hosted.supervisor")
-        flow, _ = _flow((200, {"error": "invalid_grant"}))
-        session = self._session(tmp_path, flow)
-        await self._meta(session, {"type": "venastine_sign_in", "id": "r1"})
+        flow, _ = _flow((200, {"error": "invalid_grant"}),
+                        site=sign_in.MODELSCOPE_CN)
+        session = self._session(tmp_path, {"modelscope-cn": flow})
+        await self._meta(session, self._start("modelscope-cn"))
         page = flow.callback({"code": "c",
                               "state": _state(session.sent[0]["url"])})
         await self._meta(session, {"type": "venastine_sign_in_code",
                                    "id": "r1", "code": page.handle})
         await session._exchange
         assert session.sent[-1]["type"] == "venastine_sign_in_failed"
-        assert "invalid_grant" in session.sent[-1]["reason"]
-        # The operator sees why, by the code alone.
-        assert f"session {session.id} did not finish" in caplog.text
+        reason = session.sent[-1]["reason"]
+        assert "invalid_grant" in reason and "modelscope.cn" in reason
+        # The operator sees why, and on which site, by the code alone.
+        assert (f"ModelScope (modelscope.cn) sign-in for session "
+                f"{session.id} did not finish") in caplog.text
         assert "invalid_grant" in caplog.text
         assert page.handle not in caplog.text and MS_SECRET not in caplog.text
 
     @pytest.mark.asyncio
     async def test_cancel_and_stop_both_drop_the_flow(self, tmp_path):
-        flow, _ = _flow()
-        session = self._session(tmp_path, flow)
-        await self._meta(session, {"type": "venastine_sign_in", "id": "r1"})
+        ai, _ = _flow()
+        cn, _ = _flow(site=sign_in.MODELSCOPE_CN)
+        session = self._session(tmp_path, {"modelscope": ai,
+                                           "modelscope-cn": cn})
+        # Each with the OTHER site's flow open, so dropping only one site's
+        # would leave the flow a cancel or a closed tab was meant to end.
+        await self._meta(session, self._start("modelscope"))
         await self._meta(session, {"type": "venastine_sign_in_cancel",
                                    "id": "r1"})
-        assert session.id not in flow._by_session
-        await self._meta(session, {"type": "venastine_sign_in", "id": "r2"})
+        assert session.id not in ai._by_session
+        await self._meta(session, self._start("modelscope-cn", "r2"))
         await session.stop()
-        assert session.id not in flow._by_session
+        assert session.id not in cn._by_session
+        assert session.id not in ai._by_session
 
 
 class TestTheModelScopeCallback:
@@ -925,20 +1017,47 @@ class TestTheModelScopeCallback:
 
         return TestClient(Starlette(routes=bridge.routes()))
 
-    def test_a_deployment_without_it_has_no_such_page(self, tmp_path):
+    @pytest.mark.parametrize("site", sign_in.SITES, ids=lambda s: s.name)
+    def test_a_deployment_without_it_has_no_such_page(self, tmp_path, site):
         bridge = web.Bridge(_supervisor(tmp_path))
         with self._client(bridge) as client:
-            assert client.get(sign_in.CALLBACK_PATH).status_code == 404
+            assert client.get(site.callback_path).status_code == 404
 
     def test_a_forged_state_is_refused_without_repeating_it(self, tmp_path):
         bridge = web.Bridge(_supervisor(tmp_path))
-        bridge.supervisor.sign_in, _ = _flow()
+        bridge.supervisor.sign_ins = {"modelscope": _flow()[0]}
         with self._client(bridge) as client:
-            page = client.get(sign_in.CALLBACK_PATH,
+            page = client.get(sign_in.MODELSCOPE.callback_path,
                               params={"state": "<b>forged</b>", "code": "x"})
         assert page.status_code == 400
         assert "forged" not in page.text and "$" not in page.text
         assert page.headers["cache-control"] == "no-store"
+
+    def test_each_site_is_answered_on_its_own_path_alone(self, tmp_path):
+        """Batch 176, the owner's choice of a path per site: a site's code
+        reaches only the flows of the site that issued it, so a state from
+        one site's consent page is no state at all on the other's path."""
+        ai, _ = _flow()
+        cn, _ = _flow(site=sign_in.MODELSCOPE_CN)
+        bridge = web.Bridge(_supervisor(tmp_path))
+        bridge.supervisor.sign_ins = {"modelscope-cn": cn}
+        with self._client(bridge) as client:
+            assert client.get(sign_in.MODELSCOPE.callback_path).status_code \
+                == 404
+            bridge.supervisor.sign_ins = {"modelscope": ai,
+                                          "modelscope-cn": cn}
+            ai_state = _state(ai.start("s1", "r1"))
+            crossed = client.get(sign_in.MODELSCOPE_CN.callback_path,
+                                 params={"code": "c", "state": ai_state})
+            cn_state = _state(cn.start("s2", "r2"))
+            page = client.get(sign_in.MODELSCOPE_CN.callback_path,
+                              params={"code": "c", "state": cn_state})
+        assert crossed.status_code == 400
+        assert "/connect modelscope-cn" in crossed.text
+        assert ai._by_session["s1"].code is None
+        assert page.status_code == 200
+        assert re.search(r'<p class="handle">[^<]+</p>', page.text)
+        assert "ModelScope (modelscope.cn) sign-in" in page.text
 
     @pytest.mark.parametrize("info, framed_by", [
         ({"platform": "modelscope"}, "https://www.modelscope.ai"),
@@ -955,21 +1074,27 @@ class TestTheModelScopeCallback:
             (tmp_path / "BUILD_INFO.json").write_text(json.dumps(info),
                                                       encoding="utf-8")
         bridge = web.build_bridge(env={}, root=tmp_path)
-        bridge.supervisor.sign_in, _ = _flow()
+        bridge.supervisor.sign_ins = {"modelscope": _flow()[0]}
         with self._client(bridge) as client:
-            csp = client.get(sign_in.CALLBACK_PATH).headers[
+            csp = client.get(sign_in.MODELSCOPE.callback_path).headers[
                 "content-security-policy"]
         assert csp.endswith(f"frame-ancestors {framed_by}")
         assert "default-src 'none'" in csp and "form-action 'none'" in csp
 
     def test_the_callbacks_from_one_address_are_limited(self, tmp_path):
         bridge = web.Bridge(_supervisor(tmp_path))
-        bridge.supervisor.sign_in, _ = _flow()
+        bridge.supervisor.sign_ins = {
+            "modelscope": _flow()[0],
+            "modelscope-cn": _flow(site=sign_in.MODELSCOPE_CN)[0]}
+        paths = [site.callback_path for site in sign_in.SITES]
         with self._client(bridge) as client:
-            codes = [client.get(sign_in.CALLBACK_PATH).status_code
-                     for _ in range(web.SIGN_IN_CALLBACKS_PER_MINUTE + 1)]
+            # One allowance per address across both sites' paths.
+            codes = [client.get(paths[i % 2]).status_code
+                     for i in range(web.SIGN_IN_CALLBACKS_PER_MINUTE + 1)]
+            limited = client.get(sign_in.MODELSCOPE_CN.callback_path)
         assert codes[:-1] == [400] * web.SIGN_IN_CALLBACKS_PER_MINUTE
         assert codes[-1] == 429
+        assert "/connect modelscope-cn" in limited.text
 
     def test_end_to_end_over_a_real_session(self, tmp_path):
         """The whole round, through the routes and a real pipe: the session
@@ -977,8 +1102,9 @@ class TestTheModelScopeCallback:
         redirect gets a handle, the handle typed into the terminal comes
         back to the bridge, and the token goes to that session alone."""
         flow, transport = _flow(_GRANTED)
+        cn, cn_transport = _flow(site=sign_in.MODELSCOPE_CN)
         bridge = web.Bridge(_supervisor(tmp_path, "sign-in"))
-        bridge.supervisor.sign_in = flow
+        bridge.supervisor.sign_ins = {"modelscope-cn": cn, "modelscope": flow}
         with self._client(bridge) as client:
             ticket = re.search(r'data-ticket="([^"]+)"',
                                client.get("/terminal").text).group(1)
@@ -987,11 +1113,14 @@ class TestTheModelScopeCallback:
                 screen = b""
                 while b"venastine_sign_in_url:" not in screen:
                     screen += ws.receive().get("bytes") or b""
+                # What the session was told it may sign in to: the names,
+                # in one order, never what they need.
+                assert b"offered:modelscope,modelscope-cn|" in screen
                 answer = json.loads(re.search(
                     rb"venastine_sign_in_url:(\{.*?\})\|", screen).group(1))
                 assert answer["id"] == "req-1"
 
-                page = client.get(sign_in.CALLBACK_PATH, params={
+                page = client.get(sign_in.MODELSCOPE.callback_path, params={
                     "code": "code-C", "state": _state(answer["url"])})
                 assert page.status_code == 200
                 csp = page.headers["content-security-policy"]
@@ -1016,9 +1145,38 @@ class TestTheModelScopeCallback:
         assert bridge.supervisor.sessions == {}
         assert credential == {"id": "req-1", "token": MS_TOKEN}
         (url, body), = transport.requests
-        assert url == sign_in.TOKEN_URL
+        assert url == sign_in.MODELSCOPE.token_url
         assert body["code"] == "code-C" and body["client_secret"] == MS_SECRET
         assert body["redirect_uri"] == flow.redirect_uri
+        assert cn_transport.requests == []
+
+
+class TestWhatTheBridgeOffers:
+    """build_bridge's part (batch 176): each site whose app id, secret and
+    public URL this deployment has, and no other."""
+
+    ENV = {"SPACE_HOST": "x.hf.space",
+           sign_in.MODELSCOPE_CN.client_id_env: "cn-app"}
+
+    def test_each_site_with_its_pieces_is_offered(self, tmp_path):
+        bridge = web.build_bridge(env=self.ENV, root=tmp_path, sign_in_secrets={
+            "modelscope": MS_SECRET, "modelscope-cn": MS_CN_SECRET})
+        offered = bridge.supervisor.sign_ins
+        assert set(offered) == {"modelscope", "modelscope-cn"}
+        assert offered["modelscope-cn"].client_id == "cn-app"
+        assert offered["modelscope-cn"].redirect_uri == \
+            "https://x.hf.space/oauth/modelscope-cn/callback"
+        assert offered["modelscope"].redirect_uri == \
+            "https://x.hf.space/oauth/modelscope/callback"
+
+    def test_one_sites_secret_offers_that_site_alone(self, tmp_path):
+        bridge = web.build_bridge(env=self.ENV, root=tmp_path,
+                                  sign_in_secrets={"modelscope": MS_SECRET})
+        assert set(bridge.supervisor.sign_ins) == {"modelscope"}
+
+    def test_no_secrets_offer_nothing(self, tmp_path):
+        assert web.build_bridge(env=self.ENV, root=tmp_path) \
+            .supervisor.sign_ins == {}
 
 
 class TestTheBridgeKeepsItsSecret:
@@ -1033,23 +1191,36 @@ class TestTheBridgeKeepsItsSecret:
 
         return app
 
-    def test_taking_it_removes_it(self, app_module):
-        environ = {sign_in.SECRET_ENV: f" {MS_SECRET}\n", "PATH": "/bin"}
-        assert app_module.take_secret(environ) == MS_SECRET
+    def test_taking_them_removes_every_one(self, app_module):
+        environ = {sign_in.MODELSCOPE.secret_env: f" {MS_SECRET}\n",
+                   sign_in.MODELSCOPE_CN.secret_env: MS_CN_SECRET,
+                   "PATH": "/bin"}
+        assert app_module.take_secrets(environ) == {
+            "modelscope": MS_SECRET, "modelscope-cn": MS_CN_SECRET}
         assert environ == {"PATH": "/bin"}
 
-    def test_main_takes_it_first_and_hands_it_to_the_bridge(
+    def test_a_site_without_one_maps_to_nothing(self, app_module):
+        environ = {sign_in.MODELSCOPE_CN.secret_env: MS_CN_SECRET}
+        assert app_module.take_secrets(environ) == {
+            "modelscope": "", "modelscope-cn": MS_CN_SECRET}
+        assert environ == {}
+
+    def test_main_takes_them_first_and_hands_them_to_the_bridge(
             self, app_module, monkeypatch, tmp_path, caplog):
         import security.hosted
         from deploy.hosted import isolation_report
 
+        def any_secret_left():
+            return any(site.secret_env in os.environ for site in sign_in.SITES)
+
         events = []
-        monkeypatch.setenv(sign_in.SECRET_ENV, MS_SECRET)
+        monkeypatch.setenv(sign_in.MODELSCOPE.secret_env, MS_SECRET)
+        monkeypatch.setenv(sign_in.MODELSCOPE_CN.secret_env, MS_CN_SECRET)
         monkeypatch.setattr(security.hosted, "make_undumpable", lambda: events.append(
-            ("undumpable", sign_in.SECRET_ENV in os.environ)) or True)
+            ("undumpable", any_secret_left())) or True)
         monkeypatch.setattr(session_env, "LOCK", tmp_path / "absent.lock")
         monkeypatch.setattr(isolation_report, "log", lambda *a: events.append(
-            ("report", sign_in.SECRET_ENV in os.environ)))
+            ("report", any_secret_left())))
         monkeypatch.setattr(isolation_report, "verify_confinement",
                             lambda *a: "")
         # Batch 168: a killed predecessor's sessions go before anything
@@ -1062,15 +1233,17 @@ class TestTheBridgeKeepsItsSecret:
             ("label", root == Path(app_module.__file__).resolve().parents[2]))
             or "build 0123456789ab")
 
-        def build(python, confinement, secret):
-            events.append(("build", secret))
+        def build(python, confinement, secrets):
+            events.append(("build", secrets))
             return SimpleNamespace(launch=lambda **kw: events.append(("launch",)))
 
         monkeypatch.setattr(app_module, "build", build)
         with caplog.at_level(logging.INFO, logger=app_module.__name__):
             app_module.main()
         assert events == [("undumpable", False), ("label", True), ("sweep",),
-                          ("report", False), ("build", MS_SECRET),
+                          ("report", False),
+                          ("build", {"modelscope": MS_SECRET,
+                                     "modelscope-cn": MS_CN_SECRET}),
                           ("launch",)]
-        assert sign_in.SECRET_ENV not in os.environ
+        assert not any_secret_left()
         assert "serving build 0123456789ab" in caplog.messages

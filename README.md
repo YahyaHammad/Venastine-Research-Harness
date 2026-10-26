@@ -17,7 +17,7 @@ The design premise is that a model's own confidence is not evidence. Everything 
 
 The same harness runs in your browser, nothing to install, on a [Hugging Face Space](https://huggingface.co/spaces/SolenopsisCampo/VenastineHarnessDemo) and a [ModelScope Studio](https://www.modelscope.ai/studios/Venastine-Research/VenastineHarnessDemo). Each tab gets its own session, deleted when the tab closes.
 
-- **Connect a model with a sign-in.** `/connect huggingface` and `/connect openrouter` work on both, and `/connect modelscope` wherever the deployment can complete ModelScope's sign-in. Requests use your own account's allowance, and the landing page links each provider's page for revoking access.
+- **Connect a model with a sign-in.** `/connect huggingface` and `/connect openrouter` work on both, and `/connect modelscope` (modelscope.ai) or `/connect modelscope-cn` (modelscope.cn) wherever the deployment can complete that site's sign-in. Requests use your own account's allowance, and the landing page links each provider's page for revoking access.
 - **The shared demo takes no pasted key**, and it does not offer the file and shell tools. A private duplicate of the Space in single-user mode takes both (set `VENASTINE_SINGLE_USER=1` in Hugging Face's duplicate dialog), and so does an install.
 - **It runs a commit of `main` that passed every CI check**, named in each page's footer: the Space is redeployed automatically once all of them pass, and the Studio by hand with the same checks. [PRIVACY.md](docs/PRIVACY.md#the-hosted-demo-roadmap_v3-79) says what a hosted session changes.
 
@@ -923,7 +923,7 @@ note that shell approval is governed solely by `shell_approval_mode` -- `tool_ap
 deliberately has no `shell` key, so an old file carrying one is refused at startup
 naming the key — see `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 8063 tests, fully offline, no API keys needed. The suite's own packages are `requirements-test.txt`, separate from `requirements.txt` since batch 136: they used to be in the shipped dependency list, so installing the harness also installed a test runner. It runs in parallel by default (`pytest-xdist`, 70% of your cores): **1:26 on a 16-core machine, against 9:06 single-process.** `pytest -n0` forces the old serial run, which is what you want under a debugger or when something is parsing the output. Four further tests are marked `integration` and excluded by default: three spawn a real stdio MCP server, the fourth runs an external program through the host fallback shell (`pytest -m integration`).
+Run the test suite with `pytest` — 8094 tests, fully offline, no API keys needed. The suite's own packages are `requirements-test.txt`, separate from `requirements.txt` since batch 136: they used to be in the shipped dependency list, so installing the harness also installed a test runner. It runs in parallel by default (`pytest-xdist`, 70% of your cores): **1:26 on a 16-core machine, against 9:06 single-process.** `pytest -n0` forces the old serial run, which is what you want under a debugger or when something is parsing the output. Four further tests are marked `integration` and excluded by default: three spawn a real stdio MCP server, the fourth runs an external program through the host fallback shell (`pytest -m integration`).
 
 ## Documentation
 

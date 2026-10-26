@@ -37,7 +37,8 @@ from typing import Optional
 from urllib.parse import urlsplit
 
 from deploy.hosted import single_user
-from deploy.hosted.sign_in import CALLBACK_PATH, ModelScopeSignIn
+from deploy.hosted.sign_in import SITES
+from deploy.hosted.sign_in import offered as offered_sign_ins
 from deploy.hosted.supervisor import (
     CapacityError,
     Limits,
@@ -57,9 +58,9 @@ _SECURITY_HEADERS = {
     "Referrer-Policy": "no-referrer",
 }
 
-# HD13. The page ModelScope's redirect gets carries a one-time handle: never
-# cached, with nothing in it that could run or send, and framed by no site
-# but the platform's own.
+# HD13. The page a ModelScope site's redirect gets carries a one-time handle:
+# never cached, with nothing in it that could run or send, and framed by no
+# site but the platform's own.
 _SIGN_IN_HEADERS = {
     **_SECURITY_HEADERS,
     "Cache-Control": "no-store",
@@ -268,7 +269,8 @@ class Bridge:
             Route("/terminal", self.terminal, methods=["GET"]),
             Route("/healthz", self.healthz, methods=["GET"]),
             Route("/download/{key}", self.download, methods=["GET"]),
-            Route(CALLBACK_PATH, self.sign_in_callback, methods=["GET"]),
+            *(Route(site.callback_path, self._callback_for(site),
+                    methods=["GET"]) for site in SITES),
             WebSocketRoute("/ws/{ticket}", self.websocket),
         ]
         if self.static_dir is not None:
@@ -356,12 +358,13 @@ class Bridge:
                             headers=_SECURITY_HEADERS)
 
     async def landing(self, request):
-        # HD13: ModelScope's line only where this bridge can complete its
-        # sign-in. A duplicated Space copies variables but not secrets, and
-        # there the command would only explain why it cannot.
-        offered = self.supervisor.sign_in is not None
-        return self._html(_page("landing.html", build=self.build,
-                                modelscope_hidden="" if offered else " hidden",
+        # HD13: each ModelScope site's line only where this bridge can
+        # complete its sign-in. A duplicated Space copies variables but not
+        # secrets, and there the command would only explain why it cannot.
+        hidden = {f"{site.name.replace('-', '_')}_hidden":
+                  "" if site.name in self.supervisor.sign_ins else " hidden"
+                  for site in SITES}
+        return self._html(_page("landing.html", build=self.build, **hidden,
                                 **self._mode_words()))
 
     def _notice(self, title: str, text: str, status: int):
@@ -387,27 +390,33 @@ class Bridge:
         return self._html(_page("terminal.html", ticket=ticket,
                                 static=STATIC_PREFIX, build=self.build))
 
-    async def sign_in_callback(self, request):
-        """Where ModelScope sends the person back after its consent page
-        (HD13). The page shows a handle to paste, or why there is none; it
-        never repeats anything the request carried."""
+    def _callback_for(self, site):
+        async def callback(request):
+            return await self.sign_in_callback(site, request)
+        return callback
+
+    async def sign_in_callback(self, site, request):
+        """Where `site` sends the person back after its consent page (HD13).
+        The page shows a handle to paste, or why there is none; it never
+        repeats anything the request carried. Each site has its own path,
+        so a code is only ever traded with the site that issued it."""
         from starlette.responses import HTMLResponse, Response
 
-        sign_in = self.supervisor.sign_in
+        sign_in = self.supervisor.sign_ins.get(site.name)
         if sign_in is None:
             return Response("Not found", status_code=404)
         if not self._within_rate(self._callbacks, self._client(request),
                                  SIGN_IN_CALLBACKS_PER_MINUTE):
             title, text, handle, status = (
                 "Too many sign-ins from here",
-                "Wait a minute, then run /connect modelscope again.", "", 429)
+                f"Wait a minute, then run /connect {site.name} again.", "", 429)
         else:
             page = sign_in.callback(request.query_params)
             title, text, handle, status = (page.title, page.text,
                                            page.handle or "", page.status)
         return HTMLResponse(
             _page("sign_in.html", title=title, text=text, handle=handle,
-                  build=self.build),
+                  provider=site.label, build=self.build),
             status_code=status, headers={
                 **_SIGN_IN_HEADERS,
                 "Content-Security-Policy": _SIGN_IN_CSP.format(self.framed_by)})
@@ -471,13 +480,13 @@ def _static_dir() -> Optional[Path]:
 def build_bridge(env=None, root: Optional[Path] = None,
                  python: Optional[Path] = None,
                  confinement: str = "",
-                 modelscope_secret: Optional[str] = None) -> Bridge:
+                 sign_in_secrets: Optional[dict] = None) -> Bridge:
     """The bridge a deployment runs, configured from its environment.
     `python` is the interpreter sessions run on (session_env.py); None
     means this one. `confinement` is the math tools' self-test verdict,
-    handed to every session (HD11). `modelscope_secret` is the ModelScope
-    app's client secret, which app.py has already taken out of the
-    environment (HD13)."""
+    handed to every session (HD11). `sign_in_secrets` are the ModelScope
+    apps' client secrets by site, which app.py has already taken out of
+    the environment (HD13)."""
     env = os.environ if env is None else env
     root = root or Path(__file__).resolve().parents[2]
     command = [str(python), str(root / "main.py"), "--tui"] if python else None
@@ -496,7 +505,7 @@ def build_bridge(env=None, root: Optional[Path] = None,
         command=command,
         providers_seed=env.get("VENASTINE_PROVIDERS_JSON") if requested else None,
         confinement=confinement,
-        sign_in=ModelScopeSignIn.from_env(env, modelscope_secret),
+        sign_ins=offered_sign_ins(env, sign_in_secrets or {}),
     )
     hosts = [env.get("SPACE_HOST", "")]
     if url:

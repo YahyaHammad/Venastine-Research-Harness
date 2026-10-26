@@ -8,14 +8,16 @@ packets each way (deploy/hosted/supervisor.py's docstring has the protocol).
 
     python tests/_bridge_child.py echo          -- answers, then quits on "quit"
     python tests/_bridge_child.py no-handshake  -- complains on stderr, exits
-    python tests/_bridge_child.py sign-in       -- echo, and asks the bridge for
-        a ModelScope sign-in (HD13): typing `code:<handle>` hands the handle
-        back, and each answer the bridge sends is printed as screen data
+    python tests/_bridge_child.py sign-in       -- echo, prints the sign-ins its
+        bridge said it completes, and asks for a ModelScope sign-in (HD13):
+        typing `code:<handle>` hands the handle back, and each answer the
+        bridge sends is printed as screen data
 
 The leading underscore keeps pytest from collecting it.
 """
 
 import json
+import os
 import sys
 
 
@@ -48,6 +50,8 @@ def main(mode: str) -> int:
     out.write(_meta({"type": "open_url", "url": "javascript:alert(1)"}))
     out.write(_meta({"type": "open_url", "url": "https://example.org/x"}))
     if mode == "sign-in":
+        offered = os.environ.get("VENASTINE_BRIDGE_SIGN_IN", "")
+        out.write(_packet(b"D", f"offered:{offered}|".encode()))
         out.write(_meta({"type": "venastine_sign_in", "provider": "modelscope",
                          "id": "req-1"}))
     out.flush()

@@ -2,8 +2,8 @@
 tui/hosted_driver.py
 
 ROADMAP_v3 §79 (HD13). Textual's web driver, plus the three packets a hosted
-bridge sends back about a ModelScope sign-in it is completing for this
-session.
+bridge sends back about a ModelScope sign-in -- on either site -- it is
+completing for this session.
 
 The bridge -- `deploy/hosted/supervisor.py` -- runs every hosted session under
 this driver. It is the only writer of the session's stdin, and everything a

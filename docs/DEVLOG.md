@@ -26732,3 +26732,95 @@ tests now hold that, and that no ID is accepted twice.
 - Mutations: 2 of 2 killed -- the audit passing only the first entry for a
   version, and an ID duplicated across entries.
 - ruff clean; bandit 0 new and no pair grew; gitleaks found no leaks.
+
+---
+## Batch 176 -- modelscope.cn, ModelScope's second site, signs in too (2026-10-26)
+
+**ROADMAP_v3 §79, HD13 and HD5 amended; the owner's request and choices.**
+The owner asked to add modelscope.cn as an OAuth provider if it was
+available, since modelscope.ai seemed to be a different site, and to check
+first whether registering an app there needs a modelscope.cn account.
+
+### What was measured (2026-10-26, read-only)
+
+- modelscope.cn runs its own OAuth server:
+  `/.well-known/openid-configuration` names the issuer
+  `https://www.modelscope.cn` and its own token endpoint, with the same
+  shape as .ai's -- the authorization-code grant only, and a token endpoint
+  that takes only `client_secret_basic` or `client_secret_post`. Both sites
+  also advertise `registration_endpoint` and `client_id_metadata_supported`;
+  neither was tried, since a test would register something on their server,
+  and neither removes the secret.
+- Separate accounts: .cn signs in through `passport.modelscope.cn`
+  (Alibaba's sign-in); .ai has no passport host and offers email, GitHub,
+  Google and "pcl", and no way in with a .cn account.
+- Registering an app needs a .cn account: the form is
+  `/my/settings/apps` ("OAuth互联应用"), and its API,
+  `/api/v1/oauth/apps`, answers "当前操作需要登录" without a session.
+- The same test HD5 sets: the scope list, public at
+  `/api/v1/console/config/list/business/OAuth`, is identical on both sites
+  and includes `api-inference`; the form carries "用户可以通过ModelScope OAuth 授权您的应用获得用户相关的魔搭权限", the
+  original of the invitation HD13 quotes from .ai.
+- The built-in browser's site permissions block modelscope.cn, so the form
+  was read from the site's own bundle and public endpoints with curl.
+
+### What the owner chose
+
+- Build now, with the client id empty, rather than wait for the .cn app.
+- A callback path of its own, `/oauth/modelscope-cn/callback`, over one
+  shared path with the site bound to the state.
+
+### What was built
+
+- `deploy/hosted/sign_in.py`: a `Site` per ModelScope site -- name, label,
+  origin, the project's app id ("" for .cn until registered), the id and
+  secret variables, the callback path -- and `ModelScopeSignIn` takes one;
+  every word it shows or logs names its own site and command. `offered()`
+  builds each site this deployment has an id, a secret and a public URL
+  for.
+- `deploy/hosted/app.py`: `take_secrets()` takes every site's secret out of
+  the environment first, as `take_secret()` took one.
+- `deploy/hosted/supervisor.py`: `sign_ins` by site name. A start packet
+  names its site and must be one this bridge offers; starting one drops any
+  flow the session had open on the other, and a code goes to the site last
+  started. A cancel and a closed tab drop both. The session is told every
+  offered name, sorted.
+- `deploy/hosted/web.py`: a callback route per site, each answering only
+  with its own site's flows; the landing page has a line per site.
+- `security/hosted.py`, `core/connect.py`, `tui/app.py`: `modelscope-cn`
+  is a bridge sign-in name, its preset signs in where its bridge can, its
+  revoke page is .cn's `/my/settings/apps`, and the consent line, the
+  messages and the unanswered-sign-in error name the site and command the
+  session asked for. A local install still takes a pasted .cn key.
+
+### What the owner does to switch it on
+
+1. Register an app on modelscope.cn (a .cn account), with the scopes
+   `openid api-inference` and both callbacks:
+   `https://<space host>/oauth/modelscope-cn/callback` and
+   `https://venastine-research-venastineharnessdemo.ms.fun/oauth/modelscope-cn/callback`.
+2. Set its secret as the platform secret
+   `VENASTINE_MODELSCOPE_CN_CLIENT_SECRET` on both deployments.
+3. Send the client id, to go into `MODELSCOPE_CN` in sign_in.py (or set
+   `VENASTINE_MODELSCOPE_CN_CLIENT_ID` meanwhile).
+
+### Not yet measured
+
+.cn's token endpoint's answers, held to .ai's reading since it runs the same
+server; whether .cn's API-Inference needs the account linked to Alibaba
+Cloud first, as secondary guides say; and the `modelscope-cn` preset's
+streaming usage, which stays off until measured.
+
+### Verified
+
+- Full suite 8063 -> 8094 (`test_hosted_sign_in.py` 33 -> 43,
+  `test_hosted_bridge.py` 74 -> 86, `test_hosted_mode.py` 80 -> 89): 8027
+  passed, 67 skipped on Windows.
+- Mutations: 22 of 22 killed on an export copy -- among them a code sent to
+  the first site rather than the one started, the other site's flow left
+  open on a start, a cancel or a closed tab, every callback path answering
+  with .ai's flows, every site built with .ai's secret or trading at .ai's
+  token endpoint, the secrets read rather than taken out, and the session
+  asking for .ai whatever was typed.
+- ruff clean; bandit 0 new and no pair grew; gitleaks found no leaks; both
+  deploy dry runs clean.

@@ -571,9 +571,19 @@ CONSENT = "https://www.modelscope.ai/oauth/authorize?client_id=c&state=s"
 REVOKE = "https://www.modelscope.ai/my/settings/apps"
 
 
+CN_CONSENT = "https://www.modelscope.cn/oauth/authorize?client_id=c&state=s"
+CN_REVOKE = "https://www.modelscope.cn/my/settings/apps"
+
+
 @pytest.fixture
 def offered(monkeypatch):
     monkeypatch.setattr(hosted, "BRIDGE_SIGN_INS", frozenset({"modelscope"}))
+
+
+@pytest.fixture
+def offered_cn(monkeypatch):
+    """A bridge with only modelscope.cn's app (batch 176)."""
+    monkeypatch.setattr(hosted, "BRIDGE_SIGN_INS", frozenset({"modelscope-cn"}))
 
 
 @pytest.fixture
@@ -600,8 +610,12 @@ class TestTheBridgeOffersASignIn:
     @pytest.mark.parametrize("mode, raw, expected", [
         (hosted.SHARED, "modelscope", {"modelscope"}),
         (hosted.SINGLE_USER, " ModelScope ,nonsense", {"modelscope"}),
+        (hosted.SHARED, "modelscope,modelscope-cn", {"modelscope",
+                                                     "modelscope-cn"}),
+        (hosted.SHARED, "modelscope-cn", {"modelscope-cn"}),
         (hosted.SHARED, "", set()),
         (hosted.OFF, "modelscope", set()),
+        (hosted.OFF, "modelscope-cn", set()),
     ])
     def test_only_a_hosted_session_takes_it_and_only_known_names(
             self, monkeypatch, mode, raw, expected):
@@ -610,6 +624,23 @@ class TestTheBridgeOffersASignIn:
         monkeypatch.setattr(hosted, "MODE", mode)
         monkeypatch.setenv("VENASTINE_BRIDGE_SIGN_IN", raw)
         assert hosted._bridge_sign_ins_from_env() == expected
+
+    def test_the_names_it_knows_are_the_bridges_sites(self):
+        """security/ does not import deploy/, so the two lists are held
+        together here: a site the bridge offers that a session did not know
+        would never be offered, and the reverse could never finish."""
+        from deploy.hosted.sign_in import SITES
+
+        assert hosted.BRIDGE_SIGN_IN_NAMES == {site.name for site in SITES}
+
+    def test_every_sign_in_has_a_revoke_page(self):
+        """The banner names one for each sign-in it offers, so a missing
+        entry would be a KeyError the moment a deployment offered it."""
+        from core import connect as model_connect
+        from tui.app import _REVOKE_PAGES
+
+        assert {p.sign_in for p in model_connect.PRESETS.values()
+                if p.sign_in} == set(_REVOKE_PAGES)
 
     def test_a_dotenv_cannot_set_it(self, tmp_path, monkeypatch):
         import env_secrets
@@ -836,4 +867,94 @@ class TestTheModelScopeSignInTui:
             text = app._transcript.as_text()
         assert "not running under one" in text
         assert app._connect_wait is None
+
+
+class TestTheModelScopeCnSignInTui:
+    """Batch 176: modelscope.cn's sign-in, its own command, consent page,
+    revoke page and stored provider, offered only where its bridge has
+    that site's app."""
+
+    @pytest.mark.asyncio
+    async def test_a_bridge_with_only_cn_offers_cn_alone(
+            self, shared, offered_cn, providers_file, bridge):
+        from tui.app import VenastineApp, _cmd_connect
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test():
+            banner = app._transcript.as_text()
+            _cmd_connect(app, "")
+            listed = app._transcript.as_text()
+            _cmd_connect(app, "modelscope")
+            refused = app._transcript.as_text()
+        assert "/connect modelscope-cn" in banner and CN_REVOKE in banner
+        assert REVOKE not in banner
+        assert "ModelScope API-Inference (modelscope.cn) — sign in" in listed
+        assert "does not take pasted keys" in refused
+        assert bridge == []
+
+    @pytest.mark.asyncio
+    async def test_the_bridge_signs_in_to_cn_and_the_token_stays_in_memory(
+            self, shared, offered_cn, providers_file, bridge, opened):
+        from tui.app import VenastineApp, _cmd_connect
+        from tui.hosted_driver import BridgeCredential, BridgeSignInUrl
+        from tui.screens import SecretScreen
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            _cmd_connect(app, "modelscope-cn")
+            request = app._connect_wait.request
+            assert bridge == [{"type": "venastine_sign_in",
+                               "provider": "modelscope-cn", "id": request}]
+            app.post_message(BridgeSignInUrl(request, CN_CONSENT))
+            assert await settle(pilot, lambda: isinstance(app.screen,
+                                                          SecretScreen))
+            app.screen.dismiss("handle-1")
+            assert await settle(pilot, lambda: len(bridge) == 2)
+            app.post_message(BridgeCredential(request, FAKE_MS_TOKEN))
+            assert await settle(pilot, lambda: app._connect_wait is None)
+            text = app._transcript.as_text()
+        assert opened == [CN_CONSENT]
+        assert "Sign in to ModelScope API-Inference (modelscope.cn)" in text
+        assert CN_REVOKE in text and REVOKE not in text
+        assert credentials.load_provider_data()["MODELSCOPE_CN"]["API_KEY"] \
+            == FAKE_MS_TOKEN
+        assert "MODELSCOPE" not in credentials.load_provider_data()
+        assert not providers_file.exists()
+        assert FAKE_MS_TOKEN not in text
+
+    @pytest.mark.asyncio
+    async def test_an_unanswered_cn_sign_in_names_its_own_command(
+            self, shared, offered_cn, providers_file, bridge, opened,
+            monkeypatch):
+        import tui.app as tui_app
+        from tui.hosted_driver import BridgeSignInUrl
+        from tui.screens import SecretScreen
+
+        monkeypatch.setattr(tui_app, "_BRIDGE_ANSWER_S", 0.2)
+        app = tui_app.VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            tui_app._cmd_connect(app, "modelscope-cn")
+            request = app._connect_wait.request
+            app.post_message(BridgeSignInUrl(request, CN_CONSENT))
+            assert await settle(pilot, lambda: isinstance(app.screen,
+                                                          SecretScreen))
+            app.screen.dismiss("handle-1")
+            assert await settle(pilot, lambda: app._connect_wait is None)
+            text = app._transcript.as_text()
+        assert "Run /connect modelscope-cn again." in text
+
+    @pytest.mark.asyncio
+    async def test_a_local_install_still_takes_a_cn_key(self, providers_file,
+                                                         monkeypatch):
+        """No bridge, no sign-in: /connect modelscope-cn asks for a key, as
+        it always did (HD13)."""
+        from tui.app import VenastineApp, _cmd_connect
+        from tui.screens import SecretScreen
+
+        monkeypatch.setattr(hosted, "BRIDGE_SIGN_INS", frozenset())
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            _cmd_connect(app, "modelscope-cn")
+            assert await settle(pilot, lambda: isinstance(app.screen,
+                                                          SecretScreen))
 

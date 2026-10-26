@@ -23,15 +23,18 @@ third-party app explicit permission:
     Connected App) says "Users can authorize your application through
     ModelScope OAuth to obtain ModelScope-related permissions associated with
     the user" and offers the scope `api-inference` ("Invoke API Inference").
+    modelscope.cn's form says the same in its original Chinese and offers the
+    same scope (read 2026-10-26); it is a separate site with separate
+    accounts, so it is a sign-in of its own (batch 176).
 
 Hugging Face's and OpenRouter's flows need no server of ours to receive a
 redirect, which is why both work the same in a local terminal and in a
 browser tab. ModelScope's does not work that way: its token endpoint takes
 only a confidential client (`client_secret_basic` / `client_secret_post` in
-its discovery document, read 2026-10-22), so only a hosted bridge, which can
-keep the secret, completes it -- `deploy/hosted/sign_in.py` -- and a local
-install connects ModelScope with a pasted key. Everything else is a pasted
-key everywhere.
+its discovery document, read 2026-10-22, and the same on modelscope.cn), so
+only a hosted bridge, which can keep the secret, completes it --
+`deploy/hosted/sign_in.py` -- and a local install connects either ModelScope
+site with a pasted key. Everything else is a pasted key everywhere.
 
 NO HTTP LIBRARY IS IMPORTED AT MODULE SCOPE. Every network call goes through a
 `post` callable the caller may replace, and the default imports `httpx` when
@@ -88,8 +91,8 @@ class Preset:
     `default_model` is switched to after connecting when it is set, and left
     alone when it is not -- a guessed model name is a 404 on the first turn.
     `sign_in` names the OAuth flow, or None where only a pasted key works;
-    `modelscope`'s is completed by a hosted bridge, so it is offered only
-    where the session's bridge says it can (security/hosted.py).
+    the two ModelScope sites' are completed by a hosted bridge, so each is
+    offered only where the session's bridge says it can (security/hosted.py).
     """
 
     name: str
@@ -131,6 +134,7 @@ PRESETS: dict[str, Preset] = {p.name: p for p in (
     Preset("modelscope-cn", "MODELSCOPE_CN",
            "ModelScope API-Inference (modelscope.cn)",
            "https://api-inference.modelscope.cn/v1", True, False,
+           sign_in="modelscope-cn",
            key_url="https://modelscope.cn/my/myaccesstoken"),
     Preset("openai", "OPENAI", "OpenAI", "https://api.openai.com/v1",
            True, True, key_url="https://platform.openai.com/api-keys"),

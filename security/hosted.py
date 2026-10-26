@@ -73,12 +73,15 @@ MODE = _mode_from_env()
 # Bound at import for MODE's reason. Only a value the bridge set counts.
 CONFINEMENT = os.environ.get("VENASTINE_CONFINEMENT", "").strip()
 
-# HD13. The sign-ins the BRIDGE completes for this session -- today only
-# ModelScope's, whose app needs a client secret that only the bridge holds.
-# Bound at import for MODE's reason, and honoured only in a hosted session:
-# the bridge sets it when it can finish the sign-in, and a local install has
-# no bridge to finish it, however this variable reads.
-BRIDGE_SIGN_IN_NAMES = frozenset({"modelscope"})
+# HD13. The sign-ins the BRIDGE completes for this session -- ModelScope's,
+# on modelscope.ai and on modelscope.cn (batch 176), whose apps each need a
+# client secret that only the bridge holds. The names are
+# deploy/hosted/sign_in.py's SITES, which this layer does not import;
+# test_hosted_mode.py holds the two together. Bound at import for MODE's
+# reason, and honoured only in a hosted session: the bridge sets it when it
+# can finish the sign-in, and a local install has no bridge to finish it,
+# however this variable reads.
+BRIDGE_SIGN_IN_NAMES = frozenset({"modelscope", "modelscope-cn"})
 
 
 def _bridge_sign_ins_from_env() -> frozenset:
