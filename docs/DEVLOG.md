@@ -27039,3 +27039,19 @@ fail on the first run's handling, none on the fix). The probe also kept the
 value of an opaque `x-codex-turn-state` response header in its scratch
 results; that value is not in the repository, and the fixed probe records
 its length only. A second run is owed before slice 2.
+
+## Batch 182 -- §83 slice 0, second run: what the plan route returns (2026-10-26)
+
+**Recorded, not built.** The owner ran the fixed probe, and every admitted
+request streamed to completion. Function tools work, two calls in parallel
+and their results handed back with item ids, despite the model list's
+`code_mode_only`. Usage arrives on `response.completed`. The route accepts
+efforts low to max and refuses `ultra`, though the model list offers it.
+Encrypted reasoning arrives without being asked for. A system item was
+accepted and obeyed, against OpenAI's preview-limitations page.
+`earliest_refresh_at` is advice about six minutes before expiry, not a
+floor. A reused refresh token was accepted again.
+
+The image result is recorded as one sample: a solid red 8x8 PNG, verified
+red, was delivered and called "Peach", so CG7 keeps images off until a real
+image is tried. The usage-settings address is still owed by the owner.

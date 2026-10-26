@@ -43,7 +43,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
-- **§83. A ChatGPT plan, spent in a local install** - **(NOT BUILT: decided with the owner in batch 180; slice 0's first run, batch 181, measured the sign-in, the refresh, the revocation and every refusal, and a second run is owed for what the admitted requests returned)** (OpenAI's Sign in with ChatGPT now invites open-source apps that run locally to spend a Plus or Pro subscriber's plan, the first provider since ModelScope to pass HD5's test; the harness has no Responses API path, no loopback listener, no credential that refreshes itself, and no way to sign out of anything)
+- **§83. A ChatGPT plan, spent in a local install** - **(NOT BUILT: decided with the owner in batch 180; slice 0 measured on the owner's account in batches 181 and 182, with only the usage-settings address still owed; slices 1 and 2 not built)** (OpenAI's Sign in with ChatGPT now invites open-source apps that run locally to spend a Plus or Pro subscriber's plan, the first provider since ModelScope to pass HD5's test; the harness has no Responses API path, no loopback listener, no credential that refreshes itself, and no way to sign out of anything)
 - **§82. Gemini 3's thought signatures, and a pin that could not carry them** - **(BUILT in batch 172)** (every model a new Google account can call is Gemini 3, which refuses a function call replayed without the signature it came with, and google-genai 1.0.0 had no field to hold one, so every GOOGLE tool loop failed on its second request. The pin moves to 2.29.0, each call's signature rides in §44's reasoning record, a turn another model wrote gets Google's placeholder, and the Schema keys sent are a verified list since 2.29.0's Vertex-only `additional_properties` was refused. Google effort is on as a consequence)
 - **§81. An image a tool reads, delivered to a model that can see it** - **(BUILT in batch 171; Google added in batch 173)** (nothing a model could read from the workspace reached it as anything but text: a tool result was `str(result)`, `read` decoded bytes with `errors="replace"`, and MCP dropped image blocks by decision. `view_image` attaches an image to its own result through the memory, into a new column, never through the redactor; Anthropic carries it inside the `tool_result`, the OpenAI-compatible wire in a harness message after the tool batch because its tool messages take text only, and since batch 173 Google in a harness turn after the batch too, because its function responses take no image on the models a new account can call (a GIF stays a note there); opt-in per provider with `accepts_images`, never in a research pass, and counted at a fixed weight by the compactor)
 - **§80. The copyright year, kept by a workflow** - **(BUILT in batch 169)** (the owner asked not to have to remember it: LICENSE's appendix and NOTICE both said `Copyright 2026`, and nothing would move either; a workflow at 23:59 UTC on December 31, and again on January 1 in case GitHub delayed or dropped that run, writes a range from the first year to both files together; LY1-LY3)
@@ -2866,6 +2866,66 @@ what usage the stream reports. The probe is fixed and checked against a
 fake that omits the header the same way; it now also tries `max` and
 `ultra` and records where `earliest_refresh_at` points. A second run is owed
 before slice 2, and so is the address of ChatGPT's usage settings (CG8).
+
+### Slice 0, second run (2026-10-26, batch 182)
+
+The owner ran the fixed probe: 29 steps on `gpt-6.1-sol`, signed out at the
+end, and again the guard withheld nothing. Every request OpenAI admitted
+streamed to `response.completed`, so the first run's gap is closed. Each
+request took three to nine seconds.
+
+**MEASURED:**
+
+- **The stream is the Responses stream, with two additions and no
+  `Content-Type`.** Both runs streamed without the header. The events are the
+  documented ones plus `response.metadata`, and a message item carries a
+  `phase` key the documentation does not describe. A translation has to
+  ignore an event or a key it does not know, not fail on it.
+- **Usage arrives on `response.completed`:** `input_tokens`, `output_tokens`,
+  `total_tokens`, cached and cache-write counts, reasoning tokens, and an
+  `attribution` breakdown by item id that nothing here needs.
+- **Function tools work, whatever `tool_mode: code_mode_only` means.** One
+  request asking for two cities got two `get_weather` calls in one response.
+  The calls, handed back verbatim with their item ids and statuses next to
+  their results, completed the turn, `store: false` notwithstanding. Since
+  that variant worked, the variants without ids were not tried.
+- **A system item was accepted and obeyed**, against the preview-limitations
+  page: the model answered in French as the item told it to. CG3 still sends
+  the system prompt as `instructions`, which also worked; the usage counts
+  it under its own heading.
+- **Efforts for `gpt-6.1-sol` are low, medium, high, xhigh and max.** `max`
+  completed. `ultra`, which the model list offers, is refused as
+  `invalid_value`, and the refusal lists the route's whole vocabulary: none,
+  minimal, low, medium, high, xhigh and max. `none` and `minimal` are
+  refused for this model as in the first run. So the model list's
+  `supported_reasoning_levels` is not the route's answer, and slice 2 must
+  not take it as one.
+- **Encrypted reasoning arrives unasked.** Every response that reasoned
+  carried a `reasoning` item with `encrypted_content` of about 1.7 to 2 KB,
+  without `include`, and with an empty summary. An `include` of
+  `reasoning.encrypted_content` is accepted too. Whether to hand it back on
+  later turns is slice 2's question under §44's record.
+- **An image is delivered and was misread once.** A data-URL `input_image`
+  was accepted, and the model named a colour, so it saw something. The
+  image was a solid red 8x8 PNG, checked red pixel by pixel, and the model
+  called it "Peach". One swatch shows delivery and says nothing about how
+  well a real image is read, so CG7 keeps images off until one is tried.
+- **`max_output_tokens` is accepted** (64, on a two-word answer).
+- **`earliest_refresh_at` is epoch seconds, about 3,240 seconds after
+  issue** -- some six minutes before the hour runs out. It is advice and not
+  a floor: a refresh about two minutes after sign-in succeeded in both runs.
+  Slice 1 refreshes after it and before expiry, which is CG4's window.
+- **A reused refresh token was accepted again**, immediately, with the newest
+  tokens still working afterwards, as in the first run.
+- **After revocation the access token is refused** with 401 `token_revoked`,
+  in the standard error shape this time, where the first run got
+  `invalid_token` in the `{"detail": ...}` shape. Either has to read as
+  "signed out".
+- **No rate-limit headers in either run.** The `x-codex-*` headers repeat,
+  naming `gpt-6-luna` as a "faster model" for safety buffering.
+
+**STILL OWED:** the address of ChatGPT's usage settings, for CG8's Manage
+usage link. With that, slice 0 is complete.
 
 ### Slices
 
