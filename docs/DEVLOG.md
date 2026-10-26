@@ -26912,3 +26912,39 @@ settings are on.
   was re-run with the right one and killed.
 - ruff clean; bandit 0 new and no pair grew; gitleaks found no leaks; both
   deploy dry runs clean.
+
+---
+## Batch 178 -- discovery documents are always read over https (2026-10-26)
+
+**ROADMAP_v3 §79, HD13 amended; the owner's call.** The first live start
+of f2b1952 with the Studio's OAuth settings on -- after the owner cleared an
+"app name already exists" refusal when saving them -- logged everything
+batch 177 meant to: `SYSTEM=spaces removed`, the .ai sign-in offered through
+the Studio's own app returning to `/auth/callback`, and the hand-registered
+secret named as unused. It also logged the discovery request as
+`GET http://www.modelscope.ai/.well-known/openid-configuration`: the Studio
+injects `OPENID_PROVIDER_URL` as plain http, so the document was read in
+the clear. Its issuer and endpoints were still https on www.modelscope.ai,
+and those checks hold, but a document read in the clear could be rewritten
+on the way.
+
+### What was built
+
+`discover()` now reads every document over https whatever scheme its
+provider names, and refuses a provider that is not an http or https address
+with a host. The Studio tests use the provider as measured, `http://`.
+
+### Verified
+
+- Full suite 8122 -> 8129 (`test_hosted_sign_in.py` 67 -> 74):
+  8062 passed, 67 skipped on Windows.
+- Mutations: 4 of 4 killed -- the document read with the provider's own
+  scheme (twice: in discover's tests and through the bridge's Studio
+  test), and a provider of any scheme or with no host read.
+- ruff clean; bandit 0 new and no pair grew; gitleaks found no leaks; both
+  deploy dry runs clean.
+
+### Still to try
+
+A real sign-in on the Studio, to see the platform's app accept
+`/auth/callback`.

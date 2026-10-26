@@ -1230,13 +1230,15 @@ class TestWhatTheBridgeOffers:
             .supervisor.sign_ins == {}
         assert documents == []
 
-    def test_a_studio_with_oauth_on_signs_in_through_its_own_app(self,
-                                                                 tmp_path):
+    def test_a_studio_with_oauth_on_signs_in_through_its_own_app(
+            self, tmp_path, documents):
         """Batch 177. The .ai sign-in returns to /auth/callback on the
-        Studio's host, and that host is one the bridge answers for."""
+        Studio's host, and that host is one the bridge answers for. Batch
+        178: the provider is injected as plain http, as measured on the
+        Studio, and its document is still read over https."""
         env = {"OAUTH_CLIENT_ID": "studio-app",
                "OAUTH_SCOPES": "openid api-inference",
-               "OPENID_PROVIDER_URL": "https://www.modelscope.ai",
+               "OPENID_PROVIDER_URL": "http://www.modelscope.ai",
                "STUDIO_HOST": "owner-demo.ms.fun", "STUDIO_ID": "owner/demo"}
         bridge = web.build_bridge(env=env, root=tmp_path, sign_in_secrets={
             sign_in.STUDIO_SECRET_ENV: MS_SECRET})
@@ -1244,6 +1246,8 @@ class TestWhatTheBridgeOffers:
         assert flow.studio_app is True
         assert flow.redirect_uri == "https://owner-demo.ms.fun/auth/callback"
         assert "owner-demo.ms.fun" in bridge.allowed_hosts
+        assert documents == [
+            "https://www.modelscope.ai/.well-known/openid-configuration"]
 
 
 class TestTheBridgeKeepsItsSecret:

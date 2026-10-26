@@ -495,6 +495,27 @@ class TestDiscovery:
             "https://www.modelscope.ai/oauth/authorize",
             "https://www.modelscope.ai/oauth/token")
 
+    @pytest.mark.parametrize("provider", ["http://www.modelscope.ai",
+                                          "http://www.modelscope.ai/",
+                                          "https://www.modelscope.ai"])
+    def test_it_is_always_read_over_https(self, provider):
+        """Batch 178: ModelScope's Studio OAuth injects the provider as
+        http://www.modelscope.ai (measured on the Studio), and a document
+        read in the clear could be rewritten on the way; it is read over
+        https all the same."""
+        asked = []
+        sign_in.discover(provider, lambda url: asked.append(url) or self._doc())
+        assert asked == [self.URL]
+
+    @pytest.mark.parametrize("provider", ["ftp://www.modelscope.ai",
+                                          "www.modelscope.ai", "https://", ""])
+    def test_a_provider_that_is_no_web_address_is_refused(self, provider):
+        asked = []
+        with pytest.raises(SignInError, match="not a web address"):
+            sign_in.discover(provider,
+                             lambda url: asked.append(url) or self._doc())
+        assert asked == []
+
     def test_it_is_read_from_the_well_known_path(self):
         asked = []
         sign_in.discover("https://www.modelscope.ai",
@@ -526,17 +547,23 @@ class TestTheStudiosOwnApp:
     the app ModelScope's Studio OAuth creates and injects signs in to the
     site its provider is, in place of the one registered by hand."""
 
+    # The provider as the Studio's OAuth settings inject it, measured on the
+    # Studio on 2026-10-26: plain http.
     STUDIO = {"OAUTH_CLIENT_ID": "studio-app",
               "OAUTH_SCOPES": "openid profile api-inference",
-              "OPENID_PROVIDER_URL": "https://www.modelscope.ai",
+              "OPENID_PROVIDER_URL": "http://www.modelscope.ai",
               "STUDIO_HOST": "owner-demo.ms.fun",
               "VENASTINE_PUBLIC_URL": "https://owner-demo.ms.fun",
               "STUDIO_ID": "owner/demo"}
     STUDIO_SECRET = "studio-secret-" + "9e2a" * 6
 
     def test_it_signs_in_through_the_injected_app(self):
+        documents = Documents()
         flow = ModelScopeSignIn.from_studio(self.STUDIO, self.STUDIO_SECRET,
-                                            get=Documents())
+                                            get=documents)
+        # Read over https although the provider was injected as http.
+        assert documents.asked == [
+            "https://www.modelscope.ai/.well-known/openid-configuration"]
         assert flow.site is MODELSCOPE and flow.studio_app is True
         assert flow.client_id == "studio-app"
         assert flow.redirect_uri == "https://owner-demo.ms.fun/auth/callback"

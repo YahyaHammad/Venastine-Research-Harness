@@ -171,8 +171,18 @@ def discover(provider: str, get: Get = _get_json) -> Endpoints:
     """A provider's endpoints from its discovery document, or SignInError
     naming what is wrong with it. Both endpoints must be https on the
     issuer's own host, and the token endpoint must take the secret in the
-    request body, which is how `exchange` sends it."""
-    url = f"{provider.rstrip('/')}/.well-known/openid-configuration"
+    request body, which is how `exchange` sends it.
+
+    The document is always read over https, whatever scheme `provider`
+    names: ModelScope's Studio OAuth injects `OPENID_PROVIDER_URL` as
+    `http://www.modelscope.ai` (measured on the Studio, 2026-10-26), and a
+    document read in the clear could be rewritten on the way (batch 178).
+    """
+    parts = urlsplit(provider)
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        raise SignInError(f"{provider} is not a web address")
+    url = (f"https://{parts.netloc}{parts.path.rstrip('/')}"
+           f"/.well-known/openid-configuration")
     doc = get(url)
     issuer = doc.get("issuer")
     if not isinstance(issuer, str) or urlsplit(issuer).scheme != "https":
