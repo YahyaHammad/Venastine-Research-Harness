@@ -3612,17 +3612,21 @@ class TestEveryAskWiresItsTruthfulLines:
 
 def _modal_cases():
     """(name, screen factory, dialog id), one per ModalScreen subclass in
-    tui/screens.py -- this table SHADOWS those constructors, so adding a
-    tenth screen means adding a row here. The sign-off appears twice: its
-    empty-candidates branch composes the permission dialog, its populated
-    branch the grant one."""
+    the app -- this table SHADOWS those constructors, so a new screen needs
+    a row here, and test_the_table_has_a_row_for_every_modal_screen fails
+    until it has one. The sign-off appears twice: its empty-candidates
+    branch composes the permission dialog, its populated branch the grant
+    one."""
     from tui.screens import (
+        AgentPickerScreen,
         ClaimsScreen,
         ConfirmScreen,
         GrantPickerScreen,
         ProjectKindScreen,
         QuestionScreen,
         ReviewScreen,
+        SecretScreen,
+        SessionKillScreen,
         SubagentSignoffScreen,
         ThreadPickerScreen,
     )
@@ -3657,13 +3661,63 @@ def _modal_cases():
          "#permission-dialog"),
         ("thread-picker", lambda: ThreadPickerScreen([], ""),
          "#thread-dialog"),
+        ("agent-picker", lambda: AgentPickerScreen([]),
+         "#agent-picker-dialog"),
+        ("session-kill", lambda: SessionKillScreen([]),
+         "#session-kill-dialog"),
+        ("secret", lambda: SecretScreen("Unlock the secrets store"),
+         "#permission-dialog"),
     ]
+
+
+def _modal_screen_classes():
+    """Every ModalScreen subclass this app defines, wherever it lives.
+
+    Walked from `ModalScreen.__subclasses__()` after importing the app, so a
+    modal declared outside tui/screens.py is found too. Textual's own modals
+    (the command palette is one) are left out by module.
+    """
+    from textual.screen import ModalScreen
+
+    import tui.app  # noqa: F401 -- defines or imports every screen
+
+    found, pending = set(), [ModalScreen]
+    while pending:
+        for cls in pending.pop().__subclasses__():
+            pending.append(cls)
+            if cls.__module__.split(".")[0] == "tui":
+                found.add(cls)
+    return found
 
 
 class TestEveryModalIsStyledCentredAndFits:
     """#112. Every modal at its smallest: styled, centred, and inside an
     80x24 terminal.
     """
+
+    def test_the_table_has_a_row_for_every_modal_screen(self):
+        """Batch 179. The sweep below only sees the screens `_modal_cases()`
+        lists, and since September three were missing: the run picker, the
+        kill picker, and `SecretScreen` -- the last with no `align` rule, so
+        every masked prompt (an API key, the secrets store's passphrase, the
+        hosted sign-in's code) opened in the top-left corner. Nothing went
+        red, because the table's docstring was the only thing asking for a
+        row. This makes the table answer to the screens instead.
+
+        Both directions, because "nothing is missing" is also what a walk
+        that found no screens at all would report."""
+        defined = _modal_screen_classes()
+        listed = {type(make()) for _name, make, _dialog in _modal_cases()}
+        missing = sorted(cls.__name__ for cls in defined - listed)
+        unseen = sorted(cls.__name__ for cls in listed - defined)
+
+        assert not missing, (
+            f"{', '.join(missing)} has no row in _modal_cases(), so nothing "
+            f"checks that it is centred, bounded and styled (#112)")
+        assert not unseen, (
+            f"the walk did not find {', '.join(unseen)}, which the table "
+            f"lists -- it is looking in the wrong place, and a screen it "
+            f"cannot see is a screen it cannot ask a row for")
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("name,make_screen,dialog_id", _modal_cases(),
@@ -3776,6 +3830,12 @@ _NOTICE = ("SANDBOXED: not a read-only command -- it can run code, so it runs "
 _REASON = ("Checking the sandbox mount table to answer the user question "
            "about whether the host workspace path is visible from inside "
            "the container.")
+# The hosted sign-in's fallback link, at the length a real one has: the
+# state alone is 43 characters, so the link wraps over several rows.
+_SIGN_IN_URL = ("https://www.modelscope.ai/oauth/authorize?client_id="
+                "00000000-0000-4000-8000-000000000000&redirect_uri=https%3A%2F"
+                "%2Fexample-studio.ms.fun%2Fauth%2Fcallback&response_type=code"
+                "&scope=openid+api-inference&state=" + "s" * 43)
 
 
 def _overflowing_modal_cases():
@@ -3786,6 +3846,7 @@ def _overflowing_modal_cases():
         GrantPickerScreen,
         QuestionScreen,
         ReviewScreen,
+        SecretScreen,
         SubagentSignoffScreen,
     )
 
@@ -3836,6 +3897,11 @@ def _overflowing_modal_cases():
          lambda: ConfirmScreen("Write these files?",
                                "\n".join(f"docs/file_{i}.md"
                                           for i in range(30))),
+         "#permission-dialog"),
+        ("secret-sign-in",
+         lambda: SecretScreen("Paste the code the sign-in page showed you",
+                              f"If no page opened: {_SIGN_IN_URL}",
+                              confirm_label="Connect"),
          "#permission-dialog"),
     ]
 

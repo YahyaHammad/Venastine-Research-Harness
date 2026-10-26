@@ -26948,3 +26948,51 @@ with a host. The Studio tests use the provider as measured, `http://`.
 
 A real sign-in on the Studio, to see the platform's app accept
 `/auth/callback`.
+
+## Batch 179 -- the masked prompt opens in the middle, and every modal is in the sweep (2026-10-26)
+
+**#112's rule, which one screen had escaped.** A screenshot from the owner's
+sign-in on the Studio showed "Paste the code the sign-in page showed you"
+pinned to the top-left corner. That prompt is a `SecretScreen`, which is
+every masked prompt the app has -- an API key for `/connect`, the secrets
+store's passphrase, a value for `/secrets`, the hosted sign-in's code -- and
+`SecretScreen` had no `align: center middle` rule. #112 gave every modal
+one; this screen came later (9048427, 2026-09-24) and missed it.
+
+Nothing went red because the #112 sweep only pushes the screens
+`_modal_cases()` lists, and that table shadows the constructors by hand. Its
+docstring asked for a row per new screen, and BREAKING_CHANGES said a tenth
+screen without its rules would go red; nothing enforced either. Three
+screens had no row: `SecretScreen`, the run picker (§47) and the kill
+picker (§49, SS2). The two pickers had their rules and measure centred.
+
+### What was built
+
+- `SecretScreen { align: center middle; }` in tui/app.tcss, beside the
+  other #112 rules, and that block's comment no longer claims the sweep
+  would have caught it.
+- `_modal_cases()` gains `agent-picker`, `session-kill` and `secret`;
+  `_overflowing_modal_cases()` gains `secret-sign-in`, the sign-in prompt
+  with a fallback link as long as a real one.
+- `test_the_table_has_a_row_for_every_modal_screen` walks every
+  `ModalScreen` subclass in a `tui` module (Textual's own, such as the
+  command palette, are left out) and fails on a screen with no row. It
+  also fails on a row whose screen the walk did not find, so a walk that
+  found nothing cannot pass.
+
+### Verified
+
+- Before the fix, the new `secret` row failed: the dialog sat at
+  `Region(x=0, y=0, width=72, height=12)` on 80x24. After it, a probe of
+  the sign-in prompt measured x=4, y=3 at 80x24 and x=52, y=17 at 200x50,
+  the computed centre both times.
+- Full suite 8129 -> 8148 (`test_tui.py` 474 -> 493; the modal sweep's
+  node ids 3 x 19 = 57 -> 3 x 23 = 69): 8081 passed, 67 skipped on
+  Windows. The first full run caught ARCHITECTURE.md's total still at
+  8129. `test_tui.py` and `test_docs_consistency.py` pass again with
+  `AGENT_WORKSPACE` unset.
+- Mutations: 4 of 4 killed -- the align rule removed, the `secret` row
+  removed, the walk narrowed to one module so it finds nothing, and the
+  walk taking Textual's own modals as the app's.
+- ruff clean; bandit 0 new and no pair grew; gitleaks found no leaks;
+  both deploy dry runs build, scan clean and audit clean.
