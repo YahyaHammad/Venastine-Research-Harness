@@ -63,10 +63,41 @@ class Transport:
         return self.answers.pop(0)
 
 
+def _discovery(origin):
+    """A discovery document in the shape both sites publish (read
+    2026-10-22 on modelscope.ai and 2026-10-26 on modelscope.cn)."""
+    return {"issuer": origin,
+            "authorization_endpoint": f"{origin}/oauth/authorize",
+            "token_endpoint": f"{origin}/oauth/token",
+            "token_endpoint_auth_methods_supported": [
+                "client_secret_basic", "client_secret_post"]}
+
+
+class Documents:
+    """A fake `get`: each site's discovery document by URL, a 404 for any
+    other, and every URL asked for."""
+
+    def __init__(self) -> None:
+        self.docs = {f"{s.origin}/.well-known/openid-configuration":
+                     _discovery(s.origin) for s in sign_in.SITES}
+        self.asked: list = []
+
+    def __call__(self, url):
+        self.asked.append(url)
+        if url not in self.docs:
+            raise SignInError(f"could not read {url}: HTTP 404")
+        return self.docs[url]
+
+
+def _endpoints(site):
+    return sign_in.discover(site.origin, Documents())
+
+
 def _sign_in(*answers, clock=None, site=MODELSCOPE):
     transport = Transport(*answers)
     flow = ModelScopeSignIn(site, "client-1", SECRET,
                             "https://demo.example" + site.callback_path,
+                            endpoints=_endpoints(site),
                             post=transport, now=clock or Clock(),
                             token=Tokens())
     return flow, transport
@@ -92,7 +123,8 @@ class TestStarting:
             "state": ["state-1"]}
 
     def test_the_state_is_256_bits_of_randomness(self):
-        flow = ModelScopeSignIn(MODELSCOPE, "c", SECRET, REDIRECT)
+        flow = ModelScopeSignIn(MODELSCOPE, "c", SECRET, REDIRECT,
+                                endpoints=_endpoints(MODELSCOPE))
         states = {parse_qs(urlsplit(flow.start(f"s{i}", "r")).query)
                   ["state"][0] for i in range(20)}
         assert len(states) == 20
@@ -264,12 +296,15 @@ class TestWhatADeploymentOffers:
     def test_everything_present_offers_it_returning_to_this_host(self):
         flow = ModelScopeSignIn.from_env(
             MODELSCOPE, {**self.ENV, MODELSCOPE.client_id_env: "client-9"},
-            SECRET)
+            SECRET, get=Documents())
         assert flow.client_id == "client-9"
         assert flow.redirect_uri == \
             "https://x.hf.space/oauth/modelscope/callback"
+        assert flow.callback_path == "/oauth/modelscope/callback"
+        assert flow.studio_app is False
         # Unless a fork names its own, it is the project's registered app.
-        default = ModelScopeSignIn.from_env(MODELSCOPE, self.ENV, SECRET)
+        default = ModelScopeSignIn.from_env(MODELSCOPE, self.ENV, SECRET,
+                                            get=Documents())
         assert default.client_id == MODELSCOPE.client_id
         assert re.fullmatch(r"[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}",
                             MODELSCOPE.client_id)
@@ -277,8 +312,62 @@ class TestWhatADeploymentOffers:
     def test_modelscope_names_itself(self):
         flow = ModelScopeSignIn.from_env(
             MODELSCOPE, {"VENASTINE_PUBLIC_URL": "https://a.ms.fun/",
-                         MODELSCOPE.client_id_env: "c"}, SECRET)
+                         MODELSCOPE.client_id_env: "c"}, SECRET,
+            get=Documents())
         assert flow.redirect_uri == "https://a.ms.fun/oauth/modelscope/callback"
+
+    def test_its_endpoints_are_read_from_its_own_discovery_document(self):
+        documents = Documents()
+        flow = ModelScopeSignIn.from_env(
+            MODELSCOPE_CN, {**self.ENV, MODELSCOPE_CN.client_id_env: "c"},
+            SECRET, get=documents)
+        assert documents.asked == [
+            "https://www.modelscope.cn/.well-known/openid-configuration"]
+        assert flow.endpoints == sign_in.Endpoints(
+            "https://www.modelscope.cn",
+            "https://www.modelscope.cn/oauth/authorize",
+            "https://www.modelscope.cn/oauth/token")
+
+    def test_the_flow_goes_where_the_document_says(self):
+        """Not where a site's paths usually are: endpoints that moved are
+        followed, which is the point of reading them."""
+        documents = Documents()
+        url = "https://www.modelscope.ai/.well-known/openid-configuration"
+        documents.docs[url] = {
+            **documents.docs[url],
+            "authorization_endpoint": "https://www.modelscope.ai/v2/authorize",
+            "token_endpoint": "https://www.modelscope.ai/v2/token"}
+        transport = Transport((200, {"access_token": TOKEN}))
+        flow = ModelScopeSignIn.from_env(
+            MODELSCOPE, {**self.ENV, MODELSCOPE.client_id_env: "c"}, SECRET,
+            get=documents, post=transport)
+        assert flow.start("s1", "r").startswith(
+            "https://www.modelscope.ai/v2/authorize?")
+        flow.exchange("c")
+        assert transport.requests[0][0] == "https://www.modelscope.ai/v2/token"
+
+    def test_an_unreadable_document_is_not_offered_and_says_why(self, caplog):
+        caplog.set_level(logging.INFO, logger="deploy.hosted.sign_in")
+        documents = Documents()
+        documents.docs.clear()
+        assert ModelScopeSignIn.from_env(
+            MODELSCOPE, {**self.ENV, MODELSCOPE.client_id_env: "c"}, SECRET,
+            get=documents) is None
+        assert "ModelScope sign-in: not offered, could not read" in caplog.text
+        assert SECRET not in caplog.text
+
+    def test_a_document_naming_another_issuer_is_not_offered(self, caplog):
+        """A site's document must be that site's: the .cn document served
+        where .ai's was expected offers nothing."""
+        caplog.set_level(logging.INFO, logger="deploy.hosted.sign_in")
+        documents = Documents()
+        documents.docs[
+            "https://www.modelscope.ai/.well-known/openid-configuration"] = \
+            _discovery("https://www.modelscope.cn")
+        assert ModelScopeSignIn.from_env(
+            MODELSCOPE, {**self.ENV, MODELSCOPE.client_id_env: "c"}, SECRET,
+            get=documents) is None
+        assert "names another issuer" in caplog.text
 
     @pytest.mark.parametrize("site", sign_in.SITES, ids=lambda s: s.name)
     @pytest.mark.parametrize("piece", ["secret", "public URL", "client id"])
@@ -295,21 +384,27 @@ class TestWhatADeploymentOffers:
         else:
             del env[site.client_id_env]
             site, named = site._replace(client_id=""), site.client_id_env
-        assert ModelScopeSignIn.from_env(site, env, secret) is None
+        documents = Documents()
+        assert ModelScopeSignIn.from_env(site, env, secret,
+                                         get=documents) is None
         assert f"{site.label} sign-in: not offered" in caplog.text
         assert named in caplog.text
         assert SECRET not in caplog.text
+        # Nothing is fetched for a sign-in that could not be offered anyway.
+        assert documents.asked == []
 
     def test_without_a_client_id_it_is_not_offered(self):
         assert ModelScopeSignIn.from_env(MODELSCOPE._replace(client_id=""),
-                                         self.ENV, SECRET) is None
+                                         self.ENV, SECRET,
+                                         get=Documents()) is None
 
     def test_the_secret_is_never_read_from_the_environment_here(self):
         """app.py takes it out of the environment before anything starts;
         a value left there is not this function's to find."""
         env = {**self.ENV, MODELSCOPE.client_id_env: "c",
                MODELSCOPE.secret_env: SECRET}
-        assert ModelScopeSignIn.from_env(MODELSCOPE, env) is None
+        assert ModelScopeSignIn.from_env(MODELSCOPE, env,
+                                         get=Documents()) is None
 
 
 class TestTwoSites:
@@ -323,9 +418,7 @@ class TestTwoSites:
         for field in ("origin", "client_id_env", "secret_env",
                       "callback_path"):
             assert getattr(MODELSCOPE, field) != getattr(MODELSCOPE_CN, field)
-        assert MODELSCOPE_CN.authorize_url == \
-            "https://www.modelscope.cn/oauth/authorize"
-        assert MODELSCOPE_CN.token_url == "https://www.modelscope.cn/oauth/token"
+        assert MODELSCOPE_CN.origin == "https://www.modelscope.cn"
         assert MODELSCOPE_CN.callback_path == "/oauth/modelscope-cn/callback"
         assert sign_in.SITE_BY_NAME == {"modelscope": MODELSCOPE,
                                         "modelscope-cn": MODELSCOPE_CN}
@@ -357,7 +450,7 @@ class TestTwoSites:
         site = MODELSCOPE_CN._replace(client_id="")
         flow = ModelScopeSignIn.from_env(
             site, {"SPACE_HOST": "x.hf.space", site.client_id_env: "cn-app"},
-            CN_SECRET)
+            CN_SECRET, get=Documents())
         assert flow.client_id == "cn-app"
         assert flow.redirect_uri == \
             "https://x.hf.space/oauth/modelscope-cn/callback"
@@ -367,9 +460,9 @@ class TestTwoSites:
                MODELSCOPE_CN.client_id_env: "cn"}
         transport = Transport((200, {"access_token": TOKEN}),
                               (200, {"access_token": TOKEN}))
-        offered = sign_in.offered(env, {"modelscope": SECRET,
-                                        "modelscope-cn": CN_SECRET},
-                                  post=transport)
+        offered = sign_in.offered(env, {MODELSCOPE.secret_env: SECRET,
+                                        MODELSCOPE_CN.secret_env: CN_SECRET},
+                                  get=Documents(), post=transport)
         assert set(offered) == {"modelscope", "modelscope-cn"}
         offered["modelscope"].exchange("a")
         offered["modelscope-cn"].exchange("b")
@@ -379,6 +472,157 @@ class TestTwoSites:
 
     def test_one_sites_secret_offers_that_site_alone(self):
         env = {"SPACE_HOST": "x.hf.space", MODELSCOPE_CN.client_id_env: "cn"}
-        assert set(sign_in.offered(env, {"modelscope-cn": CN_SECRET})) == \
-            {"modelscope-cn"}
-        assert sign_in.offered(env, {}) == {}
+        assert set(sign_in.offered(env, {MODELSCOPE_CN.secret_env: CN_SECRET},
+                                   get=Documents())) == {"modelscope-cn"}
+        assert sign_in.offered(env, {}, get=Documents()) == {}
+
+
+class TestDiscovery:
+    """Batch 177, the owner's call: endpoints from each provider's discovery
+    document, read once at start, and refused when they are not what the
+    flow can use."""
+
+    URL = "https://www.modelscope.ai/.well-known/openid-configuration"
+
+    def _doc(self, **changes):
+        doc = {**_discovery("https://www.modelscope.ai"), **changes}
+        return {key: value for key, value in doc.items() if value is not None}
+
+    def test_the_documents_endpoints_are_used(self):
+        assert sign_in.discover("https://www.modelscope.ai/",
+                                lambda url: self._doc()) == sign_in.Endpoints(
+            "https://www.modelscope.ai",
+            "https://www.modelscope.ai/oauth/authorize",
+            "https://www.modelscope.ai/oauth/token")
+
+    def test_it_is_read_from_the_well_known_path(self):
+        asked = []
+        sign_in.discover("https://www.modelscope.ai",
+                         lambda url: asked.append(url) or self._doc())
+        assert asked == [self.URL]
+
+    @pytest.mark.parametrize("changes, named", [
+        ({"issuer": None}, "issuer"),
+        ({"issuer": "http://www.modelscope.ai"}, "issuer"),
+        ({"authorization_endpoint": None}, "authorization_endpoint"),
+        ({"token_endpoint": "http://www.modelscope.ai/oauth/token"},
+         "token_endpoint"),
+        ({"token_endpoint": "https://elsewhere.example/oauth/token"},
+         "token_endpoint"),
+        ({"token_endpoint_auth_methods_supported": ["client_secret_basic"]},
+         "client_secret_post"),
+        # RFC 8414: no list means client_secret_basic alone.
+        ({"token_endpoint_auth_methods_supported": None},
+         "client_secret_post"),
+    ])
+    def test_a_document_the_flow_cannot_use_is_refused(self, changes, named):
+        with pytest.raises(SignInError, match=named):
+            sign_in.discover("https://www.modelscope.ai",
+                             lambda url: self._doc(**changes))
+
+
+class TestTheStudiosOwnApp:
+    """Batch 177, the owner's call: on a Studio whose OAuth settings are on,
+    the app ModelScope's Studio OAuth creates and injects signs in to the
+    site its provider is, in place of the one registered by hand."""
+
+    STUDIO = {"OAUTH_CLIENT_ID": "studio-app",
+              "OAUTH_SCOPES": "openid profile api-inference",
+              "OPENID_PROVIDER_URL": "https://www.modelscope.ai",
+              "STUDIO_HOST": "owner-demo.ms.fun",
+              "VENASTINE_PUBLIC_URL": "https://owner-demo.ms.fun",
+              "STUDIO_ID": "owner/demo"}
+    STUDIO_SECRET = "studio-secret-" + "9e2a" * 6
+
+    def test_it_signs_in_through_the_injected_app(self):
+        flow = ModelScopeSignIn.from_studio(self.STUDIO, self.STUDIO_SECRET,
+                                            get=Documents())
+        assert flow.site is MODELSCOPE and flow.studio_app is True
+        assert flow.client_id == "studio-app"
+        assert flow.redirect_uri == "https://owner-demo.ms.fun/auth/callback"
+        assert flow.callback_path == sign_in.STUDIO_CALLBACK_PATH
+        assert flow.endpoints.token_url == "https://www.modelscope.ai/oauth/token"
+        # The scope asked for is the least the sign-in needs, not every
+        # scope the Studio's settings grant.
+        assert parse_qs(urlsplit(flow.start("s1", "r")).query)["scope"] == \
+            ["openid api-inference"]
+
+    def test_its_trade_carries_the_injected_secret(self):
+        transport = Transport((200, {"access_token": TOKEN}))
+        flow = ModelScopeSignIn.from_studio(self.STUDIO, self.STUDIO_SECRET,
+                                            get=Documents(), post=transport)
+        assert flow.exchange("c") == TOKEN
+        (url, body), = transport.requests
+        assert body["client_id"] == "studio-app"
+        assert body["client_secret"] == self.STUDIO_SECRET
+        assert body["redirect_uri"] == "https://owner-demo.ms.fun/auth/callback"
+
+    def test_a_provider_on_modelscope_cn_is_the_cn_site(self):
+        env = {**self.STUDIO, "OPENID_PROVIDER_URL": "https://www.modelscope.cn"}
+        flow = ModelScopeSignIn.from_studio(env, self.STUDIO_SECRET,
+                                            get=Documents())
+        assert flow.site is MODELSCOPE_CN
+
+    def test_a_provider_that_is_no_modelscope_site_is_refused(self, caplog):
+        caplog.set_level(logging.INFO, logger="deploy.hosted.sign_in")
+        documents = Documents()
+        documents.docs["https://huggingface.co/.well-known/openid-configuration"] \
+            = _discovery("https://huggingface.co")
+        env = {**self.STUDIO, "OPENID_PROVIDER_URL": "https://huggingface.co"}
+        assert ModelScopeSignIn.from_studio(env, self.STUDIO_SECRET,
+                                            get=documents) is None
+        assert "not a ModelScope site" in caplog.text
+
+    def test_settings_without_api_inference_are_refused(self, caplog):
+        caplog.set_level(logging.INFO, logger="deploy.hosted.sign_in")
+        env = {**self.STUDIO, "OAUTH_SCOPES": "openid profile"}
+        assert ModelScopeSignIn.from_studio(env, self.STUDIO_SECRET,
+                                            get=Documents()) is None
+        assert "grant openid profile, not openid and API Inference" \
+            in caplog.text
+
+    @pytest.mark.parametrize("missing", ["OAUTH_CLIENT_SECRET",
+                                         "OPENID_PROVIDER_URL", "STUDIO_HOST"])
+    def test_a_missing_piece_is_named_and_never_a_value(self, caplog, missing):
+        caplog.set_level(logging.INFO, logger="deploy.hosted.sign_in")
+        env = {k: v for k, v in self.STUDIO.items() if k != missing}
+        secret = "" if missing == "OAUTH_CLIENT_SECRET" else self.STUDIO_SECRET
+        assert ModelScopeSignIn.from_studio(env, secret, get=Documents()) is None
+        assert f"Studio OAuth sign-in: not offered, no {missing}" in caplog.text
+        assert self.STUDIO_SECRET not in caplog.text
+
+    def test_without_studio_oauth_it_says_nothing(self, caplog):
+        caplog.set_level(logging.INFO, logger="deploy.hosted.sign_in")
+        documents = Documents()
+        assert ModelScopeSignIn.from_studio({"SPACE_HOST": "x.hf.space"}, "",
+                                            get=documents) is None
+        assert caplog.text == "" and documents.asked == []
+
+    def test_on_a_studio_it_replaces_the_hand_registered_app_for_its_site(
+            self, caplog):
+        """The Studio's .ai sign-in is its own app; modelscope.cn, which
+        that app cannot sign in, keeps the app registered by hand; and the
+        .ai secret set by hand is named as unused, never shown."""
+        caplog.set_level(logging.INFO, logger="deploy.hosted.sign_in")
+        env = {**self.STUDIO, MODELSCOPE_CN.client_id_env: "cn-app"}
+        offered = sign_in.offered(env, {
+            sign_in.STUDIO_SECRET_ENV: self.STUDIO_SECRET,
+            MODELSCOPE.secret_env: SECRET,
+            MODELSCOPE_CN.secret_env: CN_SECRET}, get=Documents())
+        assert offered["modelscope"].studio_app is True
+        assert offered["modelscope"].client_id == "studio-app"
+        assert offered["modelscope-cn"].studio_app is False
+        assert offered["modelscope-cn"].redirect_uri == \
+            "https://owner-demo.ms.fun/oauth/modelscope-cn/callback"
+        assert f"{MODELSCOPE.secret_env} is set and unused" in caplog.text
+        for secret in (SECRET, CN_SECRET, self.STUDIO_SECRET):
+            assert secret not in caplog.text
+
+    def test_off_a_studio_the_hand_registered_app_signs_in(self):
+        """A Hugging Face Space has no Studio OAuth, so it keeps the app
+        the owner registered."""
+        offered = sign_in.offered({"SPACE_HOST": "x.hf.space"},
+                                  {MODELSCOPE.secret_env: SECRET},
+                                  get=Documents())
+        assert offered["modelscope"].studio_app is False
+        assert offered["modelscope"].client_id == MODELSCOPE.client_id

@@ -26824,3 +26824,91 @@ streaming usage, which stays off until measured.
   asking for .ai whatever was typed.
 - ruff clean; bandit 0 new and no pair grew; gitleaks found no leaks; both
   deploy dry runs clean.
+
+---
+## Batch 177 -- the Studio signs in through ModelScope's Studio OAuth (2026-10-26)
+
+**ROADMAP_v3 §79, HD13 amended; the owner's request and choices.** The
+owner asked whether the Studio's sign-in had been wired by hand rather than
+through ModelScope's own Studio OAuth, and if so to pivot to it.
+
+### What was found
+
+- It had been wired by hand: the client id in `sign_in.py` is the app the
+  owner registered on 2026-10-22, its secret reaches the bridge as
+  `VENASTINE_MODELSCOPE_CLIENT_SECRET`, and nothing read what Studio OAuth
+  injects.
+- ModelScope's docs ("Using OAuth in Studios", read 2026-10-26 from its
+  documentation CDN, since the built-in browser blocks modelscope.ai):
+  turning on a Studio's OAuth settings creates an app for it, with the
+  scopes (API Inference among them) and token lifetime chosen there, and
+  injects `OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET`, `OAUTH_SCOPES`,
+  `OPENID_PROVIDER_URL`, `STUDIO_ID` and `STUDIO_HOST`, plus `SYSTEM`,
+  `SPACE_ID` and `SPACE_HOST` for Gradio. Docker Studios are supported. The
+  hand-registered connected app is what the docs prescribe for apps outside
+  a Studio.
+- Gradio 6.30.0's source (read from its tag on GitHub): `SYSTEM=spaces` with
+  a `SPACE_ID` makes `utils.get_space()` true, and then `http_server.py`
+  starts `SpacesReloader` with `watchfn_spaces`, which imports
+  `spaces.reloading` -- the Studio image has `spaces` 0.51.3 -- and
+  `blocks.py` closes `api_open` and turns `pwa` on.
+
+### What the owner chose
+
+- The Studio's own app on the Studio; the Hugging Face Space keeps the
+  hand-registered app; modelscope.cn stays a hand-registered app.
+- The copy-code flow, over the docs' Authlib example.
+- Endpoints from each site's discovery document, read once at start.
+
+### What was built
+
+- `deploy/hosted/sign_in.py`: `discover()` reads a provider's discovery
+  document and refuses one whose endpoints are not https on the issuer's
+  host or whose token endpoint does not take `client_secret_post`.
+  `from_env` reads its site's document and refuses another issuer's.
+  `from_studio` builds the sign-in through the Studio's own app for the site
+  its provider is, only when its scopes grant openid and api-inference,
+  returning to `https://{STUDIO_HOST}/auth/callback`. `offered()` prefers it
+  for its site and logs a hand-registered secret left there as unused.
+  `SECRET_ENVS` adds `OAUTH_CLIENT_SECRET`.
+- `deploy/hosted/app.py`: `take_secrets()` takes every one, keyed by
+  variable; `drop_spaces_flag()` removes `SYSTEM` where `STUDIO_ID` says
+  this is a Studio, logged.
+- `deploy/hosted/web.py`: callback routes by path, `/auth/callback`
+  included, each answered by the offered sign-in whose callback it is; the
+  Studio's host is one the bridge answers for.
+
+### What the owner does to switch it on
+
+1. In the Studio's settings, Adjust deployment settings: turn on OAuth
+   settings with the scopes `openid` and API Inference, and a token
+   lifetime; save, then redeploy.
+2. Confirm in the run log `ModelScope sign-in: offered through this
+   Studio's own app` and `SYSTEM=spaces removed`, then sign in once.
+3. Remove `VENASTINE_MODELSCOPE_CLIENT_SECRET` from the Studio's secrets
+   (the log names it as unused), and the Studio's callback from the
+   hand-registered app, which keeps the Space's.
+
+### Not yet measured
+
+Which callback paths the platform's app accepts -- `/auth/callback` is the
+one its docs show -- and what else the injected variables change, until the
+settings are on.
+
+### Verified
+
+- Full suite 8094 -> 8122 (`test_hosted_sign_in.py` 43 -> 67,
+  `test_hosted_bridge.py` 86 -> 90): 8055 passed, 67 skipped on Windows.
+  A parallel run of the four hosted suites once failed
+  `test_the_raven_is_still_except_during_a_turn[SHARED]`, a test this batch
+  does not touch; it passed three runs of its own and the full suite.
+- Mutations: 20 of 20 killed on an export copy -- among them an endpoint
+  on another host or a document naming another issuer taken, settings
+  without API Inference taken, the Studio's app always .ai's or returning to
+  the hand-registered path, the hand-registered app overriding it, its
+  secret left in the environment, SYSTEM never dropped or dropped on a
+  Space, and the flow going to the usual paths instead of the document's.
+  One row first scored a survivor because its selector matched no test; it
+  was re-run with the right one and killed.
+- ruff clean; bandit 0 new and no pair grew; gitleaks found no leaks; both
+  deploy dry runs clean.

@@ -821,10 +821,30 @@ _GRANTED = (200, {"access_token": MS_TOKEN, "scope": "openid api-inference",
                   "expires_in": 86400})
 
 
-def _flow(*answers, site=sign_in.MODELSCOPE):
+def _endpoints(origin):
+    return sign_in.Endpoints(origin, f"{origin}/oauth/authorize",
+                             f"{origin}/oauth/token")
+
+
+def _documents(url):
+    """A fake discovery `get`: both sites' documents in the shape they
+    publish, and a refusal for anything else."""
+    for site in sign_in.SITES:
+        if url == f"{site.origin}/.well-known/openid-configuration":
+            return {"issuer": site.origin,
+                    "authorization_endpoint": f"{site.origin}/oauth/authorize",
+                    "token_endpoint": f"{site.origin}/oauth/token",
+                    "token_endpoint_auth_methods_supported": [
+                        "client_secret_post"]}
+    raise sign_in.SignInError(f"could not read {url}: HTTP 404")
+
+
+def _flow(*answers, site=sign_in.MODELSCOPE, path=None):
     transport = _Transport(*answers)
     return ModelScopeSignIn(site, "client-1", MS_SECRET,
-                            f"http://testserver{site.callback_path}",
+                            f"http://testserver{path or site.callback_path}",
+                            endpoints=_endpoints(site.origin),
+                            studio_app=path is not None,
                             post=transport), transport
 
 
@@ -890,7 +910,8 @@ class TestASessionsSignInRequests:
         (answer,) = session.sent
         assert answer["type"] == "venastine_sign_in_url"
         assert answer["id"] == "r1"
-        assert answer["url"].startswith(sign_in.MODELSCOPE.authorize_url)
+        assert answer["url"].startswith(
+            "https://www.modelscope.ai/oauth/authorize?")
         assert flow._by_session[session.id].state == _state(answer["url"])
 
     @pytest.mark.asyncio
@@ -1017,11 +1038,27 @@ class TestTheModelScopeCallback:
 
         return TestClient(Starlette(routes=bridge.routes()))
 
-    @pytest.mark.parametrize("site", sign_in.SITES, ids=lambda s: s.name)
-    def test_a_deployment_without_it_has_no_such_page(self, tmp_path, site):
+    @pytest.mark.parametrize("path", web.CALLBACK_PATHS)
+    def test_a_deployment_without_it_has_no_such_page(self, tmp_path, path):
         bridge = web.Bridge(_supervisor(tmp_path))
         with self._client(bridge) as client:
-            assert client.get(site.callback_path).status_code == 404
+            assert client.get(path).status_code == 404
+
+    def test_a_studios_own_app_is_answered_on_its_own_path(self, tmp_path):
+        """Batch 177: the Studio's own app returns to the path ModelScope's
+        Studio OAuth docs give a server-side app, and the hand-registered
+        app's path is no page while it stands in."""
+        flow, _ = _flow(path=sign_in.STUDIO_CALLBACK_PATH)
+        bridge = web.Bridge(_supervisor(tmp_path))
+        bridge.supervisor.sign_ins = {"modelscope": flow}
+        with self._client(bridge) as client:
+            assert client.get(sign_in.MODELSCOPE.callback_path).status_code \
+                == 404
+            page = client.get("/auth/callback", params={
+                "code": "c", "state": _state(flow.start("s1", "r1"))})
+        assert page.status_code == 200
+        assert re.search(r'<p class="handle">[^<]+</p>', page.text)
+        assert "ModelScope sign-in" in page.text
 
     def test_a_forged_state_is_refused_without_repeating_it(self, tmp_path):
         bridge = web.Bridge(_supervisor(tmp_path))
@@ -1145,7 +1182,7 @@ class TestTheModelScopeCallback:
         assert bridge.supervisor.sessions == {}
         assert credential == {"id": "req-1", "token": MS_TOKEN}
         (url, body), = transport.requests
-        assert url == sign_in.MODELSCOPE.token_url
+        assert url == "https://www.modelscope.ai/oauth/token"
         assert body["code"] == "code-C" and body["client_secret"] == MS_SECRET
         assert body["redirect_uri"] == flow.redirect_uri
         assert cn_transport.requests == []
@@ -1158,9 +1195,22 @@ class TestWhatTheBridgeOffers:
     ENV = {"SPACE_HOST": "x.hf.space",
            sign_in.MODELSCOPE_CN.client_id_env: "cn-app"}
 
-    def test_each_site_with_its_pieces_is_offered(self, tmp_path):
+    @pytest.fixture(autouse=True)
+    def documents(self, monkeypatch):
+        """build_bridge reads each discovery document through the module's
+        default `get` (batch 177); here it reads the fake."""
+        asked = []
+        monkeypatch.setattr(sign_in, "_get_json",
+                            lambda url: asked.append(url) or _documents(url))
+        return asked
+
+    def test_each_site_with_its_pieces_is_offered(self, tmp_path, documents):
         bridge = web.build_bridge(env=self.ENV, root=tmp_path, sign_in_secrets={
-            "modelscope": MS_SECRET, "modelscope-cn": MS_CN_SECRET})
+            sign_in.MODELSCOPE.secret_env: MS_SECRET,
+            sign_in.MODELSCOPE_CN.secret_env: MS_CN_SECRET})
+        assert sorted(documents) == [
+            "https://www.modelscope.ai/.well-known/openid-configuration",
+            "https://www.modelscope.cn/.well-known/openid-configuration"]
         offered = bridge.supervisor.sign_ins
         assert set(offered) == {"modelscope", "modelscope-cn"}
         assert offered["modelscope-cn"].client_id == "cn-app"
@@ -1170,13 +1220,30 @@ class TestWhatTheBridgeOffers:
             "https://x.hf.space/oauth/modelscope/callback"
 
     def test_one_sites_secret_offers_that_site_alone(self, tmp_path):
-        bridge = web.build_bridge(env=self.ENV, root=tmp_path,
-                                  sign_in_secrets={"modelscope": MS_SECRET})
+        bridge = web.build_bridge(env=self.ENV, root=tmp_path, sign_in_secrets={
+            sign_in.MODELSCOPE.secret_env: MS_SECRET})
         assert set(bridge.supervisor.sign_ins) == {"modelscope"}
 
-    def test_no_secrets_offer_nothing(self, tmp_path):
+    def test_no_secrets_offer_nothing_and_fetch_nothing(self, tmp_path,
+                                                        documents):
         assert web.build_bridge(env=self.ENV, root=tmp_path) \
             .supervisor.sign_ins == {}
+        assert documents == []
+
+    def test_a_studio_with_oauth_on_signs_in_through_its_own_app(self,
+                                                                 tmp_path):
+        """Batch 177. The .ai sign-in returns to /auth/callback on the
+        Studio's host, and that host is one the bridge answers for."""
+        env = {"OAUTH_CLIENT_ID": "studio-app",
+               "OAUTH_SCOPES": "openid api-inference",
+               "OPENID_PROVIDER_URL": "https://www.modelscope.ai",
+               "STUDIO_HOST": "owner-demo.ms.fun", "STUDIO_ID": "owner/demo"}
+        bridge = web.build_bridge(env=env, root=tmp_path, sign_in_secrets={
+            sign_in.STUDIO_SECRET_ENV: MS_SECRET})
+        flow = bridge.supervisor.sign_ins["modelscope"]
+        assert flow.studio_app is True
+        assert flow.redirect_uri == "https://owner-demo.ms.fun/auth/callback"
+        assert "owner-demo.ms.fun" in bridge.allowed_hosts
 
 
 class TestTheBridgeKeepsItsSecret:
@@ -1192,18 +1259,38 @@ class TestTheBridgeKeepsItsSecret:
         return app
 
     def test_taking_them_removes_every_one(self, app_module):
+        """The Studio's own app's secret too (batch 177): ModelScope's
+        Studio OAuth injects it into the bridge's environment."""
         environ = {sign_in.MODELSCOPE.secret_env: f" {MS_SECRET}\n",
                    sign_in.MODELSCOPE_CN.secret_env: MS_CN_SECRET,
+                   "OAUTH_CLIENT_SECRET": "studio", "OAUTH_CLIENT_ID": "id",
                    "PATH": "/bin"}
         assert app_module.take_secrets(environ) == {
-            "modelscope": MS_SECRET, "modelscope-cn": MS_CN_SECRET}
-        assert environ == {"PATH": "/bin"}
+            sign_in.MODELSCOPE.secret_env: MS_SECRET,
+            sign_in.MODELSCOPE_CN.secret_env: MS_CN_SECRET,
+            "OAUTH_CLIENT_SECRET": "studio"}
+        assert environ == {"OAUTH_CLIENT_ID": "id", "PATH": "/bin"}
 
-    def test_a_site_without_one_maps_to_nothing(self, app_module):
+    def test_one_not_set_maps_to_nothing(self, app_module):
         environ = {sign_in.MODELSCOPE_CN.secret_env: MS_CN_SECRET}
         assert app_module.take_secrets(environ) == {
-            "modelscope": "", "modelscope-cn": MS_CN_SECRET}
+            sign_in.MODELSCOPE.secret_env: "",
+            sign_in.MODELSCOPE_CN.secret_env: MS_CN_SECRET,
+            "OAUTH_CLIENT_SECRET": ""}
         assert environ == {}
+
+    def test_a_studio_drops_the_spaces_flag_and_a_space_keeps_it(
+            self, app_module):
+        """Batch 177. Studio OAuth sets SYSTEM=spaces for Gradio's own
+        button, which would start Hugging Face's reload watcher here."""
+        studio = {"STUDIO_ID": "owner/demo", "SYSTEM": "spaces",
+                  "SPACE_ID": "owner/demo"}
+        assert app_module.drop_spaces_flag(studio) is True
+        assert studio == {"STUDIO_ID": "owner/demo", "SPACE_ID": "owner/demo"}
+        space = {"SYSTEM": "spaces", "SPACE_ID": "owner/demo"}
+        assert app_module.drop_spaces_flag(space) is False
+        assert space["SYSTEM"] == "spaces"
+        assert app_module.drop_spaces_flag({"STUDIO_ID": "owner/demo"}) is False
 
     def test_main_takes_them_first_and_hands_them_to_the_bridge(
             self, app_module, monkeypatch, tmp_path, caplog):
@@ -1216,6 +1303,9 @@ class TestTheBridgeKeepsItsSecret:
         events = []
         monkeypatch.setenv(sign_in.MODELSCOPE.secret_env, MS_SECRET)
         monkeypatch.setenv(sign_in.MODELSCOPE_CN.secret_env, MS_CN_SECRET)
+        monkeypatch.setenv("OAUTH_CLIENT_SECRET", "studio")
+        monkeypatch.setenv("STUDIO_ID", "owner/demo")
+        monkeypatch.setenv("SYSTEM", "spaces")
         monkeypatch.setattr(security.hosted, "make_undumpable", lambda: events.append(
             ("undumpable", any_secret_left())) or True)
         monkeypatch.setattr(session_env, "LOCK", tmp_path / "absent.lock")
@@ -1234,7 +1324,7 @@ class TestTheBridgeKeepsItsSecret:
             or "build 0123456789ab")
 
         def build(python, confinement, secrets):
-            events.append(("build", secrets))
+            events.append(("build", secrets, "SYSTEM" in os.environ))
             return SimpleNamespace(launch=lambda **kw: events.append(("launch",)))
 
         monkeypatch.setattr(app_module, "build", build)
@@ -1242,8 +1332,11 @@ class TestTheBridgeKeepsItsSecret:
             app_module.main()
         assert events == [("undumpable", False), ("label", True), ("sweep",),
                           ("report", False),
-                          ("build", {"modelscope": MS_SECRET,
-                                     "modelscope-cn": MS_CN_SECRET}),
+                          ("build", {sign_in.MODELSCOPE.secret_env: MS_SECRET,
+                                     sign_in.MODELSCOPE_CN.secret_env:
+                                         MS_CN_SECRET,
+                                     "OAUTH_CLIENT_SECRET": "studio"}, False),
                           ("launch",)]
-        assert not any_secret_left()
+        assert not any_secret_left() and "OAUTH_CLIENT_SECRET" not in os.environ
+        assert "SYSTEM=spaces removed" in caplog.text
         assert "serving build 0123456789ab" in caplog.messages

@@ -65,8 +65,10 @@ def public_url(env=None) -> Optional[str]:
     """Where an anonymous visitor would reach this app, or None.
 
     Hugging Face sets `SPACE_HOST` for every Space. ModelScope sets nothing
-    this code can rely on, so a Studio must name itself with
-    `VENASTINE_PUBLIC_URL`, and without it single-user mode is refused.
+    this code can rely on -- `STUDIO_HOST`, and `SPACE_HOST` for Gradio,
+    only while the Studio's OAuth settings are on (batch 177) -- so a
+    Studio must name itself with `VENASTINE_PUBLIC_URL`, and
+    without it single-user mode is refused.
     """
     env = os.environ if env is None else env
     explicit = env.get("VENASTINE_PUBLIC_URL", "").strip().rstrip("/")

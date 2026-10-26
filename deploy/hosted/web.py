@@ -37,7 +37,7 @@ from typing import Optional
 from urllib.parse import urlsplit
 
 from deploy.hosted import single_user
-from deploy.hosted.sign_in import SITES
+from deploy.hosted.sign_in import SITES, STUDIO_CALLBACK_PATH, STUDIO_HOST_ENV
 from deploy.hosted.sign_in import offered as offered_sign_ins
 from deploy.hosted.supervisor import (
     CapacityError,
@@ -68,6 +68,9 @@ _SIGN_IN_HEADERS = {
 _SIGN_IN_CSP = ("default-src 'none'; style-src 'unsafe-inline'; "
                 "base-uri 'none'; form-action 'none'; frame-ancestors {}")
 SIGN_IN_CALLBACKS_PER_MINUTE = 10
+# Every path a sign-in can return to: each site's own, for an app registered
+# by hand, and the one a Studio's own app returns to (sign_in.py).
+CALLBACK_PATHS = (*(site.callback_path for site in SITES), STUDIO_CALLBACK_PATH)
 
 # The one site that may frame that page on each platform: the platform's
 # own, which frames every page of the app. Measured on ModelScope
@@ -269,8 +272,8 @@ class Bridge:
             Route("/terminal", self.terminal, methods=["GET"]),
             Route("/healthz", self.healthz, methods=["GET"]),
             Route("/download/{key}", self.download, methods=["GET"]),
-            *(Route(site.callback_path, self._callback_for(site),
-                    methods=["GET"]) for site in SITES),
+            *(Route(path, self._callback_for(path), methods=["GET"])
+              for path in CALLBACK_PATHS),
             WebSocketRoute("/ws/{ticket}", self.websocket),
         ]
         if self.static_dir is not None:
@@ -390,21 +393,24 @@ class Bridge:
         return self._html(_page("terminal.html", ticket=ticket,
                                 static=STATIC_PREFIX, build=self.build))
 
-    def _callback_for(self, site):
+    def _callback_for(self, path):
         async def callback(request):
-            return await self.sign_in_callback(site, request)
+            return await self.sign_in_callback(path, request)
         return callback
 
-    async def sign_in_callback(self, site, request):
-        """Where `site` sends the person back after its consent page (HD13).
-        The page shows a handle to paste, or why there is none; it never
-        repeats anything the request carried. Each site has its own path,
-        so a code is only ever traded with the site that issued it."""
+    async def sign_in_callback(self, path, request):
+        """Where a site sends the person back after its consent page (HD13),
+        answered by the one offered sign-in whose callback this path is. The
+        page shows a handle to paste, or why there is none; it never repeats
+        anything the request carried. Each sign-in has its own path, so a
+        code is only ever traded with the site that issued it."""
         from starlette.responses import HTMLResponse, Response
 
-        sign_in = self.supervisor.sign_ins.get(site.name)
+        sign_in = next((s for s in self.supervisor.sign_ins.values()
+                        if s.callback_path == path), None)
         if sign_in is None:
             return Response("Not found", status_code=404)
+        site = sign_in.site
         if not self._within_rate(self._callbacks, self._client(request),
                                  SIGN_IN_CALLBACKS_PER_MINUTE):
             title, text, handle, status = (
@@ -484,9 +490,10 @@ def build_bridge(env=None, root: Optional[Path] = None,
     """The bridge a deployment runs, configured from its environment.
     `python` is the interpreter sessions run on (session_env.py); None
     means this one. `confinement` is the math tools' self-test verdict,
-    handed to every session (HD11). `sign_in_secrets` are the ModelScope
-    apps' client secrets by site, which app.py has already taken out of
-    the environment (HD13)."""
+    handed to every session (HD11). `sign_in_secrets` are the sign-ins'
+    client secrets by variable name, which app.py has already taken out of
+    the environment (HD13); each site's discovery document is read here,
+    once, before anything listens."""
     env = os.environ if env is None else env
     root = root or Path(__file__).resolve().parents[2]
     command = [str(python), str(root / "main.py"), "--tui"] if python else None
@@ -507,7 +514,7 @@ def build_bridge(env=None, root: Optional[Path] = None,
         confinement=confinement,
         sign_ins=offered_sign_ins(env, sign_in_secrets or {}),
     )
-    hosts = [env.get("SPACE_HOST", "")]
+    hosts = [env.get("SPACE_HOST", ""), env.get(STUDIO_HOST_ENV, "")]
     if url:
         hosts.append(urlsplit(url).netloc)
     platform = str(_read_build_info(root).get("platform", ""))

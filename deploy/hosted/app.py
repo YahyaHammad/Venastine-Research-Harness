@@ -35,8 +35,8 @@ def build(python=None, confinement: str = "",
     `python` is the session interpreter (session_env.py), or None to run
     sessions on this one, as a local checkout does. `confinement` is the
     math tools' self-test verdict (isolation_report.py). `sign_in_secrets`
-    are the ModelScope apps' client secrets by site, out of the environment
-    (HD13)."""
+    are the sign-ins' client secrets by variable name, out of the
+    environment (HD13)."""
     import gradio as gr
 
     from deploy.hosted.web import build_bridge
@@ -61,17 +61,35 @@ def build(python=None, confinement: str = "",
 
 
 def take_secrets(environ=None) -> dict:
-    """Each ModelScope site's app secret by site name, every one REMOVED
-    from the environment (HD13), so no process this one starts inherits it
-    -- not uv building the session environment, not the isolation probes,
-    not a session, whose environment is an allowlist anyway. A site with no
-    secret set maps to "". `/proc/<pid>/environ` still shows the block this
-    process started with, which is why main() also makes it non-dumpable."""
-    from deploy.hosted.sign_in import SITES
+    """Every sign-in secret by variable name -- each ModelScope app's
+    registered by hand, and a Studio's own app's `OAUTH_CLIENT_SECRET`,
+    which ModelScope's Studio OAuth injects -- every one REMOVED from the
+    environment (HD13), so no process this one starts inherits it -- not uv
+    building the session environment, not the isolation probes, not a
+    session, whose environment is an allowlist anyway. One not set maps to
+    "". `/proc/<pid>/environ` still shows the block this process started
+    with, which is why main() also makes it non-dumpable."""
+    from deploy.hosted.sign_in import SECRET_ENVS
 
     environ = os.environ if environ is None else environ
-    return {site.name: environ.pop(site.secret_env, "").strip()
-            for site in SITES}
+    return {name: environ.pop(name, "").strip() for name in SECRET_ENVS}
+
+
+def drop_spaces_flag(environ=None) -> bool:
+    """On a ModelScope Studio, remove `SYSTEM`, which its Studio OAuth sets
+    to `spaces` for Gradio's own sign-in button (batch 177); True when it
+    did. Gradio 6.30 reads `SYSTEM=spaces` as running on a Hugging Face
+    Space and then starts that platform's hot-reload watcher from the
+    `spaces` package (gradio/http_server.py), among other Space-only
+    defaults (gradio/blocks.py: `api_open`, `pwa`). The bridge
+    uses no Gradio sign-in, ModelScope's docs say a non-Gradio app should
+    not depend on these variables, and the Studio was measured without it.
+    `STUDIO_ID` is ModelScope's and never Hugging Face's, which is how a
+    Space keeps its own `SYSTEM`."""
+    environ = os.environ if environ is None else environ
+    if not environ.get("STUDIO_ID"):
+        return False
+    return environ.pop("SYSTEM", None) is not None
 
 
 def main() -> None:
@@ -83,9 +101,13 @@ def main() -> None:
     from security.hosted import make_undumpable
 
     undumpable = make_undumpable()
+    dropped = drop_spaces_flag()
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
     logging.getLogger(__name__).info("bridge non-dumpable: %s", undumpable)
+    if dropped:
+        logging.getLogger(__name__).info(
+            "SYSTEM=spaces removed: this is a ModelScope Studio, not a Space")
     from pathlib import Path
 
     from deploy.hosted.web import build_label
