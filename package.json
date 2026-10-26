@@ -82,6 +82,24 @@
       ]
     },
     {
+      "label": "ChatGPT plan tokens",
+      "match": "exact",
+      "value": [
+        "chatgpt_auth.json",
+        "chatgpt_auth.json.lock"
+      ],
+      "channels": [
+        "git",
+        "archive",
+        "npm"
+      ],
+      "samples": [
+        "chatgpt_auth.json",
+        "chatgpt_auth.json.lock"
+      ],
+      "note": "ROADMAP_v3 §83 (CG4). The ChatGPT-plan sign-in's access and refresh tokens, written beside providers.json; the .lock is the empty file its refreshes serialize on."
+    },
+    {
       "label": "local databases and their WAL sidecars",
       "match": "suffix",
       "value": [

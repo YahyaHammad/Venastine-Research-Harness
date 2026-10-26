@@ -7,7 +7,7 @@ module is everything about it that is not drawing: which providers there are,
 the OAuth flows whose providers explicitly invite a third-party app to use
 them, and where a key ends up. The TUI owns the asking.
 
-ONLY THREE PROVIDERS SIGN IN, AND THAT IS A RULING RATHER THAN A GAP. The
+ONLY FOUR PROVIDERS SIGN IN, AND THAT IS A RULING RATHER THAN A GAP. The
 owner asked for OAuth only where the provider's official guidance gives a
 third-party app explicit permission:
 
@@ -26,6 +26,12 @@ third-party app explicit permission:
     modelscope.cn's form says the same in its original Chinese and offers the
     same scope (read 2026-10-26); it is a separate site with separate
     accounts, so it is a sign-in of its own (batch 176).
+  * OpenAI's Sign in with ChatGPT, https://developers.openai.com/siwc -- a
+    Plus or Pro subscriber spends their ChatGPT plan inside open-source and
+    locally hosted apps, with no client secret (ROADMAP_v3 §83). A remotely
+    hosted app needs OpenAI's interest form first, so this one is LOCAL
+    ONLY (CG1), and its credential lives in `core/chatgpt_auth.py`: an
+    access token that expires hourly and a refresh token, not a key.
 
 Hugging Face's and OpenRouter's flows need no server of ours to receive a
 redirect, which is why both work the same in a local terminal and in a
@@ -34,7 +40,9 @@ only a confidential client (`client_secret_basic` / `client_secret_post` in
 its discovery document, read 2026-10-22, and the same on modelscope.cn), so
 only a hosted bridge, which can keep the secret, completes it --
 `deploy/hosted/sign_in.py` -- and a local install connects either ModelScope
-site with a pasted key. Everything else is a pasted key everywhere.
+site with a pasted key. ChatGPT's redirect comes back to a listener on
+127.0.0.1, which only the person's own machine can reach. Everything else
+is a pasted key everywhere.
 
 NO HTTP LIBRARY IS IMPORTED AT MODULE SCOPE. Every network call goes through a
 `post` callable the caller may replace, and the default imports `httpx` when
@@ -136,6 +144,12 @@ PRESETS: dict[str, Preset] = {p.name: p for p in (
            "https://api-inference.modelscope.cn/v1", True, False,
            sign_in="modelscope-cn",
            key_url="https://modelscope.cn/my/myaccesstoken"),
+    # ROADMAP_v3 §83. Not v1-compatible: the plan takes the Responses API
+    # only (Chat Completions answered 401, slice 0), which is slice 2's
+    # path. No default model and no `providers.json` entry until then
+    # (CG11), so `/model CHATGPT` refuses rather than failing a turn.
+    Preset("chatgpt", "CHATGPT", "ChatGPT plan (Sign in with ChatGPT)",
+           "https://api.openai.com/v1", False, True, sign_in="chatgpt"),
     Preset("openai", "OPENAI", "OpenAI", "https://api.openai.com/v1",
            True, True, key_url="https://platform.openai.com/api-keys"),
     Preset("anthropic", "ANTHROPIC", "Anthropic", "", False, True,
@@ -150,10 +164,11 @@ PRESETS: dict[str, Preset] = {p.name: p for p in (
            True, False),
 )}
 
-# The two names `core/client.py` routes by NAME rather than by the
-# `is_v1_compatible` flag. A custom endpoint under either would be sent to a
-# native SDK it is not, so `custom` refuses them.
-_NATIVE_PROVIDERS = frozenset({"ANTHROPIC", "GOOGLE"})
+# The names `core/client.py` routes by NAME rather than by the
+# `is_v1_compatible` flag. A custom endpoint under one would be sent to a
+# native SDK it is not -- or, for CHATGPT, to the plan's sign-in (§83) --
+# so `custom` refuses them.
+_NATIVE_PROVIDERS = frozenset({"ANTHROPIC", "GOOGLE", "CHATGPT"})
 _PROVIDER_NAME = re.compile(r"^[A-Z0-9][A-Z0-9_.-]{0,39}$")
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
@@ -231,9 +246,16 @@ def store(preset: Preset, key: str, *, persist: bool) -> None:
 
 
 def connected_providers() -> set:
-    """Names that have a non-empty key right now, file and session alike."""
-    return {name for name, entry in credentials.load_provider_data().items()
-            if entry.get("API_KEY")}
+    """Names that have a non-empty key right now, file and session alike,
+    and CHATGPT while its sign-in holds a refresh token (§83): the plan has
+    no key, so its token file is what says it is connected."""
+    from core import chatgpt_auth
+
+    names = {name for name, entry in credentials.load_provider_data().items()
+             if entry.get("API_KEY")}
+    if chatgpt_auth.status().signed_in:
+        names.add("CHATGPT")
+    return names
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +286,23 @@ def post_form(url: str, data: dict) -> tuple[int, dict]:
 
 def post_json(url: str, payload: dict) -> tuple[int, dict]:
     return _post(url, json_body=payload)
+
+
+def get_json(url: str) -> tuple[int, dict]:
+    """GET `url` and read a JSON object; `_post`'s shape and refusals."""
+    import httpx
+
+    try:
+        response = httpx.get(url, timeout=_HTTP_TIMEOUT_S)
+    except httpx.HTTPError as exc:
+        raise ConnectError(
+            f"Could not reach {urlsplit(url).hostname}: "
+            f"{type(exc).__name__}.") from None
+    try:
+        body = response.json()
+    except ValueError:
+        body = {}
+    return response.status_code, body if isinstance(body, dict) else {}
 
 
 # ---------------------------------------------------------------------------

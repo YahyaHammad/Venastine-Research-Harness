@@ -27062,3 +27062,76 @@ image is tried. The usage-settings address is still owed by the owner.
 which no API reports: `https://chatgpt.com/settings/usage?tab=overview`.
 CG8's Manage usage link points there. That was the last thing slice 0 owed;
 slice 1, signing in and out, is next.
+
+## Batch 184 -- §83 slice 1: signing in to a ChatGPT plan, and /disconnect for every provider (2026-10-26)
+
+**Built, the sign-in half.** Planned with the owner first, who chose six
+things before any code: slice 1 ships on its own with `/model CHATGPT`
+refused until slice 2 (CG11); one ChatGPT account per install, forgettable
+(CG12); `/disconnect` blanks a key and keeps the entry (CG13), asks first
+(CG14), and may remove the provider in use, saying so (CG15); PyJWT
+declared (CG16).
+
+### What was built
+
+- `core/chatgpt_auth.py`:
+  - discovery checked to OpenAI's host;
+  - the one-shot 127.0.0.1 listener, which never logs the request line
+    the code arrives in;
+  - the PKCE exchange, and the ID token checked with RS256 pinned before
+    any key is chosen;
+  - `chatgpt_auth.json` (0600, atomic) under an OS lock held across
+    processes;
+  - a refresh that re-reads the file after taking the lock and writes the
+    replacement before returning it;
+  - the revocation, and status.
+- `/connect chatgpt` with a paste prompt that closes itself when the
+  browser comes back, and CG8's one-time `NoticeScreen` in OpenAI's words.
+- `/disconnect [name [--forget]]` for every provider, through the new
+  `credentials.forget_key`.
+- `PyJWT>=2.10.1,<3` in requirements.txt, and `chatgpt_auth.json` with its
+  lock file in `neverDistribute`, `.gitignore` and `.gitattributes`.
+
+### What the checks found
+
+- **`/disconnect` moved the slash panel.** It sorts in before `/effort`, so
+  three of `TestTheWindowSlidesOverTheMatches`' tests reached `/embedder`
+  a step early. The window was measured at every step (80x24): the case
+  the class exists for -- one entry dropped, two gained, five shown within
+  the row budget -- still happens, one step later. The counts were
+  corrected, not the assertions.
+- **A mutation survived the first draft of the TUI tests.** With the
+  paste prompt's auto-dismissal removed, the prompt stayed up UNDER the
+  notice, and every test still passed, because none asked what was left
+  once the notice closed. That test now asserts the prompt is gone; the
+  mutation was re-run against the old test (survived) and the new one
+  (killed).
+- **Bandit** flagged five lines in the two new test files (`subprocess`,
+  `urlopen`), each now carrying a `nosec` with its reason, in the
+  repository's form.
+
+### Not measured
+
+Which tab of ChatGPT's settings lists connected apps. The revoke page is
+`https://chatgpt.com/settings`, said as such in the code. The owner's live
+check of slice 1 reads it.
+
+### Verified
+
+- Full suite 8148 -> 8248 (`test_chatgpt_auth.py` 67 and
+  `test_chatgpt_tui.py` 23, new; `test_connect.py` 63 -> 68;
+  `test_tui.py` 493 -> 498; the modal sweep 3 x 23 = 69 -> 3 x 24 = 72):
+  8180 passed, 68 skipped on Windows.
+- The changed suites with `AGENT_WORKSPACE` unset: 871 passed, 8 skipped.
+- Under Linux in WSL: `test_chatgpt_auth.py` and `test_connect.py`, 135
+  passed with no skips -- the 0600 mode and the `fcntl` lock held by a
+  second process included -- on PyJWT 2.10.1, the declared floor.
+- Mutations: 17 of 17 killed. They covered the state check, the RS256
+  pin, the audience, the nonce, the refresh margin, `earliest_refresh_at`,
+  write-before-return, the unusable list, the OS lock, `--forget`,
+  key-only blanking, the account check, the request-line log, the paste
+  prompt's port, the hosted refusal, the `/model` refusal, and the
+  prompt's auto-dismissal.
+- ruff clean; bandit 0 new and no pair grew; pip-audit on requirements.txt
+  found no known vulnerabilities; gitleaks found no leaks; both deploy dry
+  runs build, scan clean and audit clean.

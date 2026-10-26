@@ -189,6 +189,26 @@ google-re2==1.1.20251105
 # still covers this project's platforms.
 cryptography>=42.0,<52
 
+# ROADMAP_v3 §83 (CG6, CG16). Checks the ID token a ChatGPT-plan sign-in
+# returns against OpenAI's published keys: RS256, issuer, audience, expiry
+# and nonce. The owner chose declaring it over a hand-written RS256 check
+# on `cryptography` -- signature verification is code to get exactly right,
+# and this library is the one everybody else gets it right with.
+#
+# DECLARING IT ADDS NOTHING TO AN INSTALL, measured the way `cryptography`'s
+# entry was: mcp==2.2.0 -> pyjwt[crypto]>=2.10.1, with no marker, so it is
+# already in the hard closure of the mcp line above. What the declaration
+# buys is that a check this project's sign-in rests on no longer depends on
+# mcp happening to pull it in. MIT, so THIRD_PARTY_NOTICES.md's no-copyleft
+# claim holds; pure Python.
+#
+# A FLOOR AND A CEILING, for `cryptography`'s reason: an exact pin here
+# would fight mcp's own floor, which is this floor. The ceiling is D22's
+# rule. What to re-measure when it moves: `jwt.decode` still refuses an
+# algorithm outside the list it is given (the `none` and HS256 tests in
+# tests/test_chatgpt_auth.py), and `PyJWKSet` still reads OpenAI's JWKS.
+PyJWT>=2.10.1,<3
+
 # TECHNICAL_DEBT 18, batch 116. A PRODUCTION dependency: `arxiv.py` imports
 # it at module load, and pyproject.toml reads this file for its dependency
 # list via `dynamic = ["dependencies"]`.

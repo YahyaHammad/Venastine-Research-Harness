@@ -5,6 +5,8 @@
 # .gitignore already keeps them out of `git push`; this keeps them out of
 # `git archive` tarballs and GitHub "Download ZIP".
 providers.json export-ignore
+chatgpt_auth.json export-ignore
+chatgpt_auth.json.lock export-ignore
 .env export-ignore
 secrets.json export-ignore
 # S07-02 (batch 144), for .gitignore's reason one channel over: a failed

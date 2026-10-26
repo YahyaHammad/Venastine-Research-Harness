@@ -265,6 +265,10 @@ SecretScreen {
     align: center middle;
 }
 
+NoticeScreen {
+    align: center middle;
+}
+
 SubagentSignoffScreen {
     align: center middle;
 }

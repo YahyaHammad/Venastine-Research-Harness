@@ -101,6 +101,7 @@ from tui.screens import (
     ClaimsScreen,
     ConfirmScreen,
     GrantPickerScreen,
+    NoticeScreen,
     PermissionScreen,
     ProjectKindScreen,
     QuestionScreen,
@@ -360,6 +361,30 @@ class ConnectFinished(Message):
         super().__init__()
         self.preset = preset
         self.credential = credential
+        self.error = error
+
+
+class ChatgptAnswered(Message):
+    """OpenAI's redirect reached this machine's listener (ROADMAP_v3 §83,
+    CG5). Posted from the waiting worker so the UI thread -- which also owns
+    the paste prompt -- decides, once, which answer completes the sign-in.
+    The parameters carry the authorization code and are never logged."""
+
+    def __init__(self, wait, params):
+        super().__init__()
+        self.wait = wait
+        self.params = params
+
+
+class DisconnectFinished(Message):
+    """The ChatGPT plan's sign-out ended, off the UI thread (§83, CG9).
+    `confirmed` is `chatgpt_auth.sign_out`'s answer: True, False or None."""
+
+    def __init__(self, provider, confirmed, forgot, error):
+        super().__init__()
+        self.provider = provider
+        self.confirmed = confirmed
+        self.forgot = forgot
         self.error = error
 
 
@@ -1800,7 +1825,16 @@ class VenastineApp(App):
         if message.error is not None:
             self._transcript.write_error(message.error)
             return
+        if message.preset.sign_in == "chatgpt":
+            _finish_chatgpt(self, message.credential)
+            return
         _finish_connect(self, message.preset, message.credential)
+
+    def on_chatgpt_answered(self, message: ChatgptAnswered) -> None:
+        _chatgpt_answered(self, message.wait, message.params)
+
+    def on_disconnect_finished(self, message: DisconnectFinished) -> None:
+        _finish_disconnect(self, message)
 
     # -- the bridge's ModelScope sign-ins (HD13); each answer counts only
     # for the sign-in this session is waiting for ---------------------------
@@ -5354,6 +5388,12 @@ def _cmd_model(app: VenastineApp, args: str) -> None:
             "Usage: /model <name>, or /model <PROVIDER> <name>.")
         return
 
+    # ROADMAP_v3 §83 (CG11): the plan signs in before it can answer, and a
+    # switch to it would fail the next turn rather than this command.
+    if provider == "CHATGPT":
+        app._transcript.write_error(_CHATGPT_NOT_YET)
+        return
+
     # Unknown provider REFUSES: api_initialization would raise the same
     # ValueError on the next turn, a long way from the typo that caused it.
     if provider not in providers:
@@ -7190,10 +7230,14 @@ def _connect_policy(app: "VenastineApp") -> tuple:
 def _signs_in_here(preset) -> bool:
     """Whether `/connect <name>` can sign in on this install, rather than
     only take a key: OpenRouter's PKCE needs no registered app, Hugging
-    Face's device code needs `hf_oauth_client_id`, and each ModelScope
-    site's needs a hosted bridge that holds its app's secret (HD13)."""
+    Face's device code needs `hf_oauth_client_id`, each ModelScope site's
+    needs a hosted bridge that holds its app's secret (HD13), and the
+    ChatGPT plan's needs the person's own machine, so it is never offered
+    on a hosted deployment of either kind (§83, CG1)."""
     if preset.sign_in == "huggingface":
         return bool(config.HF_OAUTH_CLIENT_ID)
+    if preset.sign_in == "chatgpt":
+        return not hosted.is_hosted()
     if preset.sign_in in hosted.BRIDGE_SIGN_IN_NAMES:
         return hosted.bridge_signs_in(preset.sign_in)
     return preset.sign_in is not None
@@ -7215,6 +7259,12 @@ _REVOKE_PAGES = {
     # route on its own host.
     "modelscope": "https://www.modelscope.ai/my/settings/apps",
     "modelscope-cn": "https://www.modelscope.cn/my/settings/apps",
+    # §83. OpenAI's page says the app is disconnected "in ChatGPT
+    # Settings". The settings pages live under /settings -- the usage page
+    # the owner read in slice 0 is /settings/usage -- but which tab lists
+    # connected apps was not measured, so this is the settings root, not a
+    # guessed tab.
+    "chatgpt": "https://chatgpt.com/settings",
 }
 
 # Where a key for a provider with no sign-in CAN go (§79 HD12): a copy the
@@ -7317,7 +7367,11 @@ def _cmd_connect(app: "VenastineApp", args: str) -> None:
         width = max([len(p.name) for p in presets] + [len("custom")])
         lines = ["Connect a model — /connect <name>:"]
         for preset in presets:
-            if not paste_allowed:
+            if preset.sign_in == "chatgpt":
+                # CG8's words for starting it; it has no key to paste.
+                how = ("Continue with ChatGPT" if _signs_in_here(preset)
+                       else "local installs only")
+            elif not paste_allowed:
                 how = "sign in"
             elif _signs_in_here(preset):
                 how = "sign in, or --key"
@@ -7368,6 +7422,17 @@ def _cmd_connect(app: "VenastineApp", args: str) -> None:
     flags = {p.lower() for p in parts[1:]}
     if flags - {"--key"}:
         err(f"Usage: /connect {preset.name} [--key]")
+        return
+
+    if preset.sign_in == "chatgpt":
+        if "--key" in flags:
+            err("The ChatGPT plan has no key: it signs in. For an OpenAI API "
+                "key, /connect openai --key.")
+            return
+        if not _signs_in_here(preset):
+            err(_CHATGPT_LOCAL_ONLY)
+            return
+        _sign_in_chatgpt(app, preset)
         return
 
     if preset.sign_in in hosted.BRIDGE_SIGN_IN_NAMES and "--key" not in flags:
@@ -7499,6 +7564,221 @@ def _sign_in_huggingface(app: "VenastineApp", preset) -> None:
     app.run_worker(work, thread=True, exit_on_error=False, name="connect")
 
 
+# ---- ROADMAP_v3 §83: the ChatGPT plan ---------------------------------------
+
+_CHATGPT_NOT_YET = (
+    "The ChatGPT plan signs in (/connect chatgpt) but cannot answer yet: "
+    "chat on the plan arrives with ROADMAP_v3 §83 slice 2. Keep your current "
+    "model until then.")
+_CHATGPT_LOCAL_ONLY = (
+    "The ChatGPT plan signs in on a local install only: OpenAI offers it to "
+    "open-source apps running on your own machine, and its sign-in comes "
+    "back to 127.0.0.1, which a hosted deployment is not.")
+# The paste prompt's dismissal when the sign-in closes it itself -- the
+# browser came back on its own -- and never a person's answer.
+_AUTO_DISMISS = object()
+
+
+class _ChatgptSignIn:
+    """`_connect_wait` for a ChatGPT-plan sign-in (§83, CG5).
+
+    Two answers can arrive, the listener's and an address the person
+    pastes, and both reach the UI thread, which takes the first (`claimed`)
+    and ignores the other. Setting it -- `/connect cancel`, the app closing
+    -- closes the listener, including one still being opened.
+    """
+
+    def __init__(self, app: "VenastineApp", preset) -> None:
+        self.app = app
+        self.preset = preset
+        self.sign_in = None
+        self.screen = None
+        self.claimed = False
+        self.stopped = threading.Event()
+        self._lock = threading.Lock()
+
+    def attach(self, sign_in) -> bool:
+        """Adopt the started sign-in; False, and closed, if already set."""
+        with self._lock:
+            if self.stopped.is_set():
+                sign_in.close()
+                return False
+            self.sign_in = sign_in
+            return True
+
+    def set(self) -> None:
+        with self._lock:
+            self.stopped.set()
+            if self.sign_in is not None:
+                self.sign_in.close()
+
+
+def _sign_in_chatgpt(app: "VenastineApp", preset) -> None:
+    """Sign in to the ChatGPT plan (§83 slice 1; CG5, CG8, CG11).
+
+    OpenAI's redirect comes back to a one-shot listener on 127.0.0.1, and
+    the paste prompt is up from the start for a browser on another machine;
+    it closes by itself when the listener answers. Discovery, the exchange
+    and the ID token check run in workers. The tokens go from OpenAI to the
+    token file and nowhere else -- not the transcript, not the log, not the
+    keyboard.
+    """
+    from core import chatgpt_auth
+
+    wait = _ChatgptSignIn(app, preset)
+    app._connect_wait = wait
+    app._transcript.write_system("Continue with ChatGPT: asking OpenAI where "
+                                 "to sign in…")
+
+    def work() -> None:
+        try:
+            sign_in = chatgpt_auth.start()
+        except model_connect.ConnectError as exc:
+            app.post_message(ChatgptAnswered(wait, str(exc)))
+            return
+        except Exception as exc:  # noqa: BLE001 -- reported, never fatal
+            app.post_message(ChatgptAnswered(
+                wait, f"ChatGPT sign-in failed: {type(exc).__name__}."))
+            return
+        if not wait.attach(sign_in):
+            return
+        app.call_from_thread(_chatgpt_prompt, app, wait)
+        deadline = monotonic() + chatgpt_auth.SIGN_IN_WAIT_S
+        while not wait.stopped.is_set():
+            params = sign_in.wait(0.25)
+            if params is not None:
+                app.post_message(ChatgptAnswered(wait, params))
+                return
+            if monotonic() >= deadline:
+                app.post_message(ChatgptAnswered(wait, None))
+                return
+
+    app.run_worker(work, thread=True, exit_on_error=False, name="connect")
+
+
+def _chatgpt_prompt(app: "VenastineApp", wait: _ChatgptSignIn) -> None:
+    from core import chatgpt_auth
+
+    if app._connect_wait is not wait:
+        return
+    url = wait.sign_in.url
+    app._transcript.write_system(
+        f"Continue with ChatGPT: {url} — approve sharing your ChatGPT plan "
+        f"with \"{chatgpt_auth.AGENT_NAME}\", and this finishes by itself "
+        f"when the page comes back. If your browser is on another machine, "
+        f"paste the address it ended on instead. /connect cancel stops "
+        f"waiting.")
+    app._transcript.open_url(url)
+    _chatgpt_ask_paste(app, wait)
+
+
+def _chatgpt_ask_paste(app: "VenastineApp", wait: _ChatgptSignIn) -> None:
+    from core import chatgpt_auth
+
+    def answered(value) -> None:
+        if value is _AUTO_DISMISS or app._connect_wait is not wait \
+                or wait.claimed:
+            return
+        wait.screen = None
+        if not value:
+            app.stop_connect_wait()
+            app._transcript.write_system("Nothing was connected.")
+            return
+        try:
+            params = chatgpt_auth.pasted_params(wait.sign_in, value)
+        except model_connect.ConnectError as exc:
+            app._transcript.write_error(str(exc))
+            _chatgpt_ask_paste(app, wait)
+            return
+        _chatgpt_complete(app, wait, params)
+
+    wait.screen = SecretScreen(
+        "Paste the address your browser ended on",
+        f"This closes by itself when the browser comes back here. Only if "
+        f"your browser is on another machine: paste the address it ended "
+        f"on, which starts {wait.sign_in.redirect_uri}",
+        confirm_label="Connect")
+    app.push_screen(wait.screen, answered)
+
+
+def _chatgpt_answered(app: "VenastineApp", wait: _ChatgptSignIn,
+                      params) -> None:
+    """The listener's answer, a timeout (None), or a start that failed (a
+    sentence); first come, and only for the sign-in still waiting."""
+    if app._connect_wait is not wait or wait.claimed:
+        return
+    if wait.screen is not None and app.screen is wait.screen:
+        wait.screen.dismiss(_AUTO_DISMISS)
+    wait.screen = None
+    if params is None or isinstance(params, str):
+        app.stop_connect_wait()
+        app._transcript.write_error(
+            params or "No answer came back from OpenAI within 10 minutes, "
+                      "so nothing was connected. /connect chatgpt starts "
+                      "again.")
+        return
+    _chatgpt_complete(app, wait, params)
+
+
+def _chatgpt_complete(app: "VenastineApp", wait: _ChatgptSignIn,
+                      params: dict) -> None:
+    from core import chatgpt_auth
+
+    wait.claimed = True
+    wait.stopped.set()
+    sign_in, preset = wait.sign_in, wait.preset
+
+    def work() -> None:
+        try:
+            done = chatgpt_auth.complete(sign_in, params)
+        except model_connect.ConnectError as exc:
+            app.post_message(ConnectFinished(preset, None, str(exc)))
+        except Exception as exc:  # noqa: BLE001 -- reported, never fatal
+            app.post_message(ConnectFinished(
+                preset, None, f"ChatGPT sign-in failed: "
+                              f"{type(exc).__name__}."))
+        else:
+            app.post_message(ConnectFinished(preset, done, None))
+        finally:
+            sign_in.close()
+
+    app.run_worker(work, thread=True, exit_on_error=False, name="connect")
+
+
+def _finish_chatgpt(app: "VenastineApp", done) -> None:
+    """Say how the sign-in ended, and show CG8's notice once (§83).
+
+    No `/model` switch follows, unlike `_finish_connect`'s: the plan cannot
+    answer until slice 2 (CG11).
+    """
+    from core import chatgpt_auth
+
+    if done.plan_usage:
+        app._transcript.write_system(
+            "Connected the ChatGPT plan. Chat on the plan arrives with "
+            "ROADMAP_v3 §83 slice 2, so your current model stays. "
+            "/disconnect chatgpt signs out.")
+    else:
+        app._transcript.write_error(
+            "OpenAI signed you in but did not share the ChatGPT plan, so "
+            "nothing will use it. /connect chatgpt again and allow the plan, "
+            "or /disconnect chatgpt.")
+    if done.notice_due:
+        def acknowledged(_result) -> None:
+            try:
+                chatgpt_auth.mark_notice_shown()
+            except (OSError, model_connect.ConnectError):
+                pass  # shown again at the next sign-in, which is harmless
+
+        app.push_screen(NoticeScreen(
+            "You're using your ChatGPT plan",
+            f"Eligible AI requests from {chatgpt_auth.AGENT_NAME} use your "
+            f"ChatGPT plan and count toward its usage. You can see and "
+            f"manage that usage in ChatGPT's settings: "
+            f"{chatgpt_auth.USAGE_URL}"), acknowledged)
+    app.refresh_status()
+
+
 # How long the bridge may take to trade a pasted code for a token.
 _BRIDGE_ANSWER_S = 60
 
@@ -7614,6 +7894,215 @@ def _finish_connect(app: "VenastineApp", preset, key: str) -> None:
     app.refresh_status()
 
 
+# ---- ROADMAP_v3 §83: /disconnect ---------------------------------------------
+
+def _preset_for(provider: str):
+    return next((p for p in model_connect.PRESETS.values()
+                 if p.provider == provider), None)
+
+
+def _disconnect_name(provider: str) -> str:
+    """What `/disconnect` takes for `provider`: its preset's name, else the
+    provider's own name in lower case (a custom endpoint)."""
+    preset = _preset_for(provider)
+    return preset.name if preset else provider.lower()
+
+
+def _revoke_where(provider: str) -> str:
+    """Where the person can revoke what the harness only forgets: the
+    sign-in's page and the key page, whichever exist, as one clause."""
+    preset = _preset_for(provider)
+    if preset is None:
+        return ""
+    pages = []
+    if preset.sign_in and preset.sign_in in _REVOKE_PAGES:
+        pages.append(_REVOKE_PAGES[preset.sign_in])
+    if preset.key_url and preset.key_url not in pages:
+        pages.append(preset.key_url)
+    return " or ".join(pages)
+
+
+def _disconnect_rows(argument: str) -> list:
+    """The panel's offers after `/disconnect `: what is connected now."""
+    typed = argument.lstrip().lower()
+    if " " in typed:
+        return []
+    rows = []
+    for provider in sorted(model_connect.connected_providers()):
+        name = _disconnect_name(provider)
+        preset = _preset_for(provider)
+        if name.startswith(typed):
+            rows.append(SlashCommand(
+                f"disconnect {name}",
+                preset.label if preset else f"{provider} (custom)",
+                _cmd_disconnect))
+    return rows
+
+
+def _cmd_disconnect(app: "VenastineApp", args: str) -> None:
+    """Remove a provider's stored credential, or sign out of one
+    (ROADMAP_v3 §83; CG9, CG12-CG15).
+
+    `/disconnect` lists what is connected; `/disconnect <name>` asks, then
+    removes it. A key is BLANKED, not deleted -- the entry's URL and flags
+    stay, so a later `/connect` comes back to the same entry (CG13). The
+    ChatGPT plan is signed out: its refresh token revoked at OpenAI, its
+    tokens deleted, its registration kept unless `--forget` (CG9, CG12).
+
+    THE PROVIDER IN USE CAN GO (CG15). Nothing switches behind the person's
+    back; the confirmation and the result both say the next message needs
+    `/model` or `/connect` first.
+
+    A key the harness forgets still works wherever else it was copied, so
+    the result names where to revoke it; only the ChatGPT plan's is revoked
+    from here, because only OpenAI offers that to an app.
+    """
+    from core import chatgpt_auth
+    from credentials import LLM_PROVIDERS_FILE
+
+    say = app._transcript.write_system
+    err = app._transcript.write_error
+    parts = args.split()
+    flags = {p.lower() for p in parts if p.startswith("--")}
+    names = [p for p in parts if not p.startswith("--")]
+    connected = model_connect.connected_providers()
+
+    if not names:
+        if flags:
+            err("Usage: /disconnect <name> [--forget]")
+            return
+        if not connected:
+            say("Nothing is connected. /connect connects a provider.")
+            return
+        lines = ["Connected — /disconnect <name> removes one:"]
+        for provider in sorted(connected):
+            preset = _preset_for(provider)
+            label = preset.label if preset else f"{provider} (custom)"
+            lines.append(f"  {_disconnect_name(provider)}  {label}")
+        say("\n".join(lines))
+        return
+    if len(names) != 1 or flags - {"--forget"}:
+        err("Usage: /disconnect <name> [--forget]")
+        return
+
+    if app.refuse_if_occupied("disconnect a provider"):
+        return
+    if app._connect_wait is not None:
+        err("A sign-in is waiting. /connect cancel stops it first.")
+        return
+
+    preset = model_connect.PRESETS.get(names[0].lower())
+    provider = preset.provider if preset else names[0].upper()
+    forget = "--forget" in flags
+    if forget and provider != "CHATGPT":
+        err("--forget is for chatgpt only: it drops the ChatGPT plan's "
+            "registration.")
+        return
+    in_use = (" It is the provider this session is using, so the next "
+              "message needs /model or /connect first."
+              if app.provider_name == provider else "")
+
+    if provider == "CHATGPT":
+        state = chatgpt_auth.status()
+        if not state.signed_in and not (forget and state.registered):
+            err("The ChatGPT plan is not signed in."
+                + (" Its registration stays; /disconnect chatgpt --forget "
+                   "drops it." if state.registered else ""))
+            return
+        title = "Sign out of the ChatGPT plan?"
+        body = ("This revokes the sign-in at OpenAI and deletes its tokens "
+                f"from {chatgpt_auth.auth_path()}." if state.signed_in
+                else "There is no sign-in to revoke.")
+        if forget:
+            body += (" It also forgets this install's registration, so the "
+                     "next sign-in can be another ChatGPT account.")
+        confirm = "Sign out"
+    else:
+        if provider not in connected:
+            err(f"{provider} has no stored key to remove. /disconnect lists "
+                f"what is connected.")
+            return
+        label = preset.label if preset else provider
+        title = f"Remove the {label} key?"
+        where = _revoke_where(provider)
+        body = (f"This blanks {provider}'s API_KEY in {LLM_PROVIDERS_FILE}; "
+                f"its other settings stay for a later /connect. The key "
+                f"itself still works anywhere else it was copied"
+                + (f" until you revoke it at {where}." if where else "."))
+        confirm = "Remove"
+
+    def decided(yes: bool) -> None:
+        if not yes:
+            say("Nothing was disconnected.")
+            return
+        if provider == "CHATGPT":
+            def work() -> None:
+                try:
+                    confirmed = chatgpt_auth.sign_out(forget=forget)
+                except model_connect.ConnectError as exc:
+                    app.post_message(DisconnectFinished(provider, None,
+                                                        forget, str(exc)))
+                    return
+                except Exception as exc:  # noqa: BLE001 -- reported
+                    app.post_message(DisconnectFinished(
+                        provider, None, forget,
+                        f"Signing out failed: {type(exc).__name__}."))
+                    return
+                app.post_message(DisconnectFinished(provider, confirmed,
+                                                    forget, None))
+
+            app.run_worker(work, thread=True, exit_on_error=False,
+                           name="disconnect")
+            return
+        import credentials
+        from core.client import forget_client
+
+        kept = credentials.forget_key(provider)
+        forget_client(provider)
+        if kept is None:
+            err(f"{provider} had no stored key to remove.")
+            return
+        where = _revoke_where(provider)
+        say(f"Removed {provider}'s key"
+            + (" from this session." if kept == "session"
+               else f" from {LLM_PROVIDERS_FILE}.")
+            + (f" Revoke the key itself at {where}." if where else ""))
+        if in_use:
+            err(f"{provider} is this session's provider: /model or /connect "
+                f"before the next message.")
+        app.refresh_status()
+
+    app.push_screen(ConfirmScreen(title, body + in_use, confirm), decided)
+
+
+def _finish_disconnect(app: "VenastineApp", message: DisconnectFinished) -> None:
+    from core import chatgpt_auth
+
+    if message.error is not None:
+        app._transcript.write_error(message.error)
+        return
+    forgot = (" This install's registration is forgotten, so the next "
+              "sign-in can be another account." if message.forgot else "")
+    if message.confirmed is True:
+        app._transcript.write_system(
+            "Signed out of the ChatGPT plan: OpenAI revoked the sign-in and "
+            "its tokens are deleted." + forgot)
+    elif message.confirmed is False:
+        app._transcript.write_error(
+            "Signed out here: the tokens are deleted, but OpenAI did not "
+            f"confirm the revocation. Remove \"{chatgpt_auth.AGENT_NAME}\" "
+            f"where ChatGPT's settings list your connected apps "
+            f"({_REVOKE_PAGES['chatgpt']})." + forgot)
+    else:
+        app._transcript.write_system("The ChatGPT plan was not signed in."
+                                     + forgot)
+    if app.provider_name == message.provider:
+        app._transcript.write_error(
+            f"{message.provider} is this session's provider: /model or "
+            f"/connect before the next message.")
+    app.refresh_status()
+
+
 def register_builtin_commands() -> None:
     """Idempotent — registering by name overwrites, so a re-import or a
     second app instance in the test suite does not duplicate entries."""
@@ -7628,6 +8117,9 @@ def register_builtin_commands() -> None:
         SlashCommand("connect", "connect a model provider: sign in or paste a key",
                      _cmd_connect, "[name [--key]|custom <NAME> <url>|cancel]",
                      complete=_connect_rows),
+        SlashCommand("disconnect", "remove a provider's key, or sign out of one",
+                     _cmd_disconnect, "[name [--forget]]",
+                     complete=_disconnect_rows),
         SlashCommand("critic", "route the grounding and critic passes to another model",
                      _cmd_critic, "[[PROVIDER] name|off]"),
         SlashCommand("embedder", "choose the model that scores source similarity",

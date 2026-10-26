@@ -965,6 +965,48 @@ class ConfirmScreen(ModalScreen[bool]):
         self.dismiss(False)
 
 
+class NoticeScreen(ModalScreen[None]):
+    """Something to read and acknowledge, with one button (ROADMAP_v3 §83,
+    CG8).
+
+    OpenAI's guidelines for Sign in with ChatGPT ask for a notice the first
+    time someone signs in with plan usage on: that eligible requests use
+    their ChatGPT plan and that usage is managed in ChatGPT's settings,
+    titled "You're using your ChatGPT plan", with "Got it". There is no
+    decision in it, so it is not a ConfirmScreen with the No hidden: Enter,
+    Escape and the button all mean the one thing it can mean.
+    """
+
+    BINDINGS = [("escape", "acknowledge", "Got it")]
+
+    def __init__(self, title: str, body: str, button_label: str = "Got it"):
+        super().__init__()
+        self._title = title
+        self._body = body
+        self._button_label = button_label
+
+    def compose(self) -> ComposeResult:
+        yield Vertical(
+            Label(Text(self._title), id="permission-title"),
+            ScrollBox(Static(Text(self._body), id="permission-params"),
+                      id="permission-params-box"),
+            Horizontal(
+                Button(Text(self._button_label), variant="primary",
+                       id="notice-ok"),
+                id="permission-buttons"),
+            id="permission-dialog",
+        )
+
+    def on_mount(self) -> None:
+        self.query_one("#notice-ok", Button).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(None)
+
+    def action_acknowledge(self) -> None:
+        self.dismiss(None)
+
+
 class ProjectKindScreen(ModalScreen[object]):
     """Which document set /init scaffolds (§24, I13).
 

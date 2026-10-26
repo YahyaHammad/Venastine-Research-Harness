@@ -31,6 +31,7 @@ The dependencies listed below are **not** part of the project's own source but a
 | mcp | `==2.2.0` | MIT | Yes | https://pypi.org/project/mcp/ |
 | google-re2 | `==1.1.20251105` | BSD-3-Clause | Yes | https://pypi.org/project/google-re2/ |
 | cryptography | `>=42.0,<52` | Apache-2.0 OR BSD-3-Clause | Yes | https://pypi.org/project/cryptography/ |
+| PyJWT | `>=2.10.1,<3` | MIT | Yes | https://pypi.org/project/PyJWT/ |
 
 `google-re2` (added 2026-09-15, ROADMAP_v3 §49) and `cryptography` (added 2026-09-24, ROADMAP_v3 §49 slice 5a) are the dependencies above that ship **compiled native code**. Taking `google-re2` first: its wheels carry the RE2 C++ library (BSD-3-Clause) and, as RE2 depends on it, Abseil (Apache-2.0). The paragraph under *What this means* holds for it unchanged — pip fetches the wheel onto the user's machine and this project redistributes nothing — so no inbound `NOTICE` obligation arises. Where no wheel exists (musl/Alpine, glibc older than 2.28), pip builds the source distribution locally, which is the user's build rather than a distribution by this project.
 

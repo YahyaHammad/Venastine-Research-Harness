@@ -83,21 +83,26 @@ class TestThePresets:
         broken one fails every turn, so it is set only where it was
         measured. ModelScope's was, on four models (2026-10-22); OpenRouter
         sends usage without being asked, and Hugging Face's router could not
-        be measured with the token at hand."""
+        be measured with the token at hand. The ChatGPT plan's was measured
+        in §83's slice 0 (2026-10-26): every completed stream carried usage
+        on `response.completed`."""
         promising = {p.name for p in connect.PRESETS.values()
                      if p.supports_stream_usage}
-        assert promising == {"openai", "anthropic", "modelscope"}
+        assert promising == {"openai", "anthropic", "modelscope", "chatgpt"}
 
     def test_only_the_permitted_providers_sign_in(self):
         """The owner's ruling, as data: OAuth only where the provider
         explicitly invites a third-party app (HD5, HD13) -- ModelScope on
-        each of its two sites since batch 176, by the same invitation."""
+        each of its two sites since batch 176, by the same invitation, and
+        the ChatGPT plan since batch 184 (§83), whose invitation is to
+        open-source apps that run locally."""
         signing = {p.name: p.sign_in for p in connect.PRESETS.values()
                    if p.sign_in}
         assert signing == {"huggingface": "huggingface",
                            "openrouter": "openrouter",
                            "modelscope": "modelscope",
-                           "modelscope-cn": "modelscope-cn"}
+                           "modelscope-cn": "modelscope-cn",
+                           "chatgpt": "chatgpt"}
 
     @pytest.mark.asyncio
     async def test_a_local_install_connects_modelscope_with_a_key(
@@ -134,10 +139,11 @@ class TestACustomEndpoint:
         with pytest.raises(connect.ConnectError):
             connect.custom_preset("acme", url)
 
-    @pytest.mark.parametrize("name", ["anthropic", "GOOGLE"])
-    def test_the_two_native_names_are_refused(self, name):
+    @pytest.mark.parametrize("name", ["anthropic", "GOOGLE", "ChatGPT"])
+    def test_the_native_names_are_refused(self, name):
         """core/client.py routes ANTHROPIC and GOOGLE by NAME, so a custom
-        endpoint under either would be sent to an SDK it is not."""
+        endpoint under either would be sent to an SDK it is not; CHATGPT is
+        the plan's sign-in (§83), whose token file a key must not shadow."""
         with pytest.raises(connect.ConnectError, match="reserved"):
             connect.custom_preset(name, "https://x.example/v1")
 
@@ -155,6 +161,45 @@ class TestAPastedKey:
     def test_empty_or_split_is_refused(self, raw):
         with pytest.raises(connect.ConnectError):
             connect.clean_key(raw)
+
+
+class TestForgettingAKey:
+    """§83, CG13: `/disconnect`'s writer blanks a key and keeps the entry."""
+
+    def test_a_file_key_is_blanked_and_every_other_field_stays(
+            self, providers_file):
+        connect.store(connect.PRESETS["openrouter"], FAKE_OR_KEY, persist=True)
+        data = json.loads(providers_file.read_text(encoding="utf-8"))
+        data["OPENROUTER"]["echoes_reasoning"] = True
+        data["OPENROUTER"]["accepts_images"] = True
+        providers_file.write_text(json.dumps(data), encoding="utf-8")
+
+        assert credentials.forget_key("OPENROUTER") == "file"
+        after = json.loads(providers_file.read_text(encoding="utf-8"))
+        assert after["OPENROUTER"] == dict(data["OPENROUTER"], API_KEY="")
+        assert "OPENROUTER" not in connect.connected_providers()
+
+    def test_a_session_key_is_dropped_and_the_file_is_not_written(
+            self, providers_file):
+        connect.store(connect.PRESETS["openrouter"], FAKE_OR_KEY,
+                      persist=False)
+        try:
+            assert credentials.forget_key("OPENROUTER") == "session"
+        finally:
+            credentials.clear_session_providers()
+        assert not providers_file.exists()
+        assert "OPENROUTER" not in connect.connected_providers()
+
+    @pytest.mark.parametrize("setup", ["absent", "keyless"])
+    def test_nothing_to_forget_is_none(self, providers_file, setup):
+        if setup == "keyless":
+            providers_file.write_text(json.dumps(
+                {"LOCAL": {"API_KEY": "", "API_URL": "http://localhost:1/v1"}}),
+                encoding="utf-8")
+        before = providers_file.read_bytes() if providers_file.exists() else None
+        assert credentials.forget_key("LOCAL") is None
+        after = providers_file.read_bytes() if providers_file.exists() else None
+        assert after == before
 
 
 class TestWhereAKeyIsKept:

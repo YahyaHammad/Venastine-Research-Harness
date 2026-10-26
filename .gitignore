@@ -32,6 +32,10 @@ logs/
 # than the two that hold credentials.
 *.tmp
 providers.json
+# ROADMAP_v3 §83 (CG4). The ChatGPT-plan sign-in's tokens, beside
+# providers.json, and the empty file its refreshes lock on.
+chatgpt_auth.json
+chatgpt_auth.json.lock
 # ROADMAP_v3 §49 slice 5a. The harness-held secret store's DEFAULT name, in
 # case anyone points AGENT_SECRETS_FILE at a checkout. It lives in
 # ~/.config/venastine and so is normally nowhere near a repository; this is

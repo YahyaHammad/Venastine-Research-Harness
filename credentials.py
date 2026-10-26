@@ -176,6 +176,29 @@ def save_credentials(
     _write_provider_data(provider_data)
 
 
+def forget_key(provider_name: str) -> "str | None":
+    """Remove `provider_name`'s key; say where it was (ROADMAP_v3 §83, CG13).
+
+    `/disconnect`'s one writer. A session-only entry (HD5) is dropped whole,
+    since it exists only to carry the key, and the file is not touched --
+    a shared deployment never writes it. Otherwise the file entry's
+    `API_KEY` is blanked and EVERY OTHER FIELD STAYS: the URL, the two
+    flags, `echoes_reasoning`, `accepts_images` -- exactly what
+    `save_credentials` keeps when a key is replaced, so a later `/connect`
+    comes back to the same entry. Returns "session", "file", or None when
+    there was no key to forget.
+    """
+    if _SESSION_PROVIDERS.pop(provider_name, None) is not None:
+        return "session"
+    provider_data = _load_file_data()
+    entry = provider_data.get(provider_name)
+    if not entry or not entry.get("API_KEY"):
+        return None
+    entry["API_KEY"] = ""
+    _write_provider_data(provider_data)
+    return "file"
+
+
 def load_credentials(provider_name: str) -> tuple[str, str]:
     provider_data = load_provider_data()
     # #24. The two failure modes say different things now -- "the file is

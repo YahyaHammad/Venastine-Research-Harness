@@ -3622,6 +3622,7 @@ def _modal_cases():
         ClaimsScreen,
         ConfirmScreen,
         GrantPickerScreen,
+        NoticeScreen,
         ProjectKindScreen,
         QuestionScreen,
         ReviewScreen,
@@ -3666,6 +3667,8 @@ def _modal_cases():
         ("session-kill", lambda: SessionKillScreen([]),
          "#session-kill-dialog"),
         ("secret", lambda: SecretScreen("Unlock the secrets store"),
+         "#permission-dialog"),
+        ("notice", lambda: NoticeScreen("Title", "Body text."),
          "#permission-dialog"),
     ]
 
@@ -6782,10 +6785,11 @@ class TestTheWindowSlidesOverTheMatches:
     async def test_the_window_can_drop_one_and_gain_two(self):
         """The case that falls out of the ROW budget rather than a rule.
 
-        `/compact` is two rows; `/embedder` and `/forget` are two rows
-        between them. So the step that needs `/embedder` on screen drops
-        one entry and gains TWO, and the panel goes from four entries to
-        five without either cap moving.
+        `/embedder` and `/forget` are two rows between them, so the step
+        that needs `/embedder` on screen drops one entry and gains TWO, and
+        the panel goes from four entries to five without either cap moving.
+        Nine downs since batch 184's `/disconnect` sorted in before
+        `/effort` (measured: the window drops `/copy` there and gains both).
         """
         app = VenastineApp("ANTHROPIC", "test-model", {})
         async with app.run_test(size=(80, 24)) as pilot:
@@ -6794,12 +6798,12 @@ class TestTheWindowSlidesOverTheMatches:
             await pilot.press("slash")
             assert await settle(pilot, lambda: panel.display)
 
-            for _ in range(8):
+            for _ in range(9):
                 await pilot.press("down")
             assert await settle(pilot, lambda: panel.chosen.name == "embedder")
 
             assert [c.name for c in panel.visible] == [
-                "copy", "critic", "effort", "embedder", "forget"], (
+                "critic", "disconnect", "effort", "embedder", "forget"], (
                 f"the window is {[c.name for c in panel.visible]}")
             assert panel.shown == 5
             assert panel.size.height <= 8, (
@@ -6818,7 +6822,7 @@ class TestTheWindowSlidesOverTheMatches:
             await pilot.press("slash")
             assert await settle(pilot, lambda: panel.display)
 
-            for _ in range(8):
+            for _ in range(9):
                 await pilot.press("down")
             assert await settle(pilot, lambda: panel.chosen.name == "embedder")
             scrolled = [c.name for c in panel.visible]
@@ -6833,7 +6837,7 @@ class TestTheWindowSlidesOverTheMatches:
                 f"the window moved to {[c.name for c in panel.visible]} for "
                 f"a selection it was already showing")
 
-            for _ in range(7):
+            for _ in range(8):
                 await pilot.press("up")
             assert await settle(pilot, lambda: panel.chosen.name == "agent")
 
@@ -6877,7 +6881,7 @@ class TestTheWindowSlidesOverTheMatches:
             panel = app.query_one("#slash-suggest")
             await pilot.press("slash")
             assert await settle(pilot, lambda: panel.display)
-            for _ in range(8):
+            for _ in range(9):
                 await pilot.press("down")
             assert await settle(pilot, lambda: panel.chosen.name == "embedder")
 
