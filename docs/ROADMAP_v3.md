@@ -43,6 +43,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
+- **§83. A ChatGPT plan, spent in a local install** - **(NOT BUILT: decided with the owner in batch 180, three slices, slice 0 a measurement on the owner's own account)** (OpenAI's Sign in with ChatGPT now invites open-source apps that run locally to spend a Plus or Pro subscriber's plan, the first provider since ModelScope to pass HD5's test; the harness has no Responses API path, no loopback listener, no credential that refreshes itself, and no way to sign out of anything)
 - **§82. Gemini 3's thought signatures, and a pin that could not carry them** - **(BUILT in batch 172)** (every model a new Google account can call is Gemini 3, which refuses a function call replayed without the signature it came with, and google-genai 1.0.0 had no field to hold one, so every GOOGLE tool loop failed on its second request. The pin moves to 2.29.0, each call's signature rides in §44's reasoning record, a turn another model wrote gets Google's placeholder, and the Schema keys sent are a verified list since 2.29.0's Vertex-only `additional_properties` was refused. Google effort is on as a consequence)
 - **§81. An image a tool reads, delivered to a model that can see it** - **(BUILT in batch 171; Google added in batch 173)** (nothing a model could read from the workspace reached it as anything but text: a tool result was `str(result)`, `read` decoded bytes with `errors="replace"`, and MCP dropped image blocks by decision. `view_image` attaches an image to its own result through the memory, into a new column, never through the redactor; Anthropic carries it inside the `tool_result`, the OpenAI-compatible wire in a harness message after the tool batch because its tool messages take text only, and since batch 173 Google in a harness turn after the batch too, because its function responses take no image on the models a new account can call (a GIF stays a note there); opt-in per provider with `accepts_images`, never in a research pass, and counted at a fixed weight by the compactor)
 - **§80. The copyright year, kept by a workflow** - **(BUILT in batch 169)** (the owner asked not to have to remember it: LICENSE's appendix and NOTICE both said `Copyright 2026`, and nothing would move either; a workflow at 23:59 UTC on December 31, and again on January 1 in case GitHub delayed or dropped that run, writes a range from the first year to both files together; LY1-LY3)
@@ -2731,6 +2732,129 @@ leaked PID.
   because MCP is the only dynamic registrant and the composed name is its
   fact. A bound in the registry would be the fix-at-the-consumer shape
   `AGENTS.md` names by name.
+---
+
+## §83. A ChatGPT plan, spent in a local install
+
+**Decided with the owner on 2026-10-26, in batch 180; not built.** The owner
+asked whether any other major provider now passes HD5's test -- its own
+documentation invites a third-party app to sign its users in -- and one does,
+for local installs only. OpenAI's Sign in with ChatGPT (DevDay, October 2026)
+lets Plus and Pro subscribers spend their ChatGPT plan inside open-source and
+locally hosted apps. §79's survey, which found nothing comparable for
+OpenAI, is superseded by this section for local installs. For a remotely
+hosted or paid app OpenAI asks for its interest form first, and nobody has
+filed one.
+
+The same re-survey found nothing else. Anthropic's legal page forbids a
+third-party app from offering Claude.ai login. Google's Gemini OAuth guide
+covers a project authenticating itself, for testing. GitHub Models was
+retired on 2026-07-30, inference API included. Qwen Code's free OAuth tier
+ended on 2026-04-15.
+
+**WHAT WAS MEASURED** on 2026-10-26, without an account:
+
+- `https://auth.openai.com/.well-known/openid-configuration` answers with
+  issuer `https://auth.openai.com`; authorization at `/api/accounts/authorize`,
+  token at `/api/accounts/oauth/token`, revocation at
+  `/api/accounts/oauth/revoke`, keys at `/.well-known/jwks.json`; token
+  authentication methods including `none`; PKCE `S256` only; grants
+  `authorization_code` and `refresh_token`; and no device authorization
+  endpoint. So the only way back to the harness is a redirect.
+- Its `scopes_supported` lists `openid profile email offline_access` only. The
+  two plan scopes the guide asks for are not advertised there, so slice 0
+  measures whether they are granted.
+
+**WHAT OPENAI'S PAGES SAY**, read the same day:
+
+- **Registration happens during the first sign-in.** The request carries
+  `client_id=dynamic_agent_client`, a host id (`ext_agent_host_id`, a
+  `urn:uuid` chosen before the first sign-in and kept) and the app's name
+  (`agent_name_hint`). The callback returns an issued client id, saved per
+  account and reused. There is no client secret.
+- **The redirect is `http://127.0.0.1:<port>/auth/callback`.** The port may
+  change between sign-ins; the scheme, host and path may not, and `localhost`
+  is not a substitute.
+- **Scopes** `openid profile email offline_access resource.invoke
+  chatgpt.tokens.use.direct`, resource `https://api.openai.com/v1`. A valid ID
+  token alone does not grant plan usage: the granted scopes must include
+  `chatgpt.tokens.use.direct`.
+- **Access tokens last an hour; refresh tokens last 30 days and rotate on
+  every refresh.** Refreshes of one session are to be serialized, because a
+  reused refresh token is refused.
+- **Inference is `POST /v1/responses` and nothing else.** Every request sends
+  `store: false` and `stream: true`, no `previous_response_id`, and no
+  system-message item. Hosted tools (file search, code interpreter, image
+  generation, computer use, hosted MCP), audio and video input and the Files
+  API are unsupported.
+- **Errors are `subscription_sharing_*` codes, each with a prescribed
+  recovery.** A usage limit is a 429 that is not retried and that points the
+  person at ChatGPT's usage settings.
+- **Sign-out revokes the refresh token.** When revocation cannot be confirmed,
+  the local tokens are cleared anyway and the person is told where to
+  disconnect the app in ChatGPT.
+- **The UI guidelines set the words:** "Continue with ChatGPT" to start, a
+  one-time "You're using your ChatGPT plan" notice, "Using ChatGPT plan" with
+  a "Manage usage" link near where the person types, and "Manage usage" as
+  the first action on a usage-limit error.
+
+**WHAT NOBODY KNOWS UNTIL SOMEONE SIGNS IN**, which is why slice 0 exists. The
+pages do not say whether a plan token takes function tools, image input or a
+reasoning effort; what the stream reports as usage; which models a Plus
+account lists; the address of ChatGPT's usage settings; or what a limit looks
+like before it is reached.
+
+Pages read: `https://developers.openai.com/siwc`,
+`https://developers.openai.com/siwc/token-sharing-open-source` and its
+`sign-in`, `models-and-inference`, `token-reference`,
+`profiles-and-sessions`, `errors-and-recovery`, `preview-limitations` and
+`self-hosted-vms` pages, `https://developers.openai.com/siwc/ui-ux-guidelines`,
+and `https://developers.openai.com/cookbook/articles/sign-in-with-chatgpt`.
+
+### Slices
+
+- **Slice 0 -- the measurement** (CG7). The owner signs in on their own Plus or
+  Pro account and the probe asks what the pages leave open: the model list, a
+  plain streamed answer, a function tool and its result handed back, an
+  image, each reasoning effort, the usage on the completed event, and the
+  usage-settings address. It prints statuses and shapes, never a token. The
+  answers are written into this section before slice 2 is.
+- **Slice 1 -- signing in, staying signed in, signing out.** `/connect chatgpt`
+  (CG2, CG5, CG6), the token file and its refresh (CG4), the first-sign-in
+  notice (CG8), and `/disconnect <name>` for every provider (CG9).
+- **Slice 2 -- the Responses path.** The CHATGPT translation in
+  `core/client.py` (CG3), built against slice 0's answers; the error mapping
+  (CG10); and the "Using ChatGPT plan" indicator and the limit message (CG8).
+
+### What §83 deliberately does not change
+
+**No hosted deployment offers it** (CG1): not the shared demo, and not a
+single-user duplicate, which is remotely hosted too.
+
+**`OPENAI` is untouched.** An API key keeps Chat Completions and keeps being
+billed to its own account.
+
+**Identity-only sign-in is not used.** OpenAI offers it to selected commercial
+partners, and the harness has no accounts of its own to sign anyone in to.
+
+**Codex's app-server is not used.** OpenAI's guide offers it as another
+transport; the harness speaks HTTP to every provider and keeps doing so.
+
+### Design Decisions Record — §83 (CG1-CG10)
+
+| id | decision |
+|---|---|
+| **CG1** | **Local installs only: no hosted deployment offers the ChatGPT plan.** OpenAI's eligibility names open-source and locally hosted apps and sends a remotely hosted or paid one to its interest form, and its redirect reaches only the machine running the browser. `_signs_in_here` answers no for CHATGPT on every hosted deployment, shared or single-user, and `/connect chatgpt` there says why. HD5's list grows for local installs by HD5's own test; the shared demo's list does not change. Filing the interest form is the owner's call and is not made here |
+| **CG2** | **The ChatGPT plan is its own provider, `CHATGPT`, connected by `/connect chatgpt`; the owner's choice.** Its billing, credential, endpoint and restrictions all differ from an OpenAI API key's, so one name for both would make one provider behave two ways. `/model` moves between the two like any other pair. Declined: a sign-in mode on `OPENAI` |
+| **CG3** | **CHATGPT gets a Responses API path in `core/client.py`, used by it alone.** `OPENAI` and every OpenAI-compatible provider stay on Chat Completions. Each CHATGPT request sends `store: false` and `stream: true`, the system prompt as `instructions` and never as a system item, the whole history in `input` with no `previous_response_id`, and only the harness's own function tools -- never a hosted one |
+| **CG4** | **The tokens live in their own file beside `providers.json`, 0600 and written atomically; the owner's choice.** `chatgpt_auth.json` holds the host id, the issued client id per account, the access token and its expiry, the granted scopes and the rotating refresh token; `providers.json`'s CHATGPT entry holds no secret. A token is refreshed before its hour is out, under one lock across threads and processes, and the replacement refresh token is written before anything uses it, because a reused one is refused. The file joins `providers.json` in `.gitignore` and in every exclusion that keeps that file out of a bundle or a scan. Declined: the same fields inside `providers.json`, where every hourly refresh would rewrite every stored key; and the `/secrets` store, where the plan would work only after an unlock in each session |
+| **CG5** | **A one-shot listener catches the redirect, and a pasted address completes it when the browser is on another machine; the owner's choice.** The listener binds `127.0.0.1` on a free port for one sign-in, answers `/auth/callback` only, and closes after the first callback whose `state` matches, or on cancel or timeout. Over SSH the browser cannot reach it, so the same prompt also takes the address the browser ended on; it is parsed, its `state` is checked the same way, and it is exchanged with the same `redirect_uri`. Declined: the listener alone, which leaves SSH with no sign-in; and Codex's fixed port 1455, which collides with a running Codex |
+| **CG6** | **Registration and verification follow OpenAI's page as written.** The host id is a `urn:uuid` made once per install and kept. The first sign-in sends `dynamic_agent_client`, `ext_agent_host_id` and `agent_name_hint=Venastine Research Harness`, the app's own title; the issued client id is saved per account and reused. The ID token is checked against the published keys for issuer, audience, expiry and nonce. Plan usage is on only when `chatgpt.tokens.use.direct` was granted; otherwise the sign-in is kept and the person is told the plan was not shared |
+| **CG7** | **Measure before the translation is written; the owner's choice.** Slice 0 runs on the owner's own Plus or Pro account. It prints statuses and shapes and never a token, and nothing it reads reaches a chat. A capability it did not measure ships off -- an image, for one, is not delivered until `accepts_images` is set for CHATGPT on a measurement. Declined: building from the pages and measuring later |
+| **CG8** | **The TUI follows OpenAI's UI guidelines; the owner's choice.** The sign-in is offered as "Continue with ChatGPT". The first sign-in with plan usage shows a one-time modal, "You're using your ChatGPT plan", saying that eligible requests use the plan and that usage is managed in ChatGPT's settings, with "Got it". While CHATGPT is the provider, the header shows "Using ChatGPT plan" beside the model with a Manage usage link, and a usage-limit error leads with Manage usage. Declined: the same words as transcript lines only |
+| **CG9** | **`/disconnect <name>` removes any provider's stored credential; the owner's choice.** It deletes the entry from `providers.json` or from the session's overlay and forgets the cached client. For CHATGPT it first revokes the refresh token at OpenAI's revocation endpoint -- an empty 200 is success, a network error or a 5xx is retried with backoff -- and when revocation cannot be confirmed it clears the tokens anyway and says where to disconnect the app in ChatGPT. For every other provider the harness cannot revoke, so it says where the person can: the sign-in's page in `_REVOKE_PAGES`, or the preset's key page for a pasted key. Declined: a sign-out for ChatGPT alone |
+| **CG10** | **OpenAI's error table is followed code by code, and a passing failure never deletes a credential.** A usage limit (429) pauses plan requests, points at Manage usage and is never retried. An ineligible user (403) is told once, with no retry and no new sign-in. A 503 is retried with bounded backoff. An unsupported capability (400) names its `error.param` and is not resent unchanged. A refresh refused as unusable (`invalid_grant` and its kin) clears the tokens and asks for a new sign-in. A network failure or a 5xx leaves every stored token as it was |
+
 ---
 
 ## §82. Gemini 3's thought signatures, and a pin that could not carry them

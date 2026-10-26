@@ -26996,3 +26996,28 @@ picker (§49, SS2). The two pickers had their rules and measure centred.
   walk taking Textual's own modals as the app's.
 - ruff clean; bandit 0 new and no pair grew; gitleaks found no leaks;
   both deploy dry runs build, scan clean and audit clean.
+
+## Batch 180 -- §83 decided: a ChatGPT plan, spent in a local install (2026-10-26)
+
+**Specified, not built.** The owner asked whether any other major provider now
+passes HD5's test for a sign-in. A re-survey of primary pages found one:
+OpenAI's Sign in with ChatGPT, launched at DevDay this month, invites
+open-source and locally hosted apps to let Plus and Pro subscribers spend
+their plan. A remotely hosted or paid app goes through OpenAI's interest form
+first, so the hosted demo is out. Nothing else qualified: Anthropic's legal
+page forbids third-party Claude.ai login, Google's Gemini OAuth guide covers a
+project's own access, GitHub Models was retired on 2026-07-30, and Qwen Code's
+free OAuth tier ended on 2026-04-15.
+
+Measured without an account: OpenAI's discovery document at
+`auth.openai.com` lists the documented endpoints, a revocation endpoint,
+public clients, S256 PKCE and refresh grants, and no device-code endpoint.
+
+The owner's choices, CG2, CG4, CG5, CG7, CG8 and CG9: CHATGPT as its own
+provider; its tokens in their own 0600 file; a loopback listener with a
+pasted-address fallback for SSH; measurement on the owner's own account
+before the Responses translation is written; OpenAI's UI guidelines followed;
+and `/disconnect` for every provider rather than for ChatGPT alone. CG1, CG3,
+CG6 and CG10 follow from OpenAI's pages.
+
+Next is slice 0, which needs the owner to sign in on a Plus or Pro account.
