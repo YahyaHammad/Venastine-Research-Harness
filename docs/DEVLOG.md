@@ -27055,3 +27055,10 @@ floor. A reused refresh token was accepted again.
 The image result is recorded as one sample: a solid red 8x8 PNG, verified
 red, was delivered and called "Peach", so CG7 keeps images off until a real
 image is tried. The usage-settings address is still owed by the owner.
+
+## Batch 183 -- §83 slice 0 complete: the usage-settings address (2026-10-26)
+
+**Recorded, not built.** The owner read ChatGPT's usage-settings address,
+which no API reports: `https://chatgpt.com/settings/usage?tab=overview`.
+CG8's Manage usage link points there. That was the last thing slice 0 owed;
+slice 1, signing in and out, is next.
