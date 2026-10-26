@@ -27021,3 +27021,21 @@ and `/disconnect` for every provider rather than for ChatGPT alone. CG1, CG3,
 CG6 and CG10 follow from OpenAI's pages.
 
 Next is slice 0, which needs the owner to sign in on a Plus or Pro account.
+
+## Batch 181 -- §83 slice 0, first run: the sign-in measured, the streams missed (2026-10-26)
+
+**Recorded, not built.** The owner ran the slice 0 probe on their own
+account. The sign-in, the tokens, the refresh, the revocation, the model
+list and every refusal measured cleanly, and three findings differ from
+OpenAI's pages: the token response carries `earliest_refresh_at`, which no
+page mentions; a reused refresh token was accepted rather than refused; and
+revocation kills the access token at once. Chat Completions answered 401, so
+CG3's Responses-only path is measured rather than read.
+
+The probe lost every admitted request's body. The plan route streams with no
+`Content-Type` header, and the probe read a missing type as "not a stream".
+Reproduced against the offline fake with the header dropped (five checks
+fail on the first run's handling, none on the fix). The probe also kept the
+value of an opaque `x-codex-turn-state` response header in its scratch
+results; that value is not in the repository, and the fixed probe records
+its length only. A second run is owed before slice 2.

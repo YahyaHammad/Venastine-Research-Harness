@@ -43,7 +43,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
-- **§83. A ChatGPT plan, spent in a local install** - **(NOT BUILT: decided with the owner in batch 180, three slices, slice 0 a measurement on the owner's own account)** (OpenAI's Sign in with ChatGPT now invites open-source apps that run locally to spend a Plus or Pro subscriber's plan, the first provider since ModelScope to pass HD5's test; the harness has no Responses API path, no loopback listener, no credential that refreshes itself, and no way to sign out of anything)
+- **§83. A ChatGPT plan, spent in a local install** - **(NOT BUILT: decided with the owner in batch 180; slice 0's first run, batch 181, measured the sign-in, the refresh, the revocation and every refusal, and a second run is owed for what the admitted requests returned)** (OpenAI's Sign in with ChatGPT now invites open-source apps that run locally to spend a Plus or Pro subscriber's plan, the first provider since ModelScope to pass HD5's test; the harness has no Responses API path, no loopback listener, no credential that refreshes itself, and no way to sign out of anything)
 - **§82. Gemini 3's thought signatures, and a pin that could not carry them** - **(BUILT in batch 172)** (every model a new Google account can call is Gemini 3, which refuses a function call replayed without the signature it came with, and google-genai 1.0.0 had no field to hold one, so every GOOGLE tool loop failed on its second request. The pin moves to 2.29.0, each call's signature rides in §44's reasoning record, a turn another model wrote gets Google's placeholder, and the Schema keys sent are a verified list since 2.29.0's Vertex-only `additional_properties` was refused. Google effort is on as a consequence)
 - **§81. An image a tool reads, delivered to a model that can see it** - **(BUILT in batch 171; Google added in batch 173)** (nothing a model could read from the workspace reached it as anything but text: a tool result was `str(result)`, `read` decoded bytes with `errors="replace"`, and MCP dropped image blocks by decision. `view_image` attaches an image to its own result through the memory, into a new column, never through the redactor; Anthropic carries it inside the `tool_result`, the OpenAI-compatible wire in a harness message after the tool batch because its tool messages take text only, and since batch 173 Google in a harness turn after the batch too, because its function responses take no image on the models a new account can call (a GIF stays a note there); opt-in per provider with `accepts_images`, never in a research pass, and counted at a fixed weight by the compactor)
 - **§80. The copyright year, kept by a workflow** - **(BUILT in batch 169)** (the owner asked not to have to remember it: LICENSE's appendix and NOTICE both said `Copyright 2026`, and nothing would move either; a workflow at 23:59 UTC on December 31, and again on January 1 in case GitHub delayed or dropped that run, writes a range from the first year to both files together; LY1-LY3)
@@ -2810,6 +2810,62 @@ Pages read: `https://developers.openai.com/siwc`,
 `profiles-and-sessions`, `errors-and-recovery`, `preview-limitations` and
 `self-hosted-vms` pages, `https://developers.openai.com/siwc/ui-ux-guidelines`,
 and `https://developers.openai.com/cookbook/articles/sign-in-with-chatgpt`.
+
+### Slice 0, first run (2026-10-26, batch 181)
+
+The owner ran the probe on their own account: 27 steps on `gpt-6.1-sol`, the
+first model listed, signed out at the end. Its guard withheld nothing, and a
+separate scan of the results file found no email, token, client id or
+account id.
+
+**MEASURED:**
+
+- **The sign-in is as documented.** The callback carried `client_id`
+  (`oaiapp_`, 32 characters), `code`, `scope` and `state`, and all six scopes
+  were granted. The ID token is RS256 with a `kid`, verified against the
+  published keys, with the nonce matched. It names no plan: its namespaced
+  claim holds a salt and nothing else. The access token is a JWT for
+  `https://api.openai.com/v1`. Both last 3600 seconds.
+- **The token response has a field no page mentions, `earliest_refresh_at`.**
+  Its value was not recorded. A refresh less than two minutes after sign-in
+  succeeded and rotated the refresh token.
+- **A reused refresh token was accepted.** Offering the replaced one again
+  answered 200, and the newest access and refresh tokens kept working -- not
+  the `refresh_token_reused` refusal the pages describe. CG4's lock stays: a
+  grace window is the server's choice and not a promise, and nobody has
+  measured how long it lasts.
+- **Revocation ends the access token as well.** An empty 200, after which the
+  access token answered 401 `invalid_token` at once, and the refresh token
+  answered `invalid_grant` asking for a fresh sign-in.
+- **Seven models are listed, of nine:** `gpt-6.1-sol` with a 500,000-token
+  context window, and `gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna`,
+  `gpt-5.6-sol`, `gpt-5.6-terra` and `gpt-5.6-luna` at 272,000. Every one
+  takes text and image input and parallel tool calls. Each entry also
+  carries Codex's own configuration -- its base instructions and model
+  messages, `tool_mode: code_mode_only`, a minimum Codex client version --
+  which the harness has no use for and does not forward.
+- **Refused, conclusively:** `stream: false` (400, "Stream must be set to
+  true"); `temperature` (400, an unsupported parameter); efforts `none` and
+  `minimal` (400 `unsupported_value`, whose message lists low, medium, high,
+  xhigh and max for `gpt-6.1-sol`, while the model list also offers
+  `ultra`); and Chat Completions (401 `rejected_by_access_enforcement`),
+  which is CG3's premise measured. A refusal comes in either of two shapes,
+  `{"detail": ...}` or the standard error object.
+- **No rate-limit headers.** `x-codex-*` headers instead, among them
+  `x-codex-safety-buffering-enabled: true`, whose meaning no page states.
+
+**NOT MEASURED, BY THE PROBE'S FAULT.** Every request OpenAI admitted --
+plain, `instructions`, the system and developer items, `max_output_tokens`,
+efforts low to xhigh, encrypted reasoning, the tool call and the image --
+answered 200 with a stream that carried no `Content-Type` header. The probe
+took a missing type for "not a stream" and discarded the body. A 200 at
+admission does not say the stream completed, so what each returned is
+unknown: whether a system item is refused inside the stream, whether
+function tools work under `code_mode_only`, whether an image is seen, and
+what usage the stream reports. The probe is fixed and checked against a
+fake that omits the header the same way; it now also tries `max` and
+`ultra` and records where `earliest_refresh_at` points. A second run is owed
+before slice 2, and so is the address of ChatGPT's usage settings (CG8).
 
 ### Slices
 
