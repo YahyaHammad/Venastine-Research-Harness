@@ -8013,9 +8013,7 @@ def _cmd_disconnect(app: "VenastineApp", args: str) -> None:
         body = ("This revokes the sign-in at OpenAI and deletes its tokens "
                 f"from {chatgpt_auth.auth_path()}." if state.signed_in
                 else "There is no sign-in to revoke.")
-        if forget:
-            body += (" It also forgets this install's registration, so the "
-                     "next sign-in can be another ChatGPT account.")
+        body += _registration_clause(forget)
         confirm = "Sign out"
     else:
         if provider not in connected:
@@ -8075,14 +8073,32 @@ def _cmd_disconnect(app: "VenastineApp", args: str) -> None:
     app.push_screen(ConfirmScreen(title, body + in_use, confirm), decided)
 
 
+def _registration_clause(forget: bool) -> str:
+    """What a ChatGPT sign-out does to this install's registration, said
+    the same way before and after (§83, CG12 as amended in batch 185).
+
+    The owner's live check found plain `/disconnect chatgpt` and `--forget`
+    indistinguishable on screen: both sign out, and the difference only
+    shows at the NEXT sign-in, which nothing said. So both forms now say
+    what happens to the registration, not only the one that drops it.
+    """
+    if forget:
+        return (" This install's registration is dropped as well, so the "
+                "next /connect chatgpt registers afresh, may be another "
+                "ChatGPT account, and shows the first-sign-in notice again. "
+                "OpenAI keeps its own record of the app either way.")
+    return (" This install's registration stays, so the next /connect "
+            "chatgpt reuses it, for the same account, without the "
+            "first-sign-in notice; --forget would drop it too.")
+
+
 def _finish_disconnect(app: "VenastineApp", message: DisconnectFinished) -> None:
     from core import chatgpt_auth
 
     if message.error is not None:
         app._transcript.write_error(message.error)
         return
-    forgot = (" This install's registration is forgotten, so the next "
-              "sign-in can be another account." if message.forgot else "")
+    forgot = _registration_clause(message.forgot)
     if message.confirmed is True:
         app._transcript.write_system(
             "Signed out of the ChatGPT plan: OpenAI revoked the sign-in and "

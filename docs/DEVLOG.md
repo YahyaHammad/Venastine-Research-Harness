@@ -27135,3 +27135,33 @@ check of slice 1 reads it.
 - ruff clean; bandit 0 new and no pair grew; pip-audit on requirements.txt
   found no known vulnerabilities; gitleaks found no leaks; both deploy dry
   runs build, scan clean and audit clean.
+
+## Batch 185 -- §83 slice 1 checked live, and /disconnect says what it keeps (2026-10-27)
+
+**The owner's live check of slice 1 passed.** In a local TUI on their own
+account: `/connect chatgpt`, `/model CHATGPT`, `/disconnect chatgpt`,
+`/connect chatgpt` again and `/disconnect chatgpt --forget` -- the sign-in
+and the sign-out worked both times. The token file afterwards, read by its
+structure and never its values, held the host id and the endpoints only,
+and git ignores it and its lock file.
+
+**The one finding:** plain `/disconnect` and `--forget` looked the same.
+They are not -- the registration stays or goes, and that shows at the next
+sign-in -- but only `--forget`'s result mentioned the registration at all.
+CG12 is amended: both forms say what happens to it, in the confirmation and
+in the result, from one function so the two cannot drift.
+
+**Not reported, so not recorded as measured:** whether OpenAI asked for
+consent again on the second sign-in, and the connected-apps tab of
+ChatGPT's settings, which leaves the revoke page at the settings root.
+
+### Verified
+
+- Full suite, 8248 tests: 8180 passed, 68 skipped on Windows,
+  and the changed suites again with `AGENT_WORKSPACE` unset. The two sign-out tests now assert
+  each form's sentence, and the other form's absence, in both places; the
+  count is unchanged.
+- Mutations: 4 of 4 killed -- each form saying the other's sentence, and
+  the sentence left out of the confirmation or of the result.
+- ruff clean; bandit 0 new and no pair grew; gitleaks found no leaks;
+  both deploy dry runs build, scan clean and audit clean.

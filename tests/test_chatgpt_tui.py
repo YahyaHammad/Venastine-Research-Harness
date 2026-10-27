@@ -373,6 +373,10 @@ class TestDisconnecting:
     @pytest.mark.asyncio
     async def test_the_plan_is_signed_out_and_its_registration_kept(
             self, providers_file, openai):
+        """Batch 185: the owner's live check found the two forms
+        indistinguishable on screen, so the plain one now SAYS it keeps the
+        registration -- in the confirmation and in the result -- and never
+        says the --forget sentence."""
         from tui.app import _cmd_disconnect
         from tui.screens import ConfirmScreen
 
@@ -382,10 +386,16 @@ class TestDisconnecting:
             _cmd_disconnect(app, "chatgpt")
             assert await settle(pilot, lambda: isinstance(app.screen,
                                                           ConfirmScreen))
-            assert "revokes the sign-in at OpenAI" in app.screen._body
+            body = app.screen._body
             app.screen.dismiss(True)
             assert await settle(pilot, lambda: "Signed out of the ChatGPT "
                                 "plan" in _text(app))
+            text = _text(app)
+        assert "revokes the sign-in at OpenAI" in body
+        for said in (body, text):
+            assert "registration stays" in said
+            assert "--forget would drop it too" in said
+            assert "registration is dropped" not in said
         state = chatgpt_auth.status()
         assert not state.signed_in and state.registered
 
@@ -401,10 +411,16 @@ class TestDisconnecting:
             _cmd_disconnect(app, "chatgpt --forget")
             assert await settle(pilot, lambda: isinstance(app.screen,
                                                           ConfirmScreen))
-            assert "another ChatGPT account" in app.screen._body
+            body = app.screen._body
             app.screen.dismiss(True)
-            assert await settle(pilot, lambda: "registration is forgotten"
-                                in _text(app))
+            assert await settle(pilot, lambda: "Signed out of the ChatGPT "
+                                "plan" in _text(app))
+            text = _text(app)
+        for said in (body, text):
+            assert "registration is dropped as well" in said
+            assert "another ChatGPT account" in said
+            assert "first-sign-in notice again" in said
+            assert "registration stays" not in said
         assert not chatgpt_auth.status().registered
 
     @pytest.mark.asyncio
