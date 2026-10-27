@@ -560,6 +560,22 @@ class TestEffortAndTheWindow:
         assert levels
         assert authoritative is False
 
+    def test_an_unlisted_model_is_named_against_the_plans_list(self, caplog):
+        """Batch 189, the owner's live check: a typo (`gpt-6-luba`) got the
+        static table's advice to add a config entry, and the level list it
+        named included `ultra`, which the filter removes afterwards."""
+        plan = Plan(listing=_listing((MODEL, "list", 500000, ["low"]),
+                                     ("gpt-hidden", "hide", 1, ["low"])))
+        with caplog.at_level("WARNING"):
+            levels, authoritative = client._effort_levels(
+                plan, "CHATGPT", "gpt-6-luba")
+        assert ("'gpt-6-luba' is not in your ChatGPT plan's model list"
+                in caplog.text)
+        assert f"The plan lists: {MODEL}." in caplog.text
+        assert "MODEL_EFFORT_LEVELS" not in caplog.text
+        assert "ultra" not in caplog.text and "ultra" not in levels
+        assert authoritative is True
+
     def test_an_unlisted_model_falls_back_without_ultra(self):
         plan = Plan(listing=_listing(("gpt-other", "list", 1, ["low"])))
         levels, authoritative = client._effort_levels(plan, "CHATGPT", MODEL)

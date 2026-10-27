@@ -226,6 +226,45 @@ class TestThePlansKeylessEntry:
         assert "CHATGPT" not in connect.connected_providers()
 
 
+class TestTheCredentialCheck:
+    """Batch 189, from the owner's live check: the plan's credential is its
+    sign-in, never a key, at launch and at every switch."""
+
+    @staticmethod
+    def _signed_in(monkeypatch, yes):
+        from core import chatgpt_auth
+
+        monkeypatch.setattr(chatgpt_auth, "status", lambda: chatgpt_auth.Status(
+            signed_in=yes, plan_usage=yes, registered=yes, expires_at=None))
+
+    def test_a_signed_in_plan_has_nothing_missing(self, providers_file,
+                                                  monkeypatch):
+        self._signed_in(monkeypatch, True)
+        connect.store_chatgpt_entry()
+        assert credentials.missing_credential_message(
+            "CHATGPT", {"API_KEY": ""}) is None
+        assert credentials.provider_startup_issues("CHATGPT") == []
+
+    def test_a_signed_out_plan_says_how_to_sign_in_not_that_a_key_is_missing(
+            self, providers_file, monkeypatch):
+        self._signed_in(monkeypatch, False)
+        connect.store_chatgpt_entry()
+        (issue,) = credentials.provider_startup_issues("CHATGPT")
+        assert "/connect chatgpt" in issue
+        assert "API_KEY" not in issue
+
+    @pytest.mark.parametrize("key,missing", [("", True), ("sk-x", False)],
+                             ids=["blank", "present"])
+    def test_every_other_provider_is_still_asked_for_its_key(self, key,
+                                                             missing):
+        message = credentials.missing_credential_message(
+            "OPENROUTER", {"API_KEY": key})
+        if missing:
+            assert message == credentials.missing_key_message("OPENROUTER")
+        else:
+            assert message is None
+
+
 class TestWhereAKeyIsKept:
     def test_persisting_writes_the_entry_and_forgets_the_cached_client(
             self, providers_file):

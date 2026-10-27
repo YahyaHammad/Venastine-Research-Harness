@@ -5491,11 +5491,14 @@ def _cmd_model(app: VenastineApp, args: str) -> None:
     # WARN, don't refuse, on a missing key. An OpenAI-compatible endpoint
     # running locally legitimately takes no key, so refusing would block a
     # real configuration -- but every call to a hosted provider will fail
-    # auth, and finding that out one turn later is the worse trade.
-    if not providers[provider].get("API_KEY"):
-        from credentials import missing_key_message
+    # auth, and finding that out one turn later is the worse trade. The
+    # ChatGPT plan has no key at all and is asked about its sign-in
+    # instead (§83, batch 189).
+    from credentials import missing_credential_message
 
-        app._transcript.write_error(missing_key_message(provider))
+    missing = missing_credential_message(provider, providers[provider])
+    if missing:
+        app._transcript.write_error(missing)
 
     # An active agent may name its own model/provider (§18), and those win
     # in run_agent_turn. Without this the switch is a silent no-op for as
@@ -6524,12 +6527,14 @@ def _pipeline_role_args(app: VenastineApp, args: str, command: str):
             f"Unknown provider {provider!r}. Configured: "
             f"{', '.join(sorted(providers)) or 'none'}.")
         return None
-    if not providers[provider].get("API_KEY"):
-        # WARN, don't refuse -- _cmd_model's rule. An OpenAI-compatible
-        # endpoint running locally legitimately takes no key.
-        from credentials import missing_key_message
+    # WARN, don't refuse -- _cmd_model's rule, through its one test. An
+    # OpenAI-compatible endpoint running locally legitimately takes no key,
+    # and the ChatGPT plan has none at all (§83, batch 189).
+    from credentials import missing_credential_message
 
-        app._transcript.write_error(missing_key_message(provider))
+    missing = missing_credential_message(provider, providers[provider])
+    if missing:
+        app._transcript.write_error(missing)
     return provider, model
 
 

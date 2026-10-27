@@ -271,11 +271,46 @@ class TestUsingThePlan:
             _cmd_model(app, "CHATGPT gpt-6.1-sol")
             pair = (app.provider_name, app.model)
             sub_title = app.sub_title
+            text = _text(app)
+        # Batch 189, the owner's live check: the switch said "CHATGPT has no
+        # API_KEY ... calls will fail" in red about a plan that answered.
+        assert "has no API_KEY" not in text
         assert entry == {"API_KEY": "", "API_URL": chatgpt_auth.RESOURCE,
                          "is_v1_compatible": False,
                          "supports_stream_usage": True}
         assert pair == ("CHATGPT", "gpt-6.1-sol")
         assert sub_title == "CHATGPT | gpt-6.1-sol | Using ChatGPT plan"
+
+    @pytest.mark.asyncio
+    async def test_launching_on_the_plan_warns_of_no_missing_key(
+            self, providers_file, monkeypatch):
+        """Batch 189: the same red line at launch, for a remembered CHATGPT
+        pair whose sign-in was live."""
+        from tui.app import VenastineApp
+
+        monkeypatch.setattr(chatgpt_auth, "status", lambda: chatgpt_auth.Status(
+            signed_in=True, plan_usage=True, registered=True, expires_at=None))
+        connect.store_chatgpt_entry()
+        app = VenastineApp("CHATGPT", "gpt-6-luna", {})
+        async with app.run_test() as pilot:
+            assert await settle(pilot,
+                                lambda: bool(app._transcript._entries))
+            text = _text(app)
+        assert "has no API_KEY" not in text
+
+    @pytest.mark.asyncio
+    async def test_critic_on_the_plan_warns_of_no_missing_key(
+            self, providers_file, openai):
+        """Batch 189: `/critic` shares `/model`'s check, so it said it too."""
+        from tui.app import _cmd_critic
+
+        app = _app()
+        async with app.run_test() as pilot:
+            await _signed_in(app, pilot, openai)
+            _cmd_critic(app, "CHATGPT gpt-6-luna")
+            await pilot.pause()
+            text = _text(app)
+        assert "has no API_KEY" not in text
 
     @pytest.mark.asyncio
     async def test_a_sign_in_without_an_entry_gets_one_at_model(

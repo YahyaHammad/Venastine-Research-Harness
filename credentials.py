@@ -229,12 +229,40 @@ def missing_key_message(provider_name: str) -> str:
             f"needs none.")
 
 
+def missing_credential_message(provider_name: str,
+                               entry: dict) -> "str | None":
+    """What to say when `provider_name` has nothing to authenticate with, or
+    None when it has something. The ONE test, for launch and for every
+    command that switches a provider.
+
+    A key for every provider but one. The ChatGPT plan's entry holds no key
+    BY DESIGN (ROADMAP_v3 §83, CG20) and its credential is the sign-in in
+    `chatgpt_auth.json`, so testing the key said "calls will fail" -- in
+    red, at launch and after each `/model CHATGPT` -- about a plan that was
+    signed in and answering (batch 189, the owner's live check). Three call
+    sites each tested the key on their own, which is why one fix here rather
+    than three there.
+    """
+    if provider_name == "CHATGPT":
+        # Imported here: core.chatgpt_auth imports this module.
+        from core import chatgpt_auth
+
+        if chatgpt_auth.status().signed_in:
+            return None
+        return ("The ChatGPT plan is not signed in, so CHATGPT cannot answer. "
+                "/connect chatgpt signs in.")
+    if entry.get("API_KEY"):
+        return None
+    return missing_key_message(provider_name)
+
+
 def provider_startup_issues(provider_name: str) -> list:
     """What launch should say about the provider setup, before either
     shell starts (#138).
 
     The same three checks /model performs on a switch -- file present,
-    provider configured, key non-empty -- applied at the moment the user
+    provider configured, a credential present (a key, or for the ChatGPT
+    plan its sign-in: `missing_credential_message`) -- applied at the moment the user
     chose the provider, instead of at the first model call, which is a
     dead end away from the mistake that caused it. WARN-ONLY, never a
     refusal: an OpenAI-compatible endpoint running locally legitimately
@@ -250,6 +278,6 @@ def provider_startup_issues(provider_name: str) -> list:
         return [no_providers_message()]
     if provider_name not in providers:
         return [unknown_provider_message(provider_name, providers)]
-    if not providers[provider_name].get("API_KEY"):
-        return [missing_key_message(provider_name)]
-    return []
+    message = missing_credential_message(provider_name,
+                                         providers[provider_name])
+    return [message] if message else []

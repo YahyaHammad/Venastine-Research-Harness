@@ -27310,3 +27310,44 @@ refuses only while signed out (CG11 lifted).
   were not kept. The run after it was clean, and so were five repeated
   parallel runs of every ChatGPT test file this batch touched.
 - **Owed:** the owner's live check, CG23's tool-loop case inside it.
+
+## Batch 189 -- §83 slice 2b checked live, and its two warnings fixed (2026-10-27)
+
+**The owner's live check of slice 2b passed** in a local TUI on their own
+account, read from their screenshot and from the stored thread's structure
+alone:
+
+- the sign-in, and the header's "Using ChatGPT plan" with Manage usage;
+- the 272k window off the plan's list, and summaries shown as thinking;
+- a two-turn chat, and a tool loop at `/effort xhigh`;
+- CG23's one unmeasured case. The symbolic_math call's turn stored a
+  reasoning item, and the request that handed it back before the call's
+  output completed.
+
+**Two warnings it found, both fixed:**
+
+- **"CHATGPT has no API_KEY ... calls will fail"**, in red, at launch and
+  after every `/model CHATGPT`, about a plan that was answering. Three sites
+  tested the key; one function, `credentials.missing_credential_message`,
+  now asks the plan about its sign-in and every other provider about its
+  key.
+- **The static table's warning for a misspelt plan model.** It told the
+  owner to add a config entry and named `ultra`. An unlisted name is now
+  said against the plan's own list.
+
+**Observed, not acted on:** the model sent `null` for every optional
+symbolic_math parameter without a default, which that tool accepted.
+**Not reported:** what Manage usage opened, and `/disconnect` followed by a
+message.
+
+### Verified
+
+- Full suite, 8313 tests: 8245 passed, 68 skipped on Windows, with every
+  failure's name kept (`-rf`) and none to keep; the changed suites again
+  with `AGENT_WORKSPACE` unset, 377 passed and 6 skipped.
+- Mutations: 5 of 5 killed -- the plan asked about a key again, and
+  launch, `/model` and `/critic` each testing the key on its own again;
+  and an unlisted plan model falling to the static table's advice.
+- ruff clean; bandit 0 new and no pair grew; gitleaks found no leaks on an
+  export copy; both deploy dry runs build, scan clean and audit clean.
+  pip-audit not run: no requirement changed.

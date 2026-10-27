@@ -43,7 +43,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
-- **§83. A ChatGPT plan, spent in a local install** - **(IN PROGRESS: decided with the owner in batch 180; slice 0, the measurement, complete across batches 181-183; slice 1, the sign-in and `/disconnect`, BUILT in batch 184 and checked live by the owner in batch 185; slice 2 planned in batch 186, measured in batch 187 and BUILT in batch 188 (CG17-CG24); the owner's live check of chat on the plan owed)** (OpenAI's Sign in with ChatGPT now invites open-source apps that run locally to spend a Plus or Pro subscriber's plan, the first provider since ModelScope to pass HD5's test; the harness has no Responses API path, no loopback listener, no credential that refreshes itself, and no way to sign out of anything)
+- **§83. A ChatGPT plan, spent in a local install** - **(IN PROGRESS: decided with the owner in batch 180; slice 0, the measurement, complete across batches 181-183; slice 1, the sign-in and `/disconnect`, BUILT in batch 184 and checked live by the owner in batch 185; slice 2 planned in batch 186, measured in batch 187 and BUILT in batch 188 (CG17-CG24), and checked live by the owner in batch 189 with two of its steps unreported)** (OpenAI's Sign in with ChatGPT now invites open-source apps that run locally to spend a Plus or Pro subscriber's plan, the first provider since ModelScope to pass HD5's test; the harness has no Responses API path, no loopback listener, no credential that refreshes itself, and no way to sign out of anything)
 - **§82. Gemini 3's thought signatures, and a pin that could not carry them** - **(BUILT in batch 172)** (every model a new Google account can call is Gemini 3, which refuses a function call replayed without the signature it came with, and google-genai 1.0.0 had no field to hold one, so every GOOGLE tool loop failed on its second request. The pin moves to 2.29.0, each call's signature rides in §44's reasoning record, a turn another model wrote gets Google's placeholder, and the Schema keys sent are a verified list since 2.29.0's Vertex-only `additional_properties` was refused. Google effort is on as a consequence)
 - **§81. An image a tool reads, delivered to a model that can see it** - **(BUILT in batch 171; Google added in batch 173)** (nothing a model could read from the workspace reached it as anything but text: a tool result was `str(result)`, `read` decoded bytes with `errors="replace"`, and MCP dropped image blocks by decision. `view_image` attaches an image to its own result through the memory, into a new column, never through the redactor; Anthropic carries it inside the `tool_result`, the OpenAI-compatible wire in a harness message after the tool batch because its tool messages take text only, and since batch 173 Google in a harness turn after the batch too, because its function responses take no image on the models a new account can call (a GIF stays a note there); opt-in per provider with `accepts_images`, never in a research pass, and counted at a fixed weight by the compactor)
 - **§80. The copyright year, kept by a workflow** - **(BUILT in batch 169)** (the owner asked not to have to remember it: LICENSE's appendix and NOTICE both said `Copyright 2026`, and nothing would move either; a workflow at 23:59 UTC on December 31, and again on January 1 in case GitHub delayed or dropped that run, writes a range from the first year to both files together; LY1-LY3)
@@ -3180,6 +3180,59 @@ works when named, and its levels and window come from its own entry.
 tool-using turn at a high effort whose reasoning goes back before the call's
 output.
 
+### Slice 2b, live check (2026-10-27, batch 189)
+
+The owner ran, in a local TUI on their own account: `/connect chatgpt`,
+`/model CHATGPT gpt-6-luna` (after a misspelt first try), `/effort xhigh`, a
+question about the tools, and a turn asking for a dummy tool call. Read from
+the owner's screenshot, and from the stored thread's structure -- block
+types and call names, never text or ciphertext:
+
+- **The plan answers.**
+  - The sign-in said "Connected the ChatGPT plan as CHATGPT. Choose a
+    model".
+  - The header read `CHATGPT | gpt-6-luna | Using ChatGPT plan · Manage
+    usage`, with Manage usage drawn as a link.
+  - The sidebar's window read 272k: gpt-6-luna's `context_window`, off the
+    plan's list.
+- **Summaries show as thinking**: "Preparing tool list", "Preparing 1+1
+  evaluation".
+- **A two-turn chat and a tool loop at xhigh both completed**: symbolic_math
+  evaluated 1 + 1, and the answer said 2.
+- **CG23's unmeasured case passed live.** The assistant row that called
+  symbolic_math holds a reasoning record (CHATGPT, gpt-6-luna, one
+  `reasoning` block). The request after the tool result handed it back
+  before the call's output -- the tool-loop shape slice 2a could not produce
+  -- and completed with the final answer. In the same thread, the first
+  turn's reasoning went back before the second user message: slice 2a's
+  measured shape.
+
+**WHAT THE CHECK FOUND, AND BATCH 189 FIXED:**
+
+- **A false warning.** "CHATGPT has no API_KEY in providers.json -- calls
+  will fail unless it is a local endpoint that needs none" appeared in red,
+  at launch and after each `/model CHATGPT`, about a plan that was signed in
+  and answering. Launch, `/model` and `/critic` / `/embedder` each tested
+  the key on their own. There is one test now,
+  `credentials.missing_credential_message`: it asks the plan about its
+  sign-in and every other provider about its key, and tells a signed-out
+  plan to run `/connect chatgpt`.
+- **A misleading warning.** The misspelt `gpt-6-luba` fell through to the
+  static table's warning, which advised adding a `config.MODEL_EFFORT_LEVELS`
+  entry and named `ultra`, a level the CHATGPT filter removes after that
+  warning is written. An unlisted name is now said in the plan's own terms:
+  it is not in the model list, it will probably be refused, and here is
+  what the list does name.
+
+**One observation, not acted on:** the model filled every optional
+symbolic_math parameter, with `null` wherever a parameter has no default.
+symbolic_math accepted it. Whether every tool's parameter model accepts
+`null` for an optional field was not checked.
+
+**Not reported, so not recorded as checked:** what Manage usage opened, and
+`/disconnect chatgpt` followed by a message. The screenshot ends before
+them.
+
 ### What §83 deliberately does not change
 
 **No hosted deployment offers it** (CG1): not the shared demo, and not a
@@ -3220,7 +3273,7 @@ transport; the harness speaks HTTP to every provider and keeps doing so.
 | **CG20** | **CHATGPT gets a keyless `providers.json` entry; the owner's choice.** A completed sign-in writes `API_URL` `https://api.openai.com/v1`, an empty `API_KEY`, `is_v1_compatible: false` and `supports_stream_usage: true`, so `/model`, the launch restore and the per-provider flags read it as they read every other entry, and CG7's `accepts_images` has a place to be set on a measurement. `/disconnect chatgpt` keeps it, as CG13 keeps a key's entry, and signs out; `/model CHATGPT` while signed out says to run `/connect chatgpt`. CG11's refusal is lifted when slice 2b lands. Declined: constants in code, with a CHATGPT case at each reader |
 | **CG21** | **The openai SDK carries the requests; the owner's choice.** `client.responses.create(stream=True)` on the pinned openai 2.45.0, with `api_key=chatgpt_auth.access_token` -- a callable the SDK calls before every request, so the hourly refresh rides on it -- and `max_retries=0`, so CG10 decides every retry and the SDK decides none. `test_sdk_conformance.py` pins what this rests on. Declined: httpx by hand, the probe's transport, which would add an SSE reader and a second error vocabulary for `core/provider_errors.py` |
 | **CG22** | **Effort levels are the model list's, filtered to the route's vocabulary; the owner's choice.** `/effort` on CHATGPT offers the levels `/v1/models` lists for the model that the route's own vocabulary contains: none, minimal, low, medium, high, xhigh and max, from slice 0's `invalid_value` refusal. For `gpt-6.1-sol` that is low to max, which is what was measured, and `ultra`, listed and refused, drops out. Slice 2a checks the rule on every listed model. Declined: a table of measured models only |
-| **CG23** | **Reasoning goes back everywhere, the tool loop included; the owner's choice.** A turn's reasoning items go back ahead of its text and calls whether it ended in text or in calls, on §44's pair rule. Slice 2a measured the item accepted under `store: false`, with its id and without, before a user message. Before a call's output it was never sent, because the model did not reason before a trivial call, so the owner's live check is where that is seen. Declined: only before user messages; and dropping the reasoning and resending once on a refusal |
+| **CG23** | **Reasoning goes back everywhere, the tool loop included; the owner's choice.** A turn's reasoning items go back ahead of its text and calls whether it ended in text or in calls, on §44's pair rule. Slice 2a measured the item accepted under `store: false`, with its id and without, before a user message. Before a call's output it was never sent, because the model did not reason before a trivial call, so the owner's live check is where that is seen. Declined: only before user messages; and dropping the reasoning and resending once on a refusal. **Seen working in batch 189**, the owner's live check: a symbolic_math call on gpt-6-luna at `/effort xhigh` stored a reasoning item, and the request that handed it back before the call's output completed |
 | **CG24** | **`/effort` does not offer `none`; the owner's choice.** Six models accepted it in slice 2a and two refused it, and no list entry names it, so CG22's rule stays whole: a table of the six would go stale with a roster that changed between two runs a day apart. Declined: a measured table of the six |
 
 ---

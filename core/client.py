@@ -1198,26 +1198,45 @@ CHATGPT_EFFORT_VOCABULARY = ("none", "minimal", "low", "medium", "high",
 CHATGPT_NEVER_OFFERED = frozenset({"none"})
 
 
-def _chatgpt_model_entry(client, model: str) -> Optional[dict]:
-    """`model`'s entry in the plan's model list, or None when the list does
-    not name it (ROADMAP_v3 §83).
+def _chatgpt_listing(client) -> list:
+    """The plan's model list, every entry (ROADMAP_v3 §83).
 
     `client.get("/models", cast_to=object)`, because the plan's list is
     `{"models": [...]}` keyed by `slug`, which the SDK's `models.list()` --
     built for `{"data": [...]}` -- cannot read; slice 2a read it this way.
-    Any entry counts, a `visibility: hide` one included: a hidden model
-    works when named, and its levels and window are its own. Raises when
-    the list cannot be read, which each caller counts as a failed query.
+    Raises when the list cannot be read, which each caller counts as a
+    failed query.
     """
     body = client.get("/models", cast_to=object)
     entries = body.get("models") if isinstance(body, dict) else None
     if not isinstance(entries, list):
         raise ValueError(
             "the ChatGPT plan's model list carried no `models` array")
-    for entry in entries:
-        if isinstance(entry, dict) and entry.get("slug") == model:
-            return entry
-    return None
+    return [entry for entry in entries if isinstance(entry, dict)]
+
+
+def _chatgpt_entry(entries: list, model: str) -> Optional[dict]:
+    """`model`'s entry, or None when the list does not name it. Any entry
+    counts, a `visibility: hide` one included: a hidden model works when
+    named, and its levels and window are its own."""
+    return next((e for e in entries if e.get("slug") == model), None)
+
+
+def _chatgpt_unlisted(model: str, entries: list) -> None:
+    """Say that the plan does not list `model`, and what it does list.
+
+    Batch 189, the owner's live check: a typo (`gpt-6-luba`) fell through to
+    the static table's warning, which advised adding a config entry and
+    named `ultra` -- a level the CHATGPT filter removes after that warning
+    is written. On the plan an unlisted name is likeliest misspelt, and the
+    list that would show it was already in hand.
+    """
+    listed = [e.get("slug") for e in entries
+              if e.get("visibility") == "list" and e.get("slug")]
+    logger.warning(
+        "%r is not in your ChatGPT plan's model list, so the next turn will "
+        "probably be refused. The plan lists: %s.", model,
+        ", ".join(listed) or "no models")
 
 
 def _sampling_kwargs(provider_name: str, model: str, temperature) -> dict:
@@ -1394,13 +1413,14 @@ def _effort_levels(client, provider_name: str, model: str) -> tuple:
             )
     if provider_name == "CHATGPT":
         try:
-            entry = _chatgpt_model_entry(client, model)
+            entries = _chatgpt_listing(client)
         except Exception as e:
             query_failed = True
             logger.warning(
                 "Could not read effort levels for %r from the ChatGPT plan's "
                 "model list (%s); falling back to the static table.", model, e)
         else:
+            entry = _chatgpt_entry(entries, model)
             if entry is not None:
                 # ONE read, TWO readings, as Anthropic's retrieve: the entry
                 # carries the window too.
@@ -1409,6 +1429,12 @@ def _effort_levels(client, provider_name: str, model: str) -> tuple:
                 levels = [lv.get("effort") if isinstance(lv, dict) else lv
                           for lv in entry.get("supported_reasoning_levels")
                           or []]
+            else:
+                # The list answered and does not name the model: said in
+                # the plan's own terms, and the default set is filtered
+                # below like any other, without the static table's advice.
+                _chatgpt_unlisted(model, entries)
+                levels = list(config.DEFAULT_EFFORT_LEVELS)
 
     if levels is None:
         levels = config.MODEL_EFFORT_LEVELS.get(model)
@@ -1621,7 +1647,7 @@ def context_window_for(client, provider_name: str, model: str) -> tuple:
                 provider_name, model,
                 getattr(info, "input_token_limit", None)), True
         if provider_name == "CHATGPT":
-            entry = _chatgpt_model_entry(client, model)
+            entry = _chatgpt_entry(_chatgpt_listing(client), model)
             return _record_window(
                 provider_name, model,
                 entry.get("context_window") if entry else None), True
