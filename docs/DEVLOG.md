@@ -27385,3 +27385,76 @@ null as absent.
 - ruff clean; bandit 0 new and no pair grew; gitleaks found no leaks on an
   export copy; both deploy dry runs build, scan clean and audit clean.
   pip-audit not run: no requirement changed.
+
+## Batch 191 -- the bridge's rate limits forget a stale address (2026-10-27)
+
+**Found by the owner's pre-public security review** of the hosted code
+since the Space's last build: 6247be4..HEAD over `deploy/hosted/`,
+`security/` and `tui/hosted_driver.py`. It was the one defect found.
+
+**The defect.** Both per-address limits in `deploy/hosted/web.py` -- the
+session tickets (HD8) and the sign-in callbacks (HD13) -- kept each
+address's requests in a dict that gained an entry for every address it ever
+counted and never lost one. A probe counted one request from each of 5,000
+addresses, moved a fake clock on an hour, and found all 5,000 still held,
+every one past the window. So a sender with many addresses -- an IPv6 /64 is
+one machine -- could grow the bridge until its container restarted, ending
+every visitor's session. The limits themselves held.
+
+**Fixed.** `_RateBook` holds one limit and forgets an address once its
+newest request has left the 60-second window. Forgetting costs no limit:
+all of a forgotten address's requests were already outside it. The sweep
+runs at most once a window, because on every request it would make each
+one cost as much as the addresses counted -- the same attack, spent on CPU.
+So a stale address waits at most one more window, and a book holds at most
+the last two windows' addresses.
+
+### What the review found holding
+
+- The client secrets are out of the environment before anything starts,
+  and the bridge is non-dumpable. A secret goes only in the request body,
+  to the issuer's https token endpoint, and httpx follows no redirect.
+- Discovery is always read over https; the issuer must be a ModelScope
+  site and both endpoints on its host.
+- The state is 256-bit, single-use and lives ten minutes; the handle is
+  128-bit, compared in constant time, allows five tries, and is bound to
+  the bridge's own session id, never the packet's.
+- Browser input reaches a session only as screen data, so no page can
+  forge a bridge packet; the session takes a token only for the sign-in
+  it is waiting for.
+- The callback page escapes every value and is sent `no-store`,
+  `no-referrer`, under a CSP that lets nothing run, framed only by the
+  platform's own site.
+- No access log line carries a callback's query string: Gradio 6.30.0
+  starts uvicorn at `log_level="warning"`, read in its source.
+
+**Offered and not taken:** a sentence on the code page warning against
+sharing the code, against HD13's accepted residue -- a consent link sent to
+someone else, whose code is then handed back, lends the sender that
+person's ModelScope quota for a session's lifetime.
+
+### Verified
+
+- Full suite, 8321 tests: 8253 passed, 68 skipped on Windows on eight
+  workers, with no failure. Two earlier runs of the same tree on all
+  sixteen took 11:44 and 12:18 on a loaded machine and failed a
+  different set each time, none near the bridge: `test_storage_e2e`'s
+  eight concurrent writers, then `test_hosted_mode`'s idle raven in
+  both modes and one `test_tui` modal scroll. Each passed five times of
+  five on its own. The changed suite again with `AGENT_WORKSPACE`
+  unset: 93 passed, 2 skipped.
+- Mutations: 6 of 6 killed -- a book that never sweeps, a sweep reading
+  the oldest request, a sweep on every request, a sweep waiting past the
+  window's edge, a sweep time never moved on, and an address never
+  allowed breaking the sweep.
+- ruff clean; bandit 0 new and no pair grew; gitleaks found no leaks on an
+  export copy.
+- **Both deploy dry runs build and scan clean, and REFUSE at the
+  audit.** `bridge.lock`'s pillow 12.3.0 has a new advisory,
+  PYSEC-2026-4327 (CVE-2026-112394, GHSA-4558-3h8r-v8xp): the raw
+  decoders for P;2L and P;4L can read up to three heap bytes past a
+  buffer, or crash, fixed in 13.0.0, which Gradio 6.30.0 does not
+  allow. No requirement changed here; the advisory reached the audit's
+  database after batch 190's dry runs. **Owed:** the owner's triage by
+  ID, as in batches 169 and 175. pip-audit not otherwise run: no
+  requirement changed.

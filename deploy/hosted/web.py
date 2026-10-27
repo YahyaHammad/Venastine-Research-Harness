@@ -31,6 +31,7 @@ import logging
 import os
 import secrets
 import time
+from collections.abc import Callable
 from pathlib import Path
 from string import Template
 from typing import Optional
@@ -50,6 +51,8 @@ logger = logging.getLogger(__name__)
 
 PAGES = Path(__file__).resolve().parent
 TICKET_TTL_S = 60.0
+# What every per-address limit counts over: its "per minute".
+RATE_WINDOW_S = 60.0
 STATIC_PREFIX = "/venastine-static"
 PROXY_SHAPES_LOGGED = 3
 
@@ -166,6 +169,52 @@ class _Socket:
         await self._ws.close()
 
 
+class _RateBook:
+    """One per-address limit: each address's requests in the last
+    RATE_WINDOW_S.
+
+    AN ADDRESS IS FORGOTTEN once its newest request has left the window
+    (batch 191). The book used to gain an entry for every address it ever
+    counted and never lose one, so a sender with many addresses -- an
+    IPv6 /64 is one machine -- could grow the bridge until its container
+    restarted, ending every visitor's session. Forgetting costs no limit:
+    a forgotten address's requests had all left the window already.
+
+    The sweep runs at most once a window. Sweeping on every request would
+    make each one cost as much as the addresses counted, the same attack
+    spent on CPU instead of memory; once a window, a stale address waits
+    at most one more window to go, and the book never holds more than
+    the last two windows' addresses.
+    """
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._times: dict = {}
+        self._swept = clock()
+
+    def __len__(self) -> int:
+        return len(self._times)
+
+    def allow(self, client: str, per_minute: int) -> bool:
+        """Count one request from `client`; False past the limit."""
+        now = self._clock()
+        if now - self._swept >= RATE_WINDOW_S:
+            # Each list is in the order its requests came, so the last is
+            # the newest; an empty one is an address never allowed.
+            self._times = {address: times
+                           for address, times in self._times.items()
+                           if times and now - times[-1] < RATE_WINDOW_S}
+            self._swept = now
+        recent = [t for t in self._times.get(client, [])
+                  if now - t < RATE_WINDOW_S]
+        if len(recent) >= per_minute:
+            self._times[client] = recent
+            return False
+        recent.append(now)
+        self._times[client] = recent
+        return True
+
+
 class Bridge:
     """Everything the routes need: the supervisor, the mode, the gate."""
 
@@ -194,8 +243,8 @@ class Bridge:
         self._unlock = unlock
         self._unlocked = False
         self._tickets: dict = {}
-        self._issued: dict = {}
-        self._callbacks: dict = {}
+        self._issued = _RateBook()
+        self._callbacks = _RateBook()
         self._proxy_shapes_left = PROXY_SHAPES_LOGGED
 
     # -- the single-user gate ------------------------------------------------
@@ -220,20 +269,8 @@ class Bridge:
 
     # -- tickets -------------------------------------------------------------
 
-    @staticmethod
-    def _within_rate(book: dict, client: str, per_minute: int) -> bool:
-        """Count one request from `client` in `book`; False past the limit."""
-        now = time.monotonic()
-        recent = [t for t in book.get(client, []) if now - t < 60]
-        if len(recent) >= per_minute:
-            book[client] = recent
-            return False
-        recent.append(now)
-        book[client] = recent
-        return True
-
     def issue_ticket(self, client: str) -> Optional[str]:
-        if not self._within_rate(self._issued, client, self.tickets_per_minute):
+        if not self._issued.allow(client, self.tickets_per_minute):
             return None
         now = time.monotonic()
         self._tickets = {t: at for t, at in self._tickets.items()
@@ -411,8 +448,8 @@ class Bridge:
         if sign_in is None:
             return Response("Not found", status_code=404)
         site = sign_in.site
-        if not self._within_rate(self._callbacks, self._client(request),
-                                 SIGN_IN_CALLBACKS_PER_MINUTE):
+        if not self._callbacks.allow(self._client(request),
+                                     SIGN_IN_CALLBACKS_PER_MINUTE):
             title, text, handle, status = (
                 "Too many sign-ins from here",
                 f"Wait a minute, then run /connect {site.name} again.", "", 429)

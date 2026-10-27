@@ -292,6 +292,68 @@ class TestTheAddressTheRateLimitCounts:
         assert "10.0.0.5" not in caplog.text
 
 
+class TestTheRateBooksForget:
+    """Batch 191. A per-address limit forgets an address once its newest
+    request has left the window. The books used to gain an entry for every
+    address they ever counted, which a sender with many addresses could
+    grow until the container restarted."""
+
+    @staticmethod
+    def _book():
+        clock = [1000.0]
+        return web._RateBook(clock=lambda: clock[0]), clock
+
+    def test_an_address_past_the_window_is_forgotten(self):
+        book, clock = self._book()
+        for n in range(5000):
+            assert book.allow(f"2001:db8::{n:x}", 10)
+        assert len(book) == 5000
+        clock[0] += web.RATE_WINDOW_S
+        assert book.allow("198.51.100.7", 10)
+        assert len(book) == 1
+
+    def test_a_live_limit_survives_the_sweep(self):
+        """The sweep reads an address's NEWEST request: one whose oldest
+        has left the window but whose newest has not is still counted."""
+        book, clock = self._book()
+        assert book.allow("203.0.113.9", 2)
+        clock[0] += 30
+        assert book.allow("203.0.113.9", 2)
+        clock[0] += 31  # past the first request and not the second; a sweep
+        assert book.allow("203.0.113.9", 2)
+        assert not book.allow("203.0.113.9", 2)
+
+    def test_the_sweep_runs_once_a_window_not_on_every_request(self):
+        """So a request costs the same however many addresses are
+        counted, and a stale address waits at most one more window."""
+        book, clock = self._book()
+        clock[0] += 10
+        book.allow("a", 10)  # t=10
+        clock[0] += 51
+        book.allow("b", 10)  # t=61: a sweep, and a's newest is 51 s old
+        assert len(book) == 2
+        clock[0] += 19
+        book.allow("c", 10)  # t=80: a is 70 s old, and no sweep is due
+        assert len(book) == 3
+        clock[0] += 41
+        book.allow("d", 10)  # t=121: a sweep; a and b go, c stays
+        assert len(book) == 2
+
+    def test_an_address_never_allowed_is_forgotten_too(self):
+        book, clock = self._book()
+        assert not book.allow("203.0.113.9", 0)
+        clock[0] += web.RATE_WINDOW_S
+        assert book.allow("198.51.100.7", 1)
+        assert len(book) == 1
+
+    def test_both_of_the_bridges_limits_are_such_books(self, tmp_path):
+        bridge = web.Bridge(_supervisor(tmp_path))
+        assert bridge.issue_ticket("203.0.113.9")
+        assert isinstance(bridge._issued, web._RateBook)
+        assert len(bridge._issued) == 1
+        assert isinstance(bridge._callbacks, web._RateBook)
+
+
 class TestTheBridgeRunsSessionsOnThatEnvironment:
     def test_a_session_interpreter_becomes_the_command(self, tmp_path):
         python = tmp_path / "env" / "bin" / "python"
