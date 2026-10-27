@@ -76,12 +76,13 @@ SINGLE_USER_DESCRIPTION = ("Set to 1 in a PRIVATE duplicate for single-user "
                            "mode: your own keys and the file tools.")
 
 # Audit findings triaged and accepted BY ID, the owner's call (batch 169,
-# and batch 175 for two published after it). An entry applies only to a
-# lock that pins exactly its version; once the pin moves it is passed to
-# nothing and the run says it is stale. A new ID for the same version still
-# refuses until someone triages it -- which is how batch 175's two arrived:
-# as a refusal, two days after the first 35 were accepted. One entry per
-# triage, so each reason says what was read and when.
+# batch 175 for two published after it, and batch 192 for a third). An
+# entry applies only to a lock that pins exactly its version; once the pin
+# moves it is passed to nothing and the run says it is stale. A new ID for
+# the same version still refuses until someone triages it -- which is how
+# batch 175's two arrived: as a refusal, two days after the first 35 were
+# accepted. One entry per triage, so each reason says what was read and
+# when.
 ACCEPTED = (
     {"package": "pillow", "version": "12.3.0",
      # The first run of this audit found them; nothing had audited Gradio's
@@ -122,6 +123,23 @@ ACCEPTED = (
          "bridge opens no uploaded file -- its Image.open calls are the "
          "favicon and gr.Workflow, which it does not use."),
      "ids": ("CVE-2026-114501", "CVE-2026-112398")},
+    {"package": "pillow", "version": "12.3.0",
+     # Published 2026-10-19; the deploy's audit first refused it on
+     # 2026-10-27, in batch 191's dry runs.
+     "reason": (
+         "The same pin, for the same reason: Gradio 6.30.0 is still the "
+         "latest release and still requires pillow<13. Read on 2026-10-27, "
+         "in the gradio, spaces and hf-gradio wheels bridge.lock pins by "
+         "hash. PYSEC-2026-4327 (CVE-2026-112394) reads up to three heap "
+         "bytes past a buffer, or crashes, in the raw decoders for P;2L and "
+         "P;4L, on crafted image data. The bridge's own code imports no "
+         "pillow, and spaces and hf-gradio decode no image. Gradio decodes "
+         "in its components, its MCP server, its pipeline and Workflow "
+         "helpers and its PWA icon route; the bridge registers no "
+         "component, starts no MCP server (GRADIO_MCP_SERVER is never "
+         "set), calls no helper, and sets no favicon_path, so that route "
+         "answers 404 without opening anything."),
+     "ids": ("PYSEC-2026-4327",)},
 )
 
 

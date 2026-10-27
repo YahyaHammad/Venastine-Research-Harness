@@ -202,7 +202,7 @@ gate waits for. **ModelScope is deployed by the owner** with the same script and
 gate for a private test deploy and the workflow never passes it. Audit findings are accepted only BY
 ID in `deploy_demo.ACCEPTED`, each entry applying only while its version is pinned -- pillow 12.3.0
 is the first, held there by Gradio 6.30.0's `pillow<13`, with one entry per triage (35 IDs in
-batch 169, two in batch 175), so a new advisory refuses until someone reads it. The owner's one-time setup: environment
+batch 169, two in batch 175, one in batch 192), so a new advisory refuses until someone reads it. The owner's one-time setup: environment
 `demo` with deployment branches `main` only, the secret `HF_TOKEN` (a fine-grained token with write
 access to the one Space) and the variable `DEMO_HF_SPACE`; until both exist, every deploy is a dry
 run.

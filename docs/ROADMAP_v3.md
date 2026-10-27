@@ -3710,7 +3710,10 @@ Batch 166 deployed the same bundle to a private Studio,
    upload route copies a file, and pillow opens only the deployment's own
    favicon -- and the owner accepted the 35 by ID while that pin holds.
    (Batch 175 accepted two more, published after this slice, on the same
-   pin and after the same reading.)
+   pin and after the same reading, and batch 192 a third, read again in
+   the wheels the lock pins: the deployment sets no favicon, so nothing
+   in the bridge's process reaches a pillow decoder, that route
+   included.)
    And the bridge now logs `serving build <sha>` at start, because a
    private Studio answers an anonymous request with 403 and its log is
    where a deploy can be confirmed. With this slice §79 is complete; the

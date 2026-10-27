@@ -27458,3 +27458,51 @@ person's ModelScope quota for a session's lifetime.
   database after batch 190's dry runs. **Owed:** the owner's triage by
   ID, as in batches 169 and 175. pip-audit not otherwise run: no
   requirement changed.
+
+## Batch 192 -- a third pillow advisory accepted by ID, after reading again (2026-10-27)
+
+**The owner's call** (ROADMAP_v3 §79, HD9). Batch 191's dry runs refused
+`bridge.lock`: pillow 12.3.0 has PYSEC-2026-4327 (CVE-2026-112394,
+GHSA-4558-3h8r-v8xp), published 2026-10-19 and in the audit's database by
+2026-10-27. Its raw decoders for P;2L and P;4L can read up to three heap
+bytes past a buffer, or crash, on crafted data; 13.0.0 fixes it. Gradio
+6.30.0 is still the newest release and its wheel still requires
+`pillow<13.0`, so the pin cannot move.
+
+**Read again before accepting**, in the wheels `bridge.lock` pins by hash
+-- Gradio's matched against its lock hash, `spaces` and `hf-gradio`
+downloaded under `--require-hashes` -- rather than from batch 169's notes:
+
+- The bridge's own code (`deploy/`) imports no pillow.
+- `spaces` touches only `torch.frombuffer`, and torch is not in the lock;
+  `hf-gradio` uses no pillow.
+- Gradio decodes images in five places: `image_utils`, which only its
+  components import; its MCP server's reader for a tool's output; its
+  pipeline helpers; `gr.Workflow`; and the PWA icon route. The bridge
+  registers one API endpoint, `status`, which takes nothing, and no
+  component. It starts no MCP server (`GRADIO_MCP_SERVER` is never set),
+  calls no helper, and sets no `favicon_path`, so the icon route answers
+  404 without opening anything. The upload route copies a file into the
+  cache and decodes nothing.
+
+That last point sharpens batch 169's reading, which said pillow opens only
+the deployment's own favicon: the deployment has none, so it opens nothing.
+
+**A third `ACCEPTED` entry** carries that reading as its reason, one entry
+per triage as batch 175 set. The existing tests already hold it to an ID
+pip-audit names, no ID accepted twice, and every entry for a pinned version
+reaching pip-audit, so no test was added.
+
+### Verified
+
+- Both deploy dry runs build, scan clean and audit clean, `bridge.lock`
+  with 38 accepted by ID. Batch 191's, on the same tree without the
+  entry, refused on exactly this ID, which is the evidence the entry is
+  what lets it through.
+- Full suite, 8321 tests: 8253 passed, 68 skipped on Windows on eight
+  workers, with no failure; `test_deploy_demo.py` again with
+  `AGENT_WORKSPACE` unset, 62 passed.
+- ruff clean; bandit 0 new and no pair grew; gitleaks found no leaks on an
+  export copy. No mutation run: the change is one data entry, and the
+  dry runs before and after it are the test of it. pip-audit is the
+  dry runs' own.
