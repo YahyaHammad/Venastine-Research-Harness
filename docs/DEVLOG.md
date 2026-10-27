@@ -27351,3 +27351,37 @@ message.
 - ruff clean; bandit 0 new and no pair grew; gitleaks found no leaks on an
   export copy; both deploy dry runs build, scan clean and audit clean.
   pip-audit not run: no requirement changed.
+
+## Batch 190 -- the plan's nulls checked, and pin and remember settled (2026-10-27)
+
+**Checked offline, at the owner's request.** The ChatGPT plan's model does
+not send stray nulls: the live check's symbolic_math call was exactly that
+tool's declared defaults, nulls included. Each tool's arguments were built
+from its own schema and validated by its own parameter model, with no tool
+run:
+
+- arguments at the declared defaults: accepted by all sixteen tools that
+  have a model;
+- every optional parameter null: refused by thirteen of them, which the
+  model does not do;
+- the five tools without a model declared no defaults. `pin`/`unpin`
+  refused a null `last_n` and `remember` a null `scope`, each with a
+  readable error that cost a turn.
+
+**Fixed:** `pin` and `unpin` declare `last_n: 1` and `remember` declares
+`scope: "project"`, the defaults the code already used, and an explicit null
+is read as absent in both handlers. An empty or wrong value is still
+refused, never coerced. `ask_user` and `read_project_doc` already read a
+null as absent.
+
+### Verified
+
+- Full suite, 8316 tests: 8248 passed, 68 skipped on Windows, with every
+  failure's name kept and none to keep; the changed suites again with
+  `AGENT_WORKSPACE` unset, 114 passed and 4 skipped.
+- Mutations: 5 of 5 killed -- a null `last_n` refused again, pin's
+  default undeclared, a null scope refused again, an empty scope coerced
+  to the default, and remember's default undeclared.
+- ruff clean; bandit 0 new and no pair grew; gitleaks found no leaks on an
+  export copy; both deploy dry runs build, scan clean and audit clean.
+  pip-audit not run: no requirement changed.

@@ -3233,6 +3233,36 @@ symbolic_math accepted it. Whether every tool's parameter model accepts
 `/disconnect chatgpt` followed by a message. The screenshot ends before
 them.
 
+### The plan's nulls, checked (batch 190)
+
+The live check's one open observation, checked offline at the owner's
+request. **The model does not send stray nulls.** The symbolic_math call's
+arguments are exactly that tool's nine declared defaults, and its nulls are
+defaults the schema itself declares: typed `[..., "null"]` with a default of
+null. Each tool's arguments were built from its own schema and validated by
+its own parameter model, with no tool run:
+
+- **Every optional parameter at its declared default** -- what the model
+  did -- is accepted by all sixteen tools that have a parameter model.
+- **Every optional parameter null, ignoring the defaults,** would be
+  refused by thirteen of them. The live check says the model does not do
+  that.
+- **The five tools without a parameter model** declared no default for
+  their optional parameters, so what the model sends for those is unseen.
+  `ask_user` and `read_project_doc` already read a null as absent.
+  `pin`/`unpin` refused a null `last_n`, and `remember` a null `scope`, each
+  with a readable error that cost a turn.
+
+**Fixed in batch 190, at the owner's request:**
+
+- `pin` and `unpin` declare `last_n: 1`, and `remember` declares `scope:
+  "project"` -- the defaults their code already used -- so the model sends
+  those.
+- An explicit null is read as absent in both handlers. Only null: an empty
+  string or any other wrong value is still refused, never coerced.
+
+MCP tools' schemas belong to their servers and were not checked.
+
 ### What §83 deliberately does not change
 
 **No hosted deployment offers it** (CG1): not the shared demo, and not a

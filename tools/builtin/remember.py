@@ -66,6 +66,7 @@ TOOL_SCHEMA = {
                 "description": "'project' (default) for facts about this "
                                "codebase; 'global' for how the user likes "
                                "to work.",
+                "default": "project",
             },
             "category": {
                 "type": "string",
@@ -80,6 +81,20 @@ TOOL_SCHEMA = {
 _SCOPES = ("project", "global")
 
 
+def _scope(params: dict):
+    """The scope asked for, with an explicit null read as ABSENT (batch 190).
+
+    The ChatGPT plan's model sends each optional parameter at its declared
+    default (ROADMAP_v3 §83, the owner's live check), so the schema now
+    declares 'project'; a model that sends null instead means the same
+    thing, and refusing it cost a turn. Anything else -- an empty string
+    included -- is the caller's own answer, checked against _SCOPES and never
+    coerced (see `run`).
+    """
+    scope = params.get("scope")
+    return "project" if scope is None else scope
+
+
 def approval_notice(params: dict, context) -> str:
     """What the approval prompt shows before the write.
 
@@ -92,7 +107,7 @@ def approval_notice(params: dict, context) -> str:
     """
     from memories.manager import manager
 
-    scope = params.get("scope", "project")
+    scope = _scope(params)
     where = ("every future conversation, in any project"
              if scope == "global"
              else f"future conversations in {manager.scope_path() or 'this project'}")
@@ -112,7 +127,7 @@ def run(params: dict, memory=None) -> dict:
     if not content:
         return {"error": "remember requires 'content' -- the fact to save."}
 
-    scope = params.get("scope", "project")
+    scope = _scope(params)
     if scope not in _SCOPES:
         # Not silently coerced to the default. A model asking for "global"
         # and getting a project row would believe a preference follows the

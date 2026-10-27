@@ -187,6 +187,32 @@ def test_empty_content_is_an_error(fake_storage, params):
     assert fake_storage.list_memories(project_path="/proj/a") == []
 
 
+def test_an_explicit_null_scope_is_the_declared_default(fake_storage):
+    """Batch 190. The ChatGPT plan's model sends each optional parameter at
+    its declared default (ROADMAP_v3 §83, the owner's live check), so the
+    schema declares 'project' -- and a null, which a model may send
+    instead, means the same thing, in the write AND in the approval notice
+    the user decides on."""
+    assert remember.TOOL_SCHEMA["input_schema"]["properties"]["scope"][
+        "default"] == "project"
+    result = remember.run({"content": "uses pnpm", "scope": None},
+                          memory=_Memory())
+
+    assert "error" not in result
+    assert fake_storage.list_memories(
+        project_path="/proj/a")[0]["scope"] == "project"
+    notice = registry.approval_notice(
+        "remember", {"content": "x", "scope": None}, None)
+    assert "/proj/a" in notice
+
+
+def test_an_empty_scope_is_still_refused_rather_than_coerced(fake_storage):
+    """Only null is read as absent: '' is an answer, and a wrong one."""
+    assert "error" in remember.run({"content": "x", "scope": ""},
+                                   memory=_Memory())
+    assert fake_storage.list_memories(project_path="/proj/a") == []
+
+
 def test_an_unknown_scope_is_refused_rather_than_coerced(fake_storage):
     """Silently defaulting to 'project' would leave a model believing a
     preference follows the user everywhere when it does not -- the exact
