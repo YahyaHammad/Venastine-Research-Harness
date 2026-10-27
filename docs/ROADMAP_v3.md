@@ -43,7 +43,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
-- **§83. A ChatGPT plan, spent in a local install** - **(IN PROGRESS: decided with the owner in batch 180; slice 0, the measurement, complete across batches 181-183; slice 1, the sign-in and `/disconnect`, BUILT in batch 184 and checked live by the owner in batch 185; slice 2 planned in batch 186 (CG17-CG22), its measurement owed and its Responses path not built)** (OpenAI's Sign in with ChatGPT now invites open-source apps that run locally to spend a Plus or Pro subscriber's plan, the first provider since ModelScope to pass HD5's test; the harness has no Responses API path, no loopback listener, no credential that refreshes itself, and no way to sign out of anything)
+- **§83. A ChatGPT plan, spent in a local install** - **(IN PROGRESS: decided with the owner in batch 180; slice 0, the measurement, complete across batches 181-183; slice 1, the sign-in and `/disconnect`, BUILT in batch 184 and checked live by the owner in batch 185; slice 2 planned in batch 186 (CG17-CG22) and measured in batch 187, its Responses path not built)** (OpenAI's Sign in with ChatGPT now invites open-source apps that run locally to spend a Plus or Pro subscriber's plan, the first provider since ModelScope to pass HD5's test; the harness has no Responses API path, no loopback listener, no credential that refreshes itself, and no way to sign out of anything)
 - **§82. Gemini 3's thought signatures, and a pin that could not carry them** - **(BUILT in batch 172)** (every model a new Google account can call is Gemini 3, which refuses a function call replayed without the signature it came with, and google-genai 1.0.0 had no field to hold one, so every GOOGLE tool loop failed on its second request. The pin moves to 2.29.0, each call's signature rides in §44's reasoning record, a turn another model wrote gets Google's placeholder, and the Schema keys sent are a verified list since 2.29.0's Vertex-only `additional_properties` was refused. Google effort is on as a consequence)
 - **§81. An image a tool reads, delivered to a model that can see it** - **(BUILT in batch 171; Google added in batch 173)** (nothing a model could read from the workspace reached it as anything but text: a tool result was `str(result)`, `read` decoded bytes with `errors="replace"`, and MCP dropped image blocks by decision. `view_image` attaches an image to its own result through the memory, into a new column, never through the redactor; Anthropic carries it inside the `tool_result`, the OpenAI-compatible wire in a harness message after the tool batch because its tool messages take text only, and since batch 173 Google in a harness turn after the batch too, because its function responses take no image on the models a new account can call (a GIF stays a note there); opt-in per provider with `accepts_images`, never in a research pass, and counted at a fixed weight by the compactor)
 - **§80. The copyright year, kept by a workflow** - **(BUILT in batch 169)** (the owner asked not to have to remember it: LICENSE's appendix and NOTICE both said `Copyright 2026`, and nothing would move either; a workflow at 23:59 UTC on December 31, and again on January 1 in case GitHub delayed or dropped that run, writes a range from the first year to both files together; LY1-LY3)
@@ -2942,7 +2942,7 @@ points there. Slice 0 is complete.
   notice (CG8), and `/disconnect <name>` for every provider (CG9).
 - **Slice 2a -- the shapes a second turn needs** (CG17). A third probe run
   on the owner's account, through the transport slice 2b uses, before any
-  translation is written. Planned in batch 186; its results are owed.
+  translation is written. Planned in batch 186, measured in batch 187.
 - **Slice 2b -- the Responses path.** The CHATGPT translation in
   `core/client.py` (CG3, CG18, CG21, CG22), built against the answers of
   slices 0 and 2a; the error mapping (CG10); the keyless entry (CG20); and
@@ -3042,6 +3042,76 @@ chosen** (CG21):
 - Never sent: Codex's `base_instructions` and `model_messages`,
   `service_tier` and the fast tiers, `previous_response_id`, `temperature`,
   and any hosted tool.
+
+### Slice 2a, measured (2026-10-27, batch 187)
+
+The owner ran the turns probe on their own account: 25 requests on
+`gpt-6.1-sol` through the openai SDK, set up as slice 2b will set it up,
+then a sign-out. The guard withheld nothing, and a separate scan of the
+results file found no token, email, client id or refresh token.
+
+**MEASURED:**
+
+- **An earlier reply goes back as a plain message.** `{"role": "assistant",
+  "content": "<text>"}` completed, and the model used it: it named the
+  colour the earlier turn was told. Two user messages in a row completed
+  too.
+- **The harness's own tool schemas are taken as they are.** All fifteen,
+  sent without `strict`, completed with a `get_time` call, so strict mode was
+  not applied to them although none meets its rules. `strict: false`
+  completed the same way. The fifteen cost about 3,600 input tokens a
+  request.
+- **A call goes back without its item id.** `{type, call_id, name,
+  arguments}` with its `function_call_output` completed, and so did the
+  same call under a `toolu_...` call id and under a uuid4, which is what a
+  thread holds after a switch from Anthropic or Google. The `fc_` id need
+  not be kept, so §82's per-call record has no counterpart here.
+- **A reasoning item goes back before the next user message**, with its id
+  and without it, under `store: false`. As the SDK parses it, with `None`
+  fields left out, it holds `content`, `encrypted_content` (about 1.8 KB),
+  `id`, `summary` and `type`.
+- **A summary is asked for with `reasoning.summary: "auto"`, and it streams
+  as `response.reasoning_summary_text.delta`**: 95 deltas and 389
+  characters under a bold heading, when it was asked for on its own. Asked
+  for beside effort `high`, on the same question, no summary came; both
+  answered 200. "auto" leaves the choice to the server, and one sample each
+  is not a rule. Neither showed more output tokens than the control.
+- **`max_output_tokens: 16000`** is accepted.
+- **CG22's rule holds wherever the route answers.** `gpt-6.1-sol` and
+  `gpt-6-astra` refuse `none` and name low, medium, high, xhigh and max:
+  exactly the list's levels with `ultra` taken out. The other six accept
+  `none`, a level their list entries do not name, so there the rule offers
+  less than the route takes and never more. Whether each of low to max is
+  accepted on those six was not sent.
+- **The list names eight models now:** `gpt-6.1-terra` is new, at 500,000
+  tokens, beside the seven slice 0 saw.
+- **The SDK carries all of it.** The key function was called 25 times for
+  25 requests. No stream carried `Content-Type`, and the SDK read every
+  one. Its requests send its own `User-Agent` and `x-stainless-*` headers
+  and no `OpenAI-Organization` or `OpenAI-Project`; no `OPENAI_*` variable
+  is set on the owner's machine, so an install where one is set was not
+  seen. The route sets a cookie, and the SDK's client sends it back.
+- **An event the SDK does not know is parsed as the wrong class.**
+  `response.metadata` came out as a `ResponseAudioDeltaEvent` whose `type`
+  still reads `response.metadata`. The translation must dispatch on `type`,
+  never on the class.
+- **The sign-out is as before.** Revocation answered an empty 200; the
+  access token was then refused with 401 `token_revoked`, and the refresh
+  token with `invalid_grant`.
+
+**NOT MEASURED:**
+
+- **A reasoning item handed back inside a tool loop.** At xhigh and at max
+  the model called `get_time` without reasoning first, so no response
+  carried both a reasoning item and a call. The item is accepted as input,
+  with or without its id, before a user message; whether slice 2b also
+  sends it before a call's output on that evidence is the owner's to decide
+  before the build.
+- **`none` as an offered effort.** Six models take it and their list
+  entries do not name it, so CG22's rule does not offer it. Whether
+  `/effort` should is the owner's to decide before the build.
+- **A failure inside a stream.** Nothing failed, so neither an `error`
+  event nor `response.failed` was seen.
 
 ### What §83 deliberately does not change
 

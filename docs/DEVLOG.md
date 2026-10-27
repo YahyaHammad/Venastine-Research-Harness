@@ -27206,3 +27206,46 @@ will use. It was run end to end against an extended offline fake first.
   unscrubbed -- were both caught.
 - ruff clean; gitleaks found no leaks on an export copy; both deploy dry
   runs build, scan clean and audit clean.
+
+## Batch 187 -- §83 slice 2a measured: what a second turn sends (2026-10-27)
+
+**The owner ran the turns probe**: 25 requests on `gpt-6.1-sol` through
+the openai SDK, set up as slice 2b will set it up, then a sign-out. The
+guard withheld nothing, and a scan of the results file found no token,
+email, client id or refresh token.
+
+**What it settled**, every item for the first time on the plan route:
+
+- an earlier reply goes back as a plain assistant message;
+- the registry's fifteen schemas are taken without `strict`, although none
+  meets strict mode's rules, at about 3,600 input tokens a request;
+- a call goes back without its `fc_` id, and under another provider's call
+  ids, so nothing new needs keeping;
+- a reasoning item goes back before the next user message, with or without
+  its id;
+- `reasoning.summary: "auto"` streams summary deltas when the server
+  chooses to write one: once of the two times it was asked;
+- `max_output_tokens: 16000` is accepted;
+- CG22's rule gives exactly the route's levels on the two models that
+  refuse `none`. The other six accept `none`, which their list entries do
+  not name;
+- the SDK's key function ran once per request, 25 of 25.
+
+**The finding the build must not miss:** the SDK parses an event it does not
+know as the wrong class. `response.metadata` arrived as a
+`ResponseAudioDeltaEvent` that still says `response.metadata` in its
+`type`, so slice 2b dispatches on `type` alone.
+
+**Not measured, and the owner's to decide before the build:**
+
+- a reasoning item handed back inside a tool loop. The model never reasoned
+  before a trivial call, at xhigh or at max;
+- whether `/effort` offers `none` on the six models that take it.
+
+### Verified
+
+- Full suite, 8248 tests: 8180 passed, 68 skipped on Windows, and the
+  docs tests again with `AGENT_WORKSPACE` unset. Docs only, so the count
+  is unchanged.
+- ruff clean; gitleaks found no leaks on an export copy; both deploy dry
+  runs build, scan clean and audit clean.
