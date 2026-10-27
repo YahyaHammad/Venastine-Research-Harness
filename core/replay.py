@@ -180,6 +180,11 @@ def _reasoning_text(record) -> str:
     opaque ciphertext meaningful only to the model, so rendering it would
     put a wall of base64 under a `venastine ›` label. It still travels on
     the wire; this function is about what a person sees.
+
+    The third shape arrived with ROADMAP_v3 §83 and cost the name it was
+    promised: a ChatGPT plan's `reasoning` item keeps its readable part in
+    `summary`, a list of `summary_text` parts, beside `encrypted_content`,
+    which contributes nothing for `redacted_thinking`'s reason.
     """
     if not isinstance(record, dict):
         return ""
@@ -187,9 +192,11 @@ def _reasoning_text(record) -> str:
     for block in record.get("blocks") or []:
         if not isinstance(block, dict):
             continue
-        value = block.get("thinking") or block.get("text")
-        if isinstance(value, str) and value.strip():
-            parts.append(value.strip())
+        values = [block.get("thinking") or block.get("text")]
+        values += [part.get("text") for part in block.get("summary") or []
+                   if isinstance(part, dict)]
+        parts.extend(value.strip() for value in values
+                     if isinstance(value, str) and value.strip())
     return "\n\n".join(parts)
 
 

@@ -12,7 +12,8 @@ drawing: the registration OpenAI makes during the first sign-in, the
 one-shot listener its redirect comes back to, the code exchange, the ID
 token check, the token file, refreshing it, and revoking it. The TUI owns
 the asking and the words; `core/connect.py` owns the preset; slice 2's
-Responses path will be the only caller of `access_token()`.
+Responses path in `core/client.py` is the only caller of `access_token()`,
+which the openai SDK calls before every request (CG21).
 
 WHAT SLICE 0 MEASURED THAT THIS RELIES ON, on the owner's account
 (batches 181-183): the callback carries `client_id`, `code`, `scope` and
@@ -574,7 +575,8 @@ def mark_notice_shown() -> None:
 # ---------------------------------------------------------------------------
 
 def access_token(*, post: Optional[Post] = None,
-                 now: Callable[[], float] = time.time) -> str:
+                 now: Callable[[], float] = time.time,
+                 replacing: Optional[str] = None) -> str:
     """A current access token, refreshed first when it is due (CG4, CG10).
 
     Due at `earliest_refresh_at`, or `REFRESH_MARGIN_S` before expiry,
@@ -583,6 +585,12 @@ def access_token(*, post: Optional[Post] = None,
     refreshed, and its replacement is then the token to use -- and the
     replacement is written before it is returned, because the refresh token
     it replaced is spent.
+
+    `replacing` is the token a request was just refused with, a 401
+    (batch 188): it makes the refresh due whatever the clock says, but only
+    while the file still holds that token. When it does not, another thread
+    or process has already replaced it, and the replacement is returned
+    without spending a second refresh.
 
     A refresh OpenAI refuses as unusable clears the session and raises
     `SignedOut`. Anything else -- a network failure, a 5xx, a code not on
@@ -598,7 +606,9 @@ def access_token(*, post: Optional[Post] = None,
         moment = now()
         earliest = session.get("earliest_refresh_at")
         due = (moment >= session["expires_at"] - REFRESH_MARGIN_S
-               or (earliest is not None and moment >= earliest))
+               or (earliest is not None and moment >= earliest)
+               or (replacing is not None
+                   and session["access_token"] == replacing))
         if not due:
             return session["access_token"]
         client_id = (data.get("registration") or {}).get("client_id", "")

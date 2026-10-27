@@ -578,6 +578,27 @@ class TestStayingSignedIn:
         with pytest.raises(chatgpt_auth.SignedOut, match="/connect chatgpt"):
             chatgpt_auth.access_token(post=lambda u, b: pytest.fail("posted"))
 
+    def test_a_refused_token_is_refreshed_whatever_the_clock_says(self, home,
+                                                                  openai):
+        """Batch 188 (CG10): a 401 makes the refresh due, though neither
+        `earliest_refresh_at` nor the expiry does."""
+        _signed_in(openai)
+        refused = _stored()["session"]["access_token"]
+        token = chatgpt_auth.access_token(post=openai.post, replacing=refused)
+        assert len(openai.requests) == 1
+        assert token == _stored()["session"]["access_token"] != refused
+
+    def test_a_token_already_replaced_is_returned_without_a_second_refresh(
+            self, home, openai):
+        """Two requests refused together spend ONE refresh between them: the
+        second finds the file no longer holds the token it was refused with."""
+        _signed_in(openai)
+        refused = _stored()["session"]["access_token"]
+        first = chatgpt_auth.access_token(post=openai.post, replacing=refused)
+        second = chatgpt_auth.access_token(post=openai.post, replacing=refused)
+        assert second == first
+        assert len(openai.requests) == 1
+
 
 _HOLDER = textwrap.dedent("""
     import sys, time

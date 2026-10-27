@@ -42,6 +42,7 @@ needs the real package belongs here; one that does not, does not.
 import ast
 import contextlib
 import inspect
+import json
 import os
 import sys
 from types import SimpleNamespace as _SimpleNamespace
@@ -929,3 +930,178 @@ def test_the_GOOGLE_usage_read_against_a_REAL_nullable_usage_object(
         # And a bare one, which is TRUTHY and reads None from every field.
         with pytest.raises(RuntimeError, match="without usage data"):
             drain([chunk(gt.GenerateContentResponseUsageMetadata())])
+
+
+# ===========================================================================
+# ---- ROADMAP_v3 §83: the ChatGPT plan's Responses path --------------------
+# ===========================================================================
+#
+# CG21 chose the openai SDK on four properties of the pinned 2.45.0, checked
+# by reading its source in batch 186 and measured on the plan route in
+# slice 2a. Each is held here against the REAL package, with httpx's own
+# MockTransport standing in for OpenAI: no network, no credential.
+
+_PLAN_EVENTS = (
+    {"type": "response.created",
+     "response": {"id": "resp_1", "status": "in_progress"}},
+    {"type": "response.output_item.done", "output_index": 0,
+     "item": {"type": "reasoning", "id": "rs_1", "summary": [],
+              "encrypted_content": "gAAAA-opaque"}},
+    {"type": "response.output_text.delta", "item_id": "msg_1",
+     "output_index": 1, "content_index": 0, "delta": "OK"},
+    # Slice 2a: an event no page documents, which the route sends.
+    {"type": "response.metadata", "metadata": {"turn": 1}},
+    {"type": "response.output_item.done", "output_index": 2,
+     "item": {"type": "function_call", "id": "fc_1", "call_id": "call_1",
+              "name": "get_time", "arguments": "{}", "status": "completed"}},
+    {"type": "response.completed",
+     "response": {"id": "resp_1", "status": "completed",
+                  "usage": {"input_tokens": 12, "output_tokens": 3,
+                            "total_tokens": 15}}},
+)
+
+
+def _plan_sse(events=_PLAN_EVENTS) -> bytes:
+    """A plan-route stream body: SSE, and -- as the route sends it -- no
+    Content-Type header at all (slice 0, both runs)."""
+    return "".join(f"event: {e['type']}\ndata: {json.dumps(e)}\n\n"
+                   for e in events).encode()
+
+
+@contextlib.contextmanager
+def _real_plan(monkeypatch, *answers):
+    """The REAL openai SDK, built as `_chatgpt_client` builds it, against a
+    transport that answers `answers` in order. Yields (sdk, seen requests,
+    the tokens its key function handed out, core.client)."""
+    from core import chatgpt_auth
+
+    monkeypatch.setattr("core.client.load_provider_data",
+                        lambda: {"CHATGPT": {"supports_stream_usage": True}})
+    monkeypatch.setattr(chatgpt_auth, "status", lambda: chatgpt_auth.Status(
+        signed_in=True, plan_usage=True, registered=True, expires_at=None))
+    with real_package("openai", "httpx"):
+        import httpx
+        import openai
+
+        import core.client as client
+
+        queue, seen, keys = list(answers), [], []
+
+        def handler(request):
+            seen.append(request)
+            status, content = queue.pop(0)
+            if isinstance(content, dict):
+                return httpx.Response(status, json=content)
+            return httpx.Response(status, content=content)
+
+        def key():
+            keys.append(f"at-{len(keys) + 1}")
+            return keys[-1]
+
+        sdk = openai.OpenAI(
+            base_url=chatgpt_auth.RESOURCE, api_key=key, max_retries=0,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)))
+        yield sdk, seen, keys, client
+
+
+def _plan_turn(client, sdk):
+    tokens = list(client.call_model_stream(
+        sdk, "CHATGPT", "gpt-6.1-sol", [{"role": "user", "content": "hi"}],
+        "sys", []))
+    return tokens[-1].final_response
+
+
+def test_the_plan_branch_runs_on_the_REAL_sdk_and_its_key_is_called_per_request(
+        monkeypatch):
+    """CG21's premises at once: a callable `api_key` called before EVERY
+    request (so the hourly refresh needs no plumbing), a stream with no
+    Content-Type read as a stream, and the real item types giving the
+    record the shape slice 2a handed back."""
+    with _real_plan(monkeypatch, (200, _plan_sse()),
+                    (200, _plan_sse())) as (sdk, seen, keys, client):
+        first = _plan_turn(client, sdk)
+        _plan_turn(client, sdk)
+    assert [r.headers["authorization"] for r in seen] == [
+        "Bearer at-1", "Bearer at-2"]
+    assert first.text == "OK"
+    assert [(c.id, c.name, c.input) for c in first.tool_calls] == [
+        ("call_1", "get_time", {})]
+    assert first.usage == {"input_tokens": 12, "output_tokens": 3}
+    assert first.thinking["blocks"] == [{
+        "type": "reasoning", "id": "rs_1", "summary": [],
+        "encrypted_content": "gAAAA-opaque"}]
+    sent = json.loads(seen[0].content)
+    assert sent["store"] is False and sent["stream"] is True
+    assert sent["include"] == ["reasoning.encrypted_content"]
+    assert "temperature" not in sent and "previous_response_id" not in sent
+
+
+def test_an_unknown_plan_event_keeps_its_type_whatever_class_it_is_given(
+        monkeypatch):
+    """Slice 2a's trap: `response.metadata` is parsed as whichever class the
+    SDK's union tries first -- a ResponseAudioDeltaEvent on 2.45.0 -- so the
+    branch dispatches on `type`, which survives."""
+    with _real_plan(monkeypatch, (200, _plan_sse())) as (sdk, _, _, _):
+        events = list(sdk.responses.create(model="m", input=[], store=False,
+                                           stream=True))
+    kinds = [event.type for event in events]
+    assert kinds == [e["type"] for e in _PLAN_EVENTS]
+    meta = events[kinds.index("response.metadata")]
+    assert meta.type == "response.metadata", type(meta).__name__
+
+
+@pytest.mark.parametrize("status,body,code", [
+    (429, {"error": {"type": "invalid_request_error", "message": "limit",
+                     "code": "subscription_sharing_usage_limit_exceeded"}},
+     "subscription_sharing_usage_limit_exceeded"),
+    (400, {"detail": "Stream must be set to true"}, None),
+], ids=["error-object", "detail"])
+def test_a_plan_refusal_carries_what_the_mapping_reads(monkeypatch, status,
+                                                       body, code):
+    """`status_code`, and a `body` that is the INNER error object -- or the
+    whole `{"detail": ...}`, OpenAI's other shape (slice 0). And one request
+    only: `max_retries=0` leaves every retry to CG10 and the loop."""
+    with _real_plan(monkeypatch, (status, body)) as (sdk, seen, _, _):
+        with pytest.raises(Exception) as info:
+            sdk.responses.create(model="m", input=[], store=False,
+                                 stream=True)
+    assert info.value.status_code == status
+    assert info.value.body == body.get("error", body)
+    assert len(seen) == 1
+    if code:
+        from core.client import _chatgpt_fields
+        assert _chatgpt_fields(info.value.body)[0] == code
+
+
+def test_a_usage_limit_on_the_REAL_sdk_is_never_retried(monkeypatch):
+    from core import provider_errors
+    from core.client import ChatGPTUsageLimit
+
+    limit = {"error": {"type": "invalid_request_error", "message": "limit",
+                       "code": "subscription_sharing_usage_limit_exceeded"}}
+    with _real_plan(monkeypatch, (429, limit)) as (sdk, seen, _, client):
+        with pytest.raises(ChatGPTUsageLimit) as info:
+            _plan_turn(client, sdk)
+    assert str(info.value).startswith("Manage usage: ")
+    assert provider_errors.is_transient(info.value) is False
+    assert len(seen) == 1
+
+
+def test_the_REAL_sdk_holds_the_token_it_sent_for_the_401_refresh(
+        monkeypatch):
+    """`_chatgpt_open` reads `client.api_key` as the token the route refused,
+    so a forced refresh replaces THAT one (`replacing=`)."""
+    from core import chatgpt_auth
+
+    replaced = []
+    monkeypatch.setattr(chatgpt_auth, "access_token",
+                        lambda replacing=None: replaced.append(replacing))
+    revoked = {"error": {"type": None, "code": "token_revoked",
+                         "message": "invalidated"}}
+    with _real_plan(monkeypatch, (401, revoked),
+                    (200, _plan_sse())) as (sdk, seen, _, client):
+        final = _plan_turn(client, sdk)
+    assert final.text == "OK"
+    assert replaced == ["at-1"]
+    assert [r.headers["authorization"] for r in seen] == [
+        "Bearer at-1", "Bearer at-2"]

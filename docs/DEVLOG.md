@@ -27249,3 +27249,64 @@ know as the wrong class. `response.metadata` arrived as a
   is unchanged.
 - ruff clean; gitleaks found no leaks on an export copy; both deploy dry
   runs build, scan clean and audit clean.
+
+## Batch 188 -- §83 slice 2b: the ChatGPT plan answers (2026-10-27)
+
+**Built.** `/model CHATGPT <model>` chats on the plan, through the
+Responses API and the openai SDK. The owner settled the two things slice 2a
+left open (CG23, CG24):
+
+- reasoning goes back to the model that wrote it on every turn, the tool
+  loop included;
+- `/effort` never offers `none`.
+
+**What it rests on**, every shape measured except one:
+
+- the client is pointed at OpenAI's address alone, whatever the entry says,
+  with the token function as its key and no SDK retries;
+- an earlier reply, a call without its item id, tools without `strict`, and
+  reasoning handed back, all as slice 2a sent them;
+- dispatch on an event's `type`, because the SDK parses an unknown event as
+  the wrong class.
+
+The exception is CG23's tool-loop echo, which the owner's live check is
+where it is seen.
+
+**CG10, code by code:**
+
+- a usage limit leads with Manage usage and is never retried;
+- an ineligible account is told once;
+- an unsupported field is named;
+- a 401 refreshes once and the request goes again -- a refresh spent once
+  however many requests were refused together;
+- a refresh that could not be made is retried like a dropped connection.
+
+**The header** says "Using ChatGPT plan" with a Manage usage click, through
+an `App.format_title` override. The sign-in writes CHATGPT's keyless
+`providers.json` entry, which `/disconnect` keeps, and `/model CHATGPT`
+refuses only while signed out (CG11 lifted).
+
+### Verified
+
+- Full suite, 8306 tests: 8238 passed, 68 skipped on Windows; the changed
+  suites again with `AGENT_WORKSPACE` unset, 488 passed and 6 skipped. 58
+  new tests, 43 of them in `tests/test_chatgpt_client.py` and six against
+  the real openai 2.45.0 in `tests/test_sdk_conformance.py`.
+- Mutations: 19 of 19 killed, among them: the echo's pair gate off, a
+  tool-loop turn not echoed, `none` offered, `ultra` unfiltered, a usage
+  limit made transient, the 401 resend removed, `replacing=` ignored, a
+  failed refresh not a ConnectionError, `store` true, the SDK left to
+  retry, the entry not written, the header link on every provider, the
+  hosted refusal removed, and `strict` sent.
+- ruff clean; bandit 0 new and no pair grew; gitleaks found no leaks on an
+  export copy; both deploy dry runs build, scan clean and audit clean.
+  pip-audit not run: no requirement changed.
+- AGENTS.md's ceiling on what `read_project_doc` reaches is raised from
+  5 MB to 6 MB, as batch 144 raised it from 4 to 5: this entry took the
+  documents to 5.00 MB with the file count unchanged at 63, and nothing
+  the tool can reach was widened.
+- Not every run was clean. Of three full runs of the final tree, one had
+  two failures that passed when re-run on their own, and their names
+  were not kept. The run after it was clean, and so were five repeated
+  parallel runs of every ChatGPT test file this batch touched.
+- **Owed:** the owner's live check, CG23's tool-loop case inside it.

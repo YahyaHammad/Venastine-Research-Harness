@@ -154,9 +154,20 @@ def is_transient(exc: BaseException) -> bool:
         # the stream's own 200 (anthropic). The provider has said something
         # went wrong mid-generation; unless it also said the request itself
         # is at fault, that is the weather this retry is for.
-        verdict = _body_verdict(getattr(exc, "body", None))
-        return True if verdict is None else verdict
+        return open_stream_error_is_transient(getattr(exc, "body", None))
     return False
+
+
+def open_stream_error_is_transient(body) -> bool:
+    """The open-stream rule above, for a caller holding only the error object.
+
+    ROADMAP_v3 §83: the ChatGPT plan's `error` event and `response.failed`
+    arrive as EVENTS -- the openai SDK raises only on a top-level `error`
+    object, which neither has -- so `core/client.py` reads them and asks
+    here, rather than keeping a second copy of the rule.
+    """
+    verdict = _body_verdict(body)
+    return True if verdict is None else verdict
 
 
 def retry_after_s(exc: BaseException) -> Optional[float]:

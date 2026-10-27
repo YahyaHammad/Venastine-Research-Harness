@@ -41,6 +41,7 @@ from uuid import UUID, uuid4
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.content import Content
 from textual.css.query import NoMatches
 from textual.message import Message
 from textual.widgets import ContentSwitcher, Footer, Header
@@ -59,7 +60,11 @@ from core.agent_activity import AgentActivity
 from core.approval import RunAuthorization
 from core.call_view import call_entries
 from core.cancel import CancelToken
-from core.client import api_initialization, effort_levels_for_model
+from core.client import (
+    ChatGPTUsageLimit,
+    api_initialization,
+    effort_levels_for_model,
+)
 from core.loop import (
     DEFAULT_PROVIDER,
     DEFAULT_SYSTEM_PROMPT,
@@ -1718,9 +1723,37 @@ class VenastineApp(App):
 
         §79: until a hosted session holds a key for the pair, it says what
         to type instead (`_unconnected_hint`).
+
+        ROADMAP_v3 §83 (CG8, CG19): on the ChatGPT plan the line says so,
+        in OpenAI's words, and `format_title` adds the Manage usage click.
         """
-        self.sub_title = (self._unconnected_hint()
-                          or f"{self.provider_name} | {self.model}")
+        pair = f"{self.provider_name} | {self.model}"
+        if self.provider_name == "CHATGPT":
+            pair += f" | {_USING_PLAN}"
+        self.sub_title = self._unconnected_hint() or pair
+
+    def format_title(self, title: str, sub_title: str) -> Content:
+        """Textual's title line, plus Manage usage on the ChatGPT plan
+        (ROADMAP_v3 §83, CG19).
+
+        Textual's header cannot hold a URL, so the words carry ONE FIXED
+        ACTION, `app.manage_usage`. It is a constant: no model output and no
+        provider text reaches the markup, which is the reason the
+        transcript's links are style metadata rather than action strings
+        (batch 58). Measured headless on Textual 8.2.8: a click on the words
+        runs the action and does not toggle the header's tall mode.
+        """
+        content = super().format_title(title, sub_title)
+        if not sub_title.endswith(_USING_PLAN):
+            return content
+        return Content.assemble(content, (" · ", "dim"),
+                                Content.from_markup(_MANAGE_USAGE_MARKUP))
+
+    def action_manage_usage(self) -> None:
+        """Open ChatGPT's usage page (CG8): the header's Manage usage."""
+        from core import chatgpt_auth
+
+        self._transcript.open_url(chatgpt_auth.USAGE_URL)
 
     def _unconnected_hint(self) -> "str | None":
         """What to type, while a hosted session holds no key for the pair
@@ -3444,7 +3477,7 @@ class VenastineApp(App):
         self._raven.resume_animation()
         self._raven.state = ravens.IDLE
         if message.error is not None:
-            self._transcript.write_error(f"[error: {message.error}]")
+            self._write_failure(message.error)
             return
         # Reload so the grill exchange is in the live history for the
         # next streaming turn.
@@ -4884,7 +4917,21 @@ class VenastineApp(App):
         self._raven.resume_animation()
         self._raven.state = ravens.IDLE
         if message.error is not None:
-            self._transcript.write_error(f"[error: {message.error}]")
+            self._write_failure(message.error)
+
+    def _write_failure(self, error, label: str = "error") -> None:
+        """A turn, a one-shot or a research run that failed, on one line.
+
+        A ChatGPT usage limit is written as it stands, so the line LEADS
+        with Manage usage (ROADMAP_v3 §83, CG8); the header's Manage usage
+        opens the page. ONE helper for the three places a failure lands,
+        because a limit can end any of them and three copies of the rule
+        would be three chances for one to forget it.
+        """
+        if isinstance(error, ChatGPTUsageLimit):
+            self._transcript.write_error(str(error))
+        else:
+            self._transcript.write_error(f"[{label}: {error}]")
 
     def on_pipeline_event_message(self, message: PipelineEventMessage) -> None:
         """Render one PipelineEvent (§22 AC2).
@@ -4975,7 +5022,7 @@ class VenastineApp(App):
                 "claiming completion.]")
             return
         if message.error is not None:
-            self._transcript.write_error(f"[pipeline failed: {message.error}]")
+            self._write_failure(message.error, "pipeline failed")
             return
         run = message.run
         self._last_run = run
@@ -5359,12 +5406,16 @@ def _cmd_model(app: VenastineApp, args: str) -> None:
     running worker would leave the transcript claiming one model and the
     thread recording another.
     """
+    from core import chatgpt_auth
     from credentials import load_provider_data
 
     providers = load_provider_data()
 
     def _configured() -> str:
         named = sorted(p for p, e in providers.items() if e.get("API_KEY"))
+        # §83: the plan has no key; its sign-in is what connects it.
+        if chatgpt_auth.status().signed_in:
+            named.append("CHATGPT (signed in)")
         return ", ".join(named) if named else "none (add a key to providers.json)"
 
     if not args:
@@ -5388,11 +5439,21 @@ def _cmd_model(app: VenastineApp, args: str) -> None:
             "Usage: /model <name>, or /model <PROVIDER> <name>.")
         return
 
-    # ROADMAP_v3 §83 (CG11): the plan signs in before it can answer, and a
-    # switch to it would fail the next turn rather than this command.
-    if provider == "CHATGPT":
-        app._transcript.write_error(_CHATGPT_NOT_YET)
+    # ROADMAP_v3 §83. CG11's refusal is lifted: the plan answers since slice
+    # 2b. While it is signed out a switch would fail the next turn rather
+    # than this command, so this refuses and says how to sign in (CG20).
+    if provider == "CHATGPT" and not chatgpt_auth.status().signed_in:
+        app._transcript.write_error(_CHATGPT_SIGNED_OUT)
         return
+    if provider == "CHATGPT" and provider not in providers:
+        # A sign-in made before slice 2b wrote no entry; it is written now.
+        try:
+            model_connect.store_chatgpt_entry()
+        except (OSError, ValueError) as exc:
+            app._transcript.write_error(
+                f"Could not record CHATGPT in providers.json: {exc}")
+            return
+        providers = load_provider_data()
 
     # Unknown provider REFUSES: api_initialization would raise the same
     # ValueError on the next turn, a long way from the typo that caused it.
@@ -7566,10 +7627,13 @@ def _sign_in_huggingface(app: "VenastineApp", preset) -> None:
 
 # ---- ROADMAP_v3 §83: the ChatGPT plan ---------------------------------------
 
-_CHATGPT_NOT_YET = (
-    "The ChatGPT plan signs in (/connect chatgpt) but cannot answer yet: "
-    "chat on the plan arrives with ROADMAP_v3 §83 slice 2. Keep your current "
-    "model until then.")
+_CHATGPT_SIGNED_OUT = (
+    "The ChatGPT plan is not signed in, so it cannot answer. /connect "
+    "chatgpt signs in; then /model CHATGPT <name>.")
+# OpenAI's words for the indicator and its link (CG8), and the one action the
+# header's link runs (CG19). Constants: nothing else reaches that markup.
+_USING_PLAN = "Using ChatGPT plan"
+_MANAGE_USAGE_MARKUP = "[@click=app.manage_usage]Manage usage[/]"
 _CHATGPT_LOCAL_ONLY = (
     "The ChatGPT plan signs in on a local install only: OpenAI offers it to "
     "open-source apps running on your own machine, and its sign-in comes "
@@ -7746,18 +7810,27 @@ def _chatgpt_complete(app: "VenastineApp", wait: _ChatgptSignIn,
 
 
 def _finish_chatgpt(app: "VenastineApp", done) -> None:
-    """Say how the sign-in ended, and show CG8's notice once (§83).
+    """Write CHATGPT's keyless entry, say how the sign-in ended, and show
+    CG8's notice once (§83).
 
-    No `/model` switch follows, unlike `_finish_connect`'s: the plan cannot
-    answer until slice 2 (CG11).
+    The entry (CG20) is what `/model CHATGPT` and the launch restore read.
+    No `/model` switch follows, which is `_finish_connect`'s rule for a
+    preset naming no default model: the plan's roster is OpenAI's and
+    changes, so the person names the model.
     """
     from core import chatgpt_auth
 
+    try:
+        model_connect.store_chatgpt_entry()
+    except (OSError, ValueError) as exc:
+        app._transcript.write_error(
+            f"Signed in, but could not record CHATGPT in providers.json: "
+            f"{exc}")
+        return
     if done.plan_usage:
         app._transcript.write_system(
-            "Connected the ChatGPT plan. Chat on the plan arrives with "
-            "ROADMAP_v3 §83 slice 2, so your current model stays. "
-            "/disconnect chatgpt signs out.")
+            "Connected the ChatGPT plan as CHATGPT. Choose a model: /model "
+            "CHATGPT <name>. /disconnect chatgpt signs out.")
     else:
         app._transcript.write_error(
             "OpenAI signed you in but did not share the ChatGPT plan, so "

@@ -202,6 +202,30 @@ class TestForgettingAKey:
         assert after == before
 
 
+class TestThePlansKeylessEntry:
+    """§83, CG20: what a ChatGPT sign-in writes to providers.json."""
+
+    def test_it_holds_no_key_and_keeps_a_field_a_measurement_set(
+            self, providers_file):
+        connect.store_chatgpt_entry()
+        data = json.loads(providers_file.read_text(encoding="utf-8"))
+        assert data["CHATGPT"] == {
+            "API_KEY": "", "API_URL": "https://api.openai.com/v1",
+            "is_v1_compatible": False, "supports_stream_usage": True}
+        data["CHATGPT"]["accepts_images"] = True
+        providers_file.write_text(json.dumps(data), encoding="utf-8")
+
+        connect.store_chatgpt_entry()
+        after = json.loads(providers_file.read_text(encoding="utf-8"))
+        assert after["CHATGPT"]["accepts_images"] is True
+
+    def test_the_entry_alone_does_not_connect_the_plan(self, providers_file):
+        """The token file says whether the plan is connected, never the
+        entry: it has no key to count."""
+        connect.store_chatgpt_entry()
+        assert "CHATGPT" not in connect.connected_providers()
+
+
 class TestWhereAKeyIsKept:
     def test_persisting_writes_the_entry_and_forgets_the_cached_client(
             self, providers_file):

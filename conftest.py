@@ -144,13 +144,49 @@ class _FakeModels:
         return types.SimpleNamespace(data=[])
 
 
+class _FakeOpenAIResponses:
+    """Fake of client.responses on the OpenAI SDK (ROADMAP_v3 §83).
+
+    `create` records the request and returns the next queued stream -- a
+    list of events, iterated -- or raises it when an exception was queued.
+    An empty queue answers an empty stream, which `_stream_usage` then
+    judges like any stream that carried no usage.
+    """
+
+    def __init__(self):
+        self._streams = []
+        self.requests = []
+
+    def set_streams(self, streams):
+        self._streams = list(streams)
+
+    def create(self, **kwargs):
+        self.requests.append(kwargs)
+        stream = self._streams.pop(0) if self._streams else []
+        if isinstance(stream, BaseException):
+            raise stream
+        return iter(stream)
+
+
 class _FakeOpenAIClient:
-    """Fake of OpenAI(...) construction. Returns a client with .chat
-    and a .models endpoint that reports no context window by default."""
+    """Fake of OpenAI(...) construction. Returns a client with .chat, a
+    .models endpoint that reports no context window by default, and the
+    Responses surface §83's plan path uses: .responses and a raw .get.
+
+    The constructor's keywords are KEPT, because what the plan's client is
+    built with -- a key function, no SDK retries -- is a decision (CG21)."""
 
     def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.api_key = "" if callable(kwargs.get("api_key")) \
+            else kwargs.get("api_key", "")
         self.chat = _FakeOpenAIChat()
         self.models = _FakeModels()
+        self.responses = _FakeOpenAIResponses()
+        self.listing = {"models": []}
+
+    def get(self, path, *, cast_to=None, **_options):
+        return self.listing
 
 
 def _build_fake_openai_module():

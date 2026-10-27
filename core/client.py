@@ -63,7 +63,11 @@ def api_initialization(provider_name: str):
 
     entry = provider_data[provider_name]
 
-    if entry.get("is_v1_compatible", False):
+    # ROADMAP_v3 §83. Routed by NAME, before the flag: the plan is not
+    # v1-compatible and must never fall to the Chat Completions branch.
+    if provider_name == "CHATGPT":
+        client = _chatgpt_client()
+    elif entry.get("is_v1_compatible", False):
         from openai import OpenAI
         client = OpenAI(base_url=entry["API_URL"], api_key=entry["API_KEY"])
     elif provider_name == "GOOGLE":
@@ -78,6 +82,37 @@ def api_initialization(provider_name: str):
 
     _client_cache[provider_name] = client
     return client
+
+
+def _chatgpt_client():
+    """The openai SDK, set up for the ChatGPT plan (ROADMAP_v3 §83, CG21).
+
+    `api_key` is a FUNCTION, `chatgpt_auth.access_token`: the SDK calls it
+    before every request (measured 25 of 25 in slice 2a), so the hourly
+    refresh needs no other plumbing and a cached client never holds a
+    stale token. `max_retries=0`, so CG10 decides every retry and the SDK
+    decides none: its own would resend a usage-limit 429.
+
+    The address is `chatgpt_auth.RESOURCE` and never the entry's `API_URL`.
+    The token is minted for that resource alone, and a hand-edited entry
+    must not be able to send it anywhere else.
+
+    Refused on a hosted deployment (CG1), as the sign-in already is, so a
+    `providers.json` carried onto one cannot reach the plan either.
+    """
+    from security import hosted
+
+    if hosted.is_hosted():
+        raise ValueError(
+            "The ChatGPT plan answers on a local install only (ROADMAP_v3 "
+            "§83, CG1): OpenAI offers it to open-source apps running on your "
+            "own machine.")
+    from openai import OpenAI
+
+    from core import chatgpt_auth
+
+    return OpenAI(base_url=chatgpt_auth.RESOURCE,
+                  api_key=chatgpt_auth.access_token, max_retries=0)
 
 
 def forget_client(provider_name: str) -> None:
@@ -221,9 +256,10 @@ def _tool_arguments(raw_args: str, tool_name: str,
     """(input, parse_error) for one provider `arguments` string.
 
     The ONLY place a wire string is parsed as JSON. Google and Anthropic
-    hand back dicts, so this is the OpenAI-compatible branch's alone --
-    which is the branch a local model server takes, and truncated or
-    malformed tool arguments are likeliest there.
+    hand back dicts, so this is the OpenAI-compatible branch's -- which is
+    the branch a local model server takes, and truncated or malformed tool
+    arguments are likeliest there -- and, since ROADMAP_v3 §83, CHATGPT's,
+    whose Responses function calls carry `arguments` as a string too.
 
     §33 W1 (#37): a failure is RETURNED, not raised. `dispatch()` turning
     handler exceptions into {"error": ...} is the whole reason a raising
@@ -549,6 +585,22 @@ def _tools_for_provider(provider_name: str, tool_schemas: list[dict]):
             ]
         )]
 
+    if provider_name == "CHATGPT":
+        # ROADMAP_v3 §83. The Responses API's FLAT function shape, and no
+        # `strict`. Slice 2a measured it: the registry's fifteen schemas,
+        # none of which meets strict mode's rules, completed a call without
+        # the key -- and cost fewer input tokens than with `strict: false`.
+        # Never a hosted tool (CG3): only what the harness itself runs.
+        return [
+            {
+                "type": "function",
+                "name": s["name"],
+                "description": s["description"],
+                "parameters": s["input_schema"],
+            }
+            for s in tool_schemas
+        ]
+
     # OpenAI-compatible providers
     return [
         {
@@ -629,6 +681,24 @@ def _echoed_blocks(provider_name: str, model: Optional[str],
     if record.get("provider") != provider_name or record.get("model") != model:
         return []
     return [b for b in record.get("blocks") or [] if isinstance(b, dict)]
+
+
+def _chatgpt_reasoning(model: Optional[str], msg: dict) -> list:
+    """The reasoning items a CHATGPT turn goes back with (ROADMAP_v3 §83,
+    CG18, CG23): exactly as the SDK parsed them, `None` fields left out,
+    and only to the model that wrote them -- §44's pair, through
+    `_echoed_blocks`.
+
+    EVERY turn this model wrote, the ones that ended in calls included
+    (CG23, the owner's choice). Slice 2a measured the item accepted under
+    `store: false`, with its id and without, before a user message; inside a
+    tool loop it was never sent, because the model did not reason before a
+    trivial call. The item type is the same and so is the list it sits in,
+    and the tool loop is where a reasoning model most needs what it already
+    worked out. A refusal would fail that step with a 400 naming the input,
+    which is the owner's live check to see."""
+    return [b for b in _echoed_blocks("CHATGPT", model, msg)
+            if b.get("type") == "reasoning"]
 
 
 #: ROADMAP_v3 §82 (GS3). Google's stand-in for a thought signature, for a
@@ -822,6 +892,11 @@ def _messages_for_provider(provider_name: str, neutral_messages: list[dict],
     to the note, so a caller that does not pass it sends no bytes. GOOGLE
     reads it too since batch 173 (IM9); it ignored it while that wire was
     deferred.
+
+    CHATGPT (ROADMAP_v3 §83) gets the Responses API's `input` items, each
+    shape measured on the plan route in slice 2a. Its reasoning goes back
+    on §44's pair rule like Anthropic's, and is not opt-in: OpenAI's own
+    stateless pattern hands it back (CG18, CG23).
     """
     # One rule, above the split (#13, #36). Note this can leave two
     # consecutive user turns -- which is the shape Google's branch has
@@ -830,6 +905,41 @@ def _messages_for_provider(provider_name: str, neutral_messages: list[dict],
     # asserted.
     neutral_messages = [m for m in neutral_messages
                         if not _is_empty_assistant_turn(m)]
+
+    if provider_name == "CHATGPT":
+        # Slice 2a, item by item: an earlier reply as a plain assistant
+        # message, two user turns in a row, and a call WITHOUT its `fc_`
+        # item id -- under any call id, another provider's included, which
+        # is what a thread holds after a /model switch. So nothing beyond
+        # the neutral {id, name, input} has to be kept for a call.
+        translated: list = []
+        for msg in neutral_messages:
+            role = msg["role"]
+            if role == "user":
+                translated.append({"role": "user", "content": msg["content"]})
+            elif role == "assistant":
+                # The reasoning FIRST: the order the model emitted it in.
+                translated.extend(_chatgpt_reasoning(model, msg))
+                if msg.get("text"):
+                    translated.append(
+                        {"role": "assistant", "content": msg["text"]})
+                for tc in msg.get("tool_calls", []):
+                    translated.append({
+                        "type": "function_call", "call_id": tc["id"],
+                        "name": tc["name"],
+                        "arguments": json.dumps(tc["input"]),
+                    })
+            elif role == "tool":
+                # CG7: no image is delivered on this wire. One swatch was
+                # misread in slice 0, and delivering one is a measurement and
+                # a translation still to come, so a result's images become
+                # IM5's note whatever `accepts_images` says.
+                translated.append({
+                    "type": "function_call_output",
+                    "call_id": msg["tool_call_id"],
+                    "output": _with_image_note(msg),
+                })
+        return translated
 
     if provider_name == "GOOGLE":
         from google.genai import types as genai_types
@@ -1075,6 +1185,40 @@ _context_window_cache: dict[tuple[str, str], Optional[int]] = {}
 _context_window_failures: dict[tuple[str, str], int] = {}
 MAX_CONTEXT_WINDOW_QUERY_ATTEMPTS = 3
 
+#: ROADMAP_v3 §83 (CG22). The plan route's whole effort vocabulary, read off
+#: slice 0's `invalid_value` refusal of `ultra`. The model list names a level
+#: the route refuses (`ultra`), so a level reaches /effort only when the list
+#: names it AND this does. Slice 2a found the rule exact on both models whose
+#: refusal lists their levels.
+CHATGPT_EFFORT_VOCABULARY = ("none", "minimal", "low", "medium", "high",
+                             "xhigh", "max")
+#: CG24, the owner's choice. Six models accepted `none` in slice 2a and two
+#: refused it; no list entry names it, and a table of the six would go stale
+#: with a roster that changed between two runs a day apart.
+CHATGPT_NEVER_OFFERED = frozenset({"none"})
+
+
+def _chatgpt_model_entry(client, model: str) -> Optional[dict]:
+    """`model`'s entry in the plan's model list, or None when the list does
+    not name it (ROADMAP_v3 §83).
+
+    `client.get("/models", cast_to=object)`, because the plan's list is
+    `{"models": [...]}` keyed by `slug`, which the SDK's `models.list()` --
+    built for `{"data": [...]}` -- cannot read; slice 2a read it this way.
+    Any entry counts, a `visibility: hide` one included: a hidden model
+    works when named, and its levels and window are its own. Raises when
+    the list cannot be read, which each caller counts as a failed query.
+    """
+    body = client.get("/models", cast_to=object)
+    entries = body.get("models") if isinstance(body, dict) else None
+    if not isinstance(entries, list):
+        raise ValueError(
+            "the ChatGPT plan's model list carried no `models` array")
+    for entry in entries:
+        if isinstance(entry, dict) and entry.get("slug") == model:
+            return entry
+    return None
+
 
 def _sampling_kwargs(provider_name: str, model: str, temperature) -> dict:
     """Sampling parameters for this call, or {} when the model rejects them.
@@ -1103,6 +1247,13 @@ def _sampling_kwargs(provider_name: str, model: str, temperature) -> dict:
     against this harness's own default model.
     """
     if temperature is None:
+        return {}
+    if provider_name == "CHATGPT":
+        # ROADMAP_v3 §83: the plan route answers a temperature with 400
+        # "Unsupported parameter" (slice 0), on every model.
+        logger.warning(
+            "Dropping temperature=%s: the ChatGPT plan's route refuses "
+            "sampling parameters.", temperature)
         return {}
     if model in config.MODELS_REJECTING_SAMPLING_PARAMS:
         logger.warning(
@@ -1241,6 +1392,23 @@ def _effort_levels(client, provider_name: str, model: str) -> tuple:
                 "Could not read effort capabilities for %r from the Anthropic "
                 "Models API (%s); falling back to the static table.", model, e,
             )
+    if provider_name == "CHATGPT":
+        try:
+            entry = _chatgpt_model_entry(client, model)
+        except Exception as e:
+            query_failed = True
+            logger.warning(
+                "Could not read effort levels for %r from the ChatGPT plan's "
+                "model list (%s); falling back to the static table.", model, e)
+        else:
+            if entry is not None:
+                # ONE read, TWO readings, as Anthropic's retrieve: the entry
+                # carries the window too.
+                _record_window(provider_name, model,
+                               entry.get("context_window"))
+                levels = [lv.get("effort") if isinstance(lv, dict) else lv
+                          for lv in entry.get("supported_reasoning_levels")
+                          or []]
 
     if levels is None:
         levels = config.MODEL_EFFORT_LEVELS.get(model)
@@ -1251,6 +1419,12 @@ def _effort_levels(client, provider_name: str, model: str) -> tuple:
                 model, provider_name, config.DEFAULT_EFFORT_LEVELS,
             )
             levels = list(config.DEFAULT_EFFORT_LEVELS)
+
+    if provider_name == "CHATGPT":
+        # CG22 and CG24, applied to the static table's answer as well: its
+        # default set ends in `ultra`, which the route refuses.
+        levels = [lv for lv in levels if lv in CHATGPT_EFFORT_VOCABULARY
+                  and lv not in CHATGPT_NEVER_OFFERED]
 
     if query_failed:
         # Do NOT cache a failure-derived guess. Caching it made one
@@ -1413,6 +1587,10 @@ def context_window_for(client, provider_name: str, model: str) -> tuple:
                   makes no call at all.
       GOOGLE      models.get(...).input_token_limit, one field on the
                   pinned google-genai type.
+      CHATGPT     the plan's model list, `context_window` on the model's
+                  entry (ROADMAP_v3 §83) -- not the larger
+                  `max_context_window`. Usually a cache hit too: _effort_levels
+                  records it off the same read.
       v1-compat   ONE alias sniff over model_extra, not thirteen adapters,
                   because openai.types.Model allows extra fields -- over
                   whichever of models.retrieve() and models.list() answers
@@ -1442,6 +1620,11 @@ def context_window_for(client, provider_name: str, model: str) -> tuple:
             return _record_window(
                 provider_name, model,
                 getattr(info, "input_token_limit", None)), True
+        if provider_name == "CHATGPT":
+            entry = _chatgpt_model_entry(client, model)
+            return _record_window(
+                provider_name, model,
+                entry.get("context_window") if entry else None), True
         info = _model_info(client, model)
         if info is _NOT_LISTED:
             # Asked and answered by a listing that did not name it.
@@ -1526,7 +1709,21 @@ def _thinking_for_provider(provider_name: str, effort: Optional[str]) -> dict:
     Returned keys are merged into the provider's own kwargs by the caller;
     the Google entry is nested inside GenerateContentConfig rather than sent
     top-level, matching how that provider takes every other setting.
+
+    CHATGPT is the one provider that sends something with no effort set
+    (ROADMAP_v3 §83, CG18). Every request asks for a reasoning summary and
+    for the encrypted reasoning: both were accepted with and without an
+    effort in slice 2a, the encrypted reasoning arrives unasked anyway, and
+    asking says what this code relies on rather than leaning on a default.
+    "auto" leaves the summary to the server, which wrote one on one of the
+    two requests that asked.
     """
+    if provider_name == "CHATGPT":
+        reasoning = {"summary": "auto"}
+        if effort:
+            reasoning["effort"] = effort
+        return {"reasoning": reasoning,
+                "include": ["reasoning.encrypted_content"]}
     if not effort:
         return {}
     if provider_name == "ANTHROPIC":
@@ -1557,6 +1754,281 @@ def _thinking_for_provider(provider_name: str, effort: Optional[str]) -> dict:
 
 
 # ============================================================================
+# ---- The ChatGPT plan's Responses path (ROADMAP_v3 §83, slice 2) -----------
+# ============================================================================
+#
+# The one route the plan answers on is the Responses API (CG3), carried by the
+# openai SDK (CG21). Every shape below was measured on the owner's account in
+# slices 0 and 2a, except CG23's reasoning inside a tool loop, which is said
+# where it is sent (_chatgpt_reasoning).
+
+class ChatGPTPlanError(RuntimeError):
+    """A plan request OpenAI refused for a reason another attempt cannot fix
+    (CG10). The message is the person's to read.
+
+    ITS OWN TYPE, WITH NO `status_code`, and that is what makes it permanent
+    to `core/provider_errors.py`, which reads a failure by its class names
+    and its `status_code` and `body` and finds none of them here. So the
+    loop's generic 429 retry never sees a usage limit, which CG10 says is
+    never retried.
+    """
+
+
+class ChatGPTUsageLimit(ChatGPTPlanError):
+    """The plan's usage limit. Its message LEADS with Manage usage (CG8)."""
+
+
+class ChatGPTNotEligible(ChatGPTPlanError):
+    """This account cannot share its plan, or its sign-in was kept without
+    the plan scope (CG6)."""
+
+
+class ChatGPTUnsupported(ChatGPTPlanError):
+    """A field the plan does not support. The message names it, and the
+    same request is not sent again (CG10)."""
+
+
+#: §83's adopted default: an ineligible account is told the whole story once
+#: per process and briefly after that.
+_ineligible_explained = False
+
+
+def _wire_dict(obj) -> dict:
+    """An SDK object as the plain dict the wire spelled, `None` fields left
+    out: what goes into §44's record and back unchanged, the shape slice 2a
+    handed back."""
+    if isinstance(obj, dict):
+        return {k: v for k, v in obj.items() if v is not None}
+    dump = getattr(obj, "model_dump", None)
+    if callable(dump):
+        return dump(exclude_none=True, mode="json")
+    return {}
+
+
+def _chatgpt_fields(body) -> tuple:
+    """(code, param, message) off an error body, whichever of OpenAI's two
+    shapes it came in: the standard error object, or `{"detail": ...}`."""
+    error = body.get("error") if isinstance(body, dict) and isinstance(
+        body.get("error"), dict) else body
+    if not isinstance(error, dict):
+        return None, None, None
+    return (error.get("code"), error.get("param"),
+            error.get("message") or error.get("detail"))
+
+
+def _chatgpt_refusal(body) -> Optional[Exception]:
+    """CG10's exception for a refusal its code names, or None.
+
+    None hands the failure back to `core/provider_errors.py`, as for every
+    other provider: a 503, another 429 or a dropped connection is retried
+    with the loop's bounded backoff, and anything else fails the turn.
+    """
+    global _ineligible_explained
+    from core import chatgpt_auth
+
+    code, param, message = _chatgpt_fields(body)
+    said = (f" OpenAI said: {' '.join(str(message).split())[:300]}"
+            if message else "")
+    if code == "subscription_sharing_usage_limit_exceeded":
+        return ChatGPTUsageLimit(
+            f"Manage usage: {chatgpt_auth.USAGE_URL} -- this ChatGPT plan "
+            f"has reached its usage limit, so the request was not sent again. "
+            f"Your next message tries once more.{said}")
+    if code == "subscription_sharing_user_not_eligible":
+        if _ineligible_explained:
+            return ChatGPTNotEligible(
+                "This ChatGPT account cannot share its plan (said above).")
+        _ineligible_explained = True
+        return ChatGPTNotEligible(
+            f"This ChatGPT account cannot share its plan with an app, so "
+            f"nothing was sent again and no new sign-in was asked for. Switch "
+            f"with /model, or sign out with /disconnect chatgpt.{said}")
+    if code == "subscription_sharing_unsupported_capability":
+        return ChatGPTUnsupported(
+            f"The ChatGPT plan does not support "
+            f"{param or 'a field this request sent'}, so the request was not "
+            f"sent again.{said}")
+    return None
+
+
+def _chatgpt_open(client, request: dict):
+    """The stream, opened with CG10's one forced refresh on a 401.
+
+    The SDK called `chatgpt_auth.access_token` for the token it sent and
+    holds that token as `client.api_key`. `replacing=` refreshes only while
+    the file still holds it, so two requests refused together spend one
+    refresh between them. A refresh refused as unusable raises `SignedOut`
+    with the session cleared; a second 401 after a good refresh says to sign
+    in again and keeps the tokens, because only an unusable refresh clears
+    them (CG10). A refresh that could not be made at all is a
+    `ConnectionError`, which the loop retries like any dropped connection.
+
+    THE ONE RESEND THIS FILE MAKES, and it is not a retry in AGENTS.md's
+    sense, which this file does not own: nothing was wrong with the request
+    or the weather, the credential was stale, and the second attempt is made
+    with a different one. Every retry for a failure the provider might not
+    repeat is still `core/loop.py`'s, asked of `core/provider_errors.py`.
+    """
+    from core import chatgpt_auth
+
+    for attempt in (1, 2):
+        try:
+            return client.responses.create(**request)
+        except chatgpt_auth.Transient as exc:
+            raise ConnectionError(str(exc)) from exc
+        except chatgpt_auth.ChatGPTAuthError:
+            raise
+        except Exception as exc:
+            refusal = _chatgpt_refusal(getattr(exc, "body", None))
+            if refusal is not None:
+                raise refusal from exc
+            if getattr(exc, "status_code", None) != 401:
+                raise
+            if attempt == 2:
+                raise ChatGPTPlanError(
+                    "OpenAI refused the ChatGPT plan's sign-in again after a "
+                    "refresh. /connect chatgpt signs in again; the stored "
+                    "tokens are kept.") from exc
+            try:
+                chatgpt_auth.access_token(
+                    replacing=getattr(client, "api_key", None) or None)
+            except chatgpt_auth.Transient as again:
+                raise ConnectionError(str(again)) from again
+    raise AssertionError("unreachable: the second attempt returns or raises")
+
+
+def _chatgpt_stream_failure(source) -> Exception:
+    """An `error` event or a `response.failed` as an exception. Neither has
+    been seen: nothing failed in slice 2a.
+
+    The openai SDK raises only on an event whose top-level `error` key is an
+    object, which neither of these has, so they arrive as events and this
+    reads them. CG10's type when the code names one; otherwise the rule
+    `core/provider_errors.py` applies to a stream that failed after it
+    opened, on every provider.
+    """
+    from core import provider_errors
+
+    body = _wire_dict(source)
+    refusal = _chatgpt_refusal(body)
+    if refusal is not None:
+        return refusal
+    code, _, message = _chatgpt_fields(body)
+    text = (f"The ChatGPT plan's response failed ({code or 'no code'}): "
+            f"{message or 'no message'}")
+    if provider_errors.open_stream_error_is_transient(body):
+        return ConnectionError(text)
+    return ChatGPTPlanError(text)
+
+
+def _chatgpt_stream(client, model: str, items: list, system_prompt: str,
+                    tools, reasoning: dict, supports_stream_usage: bool):
+    """The CHATGPT branch of `call_model_stream`.
+
+    DISPATCH IS ON `event.type` ALONE. The SDK parses an event it does not
+    know as whichever class its union tries first: slice 2a's
+    `response.metadata` came out as a `ResponseAudioDeltaEvent` whose `type`
+    still said `response.metadata`. A class check would have read it as
+    audio; the string is the one thing that is right.
+
+    Never sent: `temperature` (refused, slice 0), `previous_response_id`
+    (the whole history goes in `input`), `service_tier`, a hosted tool, and
+    the Codex instructions the model list carries (CG3).
+    """
+    from core import chatgpt_auth
+
+    state = chatgpt_auth.status()
+    if state.signed_in and not state.plan_usage:
+        raise ChatGPTNotEligible(
+            "This ChatGPT sign-in did not share the plan: OpenAI did not "
+            "grant chatgpt.tokens.use.direct, so nothing is sent on it (CG6). "
+            "/connect chatgpt signs in again.")
+    request = dict(model=model, instructions=system_prompt, input=items,
+                   store=False, stream=True,
+                   max_output_tokens=config.MAX_TOKENS)
+    if tools:
+        request["tools"] = tools
+    request.update(reasoning)
+
+    stream = _chatgpt_open(client, request)
+    text_parts: list = []
+    pending_calls: list = []
+    reasoning_items: list = []
+    # None rather than 0, for the Google branch's reason (D21).
+    usage = {"input_tokens": None, "output_tokens": None}
+    finish_reason = None
+    summary_started = False
+    try:
+        for event in stream:
+            kind = getattr(event, "type", None)
+            if kind == "response.output_text.delta":
+                delta = getattr(event, "delta", None)
+                if isinstance(delta, str) and delta:
+                    text_parts.append(delta)
+                    yield StreamToken(text_delta=delta)
+            elif kind == "response.reasoning_summary_part.added":
+                # §38: a summary in several parts reads as paragraphs.
+                if summary_started:
+                    yield StreamToken(thinking_delta="\n\n")
+                summary_started = True
+            elif kind == "response.reasoning_summary_text.delta":
+                delta = getattr(event, "delta", None)
+                if isinstance(delta, str) and delta:
+                    yield StreamToken(thinking_delta=delta)
+            elif kind == "response.output_item.done":
+                item = getattr(event, "item", None)
+                item_type = getattr(item, "type", None)
+                if item_type == "function_call":
+                    pending_calls.append(item)
+                elif item_type == "reasoning":
+                    reasoning_items.append(_wire_dict(item))
+            elif kind in ("response.completed", "response.incomplete"):
+                response = getattr(event, "response", None)
+                usage_obj = getattr(response, "usage", None)
+                for key in ("input_tokens", "output_tokens"):
+                    reported = _token_count(usage_obj, key)
+                    if reported is not None:
+                        usage[key] = reported
+                details = getattr(response, "incomplete_details", None)
+                if getattr(details, "reason", None) == "max_output_tokens":
+                    finish_reason = "length"
+            elif kind == "response.failed":
+                raise _chatgpt_stream_failure(
+                    getattr(getattr(event, "response", None), "error", None))
+            elif kind == "error":
+                raise _chatgpt_stream_failure(event)
+    except Exception as exc:
+        # An error the SDK raised mid-stream may still carry a code CG10
+        # names; anything else, ours included, goes up as it is.
+        refusal = _chatgpt_refusal(getattr(exc, "body", None))
+        if refusal is None:
+            raise
+        raise refusal from exc
+    finally:
+        close = getattr(stream, "close", None)
+        if callable(close):
+            close()
+
+    usage = _stream_usage("CHATGPT", usage, supports_stream_usage)
+    calls = []
+    for item in pending_calls:
+        name = getattr(item, "name", None) or ""
+        parsed, parse_error = _tool_arguments(
+            getattr(item, "arguments", None) or "", name, finish_reason)
+        if parse_error is not None:
+            logger.warning(
+                "%s: %s (finish_reason=%r)", name, parse_error, finish_reason)
+        calls.append(ToolCallRequest(
+            # The id rule the other branches keep (batch 76).
+            id=getattr(item, "call_id", None) or str(uuid4()),
+            name=name, input=parsed, parse_error=parse_error))
+    yield StreamToken(final_response=ModelResponse(
+        text="".join(text_parts), tool_calls=calls, usage=usage,
+        thinking=_thinking_record("CHATGPT", model, reasoning_items),
+    ))
+
+
+# ============================================================================
 # ---- Streaming call + helpers -----------------------------------------------
 # ============================================================================
 
@@ -1576,10 +2048,11 @@ def call_model_stream(
     final_response for the terminal ModelResponse with accumulated tool
     calls and usage.
 
-    Three provider implementations — Anthropic typed events, Google
+    Four provider implementations — Anthropic typed events, Google
     chunked candidates, OpenAI-compatible index-accumulated tool-call
-    fragments — which must agree with each other about the ModelResponse
-    they produce for the same inputs.
+    fragments, and since ROADMAP_v3 §83 the ChatGPT plan's Responses events
+    (_chatgpt_stream) — which must agree with each other about the
+    ModelResponse they produce for the same inputs.
 
     There used to be a non-streaming `call_model()` beside this, and this
     docstring used to promise the two were identical. They were not: it
@@ -1617,6 +2090,15 @@ def call_model_stream(
         images=accepts_images(provider_name))
     sampling = _sampling_kwargs(provider_name, model, temperature)
     thinking = _thinking_for_provider(provider_name, effort)
+
+    if provider_name == "CHATGPT":
+        # ROADMAP_v3 §83. `sampling` is always {} here: _sampling_kwargs
+        # drops a temperature for this provider, which the route refuses.
+        yield from _chatgpt_stream(
+            client, model, translated_messages, system_prompt,
+            _tools_for_provider(provider_name, tool_schemas), thinking,
+            supports_stream_usage)
+        return
 
     if provider_name == "ANTHROPIC":
         stream_kwargs = dict(
@@ -1979,13 +2461,15 @@ class EmbeddingResult:
 # ANTHROPIC IS NOT AN OVERSIGHT. There is no Anthropic embeddings API; the
 # recommended route is a third-party embedder, which this harness reaches
 # as its own provider entry. OPENROUTER proxies chat completions only.
+# CHATGPT is the plan, which answers on the Responses API and nothing else
+# (ROADMAP_v3 §83, CG3).
 #
 # INCOMPLETE ON PURPOSE, and safe when incomplete -- the same posture as
 # MODELS_REJECTING_SAMPLING_PARAMS. An unlisted provider that turns out to
 # have no endpoint fails loudly on the probe `/embedder` runs at selection
 # time, which is a measurement rather than a guess and is why there is no
 # `supports_embeddings` table to keep in step with the world.
-PROVIDERS_WITHOUT_EMBEDDINGS = frozenset({"ANTHROPIC", "OPENROUTER"})
+PROVIDERS_WITHOUT_EMBEDDINGS = frozenset({"ANTHROPIC", "OPENROUTER", "CHATGPT"})
 
 
 def embed_texts(provider_name: str, model: str, texts,

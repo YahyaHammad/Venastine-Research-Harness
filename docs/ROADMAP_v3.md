@@ -43,7 +43,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
-- **§83. A ChatGPT plan, spent in a local install** - **(IN PROGRESS: decided with the owner in batch 180; slice 0, the measurement, complete across batches 181-183; slice 1, the sign-in and `/disconnect`, BUILT in batch 184 and checked live by the owner in batch 185; slice 2 planned in batch 186 (CG17-CG22) and measured in batch 187, its Responses path not built)** (OpenAI's Sign in with ChatGPT now invites open-source apps that run locally to spend a Plus or Pro subscriber's plan, the first provider since ModelScope to pass HD5's test; the harness has no Responses API path, no loopback listener, no credential that refreshes itself, and no way to sign out of anything)
+- **§83. A ChatGPT plan, spent in a local install** - **(IN PROGRESS: decided with the owner in batch 180; slice 0, the measurement, complete across batches 181-183; slice 1, the sign-in and `/disconnect`, BUILT in batch 184 and checked live by the owner in batch 185; slice 2 planned in batch 186, measured in batch 187 and BUILT in batch 188 (CG17-CG24); the owner's live check of chat on the plan owed)** (OpenAI's Sign in with ChatGPT now invites open-source apps that run locally to spend a Plus or Pro subscriber's plan, the first provider since ModelScope to pass HD5's test; the harness has no Responses API path, no loopback listener, no credential that refreshes itself, and no way to sign out of anything)
 - **§82. Gemini 3's thought signatures, and a pin that could not carry them** - **(BUILT in batch 172)** (every model a new Google account can call is Gemini 3, which refuses a function call replayed without the signature it came with, and google-genai 1.0.0 had no field to hold one, so every GOOGLE tool loop failed on its second request. The pin moves to 2.29.0, each call's signature rides in §44's reasoning record, a turn another model wrote gets Google's placeholder, and the Schema keys sent are a verified list since 2.29.0's Vertex-only `additional_properties` was refused. Google effort is on as a consequence)
 - **§81. An image a tool reads, delivered to a model that can see it** - **(BUILT in batch 171; Google added in batch 173)** (nothing a model could read from the workspace reached it as anything but text: a tool result was `str(result)`, `read` decoded bytes with `errors="replace"`, and MCP dropped image blocks by decision. `view_image` attaches an image to its own result through the memory, into a new column, never through the redactor; Anthropic carries it inside the `tool_result`, the OpenAI-compatible wire in a harness message after the tool batch because its tool messages take text only, and since batch 173 Google in a harness turn after the batch too, because its function responses take no image on the models a new account can call (a GIF stays a note there); opt-in per provider with `accepts_images`, never in a research pass, and counted at a fixed weight by the compactor)
 - **§80. The copyright year, kept by a workflow** - **(BUILT in batch 169)** (the owner asked not to have to remember it: LICENSE's appendix and NOTICE both said `Copyright 2026`, and nothing would move either; a workflow at 23:59 UTC on December 31, and again on January 1 in case GitHub delayed or dropped that run, writes a range from the first year to both files together; LY1-LY3)
@@ -2943,7 +2943,7 @@ points there. Slice 0 is complete.
 - **Slice 2a -- the shapes a second turn needs** (CG17). A third probe run
   on the owner's account, through the transport slice 2b uses, before any
   translation is written. Planned in batch 186, measured in batch 187.
-- **Slice 2b -- the Responses path.** The CHATGPT translation in
+- **Slice 2b -- the Responses path. BUILT in batch 188.** The CHATGPT translation in
   `core/client.py` (CG3, CG18, CG21, CG22), built against the answers of
   slices 0 and 2a; the error mapping (CG10); the keyless entry (CG20); and
   the "Using ChatGPT plan" indicator and the limit message (CG8, CG19).
@@ -3113,6 +3113,73 @@ results file found no token, email, client id or refresh token.
 - **A failure inside a stream.** Nothing failed, so neither an `error`
   event nor `response.failed` was seen.
 
+### Slice 2b, built (batch 188)
+
+The plan answers. The owner settled the two things slice 2a left open
+(CG23, CG24): reasoning goes back everywhere, the tool loop included, and
+`/effort` does not offer `none`.
+
+**WHAT WAS BUILT:**
+
+- **The client** (`_chatgpt_client`) is the openai SDK at
+  `chatgpt_auth.RESOURCE`. Never the entry's `API_URL`: the token is minted
+  for that resource alone, and a hand edit must not send it elsewhere.
+  `api_key` is the function `chatgpt_auth.access_token`, and
+  `max_retries=0`. A hosted deployment is refused, as the sign-in is (CG1).
+- **The translation:**
+  - an earlier reply as a plain assistant message;
+  - a call as `{type, call_id, name, arguments}`, with no item id;
+  - a result as `function_call_output`, its images replaced by IM5's note
+    (CG7);
+  - tools in the flat shape, without `strict`;
+  - each turn's reasoning items ahead of its text and calls, under
+    §44's pair rule (CG18, CG23).
+- **The request** carries `instructions`, the whole history in `input`,
+  `store: false`, `stream: true`, `max_output_tokens`, `reasoning.summary:
+  "auto"` with the effort when one is set, and `include` for the encrypted
+  reasoning. A temperature is dropped with a warning.
+- **The stream** is dispatched on `type` alone:
+  - text deltas become text, and summary deltas become thinking
+    (§38);
+  - function calls go through `_tool_arguments`;
+  - reasoning items go into the record;
+  - usage comes off the completed or incomplete event under D21, and
+    `max_output_tokens` reads as the cut-off it is;
+  - an `error` event or a `response.failed` is read by hand.
+- **CG10, code by code:**
+  - a usage limit becomes `ChatGPTUsageLimit`, whose sentence starts
+    "Manage usage:" and which nothing retries;
+  - ineligibility is told in full once per process;
+  - an unsupported capability names its param;
+  - a 401 refreshes once and the request goes again.
+    `access_token(replacing=)` spends a refresh only while the file still
+    holds the refused token. A second 401 says to sign in again and keeps
+    the tokens;
+  - a refresh that could not be made is a `ConnectionError` the loop
+    retries;
+  - every other 429 and 5xx stays the SDK's error, retried with the loop's
+    existing bounded backoff.
+- **Effort and the window come off one read of the model list.** The levels
+  are the entry's that the route's vocabulary names, with `none` and `ultra`
+  never offered; when the list cannot be read, the static table is filtered
+  the same way. The window is `context_window`.
+- **The keyless entry** (CG20) is written by the sign-in and, for a sign-in
+  made before this batch, by the first `/model CHATGPT`. `/disconnect` keeps
+  it. `/model CHATGPT` refuses only while signed out, which lifts CG11.
+- **The header** (CG19) shows "Using ChatGPT plan" beside the model, and
+  Manage usage as a click through an `App.format_title` override. A usage
+  limit's line leads with Manage usage wherever it lands: a turn, a one-shot
+  or a research run.
+- **Replay** shows a stored summary; the ciphertext beside it shows nothing.
+
+**ONE ADOPTED DEFAULT IS MOOT.** `/model` has no picker, so "offer the
+models the list marks `visibility: list`" constrains nothing. A hidden model
+works when named, and its levels and window come from its own entry.
+
+**OWED: the owner's live check.** Inside it is CG23's one unmeasured case: a
+tool-using turn at a high effort whose reasoning goes back before the call's
+output.
+
 ### What §83 deliberately does not change
 
 **No hosted deployment offers it** (CG1): not the shared demo, and not a
@@ -3127,7 +3194,7 @@ partners, and the harness has no accounts of its own to sign anyone in to.
 **Codex's app-server is not used.** OpenAI's guide offers it as another
 transport; the harness speaks HTTP to every provider and keeps doing so.
 
-### Design Decisions Record — §83 (CG1-CG22)
+### Design Decisions Record — §83 (CG1-CG24)
 
 | id | decision |
 |---|---|
@@ -3141,7 +3208,7 @@ transport; the harness speaks HTTP to every provider and keeps doing so.
 | **CG8** | **The TUI follows OpenAI's UI guidelines; the owner's choice.** The sign-in is offered as "Continue with ChatGPT". The first sign-in with plan usage shows a one-time modal, "You're using your ChatGPT plan", saying that eligible requests use the plan and that usage is managed in ChatGPT's settings, with "Got it". While CHATGPT is the provider, the header shows "Using ChatGPT plan" beside the model with a Manage usage link, and a usage-limit error leads with Manage usage. Declined: the same words as transcript lines only |
 | **CG9** | **`/disconnect <name>` removes any provider's stored credential; the owner's choice.** It deletes the entry from `providers.json` or from the session's overlay and forgets the cached client. For CHATGPT it first revokes the refresh token at OpenAI's revocation endpoint -- an empty 200 is success, a network error or a 5xx is retried with backoff -- and when revocation cannot be confirmed it clears the tokens anyway and says where to disconnect the app in ChatGPT. For every other provider the harness cannot revoke, so it says where the person can: the sign-in's page in `_REVOKE_PAGES`, or the preset's key page for a pasted key. Declined: a sign-out for ChatGPT alone |
 | **CG10** | **OpenAI's error table is followed code by code, and a passing failure never deletes a credential.** A usage limit (429) pauses plan requests, points at Manage usage and is never retried. An ineligible user (403) is told once, with no retry and no new sign-in. A 503 is retried with bounded backoff. An unsupported capability (400) names its `error.param` and is not resent unchanged. A refresh refused as unusable (`invalid_grant` and its kin) clears the tokens and asks for a new sign-in. A network failure or a 5xx leaves every stored token as it was |
-| **CG11** | **Slice 1 ships on its own; the owner's choice.** `/connect chatgpt` and `/disconnect` work before the plan can answer, so the token side can be tried live on the owner's account. `/model CHATGPT` refuses with one sentence saying the plan signs in and answers arrive with slice 2, and no `providers.json` entry is written until then. Declined: one batch with slice 2, and slice 1 hidden from `/connect` until slice 2 |
+| **CG11** | **Slice 1 ships on its own; the owner's choice.** `/connect chatgpt` and `/disconnect` work before the plan can answer, so the token side can be tried live on the owner's account. `/model CHATGPT` refuses with one sentence saying the plan signs in and answers arrive with slice 2, and no `providers.json` entry is written until then. Declined: one batch with slice 2, and slice 1 hidden from `/connect` until slice 2. **Lifted in batch 188** with slice 2b: `/model CHATGPT` refuses only while signed out, saying how to sign in, and the entry is CG20's |
 | **CG12** | **One ChatGPT account per install, and it can be forgotten; the owner's choice.** `/disconnect chatgpt` signs out and keeps the registration -- the host id and the issued client id, which OpenAI says survive revocation -- so the next sign-in reuses it. `/disconnect chatgpt --forget` drops the registration too, so the next sign-in can be another account. A callback naming a client id other than the saved one is refused, as OpenAI's page says. The host id stays even then: it names the install, not an account. Declined: several accounts, switchable. **Amended in batch 185**, after the owner's live check found the two forms indistinguishable on screen: the confirmation and the result of BOTH now say what happens to the registration -- plain `/disconnect chatgpt` that it stays and the next sign-in reuses it without the notice, `--forget` that it is dropped and the next sign-in registers afresh, may be another account and shows the notice again -- from one function, `_registration_clause`, so the two moments cannot disagree |
 | **CG13** | **`/disconnect` blanks a key and keeps the entry; the owner's choice.** `credentials.forget_key` empties `API_KEY` and leaves every other field -- the URL, both flags, `echoes_reasoning`, `accepts_images` -- exactly as `save_credentials` keeps them when a key is replaced, so a later `/connect` returns to the same entry. A session-only key (HD5) is dropped from the overlay and the file is never written. Declined: deleting the whole entry |
 | **CG14** | **`/disconnect` asks first; the owner's choice.** A `ConfirmScreen`, No focused, names what goes and where the provider's own revoke page is -- the sign-in's, the key page, or both -- because the harness forgets a key it cannot revoke and the key may not be recoverable. Declined: removing at once |
@@ -3153,6 +3220,8 @@ transport; the harness speaks HTTP to every provider and keeps doing so.
 | **CG20** | **CHATGPT gets a keyless `providers.json` entry; the owner's choice.** A completed sign-in writes `API_URL` `https://api.openai.com/v1`, an empty `API_KEY`, `is_v1_compatible: false` and `supports_stream_usage: true`, so `/model`, the launch restore and the per-provider flags read it as they read every other entry, and CG7's `accepts_images` has a place to be set on a measurement. `/disconnect chatgpt` keeps it, as CG13 keeps a key's entry, and signs out; `/model CHATGPT` while signed out says to run `/connect chatgpt`. CG11's refusal is lifted when slice 2b lands. Declined: constants in code, with a CHATGPT case at each reader |
 | **CG21** | **The openai SDK carries the requests; the owner's choice.** `client.responses.create(stream=True)` on the pinned openai 2.45.0, with `api_key=chatgpt_auth.access_token` -- a callable the SDK calls before every request, so the hourly refresh rides on it -- and `max_retries=0`, so CG10 decides every retry and the SDK decides none. `test_sdk_conformance.py` pins what this rests on. Declined: httpx by hand, the probe's transport, which would add an SSE reader and a second error vocabulary for `core/provider_errors.py` |
 | **CG22** | **Effort levels are the model list's, filtered to the route's vocabulary; the owner's choice.** `/effort` on CHATGPT offers the levels `/v1/models` lists for the model that the route's own vocabulary contains: none, minimal, low, medium, high, xhigh and max, from slice 0's `invalid_value` refusal. For `gpt-6.1-sol` that is low to max, which is what was measured, and `ultra`, listed and refused, drops out. Slice 2a checks the rule on every listed model. Declined: a table of measured models only |
+| **CG23** | **Reasoning goes back everywhere, the tool loop included; the owner's choice.** A turn's reasoning items go back ahead of its text and calls whether it ended in text or in calls, on §44's pair rule. Slice 2a measured the item accepted under `store: false`, with its id and without, before a user message. Before a call's output it was never sent, because the model did not reason before a trivial call, so the owner's live check is where that is seen. Declined: only before user messages; and dropping the reasoning and resending once on a refusal |
+| **CG24** | **`/effort` does not offer `none`; the owner's choice.** Six models accepted it in slice 2a and two refused it, and no list entry names it, so CG22's rule stays whole: a table of the six would go stale with a roster that changed between two runs a day apart. Declined: a measured table of the six |
 
 ---
 

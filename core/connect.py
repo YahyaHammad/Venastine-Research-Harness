@@ -145,9 +145,9 @@ PRESETS: dict[str, Preset] = {p.name: p for p in (
            sign_in="modelscope-cn",
            key_url="https://modelscope.cn/my/myaccesstoken"),
     # ROADMAP_v3 §83. Not v1-compatible: the plan takes the Responses API
-    # only (Chat Completions answered 401, slice 0), which is slice 2's
-    # path. No default model and no `providers.json` entry until then
-    # (CG11), so `/model CHATGPT` refuses rather than failing a turn.
+    # only (Chat Completions answered 401, slice 0), which `core/client.py`
+    # routes CHATGPT to by name. Its `providers.json` entry holds no key and
+    # is written when a sign-in completes (CG20, `store_chatgpt_entry`).
     Preset("chatgpt", "CHATGPT", "ChatGPT plan (Sign in with ChatGPT)",
            "https://api.openai.com/v1", False, True, sign_in="chatgpt"),
     Preset("openai", "OPENAI", "OpenAI", "https://api.openai.com/v1",
@@ -242,6 +242,26 @@ def store(preset: Preset, key: str, *, persist: bool) -> None:
             preset.is_v1_compatible, preset.supports_stream_usage)
     else:
         credentials.set_session_provider(preset.provider, entry_for(preset, key))
+    forget_client(preset.provider)
+
+
+def store_chatgpt_entry() -> None:
+    """CHATGPT's `providers.json` entry, written when a sign-in completes
+    (ROADMAP_v3 §83, CG20).
+
+    It holds NO KEY -- the plan's tokens live in `chatgpt_auth.json` (CG4)
+    -- and exists so that `/model`, the launch restore and the per-provider
+    flags read CHATGPT the way they read every other entry. Written through
+    `save_credentials`, so a field already on the entry (`accepts_images`,
+    once a measurement sets it, CG7) stays as it was. Local installs only:
+    the sign-in that calls this refuses on a hosted deployment (CG1).
+    """
+    from core.client import forget_client
+
+    preset = PRESETS["chatgpt"]
+    credentials.save_credentials(
+        preset.provider, "", preset.api_url, preset.is_v1_compatible,
+        preset.supports_stream_usage)
     forget_client(preset.provider)
 
 

@@ -1,10 +1,13 @@
 """
 test_chatgpt_tui.py
 
-ROADMAP_v3 §83 slice 1 in the TUI: `/connect chatgpt`, the paste prompt
-that closes itself, CG8's notice, the hosted and `--key` refusals, `/model
-CHATGPT` refused until slice 2 (CG11), and `/disconnect` for every provider
-(CG9, CG12-CG15).
+ROADMAP_v3 §83 in the TUI. Slice 1: `/connect chatgpt`, the paste prompt
+that closes itself, CG8's notice, the hosted and `--key` refusals, and
+`/disconnect` for every provider (CG9, CG12-CG15). Slice 2b: the keyless
+entry a sign-in writes and `/disconnect` keeps (CG20), `/model CHATGPT` --
+refused only while signed out, CG11 lifted -- the header's "Using ChatGPT
+plan" and its Manage usage click (CG8, CG19), and a usage limit's line
+leading with Manage usage.
 
 The sign-in is REAL from the TUI down: the real listener on 127.0.0.1, the
 real token file, real ID tokens checked by real PyJWT. Only OpenAI is fake,
@@ -245,20 +248,116 @@ class TestSigningIn:
             assert app._connect_wait is None
             assert "/connect openai --key" in _text(app)
 
-    @pytest.mark.asyncio
-    async def test_model_chatgpt_is_refused_until_slice_2(self,
-                                                          providers_file):
-        """CG11: no providers.json entry yet, and a sentence rather than
-        "unknown provider"."""
-        from tui.app import _CHATGPT_NOT_YET, _cmd_model
 
-        providers_file.write_text(json.dumps(
-            {"ANTHROPIC": {"API_KEY": "k", "API_URL": ""}}), encoding="utf-8")
+class TestUsingThePlan:
+    """Slice 2b. CG11's refusal is lifted: the plan answers once signed in."""
+
+    @pytest.mark.asyncio
+    async def test_signing_in_writes_the_keyless_entry_and_model_switches(
+            self, providers_file, openai):
+        """CG20: an entry with no key, so `/model` reads CHATGPT like any
+        other provider -- and no switch until the person names a model."""
+        from tui.app import _cmd_model
+
+        app = _app()
+        async with app.run_test(size=(160, 30)) as pilot:
+            await _signed_in(app, pilot, openai)
+            assert app.provider_name == "ANTHROPIC"
+            assert "Choose a model: /model CHATGPT <name>" in _text(app)
+            entry = json.loads(providers_file.read_text(
+                encoding="utf-8"))["CHATGPT"]
+            _cmd_model(app, "")
+            assert "CHATGPT (signed in)" in _text(app)
+            _cmd_model(app, "CHATGPT gpt-6.1-sol")
+            pair = (app.provider_name, app.model)
+            sub_title = app.sub_title
+        assert entry == {"API_KEY": "", "API_URL": chatgpt_auth.RESOURCE,
+                         "is_v1_compatible": False,
+                         "supports_stream_usage": True}
+        assert pair == ("CHATGPT", "gpt-6.1-sol")
+        assert sub_title == "CHATGPT | gpt-6.1-sol | Using ChatGPT plan"
+
+    @pytest.mark.asyncio
+    async def test_a_sign_in_without_an_entry_gets_one_at_model(
+            self, providers_file, openai):
+        """A sign-in made before slice 2b wrote no entry."""
+        from tui.app import _cmd_model
+
+        app = _app()
+        async with app.run_test() as pilot:
+            await _signed_in(app, pilot, openai)
+            providers_file.unlink()
+            _cmd_model(app, "CHATGPT gpt-6.1-sol")
+            provider = app.provider_name
+        assert provider == "CHATGPT"
+        assert json.loads(providers_file.read_text(
+            encoding="utf-8"))["CHATGPT"]["API_KEY"] == ""
+
+    @pytest.mark.asyncio
+    async def test_model_chatgpt_while_signed_out_says_how_to_sign_in(
+            self, providers_file):
+        """The entry an earlier sign-in left is not a sign-in: a sentence,
+        rather than a turn that fails a long way from the cause."""
+        from tui.app import _CHATGPT_SIGNED_OUT, _cmd_model
+
+        connect.store_chatgpt_entry()
         app = _app()
         async with app.run_test():
             _cmd_model(app, "CHATGPT gpt-6.1-sol")
             assert app.provider_name == "ANTHROPIC"
-            assert _CHATGPT_NOT_YET in _text(app)
+            assert _CHATGPT_SIGNED_OUT in _text(app)
+
+    @pytest.mark.asyncio
+    async def test_the_header_says_so_and_manage_usage_opens_the_page(
+            self, providers_file):
+        """CG8 and CG19: OpenAI's words beside the model, and one fixed click
+        action in Textual's header -- clicked here as a person would."""
+        from textual.widgets._header import HeaderTitle
+
+        app = _app()
+        async with app.run_test(size=(160, 30)) as pilot:
+            opened = []
+            app._transcript.open_url = opened.append
+            app.provider_name, app.model = "CHATGPT", "gpt-6.1-sol"
+            app.refresh_status()
+            await pilot.pause()
+            y = app.query_one(HeaderTitle).region.y
+            row = "".join(segment.text for segment
+                          in app.screen._compositor.render_strips()[y])
+            assert ("CHATGPT | gpt-6.1-sol | Using ChatGPT plan · "
+                    "Manage usage") in row
+            await pilot.click(offset=(row.index("Manage usage") + 3, y))
+            await pilot.pause()
+        assert opened == [chatgpt_auth.USAGE_URL]
+
+    @pytest.mark.asyncio
+    async def test_no_other_provider_gets_the_indicator_or_the_link(
+            self, providers_file):
+        app = _app()
+        async with app.run_test(size=(160, 30)) as pilot:
+            app.refresh_status()
+            await pilot.pause()
+            plain = app.format_title(app.title, app.sub_title).plain
+        assert "Manage usage" not in plain
+        assert "Using ChatGPT plan" not in plain
+
+    @pytest.mark.asyncio
+    async def test_a_usage_limit_leads_with_manage_usage(self, providers_file):
+        """CG8: the line STARTS with Manage usage, where every other failure
+        sits inside `[error: ...]`."""
+        from core.client import ChatGPTUsageLimit
+        from tui.app import TurnFinished
+
+        limit = f"Manage usage: {chatgpt_auth.USAGE_URL} -- the limit."
+        app = _app()
+        async with app.run_test() as pilot:
+            app.post_message(TurnFinished(ChatGPTUsageLimit(limit)))
+            assert await settle(pilot, lambda: limit in _text(app))
+            app.post_message(TurnFinished(RuntimeError("boom")))
+            assert await settle(pilot, lambda: "[error: boom]" in _text(app))
+            errors = [text for role, text in app._transcript._entries
+                      if role == "error"]
+        assert limit in errors
 
 
 class TestDisconnecting:
@@ -398,6 +497,9 @@ class TestDisconnecting:
             assert "registration is dropped" not in said
         state = chatgpt_auth.status()
         assert not state.signed_in and state.registered
+        # CG20: the keyless entry stays, as CG13 keeps a key's.
+        assert json.loads(providers_file.read_text(
+            encoding="utf-8"))["CHATGPT"]["API_URL"] == chatgpt_auth.RESOURCE
 
     @pytest.mark.asyncio
     async def test_forget_drops_the_registration_too(self, providers_file,
