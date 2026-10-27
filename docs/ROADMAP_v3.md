@@ -43,7 +43,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
-- **§83. A ChatGPT plan, spent in a local install** - **(IN PROGRESS: decided with the owner in batch 180; slice 0, the measurement, complete across batches 181-183; slice 1, the sign-in and `/disconnect`, BUILT in batch 184 and checked live by the owner in batch 185; slice 2, the Responses path, not built)** (OpenAI's Sign in with ChatGPT now invites open-source apps that run locally to spend a Plus or Pro subscriber's plan, the first provider since ModelScope to pass HD5's test; the harness has no Responses API path, no loopback listener, no credential that refreshes itself, and no way to sign out of anything)
+- **§83. A ChatGPT plan, spent in a local install** - **(IN PROGRESS: decided with the owner in batch 180; slice 0, the measurement, complete across batches 181-183; slice 1, the sign-in and `/disconnect`, BUILT in batch 184 and checked live by the owner in batch 185; slice 2 planned in batch 186 (CG17-CG22), its measurement owed and its Responses path not built)** (OpenAI's Sign in with ChatGPT now invites open-source apps that run locally to spend a Plus or Pro subscriber's plan, the first provider since ModelScope to pass HD5's test; the harness has no Responses API path, no loopback listener, no credential that refreshes itself, and no way to sign out of anything)
 - **§82. Gemini 3's thought signatures, and a pin that could not carry them** - **(BUILT in batch 172)** (every model a new Google account can call is Gemini 3, which refuses a function call replayed without the signature it came with, and google-genai 1.0.0 had no field to hold one, so every GOOGLE tool loop failed on its second request. The pin moves to 2.29.0, each call's signature rides in §44's reasoning record, a turn another model wrote gets Google's placeholder, and the Schema keys sent are a verified list since 2.29.0's Vertex-only `additional_properties` was refused. Google effort is on as a consequence)
 - **§81. An image a tool reads, delivered to a model that can see it** - **(BUILT in batch 171; Google added in batch 173)** (nothing a model could read from the workspace reached it as anything but text: a tool result was `str(result)`, `read` decoded bytes with `errors="replace"`, and MCP dropped image blocks by decision. `view_image` attaches an image to its own result through the memory, into a new column, never through the redactor; Anthropic carries it inside the `tool_result`, the OpenAI-compatible wire in a harness message after the tool batch because its tool messages take text only, and since batch 173 Google in a harness turn after the batch too, because its function responses take no image on the models a new account can call (a GIF stays a note there); opt-in per provider with `accepts_images`, never in a research pass, and counted at a fixed weight by the compactor)
 - **§80. The copyright year, kept by a workflow** - **(BUILT in batch 169)** (the owner asked not to have to remember it: LICENSE's appendix and NOTICE both said `Copyright 2026`, and nothing would move either; a workflow at 23:59 UTC on December 31, and again on January 1 in case GitHub delayed or dropped that run, writes a range from the first year to both files together; LY1-LY3)
@@ -2940,9 +2940,13 @@ points there. Slice 0 is complete.
 - **Slice 1 -- signing in, staying signed in, signing out. BUILT in batch 184.** `/connect chatgpt`
   (CG2, CG5, CG6), the token file and its refresh (CG4), the first-sign-in
   notice (CG8), and `/disconnect <name>` for every provider (CG9).
-- **Slice 2 -- the Responses path.** The CHATGPT translation in
-  `core/client.py` (CG3), built against slice 0's answers; the error mapping
-  (CG10); and the "Using ChatGPT plan" indicator and the limit message (CG8).
+- **Slice 2a -- the shapes a second turn needs** (CG17). A third probe run
+  on the owner's account, through the transport slice 2b uses, before any
+  translation is written. Planned in batch 186; its results are owed.
+- **Slice 2b -- the Responses path.** The CHATGPT translation in
+  `core/client.py` (CG3, CG18, CG21, CG22), built against the answers of
+  slices 0 and 2a; the error mapping (CG10); the keyless entry (CG20); and
+  the "Using ChatGPT plan" indicator and the limit message (CG8, CG19).
 
 ### Slice 1, built (batch 184)
 
@@ -2983,6 +2987,62 @@ consent again on the second sign-in, which reused the saved client id; and
 which tab of ChatGPT's settings lists connected apps, so the revoke page is
 still the settings root.
 
+### Slice 2, planned (batch 186)
+
+The owner chose six things before anything was written (CG17-CG22): measure
+first; hand reasoning back and show its summaries; a clickable header; a
+keyless `providers.json` entry; the openai SDK as the transport; and effort
+levels read from the model list, filtered.
+
+**WHY A THIRD MEASUREMENT.** Slice 0 sent single requests. A conversation's
+second turn sends shapes none of them did:
+
+- an earlier assistant reply, as an input item;
+- the harness's own function calls, which it stores as `{id, name, input}`:
+  no `fc_` item id and no status, the variant slice 0 skipped because the
+  verbatim one worked. After a `/model` switch, they also carry call ids
+  another provider wrote (`toolu_...`, a uuid4);
+- a reasoning item handed back with `store: false`, inside a tool loop and
+  before the next user message. Slice 0's tool call reasoned too little to
+  produce one, so that variant was never sent;
+- the harness's real tool schemas. A function tool sent without `strict`
+  may be held to strict mode, the Responses reference's default, and none of
+  the fifteen the registry advertises by default meets strict mode's rules
+  (measured here: every object would need `additionalProperties: false` and
+  every property required). Slice 0's one tool was written to meet them.
+
+Slice 2a also asks for reasoning summaries, with and without an effort; the
+model list says every model supports them and defaults them off. It sends
+`max_output_tokens` at the harness's 16,000, and effort `none` to every
+listed model, whose refusal names that model's levels, to check CG22's rule
+on each. It records every event type the SDK yields and every message
+`phase`.
+
+**WHAT WAS CHECKED HERE, against the pinned openai 2.45.0, before it was
+chosen** (CG21):
+
+- `api_key` may be a callable. `_prepare_options` calls it before every
+  request whose options carry `bearer_auth`, the default, so a refreshing
+  token needs no other plumbing.
+- The stream path never reads `Content-Type`, which the plan route never
+  sends.
+- The stream raises only on an event whose top-level `error` key is an
+  object, so the Responses `error` event and `response.failed` arrive as
+  events the translation has to read itself.
+
+**ADOPTED DEFAULTS** (implementation-level; the owner may overturn any):
+
+- A usage limit ends the turn and any pipeline run it is part of. Nothing
+  retries it, and the person's next message makes one attempt.
+- An ineligible account is told once per session.
+- `/model` and `/effort` offer the models the list marks `visibility:
+  list`; a hidden one still works when named.
+- The context window is the list's `context_window`, not the larger
+  `max_context_window`.
+- Never sent: Codex's `base_instructions` and `model_messages`,
+  `service_tier` and the fast tiers, `previous_response_id`, `temperature`,
+  and any hosted tool.
+
 ### What §83 deliberately does not change
 
 **No hosted deployment offers it** (CG1): not the shared demo, and not a
@@ -2997,7 +3057,7 @@ partners, and the harness has no accounts of its own to sign anyone in to.
 **Codex's app-server is not used.** OpenAI's guide offers it as another
 transport; the harness speaks HTTP to every provider and keeps doing so.
 
-### Design Decisions Record — §83 (CG1-CG10)
+### Design Decisions Record — §83 (CG1-CG22)
 
 | id | decision |
 |---|---|
@@ -3017,6 +3077,12 @@ transport; the harness speaks HTTP to every provider and keeps doing so.
 | **CG14** | **`/disconnect` asks first; the owner's choice.** A `ConfirmScreen`, No focused, names what goes and where the provider's own revoke page is -- the sign-in's, the key page, or both -- because the harness forgets a key it cannot revoke and the key may not be recoverable. Declined: removing at once |
 | **CG15** | **The provider in use may be disconnected, and it is said; the owner's choice.** The confirmation and the result both say the next message needs `/model` or `/connect`; nothing switches behind the person's back. Declined: refusing until another provider is chosen, which would also block disconnecting the only one |
 | **CG16** | **PyJWT is declared, `>=2.10.1,<3`; the owner's choice.** It checks the ID token (CG6) and was already in the hard closure through mcp, so declaring it adds nothing to an install and stops the check depending on mcp happening to pull it in. Declined: an RS256 check written here on `cryptography` |
+| **CG17** | **Slice 2 measures before it translates; the owner's choice.** A third probe run on the owner's account (slice 2a) sends what a conversation's second turn sends -- an earlier reply, the harness's own calls without item ids and with other providers' call ids, a reasoning item handed back, the registry's real schemas -- through the transport slice 2b uses, and its answers are written here before the translation is. CG7's rule, applied to the shapes slice 0 did not send. Declined: building on the documented shapes and letting the live check find what breaks |
+| **CG18** | **Reasoning goes back to the model that wrote it, and its summary is shown; the owner's choice.** A response's reasoning items are kept in §44's record (`ModelResponse.thinking`) as the SDK parsed them, and handed back unchanged, ahead of that turn's text and calls, when the record's provider and model are the ones being called; a switch drops them, §44's pair rule. `reasoning.summary` is requested, and its deltas stream as thinking the way every other provider's do (§38). Each half ships only if slice 2a shows the route accepts it. Declined: handing reasoning back without showing a summary; and dropping it, as OPENAI's Chat Completions path does |
+| **CG19** | **The header carries the indicator and the link; the owner's choice.** While CHATGPT is the provider the header reads `CHATGPT \| <model> \| Using ChatGPT plan · Manage usage`, and Manage usage is a click. Textual's header cannot hold a URL, so the app overrides `App.format_title` and the words carry one fixed action, `app.manage_usage`, which opens `chatgpt_auth.USAGE_URL` the way the transcript opens a link. The action is a constant: nothing a model or a provider sends reaches it. Declined: a line above the prompt, where OpenAI's guidelines place it; and the words alone, with a `/usage` command |
+| **CG20** | **CHATGPT gets a keyless `providers.json` entry; the owner's choice.** A completed sign-in writes `API_URL` `https://api.openai.com/v1`, an empty `API_KEY`, `is_v1_compatible: false` and `supports_stream_usage: true`, so `/model`, the launch restore and the per-provider flags read it as they read every other entry, and CG7's `accepts_images` has a place to be set on a measurement. `/disconnect chatgpt` keeps it, as CG13 keeps a key's entry, and signs out; `/model CHATGPT` while signed out says to run `/connect chatgpt`. CG11's refusal is lifted when slice 2b lands. Declined: constants in code, with a CHATGPT case at each reader |
+| **CG21** | **The openai SDK carries the requests; the owner's choice.** `client.responses.create(stream=True)` on the pinned openai 2.45.0, with `api_key=chatgpt_auth.access_token` -- a callable the SDK calls before every request, so the hourly refresh rides on it -- and `max_retries=0`, so CG10 decides every retry and the SDK decides none. `test_sdk_conformance.py` pins what this rests on. Declined: httpx by hand, the probe's transport, which would add an SSE reader and a second error vocabulary for `core/provider_errors.py` |
+| **CG22** | **Effort levels are the model list's, filtered to the route's vocabulary; the owner's choice.** `/effort` on CHATGPT offers the levels `/v1/models` lists for the model that the route's own vocabulary contains: none, minimal, low, medium, high, xhigh and max, from slice 0's `invalid_value` refusal. For `gpt-6.1-sol` that is low to max, which is what was measured, and `ultra`, listed and refused, drops out. Slice 2a checks the rule on every listed model. Declined: a table of measured models only |
 
 ---
 

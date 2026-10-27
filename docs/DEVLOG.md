@@ -27165,3 +27165,44 @@ ChatGPT's settings, which leaves the revoke page at the settings root.
   the sentence left out of the confirmation or of the result.
 - ruff clean; bandit 0 new and no pair grew; gitleaks found no leaks;
   both deploy dry runs build, scan clean and audit clean.
+
+## Batch 186 -- §83 slice 2 planned, and the probe its build waits on (2026-10-27)
+
+**Planned with the owner, not built.** Slice 2 makes the plan answer, and
+the owner chose six things first (CG17-CG22): measure the shapes a second
+turn sends before writing the translation; hand reasoning back to the model
+that wrote it and show its summaries; carry "Using ChatGPT plan" and a
+Manage usage click in the header; give CHATGPT a keyless `providers.json`
+entry; send through the openai SDK with a callable key and no SDK retries;
+and offer the effort levels the model list names, filtered to the route's
+vocabulary.
+
+**Why a third measurement.** Slice 0 sent single requests. A second turn
+sends an earlier reply, the harness's own calls without item ids, another
+provider's call ids after a switch, and a reasoning item handed back -- and
+the registry's fifteen real schemas, none of which meets strict mode's
+rules. None of that was ever sent on the plan route.
+
+**Checked here before the SDK was chosen**, against the pinned 2.45.0:
+
+- a callable `api_key` is called before every request;
+- the stream path never reads `Content-Type`;
+- the stream raises only on an event with a top-level `error` object, so
+  `error` and `response.failed` events are the translation's to read.
+
+**The probe**, for the owner to run, lives outside the repository like
+slice 0's: `probe_chatgpt_turns.py`. It reuses slice 0's sign-in, guard and
+sign-out unchanged, and it sends its requests through the SDK the build
+will use. It was run end to end against an extended offline fake first.
+
+### Verified
+
+- Full suite, 8248 tests: 8180 passed, 68 skipped on Windows, and the
+  docs tests again with `AGENT_WORKSPACE` unset. Docs only, so the count
+  is unchanged.
+- The probe's offline run through the real openai 2.45.0: every check
+  passed, and none of the fake's planted secrets reached the output. Two
+  guard mutations -- the results file unscrubbed, and a printed line
+  unscrubbed -- were both caught.
+- ruff clean; gitleaks found no leaks on an export copy; both deploy dry
+  runs build, scan clean and audit clean.
