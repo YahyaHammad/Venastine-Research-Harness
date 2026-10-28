@@ -305,6 +305,17 @@ class RavenPanel(Static):
         self._render_state()
 
     def _advance(self) -> None:
+        # Batch 200. A tick can arrive while this panel holds its timer
+        # paused. Textual's timer task waits on an asyncio.Event, resume()
+        # releases it, and a pause() before the task runs clears the event
+        # but cannot recall the release. The app does exactly that at a
+        # turn's end -- resume_animation(), then IDLE -- so a stream that
+        # held the raven past one interval let a tick through after
+        # watch_state had reset the frame, and a hosted raven sat still
+        # with its eye shut. Both conditions are the ones under which this
+        # panel pauses the timer, so a tick that meets either is stale.
+        if self._held or self._idle_and_still():
+            return
         self._frame += 1
         self._render_state()
 

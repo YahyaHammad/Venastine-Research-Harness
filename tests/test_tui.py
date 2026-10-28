@@ -2542,6 +2542,34 @@ class TestThreadStateAndInputHandling:
             await pilot.pause()
             assert calls, "a real state change stopped updating the raven"
 
+    @pytest.mark.asyncio
+    async def test_a_tick_released_by_a_resume_does_not_break_a_hold(
+            self, monkeypatch):
+        """Batch 200. Textual's timer task waits on an asyncio.Event
+        while paused and resume() releases it: a pause_animation() before
+        the task runs clears the event but cannot recall the release, so
+        one tick ran inside the hold. The same race's idle half froze a
+        hosted raven mid-blink (test_hosted_mode.py). The interval is
+        shrunk so the hold always outlasts a tick."""
+        from tui import ravens, widgets
+        from tui.widgets import RavenPanel
+
+        monkeypatch.setattr(widgets, "ANIMATION_INTERVAL", 0.001)
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            raven = app.query_one("#raven", RavenPanel)
+            raven.state = ravens.THINKING
+            assert await settle(pilot, lambda: raven._frame > 0)  # unheld
+            raven.pause_animation()
+            await asyncio.sleep(0.05)      # the timer parks, held
+            frame = raven._frame
+            raven.resume_animation()
+            raven.pause_animation()        # taken back before the task runs
+            await pump(pilot, 3)
+            assert raven._frame == frame
+            raven.resume_animation()       # a resume that stands animates
+            assert await settle(pilot, lambda: raven._frame > frame)
+
 
     @pytest.mark.asyncio
     async def test_grill_me_runs_in_the_current_thread(self, mocker, tmp_path, fake_storage):

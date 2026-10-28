@@ -12,6 +12,7 @@ The mode is a module global bound at import, so these tests set
 constants -- rather than re-importing under a changed environment.
 """
 
+import asyncio
 import json
 import os
 import signal
@@ -25,7 +26,7 @@ import pytest
 import config
 import credentials
 from security import hosted
-from tests.conftest import settle
+from tests.conftest import pump, settle
 
 FAKE_OR_KEY = "sk-or-v1-" + "a1b2c3d4" * 8
 
@@ -466,6 +467,38 @@ class TestAnIdleHostedSessionDrawsNothing:
             raven.resume_animation()
             assert not self._ticking(app)
             assert raven._frame == 0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", ["SHARED", "SINGLE_USER"])
+    async def test_a_turn_that_streamed_past_a_tick_ends_on_the_open_eye(
+            self, monkeypatch, providers_file, mode):
+        """Batch 200, from PR #265's py313-info, which failed the test
+        above on a slow runner. Textual's timer task waits on an
+        asyncio.Event while paused and resume() releases it; the IDLE
+        that follows pauses it again but cannot recall the release. So a
+        turn whose stream held the raven past one tick, ended as the app
+        ends one, let a tick through after watch_state had reset the
+        frame, and the raven sat still with its eye shut -- at the real
+        0.4s, after any stream longer than that. The interval is shrunk
+        so the hold always outlasts a tick."""
+        from tui import ravens, widgets
+        from tui.app import VenastineApp
+
+        monkeypatch.setattr(widgets, "ANIMATION_INTERVAL", 0.001)
+        monkeypatch.setattr(hosted, "MODE", getattr(hosted, mode))
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            raven = app._raven
+            raven.state = ravens.THINKING
+            assert await settle(pilot, lambda: raven._frame > 0)  # it animates
+            raven.pause_animation()        # a token stream ...
+            await asyncio.sleep(0.05)      # ... that outlasts a tick
+            raven.resume_animation()       # on_one_shot_finished, verbatim
+            raven.state = ravens.IDLE
+            await pump(pilot, 3)
+            assert not self._ticking(app)
+            assert raven._frame == 0
+            assert ravens.IDLE.frames[0] in str(raven.render())
 
     @pytest.mark.asyncio
     async def test_the_cursor_does_not_blink(self, shared, providers_file):

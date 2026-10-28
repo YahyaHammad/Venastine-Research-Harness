@@ -27849,3 +27849,114 @@ that shows the whole address.
 - ruff clean; bandit 0 new and none of the 62 pairs grew; gitleaks found
   no leaks on an export copy. Both deploy dry runs clean: batch 198's, on
   this tree.
+
+## Batch 200 -- a tick the raven had taken back, and three alerts that read a name as a secret (2026-10-28)
+
+**PR #265's checks.** The owner held the merge on two red checks. Both are
+traced here, and one was a bug.
+
+### The raven froze with its eye shut
+
+`compat`'s `py313-info` failed `test_the_raven_is_still_except_during_a_turn`
+in both runs on f10ff5c (`assert 1 == 0` on `_frame`), where the 3.11
+`pytest` job passed it. The test was right. Textual 8.2.8's `Timer._run`
+sleeps out its interval and then waits on an `asyncio.Event` before it
+ticks. `resume()` sets the event, which completes the waiting task's
+future; `pause()` clears it, and cannot un-complete that future. At a
+turn's end the app calls `resume_animation()` and then sets the raven
+`IDLE` (`on_one_shot_finished`, and the end of a run), with no await
+between, and on a hosted session the second pauses the timer again. When
+the stream had held the raven longer than one interval, the timer task was
+already parked on that event: the resume released it, and one tick ran
+after `watch_state` had reset the frame. `IDLE` has two frames, the second
+its blink, so the raven sat still with its eye shut until the next turn.
+
+- **Reproduced.** With `ANIMATION_INTERVAL` shrunk to 1 ms both cases
+  failed 5 of 5 with CI's exact assertion; at 0.4 s a local run passed,
+  because each `pilot.pause()` came back before a tick was due. CI's runner
+  was slower -- `pilot.pause()` ends on a CPU heuristic, floored at 20 ms
+  and capped at 1 s (AGENTS.md) -- and reached the condition by accident.
+  Timing, not the version: `asyncio.Event` is the same on 3.11 and 3.13.
+- **Measured at the real interval**, in a probe of a hosted shared session
+  ending a turn exactly as `on_one_shot_finished` does: a 0.1 s stream left
+  frame 0 (`<o )`), and streams of 1 s and 2 s, two of each, left frame 1
+  (`<- )`) with the timer paused. So a hosted demo has shown it after
+  nearly every turn since batch 168. Not looked at in the live demos.
+- **The fix**, in `RavenPanel._advance`: a tick that arrives while the
+  panel holds its timer paused -- held for a token stream, or idle on a
+  hosted session -- is dropped. Those are the only two conditions under
+  which the panel pauses the timer, so such a tick is always the stale one.
+  Reordering the two call sites instead was weighed and not taken: the next
+  caller would write resume-then-idle again, and the widget is where the
+  invariant lives. The held half covers a sequence the app does not
+  produce in one step today, a resume taken back by `pause_animation()`;
+  it is the same release, and `pause_animation()`'s promise is that nothing
+  undoes it.
+
+Two other timers have the same shape, read and left: `ThinkingIndicator`
+(a stale tick after `stop()` moves a hidden widget's frame, and `start()`
+resets it to 0) and the usage meter (`_sync_meter_timer` resumes or pauses
+once per change of busy, and `_refresh_meter` repaints only a changed
+string).
+
+### Three alerts that read a name as a secret
+
+GitHub's `CodeQL` check failed on three new high alerts, all
+`py/clear-text-logging-sensitive-data` in `deploy/hosted/sign_in.py`: the
+first pull-request analysis of the ModelScope sign-in code. Batch 158's
+shape again. The PR analysis's SARIF names each source, and each is the
+NAME of an environment variable:
+
+| # | site | source | what reaches the log | verdict |
+|---|---|---|---|---|
+| 66 | `sign_in.py:311` | `site.secret_env` (line 306) | "not offered, no VENASTINE_MODELSCOPE_CLIENT_SECRET" | false positive |
+| 67 | `sign_in.py:340` | the literal `"OAUTH_CLIENT_SECRET"` (line 130) | the Studio's "not offered, no ..." | false positive |
+| 68 | `sign_in.py:545` | `site.secret_env` | "... is set and unused ... it can be removed" | false positive |
+
+In the first two the secret's value only decides whether its name joins
+`missing`; the flow CodeQL drew runs through the tuple's name element. By
+A66 all three were dismissed as false positives with those reasons, through
+the API, on the owner's go-ahead -- not renamed, not suppressed inline, not
+configured away. GitHub keeps one alert across every ref it is found on
+(alert #14, dismissed in batch 158, has instances on twelve refs, `main`
+among them), and `deploy_gate.py` reads only alerts whose state is `open`,
+so after the merge these do not stop the deploy from `main`. The check's
+other line, "1 configuration not found: analyze-quality", is a warning:
+that job runs on a schedule only.
+
+### Tests
+
+- `test_a_turn_that_streamed_past_a_tick_ends_on_the_open_eye`
+  (`test_hosted_mode.py`, both hosted kinds): with the interval shrunk to
+  1 ms, a turn animates; a hold outlasts a tick; ended as the app ends one,
+  the raven is still, on frame 0, drawing the open eye.
+- `test_a_tick_released_by_a_resume_does_not_break_a_hold`
+  (`test_tui.py`): unheld it animates; a resume that `pause_animation()`
+  takes back before the task runs moves no frame; a resume that stands
+  animates again.
+- Both wait the way AGENTS.md says pilot tests wait: `settle` for what must
+  become true, `pump` for what must not happen, and a plain sleep only
+  where elapsed time is itself the condition.
+- Mutations on an export copy, 8/8 killed, each on its own assertion: no
+  guard (in each test); the idle half dropped; the held half dropped (one
+  extra frame, 170 against 169); every tick dropped (in each test); a
+  hosted raven that never animates; a resume that stands not ending the
+  hold. Two of them -- every tick dropped, and a hosted raven that never
+  animates -- first SURVIVED every raven test in the suite. Before the
+  guard a running timer was a moving raven, so every test read the timer;
+  both new tests now read the frame as well.
+
+### Verified
+
+- Full suite, 8345 tests, on Windows on eight workers, twice. The first:
+  8276 passed, 68 skipped and 1 failed (6:39) -- `test_tui.py`'s
+  `test_what_does_not_fit_the_payload_block_can_be_scrolled_to`, End
+  landing on row 1 of 8, the contention flake TECHNICAL_DEBT 30 names
+  by name; alone it passed 6 of 6, and it touches no raven. The second:
+  8277 passed, 68 skipped, with no failure (6:38).
+  `test_hosted_mode.py` and `test_tui.py` with `AGENT_WORKSPACE` unset:
+  594 passed, 2 skipped.
+- ruff clean; bandit 0 new and none of the 62 pairs grew; gitleaks found
+  no leaks on an export copy. `test_docs_consistency.py`: 77 passed, 1
+  skipped. Alerts #66-#68 read back `dismissed`, `false positive`, with
+  their comments.
