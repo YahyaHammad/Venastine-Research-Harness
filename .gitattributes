@@ -1,5 +1,6 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+*.sh text eol=lf
 
 # Never include local secrets / runtime artifacts in `git archive` (H3/C2).
 # .gitignore already keeps them out of `git push`; this keeps them out of

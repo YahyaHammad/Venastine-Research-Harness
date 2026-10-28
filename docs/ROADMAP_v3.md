@@ -3713,7 +3713,15 @@ Batch 166 deployed the same bundle to a private Studio,
    pin and after the same reading, and batch 192 a third, read again in
    the wheels the lock pins: the deployment sets no favicon, so nothing
    in the bridge's process reaches a pillow decoder, that route
-   included.)
+   included.) **Amended in batch 201**, the owner's call: the cap stays
+   the bridge's. The harness reaches pillow through matplotlib, with no
+   ceiling, so a fresh install got 13.0.0 but an environment built
+   before that release kept 12.3.0; `requirements.txt` now floors it at
+   13.0.0, and a test holds every accepted version outside what that
+   file installs. Two pyproject extras, one per kind of install, were
+   weighed and not taken: an extra only adds, so a hosted one would
+   carry Gradio and its mcp and pydantic ranges into the harness, which
+   is what HD2 separated, and neither platform installs from pyproject.
    And the bridge now logs `serving build <sha>` at start, because a
    private Studio answers an anonymous request with 403 and its log is
    where a deploy can be confirmed. With this slice §79 is complete; the

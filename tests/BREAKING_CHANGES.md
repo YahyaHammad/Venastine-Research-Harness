@@ -10,6 +10,16 @@ worth understanding, not a flaky mock to patch over.
 
 ---
 
+## GitHub installers and version policy (batch 202)
+
+| Change | Test | Fix |
+|---|---|---|
+| Replace source before dependencies finish, or fail to restore it after a command-write failure | `test_pip_failure_leaves_active_source_and_command_unchanged`, `test_command_write_failure_rolls_back_source_and_command` | Keep the previously executable app and command until provisioning succeeds; restore both on a failed swap. The tests use real directories and stub only network/process execution. |
+| Let archive entries escape, overwrite another member, or become symlinks | `test_archive_cannot_escape_or_overwrite_a_file`, `test_archive_rejects_symlinks` | Validate original ZIP names before normalization and extract ordinary files beneath a fresh root. ZIP fixtures preserve hostile Windows spellings explicitly. |
+| Change global state defaults or launch from the install directory | `test_launcher_defaults_match_npm_and_local_files_win`, `test_launcher_forwards_arguments_cwd_environment_and_exit_status` | Preserve explicit environment and local credentials/database priority; forward argv/cwd/stdio to the real child. Do not set PYTHONPATH or AGENT_WORKSPACE. |
+| Reuse a retired version, assign clean releases to working branches, or accumulate parent suffixes | `test_wrong_branch_or_reused_version_does_not_modify_files`, `test_stacked_branch_replaces_parent_name_and_identity` | Apply AGENTS.md's lifecycle and use `scripts/version.py` for the pair. npm and Python beta spellings are equivalent, while clean releases remain identical. |
+| Reintroduce exact string comparison for branch-version parity | `test_the_npm_package_and_pyproject_state_the_same_version`, `test_version_mapping_produces_canonical_python` | Compare through the one conversion in `scripts/version.py`. Release-tag tests use controlled clean metadata so branch checkouts still exercise the publish path. |
+
 ## 1. `test_orchestrator.py` — the most fragile mock in the suite
 
 This file mocks `RunAgentLoop.stream_deep_research_mode` keyed by `pass_id`
@@ -5752,3 +5762,4 @@ the only reason it lands now is that the review happened now.
 | **Dropping the Space's thumbnail, pointing it off `main`, or naming a file that is not the cover** | `test_a_shared_link_to_the_space_shows_the_cover`, `test_the_cover_is_a_png_github_takes_as_a_social_preview` | Batch 198 (ROADMAP_v3 §79, HD9), the owner's request: a shared link to the Space shows the cover. The address is the file on GitHub's `main` of the repository package.json names, so renaming the file or the repository has to move both |
 | **Drawing the star line as `system`, leaving its address unarmed, or giving `invite` another role's style** | `test_it_is_drawn_apart_from_the_rest_of_the_banner`, `test_but_the_star_line_is`, `test_the_message_roles_are_pairwise_distinct`, `test_dim_is_the_system_role_alone` | Batch 199 (ROADMAP_v3 §79, HD4), the owner's request: as one more dim italic banner line the star line was read past |
 | **Letting a tick through after the raven's timer was paused, or a guard that stops it animating at all** | `test_a_turn_that_streamed_past_a_tick_ends_on_the_open_eye` (both hosted kinds), `test_a_tick_released_by_a_resume_does_not_break_a_hold` | Batch 200 (ROADMAP_v3 §79, HD8), from PR #265's py313-info: a turn's end resumed the raven and set it idle with nothing between, Textual's timer had already been released, and a hosted raven froze with its eye shut |
+| **Dropping or lowering the pillow floor, or accepting an advisory for a version the harness can install** | `test_no_accepted_version_is_one_the_harness_can_install` | Batch 201 (ROADMAP_v3 §79, HD9), the owner's call: the harness reaches pillow through matplotlib with no ceiling, and an environment built before 13.0.0 kept 12.3.0, whose advisories `deploy_demo.ACCEPTED` takes for the bridge alone. The fix is a floor in `requirements.txt` above the accepted version, not a narrower walk |

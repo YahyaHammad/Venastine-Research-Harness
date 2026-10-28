@@ -27960,3 +27960,161 @@ that job runs on a schedule only.
   no leaks on an export copy. `test_docs_consistency.py`: 77 passed, 1
   skipped. Alerts #66-#68 read back `dismissed`, `false positive`, with
   their comments.
+
+## Batch 201 -- pillow's cap stays the bridge's (2026-10-28)
+
+**The owner's question**, after batches 169, 175 and 192 accepted 38
+pillow 12.3.0 advisories by ID: which package holds pillow back, and would
+two pyproject extras -- `hosted` with the old pillow, `local` with the new --
+keep local users off a version only the hosted demo needs?
+
+**Gradio holds it back.** Gradio 6.30.0, which both platforms run, requires
+`pillow<13.0,>=8.0`, and so does 6.31.0, the newest on PyPI today. 13.0.0
+(2026-10-16) is the first release with the fixes.
+
+**The split the extras were after already exists**, and is stronger than
+extras could make it:
+
+- A local install never meets Gradio. The harness imports no pillow; it
+  arrives through matplotlib's `pillow>=8`, uncapped. pip's dry-run resolve
+  of `requirements.txt` on a clean slate picked pillow 13.0.0.
+- The hosted demo runs two environments in one container. The bridge
+  (Gradio, pillow 12.3.0) is where the 38 IDs are accepted. The sessions,
+  where the harness and image input run, are built from `session.lock`,
+  compiled from `requirements.txt`: pillow 13.0.0, and the last deploy's
+  audit of it was clean with nothing accepted.
+
+**Why extras could not have done it.** An extra only adds packages; it
+cannot lower one. A `hosted` extra would have to carry Gradio to get the
+cap, and `gradio[oauth,mcp]`'s mcp and pydantic ranges against the
+harness's `mcp==2.2.0` and `pydantic==2.13.4` are what separated the bridge
+in the first place (HD2, measured 2026-10-20) -- so `.[hosted]` would not
+resolve. Neither platform installs from pyproject: a Space installs Gradio
+from the README's `sdk_version`, and the Studio installs `bridge.lock`.
+And a hosted session sharing Gradio's environment would run 12.3.0, which
+it does not today.
+
+**The gap that was real.** The owner's own Python had pillow 12.3.0
+(`Required-by: matplotlib`). pip leaves an installed package alone while it
+still satisfies what requires it, so any environment built before
+2026-10-16 kept 12.3.0 -- a fresh install and CI got 13.0.0. Nothing in the
+harness's own code opens an image with pillow (image input reads a file's
+first bytes to tell its type), but matplotlib does, so this closed a gap
+rather than a demonstrated hole.
+
+**The change, the owner's call:** `pillow>=13.0.0,<14` in
+`requirements.txt`, declared the way `cryptography` and `PyJWT` were -- an
+existing transitive dependency given a floor because something rests on
+it, with D22's ceiling. `scripts/build_demo_bundle.py` copies only
+textual's line from that file into the bridge, so the floor reaches
+`session.lock`, which already pinned 13.0.0, and never Gradio.
+THIRD_PARTY_NOTICES gains the row and the libraries pillow's wheel bundles.
+
+### Tests
+
+- `test_no_accepted_version_is_one_the_harness_can_install`
+  (`test_deploy_demo.py`) walks what `requirements.txt` installs -- the
+  file's lines, then each installed distribution's own requirements, extras
+  and markers followed -- and fails on any version in `deploy_demo.ACCEPTED`
+  that no constraint on the way refuses. A package only the bridge installs
+  is skipped, so a future Gradio-only acceptance asks nothing of the
+  harness. It guards its own walk: matplotlib, kiwisolver and pillow must
+  be in it and Gradio must not. Before the floor it failed with the
+  reason: "the constraints on the way are ['>=8']".
+
+### Verified
+
+- **The floor upgrades an environment that is not fresh**, measured on
+  the owner's: `pip install --dry-run -r requirements.txt` answered
+  "Requirement already satisfied: pillow>=8 ... (12.3.0)" before it and
+  "Would install pillow-13.0.0" after, and nothing else. The real
+  install then moved that environment to 13.0.0, so the suite below ran
+  on what ships. `pip-audit -r requirements.txt`, as CI runs it: no
+  known vulnerabilities.
+- **The demos do not move.** Both deploy dry runs build, scan clean and
+  audit clean: `session.lock` with nothing accepted, `bridge.lock` with
+  the same 38 accepted by ID. A ModelScope bundle built to disk pins
+  pillow 13.0.0 in `session.lock` and 12.3.0 beside Gradio 6.30.0 in
+  `bridge.lock`.
+- Mutations on an export copy, 6/6 killed, each on the assertion it
+  aims at: no pillow line, a floor at 12.3.0, a floor a major lower, and
+  an acceptance for textual 8.2.8 (the harness's own exact pin) on the
+  refusal; a walk that stops at the file, and one that drops extras, on
+  the walk's guard. The control -- an acceptance for Gradio, which only
+  the bridge installs -- passes.
+- Full suite, 8346 tests, on Windows on eight workers, twice. The first:
+  8277 passed, 68 skipped and 1 failed (4:57) --
+  `test_a_crlf_checkout_stays_crlf`, 561 differences instead of 1,
+  because pulling the PR #265 merge left the worktree's `config.yaml`
+  CRLF and the test makes it CRLF a second time. That is the known
+  local-only false red; written back as LF, with `git diff` on it still
+  empty, its class passed 5 of 5. The second: 8278 passed, 68 skipped,
+  with no failure (5:54). `test_deploy_demo.py` and
+  `test_docs_consistency.py` with `AGENT_WORKSPACE` unset: 137 passed,
+  4 skipped.
+- ruff clean; bandit 0 new against the baseline; gitleaks, run as CI
+  runs it (`-c .github/gitleaks.toml`), found no leaks on an export
+  copy. `test_docs_consistency.py`: 77 passed, 1 skipped.
+
+## Batch 202 -- GitHub installers and versions that name their branch (2026-10-28)
+
+**Context.** The owner requested Bash and PowerShell scripts usable from
+raw.githubusercontent.com, and a version policy that closes a related batch
+with a bump, distinguishes working branches, and never reuses a retired
+version. Both version files still said 0.2.0 on main and pillow-floor;
+v0.3.0 and v0.3.1 already existed, as batch 162 recorded.
+
+**Decisions made with the owner.** Installation downloads source directly
+from GitHub. npm and Python may use equivalent package-specific spellings.
+Agents bump patches autonomously at batch completion; minor and major bumps
+require the owner's request. A branch keeps its starting main version and
+increments a beta counter. A stack replaces the parent suffix with its own
+name and identity. A merge allocates the next unused main patch, rather than
+merely removing a suffix. Consecutive commits are defined along first-parent
+ancestry; shared ancestor commits are not a second version allocation.
+
+**Built.** `install.sh` and `install.ps1` find Python 3.11+, download the
+stdlib-only `scripts/install.py` completely, and run it. The helper resolves
+a ref to a full GitHub commit, extracts only ordinary files under a fresh
+directory, builds an isolated environment, then replaces managed source.
+Pip failure leaves the old app and command intact; a failed command write
+restores both. Unrelated directories and commands are refused. Old source
+trees and environments remain for recovery. Environments live under the
+already-protected ~/.config/venastine/runtime tier, not beside the source
+where a broad workspace could write the dependencies being imported.
+
+`bin/venastine.py` uses that environment and preserves cwd, argv, stdio and
+exit status. It follows the npm launcher's global-state/local-artifact rules
+and delegates settings history to config_update.py. The installer mirrors
+settings before replacing source, including edits since the last session.
+README documents both raw install commands, prerequisites, paths, updating,
+ref selection and removal. The raw URLs become usable when these files land
+on main; historical source refs without the new launcher refuse explicitly.
+
+AGENTS.md holds the new version policy. `scripts/version.py` owns the one
+npm-to-PEP-440 mapping and paired field edits, creates compact branch
+identities, increments the counter, and refuses historical reuse or a clean
+release no newer than an existing clean tag. It performs no Git mutation.
+The working version is 0.2.0-b.1.pillow-floor.r86271a0fb0cd (npm) and
+0.2.0b1+pillow.floor.r86271a0fb0cd (Python). The next clean release remains
+at least 0.3.2. The publish check rejects betas before packing; its release
+tests now use controlled clean metadata even from a beta checkout.
+
+**Verification.** 35 added test cases bring the collected default suite to
+8381. The full Windows run completed with 8308 passed, 68 skipped and four
+failures: the two new files' documentation counts were swapped, and a source
+export made for the secret scan under review/ was seen by three source-tree
+checks as duplicate production code. The counts were corrected and the
+export moved outside the repository. The subsequent documentation gate,
+which collects the complete suite, passed 78 with one expected skip; the
+installer, version and line-pattern files passed all 52 cases. The final
+installer changes were rerun separately. Both real shell bootstraps passed
+smoke tests with a local download fixture, including Bash arguments containing
+spaces and PowerShell cleanup. No GitHub install or live dependency download
+was performed: the new files are still local.
+
+Ruff and syntax checks pass. Bandit initially named only the four new
+subprocess imports; each now has a rationale matching its explicit argv-only
+calls. The changed modules pass Bandit, and the repository count gate reports
+no increase in its 62 baselined pairs. Gitleaks found no leaks on an export of
+tracked files plus these new files. Work remains uncommitted and untagged.

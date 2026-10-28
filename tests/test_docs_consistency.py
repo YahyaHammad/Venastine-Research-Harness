@@ -1443,7 +1443,9 @@ def test_the_npm_package_and_pyproject_state_the_same_version():
         f"this check reads it by pattern, and two would make the comparison "
         f"meaningless. Found: {versions}")
 
-    assert _package_json()["version"] == versions[0], (
+    from scripts.version import python_version
+
+    assert python_version(_package_json()["version"]) == versions[0], (
         f"package.json says {_package_json()['version']!r} and pyproject.toml "
         f"says {versions[0]!r}. They describe one release -- bump both.")
 
@@ -1460,7 +1462,7 @@ def test_the_npm_package_and_pyproject_state_the_same_version():
 _PREPUBLISH_CHECK = os.path.join(ROOT, "scripts", "prepublish-check.mjs")
 
 
-def _run_prepublish_check(tmp_path, ref_type, ref_name):
+def _run_prepublish_check(tmp_path, ref_type, ref_name, package_version="9.8.7"):
     """Run the real check as a run from `ref_type`/`ref_name` would.
 
     Returns the finished process and whether the script reached `npm`, which
@@ -1502,10 +1504,31 @@ def _run_prepublish_check(tmp_path, ref_type, ref_name):
         env["GITHUB_REF_TYPE"] = ref_type
         env["GITHUB_REF_NAME"] = ref_name
 
+    # Exercise the release path even when the checkout is a beta. The real
+    # script derives ROOT from its location; copy it beside controlled metadata.
+    tree = tmp_path / "release"
+    (tree / "scripts").mkdir(parents=True)
+    shutil.copyfile(_PREPUBLISH_CHECK, tree / "scripts" / "prepublish-check.mjs")
+    package = _package_json()
+    package["version"] = package_version
+    (tree / "package.json").write_text(json.dumps(package), encoding="utf-8")
+    from scripts.version import python_version
+    (tree / "pyproject.toml").write_text(f'version = "{python_version(package_version)}"\n', encoding="utf-8")
+    for name in ("config.py", "config.yaml"):
+        (tree / name).write_text("", encoding="utf-8")
     proc = subprocess.run(  # nosec B603 - node, resolved to an absolute path, running this repo's own script
-        [node, _PREPUBLISH_CHECK], cwd=ROOT, env=env,
+        [node, str(tree / "scripts" / "prepublish-check.mjs")], cwd=tree, env=env,
         capture_output=True, text=True, timeout=120)
     return proc, called.exists()
+
+
+def test_a_beta_build_is_refused_before_packing(tmp_path):
+    beta = "0.3.2-b.1.feature.r012345abcdef"
+    proc, packed = _run_prepublish_check(tmp_path, "tag", "v" + beta, package_version=beta)
+    assert proc.returncode == 1
+    assert "This is a branch build" in proc.stderr
+    assert "Version mismatch" not in proc.stderr
+    assert not packed
 
 
 @pytest.mark.parametrize("tag", [
@@ -1528,7 +1551,7 @@ def test_a_release_tag_that_is_not_the_version_is_refused_before_packing(
     compare equal to nothing. And the refusal has to come before `npm` is
     reached at all: with the call removed, the script goes on to pack.
     """
-    version = _package_json()["version"]
+    version = "9.8.7"
     tag = tag.format(version=version)
 
     proc, packed = _run_prepublish_check(tmp_path, "tag", tag)
@@ -1557,7 +1580,7 @@ def test_a_run_the_tag_check_has_no_quarrel_with_goes_on_to_pack(
     neither variable. Each one reaches the fake `npm`, so each ends in that
     fake's own failure and never in the tag refusal.
     """
-    version = _package_json()["version"]
+    version = "9.8.7"
     if ref_name is not None:
         ref_name = ref_name.format(version=version)
 
