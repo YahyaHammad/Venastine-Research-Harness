@@ -27651,3 +27651,44 @@ moved constant and says what it said.
 - ruff clean; bandit 0 new and none of the 62 pairs grew; gitleaks found
   no leaks on an export copy. The deploy dry runs were left to batch 196,
   whose tree holds this one: no requirement or lock changed here.
+
+## Batch 196 -- the code page warns whoever did not start the sign-in (2026-10-28)
+
+**The pre-public review's optional hardening, which the owner took this
+time.** HD13 accepted that a consent link can be forwarded: someone starts
+`/connect modelscope`, sends the link, and if the person who opens it
+approves and hands back the code, the sender's session runs on their
+ModelScope inference quota. The code is the step that needs the person's
+help, so the page that shows it now says, after "It works once, in that
+session only, for the next 10 minutes.": "If you did not type /connect in
+this demo yourself, close this page and share this code with no one."
+
+One producer, `ModelScopeSignIn.callback` in `deploy/hosted/sign_in.py`;
+the page template already escapes the text. Pages with no code -- expired,
+declined, refused, rate-limited -- do not carry it.
+
+### Tests
+
+- `test_the_code_page_warns_whoever_did_not_start_it`, on both sites through
+  the real route: the sentence beside the handle on the 200 page, and not on
+  a spent state's 400.
+- Mutations on an export copy, 3/3 killed: the sentence dropped; reworded
+  without "share this code with no one"; and added to the expired page,
+  which has no code.
+
+### Verified
+
+- Full suite, 8333 tests, twice on eight workers while other programs held
+  the machine's CPU. Each run failed ONE test, a different one, neither in
+  anything this batch touches: `test_the_raven_is_still_except_during_a_turn
+  [SINGLE_USER]` (a frame advanced once; 8264 passed, 68 skipped, 7:25), then
+  `test_quitting_by_gesture_releases_a_blocked_worker` (8264 passed, 68
+  skipped, 6:04). Each passed alone with its class. Batch 195's first run
+  failed two others the same way: the shifting set
+  `full-suite-takes-seven-minutes` describes, and no run here was clean.
+  The clean full run is batch 197's, on a tree holding this one, before
+  the deploys. `test_hosted_bridge.py` again with `AGENT_WORKSPACE` unset:
+  101 passed, 2 skipped.
+- ruff clean; bandit 0 new and none of the 62 pairs grew; gitleaks found
+  no leaks on an export copy. The deploy dry runs are batch 197's, on the
+  tree the deploys send.

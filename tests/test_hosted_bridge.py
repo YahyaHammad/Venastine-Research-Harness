@@ -1251,6 +1251,28 @@ class TestTheModelScopeCallback:
         assert re.search(r'<p class="handle">[^<]+</p>', page.text)
         assert "ModelScope (modelscope.cn) sign-in" in page.text
 
+    @pytest.mark.parametrize("site", sign_in.SITES, ids=lambda s: s.name)
+    def test_the_code_page_warns_whoever_did_not_start_it(self, tmp_path,
+                                                         site):
+        """Batch 196, the owner's choice from the review: a forwarded
+        consent link reaches a person who never typed /connect, and the
+        code is what would hand their quota to whoever sent it (HD13).
+        Said beside the code, and only there."""
+        warning = ("If you did not type /connect in this demo yourself, "
+                   "close this page and share this code with no one.")
+        flow, _ = _flow(site=site)
+        bridge = web.Bridge(_supervisor(tmp_path))
+        bridge.supervisor.sign_ins = {site.name: flow}
+        with self._client(bridge) as client:
+            page = client.get(site.callback_path, params={
+                "code": "c", "state": _state(flow.start("s1", "r1"))})
+            spent = client.get(site.callback_path, params={
+                "code": "c", "state": "spent"})
+        assert page.status_code == 200
+        assert re.search(r'<p class="handle">[^<]+</p>', page.text)
+        assert warning in page.text
+        assert spent.status_code == 400 and warning not in spent.text
+
     @pytest.mark.parametrize("info, framed_by", [
         ({"platform": "modelscope"}, "https://www.modelscope.ai"),
         ({"platform": "hf"}, "https://huggingface.co"),

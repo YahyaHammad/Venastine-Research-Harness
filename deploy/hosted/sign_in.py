@@ -429,10 +429,15 @@ class ModelScopeSignIn:
         flow.called_back = self._now()
         logger.info("%s sign-in approved for session %s", label,
                     flow.session)
+        # The last sentence is for a person who got the consent link from
+        # someone else: the code is what would hand that someone their
+        # inference quota (HD13; batch 196, the owner's choice).
         return Page(200, "Paste this code into the terminal", (
             f"Copy the code below into the terminal tab where you typed "
             f"{again}. It works once, in that session only, for the next 10 "
-            f"minutes."), flow.handle)
+            f"minutes. If you did not type /connect in this demo yourself, "
+            f"close this page and share this code with no one."),
+            flow.handle)
 
     def claim(self, session_id: str, handle: str) -> Claim:
         """Check a pasted handle against this session's flow. A right one
