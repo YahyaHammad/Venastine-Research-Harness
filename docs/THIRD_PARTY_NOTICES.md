@@ -83,20 +83,27 @@ Installed by `.github/workflows/deploy-demo.yml` to build, audit and upload a bu
 
 ## Non-code third-party material
 
-**No third-party source code is included in this repository.** Measured, not assumed: all 200 tracked
+**No third-party source code is included in this repository.** Measured, not assumed: all 277 tracked
 Python files carry no foreign copyright header and no `SPDX-License-Identifier`; a sweep for
 copied or adapted code ("adapted from", "copied from", "taken from", "vendored", "borrowed from")
-returns only this project's own design prose; and the 34 tracked files that are neither `.py`
+returns only this project's own design prose; and the 45 tracked files that are neither `.py`
 nor `.md` are first-party without exception — the licence texts, configuration and packaging
-(`config.yaml`, `pyproject.toml`, `requirements.txt`, `package.json`, `pytest.ini`, the `.github/`
-workflows and issue templates, the dotfiles), the two prompt texts, `bin/venastine.mjs` and
-`scripts/prepublish-check.mjs`, `docs/assets/research-mode-birds-eye.mermaid`, `tui/app.tcss`, the two
-`.example` templates, and one screenshot of this project's own interface. **No third-party
-fonts, images or data files are bundled.**
+(`config.yaml`, `pyproject.toml`, the three requirements files, `package.json`, `pytest.ini`, the
+`.github/` workflows, issue templates and scanner configuration, the dotfiles), the two prompt
+texts, `bin/venastine.mjs` and `scripts/prepublish-check.mjs`, `docs/assets/research-mode-birds-eye.mermaid`,
+`tui/app.tcss`, the two `.example` templates, the hosted demo's four page templates in
+`deploy/hosted/`, one screenshot of this project's own interface, and its cover image with the
+page it is rendered from. **No third-party fonts, images or data files are bundled.** The
+cover's text is set in Cascadia Mono, Microsoft's font under the SIL Open Font License: the PNG
+holds rendered glyphs, and its page names the font, and neither carries a copy of it.
 
 *(Counts restated in batch 83. The figure had been 166 against 200, the enumeration named
 five of the thirty-four, and the closing sentence said there were no images at all while the
 screenshot was tracked. The claim itself held throughout; only its arithmetic had drifted.)*
+
+*(Restated again in batch 198, when the cover joined: 200 and 34 had become 277 and 43 as the
+project grew. Both sweeps were run again and found nothing new, and every file added since
+batch 83 is first-party.)*
 
 What the repository *does* reproduce is third-party **text**:
 

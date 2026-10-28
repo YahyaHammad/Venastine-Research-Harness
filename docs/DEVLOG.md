@@ -27730,3 +27730,64 @@ The line is static text: an idle hosted session still draws nothing (batch
 - Both deploy dry runs build, scan clean and audit clean, `bridge.lock`
   with 38 accepted by ID, on this tree. ruff clean; bandit 0 new and none
   of the 62 pairs grew; gitleaks found no leaks on an export copy.
+
+## Batch 198 -- a cover image, and the Space's README names it (2026-10-28)
+
+**The owner's request: a landscape cover, drawn by code.**
+`docs/assets/Venastine_Research_Harness_Cover.png`, 1280x640, is rendered
+by a headless Edge from `Venastine_Research_Harness_Cover.html` beside it:
+the title, the sentence the Space's README opens with, and a research run
+drawn in the TUI's layout and the `matrix` theme's colours, over a backdrop
+of claims tied to their sources that a seeded script draws. The page says
+how to render it, that the font is named rather than bundled, and that the
+run is a sample -- its pass names are the pipeline's
+(`core/reasoning/orchestrator.py`), its counts illustrative. Rendered from
+the scratch copy and again from the committed page, the two PNGs were
+byte-identical. The owner chose this size and to commit the page too; at
+1280x640 and under 1 MB the file is also what GitHub advises and allows for
+a social preview, so one file serves both.
+
+**The Space names it (HD9, amended).** Hugging Face's configuration
+reference, read that day, gives `thumbnail` as a "URL for defining a custom
+thumbnail for social sharing", and `docs/assets/` is not in the bundle
+(package.json's `files` leaves it out). So `scripts/build_demo_bundle.py`
+writes `thumbnail:` with the file's address on GitHub's `main` -- the
+owner's choice over the build's own commit, which an unpushed or rebased
+commit would break. `raw.githubusercontent.com` served `main`'s screenshot
+that day (200); the cover's address answers 404 until this commit merges
+there. A Studio's README carries no frontmatter, so nothing here sets a
+Studio's cover.
+
+**THIRD_PARTY_NOTICES restated.** Its enumeration had drifted a second
+time: 200 Python files had become 277, and 34 other files 43. Both sweeps
+were run again -- no `SPDX-License-Identifier` and no copyright header in
+any tracked `.py`, and the "adapted from" sweep still returns only this
+project's prose -- and everything added since batch 83 is first-party:
+the hosted demo's page templates, two requirements files, the scanner
+configuration. The cover makes 45, and the notice says its font is named
+and rendered, never bundled.
+
+### Tests
+
+- `test_a_shared_link_to_the_space_shows_the_cover`: the README's
+  `thumbnail` is the cover's address on `main`, of the repository
+  package.json's `homepage` names.
+- `test_the_cover_is_a_png_github_takes_as_a_social_preview`: a PNG,
+  1280x640, under 1 MB, with its page beside it -- found in a CI checkout,
+  which holds tracked files alone.
+- Mutations on an export copy, 4/4 killed: no `thumbnail:` line; the
+  address on another branch; a cover that is not there; the screenshot
+  named instead.
+
+### Verified
+
+- Full suite, 8342 tests, on a tree holding batch 199 too: 8274 passed,
+  68 skipped on Windows on eight workers, with no failure (3:37). This
+  commit's own tree, exported from the index into a scratch repository:
+  `test_docs_consistency.py` and `test_demo_bundle.py`, 132 passed, 4
+  skipped. `test_demo_bundle.py` with `AGENT_WORKSPACE` unset: 58 passed.
+- Both deploy dry runs build, scan clean and audit clean, `bridge.lock`
+  with 38 accepted by ID; the built Space's README carries the
+  `thumbnail:` line, and its 189 files hold no image. ruff clean; bandit
+  0 new and none of the 62 pairs grew; gitleaks found no leaks on an
+  export copy.

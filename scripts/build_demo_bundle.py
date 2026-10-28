@@ -109,6 +109,15 @@ PLATFORM_MANAGED = frozenset({"gradio", "spaces", "huggingface-hub"})
 
 TITLE = "Venastine Research Harness"
 SHORT_DESCRIPTION = "Agentic research harness with a self-checking pipeline"
+# The image a shared link to the Space shows (batch 198, the owner's
+# request): Hugging Face's `thumbnail`, which takes a URL. docs/assets is
+# not in the bundle, so it is the file on GitHub's `main` -- the owner's
+# choice over the build's own commit, which an unpushed or rebased commit
+# would break. Until the commit that adds it merges there, the address
+# answers 404. The page it is rendered from sits beside it.
+COVER = "docs/assets/Venastine_Research_Harness_Cover.png"
+THUMBNAIL = ("https://raw.githubusercontent.com/YahyaHammad/"
+             "Venastine-Research-Harness/main/" + COVER)
 
 APP_SHIM = '''\
 """The entry point a Hugging Face Space or ModelScope Studio runs.
@@ -469,6 +478,7 @@ def readme(platform: str, pkg: dict, info: dict) -> str:
         f'python_version: "{PYTHON_VERSION}"\n'
         "app_file: app.py\n"
         f"short_description: {SHORT_DESCRIPTION}\n"
+        f"thumbnail: {THUMBNAIL}\n"
         f"license: {str(pkg.get('license', 'apache-2.0')).lower()}\n"
         "pinned: false\n"
         "---\n\n")

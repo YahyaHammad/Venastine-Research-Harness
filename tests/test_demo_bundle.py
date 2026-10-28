@@ -242,6 +242,32 @@ class TestTheGeneratedFiles:
         major, minor = map(int, bundle.PYTHON_VERSION.split("."))
         assert (major, minor) >= (3, 11)
 
+    def test_a_shared_link_to_the_space_shows_the_cover(self):
+        """Batch 198. Hugging Face's `thumbnail` takes a URL and the cover
+        is not in the bundle, so the README names the file on the
+        repository's `main` -- the repository package.json names, so a
+        rename of one cannot leave the other pointing at nothing."""
+        front = _front(bundle.readme("hf", PKG, self.INFO))
+        assert front["thumbnail"] == bundle.THUMBNAIL
+        repo = PKG["homepage"].split("#")[0].removeprefix(
+            "https://github.com/")
+        assert bundle.THUMBNAIL == (
+            f"https://raw.githubusercontent.com/{repo}/main/{bundle.COVER}")
+
+    def test_the_cover_is_a_png_github_takes_as_a_social_preview(self):
+        """The address resolves only if the file is committed, and a CI
+        checkout holds tracked files alone, so finding it there is finding
+        it tracked. 1280x640 and under 1 MB is GitHub's own advice and
+        limit for a social preview, so one file serves both."""
+        data = (ROOT / bundle.COVER).read_bytes()
+        assert data[:8] == b"\x89PNG\r\n\x1a\n"
+        width = int.from_bytes(data[16:20], "big")
+        height = int.from_bytes(data[20:24], "big")
+        assert (width, height) == (1280, 640)
+        assert len(data) < 1_000_000
+        # The page it is rendered from, so it can be changed and redrawn.
+        assert (ROOT / bundle.COVER).with_suffix(".html").is_file()
+
     def test_modelscope_takes_no_frontmatter(self):
         assert not bundle.readme("modelscope", PKG, self.INFO).startswith("---")
 
