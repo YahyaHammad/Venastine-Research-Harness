@@ -702,12 +702,50 @@ class TestTheSingleUserGate:
         ((200, f"<p>{single_user.HEALTH_MARKER}</p>"), False),
         ((302, ""), True),
         ((404, "Not found"), True),
-        ((200, "a sign-in page"), True),
+        ((200, "a sign-in page"), False),
     ])
     def test_it_runs_only_while_no_stranger_can_reach_it(self, answer, allowed):
         gate = single_user.ReachabilityGate("https://x.hf.space",
                                             get=lambda url: answer)
         assert gate.allowed() is allowed
+
+    def test_only_privacy_responses_allow_single_user_mode(self):
+        """An error, startup page or unknown reply is not a privacy check.
+        Check the whole HTTP status range beside the accepted controls."""
+        private = {301, 302, 303, 307, 308, 401, 403, 404}
+        for status in range(100, 600):
+            gate = single_user.ReachabilityGate(
+                "https://x.hf.space", get=lambda url, s=status: (s, ""))
+            assert gate.allowed() is (status in private), status
+            if status not in private:
+                assert f"HTTP {status}" in gate.reason
+
+    def test_a_public_marker_overrides_a_privacy_status(self):
+        for status in (200, 302, 403, 404):
+            gate = single_user.ReachabilityGate(
+                "https://x.hf.space",
+                get=lambda url, s=status: (s, single_user.HEALTH_MARKER))
+            assert not gate.allowed(), status
+            assert "answers anyone" in gate.reason
+
+    def test_an_indeterminate_answer_can_recover_to_private(self):
+        calls, now = [], [0.0]
+        answer = [(503, "Starting")]
+
+        def get(url):
+            calls.append(url)
+            return answer[0]
+
+        gate = single_user.ReachabilityGate("https://x.hf.space", get=get,
+                                            clock=lambda: now[0])
+        assert not gate.allowed()
+        answer[0] = (404, "Not found")
+        now[0] = single_user.CACHE_S - 1
+        assert not gate.allowed()
+        assert len(calls) == 1
+        now[0] = single_user.CACHE_S
+        assert gate.allowed()
+        assert len(calls) == 2
 
     def test_no_url_or_no_answer_refuses(self):
         def unreachable(url):
@@ -863,6 +901,48 @@ class TestTheRoutes:
             assert unlocked == []
         else:
             assert unlocked == [1], "config.yaml is unlocked once, not per tab"
+
+    def test_startup_errors_never_unlock_or_admit_a_public_session(self,
+                                                                 tmp_path):
+        """Drive startup, the cached answer and its expiry through the
+        bridge: no config write, ticket or websocket session may follow."""
+        from starlette.websockets import WebSocketDisconnect
+
+        for status in (200, 429, 500, 502, 503, 504):
+            calls, now, unlocked = [], [0.0], []
+            answer = [(status, "Starting")]
+
+            def get(url):
+                calls.append(url)
+                return answer[0]
+
+            gate = single_user.ReachabilityGate(
+                "https://x.hf.space", get=get, clock=lambda: now[0])
+            bridge = web.Bridge(
+                _supervisor(tmp_path), single_user_requested=True, gate=gate,
+                unlock=lambda: unlocked.append(1) or [])
+            # build_bridge asks before the server listens.
+            assert bridge.refusal() is not None, status
+            answer[0] = (200, single_user.HEALTH_MARKER)
+            with self._client(bridge) as client:
+                now[0] = 5.0
+                assert client.get("/terminal").status_code == 403
+                assert len(calls) == 1, "the cached refusal stays a refusal"
+                assert bridge._tickets == {}
+                # Even a ticket issued earlier cannot bypass the gate.
+                ticket = bridge.issue_ticket("test")
+                with pytest.raises(WebSocketDisconnect) as refused:
+                    with client.websocket_connect(
+                            f"/ws/{ticket}",
+                            headers={"origin": "http://testserver"}) as ws:
+                        ws.receive_bytes()
+                assert refused.value.code == 4403
+                now[0] = single_user.CACHE_S
+                assert client.get("/terminal").status_code == 403
+                assert len(calls) == 2
+            assert unlocked == [], status
+            assert bridge._tickets == {}
+            assert bridge.supervisor.sessions == {}
 
 
 # ---------------------------------------------------------------------------

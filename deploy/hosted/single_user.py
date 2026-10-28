@@ -10,10 +10,12 @@ public Space by mistake, that would hand every visitor a shell next to the
 operator's keys, so the request is honoured only while the app does not
 answer an ANONYMOUS request: the bridge asks its own public URL for
 `/healthz` with no credentials, and a reply carrying the bridge's own marker
-means anyone can reach it. A private Space answers an anonymous request with
-a login redirect or a 404, never the marker. Anything that cannot be decided
--- no public URL, a network error -- refuses, because "could not tell" is not
-"private".
+means anyone can reach it, whatever the status. A private deployment answers
+with a login redirect or an access denial (401, 403 or 404), never the marker.
+Anything that cannot be decided -- no public URL, a network error, an error
+page or a 200 without the marker -- refuses, because "could not tell" is not
+"private". In particular, a proxy's startup 503 must never unlock the tools
+and leave a cached approval once the public app starts answering.
 
 ONE LOCATION, WRITTEN ONCE. `config.yaml` is the only place a tool permission
 lives (D24, and `config.py`'s docstring says why there is no override
@@ -35,6 +37,10 @@ logger = logging.getLogger(__name__)
 
 HEALTH_MARKER = "venastine-hosted"
 CACHE_S = 60.0
+# HD7. Only the familiar login redirects and access denials count as a
+# private response from the deployment's own public URL. Every other status
+# is indeterminate, not evidence that anonymous access is denied.
+_PRIVATE_STATUSES = frozenset({301, 302, 303, 307, 308, 401, 403, 404})
 
 # What single-user mode turns on. Interactive sessions are not in it: they
 # need Docker or Podman, which no Space has, and there is no fallback for
@@ -111,9 +117,13 @@ class ReachabilityGate:
             self.reason = (f"could not tell whether it is private "
                            f"({type(exc).__name__})")
             return False
-        if status == 200 and HEALTH_MARKER in body:
+        if HEALTH_MARKER in body:
             self.reason = ("it answers anyone who asks: make the Space or "
                            "Studio private, or remove VENASTINE_SINGLE_USER")
+            return False
+        if status not in _PRIVATE_STATUSES:
+            self.reason = ("could not tell whether it is private "
+                           f"(anonymous health check answered HTTP {status})")
             return False
         self.reason = ""
         return True

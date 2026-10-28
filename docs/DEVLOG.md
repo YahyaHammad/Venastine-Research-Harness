@@ -27506,3 +27506,46 @@ reaching pip-audit, so no test was added.
   export copy. No mutation run: the change is one data entry, and the
   dry runs before and after it are the test of it. pip-audit is the
   dry runs' own.
+
+## Batch 193 -- an HTTP error is no proof that a deployment is private (2026-10-28)
+
+**The security audit's demonstrated finding, fixed under HD7.** With
+`VENASTINE_SINGLE_USER=1` on a public deployment, the anonymous `/healthz`
+probe could return a startup or proxy error. `ReachabilityGate._check`
+refused only a 200 containing the bridge's marker and accepted every other
+response, so a 503 unlocked shell/file tools and left an approval cached
+for a minute after the public app started answering. A session admitted
+in that window shared the single-user state and optional provider seed.
+
+**One producer changed:** `deploy/hosted/single_user.py`. A private answer
+is now an explicit set of login redirects (301/302/303/307/308) and access
+denials (401/403/404). The public marker overrides every status. All other
+answers are indeterminate and refuse with their HTTP status, including a
+200 without the marker -- the old synthetic sign-in-page test was no proof
+of privacy either. No body is quoted. The minute cache is unchanged: a
+failed check caches a refusal, and the next recognized private answer can
+recover. No new config key or design-decision family.
+
+**Regression evidence:** the revised 200 case and all four new tests fail
+against the original gate (5 failed, 6 passed in the focused run). The
+status test covers 100 through 599 beside the accepted controls. The route
+test drives the startup check, cached refusal and expiry for an unmarked
+200, 429, 500, 502, 503 and 504: no config unlock, no terminal ticket and no
+websocket session, including with a ticket issued before the check. The
+public marker is tested under 200, 302, 403 and 404; recovery to a private
+404 is tested at the cache boundary.
+
+### Verified
+
+- Hosted bridge: 97 passed, 2 skipped on Windows; the four added tests bring
+  its collected count to 99 and the suite to 8325.
+- Full suite on eight workers: 8257 passed, 68 skipped, no failure (5:44).
+  The first run caught a missed ARCHITECTURE total and the secret scan's
+  temporary source export inside the checkout: `test_line_pattern` scans
+  Python even under `.pytest_cache`. Both were corrected before this run;
+  source exports belong outside the checkout.
+- ruff clean; bandit 0 new, with none of the 62 baselined file/test pairs
+  growing; gitleaks found no leaks in an export of the tracked changes.
+- No requirement changed and no deploy was made. Live platform behavior
+  was not re-probed; the HTTP answers and clock are controlled in the
+  regression tests, with the actual bridge routes and configuration writer.
