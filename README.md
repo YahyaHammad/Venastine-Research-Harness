@@ -25,7 +25,62 @@ The same harness runs in your browser, nothing to install, on a [Hugging Face Sp
 
 ## Setup
 
-**Python 3.11 or newer**, either way in. `mcp_client/client.py` uses `asyncio.timeout`, which is 3.11+, and 27 sites use runtime `X | Y` annotations (3.10+). `pyproject.toml` declares the floor, so an install refuses an older interpreter rather than failing later from inside the MCP connect path.
+**Python 3.11 or newer**, for every local install. `mcp_client/client.py` uses `asyncio.timeout`, which is 3.11+, and 27 sites use runtime `X | Y` annotations (3.10+). `pyproject.toml` declares the floor, so an install refuses an older interpreter rather than failing later from inside the MCP connect path.
+
+### Install directly from GitHub
+
+Requires **Python 3.11+**, including its `venv` module. Node, npm, Git, and
+administrator access are not needed. On Linux/macOS (Bash and curl):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/YahyaHammad/Venastine-Research-Harness/main/install.sh | bash
+```
+
+On Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/YahyaHammad/Venastine-Research-Harness/main/install.ps1 | iex
+```
+
+These commands become available when the installer files land on `main`.
+You can also download and inspect the scripts before running them. They
+download the shared Python installer completely, then execute it. It resolves
+`main` to a full commit ID, downloads that source archive, and installs the
+runtime dependencies in an isolated environment. It does not install Python.
+
+The source lives under `~/.local/share/venastine/app`, with a `venastine`
+command in `~/.local/bin` (`venastine.cmd` on Windows). Add that directory to
+your user PATH if needed; the installer also prints the full command path.
+Then, from your project directory, run `venastine --tui` and use `/connect`.
+`venastine --venastine-doctor` shows the installed version, commit, interpreter,
+and state paths. Credentials and conversation state follow the same rules
+as the npm installation below.
+
+Rerun the installer to update, after closing running Venastine sessions. It
+builds a fresh environment before replacing the active source and carries
+your `config.yaml` edits forward through the existing settings merger.
+Previous source trees (`previous-*`) stay under the install directory for
+recovery. Python environments stay in `~/.config/venastine/runtime/github-*`,
+inside the user tier the harness already protects from tool writes. Updates
+therefore use more disk space. An unrelated existing directory or command is
+never replaced.
+
+Choose a branch, tag, or full commit ID with `VENASTINE_REF`; choose locations
+with `VENASTINE_INSTALL_DIR` and `VENASTINE_BIN_DIR`, or a Python executable
+with `VENASTINE_PYTHON`. Set these before running either command. The default
+ref is `main`; older refs without `bin/venastine.py` cannot use this installer.
+The installer itself is downloaded from `main`, even when selecting another
+source ref. Bash also forwards options to the helper:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/YahyaHammad/Venastine-Research-Harness/main/install.sh | bash -s -- --ref main
+```
+
+From a checkout, `python scripts/install.py --help` lists the same options
+without downloading or installing anything. To remove a GitHub installation,
+remove its command, install directory, and the `github-*` runtime directories
+it created; other state in `~/.config/venastine` and artifacts in your projects
+remain separate.
 
 ### From npm
 
@@ -923,7 +978,7 @@ note that shell approval is governed solely by `shell_approval_mode` -- `tool_ap
 deliberately has no `shell` key, so an old file carrying one is refused at startup
 naming the key — see `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 8346 tests, fully offline, no API keys needed. The suite's own packages are `requirements-test.txt`, separate from `requirements.txt` since batch 136: they used to be in the shipped dependency list, so installing the harness also installed a test runner. It runs in parallel by default (`pytest-xdist`, 70% of your cores): **1:26 on a 16-core machine, against 9:06 single-process.** `pytest -n0` forces the old serial run, which is what you want under a debugger or when something is parsing the output. Four further tests are marked `integration` and excluded by default: three spawn a real stdio MCP server, the fourth runs an external program through the host fallback shell (`pytest -m integration`).
+Run the test suite with `pytest` — 8381 tests, fully offline, no API keys needed. The suite's own packages are `requirements-test.txt`, separate from `requirements.txt` since batch 136: they used to be in the shipped dependency list, so installing the harness also installed a test runner. It runs in parallel by default (`pytest-xdist`, 70% of your cores): **1:26 on a 16-core machine, against 9:06 single-process.** `pytest -n0` forces the old serial run, which is what you want under a debugger or when something is parsing the output. Four further tests are marked `integration` and excluded by default: three spawn a real stdio MCP server, the fourth runs an external program through the host fallback shell (`pytest -m integration`).
 
 ## Documentation
 

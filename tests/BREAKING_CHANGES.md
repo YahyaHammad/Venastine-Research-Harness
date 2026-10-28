@@ -10,6 +10,16 @@ worth understanding, not a flaky mock to patch over.
 
 ---
 
+## GitHub installers and version policy (batch 202)
+
+| Change | Test | Fix |
+|---|---|---|
+| Replace source before dependencies finish, or fail to restore it after a command-write failure | `test_pip_failure_leaves_active_source_and_command_unchanged`, `test_command_write_failure_rolls_back_source_and_command` | Keep the previously executable app and command until provisioning succeeds; restore both on a failed swap. The tests use real directories and stub only network/process execution. |
+| Let archive entries escape, overwrite another member, or become symlinks | `test_archive_cannot_escape_or_overwrite_a_file`, `test_archive_rejects_symlinks` | Validate original ZIP names before normalization and extract ordinary files beneath a fresh root. ZIP fixtures preserve hostile Windows spellings explicitly. |
+| Change global state defaults or launch from the install directory | `test_launcher_defaults_match_npm_and_local_files_win`, `test_launcher_forwards_arguments_cwd_environment_and_exit_status` | Preserve explicit environment and local credentials/database priority; forward argv/cwd/stdio to the real child. Do not set PYTHONPATH or AGENT_WORKSPACE. |
+| Reuse a retired version, assign clean releases to working branches, or accumulate parent suffixes | `test_wrong_branch_or_reused_version_does_not_modify_files`, `test_stacked_branch_replaces_parent_name_and_identity` | Apply AGENTS.md's lifecycle and use `scripts/version.py` for the pair. npm and Python beta spellings are equivalent, while clean releases remain identical. |
+| Reintroduce exact string comparison for branch-version parity | `test_the_npm_package_and_pyproject_state_the_same_version`, `test_version_mapping_produces_canonical_python` | Compare through the one conversion in `scripts/version.py`. Release-tag tests use controlled clean metadata so branch checkouts still exercise the publish path. |
+
 ## 1. `test_orchestrator.py` — the most fragile mock in the suite
 
 This file mocks `RunAgentLoop.stream_deep_research_mode` keyed by `pass_id`

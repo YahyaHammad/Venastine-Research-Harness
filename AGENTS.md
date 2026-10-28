@@ -60,7 +60,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 8346 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
+pytest                                            # 8381 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -93,14 +93,99 @@ MCP servers are a *third* config file again — `mcp.json`, user-level or `.vena
 
 **Credentials are two separate mechanisms, deliberately.** LLM provider keys → `providers.json` (managed by `credentials.py`, gitignored, template at `providers.json.example`, and written for you by `/connect` since §79; a shared hosted session keeps a connected key in memory instead and never writes it, HD5). The ChatGPT plan has no key: its hourly tokens live in `chatgpt_auth.json` beside that file, managed by `core/chatgpt_auth.py` (§83). Misc tool API keys (GitHub, NVD) → `.env` (managed by `env_secrets.py`, template at `.env.example`). Never mix them.
 
-## Distribution (npm, batch 35)
+## Version naming and batch completion (batch 202)
 
-The project ships through two channels: `git clone`, and npm as **a folder of source** — no binary,
+**The names are major.minor.patch.** Agents autonomously increment the patch
+on the last commit of a related batch on `main`. Minor and major bumps happen
+only at the owner's explicit request. Several consecutive commits may share
+a version while a batch is in progress; a completed batch gets its own version.
+A version change belongs in the final batch commit, not an unrelated later batch.
+
+**Clean `X.Y.Z` versions belong only on `main`.** Every working branch gets
+its own beta identity in its first new commit. Its base is the clean version
+on main from which its ancestry started, fixed for that branch's lifetime.
+The spellings describe the same build:
+
+| file | example |
+|---|---|
+| `package.json` (npm/SemVer) | `0.3.2-b.1.pillow-floor.r012345abcdef` |
+| `pyproject.toml` (PEP 440) | `0.3.2b1+pillow.floor.r012345abcdef` |
+
+`b` means beta. The number is the branch's completed-batch counter: start at
+0 and increment it in the final commit of each related batch. The readable
+branch slug is lowercase ASCII letters/digits separated by hyphens, capped
+at 40 characters; Python spells its hyphens as dots. The `r` plus twelve
+random hex digits is a fresh identity for this branch incarnation, NOT a
+commit hash. Keep it and the slug stable through renames, rebases, and merges
+from main; never reset the counter or reuse an identity for a new branch.
+
+**Stacked branches replace the suffix.** A child keeps its parent's original
+main base, takes its own slug and fresh identity, and starts its own counter.
+It does not concatenate parent names. Shared ancestor commits keep their
+original versions; the child's first new commit introduces the new identity.
+
+**Merging allocates a fresh main patch; stripping a suffix is insufficient.**
+A branch based on `0.3.2` lands as `0.3.3`, or a later unused patch if main has
+advanced. Allocate on main's merge commit or an immediate follow-up commit,
+before tagging or publishing. A PR can prepare that operation but keeps its
+beta spelling until it lands. Read main and existing tags before choosing;
+simultaneous PRs cannot reserve the same release merely by naming it. An
+owner-requested minor/major release instead uses the owner's chosen new line.
+
+**Never reintroduce a retired version.** Consecutive means a connected run
+along a branch's FIRST-PARENT ancestry, not adjacency in a date-sorted log
+of parallel branches. A version may continue through a batch but must not
+reappear after that lineage has moved to another version. Shared ancestors
+and the merge carrying the same branch commits are not fresh allocations.
+Reverts and cherry-picks preserve this rule: reverting code gets a new
+version, never the reverted version fields. A reused branch name receives
+a new identity. Rewrite/rebase copies of the same unpublished batch retain
+its identity; they are not a new release. Published versions and tags are
+immutable. Apply this prospectively; do not rewrite old history to repair
+the missed bumps.
+
+**The migration starts from the files, while releases respect old tags.**
+When this policy was agreed, `main` and `pillow-floor` both still said `0.2.0`,
+and `v0.3.0` / `v0.3.1` already existed. This branch therefore starts with
+`0.2.0-b...`; the next clean main release is at least `0.3.2`. The `0.3.2`
+branch example above describes a future branch based on that main release.
+
+Use `python scripts/version.py branch` once on a new branch (it derives a
+stacked branch's base too), `python scripts/version.py bump` at batch
+completion, and `python scripts/version.py check` to validate the pair.
+For a merge release, `python scripts/version.py set X.Y.Z` on main writes
+both files. The helper refuses a clean version on another branch, a beta
+on main, and a newly allocated version already found in reachable history.
+It does not fetch remote history, allocate release numbers, commit, or tag:
+the agent still checks current main/tags and closes the batch deliberately.
+`scripts/version.py` owns the npm-to-Python conversion; do not maintain
+another version mapping. The publish gate rejects branch builds before packing;
+clean releases still require exact file parity and an exactly matching tag.
+
+## Distribution (npm, batch 35; GitHub installers, batch 202)
+
+The local install paths are a clone, the GitHub installers (`install.sh` and
+`install.ps1`), and npm as **a folder of source** — no binary,
 no bundle. `bin/venastine.mjs` is the only thing npm can execute; its whole job is to find a Python
 ≥3.11, make sure the dependencies exist, and spawn `python <root>/main.py` with the user's argv,
 cwd and stdio. The harness itself did not have to change to support this, because every shipped
 asset already resolves from `__file__` (`HARNESS_ROOT`, `_package_root()`, `prompts/system_prompts.py`)
 and every piece of state from cwd with an env override.
+
+The shell installers download `scripts/install.py`, which requires Python
+3.11+, resolves the chosen GitHub ref to a commit, downloads that archive,
+and installs `requirements.txt` in an isolated environment. No Node/npm,
+Git checkout, system Python changes, or administrator privileges are needed.
+The default install is `~/.local/share/venastine`, with its command under
+`~/.local/bin` on every platform. `bin/venastine.py` launches it, preserving
+cwd, arguments, explicit environment settings, and the npm launcher's global
+state/local-artifact rules. It never installs dependencies during launch.
+Updates build the environment before swapping source, mirror the old settings
+before replacement, and use `config_update.py` for the merge. Runtimes live
+under `~/.config/venastine/runtime/github-*`, inside the already-protected
+user tier; never put imported dependencies in an unprotected sibling of the
+source. Prior app trees and runtimes remain available for recovery. Never replace an unmanaged folder
+or command. Both shell scripts keep the download separate from execution.
 
 **`npm update` replaces the package directory wholesale, `config.yaml` included** (batch 86, measured with `npm pack` and two installs into a scratch prefix). `config_update.py` is what makes that survivable: the launcher runs it before `main.py`, and it re-applies the user's own values onto the freshly shipped file from a pristine copy and a mirror kept in `~/.config/venastine/config-state/`. Two rules there are load-bearing rather than tidy. **The mirror is refreshed only after the version check** -- copying `config.yaml` over it first overwrites it with the file npm just replaced, and every other test still passes. Batch 87 moved the post-session copy out of this file for that reason: it was four lines of `fs.copyFileSync` guarded only by a version file EXISTING, so a merge that failed was followed at session end by the newly shipped file being copied over the mirror, and the user's settings were gone from every copy. The launcher now spawns `config_update.py --mirror` and owns no decision at all; the state is keyed per install, and the launcher READS `installs.json` rather than recomputing a path. **Nothing in that path may fail a launch**: the module always exits 0 and the launcher does not check its status, which is why the cheap path imports no first-party code at all (`import config_schema` alone costs 294ms of pydantic and ruamel, on a path that runs at every launch and does nothing on almost all of them).
 
@@ -179,7 +264,7 @@ place, so **a release bumps `package.json` and `pyproject.toml` first and tags t
 carries the bump**. npm already holds 0.1.0 and 0.2.0, neither with provenance, so both were
 published outside the workflow, and the next version has to be past 0.3.1.
 
-**The hosted demo is a third channel, and it deploys only a commit every CI check passed**
+**The hosted demo deploys only a commit every CI check passed**
 (ROADMAP_v3 §79 HD9, amended in batch 169 -- the owner's rule). What deploys is a bundle
 (`scripts/build_demo_bundle.py`), never the tree. `.github/workflows/deploy-demo.yml` wakes each time
 a CI workflow finishes on a push to `main`; its first job holds no secret and runs

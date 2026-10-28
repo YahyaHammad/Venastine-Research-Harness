@@ -28055,3 +28055,66 @@ THIRD_PARTY_NOTICES gains the row and the libraries pillow's wheel bundles.
 - ruff clean; bandit 0 new against the baseline; gitleaks, run as CI
   runs it (`-c .github/gitleaks.toml`), found no leaks on an export
   copy. `test_docs_consistency.py`: 77 passed, 1 skipped.
+
+## Batch 202 -- GitHub installers and versions that name their branch (2026-10-28)
+
+**Context.** The owner requested Bash and PowerShell scripts usable from
+raw.githubusercontent.com, and a version policy that closes a related batch
+with a bump, distinguishes working branches, and never reuses a retired
+version. Both version files still said 0.2.0 on main and pillow-floor;
+v0.3.0 and v0.3.1 already existed, as batch 162 recorded.
+
+**Decisions made with the owner.** Installation downloads source directly
+from GitHub. npm and Python may use equivalent package-specific spellings.
+Agents bump patches autonomously at batch completion; minor and major bumps
+require the owner's request. A branch keeps its starting main version and
+increments a beta counter. A stack replaces the parent suffix with its own
+name and identity. A merge allocates the next unused main patch, rather than
+merely removing a suffix. Consecutive commits are defined along first-parent
+ancestry; shared ancestor commits are not a second version allocation.
+
+**Built.** `install.sh` and `install.ps1` find Python 3.11+, download the
+stdlib-only `scripts/install.py` completely, and run it. The helper resolves
+a ref to a full GitHub commit, extracts only ordinary files under a fresh
+directory, builds an isolated environment, then replaces managed source.
+Pip failure leaves the old app and command intact; a failed command write
+restores both. Unrelated directories and commands are refused. Old source
+trees and environments remain for recovery. Environments live under the
+already-protected ~/.config/venastine/runtime tier, not beside the source
+where a broad workspace could write the dependencies being imported.
+
+`bin/venastine.py` uses that environment and preserves cwd, argv, stdio and
+exit status. It follows the npm launcher's global-state/local-artifact rules
+and delegates settings history to config_update.py. The installer mirrors
+settings before replacing source, including edits since the last session.
+README documents both raw install commands, prerequisites, paths, updating,
+ref selection and removal. The raw URLs become usable when these files land
+on main; historical source refs without the new launcher refuse explicitly.
+
+AGENTS.md holds the new version policy. `scripts/version.py` owns the one
+npm-to-PEP-440 mapping and paired field edits, creates compact branch
+identities, increments the counter, and refuses historical reuse or a clean
+release no newer than an existing clean tag. It performs no Git mutation.
+The working version is 0.2.0-b.1.pillow-floor.r86271a0fb0cd (npm) and
+0.2.0b1+pillow.floor.r86271a0fb0cd (Python). The next clean release remains
+at least 0.3.2. The publish check rejects betas before packing; its release
+tests now use controlled clean metadata even from a beta checkout.
+
+**Verification.** 35 added test cases bring the collected default suite to
+8381. The full Windows run completed with 8308 passed, 68 skipped and four
+failures: the two new files' documentation counts were swapped, and a source
+export made for the secret scan under review/ was seen by three source-tree
+checks as duplicate production code. The counts were corrected and the
+export moved outside the repository. The subsequent documentation gate,
+which collects the complete suite, passed 78 with one expected skip; the
+installer, version and line-pattern files passed all 52 cases. The final
+installer changes were rerun separately. Both real shell bootstraps passed
+smoke tests with a local download fixture, including Bash arguments containing
+spaces and PowerShell cleanup. No GitHub install or live dependency download
+was performed: the new files are still local.
+
+Ruff and syntax checks pass. Bandit initially named only the four new
+subprocess imports; each now has a rationale matching its explicit argv-only
+calls. The changed modules pass Bandit, and the repository count gate reports
+no increase in its 62 baselined pairs. Gitleaks found no leaks on an export of
+tracked files plus these new files. Work remains uncommitted and untagged.

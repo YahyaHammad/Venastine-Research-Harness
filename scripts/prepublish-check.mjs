@@ -278,6 +278,12 @@ function rootPythonModules() {
 const tagProblem = releaseTagProblem();
 if (tagProblem) refuse([tagProblem]);
 
+// Branch builds have equivalent npm/PEP-440 spellings, not identical text.
+// Only clean releases may be published, so this gate precedes release parity.
+if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(pkg.version)) {
+  refuse(['This is a branch build. Allocate a fresh clean release version on main before publishing.']);
+}
+
 const pyVersion = versionFromPyproject();
 
 if (pyVersion && pyVersion !== pkg.version) {
