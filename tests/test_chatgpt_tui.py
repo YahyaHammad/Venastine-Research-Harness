@@ -218,7 +218,7 @@ class TestSigningIn:
                                                   monkeypatch, shared):
         """CG1, on both kinds of deployment."""
         from security import hosted
-        from tui.app import _CHATGPT_LOCAL_ONLY, _cmd_connect
+        from tui.app import _cmd_connect
 
         monkeypatch.setattr(hosted, "is_hosted", lambda: True)
         monkeypatch.setattr(hosted, "is_shared", lambda: shared)
@@ -229,7 +229,7 @@ class TestSigningIn:
             _cmd_connect(app, "chatgpt")
             text = _text(app)
             assert app._connect_wait is None
-        assert _CHATGPT_LOCAL_ONLY in text
+        assert chatgpt_auth.LOCAL_ONLY in text
         if shared:
             assert "chatgpt" not in listed.split("Connect a model")[1]
         else:
@@ -341,6 +341,33 @@ class TestUsingThePlan:
             _cmd_model(app, "CHATGPT gpt-6.1-sol")
             assert app.provider_name == "ANTHROPIC"
             assert _CHATGPT_SIGNED_OUT in _text(app)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("signed_in", [False, True],
+                             ids=["signed-out", "a-carried-token-file"])
+    async def test_model_chatgpt_on_a_hosted_deployment_says_why_not(
+            self, providers_file, monkeypatch, signed_in):
+        """Batch 195: it said "/connect chatgpt signs in", which a hosted
+        deployment refuses (CG1). A token file carried onto one is no
+        better -- the client refuses it -- so the switch refuses too,
+        rather than leaving a turn to fail."""
+        from security import hosted
+        from tui.app import _cmd_model
+
+        monkeypatch.setattr(hosted, "is_hosted", lambda: True)
+        monkeypatch.setattr(chatgpt_auth, "status", lambda: chatgpt_auth.Status(
+            signed_in=signed_in, plan_usage=signed_in, registered=signed_in,
+            expires_at=None))
+        connect.store_chatgpt_entry()
+        app = _app()
+        async with app.run_test():
+            before = _text(app)
+            _cmd_model(app, "CHATGPT gpt-6.1-sol")
+            said = _text(app)[len(before):]
+            provider = app.provider_name
+        assert provider == "ANTHROPIC"
+        assert chatgpt_auth.LOCAL_ONLY in said
+        assert "/connect chatgpt" not in said
 
     @pytest.mark.asyncio
     async def test_the_header_says_so_and_manage_usage_opens_the_page(

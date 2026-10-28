@@ -253,6 +253,23 @@ class TestTheCredentialCheck:
         assert "/connect chatgpt" in issue
         assert "API_KEY" not in issue
 
+    @pytest.mark.parametrize("signed_in", [False, True],
+                             ids=["signed-out", "a-carried-token-file"])
+    def test_a_hosted_deployment_says_the_plan_is_local_only(
+            self, providers_file, monkeypatch, signed_in):
+        """Batch 195: at launch and at /critic, which share this check,
+        as at /model -- never "/connect chatgpt", which a hosted
+        deployment refuses (CG1)."""
+        from core import chatgpt_auth
+        from security import hosted
+
+        self._signed_in(monkeypatch, signed_in)
+        monkeypatch.setattr(hosted, "is_hosted", lambda: True)
+        connect.store_chatgpt_entry()
+        (issue,) = credentials.provider_startup_issues("CHATGPT")
+        assert issue == chatgpt_auth.LOCAL_ONLY
+        assert "/connect chatgpt" not in issue
+
     @pytest.mark.parametrize("key,missing", [("", True), ("sk-x", False)],
                              ids=["blank", "present"])
     def test_every_other_provider_is_still_asked_for_its_key(self, key,

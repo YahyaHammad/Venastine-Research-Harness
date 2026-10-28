@@ -73,6 +73,13 @@ AGENT_NAME = "Venastine Research Harness"
 CALLBACK_PATH = "/auth/callback"
 # Read by the owner from ChatGPT on 2026-10-26 (slice 0); no API reports it.
 USAGE_URL = "https://chatgpt.com/settings/usage?tab=overview"
+# CG1 in one sentence, wherever a hosted deployment meets the plan:
+# /connect, /model, /critic and the launch warning (batch 195). It moved
+# here from tui/app.py so credentials.py can say it too.
+LOCAL_ONLY = (
+    "The ChatGPT plan signs in on a local install only: OpenAI offers it to "
+    "open-source apps running on your own machine, and its sign-in comes "
+    "back to 127.0.0.1, which a hosted deployment is not.")
 
 AUTH_FILE = "chatgpt_auth.json"
 STORE_VERSION = 1

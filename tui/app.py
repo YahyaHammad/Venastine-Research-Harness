@@ -5439,6 +5439,12 @@ def _cmd_model(app: VenastineApp, args: str) -> None:
             "Usage: /model <name>, or /model <PROVIDER> <name>.")
         return
 
+    # CG1: a hosted deployment never reaches the plan, signed in or not, so
+    # the switch refuses with the reason -- not with "/connect chatgpt
+    # signs in", which that deployment refuses in turn (batch 195).
+    if provider == "CHATGPT" and hosted.is_hosted():
+        app._transcript.write_error(chatgpt_auth.LOCAL_ONLY)
+        return
     # ROADMAP_v3 §83. CG11's refusal is lifted: the plan answers since slice
     # 2b. While it is signed out a switch would fail the next turn rather
     # than this command, so this refuses and says how to sign in (CG20).
@@ -7496,7 +7502,9 @@ def _cmd_connect(app: "VenastineApp", args: str) -> None:
                 "key, /connect openai --key.")
             return
         if not _signs_in_here(preset):
-            err(_CHATGPT_LOCAL_ONLY)
+            from core import chatgpt_auth
+
+            err(chatgpt_auth.LOCAL_ONLY)
             return
         _sign_in_chatgpt(app, preset)
         return
@@ -7639,10 +7647,8 @@ _CHATGPT_SIGNED_OUT = (
 # header's link runs (CG19). Constants: nothing else reaches that markup.
 _USING_PLAN = "Using ChatGPT plan"
 _MANAGE_USAGE_MARKUP = "[@click=app.manage_usage]Manage usage[/]"
-_CHATGPT_LOCAL_ONLY = (
-    "The ChatGPT plan signs in on a local install only: OpenAI offers it to "
-    "open-source apps running on your own machine, and its sign-in comes "
-    "back to 127.0.0.1, which a hosted deployment is not.")
+# CG1's sentence is core.chatgpt_auth.LOCAL_ONLY since batch 195, so the
+# launch warning in credentials.py can say it too.
 # The paste prompt's dismissal when the sign-in closes it itself -- the
 # browser came back on its own -- and never a person's answer.
 _AUTO_DISMISS = object()

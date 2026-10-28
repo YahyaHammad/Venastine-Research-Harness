@@ -27605,3 +27605,49 @@ with a login redirect, single-user mode would refuse and say "answered HTTP
   pairs grew; gitleaks found no leaks on an export copy.
 - No deploy in this commit; the measurements above were anonymous reads
   of the two private deployments' `/healthz`, nothing sent.
+
+## Batch 195 -- a hosted deployment says why the plan is not there (2026-10-28)
+
+**From the pre-public review, under CG1; the owner asked for the review's
+open issues fixed.** On any hosted deployment `/model CHATGPT <name>`
+answered "The ChatGPT plan is not signed in ... /connect chatgpt signs in",
+and `/connect chatgpt` there refuses (CG1), so the hint was a dead end.
+`/critic` and the launch warning said the same through
+`credentials.missing_credential_message`. Reading the switch found a second
+case: a token file carried onto a single-user deployment passed the
+signed-in check, the switch went through, and the next turn failed in
+`core/client.py`, which refuses the plan on any hosted deployment.
+
+**What changed:** the CG1 sentence moved from `tui/app.py`
+(`_CHATGPT_LOCAL_ONLY`) to `core/chatgpt_auth.LOCAL_ONLY`, so
+`credentials.py` can say it in the same words. On a hosted deployment
+`missing_credential_message` returns it for CHATGPT before asking about the
+sign-in, which covers launch and `/critic`, and `/model CHATGPT` refuses with
+it before its signed-out check. `/connect chatgpt`'s refusal reads the
+moved constant and says what it said.
+
+### Tests
+
+- `test_model_chatgpt_on_a_hosted_deployment_says_why_not`, signed out and
+  with a carried token file: the provider is not switched, the sentence is
+  said and "/connect chatgpt" is not.
+- `test_a_hosted_deployment_says_the_plan_is_local_only`, both ways: the
+  launch check's one issue is the sentence.
+- `test_a_hosted_deployment_refuses_it` reads the moved constant.
+- Mutations on an export copy, 4/4 killed: `/model`'s hosted check removed;
+  the credential check's removed; it moved after the signed-in check, which
+  the carried token file catches; and `/model` refusing with the signed-out
+  sentence instead.
+
+### Verified
+
+- Full suite, 8331 tests. The first run on eight workers failed two tests
+  this batch does not touch -- `test_it_serves_the_secret_the_prompt_asks_for`
+  (askpass) and `test_a_code_block_in_the_viewer_matches_the_live_pane` --
+  in a 12:05 run, against 4 to 8 minutes usually: the machine was loaded.
+  Both passed alone, and the whole suite again on eight workers passed
+  clean, 8263 passed and 68 skipped (4:21). The changed suites again with
+  `AGENT_WORKSPACE` unset: 151 passed, 1 skipped.
+- ruff clean; bandit 0 new and none of the 62 pairs grew; gitleaks found
+  no leaks on an export copy. The deploy dry runs were left to batch 196,
+  whose tree holds this one: no requirement or lock changed here.

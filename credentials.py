@@ -242,11 +242,19 @@ def missing_credential_message(provider_name: str,
     signed in and answering (batch 189, the owner's live check). Three call
     sites each tested the key on their own, which is why one fix here rather
     than three there.
+
+    On a hosted deployment the plan has no credential at all (CG1): the
+    answer there is why, never "/connect chatgpt signs in", which that
+    deployment refuses (batch 195). Signed in or not -- a token file
+    carried onto one still cannot reach the plan (core/client.py).
     """
     if provider_name == "CHATGPT":
         # Imported here: core.chatgpt_auth imports this module.
         from core import chatgpt_auth
+        from security import hosted
 
+        if hosted.is_hosted():
+            return chatgpt_auth.LOCAL_ONLY
         if chatgpt_auth.status().signed_in:
             return None
         return ("The ChatGPT plan is not signed in, so CHATGPT cannot answer. "
