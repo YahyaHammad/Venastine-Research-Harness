@@ -1308,7 +1308,12 @@ class VenastineApp(App):
         for warning in self._startup_warnings:
             self._transcript.write_error(warning)
         for line in _hosted_banner():
-            self._transcript.write_system(line)
+            # Batch 199: the star line in its own role, coloured and with
+            # its address armed; the rest is the harness narrating.
+            if line == _STAR_LINE:
+                self._transcript.write_role("invite", line)
+            else:
+                self._transcript.write_system(line)
         # Batch 121. Beside batch 87's for the same reason, and ABOVE it
         # because these are facts about this launch rather than about the
         # install: "I created your user-level mcp.json" is the first thing
@@ -7317,6 +7322,8 @@ def _signs_in_here(preset) -> bool:
 
 # The banner's last line on either kind of hosted deployment (batch 197,
 # the owner's request and wording). A local install says nothing of it.
+# Written in the `invite` role (batch 199): bold, in the theme's success
+# colour, with the address ctrl+clickable.
 _STAR_LINE = ("Like it? Star the repo on GitHub to support its development: "
               "https://github.com/YahyaHammad/Venastine-Research-Harness")
 

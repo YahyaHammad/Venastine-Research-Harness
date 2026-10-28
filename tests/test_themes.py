@@ -50,6 +50,8 @@ EXPECTED_ROLE_KEYS = {
     # ROADMAP_v3 §49 (SS5): the harness opening a turn with a background
     # session's result.
     "wake",
+    # Batch 199: the hosted banner's star line.
+    "invite",
     "thinking", "pass", "pass_done", "tool", "tool_error", "warning",
     "error", "success", "HIGH", "MEDIUM", "LOW", "UNVERIFIED",
     "UNVERIFIED_COVERAGE",
@@ -355,6 +357,9 @@ MESSAGE_ROLES = [
     # share a pane, so "can a reader tell them apart" is exactly the
     # question this list is asked.
     "output",
+    # Batch 199: the hosted banner's star line, which sits among `system`
+    # lines and exists to stand out from them.
+    "invite",
 ]
 
 

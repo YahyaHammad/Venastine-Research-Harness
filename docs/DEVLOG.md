@@ -27791,3 +27791,61 @@ and rendered, never bundled.
   `thumbnail:` line, and its 189 files hold no image. ruff clean; bandit
   0 new and none of the 62 pairs grew; gitleaks found no leaks on an
   export copy.
+
+## Batch 199 -- the star line in its own colour, its address clickable (2026-10-28)
+
+**The owner's request.** Batch 197's star line was drawn like every other
+banner line: `system`, dim italic, the harness narrating itself, which is
+meant to recede (`test_dim_is_the_system_role_alone` says so) -- so the one
+line asking the reader to do something was read past. It now has a role of
+its own, `invite`, which only it uses. The owner's choices:
+
+- **Bold, in the theme's success colour** (`#5aa86f` on dark-plain), over
+  the theme's amber -- GitHub's star colour, but the warning hue everywhere
+  else in the transcript -- and its accent, a light grey-blue on dark-plain,
+  the hosted default, which is grey but for its three severities. Bold
+  keeps it apart from `success`, which is plain.
+- **Its address ctrl+clickable.** `invite` joins `LINKED_ROLES` and takes
+  the links-only scanner. Batch 65 left the harness's own voice out of that
+  set because nothing had asked to click one; this is the first line the
+  harness writes to be clicked, and `system`, `error` and `warning` stay
+  unarmed (`test_the_harness_own_voice_is_not_armed`).
+- It is META, beside `system`, so `/copy conversation` leaves it out.
+
+Only the star line: the rest of the banner stays `system`. `on_mount`
+writes `_STAR_LINE` through `write_role("invite", ...)` and every other
+banner line through `write_system`, as before.
+
+Measured on a real shared session's screen (Textual's compositor,
+dark-plain): the line `bold #5aa86f`, its address `bold underline #5aa86f`
+with the URL in its metadata. The first screenshot came out grey: the shell
+it ran from set `NO_COLOR=1`, which Rich honours by dropping every colour
+and keeping bold and underline. Without it the export shows the green. At
+80 columns the transcript pane is narrower than the address and its last
+five characters are out of view, as any word that long would be --
+measured, and not this batch's to change; the test reads it at a width
+that shows the whole address.
+
+### Tests
+
+- `test_it_is_drawn_apart_from_the_rest_of_the_banner`
+  (`test_hosted_mode.py`): in a real shared session the star line's entry
+  is `invite`, and every other banner line's `system`.
+- `test_but_the_star_line_is` (`test_live_output.py`): every cell of the
+  address armed, and only those.
+- `invite` joins `MESSAGE_ROLES` and `EXPECTED_ROLE_KEYS` in
+  `test_themes.py`, so on every theme it is distinct from every other
+  message role, undimmed, and classified.
+- Mutations on an export copy, 7/7 killed: drawn as `system`; the whole
+  banner drawn as `invite`; unarmed; the same style as `success`; dimmed;
+  the `system` style; unclassified.
+
+### Verified
+
+- Full suite, 8342 tests: 8274 passed, 68 skipped on Windows on eight
+  workers, with no failure (3:37). `test_themes.py`, `test_hosted_mode.py`
+  and `test_live_output.py` with `AGENT_WORKSPACE` unset, beside
+  `test_demo_bundle.py`: 731 passed, 2 skipped.
+- ruff clean; bandit 0 new and none of the 62 pairs grew; gitleaks found
+  no leaks on an export copy. Both deploy dry runs clean: batch 198's, on
+  this tree.

@@ -381,6 +381,13 @@ def role_styles(theme: Theme) -> dict[str, str]:
         # this line opens a turn the reader did not ask for, and `system`
         # alone is dimmed (test_dim_is_the_system_role_alone).
         "wake": f"bold italic {palette['accent']}",
+        # Batch 199, the owner's request and choice: the hosted banner's
+        # star line, the harness asking the reader to do something outside
+        # it. The success hue because it is the inviting colour every theme
+        # has -- dark-plain, the hosted default, is grey but for its three
+        # severities -- and BOLD, where `success` is plain, so it is not a
+        # line reporting that something went well.
+        "invite": f"bold {palette['success']}",
         # §38: the model's reasoning, when tui.show_thinking renders it
         # inline. `secondary` because thinking is the answer's quieter
         # sibling rather than a severity or an identity -- it already

@@ -240,7 +240,10 @@ META_ROLES = frozenset({
     # harness to start a turn. The model reads it, but nobody in the
     # conversation SAID it, so /copy conversation leaves it out as it leaves
     # out a routed warning -- and the answer it prompted still copies.
-    "wake"})
+    "wake",
+    # Batch 199: the hosted banner's star line. The harness's voice, like
+    # the `system` lines around it, so /copy conversation leaves it out.
+    "invite"})
 
 # Batch 65 (TECHNICAL_DEBT 16). The lines whose URLs are armed for
 # ctrl+click, beside the two sets above for their reason: which roles a
@@ -257,7 +260,11 @@ META_ROLES = frozenset({
 # They take the LINKS-ONLY scanner, never the prose grammar. A tool
 # line is a digest, and `markdown.link_spans` says at length what the
 # full grammar does to one.
-LINKED_ROLES = frozenset({"tool", "pipeline_tool", "tool_error"})
+#
+# Batch 199 adds `invite`, the hosted banner's star line, by the owner's
+# choice: the one line the harness writes so that it is clicked. Same
+# links-only scanner; `system`, `error` and `warning` stay unarmed.
+LINKED_ROLES = frozenset({"tool", "pipeline_tool", "tool_error", "invite"})
 
 
 class RavenPanel(Static):

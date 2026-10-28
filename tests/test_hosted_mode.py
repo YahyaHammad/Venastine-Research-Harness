@@ -555,6 +555,22 @@ class TestTheBannerAsksForAStar:
             "Star the repo on GitHub")
         assert _STAR_LINE.startswith("Like it? Star the repo on GitHub")
 
+    @pytest.mark.asyncio
+    async def test_it_is_drawn_apart_from_the_rest_of_the_banner(
+            self, shared, providers_file):
+        """Batch 199, the owner's request: it rendered as one more dim
+        italic `system` line and was read past. Its own role, and only
+        it -- the banner around it stays the harness narrating."""
+        from tui.app import _STAR_LINE, VenastineApp, _hosted_banner
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test():
+            entries = list(app._transcript._entries)
+        assert [r for r, t in entries if t == _STAR_LINE] == ["invite"]
+        rest = [line for line in _hosted_banner() if line != _STAR_LINE]
+        assert rest
+        assert {r for r, t in entries if t in rest} == {"system"}
+
 
 class TestALocalInstallIsUnchanged:
     @pytest.mark.asyncio

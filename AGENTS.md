@@ -60,7 +60,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 8340 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
+pytest                                            # 8342 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -579,7 +579,9 @@ digest is a shell command or a JSON argument, and `inline_spans` does not merely
 over-decorate one, it **eats characters** — `# \`date\`` loses its backticks to a code span
 and `name~=*test*  ~~old~~` renders as `name~=test  old`. A digest that no longer shows
 what ran is worse than an inert URL. The harness's own voice (`system`, `error`) is
-deliberately not in the set.
+deliberately not in the set. Batch 199 adds one role: `invite`, the hosted banner's star
+line, which the owner asked to be clickable — the first line the harness writes to be
+clicked. `system`, `error` and `warning` stay out.
 
 **`param_digest` truncates at 60 characters, so the target rides beside the text.**
 Most real URLs are longer, and an elided one is refused by the ASCII rule (the ellipsis
