@@ -11,12 +11,17 @@ anthropic==0.116.0
 ddgs==9.14.4
 httpx==0.28.1
 openai==2.45.0
-# NOTE (ROADMAP_v2 §16): this pin has no ThinkingConfig.thinking_budget --
-# that field arrived in a later release. core/client.py checks for it at
-# runtime and reports no effort levels on GOOGLE rather than sending a
-# field the SDK cannot carry. Moving this pin enables Google effort; it
-# also puts §9's verified Google implementation back in scope for retest.
-google-genai==1.0.0
+# ROADMAP_v3 §82 (GS1), batch 172: 1.0.0 -> 2.29.0, the owner's choice.
+# Gemini 3 refuses a request whose current turn holds a function call
+# without the thought signature it came with; 1.0.0's Part had no field
+# to hold one, and every model a new Google account can call is Gemini 3,
+# so every GOOGLE tool loop failed on its second request. 2.29.0 was the
+# newest release at least two weeks old when chosen. It also carries
+# ThinkingConfig.thinking_budget, which core/client.py checks for at
+# runtime, so Google reasoning effort is ON now (ROADMAP_v2 §16), and
+# §9's Google implementation was retested live against it. Its
+# transport is httpx now, not requests.
+google-genai==2.29.0
 pydantic==2.13.4
 sympy==1.13.3
 sqlmodel==0.0.39
@@ -114,7 +119,20 @@ rich>=14.2,<16
 # raising ToolError on purpose keeps its message, a tool that CRASHES has
 # its text withheld -- and re-run tests/test_mcp_client.py, which is written
 # to hold on both versions.
-mcp==2.0.0
+#
+# 2.2.0 SINCE BATCH 165's follow-up, for CVE-2026-59951: a Streamable HTTP
+# SERVER kept every session's state with no expiry and no cap, so a client
+# could grow its memory without bound. This harness is an MCP client and
+# serves nothing, so it was never exposed -- the bump is because pip-audit
+# fails on any advisory, and a fix existed. Taken the deliberate way, the
+# split read first: 2.1.0 withholds a crashed tool's text and drops
+# outputSchema/structuredContent for tools that return content blocks;
+# 2.2.0 follows redirects only within the same origin (or http -> https on
+# one host) and no longer honours a passed-in client's follow_redirects.
+# Neither touches what this client does. test_mcp_client.py,
+# test_mcp_config.py and the integration servers all pass on it, and
+# mcp-types moves with it in lockstep.
+mcp==2.2.0
 
 # ROADMAP_v3 §49 (SS8). The engine for a monitor session's pattern -- a
 # regex the MODEL wrote, matched against program output nobody controls,
@@ -150,6 +168,8 @@ google-re2==1.1.20251105
 # DECLARING IT ADDS NOTHING TO AN INSTALL, measured rather than assumed:
 # google-genai==1.0.0 -> google-auth>=2.14.1 -> cryptography>=38.0.3, with
 # no extra marker, so it is already in the hard closure of the line above.
+# Re-measured on the 2.29.0 pin (batch 172): google-auth>=2.56.0 ->
+# cryptography>=38.0.3 (>=41.0.5 on Python 3.14), still no extra marker.
 # What the declaration buys is that a dependency this project's SECURITY
 # rests on is pinned by this project rather than by whatever google-auth
 # happens to resolve to.
@@ -168,6 +188,26 @@ google-re2==1.1.20251105
 # the three failure causes being indistinguishable), and the wheel list
 # still covers this project's platforms.
 cryptography>=42.0,<52
+
+# ROADMAP_v3 §83 (CG6, CG16). Checks the ID token a ChatGPT-plan sign-in
+# returns against OpenAI's published keys: RS256, issuer, audience, expiry
+# and nonce. The owner chose declaring it over a hand-written RS256 check
+# on `cryptography` -- signature verification is code to get exactly right,
+# and this library is the one everybody else gets it right with.
+#
+# DECLARING IT ADDS NOTHING TO AN INSTALL, measured the way `cryptography`'s
+# entry was: mcp==2.2.0 -> pyjwt[crypto]>=2.10.1, with no marker, so it is
+# already in the hard closure of the mcp line above. What the declaration
+# buys is that a check this project's sign-in rests on no longer depends on
+# mcp happening to pull it in. MIT, so THIRD_PARTY_NOTICES.md's no-copyleft
+# claim holds; pure Python.
+#
+# A FLOOR AND A CEILING, for `cryptography`'s reason: an exact pin here
+# would fight mcp's own floor, which is this floor. The ceiling is D22's
+# rule. What to re-measure when it moves: `jwt.decode` still refuses an
+# algorithm outside the list it is given (the `none` and HS256 tests in
+# tests/test_chatgpt_auth.py), and `PyJWKSet` still reads OpenAI's JWKS.
+PyJWT>=2.10.1,<3
 
 # TECHNICAL_DEBT 18, batch 116. A PRODUCTION dependency: `arxiv.py` imports
 # it at module load, and pyproject.toml reads this file for its dependency

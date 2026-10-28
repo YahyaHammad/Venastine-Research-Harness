@@ -14,7 +14,9 @@ Neutral shapes stored in self._messages:
   assistant: {"role": "assistant", "text": "...", "tool_calls": [
                   {"id": "...", "name": "...", "input": {...}}, ...]}
   tool:      {"role": "tool", "tool_call_id": "...", "content": "..."}
-             (one entry per individual tool result)
+             (one entry per individual tool result; plus "images": [
+              {"media_type": "...", "data": "<base64>"}, ...] only when a
+              tool attached one -- ROADMAP_v3 §81)
 
 PERSISTENCE, AND WHY THERE'S NO NORMALIZATION STEP HERE:
   Each add_* method passes storage.save_message() only the PAYLOAD that
@@ -124,6 +126,11 @@ class ConversationMemory:
         # resumed -- see record_billed for why this one is deliberately not
         # extra_data like its neighbour.
         self.billed_tokens = 0
+        # ROADMAP_v3 §81 (IM3). Images a tool attached for a call whose
+        # result has not been written yet, keyed by the call's id.
+        # add_tool_result takes them into the row it writes; nothing else
+        # reads this, and it is never persisted on its own.
+        self._pending_images: dict[str, list] = {}
         if thread_id is None:
             self.thread_id = create_thread(
                 kind=kind, parent_thread_id=parent_thread_id,
@@ -434,14 +441,41 @@ class ConversationMemory:
             thinking=thinking,
         )
 
+    def attach_image(self, tool_call_id: str, media_type: str,
+                     data: str) -> None:
+        """ROADMAP_v3 §81 (IM3). Hold an image for the result of
+        `tool_call_id`, to be written WITH that result's row.
+
+        The bytes reach the thread this way rather than inside the tool's
+        result dict, and that is the design: a result passes the output
+        redactor, the tool_result event and every shell's transcript, all of
+        which read text. A base64 payload run through the secret patterns can
+        be altered -- and an altered image is one the provider rejects -- so
+        the exemption from redaction is structural: the bytes never enter
+        that path. Only first-party code holding this object can attach; an
+        MCP server's result is a dict and cannot.
+
+        `data` is base64. Nothing is written here: a call that never gets a
+        result row never gets its image either.
+        """
+        self._pending_images.setdefault(tool_call_id, []).append(
+            {"media_type": media_type, "data": data})
+
     def add_tool_result(self, tool_call_id: str, result: dict) -> None:
         result_text = str(result)
         entry = {"role": "tool", "tool_call_id": tool_call_id, "content": result_text}
+        # §81 (IM2). Taken whatever the result says: the tool attaches only
+        # on its success path, immediately before returning, so an image
+        # pending here belongs to this result.
+        images = self._pending_images.pop(tool_call_id, None)
+        if images:
+            entry["images"] = images
         self._messages.append(entry)
         # Persist only the result string. tool_call_id already has its
         # own column (passed below) -- it doesn't need to also be
-        # duplicated inside content.
-        save_message(self.thread_id, role="tool", content=result_text, tool_call_id=tool_call_id)
+        # duplicated inside content. The images have their own column too.
+        save_message(self.thread_id, role="tool", content=result_text,
+                     tool_call_id=tool_call_id, images=images)
 
     @property
     def messages(self) -> list[dict]:

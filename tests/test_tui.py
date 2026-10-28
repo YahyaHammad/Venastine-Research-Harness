@@ -2542,6 +2542,34 @@ class TestThreadStateAndInputHandling:
             await pilot.pause()
             assert calls, "a real state change stopped updating the raven"
 
+    @pytest.mark.asyncio
+    async def test_a_tick_released_by_a_resume_does_not_break_a_hold(
+            self, monkeypatch):
+        """Batch 200. Textual's timer task waits on an asyncio.Event
+        while paused and resume() releases it: a pause_animation() before
+        the task runs clears the event but cannot recall the release, so
+        one tick ran inside the hold. The same race's idle half froze a
+        hosted raven mid-blink (test_hosted_mode.py). The interval is
+        shrunk so the hold always outlasts a tick."""
+        from tui import ravens, widgets
+        from tui.widgets import RavenPanel
+
+        monkeypatch.setattr(widgets, "ANIMATION_INTERVAL", 0.001)
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            raven = app.query_one("#raven", RavenPanel)
+            raven.state = ravens.THINKING
+            assert await settle(pilot, lambda: raven._frame > 0)  # unheld
+            raven.pause_animation()
+            await asyncio.sleep(0.05)      # the timer parks, held
+            frame = raven._frame
+            raven.resume_animation()
+            raven.pause_animation()        # taken back before the task runs
+            await pump(pilot, 3)
+            assert raven._frame == frame
+            raven.resume_animation()       # a resume that stands animates
+            assert await settle(pilot, lambda: raven._frame > frame)
+
 
     @pytest.mark.asyncio
     async def test_grill_me_runs_in_the_current_thread(self, mocker, tmp_path, fake_storage):
@@ -3612,17 +3640,22 @@ class TestEveryAskWiresItsTruthfulLines:
 
 def _modal_cases():
     """(name, screen factory, dialog id), one per ModalScreen subclass in
-    tui/screens.py -- this table SHADOWS those constructors, so adding a
-    tenth screen means adding a row here. The sign-off appears twice: its
-    empty-candidates branch composes the permission dialog, its populated
-    branch the grant one."""
+    the app -- this table SHADOWS those constructors, so a new screen needs
+    a row here, and test_the_table_has_a_row_for_every_modal_screen fails
+    until it has one. The sign-off appears twice: its empty-candidates
+    branch composes the permission dialog, its populated branch the grant
+    one."""
     from tui.screens import (
+        AgentPickerScreen,
         ClaimsScreen,
         ConfirmScreen,
         GrantPickerScreen,
+        NoticeScreen,
         ProjectKindScreen,
         QuestionScreen,
         ReviewScreen,
+        SecretScreen,
+        SessionKillScreen,
         SubagentSignoffScreen,
         ThreadPickerScreen,
     )
@@ -3657,13 +3690,65 @@ def _modal_cases():
          "#permission-dialog"),
         ("thread-picker", lambda: ThreadPickerScreen([], ""),
          "#thread-dialog"),
+        ("agent-picker", lambda: AgentPickerScreen([]),
+         "#agent-picker-dialog"),
+        ("session-kill", lambda: SessionKillScreen([]),
+         "#session-kill-dialog"),
+        ("secret", lambda: SecretScreen("Unlock the secrets store"),
+         "#permission-dialog"),
+        ("notice", lambda: NoticeScreen("Title", "Body text."),
+         "#permission-dialog"),
     ]
+
+
+def _modal_screen_classes():
+    """Every ModalScreen subclass this app defines, wherever it lives.
+
+    Walked from `ModalScreen.__subclasses__()` after importing the app, so a
+    modal declared outside tui/screens.py is found too. Textual's own modals
+    (the command palette is one) are left out by module.
+    """
+    from textual.screen import ModalScreen
+
+    import tui.app  # noqa: F401 -- defines or imports every screen
+
+    found, pending = set(), [ModalScreen]
+    while pending:
+        for cls in pending.pop().__subclasses__():
+            pending.append(cls)
+            if cls.__module__.split(".")[0] == "tui":
+                found.add(cls)
+    return found
 
 
 class TestEveryModalIsStyledCentredAndFits:
     """#112. Every modal at its smallest: styled, centred, and inside an
     80x24 terminal.
     """
+
+    def test_the_table_has_a_row_for_every_modal_screen(self):
+        """Batch 179. The sweep below only sees the screens `_modal_cases()`
+        lists, and since September three were missing: the run picker, the
+        kill picker, and `SecretScreen` -- the last with no `align` rule, so
+        every masked prompt (an API key, the secrets store's passphrase, the
+        hosted sign-in's code) opened in the top-left corner. Nothing went
+        red, because the table's docstring was the only thing asking for a
+        row. This makes the table answer to the screens instead.
+
+        Both directions, because "nothing is missing" is also what a walk
+        that found no screens at all would report."""
+        defined = _modal_screen_classes()
+        listed = {type(make()) for _name, make, _dialog in _modal_cases()}
+        missing = sorted(cls.__name__ for cls in defined - listed)
+        unseen = sorted(cls.__name__ for cls in listed - defined)
+
+        assert not missing, (
+            f"{', '.join(missing)} has no row in _modal_cases(), so nothing "
+            f"checks that it is centred, bounded and styled (#112)")
+        assert not unseen, (
+            f"the walk did not find {', '.join(unseen)}, which the table "
+            f"lists -- it is looking in the wrong place, and a screen it "
+            f"cannot see is a screen it cannot ask a row for")
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("name,make_screen,dialog_id", _modal_cases(),
@@ -3776,6 +3861,12 @@ _NOTICE = ("SANDBOXED: not a read-only command -- it can run code, so it runs "
 _REASON = ("Checking the sandbox mount table to answer the user question "
            "about whether the host workspace path is visible from inside "
            "the container.")
+# The hosted sign-in's fallback link, at the length a real one has: the
+# state alone is 43 characters, so the link wraps over several rows.
+_SIGN_IN_URL = ("https://www.modelscope.ai/oauth/authorize?client_id="
+                "00000000-0000-4000-8000-000000000000&redirect_uri=https%3A%2F"
+                "%2Fexample-studio.ms.fun%2Fauth%2Fcallback&response_type=code"
+                "&scope=openid+api-inference&state=" + "s" * 43)
 
 
 def _overflowing_modal_cases():
@@ -3786,6 +3877,7 @@ def _overflowing_modal_cases():
         GrantPickerScreen,
         QuestionScreen,
         ReviewScreen,
+        SecretScreen,
         SubagentSignoffScreen,
     )
 
@@ -3836,6 +3928,11 @@ def _overflowing_modal_cases():
          lambda: ConfirmScreen("Write these files?",
                                "\n".join(f"docs/file_{i}.md"
                                           for i in range(30))),
+         "#permission-dialog"),
+        ("secret-sign-in",
+         lambda: SecretScreen("Paste the code the sign-in page showed you",
+                              f"If no page opened: {_SIGN_IN_URL}",
+                              confirm_label="Connect"),
          "#permission-dialog"),
     ]
 
@@ -5886,7 +5983,7 @@ class TestMatchingIsTheListHelpReads:
 
     def test_a_prefix_offers_the_commands_that_start_with_it(self):
         names = [c.name for c in commands.matching("/co")]
-        assert names == ["compact", "config", "copy"], (
+        assert names == ["compact", "config", "connect", "copy"], (
             f"/co offered {names}; prefix matching on the NAME is what a "
             f"user typing a command is doing")
 
@@ -5981,15 +6078,15 @@ class TestThePanelOpensOnWhatIsTyped:
             await pilot.press("slash", "c")
             assert await settle(pilot, lambda: panel.shown == 4)
             names = [c.name for c in panel._matches]
-            assert names == ["claims", "compact", "config", "copy",
-                             "critic"], (
-                "five commands start with c since batch 84 added "
-                "/config; four of them fit")
+            assert names == ["claims", "compact", "config", "connect",
+                             "copy", "critic"], (
+                "six commands start with c since batch 163 added "
+                "/connect (batch 84 had added /config); four of them fit")
 
             await pilot.press("o")
             assert await settle(
                 pilot, lambda: [c.name for c in panel._matches] ==
-                ["compact", "config", "copy"])
+                ["compact", "config", "connect", "copy"])
 
     @pytest.mark.asyncio
     async def test_a_space_closes_it_and_a_backspace_brings_it_back(self):
@@ -6233,10 +6330,10 @@ class TestThePanelFitsTheRowsItHas:
 
             await pilot.press("c")
             assert await settle(pilot, lambda: panel.shown == 4)
-            assert panel.border_title.startswith("1-4 of 5 "), (
-                f"the title reads {panel.border_title!r}; four commands "
-                f"start with c and all four are on screen, so claiming "
-                f"twenty-six candidates would be a lie about the filter")
+            assert panel.border_title.startswith("1-4 of 6 "), (
+                f"the title reads {panel.border_title!r}; six commands "
+                f"start with c and four are on screen, so claiming every "
+                f"command as a candidate would be a lie about the filter")
 
     @pytest.mark.asyncio
     async def test_the_transcript_survives_the_panel_at_the_floor(self):
@@ -6704,22 +6801,23 @@ class TestTheWindowSlidesOverTheMatches:
 
             for _ in range(4):
                 await pilot.press("down")
-            assert await settle(pilot, lambda: panel.chosen.name == "copy")
+            assert await settle(pilot, lambda: panel.chosen.name == "connect")
 
             assert [c.name for c in panel.visible] == [
-                "claims", "compact", "config", "copy"], (
+                "claims", "compact", "config", "connect"], (
                 f"the window is {[c.name for c in panel.visible]}; a fourth "
                 f"down should have dropped /agent off the top and brought "
-                f"/copy in at the bottom, not cycled back to the start")
+                f"/connect in at the bottom, not cycled back to the start")
 
     @pytest.mark.asyncio
     async def test_the_window_can_drop_one_and_gain_two(self):
         """The case that falls out of the ROW budget rather than a rule.
 
-        `/compact` is two rows; `/embedder` and `/forget` are two rows
-        between them. So the step that needs `/embedder` on screen drops
-        one entry and gains TWO, and the panel goes from four entries to
-        five without either cap moving.
+        `/embedder` and `/forget` are two rows between them, so the step
+        that needs `/embedder` on screen drops one entry and gains TWO, and
+        the panel goes from four entries to five without either cap moving.
+        Nine downs since batch 184's `/disconnect` sorted in before
+        `/effort` (measured: the window drops `/copy` there and gains both).
         """
         app = VenastineApp("ANTHROPIC", "test-model", {})
         async with app.run_test(size=(80, 24)) as pilot:
@@ -6728,12 +6826,12 @@ class TestTheWindowSlidesOverTheMatches:
             await pilot.press("slash")
             assert await settle(pilot, lambda: panel.display)
 
-            for _ in range(7):
+            for _ in range(9):
                 await pilot.press("down")
             assert await settle(pilot, lambda: panel.chosen.name == "embedder")
 
             assert [c.name for c in panel.visible] == [
-                "copy", "critic", "effort", "embedder", "forget"], (
+                "critic", "disconnect", "effort", "embedder", "forget"], (
                 f"the window is {[c.name for c in panel.visible]}")
             assert panel.shown == 5
             assert panel.size.height <= 8, (
@@ -6752,7 +6850,7 @@ class TestTheWindowSlidesOverTheMatches:
             await pilot.press("slash")
             assert await settle(pilot, lambda: panel.display)
 
-            for _ in range(7):
+            for _ in range(9):
                 await pilot.press("down")
             assert await settle(pilot, lambda: panel.chosen.name == "embedder")
             scrolled = [c.name for c in panel.visible]
@@ -6767,7 +6865,7 @@ class TestTheWindowSlidesOverTheMatches:
                 f"the window moved to {[c.name for c in panel.visible]} for "
                 f"a selection it was already showing")
 
-            for _ in range(6):
+            for _ in range(8):
                 await pilot.press("up")
             assert await settle(pilot, lambda: panel.chosen.name == "agent")
 
@@ -6811,7 +6909,7 @@ class TestTheWindowSlidesOverTheMatches:
             panel = app.query_one("#slash-suggest")
             await pilot.press("slash")
             assert await settle(pilot, lambda: panel.display)
-            for _ in range(7):
+            for _ in range(9):
                 await pilot.press("down")
             assert await settle(pilot, lambda: panel.chosen.name == "embedder")
 
@@ -6834,7 +6932,7 @@ class TestTheWindowSlidesOverTheMatches:
 
             for _ in range(4):
                 await pilot.press("down")
-            assert await settle(pilot, lambda: panel.chosen.name == "copy")
+            assert await settle(pilot, lambda: panel.chosen.name == "connect")
             assert panel.border_title.startswith(
                 f"2-5 of {len(commands.all())} "), (
                 f"the title reads {panel.border_title!r}; once the window "
@@ -6848,8 +6946,8 @@ class TestTheWindowSlidesOverTheMatches:
             await pilot.pause()
             panel = app.query_one("#slash-suggest")
 
-            # /t, not /c: batch 84 made the c list five long, and this
-            # case needs a prefix whose matches all fit.
+            # /t, not /c: batch 84 made the c list five long and batch 163
+            # six, and this case needs a prefix whose matches all fit.
             await pilot.press("slash", "t")
             assert await settle(pilot, lambda: panel.shown == 4)
             assert panel.border_title.startswith("4 of 4 "), (

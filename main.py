@@ -1026,7 +1026,7 @@ def _echo_off():
         try:
             termios.tcsetattr(fd, termios.TCSADRAIN, before)
         except (OSError, termios.error):
-            pass
+            pass  # the terminal is gone or no longer a tty; nothing to restore
 
     return restore
 
@@ -2692,6 +2692,17 @@ def main(argv=None) -> int:
     raises it with code 2, and run_research with code 1 on a failed
     pipeline. This returns a code only where it decides one.
     """
+    # ROADMAP_v3 §79 (HD6). FIRST, before anything reads a credential: a
+    # hosted session marks itself non-dumpable, so another visitor's process
+    # in the same container cannot read its memory or environment. Here and
+    # not in the bridge, because an exec resets the flag. And it ends with
+    # the bridge (HD8) rather than outliving it as an orphan.
+    from security import hosted
+
+    if hosted.is_hosted():
+        hosted.make_undumpable()
+        hosted.die_with_parent()
+
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -2928,7 +2939,10 @@ def main(argv=None) -> int:
     # request: create the real one, empty, and name it. The skeleton is
     # §24's own render_mcp(), not a second copy of it.
     created = _ensure_user_mcp_config()
-    if created:
+    # §79 (batch 168): not in a shared deployment, where the file is in a
+    # session directory deleted with the tab and no tool there can edit it
+    # -- the notice only printed a temporary path at every visitor.
+    if created and not hosted.is_shared():
         startup_notices.append(
             f'[mcp] created {created} -- your own MCP servers go in this '
             f'file, under "mcpServers". Project servers stay in '

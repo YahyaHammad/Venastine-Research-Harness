@@ -241,8 +241,10 @@ def test_tools_google_wraps_in_function_declarations():
              "properties": {
                  "query": {"type": "string"},
                  # Optional[dict] -- pydantic renders every Optional field
-                 # this way, and `additionalProperties` is not a field on
-                 # the pinned `Schema`. This repository's own
+                 # this way, and `additionalProperties` is not a key the
+                 # Gemini API takes: 1.0.0's `Schema` had no field for it,
+                 # and the 2.29.0 pin's field is refused on the wire
+                 # (ROADMAP_v3 §82). This repository's own
                  # probability_stats carries exactly this.
                  "counts": {"anyOf": [
                      {"additionalProperties": {"type": "number"},
@@ -263,7 +265,7 @@ def test_tools_google_wraps_in_function_declarations():
     assert first.description == "Search the web"
     assert tool.function_declarations[1].name == "get_time"
 
-    # Derived, not copied: the key the pinned Schema cannot carry is gone
+    # Derived, not copied: the key the Gemini API cannot take is gone
     # from both levels, and the Optional union became one type plus the
     # flag this SDK spells `nullable`.
     assert first.parameters != schemas[0]["input_schema"]

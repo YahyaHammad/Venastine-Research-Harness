@@ -356,6 +356,18 @@ class ToolSpec:
     # NO IMPORT-TIME GUARD, for rationale_param's reason: None is the
     # correct answer for every tool but one.
     headline_param: Optional[str] = None
+    # ROADMAP_v3 §81 (IM6). Whether this tool's result carries an IMAGE --
+    # which reaches the model only from a provider marked `accepts_images`,
+    # and never in a research pass. registry.schemas() drops such a tool
+    # unless its caller says images can be delivered in this run.
+    #
+    # NOT an available_check: that predicate takes no arguments, and this
+    # answer depends on the RUN -- its provider and what its thread is --
+    # which only the loop holds. DECLARED HERE for `opens_thread`'s reason:
+    # the loop asks the registry, so no tool name appears in core/loop.py.
+    # Defaulted False, because a tool that returns text is offered wherever
+    # it always was.
+    returns_images: bool = False
 
 
 def assert_grant_policy_declared(tools: Iterable[str], specs=None) -> None:

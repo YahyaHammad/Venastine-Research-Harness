@@ -1,0 +1,41 @@
+# ROADMAP_v3 §79 (HD2, HD9). What the BRIDGE needs -- the Gradio process
+# that serves the page and relays each session. The harness itself does not
+# run here: scripts/build_demo_bundle.py compiles the harness's own
+# requirements.txt into deploy/hosted/session.lock, and session_env.py
+# builds a separate environment from that when the container starts.
+#
+# WHY SEPARATE, measured 2026-10-20: a Space installs `gradio[oauth,mcp]` in
+# the same pip command as this file, and that extra wants mcp<2 and
+# pydantic<=2.12.5 against the harness's mcp==2.2.0 and pydantic==2.13.4.
+# (Gradio 4.x is no way out either: its client wants websockets<13, the
+# harness's google-genai wants >=13, and it has no `gr.Server`.)
+#
+# NOT listed, on purpose: gradio, spaces and huggingface_hub. A Space
+# installs all three itself -- gradio at the README's `sdk_version`, which is
+# GRADIO_VERSION in build_demo_bundle.py -- and listing them fails the
+# build's resolve or replaces the ZeroGPU runtime. The ModelScope bundle is
+# a Docker image of our own, so the builder compiles gradio and `spaces`
+# into its bridge.lock with everything here.
+#
+# ALSO NOT listed: textual. The builder copies the harness's own textual pin
+# in, because supervisor.py decodes the sessions' binary packets with
+# textual's encoder, and the two ends must be the same version.
+#
+# textual-serve: EXACT, for the reason textual is, and only for its browser
+# assets (textual.js and xterm's CSS). Its server is never started;
+# supervisor.py's docstring says why. MIT.
+textual-serve==1.1.3
+# uv: builds the session environment (session_env.py). 0.13.4 for
+# PYSEC-2026-4321 (GHSA-hq85-5cpj-mr62): earlier versions trusted a root CA
+# whose intermediates' keys were compromised. The install it does is
+# --require-hashes, so a forged connection could fail it but not change it;
+# the bump is for the audit. Measured 2026-10-22 in a clean python:3.12-slim:
+# the session lock installed in 18 s from an empty cache, as on 0.12.23.
+# MIT OR Apache-2.0.
+uv==0.13.4
+# websockets: what lets uvicorn -- Gradio's server -- upgrade a connection to
+# a websocket at all, and every session is one. It was never declared, and
+# worked only by accident: a Space's own install line adds
+# `websockets>=10.4`, and ModelScope's image had it preinstalled. In a clean
+# image (2026-10-22) every upgrade was answered 404. EXACT. BSD-3-Clause.
+websockets==17.3

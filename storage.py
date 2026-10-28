@@ -148,6 +148,20 @@ class MessageLog(SQLModel, table=True):
     # start call id would hide the real tool_result -- the HTTP 400 M4
     # exists to prevent. The call id lives inside this JSON instead.
     harness: Optional[str] = None
+    # ROADMAP_v3 §81 (IM2). The images a tool result carried, as a JSON list
+    # of {"media_type", "data"} with `data` base64 -- tool rows only, and only
+    # where `view_image` attached one. NULL everywhere else.
+    #
+    # A COLUMN rather than blocks inside `content`, for `thinking`'s reason:
+    # `content` is read as a string by every consumer of the conversation --
+    # replay, the transcript, /copy, the compactor, the summarizer -- and
+    # only two readers have any use for the bytes, provider translation and
+    # the compactor's size proxy. In the database rather than in a blob store
+    # or as a path to the workspace file: a path would make a resumed thread
+    # send whatever the file holds NOW, and a second store would be a second
+    # place docs/PRIVACY.md's "wipe everything" has to name. Nullable and
+    # additive, so database.ensure_columns() adds it like `thinking`.
+    images: Optional[str] = None
 
 
 class CompactionCheckpoint(SQLModel, table=True):
@@ -419,6 +433,7 @@ def save_message(
     tool_call_id: Optional[str] = None,
     thinking: Optional[dict] = None,
     harness: Optional[dict] = None,
+    images: Optional[list] = None,
 ) -> None:
     """Append one archived row and stamp the thread's activity (#32).
 
@@ -444,6 +459,9 @@ def save_message(
             # ROADMAP_v3 §49 (SS5), on `thinking`'s terms: NULL for every
             # row a person or the model wrote, which is nearly all of them.
             harness=json.dumps(harness) if harness else None,
+            # ROADMAP_v3 §81 (IM2), on `thinking`'s terms again: NULL for
+            # every row that attached no image.
+            images=json.dumps(images) if images else None,
         )
         session.add(new_message)
         thread = session.get(ConversationThread, thread_id)
@@ -630,6 +648,31 @@ def _decode_harness(raw):
     return value if isinstance(value, dict) and value.get("kind") else None
 
 
+def _decode_images(raw):
+    """A tool row's stored images (ROADMAP_v3 §81, IM2), or None.
+
+    `_decode_thinking`'s rule: an entry that cannot be read costs that
+    entry, never the thread. An entry is usable when it names a media type
+    and carries data, both as non-empty strings -- what translation needs to
+    build a block, and nothing it would have to guess at.
+    """
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(value, list):
+        return None
+    usable = [entry for entry in value
+              if isinstance(entry, dict)
+              and isinstance(entry.get("media_type"), str)
+              and entry["media_type"]
+              and isinstance(entry.get("data"), str)
+              and entry["data"]]
+    return usable or None
+
+
 def _to_neutral(msg: dict) -> dict:
     """Reconstructs the exact neutral shape core/memory.py's add_* methods
     write, per msg.role -- this is the counterpart to memory.py only ever
@@ -665,6 +708,13 @@ def _to_neutral(msg: dict) -> dict:
     elif role == "tool":
         # decoded is the plain result string add_tool_result persisted.
         payload = {"role": "tool", "tool_call_id": msg["tool_call_id"], "content": decoded}
+        # ROADMAP_v3 §81 (IM2), on §44's terms for `thinking`: present ONLY
+        # when the row attached an image, so every tool row written before
+        # reconstructs to exactly the shape it did. Read by translation and
+        # the compactor's size proxy; never by anything that renders text.
+        images = _decode_images(msg.get("images"))
+        if images is not None:
+            payload["images"] = images
     else:
         # user (and any future plain-content role): decoded is
         # already the right value for "content".
@@ -730,6 +780,9 @@ def _ordered_rows(thread_id: UUID) -> list[dict]:
                 # ROADMAP_v3 §49 (SS5). NULL for every row a person or the
                 # model wrote.
                 "harness": m.harness,
+                # ROADMAP_v3 §81 (IM2). NULL for every row that attached no
+                # image; the compactor's size proxy reads it (IM8).
+                "images": m.images,
             }
             for m in session.exec(statement).all()
         ]

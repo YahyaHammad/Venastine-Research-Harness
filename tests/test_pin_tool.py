@@ -330,3 +330,21 @@ def test_unpin_shares_pins_argument_validation():
     assert "error" in pin.unpin_run({"last_n": True}, memory=memory)
     assert "error" in pin.unpin_run({}, memory=None)
     assert memory.unpin_calls == []
+
+
+def test_an_explicit_null_is_the_declared_default(mocker):
+    """Batch 190. The ChatGPT plan's model sends each optional parameter at
+    its declared default (ROADMAP_v3 §83, the owner's live check), so both
+    schemas declare 1 -- and a null, which a model may send instead, means
+    the same thing rather than costing a turn on a refusal."""
+    assert pin.TOOL_SCHEMA["input_schema"]["properties"]["last_n"][
+        "default"] == 1
+    assert pin.UNPIN_TOOL_SCHEMA["input_schema"]["properties"]["last_n"][
+        "default"] == 1
+    memory = _Memory()
+    _under_cap(mocker)
+
+    assert "error" not in pin.run({"last_n": None}, memory=memory)
+    assert "error" not in pin.unpin_run({"last_n": None}, memory=memory)
+    assert memory.calls == [1]
+    assert memory.unpin_calls == [1]

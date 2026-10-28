@@ -13,6 +13,16 @@ The design premise is that a model's own confidence is not evidence. Everything 
 
 ---
 
+## Try it online
+
+The same harness runs in your browser, nothing to install, on a [Hugging Face Space](https://huggingface.co/spaces/SolenopsisCampo/VenastineHarnessDemo) and a [ModelScope Studio](https://www.modelscope.ai/studios/Venastine-Research/VenastineHarnessDemo). Each tab gets its own session, deleted when the tab closes.
+
+- **Connect a model with a sign-in.** `/connect huggingface` and `/connect openrouter` work on both, and `/connect modelscope` (modelscope.ai) or `/connect modelscope-cn` (modelscope.cn) wherever the deployment can complete that site's sign-in. Requests use your own account's allowance, and the landing page links each provider's page for revoking access.
+- **The shared demo takes no pasted key**, and it does not offer the file and shell tools. A private duplicate of the Space in single-user mode takes both (set `VENASTINE_SINGLE_USER=1` in Hugging Face's duplicate dialog), and so does an install.
+- **It runs a commit of `main` that passed every CI check**, named in each page's footer: the Space is redeployed automatically once all of them pass, and the Studio by hand with the same checks. [PRIVACY.md](docs/PRIVACY.md#the-hosted-demo-roadmap_v3-79) says what a hosted session changes.
+
+---
+
 ## Setup
 
 **Python 3.11 or newer**, either way in. `mcp_client/client.py` uses `asyncio.timeout`, which is 3.11+, and 27 sites use runtime `X | Y` annotations (3.10+). `pyproject.toml` declares the floor, so an install refuses an older interpreter rather than failing later from inside the MCP connect path.
@@ -63,7 +73,7 @@ cp providers.json.example providers.json   # then add your provider's API key
 cp .env.example .env     # then fill in only the keys your tools actually need
 ```
 
-Without the first file every model call fails — both shells say so at launch (#138), but creating it is the one setup step they cannot do for you.
+Without the first file every model call fails — both shells say so at launch (#138). **In the TUI, `/connect` writes it for you**: `/connect` lists the providers it knows, `/connect <name>` asks for the key in a masked prompt and saves it (0600), and `/connect custom <NAME> <url>` adds any OpenAI-compatible endpoint. Three providers let you **sign in instead of pasting a key**, because their own documentation invites a third-party app to: `/connect huggingface` uses Hugging Face's device code flow (its [OAuth guide](https://huggingface.co/docs/hub/oauth) — a code to confirm on huggingface.co, with the `inference-api` scope only) through the project's own app, named by `hf_oauth_client_id` in `config.yaml`, and `/connect openrouter` uses [OpenRouter's PKCE flow](https://openrouter.ai/docs/guides/overview/auth/oauth), which shows a code to paste back and makes a key you can delete at openrouter.ai/keys. And `/connect chatgpt` signs in to a ChatGPT Plus or Pro plan through [OpenAI's Sign in with ChatGPT](https://developers.openai.com/siwc), which offers it to open-source apps running on your own machine: the page comes back to a one-shot listener on 127.0.0.1, so it works in a local install and never on a hosted one. Once you are signed in, `/model CHATGPT <model>` chats on the plan: the header says "Using ChatGPT plan" with a Manage usage link, and a usage limit stops and points there rather than retrying. Everything else is a pasted key. Either way the next turn uses the new key without a restart. **`/disconnect <name>` undoes it**: it asks first, then blanks the key (the entry's other settings stay for a later `/connect`) and says where to revoke the key itself, or signs out of the ChatGPT plan, revoking it at OpenAI; `--forget` also drops the plan's registration so the next sign-in can be another account.
 
 Both are gitignored. They are kept apart on purpose: provider keys are read by one module at model-call time, while tool keys are handed to code that talks to third parties. Mixing them would put every tool's secrets in reach of the credential path and vice versa. If it is ever unclear which file a new secret belongs in, it belongs in `.env` unless a model provider is going to authenticate with it.
 
@@ -354,7 +364,7 @@ Because approval ORs, an override can only ever *add* a prompt. There is no way 
 | | |
 |---|---|
 | No approval | `web_search`, `fetch_url`, `arxiv_search`, `get_time`, the six maths tools (`symbolic_math`, `linear_algebra`, `probability_stats`, `discrete_math`, `logic`, `geometry`), `load_skill`, `pin`, `unpin`, `ask_user`, `todo_write`, `read_project_doc`, and the three that act on this conversation's own background sessions (`shell_sessions`, `shell_output`, `shell_kill`), and `shell_input` — typing into an interactive shell you already approved (a line naming a protected path still asks, and a Ctrl-C never does) |
-| Depends on the call | `read`, `write`, `edit` — decided per path, and all three are denied by default anyway |
+| Depends on the call | `read`, `view_image`, `write`, `edit` — decided per path, and all four are denied by default anyway. `view_image` is also only offered where the image can reach the model: a provider marked `accepts_images` in `providers.json`, outside a research pass |
 | Always | `shell` and the three that start a session (`shell_background`, `shell_monitor`, `shell_interactive`), `spawn_subagent`, `remember`, `write_project_doc`, and **every MCP tool** |
 
 Every registered tool appears in that table, and a test asserts it (audit #125): `ToolPermissions` and `ToolApprovals` are plain dataclasses, so "did the table keep up with the registry" is a question the suite can answer instead of a reader. `write_project_doc` is the one the omission mattered for — it is what `/init` uses to write documents into a repository, and §24's I1 gives it a fixed allowlist of document *names* with no path parameter precisely because it is dangerous enough to constrain.
@@ -745,7 +755,7 @@ A level is validated against the model that will **receive** it, not the one it 
 |---|---|---|
 | Anthropic | `low`, `medium`, `high`, `xhigh`, `max` — whichever the model reports supported | Queried live from the Models API, so newly released Anthropic models need no entry anywhere |
 | OpenAI-compatible | `low`, `medium`, `high` assumed for unknown models | Static table (`config.MODEL_EFFORT_LEVELS`). Known non-reasoning models — gpt-4o family, gpt-3.5 — ship with *empty* lists, meaning "takes no effort parameter": a requested level is dropped cleanly instead of 400ing every call. An unlisted model gets the assumption plus a WARNING naming it |
-| Google | Levels map to integer thinking budgets, `low`→2,048 through `max`→dynamic | Mapped at the boundary. The pinned `google-genai` has no budget field, so Google currently reports no levels and effort drops regardless of the default |
+| Google | Levels map to integer thinking budgets, `low`→2,048 through `max`→dynamic | Mapped at the boundary and sent as `thinking_budget`. On since batch 172, when the `google-genai` pin moved to 2.29.0; an unlisted Gemini model gets the default level set plus a WARNING, like any other unlisted model |
 
 **Seeing the thinking is separate from doing it.** Effort is what makes the model reason; whether the API hands those thoughts back to the client is a different question, and the answer varies by provider. Reasoning streams into the transcript on **Anthropic** and on OpenAI-compatible providers that send it — DeepSeek, Qwen, Z.AI, OpenRouter. It is absent on **OpenAI**, whose Chat Completions endpoint returns no reasoning text at all, and on **Google**, whose request deliberately does not ask for thought summaries: those would be billed as extra output for something the model produces either way. On those two the turn still thinks; you just do not see it. `tui.show_thinking` and `/thinking` control the display, never the reasoning.
 
@@ -887,6 +897,7 @@ Deliberately not settings.json keys: editing these means editing the harness's o
 | `is_v1_compatible` | `true` routes the provider through the OpenAI-compatible translation |
 | `supports_stream_usage` | Promises streamed responses carry token usage. If a stream then ends with none, the harness **raises** rather than accounting zero tokens — a silent zero would disable the budget stop condition while looking healthy. Endpoints that don't return streaming usage ship with `false` |
 | `echoes_reasoning` | Opt in to sending this provider's own reasoning back on the next request (§44). Off everywhere by default: there is no standard for it the way there is for receiving reasoning — DeepSeek documents that `reasoning_content` must not be supplied on input and returns a 400, while OpenRouter accepts it for some models and ignores it for others. Anthropic needs no flag; its thinking blocks are signed and are echoed to the model that produced them automatically |
+| `accepts_images` | Opt in to delivering images that `view_image` attaches (ROADMAP_v3 §81). It must be JSON `true`; a quoted `"true"` does not count. It needs setting per endpoint because whether a request with an image succeeds depends on the endpoint and often the model, and sending one to a model without vision fails the request. The example sets it for ANTHROPIC and GOOGLE, the two providers where every chat model accepts images. For an OpenAI-compatible endpoint serving a vision model, add it yourself; the image then travels in a harness message after the tool results, because that API's tool messages carry text only. On GOOGLE the image travels the same way, after the function responses, and a GIF becomes a note there rather than an image. A provider without the flag gets a note saying the image was not sent, and `view_image` is not offered to it at all |
 
 `mcp.json` entries are tabulated under [MCP servers](#mcp-servers).
 
@@ -912,7 +923,7 @@ note that shell approval is governed solely by `shell_approval_mode` -- `tool_ap
 deliberately has no `shell` key, so an old file carrying one is refused at startup
 naming the key — see `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 7376 tests, fully offline, no API keys needed. The suite's own packages are `requirements-test.txt`, separate from `requirements.txt` since batch 136: they used to be in the shipped dependency list, so installing the harness also installed a test runner. It runs in parallel by default (`pytest-xdist`, 70% of your cores): **1:26 on a 16-core machine, against 9:06 single-process.** `pytest -n0` forces the old serial run, which is what you want under a debugger or when something is parsing the output. Four further tests are marked `integration` and excluded by default: three spawn a real stdio MCP server, the fourth runs an external program through the host fallback shell (`pytest -m integration`).
+Run the test suite with `pytest` — 8345 tests, fully offline, no API keys needed. The suite's own packages are `requirements-test.txt`, separate from `requirements.txt` since batch 136: they used to be in the shipped dependency list, so installing the harness also installed a test runner. It runs in parallel by default (`pytest-xdist`, 70% of your cores): **1:26 on a 16-core machine, against 9:06 single-process.** `pytest -n0` forces the old serial run, which is what you want under a debugger or when something is parsing the output. Four further tests are marked `integration` and excluded by default: three spawn a real stdio MCP server, the fourth runs an external program through the host fallback shell (`pytest -m integration`).
 
 ## Documentation
 

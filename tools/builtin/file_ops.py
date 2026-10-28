@@ -7,6 +7,11 @@ to match config.ToolPermissions' three separate boolean fields (read /
 write / edit), so review/audit agents can be given read access without
 write or edit.
 
+A fourth, view_image (ROADMAP_v3 §81), reads an image and attaches it
+to its own result rather than returning text. It follows read's path
+rules exactly, with its own permission row so it can be enabled apart
+from read. See view_image_run for where the bytes go.
+
 SECURITY MODEL (ROADMAP §6, deviated per user decision):
   Paths within WORKSPACE_DIR are auto-approved (unless the matching
   ToolApprovals boolean is True, which forces approval even inside the
@@ -69,6 +74,7 @@ RICH FORMAT SUPPORT (deviated from ROADMAP §6):
 
 from __future__ import annotations
 
+import base64
 import logging
 import os
 from typing import Optional
@@ -341,7 +347,6 @@ def _truncate_lines(
                 # next line, and the rest of this one is not reachable
                 # through a tool whose paging unit is a line.
                 kept.append(line[:config.MAX_READ_CHARS])
-                used = len(kept[0])
                 cut_inside_a_line = True
             break
         kept.append(line)
@@ -583,6 +588,118 @@ def edit_run(params: dict) -> dict:
 
 
 # ===========================================================================
+# ---- VIEW_IMAGE (ROADMAP_v3 §81) ------------------------------------------
+# ===========================================================================
+
+#: What both wires §81 delivers to accept as a base64 image: Anthropic's
+#: image block and the OpenAI-compatible `image_url` part (IM7). Google, a wire
+#: since batch 173, is sent three of them and gets a note for GIF (IM10). Judged from
+#: the file's own leading bytes, never its extension -- a PNG renamed `.jpg`
+#: is a PNG, and declaring the wrong media type is a request the provider
+#: rejects.
+_IMAGE_SIGNATURES = (
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+)
+
+
+def _image_media_type(head: bytes) -> Optional[str]:
+    """The media type *head* (a file's first bytes) declares, or None."""
+    for signature, media_type in _IMAGE_SIGNATURES:
+        if head.startswith(signature):
+            return media_type
+    # WEBP is a RIFF container: "RIFF", a four-byte length, then "WEBP".
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+class ViewImageParams(BaseModel):
+    path: str = Field(..., description="Path to a PNG, JPEG, GIF or WEBP file, relative to the agent's workspace directory, or an absolute path.")
+
+
+VIEW_IMAGE_TOOL_SCHEMA = {
+    "name": "view_image",
+    "description": (
+        "Look at an image file. The image itself is attached to the result, "
+        "so you see the picture rather than a description of it. PNG, JPEG, "
+        f"GIF and WEBP, up to {config.MAX_IMAGE_BYTES} bytes. For text and "
+        "documents use read."
+    ),
+    "input_schema": ViewImageParams.model_json_schema(),
+}
+
+
+def view_image_run(params: dict, memory=None, call_id=None,
+                   parent_run=None) -> dict:
+    """Read an image off disk and attach it to this call's result (IM1).
+
+    The RESULT is text -- it names what was attached -- and the bytes go to
+    `memory.attach_image`, which writes them into the same row as that
+    result (IM3). They never ride in the returned dict, so the output
+    redactor, the tool_result event and both shells' transcripts see only
+    the sentence.
+
+    The path rules are `read`'s exactly: the same `_refusal_for` and
+    `_file_approval_check`, and the protected segment re-tested here as all
+    three file tools re-test it.
+    """
+    parsed = ViewImageParams(**params)
+    refused = _protected_path_error(parsed.path)
+    if refused is not None:
+        return {"error": refused}
+    # THE RUN'S OWN ANSWER (IM6), computed once by the loop and read by the
+    # schema list too, so the two cannot disagree. The schema list already
+    # left this tool out when it is False; this is the backstop for a call
+    # made anyway, by a model naming a tool it was not offered.
+    if parent_run is None or not getattr(parent_run, "images", False):
+        return {"error": (
+            "view_image is not available in this run: either the provider "
+            "is not marked `accepts_images` in providers.json, or this is a "
+            "research pass, which does not take images."
+        )}
+    if memory is None or call_id is None:
+        return {"error": "view_image has no conversation to attach the image to."}
+
+    resolved = resolve_path(parsed.path)
+    if not os.path.exists(resolved):
+        return {"error": f"No such file or directory: {parsed.path}"}
+    if not os.path.isfile(resolved):
+        return {"error": f"Not a regular file: {parsed.path}"}
+    file_size = os.path.getsize(resolved)
+    if file_size > config.MAX_IMAGE_BYTES:
+        return {"error": (
+            f"Image size ({file_size} bytes) exceeds the maximum attachable "
+            f"size ({config.MAX_IMAGE_BYTES} bytes)."
+        )}
+    try:
+        # One byte past the cap, so a file that grew after the size check
+        # is refused rather than read without a bound.
+        with open(resolved, "rb") as f:
+            raw = f.read(config.MAX_IMAGE_BYTES + 1)
+    except OSError as e:
+        logger.exception("view_image failed on %s", parsed.path)
+        return {"error": f"Could not read file: {e}"}
+    if len(raw) > config.MAX_IMAGE_BYTES:
+        return {"error": (
+            f"Image exceeds the maximum attachable size "
+            f"({config.MAX_IMAGE_BYTES} bytes)."
+        )}
+
+    media_type = _image_media_type(raw[:12])
+    if media_type is None:
+        return {"error": (
+            f"{parsed.path} is not a PNG, JPEG, GIF or WEBP image (judged by "
+            f"its contents, not its name)."
+        )}
+    memory.attach_image(call_id, media_type,
+                        base64.b64encode(raw).decode("ascii"))
+    return {"content": f"Attached {parsed.path} ({media_type}, {len(raw)} bytes)."}
+
+
+# ===========================================================================
 # ---- What each tool takes -------------------------------------------------
 # ===========================================================================
 
@@ -594,4 +711,5 @@ _PARAM_MODELS = {
     "read": ReadFileParams,
     "write": WriteFileParams,
     "edit": EditFileParams,
+    "view_image": ViewImageParams,
 }

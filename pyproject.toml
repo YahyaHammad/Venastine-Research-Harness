@@ -106,6 +106,7 @@ test = [
     "pytest-mock>=3.14",
     "pytest-asyncio>=1.0",
     "pytest-xdist>=3.6",
+    "starlette>=0.40",
 ]
 
 [tool.setuptools.dynamic]

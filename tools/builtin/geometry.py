@@ -170,7 +170,7 @@ def run(params: dict) -> dict:
             elif hasattr(result, "evalf"):
                 result = result.evalf(parsed.precision)
         except Exception:
-            pass
+            pass  # no numeric form; the exact result is still a correct answer
 
     # H6, one batch late (batch 143). The evaluate block above stays where it is: a tail
     # handler contains the one call that can fail without restructuring the

@@ -25,8 +25,9 @@ WHAT COUNTS AS TRANSIENT (owner decision, batch 91):
 
   * a connection failure or a timeout -- openai / anthropic
     APIConnectionError and APITimeoutError, an httpx transport error raised
-    raw while a stream is being read, a requests ConnectionError / Timeout
-    (google-genai's transport), and the builtin ConnectionError /
+    raw while a stream is being read (and by google-genai, whose transport
+    httpx is since 2.x), a requests ConnectionError / Timeout (google-auth's
+    token refresh; google-genai 1.0's transport), and the builtin ConnectionError /
     TimeoutError;
   * HTTP 408, 409, 429 and any 5xx -- the statuses the openai and anthropic
     SDKs already retry for themselves before a stream opens;
@@ -65,8 +66,8 @@ DESCRIBE_LIMIT = 500
 
 _CONNECTION_NAMES = frozenset({
     "APIConnectionError", "APITimeoutError",   # openai, anthropic
-    "TransportError", "TimeoutException",      # httpx, raw mid-stream
-    "ConnectionError", "Timeout",              # requests (google-genai); builtin
+    "TransportError", "TimeoutException",      # httpx: raw mid-stream; google-genai
+    "ConnectionError", "Timeout",              # requests (google-auth); builtin
     "ChunkedEncodingError",                    # requests, a body cut off mid-read
     "TimeoutError",                            # builtin
 })
@@ -153,9 +154,20 @@ def is_transient(exc: BaseException) -> bool:
         # the stream's own 200 (anthropic). The provider has said something
         # went wrong mid-generation; unless it also said the request itself
         # is at fault, that is the weather this retry is for.
-        verdict = _body_verdict(getattr(exc, "body", None))
-        return True if verdict is None else verdict
+        return open_stream_error_is_transient(getattr(exc, "body", None))
     return False
+
+
+def open_stream_error_is_transient(body) -> bool:
+    """The open-stream rule above, for a caller holding only the error object.
+
+    ROADMAP_v3 §83: the ChatGPT plan's `error` event and `response.failed`
+    arrive as EVENTS -- the openai SDK raises only on a top-level `error`
+    object, which neither has -- so `core/client.py` reads them and asks
+    here, rather than keeping a second copy of the rule.
+    """
+    verdict = _body_verdict(body)
+    return True if verdict is None else verdict
 
 
 def retry_after_s(exc: BaseException) -> Optional[float]:

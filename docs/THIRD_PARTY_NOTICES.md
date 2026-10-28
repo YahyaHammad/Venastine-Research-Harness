@@ -6,7 +6,7 @@ The dependencies listed below are **not** part of the project's own source but a
 
 > **Scope.** Two things are covered here: the project's **declared direct** dependencies — the pins in `requirements.txt` and the extras in `pyproject.toml` — and, under *Non-code third-party material* below, the third-party **text** the repository reproduces.
 >
-> The transitive dependency closure is *not* enumerated: `matplotlib` alone pulls numpy, pillow, kiwisolver and fonttools, and `mcp==2.0.0` brings `httpx2` (see the note beside the `mcp` pin in `requirements.txt`). For the full closure, run `pip-licenses` against a resolved environment — see *How to regenerate* below.
+> The transitive dependency closure is *not* enumerated: `matplotlib` alone pulls numpy, pillow, kiwisolver and fonttools, and `mcp==2.2.0` brings `httpx2` (see the note beside the `mcp` pin in `requirements.txt`). For the full closure, run `pip-licenses` against a resolved environment — see *How to regenerate* below.
 
 > Versions shown are the pins from `requirements.txt` / `pyproject.toml` at the time this file was created. Where a range is used (e.g. `rich>=14.2,<16`) the exact resolved version will vary.
 
@@ -18,7 +18,7 @@ The dependencies listed below are **not** part of the project's own source but a
 | ddgs | `==9.14.4` | MIT | Yes | https://pypi.org/project/ddgs/ |
 | httpx | `==0.28.1` | BSD-3-Clause | Yes | https://pypi.org/project/httpx/ |
 | openai | `==2.45.0` | Apache-2.0 | Yes | https://pypi.org/project/openai/ |
-| google-genai | `==1.0.0` | Apache-2.0 | Yes | https://pypi.org/project/google-genai/ |
+| google-genai | `==2.29.0` | Apache-2.0 | Yes | https://pypi.org/project/google-genai/ |
 | pydantic | `==2.13.4` | MIT | Yes | https://pypi.org/project/pydantic/ |
 | sympy | `==1.13.3` | BSD-3-Clause | Yes | https://pypi.org/project/sympy/ |
 | sqlmodel | `==0.0.39` | MIT | Yes | https://pypi.org/project/sqlmodel/ |
@@ -28,13 +28,14 @@ The dependencies listed below are **not** part of the project's own source but a
 | ruamel.yaml | `==0.19.1` | MIT | Yes | https://pypi.org/project/ruamel.yaml/ |
 | textual | `==8.2.8` | MIT | Yes | https://pypi.org/project/textual/ |
 | rich | `>=14.2,<16` | MIT | Yes | https://pypi.org/project/rich/ |
-| mcp | `==2.0.0` | MIT | Yes | https://pypi.org/project/mcp/ |
+| mcp | `==2.2.0` | MIT | Yes | https://pypi.org/project/mcp/ |
 | google-re2 | `==1.1.20251105` | BSD-3-Clause | Yes | https://pypi.org/project/google-re2/ |
 | cryptography | `>=42.0,<52` | Apache-2.0 OR BSD-3-Clause | Yes | https://pypi.org/project/cryptography/ |
+| PyJWT | `>=2.10.1,<3` | MIT | Yes | https://pypi.org/project/PyJWT/ |
 
 `google-re2` (added 2026-09-15, ROADMAP_v3 §49) and `cryptography` (added 2026-09-24, ROADMAP_v3 §49 slice 5a) are the dependencies above that ship **compiled native code**. Taking `google-re2` first: its wheels carry the RE2 C++ library (BSD-3-Clause) and, as RE2 depends on it, Abseil (Apache-2.0). The paragraph under *What this means* holds for it unchanged — pip fetches the wheel onto the user's machine and this project redistributes nothing — so no inbound `NOTICE` obligation arises. Where no wheel exists (musl/Alpine, glibc older than 2.28), pip builds the source distribution locally, which is the user's build rather than a distribution by this project.
 
-`cryptography` was **already in the install closure** before it was declared — `google-genai==1.0.0` → `google-auth>=2.14.1` → `cryptography>=38.0.3`, with no extra marker — so declaring it added no package to an install and no licence surface that was not already present; it made an existing transitive dependency into a pinned direct one, because the harness-held secret store (ROADMAP_v3 §49 slice 5a, SS57) rests on it. Its wheels carry a **Rust** extension and a statically linked **OpenSSL** (Apache-2.0); the dual licence above is the project's own, and the paragraph under *What this means* holds for it unchanged — pip fetches the wheel onto the user's machine and this project redistributes nothing, so no inbound `NOTICE` obligation arises. Wheels exist for CPython 3.7+ on Windows (x64, x86), macOS (arm64, x86_64) and manylinux/musllinux (x86_64, aarch64); where none does, pip builds the sdist locally and needs a Rust toolchain, which is the user's build rather than a distribution by this project.
+`cryptography` was **already in the install closure** before it was declared — `google-genai==1.0.0` → `google-auth>=2.14.1` → `cryptography>=38.0.3`, with no extra marker (re-measured on the 2.29.0 pin in batch 172: `google-auth>=2.56.0` → `cryptography>=38.0.3`, still unmarked) — so declaring it added no package to an install and no licence surface that was not already present; it made an existing transitive dependency into a pinned direct one, because the harness-held secret store (ROADMAP_v3 §49 slice 5a, SS57) rests on it. Its wheels carry a **Rust** extension and a statically linked **OpenSSL** (Apache-2.0); the dual licence above is the project's own, and the paragraph under *What this means* holds for it unchanged — pip fetches the wheel onto the user's machine and this project redistributes nothing, so no inbound `NOTICE` obligation arises. Wheels exist for CPython 3.7+ on Windows (x64, x86), macOS (arm64, x86_64) and manylinux/musllinux (x86_64, aarch64); where none does, pip builds the sdist locally and needs a Rust toolchain, which is the user's build rather than a distribution by this project.
 
 ## Test dependencies (not used by end users during runtime, only for CI and developer testing)
 
@@ -59,22 +60,50 @@ The dependencies listed below are **not** part of the project's own source but a
 
 `weasyprint` is BSD-3-Clause itself; the caveat is its **system** dependencies (`pango`, `cairo`, `harfbuzz`), which are LGPL and are linked at runtime rather than vendored into this project. If `markdown` or `weasyprint` is later pinned, update the version column above.
 
+## Hosted demo (`deploy/`, ROADMAP_v3 §79)
+
+What the bridge -- the process that serves a Space's or Studio's page and relays each session -- runs beside Gradio. None of it is installed by `pip install` or npm: `deploy/` ships in neither, and a deployment installs these from PyPI when the platform builds it, so nothing here is redistributed. Licences read from each version's PyPI metadata (2026-10-23).
+
+| Package | Version (as pinned) | Primary License | Apache 2.0 Compatible | Where |
+|---|---|---|---|---|
+| textual-serve | `==1.1.3` | MIT | Yes | `deploy/hosted/requirements.txt`; its browser assets only, its server never runs |
+| uv | `==0.13.4` | MIT OR Apache-2.0 | Yes | `deploy/hosted/requirements.txt`; builds the session environment |
+| websockets | `==17.3` | BSD-3-Clause | Yes | `deploy/hosted/requirements.txt`; the websocket upgrade every session is |
+| gradio | `==6.30.0` | Apache-2.0 | Yes | installed by the Space at the README's `sdk_version`; in the Studio's `bridge.lock` |
+| spaces | `==0.51.3` | Apache-2.0 | Yes | installed by the Space itself; in the Studio's `bridge.lock` |
+
+## Deploy tooling (CI only)
+
+Installed by `.github/workflows/deploy-demo.yml` to build, audit and upload a bundle (batch 169), and by the owner to deploy the Studio by hand. Never part of any install or bundle.
+
+| Package | Version (as pinned) | Primary License | Apache 2.0 Compatible |
+|---|---|---|---|
+| huggingface_hub | `==2.2.0` | Apache-2.0 | Yes |
+| pip-audit | `==2.10.1` | Apache-2.0 | Yes |
+
 ## Non-code third-party material
 
-**No third-party source code is included in this repository.** Measured, not assumed: all 200 tracked
+**No third-party source code is included in this repository.** Measured, not assumed: all 277 tracked
 Python files carry no foreign copyright header and no `SPDX-License-Identifier`; a sweep for
 copied or adapted code ("adapted from", "copied from", "taken from", "vendored", "borrowed from")
-returns only this project's own design prose; and the 34 tracked files that are neither `.py`
+returns only this project's own design prose; and the 45 tracked files that are neither `.py`
 nor `.md` are first-party without exception — the licence texts, configuration and packaging
-(`config.yaml`, `pyproject.toml`, `requirements.txt`, `package.json`, `pytest.ini`, the `.github/`
-workflows and issue templates, the dotfiles), the two prompt texts, `bin/venastine.mjs` and
-`scripts/prepublish-check.mjs`, `docs/assets/research-mode-birds-eye.mermaid`, `tui/app.tcss`, the two
-`.example` templates, and one screenshot of this project's own interface. **No third-party
-fonts, images or data files are bundled.**
+(`config.yaml`, `pyproject.toml`, the three requirements files, `package.json`, `pytest.ini`, the
+`.github/` workflows, issue templates and scanner configuration, the dotfiles), the two prompt
+texts, `bin/venastine.mjs` and `scripts/prepublish-check.mjs`, `docs/assets/research-mode-birds-eye.mermaid`,
+`tui/app.tcss`, the two `.example` templates, the hosted demo's four page templates in
+`deploy/hosted/`, one screenshot of this project's own interface, and its cover image with the
+page it is rendered from. **No third-party fonts, images or data files are bundled.** The
+cover's text is set in Cascadia Mono, Microsoft's font under the SIL Open Font License: the PNG
+holds rendered glyphs, and its page names the font, and neither carries a copy of it.
 
 *(Counts restated in batch 83. The figure had been 166 against 200, the enumeration named
 five of the thirty-four, and the closing sentence said there were no images at all while the
 screenshot was tracked. The claim itself held throughout; only its arithmetic had drifted.)*
+
+*(Restated again in batch 198, when the cover joined: 200 and 34 had become 277 and 43 as the
+project grew. Both sweeps were run again and found nothing new, and every file added since
+batch 83 is first-party.)*
 
 What the repository *does* reproduce is third-party **text**:
 

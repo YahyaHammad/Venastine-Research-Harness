@@ -29,6 +29,7 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING, Optional
 
 import config
+from security import hosted
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, never imported at runtime
     from tools.context import ToolContext
@@ -132,6 +133,14 @@ def is_tool_allowed(
     """
     permissions = config.ToolPermissions()
     if not getattr(permissions, tool_name, _default_for_unknown_tool(tool_name)):
+        return False
+    # ROADMAP_v3 §79 (HD4). A shared hosted deployment refuses the tools
+    # that reach the container itself, whatever config.yaml says: every
+    # visitor shares that container and one Unix user. Second to the global
+    # check and before any context, for the same reason that check is
+    # first -- no agent or skill may re-enable what this layer refuses.
+    # HD11 adds the math tools, unless the bridge verified their confinement.
+    if tool_name in hosted.refused_tools():
         return False
     if context is not None and context.allowed_tools is not None:
         return tool_name in context.allowed_tools

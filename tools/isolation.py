@@ -55,6 +55,7 @@ import os
 import platform
 import subprocess
 import sys
+from typing import Optional
 
 import config
 
@@ -227,14 +228,23 @@ def _interpret(tool_name: str, stdout: str, stderr: str, returncode: int,
 
 
 def run_isolated(handler, params: dict, timeout: float,
-                 tool_name: str = "") -> dict:
+                 tool_name: str = "", confine: Optional[bool] = None) -> dict:
     """Run `handler` in a killable child and return its result dict.
 
     `handler` is resolved by module and qualified name in the child rather
     than pickled: the registry's handlers are plain module-level functions
     and naming them keeps the child's import surface to the one tool.
     Both names come from the registry, never from a model.
+
+    `confine` walls the child in (security/confine.py) once it has loaded
+    the tool and before it reads `params`. None means "when this is a
+    shared hosted deployment" (§79 HD11), the one place a stranger chooses
+    what a math tool evaluates.
     """
+    if confine is None:
+        from security import hosted
+
+        confine = hosted.is_shared()
     tool_name = tool_name or getattr(handler, "__name__", "tool")
     module = getattr(handler, "__module__", None)
     function = getattr(handler, "__name__", None)
@@ -248,7 +258,8 @@ def run_isolated(handler, params: dict, timeout: float,
 
     request = json.dumps({"module": module, "function": function,
                           "params": params, "max_bytes":
-                          MAX_CHILD_OUTPUT_BYTES})
+                          MAX_CHILD_OUTPUT_BYTES, "confine": bool(confine),
+                          "tool_name": tool_name})
 
     popen_kwargs = {}
     if platform.system() != "Windows":
@@ -295,6 +306,20 @@ def _child_main() -> int:
 
     module = importlib.import_module(request["module"])
     handler = getattr(module, request["function"])
+    if request.get("confine"):
+        # AFTER the import, which is what needs the filesystem, and BEFORE
+        # the params are touched, which is where a visitor's expression is.
+        # A wall that will not go up means the call does not run: there is
+        # no unconfined fallback to fall to (security/confine.py).
+        from security import confine
+
+        reason = confine.lock_down()
+        if reason:
+            name = request.get("tool_name") or request["function"]
+            sys.stdout.write(MARKER + json.dumps({
+                "error": f"{name} was not run: this deployment could not "
+                         f"confine it ({reason})."}) + "\n")
+            return 0
     result = handler(request["params"])
 
     payload = json.dumps(result, default=str)

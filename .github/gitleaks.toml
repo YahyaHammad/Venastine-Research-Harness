@@ -1,5 +1,5 @@
 # Gitleaks config for the secrets job (gitleaks.yml). Extends the default
-# rule set; the only delta is the allowlist below.
+# rule set; the only delta is the allowlists below.
 #
 # These paths are gitignored runtime/build residue, not committable
 # content, so scanning them can only produce noise:
@@ -19,4 +19,27 @@ paths = [
     '''providers\.json$''',
     '''__pycache__/''',
     '''\.pyc$''',
+]
+
+# The Hugging Face OAuth app's client id in config.yaml (ROADMAP_v3 §79,
+# HD5). PUBLIC by design -- the app has no secret, and the id is what HF's
+# consent page shows the person approving -- but generic-api-key reads any
+# high-entropy value assigned to a `client_id` name as a key. Blessed by
+# SHAPE, not by line number (TECHNICAL_DEBT 87: a line-pinned fingerprint
+# re-fires whenever config.yaml grows above it): all three must hold -- the
+# rule, the file, and the exact `hf_oauth_client_id: "<uuid>"` line -- so a
+# real key pasted anywhere else in config.yaml still fires. Paths are
+# relative to --source, so a demo bundle (scripts/build_demo_bundle.py) is
+# scanned with `--source .` from inside it; scanned from outside, its path
+# is `<dir>/config.yaml` and the id fires (measured 2026-10-20).
+[[allowlists]]
+description = "hf_oauth_client_id in config.yaml is a public OAuth client id"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''^config\.yaml$''']
+# `\s*` at both ends: the line gitleaks matches against carries the newline
+# before it (measured: anchored on `^hf_`, only a first-line copy matched).
+regexTarget = "line"
+regexes = [
+    '''^\s*hf_oauth_client_id: "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"\s*$''',
 ]

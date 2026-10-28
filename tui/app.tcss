@@ -252,9 +252,20 @@ PermissionScreen {
    screen had both a type selector and an id block for its dialog, and
    five of nine never got the first -- they measured at x=0, y=0, pinned
    to the top-left corner of an 80x24 terminal. The viewport test in
-   tests/test_tui.py pushes all nine and would catch a tenth. */
+   tests/test_tui.py pushes every modal the app defines; until batch 179
+   it pushed only the ones its table listed, and SecretScreen, which came
+   later and missed both the row and this rule, opened every masked
+   prompt in the corner. */
 
 GrantPickerScreen {
+    align: center middle;
+}
+
+SecretScreen {
+    align: center middle;
+}
+
+NoticeScreen {
     align: center middle;
 }
 

@@ -201,6 +201,7 @@ class ToolPermissionsModel(_Model):
     logic: StrictBool
     geometry: StrictBool
     read: StrictBool
+    view_image: StrictBool
     write: StrictBool
     edit: StrictBool
     shell: StrictBool
@@ -247,6 +248,7 @@ class ToolApprovalsModel(_Model):
     logic: StrictBool
     geometry: StrictBool
     read: StrictBool
+    view_image: StrictBool
     write: StrictBool
     edit: StrictBool
     shell_input: StrictBool
@@ -363,6 +365,7 @@ class HarnessConfig(_Model):
     max_file_size_bytes: PositiveInt
     max_read_lines: PositiveInt
     max_read_chars: PositiveInt
+    max_image_bytes: PositiveInt
 
     # -- /init -------------------------------------------------------------
     initializer_agent: str
@@ -462,6 +465,10 @@ class HarnessConfig(_Model):
     # -- Context windows ---------------------------------------------------
     model_context_windows: dict[str, PositiveInt]
     default_context_window: PositiveInt
+
+    # -- Connecting a model (ROADMAP_v3 §79, HD5) --------------------------
+    # A public client id; empty hides the sign-in.
+    hf_oauth_client_id: str
 
     # -- Tool permissions and approvals -----------------------------------
     tool_permissions: ToolPermissionsModel

@@ -144,13 +144,49 @@ class _FakeModels:
         return types.SimpleNamespace(data=[])
 
 
+class _FakeOpenAIResponses:
+    """Fake of client.responses on the OpenAI SDK (ROADMAP_v3 §83).
+
+    `create` records the request and returns the next queued stream -- a
+    list of events, iterated -- or raises it when an exception was queued.
+    An empty queue answers an empty stream, which `_stream_usage` then
+    judges like any stream that carried no usage.
+    """
+
+    def __init__(self):
+        self._streams = []
+        self.requests = []
+
+    def set_streams(self, streams):
+        self._streams = list(streams)
+
+    def create(self, **kwargs):
+        self.requests.append(kwargs)
+        stream = self._streams.pop(0) if self._streams else []
+        if isinstance(stream, BaseException):
+            raise stream
+        return iter(stream)
+
+
 class _FakeOpenAIClient:
-    """Fake of OpenAI(...) construction. Returns a client with .chat
-    and a .models endpoint that reports no context window by default."""
+    """Fake of OpenAI(...) construction. Returns a client with .chat, a
+    .models endpoint that reports no context window by default, and the
+    Responses surface §83's plan path uses: .responses and a raw .get.
+
+    The constructor's keywords are KEPT, because what the plan's client is
+    built with -- a key function, no SDK retries -- is a decision (CG21)."""
 
     def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.api_key = "" if callable(kwargs.get("api_key")) \
+            else kwargs.get("api_key", "")
         self.chat = _FakeOpenAIChat()
         self.models = _FakeModels()
+        self.responses = _FakeOpenAIResponses()
+        self.listing = {"models": []}
+
+    def get(self, path, *, cast_to=None, **_options):
+        return self.listing
 
 
 def _build_fake_openai_module():
@@ -236,7 +272,7 @@ def _build_fake_anthropic_module():
 def _build_fake_google_module():
     """Two-level fake: `google` and `google.genai`. Includes a `types`
     submodule with the classes core/client.py's GOOGLE branch constructs
-    (Tool, FunctionDeclaration, FunctionCall, FunctionResponse, Part,
+    (Tool, FunctionDeclaration, FunctionCall, FunctionResponse, Part, Blob,
     Content, GenerateContentConfig) and a fake `models.generate_content`
     on the client so call_model's GOOGLE branch can be tested offline."""
 
@@ -268,11 +304,22 @@ def _build_fake_google_module():
             self.response = response
             self.id = id
 
+    class _FakeBlob:
+        """ROADMAP_v3 §81 (IM9): `data` is bytes, as on the pinned Blob."""
+
+        def __init__(self, mime_type=None, data=None, **kw):
+            self.mime_type = mime_type
+            self.data = data
+
     class _FakePart:
-        def __init__(self, text=None, function_call=None, function_response=None, **kw):
+        def __init__(self, text=None, function_call=None, function_response=None,
+                     thought_signature=None, inline_data=None, **kw):
             self.text = text
             self.function_call = function_call
             self.function_response = function_response
+            # ROADMAP_v3 §82 (GS2): bytes, as on the pinned Part.
+            self.thought_signature = thought_signature
+            self.inline_data = inline_data
 
     class _FakeContent:
         def __init__(self, role=None, parts=None, **kw):
@@ -289,18 +336,21 @@ def _build_fake_google_module():
             self.thinking_config = thinking_config
 
     class _FakeThinkingConfig:
-        """Mirrors the REAL google-genai's ThinkingConfig, which exists on the
-        pinned 1.0.0 -- but note the real one there carries only
-        `include_thoughts`; `thinking_budget` arrived in a later release.
-        The fake accepts both so tests can exercise either side of
-        core.client._google_supports_thinking_budget(), which is the gate
-        that keeps §16 from sending a field the pinned SDK cannot carry."""
+        """Mirrors the REAL google-genai's ThinkingConfig on the pinned
+        2.29.0: `include_thoughts`, `thinking_budget` and `thinking_level`.
+        The old pin (1.0.0) carried only `include_thoughts`, which is why
+        core.client._google_supports_thinking_budget() exists -- the gate
+        that keeps §16 from sending a field the installed SDK cannot carry.
+        Tests reach its other side by patching it."""
 
-        model_fields = {"include_thoughts": None, "thinking_budget": None}
+        model_fields = {"include_thoughts": None, "thinking_budget": None,
+                        "thinking_level": None}
 
-        def __init__(self, include_thoughts=None, thinking_budget=None, **kw):
+        def __init__(self, include_thoughts=None, thinking_budget=None,
+                     thinking_level=None, **kw):
             self.include_thoughts = include_thoughts
             self.thinking_budget = thinking_budget
+            self.thinking_level = thinking_level
 
     class _FakeSchemaField:
         """Just the `.alias` that `_google_schema_keys` reads."""
@@ -321,18 +371,20 @@ def _build_fake_google_module():
         worse -- the reduction would strip every key and the tests here would
         pass against schemas that are not what production sends.
 
-        These are the 22 fields of `google-genai==1.0.0`. The alias is the
-        camelCase spelling, which is how JSON Schema writes them and is the
-        half that makes `anyOf` recognisable at all. This fake is NOT
+        These are the 25 fields of `google-genai==2.29.0` (1.0.0 had 22;
+        `additional_properties`, `defs` and `ref` arrived since). The alias
+        is the camelCase spelling, which is how JSON Schema writes them and
+        is the half that makes `anyOf` recognisable at all. This fake is NOT
         `extra="forbid"` and does not validate -- it cannot, and that is what
         `tests/test_sdk_conformance.py` drives the REAL package for.
         """
 
         _NAMES = (
-            "any_of", "default", "description", "enum", "example", "format",
+            "additional_properties", "any_of", "default", "defs",
+            "description", "enum", "example", "format",
             "items", "max_items", "max_length", "max_properties", "maximum",
             "min_items", "min_length", "min_properties", "minimum",
-            "nullable", "pattern", "properties", "property_ordering",
+            "nullable", "pattern", "properties", "property_ordering", "ref",
             "required", "title", "type",
         )
 
@@ -354,6 +406,7 @@ def _build_fake_google_module():
     types_mod.FunctionCall = _FakeFunctionCall
     types_mod.FunctionResponse = _FakeFunctionResponse
     types_mod.Part = _FakePart
+    types_mod.Blob = _FakeBlob
     types_mod.Content = _FakeContent
     types_mod.GenerateContentConfig = _FakeGenerateContentConfig
 

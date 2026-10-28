@@ -43,6 +43,12 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
+- **§83. A ChatGPT plan, spent in a local install** - **(IN PROGRESS: decided with the owner in batch 180; slice 0, the measurement, complete across batches 181-183; slice 1, the sign-in and `/disconnect`, BUILT in batch 184 and checked live by the owner in batch 185; slice 2 planned in batch 186, measured in batch 187 and BUILT in batch 188 (CG17-CG24), and checked live by the owner in batch 189 with two of its steps unreported)** (OpenAI's Sign in with ChatGPT now invites open-source apps that run locally to spend a Plus or Pro subscriber's plan, the first provider since ModelScope to pass HD5's test; the harness has no Responses API path, no loopback listener, no credential that refreshes itself, and no way to sign out of anything)
+- **§82. Gemini 3's thought signatures, and a pin that could not carry them** - **(BUILT in batch 172)** (every model a new Google account can call is Gemini 3, which refuses a function call replayed without the signature it came with, and google-genai 1.0.0 had no field to hold one, so every GOOGLE tool loop failed on its second request. The pin moves to 2.29.0, each call's signature rides in §44's reasoning record, a turn another model wrote gets Google's placeholder, and the Schema keys sent are a verified list since 2.29.0's Vertex-only `additional_properties` was refused. Google effort is on as a consequence)
+- **§81. An image a tool reads, delivered to a model that can see it** - **(BUILT in batch 171; Google added in batch 173)** (nothing a model could read from the workspace reached it as anything but text: a tool result was `str(result)`, `read` decoded bytes with `errors="replace"`, and MCP dropped image blocks by decision. `view_image` attaches an image to its own result through the memory, into a new column, never through the redactor; Anthropic carries it inside the `tool_result`, the OpenAI-compatible wire in a harness message after the tool batch because its tool messages take text only, and since batch 173 Google in a harness turn after the batch too, because its function responses take no image on the models a new account can call (a GIF stays a note there); opt-in per provider with `accepts_images`, never in a research pass, and counted at a fixed weight by the compactor)
+- **§80. The copyright year, kept by a workflow** - **(BUILT in batch 169)** (the owner asked not to have to remember it: LICENSE's appendix and NOTICE both said `Copyright 2026`, and nothing would move either; a workflow at 23:59 UTC on December 31, and again on January 1 in case GitHub delayed or dropped that run, writes a range from the first year to both files together; LY1-LY3)
+- **§79. A demo nobody has to install** - **(BUILT across batches 163-169: slice 1, `/connect`, BUILT in batch 163; slice 2, hosted modes, BUILT in batch 164; slice 3, the bridge, the bundle and the math tools' confinement, BUILT in batch 165; slice 4, ModelScope as a Docker Studio and no pasted keys on a shared deployment, BUILT in batch 166; slice 5, ModelScope sign-in completed by the bridge, BUILT in batch 167; slice 6, the pre-public fixes, BUILT in batch 168; slice 7, the deploy workflow, gated on every CI check, BUILT in batch 169)** (the harness ran only where someone installed it, and connecting a model meant copying a template and editing JSON by hand; the owner asked for a public Hugging Face Space and ModelScope Studio kept current from `main`, a sign-in where a provider's own documentation invites one, and a private single-user mode with the full harness; HD1-HD13)
+- **§78. A release tag that named one version while the run packed another** - **(BUILT in batch 162)** (`v0.3.0` and `v0.3.1` were pushed on commits whose `package.json` and `pyproject.toml` both said 0.2.0, and the `v0.3.1` publish run packed `@yahyahammad/venastine@0.2.0` and reported the prepublish check passed, because that check compared the two files with each other and nothing read the tag; it uploaded nothing only because no `NPM_TOKEN` exists. The owner ruled both tags releases whose bump was missed, left the files and the tags where they are, and put the comparison first in `scripts/prepublish-check.mjs`, before anything is packed; A78)
 - **§77. The approval wait that gave up before the test that was answering it** - **(BUILT in batch 161)** (the `v0.3.1` tag run failed one pilot test, "tool never dispatched", after the same commit had passed twice: `conftest`'s autouse fixture shrank a modal's wait to 5s, half of `settle`'s 10s deadline, and 23 pilot tests act on an open modal inside that wait. Raised to 30s and pinned from below as well as from above; A77)
 - **§76. Nine security findings the marathon deferred, and the answer each was waiting for** - **(BUILT in batch 160)** (the nine `security`-area issues batch 159 filed, each put to the owner with options and a recommendation: `**` unpacking refused by the math guard, an empty workspace refused before it resolves, a `.env` read and never loaded, the redaction vocabulary widened to the current vendor formats and three structural shapes, the word on each side of a session buffer's dropped middle moved into the gap, a hardlink into `.venastine/` refused by inode, a session's refused credential quarantined, bidi and zero-width characters revealed in approvals, and an MCP tool's description ruled third-party data in the system prompt; A68-A76)
 - **§75. Thirteen alerts that read a name as a secret, and the gate nothing in the workflow could fail** - **(BUILT in batch 158)** (PR #200's first `CodeQL` check raised 13 high-severity alerts and every one was a false positive: ten came from a source heuristic that reads `args.secrets`, `_secret_twin_name()` and `KEY_PASSPHRASE` as secrets because of their names, and three were test assertions read as URL sanitizers; `tests/` is now skipped because it never ships, the eight in shipped code are dismissed with recorded reasons, and the same red check is the measurement TECHNICAL_DEBT 76 lacked -- the gate is GitHub's pull-request check, and the workflow header now says so)
@@ -2726,6 +2732,1104 @@ leaked PID.
   because MCP is the only dynamic registrant and the composed name is its
   fact. A bound in the registry would be the fix-at-the-consumer shape
   `AGENTS.md` names by name.
+---
+
+## §83. A ChatGPT plan, spent in a local install
+
+**Decided with the owner on 2026-10-26, in batch 180; not built.** The owner
+asked whether any other major provider now passes HD5's test -- its own
+documentation invites a third-party app to sign its users in -- and one does,
+for local installs only. OpenAI's Sign in with ChatGPT (DevDay, October 2026)
+lets Plus and Pro subscribers spend their ChatGPT plan inside open-source and
+locally hosted apps. §79's survey, which found nothing comparable for
+OpenAI, is superseded by this section for local installs. For a remotely
+hosted or paid app OpenAI asks for its interest form first, and nobody has
+filed one.
+
+The same re-survey found nothing else. Anthropic's legal page forbids a
+third-party app from offering Claude.ai login. Google's Gemini OAuth guide
+covers a project authenticating itself, for testing. GitHub Models was
+retired on 2026-07-30, inference API included. Qwen Code's free OAuth tier
+ended on 2026-04-15.
+
+**WHAT WAS MEASURED** on 2026-10-26, without an account:
+
+- `https://auth.openai.com/.well-known/openid-configuration` answers with
+  issuer `https://auth.openai.com`; authorization at `/api/accounts/authorize`,
+  token at `/api/accounts/oauth/token`, revocation at
+  `/api/accounts/oauth/revoke`, keys at `/.well-known/jwks.json`; token
+  authentication methods including `none`; PKCE `S256` only; grants
+  `authorization_code` and `refresh_token`; and no device authorization
+  endpoint. So the only way back to the harness is a redirect.
+- Its `scopes_supported` lists `openid profile email offline_access` only. The
+  two plan scopes the guide asks for are not advertised there, so slice 0
+  measures whether they are granted.
+
+**WHAT OPENAI'S PAGES SAY**, read the same day:
+
+- **Registration happens during the first sign-in.** The request carries
+  `client_id=dynamic_agent_client`, a host id (`ext_agent_host_id`, a
+  `urn:uuid` chosen before the first sign-in and kept) and the app's name
+  (`agent_name_hint`). The callback returns an issued client id, saved per
+  account and reused. There is no client secret.
+- **The redirect is `http://127.0.0.1:<port>/auth/callback`.** The port may
+  change between sign-ins; the scheme, host and path may not, and `localhost`
+  is not a substitute.
+- **Scopes** `openid profile email offline_access resource.invoke
+  chatgpt.tokens.use.direct`, resource `https://api.openai.com/v1`. A valid ID
+  token alone does not grant plan usage: the granted scopes must include
+  `chatgpt.tokens.use.direct`.
+- **Access tokens last an hour; refresh tokens last 30 days and rotate on
+  every refresh.** Refreshes of one session are to be serialized, because a
+  reused refresh token is refused.
+- **Inference is `POST /v1/responses` and nothing else.** Every request sends
+  `store: false` and `stream: true`, no `previous_response_id`, and no
+  system-message item. Hosted tools (file search, code interpreter, image
+  generation, computer use, hosted MCP), audio and video input and the Files
+  API are unsupported.
+- **Errors are `subscription_sharing_*` codes, each with a prescribed
+  recovery.** A usage limit is a 429 that is not retried and that points the
+  person at ChatGPT's usage settings.
+- **Sign-out revokes the refresh token.** When revocation cannot be confirmed,
+  the local tokens are cleared anyway and the person is told where to
+  disconnect the app in ChatGPT.
+- **The UI guidelines set the words:** "Continue with ChatGPT" to start, a
+  one-time "You're using your ChatGPT plan" notice, "Using ChatGPT plan" with
+  a "Manage usage" link near where the person types, and "Manage usage" as
+  the first action on a usage-limit error.
+
+**WHAT NOBODY KNOWS UNTIL SOMEONE SIGNS IN**, which is why slice 0 exists. The
+pages do not say whether a plan token takes function tools, image input or a
+reasoning effort; what the stream reports as usage; which models a Plus
+account lists; the address of ChatGPT's usage settings; or what a limit looks
+like before it is reached.
+
+Pages read: `https://developers.openai.com/siwc`,
+`https://developers.openai.com/siwc/token-sharing-open-source` and its
+`sign-in`, `models-and-inference`, `token-reference`,
+`profiles-and-sessions`, `errors-and-recovery`, `preview-limitations` and
+`self-hosted-vms` pages, `https://developers.openai.com/siwc/ui-ux-guidelines`,
+and `https://developers.openai.com/cookbook/articles/sign-in-with-chatgpt`.
+
+### Slice 0, first run (2026-10-26, batch 181)
+
+The owner ran the probe on their own account: 27 steps on `gpt-6.1-sol`, the
+first model listed, signed out at the end. Its guard withheld nothing, and a
+separate scan of the results file found no email, token, client id or
+account id.
+
+**MEASURED:**
+
+- **The sign-in is as documented.** The callback carried `client_id`
+  (`oaiapp_`, 32 characters), `code`, `scope` and `state`, and all six scopes
+  were granted. The ID token is RS256 with a `kid`, verified against the
+  published keys, with the nonce matched. It names no plan: its namespaced
+  claim holds a salt and nothing else. The access token is a JWT for
+  `https://api.openai.com/v1`. Both last 3600 seconds.
+- **The token response has a field no page mentions, `earliest_refresh_at`.**
+  Its value was not recorded. A refresh less than two minutes after sign-in
+  succeeded and rotated the refresh token.
+- **A reused refresh token was accepted.** Offering the replaced one again
+  answered 200, and the newest access and refresh tokens kept working -- not
+  the `refresh_token_reused` refusal the pages describe. CG4's lock stays: a
+  grace window is the server's choice and not a promise, and nobody has
+  measured how long it lasts.
+- **Revocation ends the access token as well.** An empty 200, after which the
+  access token answered 401 `invalid_token` at once, and the refresh token
+  answered `invalid_grant` asking for a fresh sign-in.
+- **Seven models are listed, of nine:** `gpt-6.1-sol` with a 500,000-token
+  context window, and `gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna`,
+  `gpt-5.6-sol`, `gpt-5.6-terra` and `gpt-5.6-luna` at 272,000. Every one
+  takes text and image input and parallel tool calls. Each entry also
+  carries Codex's own configuration -- its base instructions and model
+  messages, `tool_mode: code_mode_only`, a minimum Codex client version --
+  which the harness has no use for and does not forward.
+- **Refused, conclusively:** `stream: false` (400, "Stream must be set to
+  true"); `temperature` (400, an unsupported parameter); efforts `none` and
+  `minimal` (400 `unsupported_value`, whose message lists low, medium, high,
+  xhigh and max for `gpt-6.1-sol`, while the model list also offers
+  `ultra`); and Chat Completions (401 `rejected_by_access_enforcement`),
+  which is CG3's premise measured. A refusal comes in either of two shapes,
+  `{"detail": ...}` or the standard error object.
+- **No rate-limit headers.** `x-codex-*` headers instead, among them
+  `x-codex-safety-buffering-enabled: true`, whose meaning no page states.
+
+**NOT MEASURED, BY THE PROBE'S FAULT.** Every request OpenAI admitted --
+plain, `instructions`, the system and developer items, `max_output_tokens`,
+efforts low to xhigh, encrypted reasoning, the tool call and the image --
+answered 200 with a stream that carried no `Content-Type` header. The probe
+took a missing type for "not a stream" and discarded the body. A 200 at
+admission does not say the stream completed, so what each returned is
+unknown: whether a system item is refused inside the stream, whether
+function tools work under `code_mode_only`, whether an image is seen, and
+what usage the stream reports. The probe is fixed and checked against a
+fake that omits the header the same way; it now also tries `max` and
+`ultra` and records where `earliest_refresh_at` points. A second run is owed
+before slice 2, and so is the address of ChatGPT's usage settings (CG8).
+
+### Slice 0, second run (2026-10-26, batch 182)
+
+The owner ran the fixed probe: 29 steps on `gpt-6.1-sol`, signed out at the
+end, and again the guard withheld nothing. Every request OpenAI admitted
+streamed to `response.completed`, so the first run's gap is closed. Each
+request took three to nine seconds.
+
+**MEASURED:**
+
+- **The stream is the Responses stream, with two additions and no
+  `Content-Type`.** Both runs streamed without the header. The events are the
+  documented ones plus `response.metadata`, and a message item carries a
+  `phase` key the documentation does not describe. A translation has to
+  ignore an event or a key it does not know, not fail on it.
+- **Usage arrives on `response.completed`:** `input_tokens`, `output_tokens`,
+  `total_tokens`, cached and cache-write counts, reasoning tokens, and an
+  `attribution` breakdown by item id that nothing here needs.
+- **Function tools work, whatever `tool_mode: code_mode_only` means.** One
+  request asking for two cities got two `get_weather` calls in one response.
+  The calls, handed back verbatim with their item ids and statuses next to
+  their results, completed the turn, `store: false` notwithstanding. Since
+  that variant worked, the variants without ids were not tried.
+- **A system item was accepted and obeyed**, against the preview-limitations
+  page: the model answered in French as the item told it to. CG3 still sends
+  the system prompt as `instructions`, which also worked; the usage counts
+  it under its own heading.
+- **Efforts for `gpt-6.1-sol` are low, medium, high, xhigh and max.** `max`
+  completed. `ultra`, which the model list offers, is refused as
+  `invalid_value`, and the refusal lists the route's whole vocabulary: none,
+  minimal, low, medium, high, xhigh and max. `none` and `minimal` are
+  refused for this model as in the first run. So the model list's
+  `supported_reasoning_levels` is not the route's answer, and slice 2 must
+  not take it as one.
+- **Encrypted reasoning arrives unasked.** Every response that reasoned
+  carried a `reasoning` item with `encrypted_content` of about 1.7 to 2 KB,
+  without `include`, and with an empty summary. An `include` of
+  `reasoning.encrypted_content` is accepted too. Whether to hand it back on
+  later turns is slice 2's question under §44's record.
+- **An image is delivered and was misread once.** A data-URL `input_image`
+  was accepted, and the model named a colour, so it saw something. The
+  image was a solid red 8x8 PNG, checked red pixel by pixel, and the model
+  called it "Peach". One swatch shows delivery and says nothing about how
+  well a real image is read, so CG7 keeps images off until one is tried.
+- **`max_output_tokens` is accepted** (64, on a two-word answer).
+- **`earliest_refresh_at` is epoch seconds, about 3,240 seconds after
+  issue** -- some six minutes before the hour runs out. It is advice and not
+  a floor: a refresh about two minutes after sign-in succeeded in both runs.
+  Slice 1 refreshes after it and before expiry, which is CG4's window.
+- **A reused refresh token was accepted again**, immediately, with the newest
+  tokens still working afterwards, as in the first run.
+- **After revocation the access token is refused** with 401 `token_revoked`,
+  in the standard error shape this time, where the first run got
+  `invalid_token` in the `{"detail": ...}` shape. Either has to read as
+  "signed out".
+- **No rate-limit headers in either run.** The `x-codex-*` headers repeat,
+  naming `gpt-6-luna` as a "faster model" for safety buffering.
+
+**The usage-settings address**, which the API cannot report, was read by
+the owner from ChatGPT the same day (batch 183):
+`https://chatgpt.com/settings/usage?tab=overview`. CG8's Manage usage link
+points there. Slice 0 is complete.
+
+### Slices
+
+- **Slice 0 -- the measurement** (CG7). The owner signs in on their own Plus or
+  Pro account and the probe asks what the pages leave open: the model list, a
+  plain streamed answer, a function tool and its result handed back, an
+  image, each reasoning effort, the usage on the completed event, and the
+  usage-settings address. It prints statuses and shapes, never a token. The
+  answers are written into this section before slice 2 is.
+- **Slice 1 -- signing in, staying signed in, signing out. BUILT in batch 184.** `/connect chatgpt`
+  (CG2, CG5, CG6), the token file and its refresh (CG4), the first-sign-in
+  notice (CG8), and `/disconnect <name>` for every provider (CG9).
+- **Slice 2a -- the shapes a second turn needs** (CG17). A third probe run
+  on the owner's account, through the transport slice 2b uses, before any
+  translation is written. Planned in batch 186, measured in batch 187.
+- **Slice 2b -- the Responses path. BUILT in batch 188.** The CHATGPT translation in
+  `core/client.py` (CG3, CG18, CG21, CG22), built against the answers of
+  slices 0 and 2a; the error mapping (CG10); the keyless entry (CG20); and
+  the "Using ChatGPT plan" indicator and the limit message (CG8, CG19).
+
+### Slice 1, built (batch 184)
+
+`core/chatgpt_auth.py` holds the credential and nothing else: discovery,
+the one-shot listener, the code exchange, the ID token check, the token
+file under its cross-process lock, the refresh, and the revocation.
+`/connect chatgpt` drives it; `/disconnect` is new and covers every
+provider. The owner chose six things before it was built (CG11-CG16):
+slice 1 ships on its own, with `/model CHATGPT` refused until slice 2; one
+ChatGPT account per install, forgettable; a key's removal blanks it and
+keeps the entry; `/disconnect` confirms first; the provider in use may go,
+and is said to; PyJWT is declared.
+
+**Not measured, and said where it is used:** which tab of ChatGPT's settings
+lists connected apps. OpenAI's page says only "in ChatGPT Settings", so the
+revoke page is `https://chatgpt.com/settings`, the root of the pages the
+owner's usage address showed exist. The owner's live check of slice 1 is
+where the tab gets read.
+
+### Slice 1, live check (2026-10-27, batch 185)
+
+The owner ran, in a local TUI on their own account: `/connect chatgpt`,
+`/model CHATGPT`, `/disconnect chatgpt`, `/connect chatgpt` again, and
+`/disconnect chatgpt --forget`. **The sign-in and the sign-out both worked,
+both times.** The token file afterwards, read by its structure alone: the
+host id and the four endpoints, with no registration and no session -- what
+`--forget` is meant to leave -- and both it and its lock file ignored by git.
+
+**What the check found:** the owner could not tell plain `/disconnect
+chatgpt` from `--forget`. Nothing was wrong underneath: the difference shows
+only at the NEXT sign-in -- the same client id reused, or a fresh
+registration that may be another account and shows the first-sign-in notice
+again -- and only `--forget`'s result said anything about the registration.
+CG12 is amended accordingly: both forms now say what happens to it.
+
+**Not reported, so not recorded as measured:** whether OpenAI asked for
+consent again on the second sign-in, which reused the saved client id; and
+which tab of ChatGPT's settings lists connected apps, so the revoke page is
+still the settings root.
+
+### Slice 2, planned (batch 186)
+
+The owner chose six things before anything was written (CG17-CG22): measure
+first; hand reasoning back and show its summaries; a clickable header; a
+keyless `providers.json` entry; the openai SDK as the transport; and effort
+levels read from the model list, filtered.
+
+**WHY A THIRD MEASUREMENT.** Slice 0 sent single requests. A conversation's
+second turn sends shapes none of them did:
+
+- an earlier assistant reply, as an input item;
+- the harness's own function calls, which it stores as `{id, name, input}`:
+  no `fc_` item id and no status, the variant slice 0 skipped because the
+  verbatim one worked. After a `/model` switch, they also carry call ids
+  another provider wrote (`toolu_...`, a uuid4);
+- a reasoning item handed back with `store: false`, inside a tool loop and
+  before the next user message. Slice 0's tool call reasoned too little to
+  produce one, so that variant was never sent;
+- the harness's real tool schemas. A function tool sent without `strict`
+  may be held to strict mode, the Responses reference's default, and none of
+  the fifteen the registry advertises by default meets strict mode's rules
+  (measured here: every object would need `additionalProperties: false` and
+  every property required). Slice 0's one tool was written to meet them.
+
+Slice 2a also asks for reasoning summaries, with and without an effort; the
+model list says every model supports them and defaults them off. It sends
+`max_output_tokens` at the harness's 16,000, and effort `none` to every
+listed model, whose refusal names that model's levels, to check CG22's rule
+on each. It records every event type the SDK yields and every message
+`phase`.
+
+**WHAT WAS CHECKED HERE, against the pinned openai 2.45.0, before it was
+chosen** (CG21):
+
+- `api_key` may be a callable. `_prepare_options` calls it before every
+  request whose options carry `bearer_auth`, the default, so a refreshing
+  token needs no other plumbing.
+- The stream path never reads `Content-Type`, which the plan route never
+  sends.
+- The stream raises only on an event whose top-level `error` key is an
+  object, so the Responses `error` event and `response.failed` arrive as
+  events the translation has to read itself.
+
+**ADOPTED DEFAULTS** (implementation-level; the owner may overturn any):
+
+- A usage limit ends the turn and any pipeline run it is part of. Nothing
+  retries it, and the person's next message makes one attempt.
+- An ineligible account is told once per session.
+- `/model` and `/effort` offer the models the list marks `visibility:
+  list`; a hidden one still works when named.
+- The context window is the list's `context_window`, not the larger
+  `max_context_window`.
+- Never sent: Codex's `base_instructions` and `model_messages`,
+  `service_tier` and the fast tiers, `previous_response_id`, `temperature`,
+  and any hosted tool.
+
+### Slice 2a, measured (2026-10-27, batch 187)
+
+The owner ran the turns probe on their own account: 25 requests on
+`gpt-6.1-sol` through the openai SDK, set up as slice 2b will set it up,
+then a sign-out. The guard withheld nothing, and a separate scan of the
+results file found no token, email, client id or refresh token.
+
+**MEASURED:**
+
+- **An earlier reply goes back as a plain message.** `{"role": "assistant",
+  "content": "<text>"}` completed, and the model used it: it named the
+  colour the earlier turn was told. Two user messages in a row completed
+  too.
+- **The harness's own tool schemas are taken as they are.** All fifteen,
+  sent without `strict`, completed with a `get_time` call, so strict mode was
+  not applied to them although none meets its rules. `strict: false`
+  completed the same way. The fifteen cost about 3,600 input tokens a
+  request.
+- **A call goes back without its item id.** `{type, call_id, name,
+  arguments}` with its `function_call_output` completed, and so did the
+  same call under a `toolu_...` call id and under a uuid4, which is what a
+  thread holds after a switch from Anthropic or Google. The `fc_` id need
+  not be kept, so §82's per-call record has no counterpart here.
+- **A reasoning item goes back before the next user message**, with its id
+  and without it, under `store: false`. As the SDK parses it, with `None`
+  fields left out, it holds `content`, `encrypted_content` (about 1.8 KB),
+  `id`, `summary` and `type`.
+- **A summary is asked for with `reasoning.summary: "auto"`, and it streams
+  as `response.reasoning_summary_text.delta`**: 95 deltas and 389
+  characters under a bold heading, when it was asked for on its own. Asked
+  for beside effort `high`, on the same question, no summary came; both
+  answered 200. "auto" leaves the choice to the server, and one sample each
+  is not a rule. Neither showed more output tokens than the control.
+- **`max_output_tokens: 16000`** is accepted.
+- **CG22's rule holds wherever the route answers.** `gpt-6.1-sol` and
+  `gpt-6-astra` refuse `none` and name low, medium, high, xhigh and max:
+  exactly the list's levels with `ultra` taken out. The other six accept
+  `none`, a level their list entries do not name, so there the rule offers
+  less than the route takes and never more. Whether each of low to max is
+  accepted on those six was not sent.
+- **The list names eight models now:** `gpt-6.1-terra` is new, at 500,000
+  tokens, beside the seven slice 0 saw.
+- **The SDK carries all of it.** The key function was called 25 times for
+  25 requests. No stream carried `Content-Type`, and the SDK read every
+  one. Its requests send its own `User-Agent` and `x-stainless-*` headers
+  and no `OpenAI-Organization` or `OpenAI-Project`; no `OPENAI_*` variable
+  is set on the owner's machine, so an install where one is set was not
+  seen. The route sets a cookie, and the SDK's client sends it back.
+- **An event the SDK does not know is parsed as the wrong class.**
+  `response.metadata` came out as a `ResponseAudioDeltaEvent` whose `type`
+  still reads `response.metadata`. The translation must dispatch on `type`,
+  never on the class.
+- **The sign-out is as before.** Revocation answered an empty 200; the
+  access token was then refused with 401 `token_revoked`, and the refresh
+  token with `invalid_grant`.
+
+**NOT MEASURED:**
+
+- **A reasoning item handed back inside a tool loop.** At xhigh and at max
+  the model called `get_time` without reasoning first, so no response
+  carried both a reasoning item and a call. The item is accepted as input,
+  with or without its id, before a user message; whether slice 2b also
+  sends it before a call's output on that evidence is the owner's to decide
+  before the build.
+- **`none` as an offered effort.** Six models take it and their list
+  entries do not name it, so CG22's rule does not offer it. Whether
+  `/effort` should is the owner's to decide before the build.
+- **A failure inside a stream.** Nothing failed, so neither an `error`
+  event nor `response.failed` was seen.
+
+### Slice 2b, built (batch 188)
+
+The plan answers. The owner settled the two things slice 2a left open
+(CG23, CG24): reasoning goes back everywhere, the tool loop included, and
+`/effort` does not offer `none`.
+
+**WHAT WAS BUILT:**
+
+- **The client** (`_chatgpt_client`) is the openai SDK at
+  `chatgpt_auth.RESOURCE`. Never the entry's `API_URL`: the token is minted
+  for that resource alone, and a hand edit must not send it elsewhere.
+  `api_key` is the function `chatgpt_auth.access_token`, and
+  `max_retries=0`. A hosted deployment is refused, as the sign-in is (CG1).
+- **The translation:**
+  - an earlier reply as a plain assistant message;
+  - a call as `{type, call_id, name, arguments}`, with no item id;
+  - a result as `function_call_output`, its images replaced by IM5's note
+    (CG7);
+  - tools in the flat shape, without `strict`;
+  - each turn's reasoning items ahead of its text and calls, under
+    §44's pair rule (CG18, CG23).
+- **The request** carries `instructions`, the whole history in `input`,
+  `store: false`, `stream: true`, `max_output_tokens`, `reasoning.summary:
+  "auto"` with the effort when one is set, and `include` for the encrypted
+  reasoning. A temperature is dropped with a warning.
+- **The stream** is dispatched on `type` alone:
+  - text deltas become text, and summary deltas become thinking
+    (§38);
+  - function calls go through `_tool_arguments`;
+  - reasoning items go into the record;
+  - usage comes off the completed or incomplete event under D21, and
+    `max_output_tokens` reads as the cut-off it is;
+  - an `error` event or a `response.failed` is read by hand.
+- **CG10, code by code:**
+  - a usage limit becomes `ChatGPTUsageLimit`, whose sentence starts
+    "Manage usage:" and which nothing retries;
+  - ineligibility is told in full once per process;
+  - an unsupported capability names its param;
+  - a 401 refreshes once and the request goes again.
+    `access_token(replacing=)` spends a refresh only while the file still
+    holds the refused token. A second 401 says to sign in again and keeps
+    the tokens;
+  - a refresh that could not be made is a `ConnectionError` the loop
+    retries;
+  - every other 429 and 5xx stays the SDK's error, retried with the loop's
+    existing bounded backoff.
+- **Effort and the window come off one read of the model list.** The levels
+  are the entry's that the route's vocabulary names, with `none` and `ultra`
+  never offered; when the list cannot be read, the static table is filtered
+  the same way. The window is `context_window`.
+- **The keyless entry** (CG20) is written by the sign-in and, for a sign-in
+  made before this batch, by the first `/model CHATGPT`. `/disconnect` keeps
+  it. `/model CHATGPT` refuses only while signed out, which lifts CG11.
+- **The header** (CG19) shows "Using ChatGPT plan" beside the model, and
+  Manage usage as a click through an `App.format_title` override. A usage
+  limit's line leads with Manage usage wherever it lands: a turn, a one-shot
+  or a research run.
+- **Replay** shows a stored summary; the ciphertext beside it shows nothing.
+
+**ONE ADOPTED DEFAULT IS MOOT.** `/model` has no picker, so "offer the
+models the list marks `visibility: list`" constrains nothing. A hidden model
+works when named, and its levels and window come from its own entry.
+
+**OWED: the owner's live check.** Inside it is CG23's one unmeasured case: a
+tool-using turn at a high effort whose reasoning goes back before the call's
+output.
+
+### Slice 2b, live check (2026-10-27, batch 189)
+
+The owner ran, in a local TUI on their own account: `/connect chatgpt`,
+`/model CHATGPT gpt-6-luna` (after a misspelt first try), `/effort xhigh`, a
+question about the tools, and a turn asking for a dummy tool call. Read from
+the owner's screenshot, and from the stored thread's structure -- block
+types and call names, never text or ciphertext:
+
+- **The plan answers.**
+  - The sign-in said "Connected the ChatGPT plan as CHATGPT. Choose a
+    model".
+  - The header read `CHATGPT | gpt-6-luna | Using ChatGPT plan · Manage
+    usage`, with Manage usage drawn as a link.
+  - The sidebar's window read 272k: gpt-6-luna's `context_window`, off the
+    plan's list.
+- **Summaries show as thinking**: "Preparing tool list", "Preparing 1+1
+  evaluation".
+- **A two-turn chat and a tool loop at xhigh both completed**: symbolic_math
+  evaluated 1 + 1, and the answer said 2.
+- **CG23's unmeasured case passed live.** The assistant row that called
+  symbolic_math holds a reasoning record (CHATGPT, gpt-6-luna, one
+  `reasoning` block). The request after the tool result handed it back
+  before the call's output -- the tool-loop shape slice 2a could not produce
+  -- and completed with the final answer. In the same thread, the first
+  turn's reasoning went back before the second user message: slice 2a's
+  measured shape.
+
+**WHAT THE CHECK FOUND, AND BATCH 189 FIXED:**
+
+- **A false warning.** "CHATGPT has no API_KEY in providers.json -- calls
+  will fail unless it is a local endpoint that needs none" appeared in red,
+  at launch and after each `/model CHATGPT`, about a plan that was signed in
+  and answering. Launch, `/model` and `/critic` / `/embedder` each tested
+  the key on their own. There is one test now,
+  `credentials.missing_credential_message`: it asks the plan about its
+  sign-in and every other provider about its key, and tells a signed-out
+  plan to run `/connect chatgpt`.
+- **A misleading warning.** The misspelt `gpt-6-luba` fell through to the
+  static table's warning, which advised adding a `config.MODEL_EFFORT_LEVELS`
+  entry and named `ultra`, a level the CHATGPT filter removes after that
+  warning is written. An unlisted name is now said in the plan's own terms:
+  it is not in the model list, it will probably be refused, and here is
+  what the list does name.
+
+**One observation, not acted on:** the model filled every optional
+symbolic_math parameter, with `null` wherever a parameter has no default.
+symbolic_math accepted it. Whether every tool's parameter model accepts
+`null` for an optional field was not checked.
+
+**Not reported, so not recorded as checked:** what Manage usage opened, and
+`/disconnect chatgpt` followed by a message. The screenshot ends before
+them.
+
+### The plan's nulls, checked (batch 190)
+
+The live check's one open observation, checked offline at the owner's
+request. **The model does not send stray nulls.** The symbolic_math call's
+arguments are exactly that tool's nine declared defaults, and its nulls are
+defaults the schema itself declares: typed `[..., "null"]` with a default of
+null. Each tool's arguments were built from its own schema and validated by
+its own parameter model, with no tool run:
+
+- **Every optional parameter at its declared default** -- what the model
+  did -- is accepted by all sixteen tools that have a parameter model.
+- **Every optional parameter null, ignoring the defaults,** would be
+  refused by thirteen of them. The live check says the model does not do
+  that.
+- **The five tools without a parameter model** declared no default for
+  their optional parameters, so what the model sends for those is unseen.
+  `ask_user` and `read_project_doc` already read a null as absent.
+  `pin`/`unpin` refused a null `last_n`, and `remember` a null `scope`, each
+  with a readable error that cost a turn.
+
+**Fixed in batch 190, at the owner's request:**
+
+- `pin` and `unpin` declare `last_n: 1`, and `remember` declares `scope:
+  "project"` -- the defaults their code already used -- so the model sends
+  those.
+- An explicit null is read as absent in both handlers. Only null: an empty
+  string or any other wrong value is still refused, never coerced.
+
+MCP tools' schemas belong to their servers and were not checked.
+
+### What §83 deliberately does not change
+
+**No hosted deployment offers it** (CG1): not the shared demo, and not a
+single-user duplicate, which is remotely hosted too.
+
+**`OPENAI` is untouched.** An API key keeps Chat Completions and keeps being
+billed to its own account.
+
+**Identity-only sign-in is not used.** OpenAI offers it to selected commercial
+partners, and the harness has no accounts of its own to sign anyone in to.
+
+**Codex's app-server is not used.** OpenAI's guide offers it as another
+transport; the harness speaks HTTP to every provider and keeps doing so.
+
+### Design Decisions Record — §83 (CG1-CG24)
+
+| id | decision |
+|---|---|
+| **CG1** | **Local installs only: no hosted deployment offers the ChatGPT plan.** OpenAI's eligibility names open-source and locally hosted apps and sends a remotely hosted or paid one to its interest form, and its redirect reaches only the machine running the browser. `_signs_in_here` answers no for CHATGPT on every hosted deployment, shared or single-user, and `/connect chatgpt` there says why. HD5's list grows for local installs by HD5's own test; the shared demo's list does not change. Filing the interest form is the owner's call and is not made here. **Amended in batch 195**: on a hosted deployment `/model CHATGPT`, `/critic` and the launch warning say the same sentence, signed in or not, where they said `/connect chatgpt` signs in -- which that deployment refuses. `/model` refuses the switch there too, since a token file carried onto one still cannot reach the plan (`core/client.py`); the sentence is `core/chatgpt_auth.LOCAL_ONLY`, so every place says it in one wording |
+| **CG2** | **The ChatGPT plan is its own provider, `CHATGPT`, connected by `/connect chatgpt`; the owner's choice.** Its billing, credential, endpoint and restrictions all differ from an OpenAI API key's, so one name for both would make one provider behave two ways. `/model` moves between the two like any other pair. Declined: a sign-in mode on `OPENAI` |
+| **CG3** | **CHATGPT gets a Responses API path in `core/client.py`, used by it alone.** `OPENAI` and every OpenAI-compatible provider stay on Chat Completions. Each CHATGPT request sends `store: false` and `stream: true`, the system prompt as `instructions` and never as a system item, the whole history in `input` with no `previous_response_id`, and only the harness's own function tools -- never a hosted one |
+| **CG4** | **The tokens live in their own file beside `providers.json`, 0600 and written atomically; the owner's choice.** `chatgpt_auth.json` holds the host id, the issued client id per account, the access token and its expiry, the granted scopes and the rotating refresh token; `providers.json`'s CHATGPT entry holds no secret. A token is refreshed before its hour is out, under one lock across threads and processes, and the replacement refresh token is written before anything uses it, because a reused one is refused. The file joins `providers.json` in `.gitignore` and in every exclusion that keeps that file out of a bundle or a scan. Declined: the same fields inside `providers.json`, where every hourly refresh would rewrite every stored key; and the `/secrets` store, where the plan would work only after an unlock in each session |
+| **CG5** | **A one-shot listener catches the redirect, and a pasted address completes it when the browser is on another machine; the owner's choice.** The listener binds `127.0.0.1` on a free port for one sign-in, answers `/auth/callback` only, and closes after the first callback whose `state` matches, or on cancel or timeout. Over SSH the browser cannot reach it, so the same prompt also takes the address the browser ended on; it is parsed, its `state` is checked the same way, and it is exchanged with the same `redirect_uri`. Declined: the listener alone, which leaves SSH with no sign-in; and Codex's fixed port 1455, which collides with a running Codex |
+| **CG6** | **Registration and verification follow OpenAI's page as written.** The host id is a `urn:uuid` made once per install and kept. The first sign-in sends `dynamic_agent_client`, `ext_agent_host_id` and `agent_name_hint=Venastine Research Harness`, the app's own title; the issued client id is saved per account and reused. The ID token is checked against the published keys for issuer, audience, expiry and nonce. Plan usage is on only when `chatgpt.tokens.use.direct` was granted; otherwise the sign-in is kept and the person is told the plan was not shared |
+| **CG7** | **Measure before the translation is written; the owner's choice.** Slice 0 runs on the owner's own Plus or Pro account. It prints statuses and shapes and never a token, and nothing it reads reaches a chat. A capability it did not measure ships off -- an image, for one, is not delivered until `accepts_images` is set for CHATGPT on a measurement. Declined: building from the pages and measuring later |
+| **CG8** | **The TUI follows OpenAI's UI guidelines; the owner's choice.** The sign-in is offered as "Continue with ChatGPT". The first sign-in with plan usage shows a one-time modal, "You're using your ChatGPT plan", saying that eligible requests use the plan and that usage is managed in ChatGPT's settings, with "Got it". While CHATGPT is the provider, the header shows "Using ChatGPT plan" beside the model with a Manage usage link, and a usage-limit error leads with Manage usage. Declined: the same words as transcript lines only |
+| **CG9** | **`/disconnect <name>` removes any provider's stored credential; the owner's choice.** It deletes the entry from `providers.json` or from the session's overlay and forgets the cached client. For CHATGPT it first revokes the refresh token at OpenAI's revocation endpoint -- an empty 200 is success, a network error or a 5xx is retried with backoff -- and when revocation cannot be confirmed it clears the tokens anyway and says where to disconnect the app in ChatGPT. For every other provider the harness cannot revoke, so it says where the person can: the sign-in's page in `_REVOKE_PAGES`, or the preset's key page for a pasted key. Declined: a sign-out for ChatGPT alone |
+| **CG10** | **OpenAI's error table is followed code by code, and a passing failure never deletes a credential.** A usage limit (429) pauses plan requests, points at Manage usage and is never retried. An ineligible user (403) is told once, with no retry and no new sign-in. A 503 is retried with bounded backoff. An unsupported capability (400) names its `error.param` and is not resent unchanged. A refresh refused as unusable (`invalid_grant` and its kin) clears the tokens and asks for a new sign-in. A network failure or a 5xx leaves every stored token as it was |
+| **CG11** | **Slice 1 ships on its own; the owner's choice.** `/connect chatgpt` and `/disconnect` work before the plan can answer, so the token side can be tried live on the owner's account. `/model CHATGPT` refuses with one sentence saying the plan signs in and answers arrive with slice 2, and no `providers.json` entry is written until then. Declined: one batch with slice 2, and slice 1 hidden from `/connect` until slice 2. **Lifted in batch 188** with slice 2b: `/model CHATGPT` refuses only while signed out, saying how to sign in, and the entry is CG20's |
+| **CG12** | **One ChatGPT account per install, and it can be forgotten; the owner's choice.** `/disconnect chatgpt` signs out and keeps the registration -- the host id and the issued client id, which OpenAI says survive revocation -- so the next sign-in reuses it. `/disconnect chatgpt --forget` drops the registration too, so the next sign-in can be another account. A callback naming a client id other than the saved one is refused, as OpenAI's page says. The host id stays even then: it names the install, not an account. Declined: several accounts, switchable. **Amended in batch 185**, after the owner's live check found the two forms indistinguishable on screen: the confirmation and the result of BOTH now say what happens to the registration -- plain `/disconnect chatgpt` that it stays and the next sign-in reuses it without the notice, `--forget` that it is dropped and the next sign-in registers afresh, may be another account and shows the notice again -- from one function, `_registration_clause`, so the two moments cannot disagree |
+| **CG13** | **`/disconnect` blanks a key and keeps the entry; the owner's choice.** `credentials.forget_key` empties `API_KEY` and leaves every other field -- the URL, both flags, `echoes_reasoning`, `accepts_images` -- exactly as `save_credentials` keeps them when a key is replaced, so a later `/connect` returns to the same entry. A session-only key (HD5) is dropped from the overlay and the file is never written. Declined: deleting the whole entry |
+| **CG14** | **`/disconnect` asks first; the owner's choice.** A `ConfirmScreen`, No focused, names what goes and where the provider's own revoke page is -- the sign-in's, the key page, or both -- because the harness forgets a key it cannot revoke and the key may not be recoverable. Declined: removing at once |
+| **CG15** | **The provider in use may be disconnected, and it is said; the owner's choice.** The confirmation and the result both say the next message needs `/model` or `/connect`; nothing switches behind the person's back. Declined: refusing until another provider is chosen, which would also block disconnecting the only one |
+| **CG16** | **PyJWT is declared, `>=2.10.1,<3`; the owner's choice.** It checks the ID token (CG6) and was already in the hard closure through mcp, so declaring it adds nothing to an install and stops the check depending on mcp happening to pull it in. Declined: an RS256 check written here on `cryptography` |
+| **CG17** | **Slice 2 measures before it translates; the owner's choice.** A third probe run on the owner's account (slice 2a) sends what a conversation's second turn sends -- an earlier reply, the harness's own calls without item ids and with other providers' call ids, a reasoning item handed back, the registry's real schemas -- through the transport slice 2b uses, and its answers are written here before the translation is. CG7's rule, applied to the shapes slice 0 did not send. Declined: building on the documented shapes and letting the live check find what breaks |
+| **CG18** | **Reasoning goes back to the model that wrote it, and its summary is shown; the owner's choice.** A response's reasoning items are kept in §44's record (`ModelResponse.thinking`) as the SDK parsed them, and handed back unchanged, ahead of that turn's text and calls, when the record's provider and model are the ones being called; a switch drops them, §44's pair rule. `reasoning.summary` is requested, and its deltas stream as thinking the way every other provider's do (§38). Each half ships only if slice 2a shows the route accepts it. Declined: handing reasoning back without showing a summary; and dropping it, as OPENAI's Chat Completions path does |
+| **CG19** | **The header carries the indicator and the link; the owner's choice.** While CHATGPT is the provider the header reads `CHATGPT \| <model> \| Using ChatGPT plan · Manage usage`, and Manage usage is a click. Textual's header cannot hold a URL, so the app overrides `App.format_title` and the words carry one fixed action, `app.manage_usage`, which opens `chatgpt_auth.USAGE_URL` the way the transcript opens a link. The action is a constant: nothing a model or a provider sends reaches it. Declined: a line above the prompt, where OpenAI's guidelines place it; and the words alone, with a `/usage` command |
+| **CG20** | **CHATGPT gets a keyless `providers.json` entry; the owner's choice.** A completed sign-in writes `API_URL` `https://api.openai.com/v1`, an empty `API_KEY`, `is_v1_compatible: false` and `supports_stream_usage: true`, so `/model`, the launch restore and the per-provider flags read it as they read every other entry, and CG7's `accepts_images` has a place to be set on a measurement. `/disconnect chatgpt` keeps it, as CG13 keeps a key's entry, and signs out; `/model CHATGPT` while signed out says to run `/connect chatgpt`. CG11's refusal is lifted when slice 2b lands. Declined: constants in code, with a CHATGPT case at each reader |
+| **CG21** | **The openai SDK carries the requests; the owner's choice.** `client.responses.create(stream=True)` on the pinned openai 2.45.0, with `api_key=chatgpt_auth.access_token` -- a callable the SDK calls before every request, so the hourly refresh rides on it -- and `max_retries=0`, so CG10 decides every retry and the SDK decides none. `test_sdk_conformance.py` pins what this rests on. Declined: httpx by hand, the probe's transport, which would add an SSE reader and a second error vocabulary for `core/provider_errors.py` |
+| **CG22** | **Effort levels are the model list's, filtered to the route's vocabulary; the owner's choice.** `/effort` on CHATGPT offers the levels `/v1/models` lists for the model that the route's own vocabulary contains: none, minimal, low, medium, high, xhigh and max, from slice 0's `invalid_value` refusal. For `gpt-6.1-sol` that is low to max, which is what was measured, and `ultra`, listed and refused, drops out. Slice 2a checks the rule on every listed model. Declined: a table of measured models only |
+| **CG23** | **Reasoning goes back everywhere, the tool loop included; the owner's choice.** A turn's reasoning items go back ahead of its text and calls whether it ended in text or in calls, on §44's pair rule. Slice 2a measured the item accepted under `store: false`, with its id and without, before a user message. Before a call's output it was never sent, because the model did not reason before a trivial call, so the owner's live check is where that is seen. Declined: only before user messages; and dropping the reasoning and resending once on a refusal. **Seen working in batch 189**, the owner's live check: a symbolic_math call on gpt-6-luna at `/effort xhigh` stored a reasoning item, and the request that handed it back before the call's output completed |
+| **CG24** | **`/effort` does not offer `none`; the owner's choice.** Six models accepted it in slice 2a and two refused it, and no list entry names it, so CG22's rule stays whole: a table of the six would go stale with a roster that changed between two runs a day apart. Declined: a measured table of the six |
+
+---
+
+## §82. Gemini 3's thought signatures, and a pin that could not carry them
+
+**Built in batch 172**, found while adding Google to §81's image input. The
+owner asked for images on Google, and the live measurement that shape needed
+turned up a defect underneath it: no GOOGLE tool loop could finish. Four
+decisions, GS1-GS4; the first is the owner's.
+
+**WHAT WAS MEASURED** on 2026-10-25, with the owner's free-tier key, over raw
+REST and through the SDK:
+
+- Every model a new account can call is Gemini 3: `gemini-2.5-flash` answers
+  404, "no longer available to new users".
+- A Gemini 3 response puts a `thoughtSignature` on its function-call part, and
+  only on the first call of a parallel batch.
+- Replaying that call without it is a 400 -- "Function call is missing a
+  thought_signature in functionCall parts" -- on gemini-3.1-flash-lite and
+  gemini-3.8-flash alike. Only the CURRENT turn is checked: a call before the
+  latest user text passes unsigned.
+- google-genai 1.0.0's `Part` has no `thought_signature` field, so the parse
+  dropped it. Plain chat and streaming worked; the second request of every
+  tool loop failed.
+- Google's placeholder, `skip_thought_signature_validator`, is accepted in
+  place of a real signature.
+
+**THE SHAPE.** The stream reads each call's signature off the part that carried
+it and records it in §44's reasoning record, `ModelResponse.thinking`, one
+block per call. The translation hands each call back exactly what it came
+with when the turn's record is this model's (§44's pair), and Google's
+placeholder on the first call of a turn it did not write. Nothing new is
+persisted anywhere new: the record already had a column, and it already
+bypassed the redactor, which a base64 signature needs as much as an
+Anthropic signed block does.
+
+**WHAT THE BUMP CHANGED BESIDES.**
+
+- `ThinkingConfig.thinking_budget` exists on 2.29.0, so
+  `_google_supports_thinking_budget()` answers True and Google effort is on.
+  Every budget in `google_thinking_budgets`, 0 included, was accepted on
+  gemini-3.1-flash-lite. On gemini-3.8-flash low, medium and max returned 200
+  and the rest met 503 "high demand", which is capacity, not a refusal.
+  §9's Google implementation was retested live: chat, streaming, the tool
+  loop with the real registry's 16 declarations, and effort `high`.
+- `Schema` gained `additional_properties`, `defs` and `ref`. The Gemini API
+  refused the first -- 400, `Unknown name "additional_properties"` -- and took
+  every declaration with it (GS4).
+- The transport is httpx, not requests. The classifier already named httpx's
+  `TransportError` and `TimeoutException`, so a GOOGLE connection failure is
+  still transient. Retries stay the harness's: with no `retry_options`,
+  2.29.0 makes one attempt, as 1.0.0 did.
+
+### What §82 deliberately does not change
+
+**Text-part signatures are not kept.** A response without calls may carry a
+signature on its last text part. It is not validated, and the neutral
+assistant shape holds one text, so there is no part to hand it back on.
+Google recommends it for reasoning quality; it does not require it.
+
+**Thought summaries stay off** (§38 O2). `include_thoughts` is unchanged.
+
+**Thinking tokens are still not counted as output.** Gemini reports
+`thoughts_token_count` apart from `candidates_token_count`, and the GOOGLE
+usage read takes the latter. That was true before this batch; with effort on
+it is larger. Recorded here, not fixed here.
+
+**`thinking_level`**, Gemini 3's native control, is not used. Budgets are what
+the map sends, and they were accepted.
+
+### Design Decisions Record — §82 (GS1-GS4)
+
+| id | decision |
+|---|---|
+| **GS1** | **The google-genai pin moves from 1.0.0 to 2.29.0, the owner's choice, exact like every SDK pin.** 2.29.0 (2026-10-07) was the newest release at least two weeks old on the day it was chosen, and it carries `Part.thought_signature`. The alternative was to ship image input on the old pin and leave GOOGLE tool use failing on its second request. The side effect, accepted by the owner: Google effort is on, because 2.29.0 also carries `thinking_budget`. `test_the_thinking_budget_guard_still_describes_the_pin` is inverted rather than deleted, as its own message asked |
+| **GS2** | **A call's signature lives in §44's reasoning record, one block per call, including a call that carried none.** `{"type": "thought_signature", "call_id": ..., "signature": base64 or null}` in `ModelResponse.thinking`, persisted in the `thinking` column like Anthropic's signed blocks and never through the redactor. Per call, because Gemini 3 signs only the first call of a parallel batch. Null is recorded because a model that does not think signs nothing, and "this model attached nothing" must not read as "nothing is known", which would earn the placeholder. No `text` or `thinking` key, so replay renders nothing for it |
+| **GS3** | **A turn the target model did not write gets Google's placeholder on its first call, and nothing on the rest.** That covers another provider's turn, another Google model's after a /model switch, a row written before this batch, and a signature that will not decode. Gemini 3 validates only the current turn, so this matters after a mid-turn switch and costs nothing elsewhere. A real signature always wins. Measured accepted (`skip_thought_signature_validator`) |
+| **GS4** | **The Schema keys sent to Google are a verified list narrowed to the installed SDK, not every field the SDK has.** `_google_schema_keys` read every `Schema` field so that a new one would be carried with no change. 2.29.0 disproved the premise: its `additional_properties` is a Vertex AI field the Gemini API refuses, and because the declarations travel together, one refused key fails every GOOGLE call. `_GOOGLE_SCHEMA_VERIFIED` is the 22 fields 1.0.0 had, verified on the wire by batch 132 and §9. `test_every_VERIFIED_schema_key_is_still_a_field_on_the_pinned_type` names the SDK's extra three, so a new field is a decision to measure rather than a silent omission or a 400 |
+
+---
+
+## §81. An image a tool reads, delivered to a model that can see it
+
+**Built in batch 171** -- on its own branch, as batch 159 and §76, which `main`
+used for other work before the branch merged; renumbered on 2026-10-25, the
+owner's choice -- from the owner's question whether a multimodal model
+behind a compatible API could take non-text input by reading it from the
+workspace. It could not. Every path into a conversation was text: a user row
+was a string, a tool result was `str(result)`, `read` either ran markitdown or
+decoded with `errors="replace"`, `fetch_url` decoded the body, and MCP's
+`_normalize` dropped image blocks by decision (A32). The owner asked for the
+smallest change that gives a model eyes, with no attachment UI in the harness,
+and ruled on the shape before any code was written. Eight decisions, IM1-IM8.
+
+**WHAT MADE IT MORE THAN ONE FUNCTION.** Measured before designing, against the
+three pinned SDKs. Anthropic 0.116.0's `tool_result` content is
+`str | Iterable[TextBlock | ImageBlock | ...]`, so an image fits inside its own
+result. openai 2.45.0's tool message content is
+`str | Iterable[ChatCompletionContentPartTextParam]`: text parts ONLY, so an image
+from a tool can reach that wire only in a user message. google-genai 1.0.0's
+`FunctionResponse` has `id`, `name` and `response` and nothing an image could go
+in (batch 173 measured the next pin: 2.29.0 has `FunctionResponse.parts`, and
+Gemini 2.5 refuses it -- IM9). So the neutral shape no longer translated nearly 1:1. Separately, every layer
+that measures or rewrites the conversation assumed text: the compactor sizes
+by characters, the output redactor runs its patterns over every string value,
+and thirty-five sites in sixteen modules read a message's `content` as a
+string.
+
+**THE SHAPE.** A new tool, `view_image(path)` (IM1), reads the file, judges its
+format from its leading bytes (IM7), and hands the base64 to the memory with
+`attach_image(call_id, ...)` (IM3). The loop's ordinary `add_tool_result` then
+writes the image into a new nullable `MessageLog.images` column of that same
+row (IM2). The tool's RESULT is one sentence naming what was attached. So the
+bytes never pass the redactor, the `tool_result` event, the transcript, replay
+or `/copy`, and `content` stays the string all thirty-five readers expect.
+Two readers know the column exists: provider translation (IM4, IM5) and the
+compactor's size proxy (IM8).
+
+**WHO IS OFFERED IT.** Whether an image can reach the model is a property of
+the run: its provider, and what its thread is. `RunInfo.images` is computed once
+by the loop and read twice, by the schema list and by the handler, so the two
+cannot disagree (IM6). A provider opts in with `accepts_images: true` in
+`providers.json`, on `echoes_reasoning`'s terms. A research pass never gets
+the tool, because the pipeline's sources, claims and grounding are all text.
+
+### What §81 deliberately does not change
+
+**MCP image blocks are still dropped.** A32's decline stands, and its in-band
+placeholder still tells the model. Passing them through is a separate step, now
+a small one: `_normalize` would attach rather than drop, through the memory, as
+`view_image` does.
+
+**Google was deferred until batch 173.** Its wire got IM5's note whatever its
+entry said, and a flag set on it was warned about once. Batch 172 (§82) made
+a GOOGLE tool loop work at all; batch 173 measured the shape and built it: a
+harness turn after the batch, like the OpenAI-compatible wire, with a GIF left
+as a note (IM9, IM10). The sibling `inline_data` part this paragraph guessed at
+was accepted too, and not chosen.
+
+**A thread's images all travel with every request, and nothing bounds their
+sum.** The cap (IM7) is per image. Google documents a 20 MB limit on the whole
+request (a later Google announcement raises inline data to 100 MB), and
+Anthropic's is 32 MB, so a thread holding several maximum-size images can
+outgrow a request on every wire. Recorded in batch 173, not handled.
+
+**No attachment UI and no `@` image.** The owner ruled the harness gets no
+attachment channel for now, so the only producer is the tool. §54's `@` names a
+FILE in the prompt and is unbuilt. When it is built, an image named that way
+would reuse IM2's column on a user row rather than invent a second one.
+
+**No downscaling and no dimension parsing.** Both need an imaging dependency the
+harness does not carry. The cap (IM7) and the fixed weight (IM8) are what stand
+in for them.
+
+**`read` is unchanged.** Its result is pages of text lines with offset and count.
+An image is neither, so it gets its own tool and its own permission row.
+
+### Design Decisions Record — §81 (IM1-IM10)
+
+| id | decision |
+|---|---|
+| **IM1** | **The channel is a dedicated `view_image` tool, not `read`, and it ships disabled like `read`.** `read`'s contract is pages of text lines with `offset` and `count`, which an image has neither of. A separate tool keeps that contract and gets its own rows in both permission tables (D24), so it can be enabled apart from `read`. Both rows ship `false`, because a tool that reads arbitrary workspace files while `read` is off would be a way around that default. The path rules are `read`'s exactly: the same `_file_approval_check`, so outside the workspace asks; the same `_refusal_for` shape; and the protected segment re-tested in the handler, as every file tool re-tests it |
+| **IM2** | **The bytes live in a nullable `MessageLog.images` column, in the database, and `content` stays a string.** `thinking`'s precedent: a different kind of thing with different rules, read by two consumers and invisible to the rest, added to existing databases by `ensure_columns()`. Present in the neutral shape ONLY when a row attached one, so every row written before reconstructs exactly as it did, and an unreadable entry costs that entry, never the thread (`_decode_thinking`'s rule). In `app.db` rather than a blob store or a reference to the workspace file. A reference would make a resumed thread send whatever the file holds now. A second store would be a second place `docs/PRIVACY.md`'s "wipe everything" has to name |
+| **IM3** | **The image goes from the tool to the memory, never through the tool result.** `view_image` takes the injected `memory` and `call_id`. `attach_image` holds the image under that call id, and `add_tool_result` takes it into the row it writes. So the exemption from redaction that images need is structural rather than a rule. A base64 string run through the secret patterns can be altered, and an altered image is a request the provider rejects. The bytes never enter that path, so the redactor is unchanged and still scans every value of every result. Only first-party code holding the memory can attach; an MCP server's result is a dict and cannot. A call that never gets a result row never gets its image |
+| **IM4** | **Delivery is opt-in per provider, and each wire carries the image where its SDK allows.** `accepts_images` in `providers.json`, tested `is True` (A29's reason). Anthropic: image blocks after the text inside the `tool_result`, the text block omitted when empty because the API rejects an empty one. OpenAI-compatible: the tool message keeps its text and says the image follows. One harness-labelled user message carries every image of the batch AFTER the last tool message, because each tool message must directly follow the assistant turn that called it. That message is derived on every request and never persisted, the compaction summary's rule (M8). Google: never, deferred -- until batch 173, which gave it IM9's harness turn. `accepts_images()` in `core/client.py` is the one predicate, read by the loop and by `call_model_stream` |
+| **IM5** | **A wire that does not receive an image gets a sentence saying so, never the bytes and never silence.** One rule for a provider not marked `accepts_images`, for a thread that switched to one after the image was attached, and since batch 173 for an image type Google is not sent (IM10). Until then it covered Google whole. A model told nothing answers from a result that reads as complete, which is A32's lesson about MCP's placeholder |
+| **IM6** | **Whether a run can deliver an image is decided once, and both the schema list and the handler read that answer.** `RunInfo.images` = the provider accepts images AND the thread is not a research pass (a property of what the thread is, `_derived_compaction_mode`'s argument). `ToolSpec.returns_images` declares the tool. `registry.schemas()` drops it unless told `images=True`, and the parameter DEFAULTS FALSE, so a caller that never heard of images hides the tool rather than offering a result the model cannot see. It is not an `available_check`, which takes no arguments and cannot see the run. A tool the user enabled and the run leaves out is named once in a WARNING (`image_hidden()`, the headless notice's rule). The handler refuses a call made anyway |
+| **IM7** | **Format from the bytes, and a cap derived from the smaller wire.** PNG, JPEG, GIF and WEBP, the formats both wires accept, judged by signature and never by extension: a PNG named `.jpg` declared as JPEG is a rejected request. `max_image_bytes` is 3,932,160 (3.75 MiB). Base64 makes that 5 MiB on the wire, which is Anthropic's per-image limit; `CONFIG_ARCHITECTURE.md` carries the arithmetic. A file that grows between the size check and the read is refused, because the read stops one byte past the cap. Google, a wire since batch 173, is sent three of the four (IM10), and its limit is on the whole request rather than per image |
+| **IM8** | **The compactor counts an image as a fixed 1,600 tokens, and the summarizer never sees its bytes.** `IMAGE_TOKEN_ESTIMATE` in `core/compaction.py`, beside `CHARS_PER_TOKEN`. Every row-size sum goes through `_row_chars`, and the neutral-shape estimate counts images too, so no floor and no pin cap disagrees about an image. 1,600 is the top of Anthropic's own estimate for an image it has scaled to about 1.15 megapixels, so a large image is counted near its cost and a small one is overcounted. Overcounting folds a little early, where undercounting would let a thread of screenshots run past the window. Counting the base64 LENGTH would read a 1 MB file as 330,000 tokens. `_as_text` reads `content` alone, so a folded image leaves its sentence in the summary and its bytes with the row |
+| **IM9** | **Google gets a harness turn after the batch, measured, and the shape Google's own ADK uses (batch 173).** A `FunctionResponse` cannot carry the image on the models a new account can call: google-genai 2.29.0 has `FunctionResponse.parts`, Gemini 2.5 answers "multimodal function responses are not supported for this model", and only Gemini 3 takes it. So one user Content follows the WHOLE batch: per call, a harness-labelled text part, then `inline_data` parts with the DECODED bytes, because `Blob.data` is bytes and a base64 string would be sent as text. Measured on gemini-3.1-flash-lite and gemini-3.8-flash, and through the harness on gemini-3.5-flash-lite. A sibling part inside the function-response Content was accepted too; the turn after the batch was chosen because it leaves the batching predicate alone and is the other wire's rule. Derived per request, never persisted (M8). The owner chose it over bumping the SDK for `FunctionResponse.parts`. A stored copy that will not decode costs that image a note, never the request |
+| **IM10** | **On Google, PNG, JPEG and WEBP are sent and a GIF is a note, the owner's choice (batch 173).** Gemini documents PNG, JPEG, WEBP, HEIC and HEIF. Two Gemini 3 models read a GIF correctly when measured, but an undocumented type is not a contract, and an image the endpoint refused would stay in the thread and fail every request after it. `_GOOGLE_IMAGE_TYPES`; the note names the type, and a GIF beside a PNG in one batch leaves the PNG delivered |
+---
+
+## §80. The copyright year, kept by a workflow
+
+**Requested and built in batch 169.** LICENSE's appendix and NOTICE both
+said `Copyright 2026 Yahya Hammad`, and nothing would ever move either. The
+owner asked for a workflow that corrects the year at 23:59 GMT on December 31
+so it need not be remembered. `.github/workflows/copyright-year.yml` runs
+`scripts/bump_copyright_year.py` then and commits what changed.
+
+### What §80 deliberately does not change
+
+**The holder, the first year and every other line of both files.** The job
+touches one line per file, and only when a year is due.
+
+**What a bot commit can start.** A push made with `GITHUB_TOKEN` starts no
+workflow, so the New Year commit gets no CI run and no demo deploy
+(§79 HD9); the demo's copy catches up with the next human push.
+
+### Design Decisions Record — §80 (LY1-LY3)
+
+| ID | Decision |
+|---|---|
+| **LY1** | **A range from the first year**, the owner's choice: `2026` becomes `2026-2027`, then `2026-2028`. The first year is the one a copyright notice points at and never moves; a single year replaced each January was the alternative. Never backwards: a year already past the target is left alone |
+| **LY2** | **LICENSE and NOTICE together, or neither.** Both carry the line, and NOTICE is where Apache-2.0 attribution lives, so moving one alone would leave them disagreeing. Two files that already disagree, or a file without exactly one copyright line, are refused rather than guessed at, and a test holds the two lines equal |
+| **LY3** | **Two schedules and a year that does not depend on which ran.** 23:59 UTC on December 31 is the owner's time; 06:07 on January 1 is the catch-up, because GitHub delays scheduled runs at busy hours and can drop them, and midnight UTC on New Year is the busiest. The year written is next year on December 31 (UTC) and this year on any other day, so an on-time run, a delayed one and the catch-up all write the same, and a second run changes nothing. The job is the only workflow with `contents: write`; if `main` ever requires pull requests or signed commits its push fails and says so, and GitHub disables schedules after 60 days without repository activity |
+
+## §79. A demo nobody has to install
+
+**Requested and designed in batch 163, built across batches 163-169.** The
+harness ran where someone installed it -- a clone or the npm package -- and
+connecting a model meant copying `providers.json.example` and editing JSON,
+which README called "the one setup step they cannot do for you". The owner asked
+for a public demo on Hugging Face Spaces and ModelScope Studios, kept current
+from `main`, where a visitor can try the harness without installing anything
+and connect a model without touching a file. Every decision below was put to
+the owner with options and a recommendation before any code was written.
+
+### What was measured or read before anything was designed (2026-10-19)
+
+- **The owner's Hugging Face account is free**, and on a free account the only
+  hostable compute Space is a Gradio-SDK app on ZeroGPU, two per account.
+  Docker Spaces and the plain CPU tier need a paid plan. ZeroGPU refuses to
+  start without at least one `@spaces.GPU` function; a no-op one burns no quota.
+  `gr.Server` is a FastAPI subclass, so a Gradio Space can carry custom routes
+  and a websocket beside Gradio's own.
+- **ModelScope is the international site**, `modelscope.ai`, under the
+  organisation `Venastine-Research`. A Studio is fed by a git push to `master`
+  (force push prohibited) and redeployed by `POST /openapi/v1/studios/{o}/{r}/deploy`.
+  Its free tier is a CPU instance. API-Inference there is
+  `https://api-inference.modelscope.ai/v1`, OpenAI-compatible: `/v1/models`
+  answered 200 with a live list. A ModelScope access token is account-wide --
+  the same token pushes code to the account's repositories. It reports
+  streaming usage when `stream_options.include_usage` is sent -- on every
+  one of four models measured in batch 167 -- and without it most models
+  send usage of zero, so the `/connect` preset sets `supports_stream_usage`.
+- **Textual already renders in a browser.** Its web driver
+  (`textual.drivers.web_driver:WebDriver`) is what `textual-serve` runs: one
+  app subprocess per websocket, framed packets after a `__GANGLION__` line, an
+  xterm.js page on the other end. `textual-serve`'s own server is aiohttp-only
+  and builds the child's environment with `os.environ.copy()`, so every Space
+  secret would reach the child and, through it, the model's tools.
+- **Only two providers explicitly invite third-party OAuth in their own
+  documentation.** Hugging Face (`https://huggingface.co/docs/hub/oauth`): a
+  "Sign in with HF" flow "in any website or App", the `inference-api` scope,
+  public apps with no secret, and a device code flow. OpenRouter
+  (`https://openrouter.ai/docs/guides/overview/auth/oauth`): "Use OAuth to let
+  your users bring their own OpenRouter API key to your app", PKCE, and a mode
+  with no callback URL in which the code is shown to copy. Nothing comparable
+  was found for ModelScope, Anthropic, OpenAI or Google.
+- **A credential used by the harness lives on the server.** The process that
+  calls the model runs in the container; the browser only draws the terminal.
+  Every visitor shares that container and one Unix user, and a Space has no
+  root with which to give each session its own. **Wrong about root, measured
+  in batch 165** -- a ZeroGPU Space runs as root; see the next section.
+- **The code**: no in-app way to add a provider existed, and
+  `credentials.save_credentials()` had no production caller. Any
+  OpenAI-compatible endpoint already worked as a hand-written entry. The client
+  cache is keyed by provider name for the life of the process, so a key added
+  mid-session was ignored until a restart. Shell, `read`, `write` and `edit`
+  ship disabled and the host fallback ships off. `/config` writes the
+  install tree's `config.yaml`, which every session in a container shares, and
+  `/copy --file` writes any path. Every piece of state is redirectable per
+  process, which is §60 UH3's supervisor shape exactly.
+
+### What the first deploys measured (2026-10-20)
+
+Batch 165 put the bridge on the owner's private Space before the rest of the
+slice was decided, and the Space's own log answered what nothing outside it
+could. The bridge writes those answers at every start since
+(`deploy/hosted/isolation_report.py`), so a platform that changes them says so.
+
+- **A Space installs `gradio[oauth,mcp]` at the README's `sdk_version`, in the
+  same pip command as the bundle's requirements.** Gradio 4.44.0 cannot share
+  an environment with the harness at all -- its client wants `websockets<13`,
+  `google-genai` wants `>=13` -- and has no `gr.Server`. 6.30.0 resolves, but
+  its `mcp` extra wants `mcp<2` and `pydantic<=2.12.5` against the harness's
+  deliberate `mcp==2.0.0` and `pydantic==2.13.4`. One environment would run
+  the hosted harness on versions CI never tests (HD2, amended).
+- **A ZeroGPU Space runs as root**: uid 0, `HOME=/root` at mode 700, an Amazon
+  Linux 6.18 kernel on x86_64, and Docker's default capabilities less
+  `NET_RAW` -- `DAC_OVERRIDE`, `KILL`, `SETUID` and `SETGID` among them,
+  neither `SYS_PTRACE` nor `SYS_ADMIN`. HD6 holds anyway, because reading a
+  non-dumpable process takes `SYS_PTRACE` whatever the uid. `DAC_OVERRIDE` is
+  the one that matters: root reads any file, a 0700 directory included. And
+  root can become another user, which the bullet above said a Space could not.
+- **Landlock is at ABI 7 and a seccomp filter installs.** Both were applied
+  from Python through `ctypes`, in a child on the session interpreter, which
+  then computed an integral and was refused every read outside its import
+  roots, every write, a socket, `fork`, `exec`, a signal, `ptrace` and
+  `setuid(0)`.
+- **The proxy APPENDS to `X-Forwarded-For`.** A request carrying a
+  hand-written TEST-NET-2 entry arrived with it first and the real address
+  after it, so the rate limit, which keyed on the first entry, keyed on a
+  value the client chose (HD8, amended).
+- **A session outlived its bridge** (under WSL): a bridge stopped with SIGTERM
+  left `main.py --tui` running, re-parented to init, holding its session
+  directory (HD8, amended).
+
+### What the first ModelScope deploy measured (2026-10-22)
+
+Batch 166 deployed the same bundle to a private Studio,
+`Venastine-Research/VenastineHarnessDemo`, and no session could open.
+
+- **A Gradio-SDK Studio passes no websocket.** Its gateway -- Envoy in front of
+  Alibaba Function Compute, by its `x-envoy-*` and `x-fc-*` headers -- answered
+  every websocket upgrade, on every path, a real ticket's included, with an
+  empty HTTP 200, while a plain GET to the same paths reached the app. And
+  `/` was always ModelScope's own Gradio front end, so the landing page never
+  showed (HD2, amended).
+- **A Docker-SDK Studio passes both.** The same Studio switched to Docker
+  served our `/`, and an upgrade with a bad ticket got the bridge's own
+  refusal; a session opened, drew its banner, listed `/connect` and fetched a
+  Hugging Face device code, and an idle websocket was still open after 16
+  minutes. The builder pulled a `python:3.12-slim` image from Docker Hub by
+  digest and installed from pypi.org. Nothing on modelscope.ai asked for a
+  linked cloud account first.
+- **The bridge never declared its websocket library.** In a clean image uvicorn
+  answered every upgrade 404. It had worked only because a Space's own install
+  line adds `websockets>=10.4` and ModelScope's image ships it.
+- **ModelScope's proxy REPLACES `X-Forwarded-For`.** A hand-written TEST-NET-2
+  entry never arrived, twice; the header came as `[client, hop, hop]`, so the
+  rate limit, which keys on the last entry, keyed every visitor to one of
+  ModelScope's own hops (HD8, amended).
+- **Its kernel has no Landlock**: Alibaba's 5.10, uid 0, Docker's default
+  capabilities WITH `NET_RAW`. The math tools' self-test fails there and they
+  are refused, as HD11 means them to be.
+- **Gradio phones home at every start**: `huggingface.co/api/telemetry`,
+  `huggingface.co/api/agent-harnesses` and `api.gradio.app/pkg-version`. With
+  `GRADIO_ANALYTICS_ENABLED=False` none of the three was made.
+- **ModelScope mounts object storage into a Studio**, `/mnt/workspace` and
+  Gradio's `/tmp/gradio`, which outlive the container. No session writes to
+  either: sessions live in their own directories under the temporary root.
+
+### Slices
+
+1. **`/connect`, batch 163.** A preset catalogue, the two sign-in flows, a
+   pasted key for everything else, a key stored in `providers.json` or -- for
+   the shared demo -- in the process alone, the client cache forgotten on
+   every connect, a link that opens in the reader's own browser under the web
+   driver, and the three new credential shapes redacted. Useful to every
+   install, which is why it came first.
+2. **Hosted modes inside the harness, batch 164.** `security/hosted.py` reads
+   `VENASTINE_HOSTED` once; a shared deployment refuses the container-reaching
+   tools in `is_tool_allowed` whatever `config.yaml` says, refuses `/config`
+   and a pasted key, keeps a connected key in memory, turns `/copy --file` into
+   a browser download under the file's name alone, and replaces the launch's
+   file-shaped provider warnings with a banner that says what the server holds
+   and where to revoke it. Every hosted session calls `prctl(PR_SET_DUMPABLE,
+   0)` first thing in `main()`. Measured under WSL before that was relied on: a
+   sibling process of the same user read an ordinary process's
+   `/proc/<pid>/environ`, secret included, and was refused the same read with
+   EACCES once the target had made the call.
+3. **The bridge and the bundle, batch 165.** `deploy/hosted/`: a Starlette
+   bridge on Gradio's `gr.Server` that speaks Textual's web-driver protocol to
+   one `main.py --tui` per tab over an allowlisted environment; the session
+   environment built at container start from a hash-locked `session.lock`; the
+   single-user gate that asks the app's own public URL whether a stranger can
+   reach it; and the startup report of what the container lets a process do.
+   `scripts/build_demo_bundle.py` builds what a Space runs from the npm `files`
+   allowlist and refuses any `neverDistribute` match. A shared deployment's
+   math tools run confined, or not at all (HD11). Deployed by hand to the
+   owner's private Space and measured there; nothing deploys from `main` yet.
+4. **ModelScope as a Docker Studio, batch 166.** The ModelScope bundle carries
+   a generated `Dockerfile`, an allowlist `.dockerignore` and a hashed
+   `bridge.lock`, and builds the session environment into the image; the
+   bridge declares its websocket library, keys its rate limit on the entry
+   each platform's proxy writes, and starts Gradio with its analytics off. A
+   shared deployment still takes no pasted key, now as a recorded decision
+   that names where a key can go instead (HD12).
+5. **ModelScope sign-in, completed by the bridge, batch 167.**
+   `deploy/hosted/sign_in.py` completes ModelScope's OAuth for a session
+   with the app's client secret, which only the bridge holds: the session
+   asks through a meta packet only the bridge can answer
+   (`tui/hosted_driver.py`), ModelScope's redirect lands on
+   `/oauth/modelscope/callback`, whose page shows a one-time handle only
+   that session can redeem, and the token reaches that session's memory
+   alone (HD13). A local install connects ModelScope with a pasted key, as
+   before. Batch 176 adds modelscope.cn as a second site, with its own
+   app, secret and `/oauth/modelscope-cn/callback` (HD13, amended).
+   Batch 177 signs the Studio in through ModelScope's Studio OAuth --
+   the app the platform creates for it -- and reads every site's
+   endpoints from its discovery document (HD13, amended).
+6. **The pre-public fixes, batch 168.** A shared deployment refuses
+   `/secrets` (HD4); a hosted session draws nothing while idle, which is
+   also what lets the bridge's idle limit fire, and a bridge deletes what
+   a killed predecessor left of its sessions before it listens (HD8); the
+   landing page names `/connect modelscope` where the bridge can complete
+   it (HD13); the header and the session banner say what to type until
+   a model is connected;
+   and OpenRouter's preset defaults to a free model whose endpoint
+   answered, `minimax/minimax-m3.1-flash:free`, the owner's choice.
+7. **The deploy workflow, batch 169, gated on every CI check** -- the
+   owner's rule, which amends HD9. `.github/workflows/deploy-demo.yml`
+   wakes each time a CI workflow finishes on a push to `main`, and its
+   first job, which holds no secret, asks `scripts/deploy_gate.py`
+   whether every check run on the commit passed and the commit is still
+   the tip; the run woken by the last workflow to finish deploys the
+   Space with `scripts/deploy_demo.py`. The owner deploys the Studio with
+   the same script and gate. What exploration found first: `main`'s
+   ruleset requires no checks at all, so the gate judges the commit that
+   landed rather than leaning on a pull request's; compat's `py313-info`
+   may fail without turning its workflow red; pip-audit never ran on a
+   push, and its Monday run on main's tip had failed (mcp 2.0.0, which
+   this branch fixes) -- the gate, run against the real API, refused that
+   commit for exactly that; and codeql and pip-audit put push and
+   scheduled runs in one cancelling group. The first audit of the locks a
+   bundle installs found what nothing had audited, because a Space
+   installs Gradio itself: Gradio 6.30.0, its latest release, holds
+   pillow below 13, and pillow 12.3.0 has 35 advisories fixed in 13.0.0.
+   Read in Gradio's source, the bridge reaches no pillow decoder -- the
+   upload route copies a file, and pillow opens only the deployment's own
+   favicon -- and the owner accepted the 35 by ID while that pin holds.
+   (Batch 175 accepted two more, published after this slice, on the same
+   pin and after the same reading, and batch 192 a third, read again in
+   the wheels the lock pins: the deployment sets no favicon, so nothing
+   in the bridge's process reaches a pillow decoder, that route
+   included.)
+   And the bridge now logs `serving build <sha>` at start, because a
+   private Studio answers an anonymous request with 403 and its log is
+   where a deploy can be confirmed. With this slice §79 is complete; the
+   public flip of the two deployments is the owner's. Batch 170 closed
+   the one gap this slice had stated: an open high or critical code
+   scanning alert on `main` now holds the deploy (HD9).
+
+### What §79 deliberately does not change
+
+**The credential split.** Provider keys still live in `providers.json` and
+nowhere else on disk; `/connect` is a writer for that file, not a second store.
+The session-only overlay holds a key in memory and is never written.
+
+**The shipped tool defaults.** A shared demo offers what a fresh install offers.
+The six math tools run confined there (HD11), and are refused only on a host
+where that confinement could not be verified -- which is a deployment that
+cannot run them safely, not a different default.
+
+**Who may call the model.** `/connect` is a slash command, typed by a person;
+nothing in a context window can reach it.
+
+### Design Decisions Record — §79 (HD1-HD13)
+
+| id | decision |
+|---|---|
+| **HD1** | **The browser draws the TUI through Textual's web driver, and the bridge is ours.** A Starlette bridge speaks `textual-serve`'s framed protocol to one `main.py --tui` child per websocket. The `textual-serve` package, pinned exactly and installed only by the deploy, supplies its xterm.js client assets and nothing else; its aiohttp server is never run, because it copies the whole parent environment into the child. A pseudo-terminal emulator was the alternative and loses Textual's browser-side link opening and file delivery |
+| **HD2** | **One app serves both platforms**: Gradio SDK with `gr.Server` mounting the bridge's routes. On Hugging Face the Space runs on ZeroGPU, the only compute a free account can host, with one no-op `@spaces.GPU(duration=1)` function registered through `@app.api` and never stacked on it; no provider call is ever made inside a GPU function. On ModelScope the Studio runs on the free CPU tier. **Amended in batch 165**, by measurement: the Space installs `gradio[oauth,mcp]` at the README's `sdk_version` (6.30.0, on Python 3.12) in the same command as the bundle's requirements, and that extra cannot share an environment with the harness's `mcp` and `pydantic` pins -- so there are TWO environments. The bridge's is the Space's own and holds only `textual-serve`, `uv` and the harness's `textual` pin; the sessions' is built at container start by `deploy/hosted/session_env.py`, with `uv`, from `session.lock` -- the harness's `requirements.txt` compiled by the bundle builder with a hash for every file, installed `--require-hashes --no-build`, and reused while the lock is unchanged (3 s on the Space). As root it lives in `/opt`, where a math child that has become `nobody` can still import from it (HD11). **Amended in batch 166**, by measurement: ModelScope runs the bundle as a **Docker-SDK** Studio, because a Gradio-SDK Studio's gateway answered every websocket upgrade with an empty 200 and served its own Gradio page at `/`, and a Docker Studio passed both. The image is ours: `python:3.12-slim` by digest, the bridge installed from a hashed `bridge.lock` (Gradio at the same version as the Space, plus the bridge's requirements) with `--require-hashes --no-deps --only-binary=:all:`, and the session environment built INTO the image, so a container start installs nothing. Hugging Face stays a Gradio-SDK Space on ZeroGPU: a Docker Space needs a paid plan there |
+| **HD3** | **One process per browser tab, isolated by its environment**: a fresh session directory per connection, and `HOME`, `APP_DB_PATH`, `AGENT_LOG_FILE`, `AGENT_WORKSPACE`, `AGENT_OUTPUT_DIR`, `AGENT_PROVIDERS_FILE` and `AGENT_SECRETS_FILE` all inside it. The environment is built from an allowlist, never copied, and never carries `PYTHONPATH`. The directory is deleted when the tab closes, so nothing a visitor did outlives the session. Setting `AGENT_WORKSPACE` here does not contradict the npm launcher's rule against it: that rule exists because a shared directory would become an auto-approved write boundary for every project, and a per-session temporary directory is the opposite |
+| **HD4** | **Two hosted modes, read from the real environment only**: `VENASTINE_HOSTED=shared` and `VENASTINE_HOSTED=single-user`. A `.env` cannot set either, by A70. Shared mode only REMOVES capability: `/config` is refused, because it writes a file every session in the container shares; `/copy --file` delivers to the reader's browser instead of writing a server path; and a banner says the session is temporary. **Amended in batch 168**: `/secrets` is refused there too -- the store holds the shell tools' SSH and sudo passwords, which have no use where those tools are refused, and a password typed into a shared server is what HD12 refuses for keys -- and the `[mcp] created ...` startup notice is not shown, because it named a file in a temporary session directory that nothing there can edit. **Amended in batch 174**, when image input (§81) merged into this branch: `view_image` reads a workspace file under `read`'s rules, so it joins the tools a shared deployment refuses whatever `config.yaml` says, and a test now refuses every tool registered with the file approval check, so the next one cannot arrive the same way. **Amended in batch 197**, the owner's request and wording: the banner of either kind of hosted deployment ends with "Like it? Star the repo on GitHub to support its development:" and the repository's address, after whatever it says about connecting a model; a local install shows no banner, so nothing. **Amended in batch 199**, the owner's request and choices: that line is drawn apart from the rest of the banner, which is the harness narrating in dim italic and was read past with it. It has its own role, `invite`: bold in the theme's success colour, its address ctrl+clickable -- the first line the harness itself writes to be clicked -- and left out of `/copy conversation` like the lines around it |
+| **HD5** | **In a shared deployment a credential comes only from a scoped sign-in and lives only in the session's process.** `/connect` offers Hugging Face's device code flow -- through a public OAuth app the project owns, its client id in `config.yaml` as `hf_oauth_client_id`, its scopes `openid profile inference-api` on the app's registration -- and OpenRouter's PKCE flow with the code shown to copy. A pasted key is refused there. The credential is held in an in-memory overlay in `credentials.py`, never written, and dropped when the session ends. In a local install, and in single-user mode, both sign-ins are offered and a pasted key is accepted and saved to `providers.json`. OAuth is offered for exactly these two providers because they are the two whose official documentation explicitly invites a third-party app to use it; that list grows only by the same test. **Amended in batch 165**: `hf_oauth_client_id` names the project's own public app, registered by the owner on 2026-10-20, so the sign-in works in every install without anyone registering another. A shared deployment offers -- in its banner, `/connect`'s list and the command panel -- only the sign-ins that work there, because offering Hugging Face with no client id led straight to the pasted-token refusal, measured on the Space. **Amended in batch 167**: a third provider signs in, ModelScope, by the same test -- its app registration offers the scope `api-inference` and invites the app in so many words -- and only where a hosted bridge can complete the flow, because ModelScope's token endpoint takes only a confidential client (HD13). A shared deployment offers it when its bridge says it can, and names its revoke page with the others. **Amended in batch 176**: ModelScope's second site, modelscope.cn, signs in by the same test -- its app form carries the same invitation in its original Chinese ("用户可以通过ModelScope OAuth 授权您的应用获得用户相关的魔搭权限") and offers the same `api-inference` scope, both read 2026-10-26 -- as a sign-in of its own, `/connect modelscope-cn`, because the two sites are separate: each is its own OAuth issuer with its own accounts and its own apps (HD13) |
+| **HD6** | **A session cannot read another session's memory.** Every hosted session process marks itself non-dumpable (`prctl(PR_SET_DUMPABLE, 0)`) at startup, after exec, which resets it, so another process of the same user is refused its `/proc/<pid>/mem`, `/proc/<pid>/environ` and a debugger attach. The Hugging Face token arrives from Hugging Face directly into the session and is never typed, so it never crosses the websocket. **Amended in batch 165**, by measurement: a ZeroGPU Space runs every session as root, and this still holds, because reading a non-dumpable process takes `CAP_SYS_PTRACE`, which the Space does not grant. What root does have is `DAC_OVERRIDE`, so a session that could run code could read another's FILES; that is why no tool in a shared deployment reaches the container, and why the one tool family that evaluates what the model sends is walled in (HD11). **Amended in batch 167**: the BRIDGE marks itself non-dumpable too, first thing at start, because it now holds a secret no session may read -- the ModelScope app's (HD13) -- and every session runs as the same user it does |
+| **HD7** | **Single-user mode is honoured only when the app is not reachable anonymously**, and fails closed. The bridge requests its own public URL with no credentials -- `SPACE_HOST` on Hugging Face, `VENASTINE_PUBLIC_URL` on ModelScope, where its absence refuses -- at startup and before each session, and an anonymous answer refuses every session with a page saying why. When honoured, a pasted key and a ModelScope token are accepted, an optional `VENASTINE_PROVIDERS_JSON` secret seeds the session's `providers.json`, `/config` and `/copy --file` work, and at bridge start `config.yaml` -- the one location, written with `config_edit`'s comment-preserving writer -- enables `read`, `write`, `edit` and `shell` and the host fallback, because the private container is the sandbox and a `/config` edit would be lost at the next restart. The owner asked for the tools explicitly. Interactive shell sessions still need Docker or Podman and stay unavailable. **Amended in batch 165**: every session of a single-user deployment shares ONE state directory that nothing deletes (`VENASTINE_STATE_DIR`, by default `$TMPDIR/venastine-state`), so the owner's threads survive a reloaded tab until the container restarts; a shared deployment still gives every tab a fresh directory and deletes it **Clarified in batch 193**: only login redirects (301, 302, 303, 307, 308) and access denials (401, 403, 404) count as private responses from that URL. A reply carrying the public health marker refuses whatever its status; every other response, including an unmarked 200, rate limiting and a startup or proxy error, is indeterminate and refuses. The minute cache keeps that refusal, never an approval from a failed check; a later recognized private response can allow the deployment again. **Amended in batch 194**: a redirect is indeterminate too, so only 401, 403 and 404 count. Measured that day: a private Space answers an anonymous `/healthz` with 404 and a private Studio with 403, and Hugging Face answers plain http with a 301 to https before it checks privacy, so an `http://` `VENASTINE_PUBLIC_URL` drew a redirect from a public Space as well. |
+| **HD8** | **The bridge bounds what it runs**: a maximum number of concurrent sessions (4 shared, 2 single-user), an idle timeout, a hard lifetime, address-space and CPU limits on the child, and the whole process group killed on stop. A websocket must carry a same-origin `Origin` header and a one-time ticket, and session creation is rate-limited per address. **Amended in batch 165**, three measurements: a session now dies with its bridge -- `prctl(PR_SET_PDEATHSIG, SIGTERM)` at startup, after a SIGTERMed bridge left its sessions running under WSL; the bridge's cleanup of a session is shielded from cancellation and forgets the session only once it has stopped, because a cancelled handler (Starlette's TestClient cancels one when its socket closes; any server does at shutdown) left the child running and its directory in place; and the rate limit keys on the LAST `X-Forwarded-For` entry, the one the platform's proxy appends, where it had keyed on the first, which the client writes. A session that never reaches the handshake has its stderr's tail logged, from a file in the session rather than a pipe nobody reads. **Amended in batch 166**: the entry the rate limit keys on is the one EACH platform's proxy writes, read from `BUILD_INFO.json`'s `platform` -- the last on Hugging Face, which appends, and the FIRST on ModelScope, which replaces the header and rebuilds it as `[client, hop, hop]`; keying on the last there put every visitor behind one of ModelScope's own hops. A platform not measured keeps the last. And `websockets` is a declared, exact requirement of the bridge, because uvicorn upgrades nothing without a websocket library and the bridge had relied on the platforms supplying one. **Amended in batch 168**, by measurement: the idle timeout had never fired. The bridge counts a session's output as activity -- rightly, so a long research run the person is watching is not cut off -- and an idle session's raven blinked at five redraws a second, 6.9 KB/s to a silent tab, with the prompt's cursor adding 0.6 KB/s once the tab had focus; so an abandoned tab held its slot for the full two-hour lifetime. A hosted session now draws nothing while idle -- the raven holds its first frame and the cursor does not blink, 0 bytes over a minute -- and a local install keeps both. And before it listens, the bridge deletes the `venastine-session-*` directories a killed predecessor left in its session root: directories only, never a link, never another user's, never the single-user state, and from `app.py` alone, because the suite builds bridges in parallel over one temporary directory. **Amended in batch 191**, from the owner's pre-public security review: every per-address limit -- the session tickets, and the sign-in callbacks (HD13) -- forgets an address once its newest request has left the 60-second window. Each had gained an entry for every address it ever counted and never lost one -- a probe found 5,000 one-off addresses all still held an hour later -- so a sender with many addresses (an IPv6 /64 is one machine) could grow the bridge until its container restarted, and every visitor's session with it. Forgetting costs no limit, since a forgotten address's requests had all left the window. The sweep runs at most once a window, because sweeping on every request would make each one cost as much as the addresses counted; a book holds at most the last two windows' addresses. **Amended in batch 200**, from PR #265's `compat` check: the idle raven did not always hold its first frame. At a turn's end the app resumes the raven's timer and then sets it idle, which pauses it again, with nothing between -- and Textual's timer task waits on an `asyncio.Event` that the resume had already released, so one tick ran after the frame was reset. After any stream longer than the 0.4s interval, the hosted raven sat still with its eye shut, measured. A tick that arrives while the raven holds its timer paused -- idle on a hosted session, or held for a token stream -- is now dropped |
+| **HD9** | **What deploys is a built bundle, only from `main`, only after the tests pass.** The bundle is the npm `files` allowlist -- what an end user runs, already checked against `neverDistribute` -- plus the deploy overlay, a generated per-platform README and requirements, and `BUILD_INFO.json` naming the commit, which the page shows. Never a git mirror: the Space README needs frontmatter the repository's must not carry, and ModelScope forbids the force push a mirror needs. The workflow runs on `workflow_run` of `tests.yml` completing with success, for a `push` event, from this repository, on `main`; a manual run is a dry run unless it is on `main`; a missing secret turns that platform's step into a dry run; gitleaks scans the bundle before anything is uploaded; every action is pinned by commit. Whoever can merge to `main` decides the code that runs beside every live visitor's credential, and this section says so in as many words. **Amended in batch 165**: `scripts/build_demo_bundle.py` builds the bundle. It refuses a `neverDistribute` match more strictly than the npm and pip channels apply the list -- an `exact` pattern at any depth, a `dir` pattern as any directory segment, an unknown match kind loudly -- and generates the root `app.py` shim, the README, the requirements, `.gitattributes` (an upload that deletes everything else keeps a Space's old one) and `session.lock`, recording in `BUILD_INFO.json` whether the build had local changes. The client id is a public value that gitleaks' `generic-api-key` reads as a key, so `.github/gitleaks.toml` allowlists that one line by its shape, and a bundle is scanned from its own root, where its path is `config.yaml`. **Amended in batch 166**: what each bundle carries differs by platform. The Space's has the README frontmatter and a `requirements.txt` the Space installs. The Studio's has a generated `Dockerfile`, `bridge.lock` and a `.dockerignore`, and no `requirements.txt`, which nothing there would install. The `.dockerignore` is an ALLOWLIST generated from the same file list the bundle wrote -- everything left out, then exactly the bundle's files let back in, then caches left out again -- because ModelScope builds from a git clone of the Studio, whose `.git` and anything else in it a denylist would have to anticipate; a path that cannot be named literally in it refuses the build. Measured with `.git`, `providers.json`, a stray file and `__pycache__` planted in the context: the image held exactly the bundle's files, and an integration test repeats that against a real image. The start-up shim turns Gradio's analytics off unless the operator sets the variable, because every start otherwise called huggingface.co and api.gradio.app. **Amended in batch 169**, by the owner's rule: a commit deploys only when EVERY CI check on it passed, not `tests.yml` alone. `scripts/deploy_gate.py` reads GitHub's record of the commit: every check run must be success or skipped -- a job its workflow lets fail and a scheduled run on the same commit included, this workflow's own and GitHub's `dynamic` runs excepted -- every workflow a push to `main` runs must have a successful push run, and the commit must be `main`'s tip. deploy-demo.yml lists exactly those workflows under `workflow_run`, the gate derives them from the files, and a test holds the two together; a push trigger filtered by path is refused, since the gate would wait for it forever. pip-audit runs on a push to `main` for this, and codeql and pip-audit key their concurrency on the event so a schedule cannot cancel a push run. The gate re-checks the trigger itself -- a push, to `main`, in this repository -- because a `workflow_run` job's `github.ref` is always the default branch and the `demo` environment's branch rule therefore cannot; the environment holds `HF_TOKEN`, a fine-grained token for the one Space, and only the deploy job enters it. Before anything is sent, `scripts/deploy_demo.py` scans the bundle from its root, audits the locks it installs -- on Hugging Face the bridge's packages resolved for the platform, since the Space installs Gradio itself -- accepting a finding only by ID while its version is pinned, and asks the gate once more. A Space is deployed when its page names the build. **ModelScope is deployed by the owner** with the same script and gate: its tokens are account-wide and it offers no trusted CI, so no workflow holds one. `--unverified` skips the gate for a private test deploy and the workflow never passes it. **Amended in batch 170**, the owner's choice: an open code scanning alert on `main` of security severity high or critical holds the deploy too. CodeQL on a push uploads its alerts and fails nothing -- the `CodeQL` check is posted on pull requests only -- so batch 169 had recorded that a new alert on a direct push would pass. The gate reads the alerts for `main` with `security-events: read`, and an alert list it cannot read stops the deploy rather than reading as empty; medium and low alerts and quality notes are triaged, not gated. The first triage of all 51 open alerts fixed 19 in code (17 empty `except` blocks given their reason, a dead store, a dead alias) and dismissed 32 with a reason each, and the one high alert, `json_store`'s `0o666` default, led to the consent store that had no mode of its own. **Amended in batch 198**, the owner's request: the Space's README names a cover image as its `thumbnail`, which Hugging Face takes as a URL, for social sharing. `docs/assets/` is not in the bundle, so the address is the file on GitHub's `main` -- the owner's choice over the build's own commit, which an unpushed or rebased commit would break -- and it resolves once the commit adding it has merged there. A Studio's README carries no frontmatter, so nothing here sets a Studio's cover |
+| **HD10** | **Deferred: a model hosted on ZeroGPU, and keys held in the browser.** A ZeroGPU model would spend the visitor's few daily GPU minutes one agent step at a time, each a separate allocation with queueing and a possible cold start, and charging the visitor rather than the Space would mean forwarding their identity header from a subprocess; the no-op GPU function keeps the Space ready for it. Keys held in the browser would mean relaying every model call through the page, which only some providers permit from a browser at all |
+| **HD11** | **In a shared deployment the math tools run walled in, or not at all.** SymPy's parser ends in `eval`, and a visitor chooses every expression their own model sends, so `_validate_ast` is the lock and `security/confine.py` is what stands behind it. The child each math call already ran in (H2, H3) puts up four walls after importing the tool and before reading its params: no file may grow and the process is non-dumpable; a child started as root becomes `nobody`; Landlock allows reading beneath the interpreter's import roots and nothing else, from ABI 4 no TCP and from ABI 6 no signal or abstract socket outside the child; and a seccomp denylist answers process creation, networking, signals, tracing, privilege changes, mounts and the kernel's control surfaces with `EPERM`. A denylist, because which calls CPython, glibc and SymPy's lazy imports need is a property of their versions, and Landlock carries the filesystem. A wall that will not go up means the call does not run. The bridge proves the walls at every start with a self-test on the session interpreter -- an integral computed, then every escape attempted -- and only a clean pass sets `VENASTINE_CONFINEMENT=verified` for its sessions; without it `security/hosted.py` refuses the six tools as it refuses the container tools. Linux on x86_64 only. A local install and a single-user deployment are unchanged: one has its owner at the keyboard, the other a shell already. Measured on the Space before it was relied on (2026-10-20: uid 65534, Landlock ABI 7, eleven escapes and the way back to root all refused), and the verdict is in the Space's log at every start. **Noted in batch 166**: a ModelScope Studio's kernel (Alibaba's 5.10) has no Landlock, so the self-test fails there and a shared Studio refuses the six tools. That is this decision working, not a gap in it; a weaker set of walls for kernels without Landlock would be a decision of its own |
+| **HD12** | **A shared deployment takes no pasted key, by decision, and says where a key can go instead.** Holding one safely is not the obstacle -- it could live exactly as a sign-in's does, in the session's memory, in a non-dumpable process, gone at disconnect. What no code here can fix: (1) whoever controls the deployment -- its operator, its platform, anyone who can merge to `main` (HD9) -- can use whatever a session holds, and a sign-in bounds that through the provider (Hugging Face's token is scoped to inference, expires in 8 hours and is listed under the person's connected apps; OpenRouter's key is made for this app on OpenRouter's own consent page), while a pasted key is usually the account's own, unscoped, with no expiry, held where the provider has no record of it; (2) a public Space can be duplicated by anyone and looks identical, and a look-alike gains little from a sign-in, which happens on the provider's page, but would collect pasted keys with nothing to tell it apart -- the demo would be teaching the exact habit a phishing copy needs; (3) the providers' own key guidance stops short of the bar HD5 set for a sign-in: Anthropic's says that whoever needs access should get their own key and to trust a third-party tool with one only as far as its developer, and OpenAI's key-safety article says sharing a key breaks its Terms of Use (read from a search excerpt; the page refused a direct fetch, 2026-10-22); (4) a typed key crosses the platform's TLS-terminating proxy as websocket keystrokes, where a sign-in sends nothing usable. So the refusal stays, and `/connect`, its listing and the landing page name the two places a key is the person's own business: the installed harness, and a private duplicate of the Space in single-user mode (HD7), which takes keys and the `VENASTINE_PROVIDERS_JSON` secret -- in Hugging Face's own steps, private by default, ZeroGPU on a free account. Browser-held keys (HD10) would answer (4) and part of (1), not (2) or (3), since the page's script comes from the deployment. What would reopen this: a provider whose documentation explicitly invites a hosted third-party app to hold a user's key, or a shipped browser-held design that answers (2) |
+| **HD13** | **ModelScope's sign-in is completed by the bridge, on hosted deployments only, and its code is copied, not delivered.** ModelScope's OAuth app registration offers the scope `api-inference` ("Invoke API Inference") and says "Users can authorize your application through ModelScope OAuth to obtain ModelScope-related permissions associated with the user" -- the explicit invitation HD5 requires (the published `scopes_supported` leaves that scope out; the registration offers it). Its discovery document, read 2026-10-22, lists the authorization-code grant and nothing else, and a token endpoint that authenticates the app only by `client_secret_basic` or `client_secret_post`: no public client, no device code, no PKCE advertised. So the app's secret is mandatory, and only a deployment can keep one. It is a platform secret, `VENASTINE_MODELSCOPE_CLIENT_SECRET` (Hugging Face does not copy a secret to a duplicate), taken out of the environment by the bridge before it starts anything, after which the bridge makes itself non-dumpable (HD6); it never reaches a session, whose environment is an allowlist (HD3). The client id is public and lives in `deploy/hosted/sign_in.py`, overridable by `VENASTINE_MODELSCOPE_CLIENT_ID` for a fork's own app. A local install connects ModelScope with a pasted key, as before. The flow: `/connect modelscope` asks the bridge for a sign-in through a meta packet -- the bridge is the only writer of a session's stdin and everything a browser sends reaches it as screen input, so only the bridge can answer one (`tui/hosted_driver.py`), and the session still accepts an answer only for the request it is waiting on. The bridge issues a 256-bit state bound to that session for ten minutes and returns ModelScope's consent URL, with the scopes `openid api-inference` and the deployment's own `/oauth/modelscope/callback`. The callback spends the state at its first use and shows a one-time handle -- never the code or anything else the request carried, sent `no-store`, `no-referrer` and under a CSP that lets nothing run, rate-limited per address -- which the person pastes into the terminal. The bridge accepts the handle only from the session that started the flow, five tries at most, then trades ModelScope's code for a token with the secret, refuses an `error` even in an HTTP 200 (ModelScope answers failures that way) and a granted scope without `api-inference`, drops the refresh and id tokens, and hands the token to that session, which keeps it in memory (HD5); it can be revoked at https://www.modelscope.ai/my/settings/apps. The owner chose the copy over delivering the token to the session automatically: with delivery, anyone could start a sign-in, send its link to someone else and receive that person's token when they approved it, and a cookie that would bind the approving browser to the session fails in the embedded Space, where Safari and Firefox partition it. What would change this: a public-client or device-code flow from ModelScope, which would also let a local install sign in. **Amended in batch 167's first live run**: the callback page may be framed by the platform's own site and no other -- `https://www.modelscope.ai` on a Studio, `https://huggingface.co` on a Space -- because ModelScope delivers the redirect to a Studio's host inside its own Studio page, and with `frame-ancestors 'none'` the browser showed the person nothing; the page has nothing to click, so a frame can take nothing from it. **Amended in batch 168**: the landing page names `/connect modelscope`, with its revoke page, only where the bridge holds the secret -- a duplicated Space copies variables but not secrets, and there the command could only refuse. **Amended in batch 176**: ModelScope's second site signs in too. modelscope.cn is a separate site, measured 2026-10-26 -- its own issuer (`https://www.modelscope.cn`), token endpoint and accounts (it signs in through `passport.modelscope.cn`; .ai by email, GitHub or Google) and its own app registry, so an app on one is no client of the other -- with the same discovery document (authorization code only, a client secret at the token endpoint), the same `api-inference` scope and the same invitation on its app form (HD5). So `deploy/hosted/sign_in.py` holds one SITE per ModelScope site, each with its own app id, its own platform secret (`VENASTINE_MODELSCOPE_CN_CLIENT_SECRET`, taken out of the environment with the first) and -- the owner's choice over one shared path with the site bound to the state -- its own callback, `/oauth/modelscope-cn/callback`, so a code is only ever traded with the site that issued it. Built before the app exists, also the owner's choice: registering one takes a modelscope.cn account, and until its id is in the code or in `VENASTINE_MODELSCOPE_CN_CLIENT_ID` and its secret is set, no deployment offers it. A session asks for a site by name (`/connect modelscope-cn`, the preset that took only a pasted key before) and waits for one sign-in at a time: starting one drops any flow it had open on the other site, and its code goes to the site it last started. A deployment offers each site whose pieces it has, and the landing page, banner and revoke links name only those; .cn's revoke page is the same route on its own host, `https://www.modelscope.cn/my/settings/apps`. Not yet measured, for want of the app: .cn's token endpoint's answers, held to .ai's reading since it runs the same server, and whether .cn's API-Inference needs the account linked to Alibaba Cloud first, as secondary guides say. **Amended in batch 177**: a Studio signs in through its own app. ModelScope's Studio OAuth (its docs, "Using OAuth in Studios") creates an app for a Studio whose OAuth settings are on, with the scopes and token lifetime chosen there, and injects `OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET`, `OAUTH_SCOPES`, `OPENID_PROVIDER_URL` and `STUDIO_HOST`; the owner chose it over the app registered by hand, as the platform's own way, wherever it exists. So where those are present the site whose issuer `OPENID_PROVIDER_URL` names signs in through that app -- only if its settings grant `openid` and `api-inference`, asking for those two alone -- returning to `https://{STUDIO_HOST}/auth/callback`, the path those docs give a server-side app; the hand-registered app's secret, if still set there, is logged as unused. The hand-registered app stays for everywhere else, the owner's choice: a Hugging Face Space, which has no Studio OAuth, and modelscope.cn, which a modelscope.ai Studio's app cannot sign in. The copy-code flow stays, also the owner's choice over the docs' Authlib example, which binds a sign-in to a browser cookie and delivers it to whoever approves -- the two things this record already refused. Every site's endpoints now come from its discovery document, read once at start (the owner's choice over fixed paths): both must be https on the issuer's host, the token endpoint must take `client_secret_post`, and a site whose document cannot be read, or names another issuer, is not offered, with the reason logged. `OAUTH_CLIENT_SECRET` is taken out of the environment with the others. And on a Studio the bridge removes `SYSTEM`, which Studio OAuth sets to `spaces` for Gradio's own sign-in button: Gradio 6.30 then takes the Studio for a Hugging Face Space and starts that platform's reload watcher from the `spaces` package, the bridge uses no Gradio sign-in, and those docs say a non-Gradio app should not depend on these variables; `STUDIO_ID` is how a Studio is told from a Space. Not yet measured, for want of the settings being on: which callback paths the platform's app accepts, and what else the injected variables change. **Amended in batch 178**, after the first live start with the settings on (2026-10-26): the Studio injects `OPENID_PROVIDER_URL` as plain `http://www.modelscope.ai`, and the document was read in the clear. Every discovery document is now read over https whatever scheme its provider names, and a provider that is no http or https address with a host is refused. The same start confirmed `SYSTEM=spaces` removed and the .ai sign-in offered through the Studio's own app. **Amended in batch 196**, the owner's choice from the pre-public review: the code page also says "If you did not type /connect in this demo yourself, close this page and share this code with no one." A forwarded consent link still reaches whoever it is sent to, but the code is what hands over their quota, and the page now says so beside it |
+
+---
+
+## §78. A release tag that named one version while the run packed another
+
+**Built in batch 162**, from register item 115, which batch 161 filed while
+reading the `v0.3.1` tag's runs. `package.json` and `pyproject.toml` both say
+`0.2.0`. They said it under `v0.3.0` at `f836602` and under `v0.3.1` at
+`e50fe6e`. The `v0.3.1` `publish (npm)` run packed `@yahyahammad/venastine@0.2.0`,
+and `scripts/prepublish-check.mjs` reported "prepublish check passed: v0.2.0".
+It uploaded nothing, and only because no `NPM_TOKEN` is configured.
+
+**THE TAG WAS A THIRD COPY OF THE VERSION, AND NOTHING READ IT.** The script
+compares the two version files with each other. `tests/test_docs_consistency.py`
+pins the same pair. `publish.yml` reads no tag name at all. So once the channel
+is armed, a tag push publishes whatever the files say, whatever the tag says, and
+`publish.yml`'s own header says why that cannot be undone: a published npm
+version "can never be replaced -- only deprecated".
+
+**What npm holds, which the register entry did not measure.** `npm view
+@yahyahammad/venastine` lists `0.1.0` (2026-09-03) and `0.2.0` (2026-09-09,
+`gitHead` `41b4850`, the `v0.2.0` commit), and neither carries a provenance
+attestation, so neither came from this workflow's real publish step. So an armed
+`v0.3.1` run would not have published silently: npm refuses to publish over an
+existing version, and the step would have gone red. The silent case is the next
+one: a tag on a commit whose files name a version npm does not have yet, and
+that version goes out under the wrong tag for good. The entry's conclusion
+stands, and its example would have failed loudly.
+
+**What the tags were.** `v0.1.0` at `1e92f36` and `v0.2.0` at `41b4850` each
+matched their files. `v0.3.0` and `v0.3.1` are lightweight tags on two PR merges,
+#200 and #263, and nothing was bumped for either. Asked, the owner ruled them
+releases whose bump was missed.
+
+**The check, and where it runs.** `releaseTagProblem()` is the first thing the
+script does after reading `package.json`. When `GITHUB_REF_TYPE` is `tag`, it
+refuses unless `GITHUB_REF_NAME` is exactly `v` + `package.json`'s version, and it
+exits before `npm pack --dry-run`, the script's only packing. On the publish path
+it runs twice: at the explicit "Prepublish check" step, and again in `npm
+publish`'s `prepublishOnly`, which npm runs before it packs. When a tag was
+compared, the pass line now says "(the tag names it)". The `v0.3.1` log said
+"passed: v0.2.0" and nothing about the tag.
+
+**How it is tested, and why that is new here.** Every other test of this script
+reads its source, because the suite has no JS harness. A tag exists only on the
+run it started, so this one runs the real script under Node. A fake `npm` on
+`PATH` records that it was called and fails, so nothing is packed and nothing
+touches the network. "Refused before anything is packed" then becomes a file that
+does or does not exist. Three near misses must be refused without `npm` being
+called: a prerelease of the version, the version without its `v`, and an empty
+name. Three controls must reach `npm`: the right tag, a branch run, and a run
+with neither variable. Without Node the tests skip, except under `GITHUB_ACTIONS`,
+where they fail, because a revert check cannot see a test that skips.
+
+### What §78 deliberately does not change
+
+**The version files and the tags.** Both stay where they are, by ruling. npm
+received nothing from either `v0.3` tag. The next release bumps both files past
+0.3.1 and tags the commit that carries the bump, and a re-run of either old tag
+now refuses.
+
+**The channel.** No `NPM_TOKEN`, no retag, no push. Arming stays the owner's act,
+in the order `AGENTS.md` gives: public repository first, then the secret.
+
+**`publish.yml`'s steps.** Only its comments changed. A workflow step would fail
+before the suite rather than after it, minutes sooner. The owner chose one copy,
+in the file that already owns version parity, over a second call site.
+
+**The pair check.** `package.json` against `pyproject.toml` is unchanged, in the
+script and in the suite. The tag is compared with `package.json` alone, because
+the pair check, which runs next, makes them one fact.
+
+### Design Decisions Record — §78 (A78)
+
+| id | decision |
+|---|---|
+| **A78** | **On a run from a tag, the tag must name the version that would be published, and that is decided before anything is packed.** `scripts/prepublish-check.mjs`'s `releaseTagProblem()` reads `GITHUB_REF_TYPE` and, for `tag`, refuses unless `GITHUB_REF_NAME` is exactly `v` + `package.json`'s version. It exits before `npm pack --dry-run`. It is keyed on the ref and not the event, so a manual run started from a tag is held to the same rule as a tag push. A branch run or a local `npm publish` names no version and is not compared. The comparison is exact: a prerelease tag starts with the right version, and a tag without its `v` contains it. The owner ruled `v0.3.0` and `v0.3.1` releases whose bump was missed, and left the files and the tags alone. The owner chose the script over a workflow step, which would fail sooner, and over both, which would add a second call site |
+
 ---
 
 ## §77. The approval wait that gave up before the test that was answering it

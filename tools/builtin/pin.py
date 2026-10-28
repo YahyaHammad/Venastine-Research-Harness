@@ -46,6 +46,7 @@ TOOL_SCHEMA = {
                                "it are already protected automatically, so "
                                "reach further back than you think you need).",
                 "minimum": 1,
+                "default": 1,
             },
         },
         "required": [],
@@ -69,6 +70,7 @@ UNPIN_TOOL_SCHEMA = {
                 "description": "How many recent turns to release. Defaults "
                                "to 1.",
                 "minimum": 1,
+                "default": 1,
             },
         },
         "required": [],
@@ -77,8 +79,17 @@ UNPIN_TOOL_SCHEMA = {
 
 
 def _validated_turns(params: dict) -> object:
-    """pin/unpin's shared argument validation: the error, or the int."""
-    last_n = params.get("last_n", 1)
+    """pin/unpin's shared argument validation: the error, or the int.
+
+    An explicit null is ABSENT (batch 190). The ChatGPT plan's model sends
+    each optional parameter at its declared default (ROADMAP_v3 §83, the
+    owner's live check), so the schema now declares 1; a model that sends
+    null instead means the same thing, and refusing it cost a turn. Every
+    other non-integer is still refused, never coerced.
+    """
+    last_n = params.get("last_n")
+    if last_n is None:
+        last_n = 1
     if isinstance(last_n, bool) or not isinstance(last_n, int):
         # isinstance(True, int) is True in Python, and a model emitting
         # `last_n: true` would otherwise pin exactly one turn while looking

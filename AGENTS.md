@@ -32,6 +32,11 @@ python main.py --mode research "some query"       # ten-pass deep-research pipel
 python main.py --provider OPENAI --model gpt-5.1  # override provider/model
 python main.py --tui                              # Textual TUI (§16); the CLI stays the default (D12)
 python main.py --tui --provider OPENAI --model gpt-4o   # or switch in-session with /model
+# §79 in the TUI: /connect [name [--key]|custom <NAME> <url>|cancel] -- connect a provider
+#   without editing providers.json: HF and OpenRouter sign in (HD5), and each ModelScope
+#   site (modelscope, modelscope-cn) where a hosted bridge holds its app (HD13); the rest take a key
+#   /connect chatgpt signs in to a ChatGPT plan, local installs only, then /model CHATGPT <name> (§83);
+#   /disconnect [name [--forget]] blanks a key or signs out of the plan
 python main.py --trust-project                    # grant D17 workspace trust non-interactively
 python main.py --mode research --grant "q"        # §25: pick gated tools to authorise for this run
 python main.py --mode research --attended "q"     # §25: approve every gated call as it happens
@@ -55,7 +60,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 7376 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
+pytest                                            # 8345 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -76,7 +81,7 @@ Test dependencies (`pytest`, `pytest-mock`, `pytest-asyncio` and `pytest-xdist`)
 
 **The suite was FLOOR-BOUND and is not any more, and batch 114 is why.** The slowest single GROUP sets the wall time whatever the worker count, and under loadscope that was `tests/test_tui.py`'s 183 module-level tests — one group, because a test outside a class is grouped by MODULE — at 292 node ids and about a fifth of the suite's measured time. They were cut into 41 classes along the section banners the file already had (TECHNICAL_DEBT 30) and are **73** now, which is the rule working rather than drifting. That number is read back out of this sentence by `test_agents_md_states_the_real_test_tui_class_count` (batch 128), so a batch that adds a class here also edits this digit. Measured properly: three runs a side, ALTERNATED on one box so drift cancels instead of landing on whichever side ran second — **2:17.9 / 2:07.9 / 2:28.6 before against 1:10.7 / 1:40.6 / 1:26.3 after, a mean of 138.1s against 85.9s, 1.61×**, and the two ranges do not overlap, which is the part that makes it a result rather than a pair of averages. Against a serial run that read 8:41 the same evening, 6.1× where it was 3.8×.
 
-**What is left as the floor is one PARAMETRISED function**, and it cannot be split by any class boundary: loadscope groups every node id of a parametrised test together, and `test_every_modal_keeps_its_decision_on_screen` is 3 sizes × 19 cases = **57** of them, pinned against the collected node ids by `test_agents_md_states_the_real_modal_parametrisation` (batch 128) because `_DECISION_CASES` is computed and cannot be counted by reading. Splitting it further was measured and declined — `-n auto` is 11 workers here and the serial suite is ~520s, so the ideal worker share is ~47s and that group already sits under it. Below a bound that has stopped binding there is nothing to win.
+**What is left as the floor is one PARAMETRISED function**, and it cannot be split by any class boundary: loadscope groups every node id of a parametrised test together, and `test_every_modal_keeps_its_decision_on_screen` is 3 sizes × 24 cases = **72** of them, pinned against the collected node ids by `test_agents_md_states_the_real_modal_parametrisation` (batch 128) because `_DECISION_CASES` is computed and cannot be counted by reading. Splitting it further was measured and declined — `-n auto` is 11 workers here and the serial suite is ~520s, so the ideal worker share is ~47s and that group already sits under it. Below a bound that has stopped binding there is nothing to win.
 
 **Two things not to re-derive from the above.** CI gains nothing: `-n auto` is 70% of the cores, so a 4-core runner takes 3 workers and its ideal share was already above the old floor — the payoff is on developer machines, which is where the suite runs many times a batch. And extra workers still buy nothing: alternated on the same commit, `-n auto` (11 workers) ran 2:09 / 2:10 and `-n logical` (16) ran 2:13 / 2:13 / 2:14, about 3% SLOWER, which is the same answer batch 109 got under loadfile.
 
@@ -86,7 +91,7 @@ Test dependencies (`pytest`, `pytest-mock`, `pytest-asyncio` and `pytest-xdist`)
 
 MCP servers are a *third* config file again — `mcp.json`, user-level or `.venastine/`-level. Not `.env`, not `providers.json`, not `settings.json`.
 
-**Credentials are two separate mechanisms, deliberately.** LLM provider keys → `providers.json` (managed by `credentials.py`, gitignored, template at `providers.json.example`). Misc tool API keys (GitHub, NVD) → `.env` (managed by `env_secrets.py`, template at `.env.example`). Never mix them.
+**Credentials are two separate mechanisms, deliberately.** LLM provider keys → `providers.json` (managed by `credentials.py`, gitignored, template at `providers.json.example`, and written for you by `/connect` since §79; a shared hosted session keeps a connected key in memory instead and never writes it, HD5). The ChatGPT plan has no key: its hourly tokens live in `chatgpt_auth.json` beside that file, managed by `core/chatgpt_auth.py` (§83). Misc tool API keys (GitHub, NVD) → `.env` (managed by `env_secrets.py`, template at `.env.example`). Never mix them.
 
 ## Distribution (npm, batch 35)
 
@@ -166,6 +171,49 @@ Publishing makes the source public regardless of the repository's visibility, an
 published npm version can never be replaced — only deprecated, so the repository goes
 public and the secret is added deliberately, in that order.
 
+**A tag publishes only the version it names** (ROADMAP_v3 §78, A78, batch 162). On a run from a
+tag, `scripts/prepublish-check.mjs` refuses before it packs anything unless `GITHUB_REF_NAME` is
+exactly `v` + `package.json`'s version. `v0.3.0` and `v0.3.1` were pushed with both files at 0.2.0
+and nothing compared them. The owner ruled them releases whose bump was missed and left them in
+place, so **a release bumps `package.json` and `pyproject.toml` first and tags the commit that
+carries the bump**. npm already holds 0.1.0 and 0.2.0, neither with provenance, so both were
+published outside the workflow, and the next version has to be past 0.3.1.
+
+**The hosted demo is a third channel, and it deploys only a commit every CI check passed**
+(ROADMAP_v3 §79 HD9, amended in batch 169 -- the owner's rule). What deploys is a bundle
+(`scripts/build_demo_bundle.py`), never the tree. `.github/workflows/deploy-demo.yml` wakes each time
+a CI workflow finishes on a push to `main`; its first job holds no secret and runs
+`scripts/deploy_gate.py`, which reads GitHub's record of the commit: every check run must be success
+or skipped -- a job its workflow lets fail (compat's `py313-info`) and a scheduled run on the same
+commit included -- every workflow a push to main runs must have passed, the commit must still be
+the tip, and since batch 170 no code scanning alert of high or critical security severity may be
+open on `main` (CodeQL on a push fails nothing, so the gate reads the alerts itself). Only then does `deploy-hf`, the one job in environment `demo`, run `scripts/deploy_demo.py`:
+build, gitleaks from the bundle's root, pip-audit of the locks it installs, the gate once more,
+upload, and wait until the page names the build. **Three rules here are load-bearing.** The
+`workflow_run` list must equal the workflows a push to main runs (`deploy_gate.required_workflows()`
+reads them from the files; `test_docs_consistency.py` holds the two together), and no such workflow
+may filter its push by path, or the gate waits forever. The gate re-checks that the trigger was a
+push to `main` in this repository, because a `workflow_run` job's `github.ref` is always the default
+branch and an environment's branch rule therefore cannot. And event values reach a script through
+`env:`, never pasted into `run:`. pip-audit runs on a push to main for this (batch 169), and codeql
+and pip-audit key their concurrency on the event too, so a schedule cannot cancel the push run the
+gate waits for. **ModelScope is deployed by the owner** with the same script and the same gate
+(`--platform modelscope`): it has no fine-grained tokens and no trusted CI. `--unverified` skips the
+gate for a private test deploy and the workflow never passes it. Audit findings are accepted only BY
+ID in `deploy_demo.ACCEPTED`, each entry applying only while its version is pinned -- pillow 12.3.0
+is the first, held there by Gradio 6.30.0's `pillow<13`, with one entry per triage (35 IDs in
+batch 169, two in batch 175, one in batch 192), so a new advisory refuses until someone reads it. The owner's one-time setup: environment
+`demo` with deployment branches `main` only, the secret `HF_TOKEN` (a fine-grained token with write
+access to the one Space) and the variable `DEMO_HF_SPACE`; until both exist, every deploy is a dry
+run.
+
+**The copyright year keeps itself** (ROADMAP_v3 §80, batch 169). `.github/workflows/copyright-year.yml`
+runs `scripts/bump_copyright_year.py` at 23:59 UTC on December 31 and again early on January 1, in
+case GitHub delayed or dropped the first run. It writes a range from the first year
+(`Copyright 2026-2027`), to LICENSE's appendix and NOTICE together, and is the only workflow with
+`contents: write`. Its push uses `GITHUB_TOKEN`, which starts no workflow, so that commit gets no CI
+and no demo deploy. Edit the two copyright lines together or the job refuses.
+
 ## Documentation map
 
 Read these before changing anything non-trivial — they carry design decisions that are locked, not defaults to re-derive.
@@ -182,7 +230,7 @@ made the move free: no import changed, and `tests/test_docs_consistency.py` is t
 opens any of these files (its `DOCS` constant is where the path now comes from).
 
 - **docs/ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49–§52, §55, §61, §62, §63, §64, §65, §66, §67, §68, §69, §70, §71, §72, §73, §74, §75, §76 and §77 built; §53, §54 and §56–§60 recorded from the owner's requests in batches 122 and 123, specified and not yet designed) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A77 from §32 (A16 in ROADMAP_v3 §62, A17, A18 and A19 in §63, A20 and A21 in §64, A22, A23 and A24 in §65, A25, A26 and A27 in §66, A28, A29, A30, A31, A32 and A33 in §67, A34, A35, A36, A37, A38 and A39 in §68, A40, A41, A42, A43, A44 and A45 in §69, A46, A47, A48 and A49 in §70, A50, A51, A52 and A53 in §71, A54, A55, A56 and A57 in §72, A58, A59, A60, A61 and A62 in §73, A63, A64 and A65 in §74, A66 and A67 in §75, A68, A69, A70, A71, A72, A73, A74, A75 and A76 in §76, A77 in §77), W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 SS1–SS72 from §49, NW1–NW5 from §50, PG1–PG9 from §51, RB1–RB7 from §52, IO1–IO7 from §53, AT1–AT8 from §54, TR1–TR15 from §55, JV1–JV10 from §56, SM1–SM4 from §57, PR1–PR5 from §58 UI1–UI4 from §59, UH1–UH12 from §60 and CN1–CN12 from §61). Section and D-numbers are stable and cross-referenced everywhere.
+- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49–§52, §55, §61, §62, §63, §64, §65, §66, §67, §68, §69, §70, §71, §72, §73, §74, §75, §76, §77, §78, §79, §80, §81 and §82 built; §53, §54 and §56–§60 recorded from the owner's requests in batches 122 and 123, specified and not yet designed; §79 designed with the owner in batch 163 and built in seven slices through batch 169; §83 decided with the owner in batch 180, measured in batches 181-183, its sign-in slice built in batch 184, and its Responses slice planned in batch 186, measured in batch 187, built in batch 188 and checked live in batch 189) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A78 from §32 (A16 in ROADMAP_v3 §62, A17, A18 and A19 in §63, A20 and A21 in §64, A22, A23 and A24 in §65, A25, A26 and A27 in §66, A28, A29, A30, A31, A32 and A33 in §67, A34, A35, A36, A37, A38 and A39 in §68, A40, A41, A42, A43, A44 and A45 in §69, A46, A47, A48 and A49 in §70, A50, A51, A52 and A53 in §71, A54, A55, A56 and A57 in §72, A58, A59, A60, A61 and A62 in §73, A63, A64 and A65 in §74, A66 and A67 in §75, A68, A69, A70, A71, A72, A73, A74, A75 and A76 in §76, A77 in §77, A78 in §78), W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 SS1–SS72 from §49, NW1–NW5 from §50, PG1–PG9 from §51, RB1–RB7 from §52, IO1–IO7 from §53, AT1–AT8 from §54, TR1–TR15 from §55, JV1–JV10 from §56, SM1–SM4 from §57, PR1–PR5 from §58 UI1–UI4 from §59, UH1–UH12 from §60, CN1–CN12 from §61, HD1–HD13 from §79, LY1–LY3 from §80, IM1–IM10 from §81, GS1–GS4 from §82 and CG1–CG24 from §83). Section and D-numbers are stable and cross-referenced everywhere.
 
 **Six namespaces use the same `LETTER+NUMBER` shape, and only the first is the
 record.** An id that resolves to two places is a cross-reference that fails
@@ -229,12 +277,13 @@ That qualifier is load-bearing, not pedantry (audit #128). This file used to say
 | `config_update.py` | The three-way merge that carries an edited `config.yaml` across an `npm update`; `bin/venastine.mjs` runs it before `main.py` | Anything at runtime; a user tier or a redirectable config path -- it puts values back into the ONE location, it does not add a second |
 | `config.py` | Publishing those values as plain mutable module globals | Any logic, any `if`/`else`, any `os.environ` read, any decision-making function |
 | `credentials.py` / `env_secrets.py` | LLM provider keys / misc tool keys | Each other's domain |
+| `core/chatgpt_auth.py` | The ChatGPT plan's credential (§83): its sign-in, `chatgpt_auth.json` and its lock, the refresh, the revocation | A key (that is `credentials.py`), and any drawing |
 | `database.py` | The engine/connection only | Table classes, CRUD, awareness of what data exists |
 | `storage.py` | Schema (table classes) + CRUD | Active conversation state, provider-specific shapes |
 | `core/memory.py` | Active in-run state, provider-neutral, write-through | SQL, table classes, provider shapes |
 | `core/session.py` | The ephemeral `/trigger` override, and what clears it | Resolving that number; persisting anything, ever |
 | `core/model_windows.py` | The remembered context window per `(provider, model)` | Deciding whether a number is a sensible window |
-| `core/client.py` | One call + provider format translation | Looping, retry, tool dispatch, bookkeeping |
+| `core/client.py` | One call + provider format translation, and the one resend a stale ChatGPT plan token needs (§83, CG10) | Looping, retry, tool dispatch, bookkeeping |
 | `core/provider_errors.py` | Which provider failures are transient, the retry backoff, the one-line description of a failure | The attempt itself (`core/loop.py`); importing any SDK |
 | `core/loop.py` | Call-dispatch-repeat control flow | Provider formats, tool policy, pipeline state |
 | `security/permissions.py` | Policy (`is_tool_allowed`, `requires_approval`) | Dispatch mechanics |
@@ -322,7 +371,10 @@ separately. **Batch 108 added the two that hold credentials** -- `credentials.py
 over the live file, so a crash mid-write destroyed every stored API key or secret; the
 helper's own docstring had argued that exact case since batch 45. That extraction is also what made `known_mcp_servers.json` atomic — it was
 the one of the four writing a CONSENT record through a bare `open(path, "w")`, while its
-three siblings each explained at length why that is unacceptable. `/effort` and `/thinking` are unchanged.
+three siblings each explained at length why that is unacceptable. **And it is `0o600` since batch 170**, like
+the trust store: it took `open()`'s mode less the umask, so a group-writable umask let someone else
+write a consent. Triaging CodeQL's alert on `json_store`'s default mode found it; that default stays
+`0o666`, which is right for the files the agent writes in a workspace. `/effort` and `/thinking` are unchanged.
 
 **The model has a second reason not to be written into that file** (RM3): a project's
 `.venastine/settings.json` is inside D17's trust content hash, so a session writing
@@ -527,7 +579,9 @@ digest is a shell command or a JSON argument, and `inline_spans` does not merely
 over-decorate one, it **eats characters** — `# \`date\`` loses its backticks to a code span
 and `name~=*test*  ~~old~~` renders as `name~=test  old`. A digest that no longer shows
 what ran is worse than an inert URL. The harness's own voice (`system`, `error`) is
-deliberately not in the set.
+deliberately not in the set. Batch 199 adds one role: `invite`, the hosted banner's star
+line, which the owner asked to be clickable — the first line the harness writes to be
+clicked. `system`, `error` and `warning` stay out.
 
 **`param_digest` truncates at 60 characters, so the target rides beside the text.**
 Most real URLs are longer, and an elided one is refused by the ASCII rule (the ellipsis
@@ -1509,7 +1563,7 @@ would never clear.
 
 **The package is `mcp_client/`, never `mcp/`.** The project root is on `sys.path`, so a top-level `mcp/` shadows the installed SDK — the `logging.py` incident again. §17's spec sketches `mcp/client.py`; don't follow it there. Every SDK symbol lives inside this package so a version migration touches one directory.
 
-**Pinned to `mcp==2.0.0`, EXACTLY, and the range is what it was pinned away FROM.** `requirements.txt` carries the reason: under `>=2.0,<3` a minor release went red on main while every local run stayed green, so CI's result depended on WHEN it ran and CI was not testing what anyone runs locally. Moving it is deliberate: read 2.1.0's split first. v2 is not v1: fields are snake_case (`.content` / `.structured_content` / `.is_error`), `Tool.input_schema`, timeouts are `float`, the exception is `MCPError`, and `Client(server)` replaces `ClientSession` + a separate transport CM. Reading the v1 spellings against v2 doesn't crash — `getattr` returns `None` and every failed call silently looks successful.
+**Pinned to `mcp==2.2.0`, EXACTLY, and the range is what it was pinned away FROM** (2.0.0 until batch 165's follow-up, which took 2.2.0 for CVE-2026-59951 -- a server-side advisory this client was never exposed to -- after reading the split the next sentences describe). `requirements.txt` carries the reason: under `>=2.0,<3` a minor release went red on main while every local run stayed green, so CI's result depended on WHEN it ran and CI was not testing what anyone runs locally. Moving it is deliberate: read 2.1.0's split first. v2 is not v1: fields are snake_case (`.content` / `.structured_content` / `.is_error`), `Tool.input_schema`, timeouts are `float`, the exception is `MCPError`, and `Client(server)` replaces `ClientSession` + a separate transport CM. Reading the v1 spellings against v2 doesn't crash — `getattr` returns `None` and every failed call silently looks successful.
 
 **The manager task is required.** `AsyncExitStack` cannot be entered in `connect_all()` and closed in `disconnect_all()`: anyio binds cancel scopes to the **task**, and `run_coroutine_threadsafe()` makes a new task per call, so the right *loop* is necessary but not sufficient. One long-lived `_manager()` task enters every context, signals ready, and parks until shutdown. If `RuntimeError: Attempted to exit cancel scope in a different task` appears, something moved an enter/exit across a task boundary.
 
@@ -1584,7 +1638,13 @@ Anthropic, OpenAI-compatible (any `is_v1_compatible` provider), and Google are a
 
 **Two providers show no thinking, by construction rather than by bug** (O2). `OPENAI`'s Chat Completions endpoint returns no reasoning text at all, and `GOOGLE`'s request deliberately does not ask for thought summaries — `ThinkingConfig(include_thoughts=True)` exists on the pin, and setting it is an owner decision (it changes a verified provider's request and bills the summaries), not an omission to fix. Both SDK shapes are asserted against the REAL packages in `tests/test_sdk_conformance.py`: a field rename here fails *silently*, since `getattr` returns `None` and every stream then looks like it carried nothing.
 
+**Gemini 3 signs its function calls, and the signature must go back** (ROADMAP_v3 §82, GS1–GS4). Every model a new Google account can call is Gemini 3, which answers 400 when a call in the current turn is replayed without the `thought_signature` it came with. The GOOGLE stream records one block per call in `ModelResponse.thinking` (§44's record, signature or null), and the translation hands back exactly that to the same model, or Google's placeholder on the first call of a turn another model wrote. Do not drop the null blocks: they keep "this model attached nothing" apart from "unknown". **And do not go back to sending every `Schema` field the SDK has.** `_GOOGLE_SCHEMA_VERIFIED` exists because google-genai 2.29.0's `additional_properties` is refused by the Gemini API, and one refused key fails every declaration at once. The pin is google-genai 2.29.0, and Google reasoning effort is on because of it.
+
+**The ChatGPT plan signs in and holds no key** (ROADMAP_v3 §83, CG1–CG24). Its tokens rotate: an access token lasts an hour and each refresh spends the refresh token it replaces, so every read-modify-write of `chatgpt_auth.json` holds one OS lock across threads and processes, re-reads the file after taking it, and writes a replacement before returning it. A refresh OpenAI refuses as unusable ends the session; anything else keeps every token. The ID token is checked with the algorithm pinned to RS256 BEFORE a key is chosen. The sign-in comes back to 127.0.0.1, which is why no hosted deployment offers it (CG1), and `/model CHATGPT` chats on the plan through the Responses path in `core/client.py` (slice 2b): the openai SDK with the token function as its key and no retries of its own, reasoning handed back only to the model that wrote it, dispatch on an event's `type` and never its class (the SDK parses an unknown event as the wrong one), and a usage limit never retried. Its keyless `providers.json` entry is the sign-in's (CG20), and launch and every switch ask the plan about its sign-in, never its key (`credentials.missing_credential_message`, batch 189).
+
 **The empty assistant turn is dropped ABOVE the branch split (#13, #36).** A turn with neither text nor tool calls — a safety filter, a truncation, an empty pass response — is persisted by D20 and so reaches translation on every resume. It used to produce three different results from one neutral input: `content: null` on OpenAI (#13, which killed a live Pass 2), `content: []` on Anthropic (#36, on the *default* provider), and a skip on Google — guarded only because Google was the provider being debugged when it surfaced. `_is_empty_assistant_turn` now filters once at the top of `_messages_for_provider`, so a fourth branch inherits the fix instead of re-deriving it, and Google's local `if parts:` is gone. **Both halves must be empty**: a tool-call-only turn legitimately has no text, and a guard keyed on text alone drops the `tool_use` and orphans the `tool_result` after it. Dropping the turn can leave two consecutive `user` messages, which is the shape Google's branch has always produced here.
+
+**An image is a COLUMN, not a content block, and it never rides in a tool result** (ROADMAP_v3 §81, IM1–IM10). `view_image` hands the base64 to `memory.attach_image(call_id, …)`, and the loop's ordinary `add_tool_result` writes it into `MessageLog.images` on that same row. The result the tool returns is one sentence. Two consequences follow, and both are what keeps this cheap. First, the bytes never reach the output redactor, so "every value is scanned" (#47) still holds without an exemption. Second, `content` stays the string that thirty-five readers expect. Do not "simplify" either: putting the image in the result dict sends base64 through the secret patterns, which can alter it and turn it into a request the provider rejects; and making `content` a list of blocks touches every reader of it. Only two readers know about the column: translation and the compactor's `_row_chars`. **The three wires disagree, and that is measured against the pins, not assumed.** Anthropic puts the image inside the `tool_result`. OpenAI-compatible tool messages take text parts only, so the images go in ONE harness-labelled user message after the whole tool batch, derived per request and never persisted. Google gets the same harness turn after the batch since batch 173 (IM9), because its function responses take no image on the models a new account can call, and a GIF there is a note (IM10). A provider not marked `accepts_images` (`is True`, A29) gets IM5's note. Whether a run is offered the tool is `RunInfo.images`, computed once in `_run_steps` and read by both `schemas(images=)` and the handler. The parameter defaults False, so a new caller hides the tool rather than offering a result the model cannot see.
 
 ### Research pipeline (`core/reasoning/`)
 
@@ -2929,13 +2989,15 @@ is gone outright, not kept as a fallback. `doc_path()` is one join now.
   and source files are out of scope entirely — widening to those turns it into
   `read` with no gate. But the set is not small: the tool takes a PATH, resolves
   anywhere under the project, and admits `.md`/`.markdown`/`.rst`/`.txt` plus ten
-  named build files, which on a clean checkout of this repository is **62 files
-  and under 5 MB at depths 0-3**, including every agent and skill body under
+  named build files, which on a clean checkout of this repository is **63 files
+  and under 6 MB at depths 0-3**, including every agent and skill body under
   `agents/builtin/` and `skills/builtin/` and the whole of `docs/`. The 61st is
   `docs/REVIEW_MARATHON.md` (batch 129), and the per-scope review reports it
   governs are deliberately NOT tracked, so they do not move this figure at
   all -- that decision is recorded there and this is the number it was taken
-  against. **It said 40
+  against. The 63rd is `deploy/hosted/requirements.txt` (batch 165), read
+  before it was counted: two pinned package names and why each is there --
+  what the hosted demo's bridge installs, nothing a pass could use. **It said 40
   files and ~1.1 MB until batch 128**, when it was re-measured through the
   tool's own `is_readable_doc` at 60 files and 3.58 MB -- a 3.3x
   understatement, and almost all of the growth is this record: `DEVLOG.md`
@@ -2951,7 +3013,12 @@ is gone outright, not kept as a fallback. `doc_path()` is one join now.
   128, 4.01 MB at batch 144, so about 27 KB a batch), because the ceiling is
   a ceiling on purpose: an equality would go red on the next commit and be
   retyped without being read, and a round number going red is the moment
-  noticing is the correct outcome. The FILE COUNT is pinned exactly instead,
+  noticing is the correct outcome. **It was 5 MB until batch 188**, when the
+  real figure reached 5.00 MB with the file count unchanged at 63, and once
+  more the record was all of it: that batch's own DEVLOG entry crossed the
+  line. Raised to 6 MB, which is roughly forty more batches at the rate
+  measured since (4.01 MB at batch 144, 5.00 MB at batch 188, about 23 KB a
+  batch); nothing the tool can reach was widened. The FILE COUNT is pinned exactly instead,
   and it did not move. ARCHITECTURE.md used to say the most a prompt-injected pass
   gains is the README (audit #97); understating a security bound is the one
   direction that costs something.

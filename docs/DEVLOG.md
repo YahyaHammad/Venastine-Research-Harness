@@ -25397,3 +25397,2566 @@ Each mutation was measured against the shipped fixture:
 - the old 5s fails the floor;
 - `autouse=False` fails the ceiling, with "assert 600 <= 60";
 - a dropped answer fails all three AC2 tests.
+
+## Batch 162 -- a release tag that named one version while the run packed another (2026-10-16)
+
+### What was built
+
+ROADMAP_v3 §78, A78, closing TECHNICAL_DEBT 115, on branch
+`release-tag-matches-version` from batch 161's tip at `1668a39`. It stacks on
+that branch, which is not merged, because A77 and §77 exist only there. Branched
+from `main`, this batch's ids would collide with it.
+
+- `scripts/prepublish-check.mjs`: `releaseTagProblem()` is the first thing the
+  script does. When `GITHUB_REF_TYPE` is `tag`, it refuses unless
+  `GITHUB_REF_NAME` is exactly `v` + `package.json`'s version, and it exits
+  before `npm pack --dry-run`. The refusal message and the existing one share a
+  new `refuse()`. The pass line says "(the tag names it)" when a tag was compared.
+- `tests/test_docs_consistency.py`: six tests. Three are near misses, which must
+  be refused without `npm` being called. Three are controls, which must reach it.
+  They run the real script under Node with a fake `npm` on `PATH`.
+- `.github/workflows/publish.yml`: comments only. The trigger comment says to tag
+  a commit whose files already carry the version, and the prepublish step says
+  what it now refuses.
+- `AGENTS.md`'s Distribution section, its documentation map, the test counts in
+  three documents, `docs/ARCHITECTURE.md`'s tree entries for the script and the
+  test file, and three `tests/BREAKING_CHANGES.md` rows.
+
+### What the owner ruled
+
+Three questions, each asked with options and a recommendation. The owner took
+the recommendation every time.
+
+- **Were `v0.3.0` and `v0.3.1` meant as package versions?** Yes. They were
+  releases, and the bump was missed. `v0.1.0` and `v0.2.0` each matched their
+  files, and these two are lightweight tags on the merges of PRs #200 and #263.
+- **Bump the files to the tags, or leave the tags?** Leave both. Nothing from
+  either tag reached npm. The next release bumps both files past 0.3.1 and tags
+  the commit that carries the bump. Not chosen: bumping to 0.3.1 now, which
+  leaves `v0.3.1` pointing at a 0.2.0 commit, and retagging, which is the owner's
+  own act on the remote.
+- **Where does the check live?** In `prepublish-check.mjs`, first. Not chosen: a
+  workflow step, which fails before the suite rather than after it but is
+  testable only as YAML and is not carried by `prepublishOnly`; and both, which
+  adds a CLI mode and a second call site.
+
+### What measuring found
+
+- **The check refuses the real case.** With `GITHUB_REF_TYPE=tag` and
+  `GITHUB_REF_NAME=v0.3.1`, the script exits 1: "package.json says 0.2.0, so its
+  tag is v0.2.0", and "Nothing was packed". With `v0.2.0`, it packs (the real
+  `npm pack --dry-run`, 167 files) and passes.
+- **npm already holds 0.1.0 and 0.2.0, which the register entry did not
+  measure.** `npm view @yahyahammad/venastine` lists 0.1.0 (2026-09-03) and
+  0.2.0 (2026-09-09, `gitHead` `41b4850`, the `v0.2.0` commit). Neither has a
+  provenance attestation, so neither came from the workflow's real publish step.
+  So the entry's own example was wrong about its consequence: an armed `v0.3.1`
+  run would have been refused by npm as a republish of 0.2.0, red rather than
+  silent. The silent case is a tag on a commit whose files name a version npm
+  does not have yet. The entry and §78 both record the correction.
+- **Each weakening of the check fails a test.** Six mutations were applied to
+  the script, each one asserted to have applied, then run against the six tests:
+  - removing the call fails all three near misses;
+  - a prefix comparison fails the prerelease case;
+  - a substring comparison fails the prerelease and the missing-`v` cases;
+  - moving the call below the pack fails all three, on the `npm` marker file;
+  - keying on `GITHUB_EVENT_NAME` fails all three;
+  - refusing every tag fails the right-tag control.
+
+### What the gates caught
+
+Nothing in this batch's own work. One finding came from outside the code: the
+npm registry contradicted the register entry, as recorded above.
+
+### Verification
+
+`tests/test_docs_consistency.py` passes, 68 passed and 1 skipped, both with
+`AGENT_WORKSPACE` set and with it unset. The skip is the count check, which needs
+a full session. `ruff check .` is clean. bandit with the CI job's own flags,
+against a Windows-path copy of the baseline, exits 0 with nothing new, and
+`scripts/bandit-count-check.py` reports 62 pairs, none grown.
+gitleaks with `.github/gitleaks.toml`, over an export of the tracked files as
+they stood uncommitted, finds nothing.
+
+`python -m pytest -q` is green: 7333 passed, 49 skipped -- 7382, six more than
+batch 161 -- in 1:31. That run was on the tree before the last wording edit to
+`releaseTagProblem()`'s comment and this paragraph; the six new tests and the
+docs gate were re-run after it. Under WSL the six pass as well, which is the
+fake `npm`'s POSIX branch -- the one CI takes -- and its controls are what
+show that fake is reached there.
+
+## Batch 163 -- `/connect`, and a key that never has to be typed into a file (2026-10-19)
+
+### What was built
+
+ROADMAP_v3 §79's first slice (HD5), on a new branch `hosted-demo` cut from
+batch 162's tip at `d208274`, because §77 and §78 exist only on that unmerged
+branch and §79's index row sits beside theirs. §79 itself was designed with the
+owner in this batch, and all ten decisions are recorded now so every id the code
+cites resolves from the first commit.
+
+- `core/connect.py` (new): the preset catalogue -- Hugging Face Inference
+  Providers, OpenRouter, ModelScope on both sites, OpenAI, Anthropic, Google,
+  DeepSeek, Groq, Mistral, and `custom` for any OpenAI-compatible URL -- the
+  Hugging Face device code flow, the OpenRouter PKCE flow with the code shown to
+  copy, `clean_key`, and `store()`, the one way a key is kept. No HTTP library
+  at module scope; every request goes through a replaceable `post`.
+- `credentials.py`: a session-only overlay laid over the file by
+  `load_provider_data()` and never written. `save_credentials` now reads the
+  FILE alone, which is what keeps a session key off the disk when some other
+  provider is saved later.
+- `core/client.py`: `forget_client(name)`, because the client cache is keyed by
+  provider name for the life of the process and a reconnect otherwise kept the
+  old key until a restart.
+- `tui/app.py`: `/connect`, `/connect <name> [--key]`, `/connect custom <NAME>
+  <url>`, `/connect cancel`; two worker messages; the waiting sign-in stopped by
+  the unmount and by every exit. The `/model` switch after a connect is the
+  existing command, called rather than copied.
+- `tui/widgets.py`: a ctrl+clicked link goes to `App.open_url` under the web
+  driver, where `webbrowser.open` would open the SERVER's browser.
+- `safety/policy_enforcement.py`: Hugging Face, OpenRouter and prefixed
+  ModelScope token patterns, bounded at the start of a word so a thread id or
+  `items-<uuid>` is never touched.
+- `config.yaml` / `config_schema.py` / `CONFIG_ARCHITECTURE.md`:
+  `hf_oauth_client_id`, empty, in a new "Connecting a model" section placed
+  before the tool tables -- after them would have moved every line number the
+  `/config` diff tests pin.
+
+### What the owner ruled
+
+- **OAuth only where the provider's own guidance explicitly permits a
+  third-party app.** Two qualified: Hugging Face's OAuth page (a "Sign in with
+  HF" flow "in any website or App", the `inference-api` scope, public apps, a
+  device code flow) and OpenRouter's PKCE guide ("Use OAuth to let your users
+  bring their own OpenRouter API key to your app"). The owner reviews the OAuth
+  details before anything is pushed, so these commits stay local.
+- **Hybrid credentials for the hosted demo**: sign-ins only on a shared
+  deployment, with the key held in memory; pasted keys and the full tool set in
+  a private single-user deployment. This batch builds the mechanism; batch 164
+  wires the modes.
+- **A pseudo-terminal was not needed.** Textual's web driver is the browser
+  route (HD1).
+
+### What measuring found
+
+- **`tools: null` was NOT changed.** An exploration flagged that the
+  OpenAI-compatible branch sends `tools: null` on a tool-less turn and that some
+  endpoints might reject it. Nothing here could measure an endpoint without a
+  key, and the Anthropic branch sends the same `None` on the default provider
+  every research pass, so the change would have been a guess. It is a live
+  verification item for the deploy instead.
+- **The ModelScope token shape is not confirmed.** The pattern covers the `ms-`
+  prefixed form; the owner's real token is the measurement still owed.
+- **Eight suggestion-panel tests moved, and that was the established route.**
+  `/connect` is a sixth command under `/c`, between `/config` and `/copy`.
+  Batch 84 moved the same tests when `/config` arrived. The windows were
+  re-measured through a probe before the tests were edited, and every test keeps
+  its claim: a fourth down still scrolls, `/embedder` still drops one and gains
+  two, one more press away.
+- **A bare-built app has no `__init__`**, so `_connect_wait` is a class
+  attribute beside `_shutting_down`, for the reason that one is.
+
+### What the gates caught
+
+The docs gate, four times, all mechanical: the unresolved `HD5` citations
+before §79 existed, the module and test trees, the settable-scalar figure (145
+to 146) and `test_logging_setup.py`'s count, which the three new
+`REDACTION_CASES` rows parametrise.
+
+### Verification
+
+`python -m pytest -q` is green: 7399 passed, 50 skipped -- 7449, 67 more than
+batch 162 (61 in `tests/test_connect.py`, six from the three new
+`REDACTION_CASES` rows) -- in 1:56. The touched suites pass again with
+`AGENT_WORKSPACE` unset, and under WSL `tests/test_connect.py` runs all 61,
+the 0600 check included. `ruff check .` is clean. bandit with the CI job's own
+flags, against a copy of the baseline whose leading `./` became `.\`, exits 0
+with nothing new, and `scripts/bandit-count-check.py` reports 62 pairs, none
+grown. gitleaks with `.github/gitleaks.toml`, over an export of the tracked and
+new files as they stood uncommitted and scanned with a relative source, finds
+nothing.
+
+Measured for batch 164 while the suite ran, under WSL (`ptrace_scope` 1): a
+sibling process of the same user READ an ordinary process's
+`/proc/<pid>/environ`, secret included; once the target called
+`prctl(PR_SET_DUMPABLE, 0)` the same read was refused with EACCES, and so was
+`/proc/<pid>/mem`. That is HD6's premise, measured rather than assumed.
+
+## Batch 164 -- what a hosted deployment changes inside the harness (2026-10-19)
+
+### What was built
+
+ROADMAP_v3 §79's second slice (HD4, HD6), on `hosted-demo` after batch 163.
+
+- `security/hosted.py` (new): the mode, read once from `VENASTINE_HOSTED` --
+  unset is a local install, `single-user` is one that says it is hosted, and
+  `shared` or anything unrecognised takes capability away; the
+  container-reaching tools a shared deployment refuses; and
+  `make_undumpable()`.
+- `security/permissions.py`: `is_tool_allowed` consults that refusal second to
+  the global check and before any context, so a deployment whose `config.yaml`
+  turns `shell` on is still not a shell when it is shared, and no agent or
+  skill can re-enable one.
+- `main.py`: a hosted session calls `prctl(PR_SET_DUMPABLE, 0)` first, before
+  `parse_args`.
+- `tui/app.py`: in a shared deployment `/config` is refused, `/connect`
+  refuses a pasted key and keeps a sign-in in memory, `/copy --file` becomes a
+  browser download under the file's name alone (in any browser tab, shared or
+  not, since a path there names the server's disk), and the launch's
+  file-shaped provider warnings give way to a banner saying the session is
+  temporary, what the server holds and where to revoke it. Single-user mode
+  says it is hosted and otherwise behaves like a local install.
+- `docs/SECURITY.md`: the hosted threat model -- one container, one user, and
+  the three things that stand between one visitor and another -- with what is
+  in scope and what is not.
+
+### What measuring found
+
+- **The revoke link was checked before it was printed.** Every
+  `huggingface.co/settings/*` path redirects an anonymous request to the login
+  page, so a status code proves nothing; Hugging Face's own blog sends readers
+  to `https://huggingface.co/settings/connected-applications` to reset an app's
+  connection, and `huggingface.js` names the same page for creating one.
+- **`env_secrets.get_env_secret` raises on a missing name by default**, which
+  the first draft of the `.env` test met; it reads `required=False` now.
+
+### What the gates caught
+
+bandit, on the new test file's `subprocess` (B404, B603): one test runs
+`prctl` in a child so the worker itself stays dumpable. Annotated with the
+reason, in `test_docs_consistency.py`'s style.
+
+### Verification
+
+`python -m pytest -q` is green: 7441 passed, 51 skipped -- 7492, 43 more than
+batch 163, all in `tests/test_hosted_mode.py` -- in 1:56. The new and touched
+suites pass again with `AGENT_WORKSPACE` unset, and under WSL, where the
+Linux-only `prctl` test runs and passes. `ruff check .` is clean; bandit with
+the CI flags against the rewritten baseline copy exits 0 after the annotation,
+and the count check reports 62 pairs, none grown; gitleaks over an export of the
+tracked and new files finds nothing.
+
+## Batch 165 -- the bridge, the bundle, and a math child that walls itself in (2026-10-20)
+
+### What was built
+
+ROADMAP_v3 §79's third slice (HD1-HD3, HD7-HD9, and HD11, new), on
+`hosted-demo` after batch 164. Deployed by hand to the owner's private Space
+and measured there before most of it was decided.
+
+- `deploy/hosted/` (new), the bridge a Space runs. `app.py` is Gradio's
+  `gr.Server` with the bridge's routes and the one no-op `@spaces.GPU`
+  function, and builds the session environment and writes the isolation
+  report before it listens. `web.py` is the Starlette routes: the landing
+  page, `/terminal` with a one-time ticket, `/ws/{ticket}` with a same-origin
+  `Origin`, `/download/{key}` and `/healthz`, rate-limited per address.
+  `supervisor.py` runs one `main.py --tui` per tab over Textual's web-driver
+  framing with an environment built from an allowlist, and owns the limits,
+  the timeouts, the process-group kill, the directory's deletion and file
+  delivery to the browser. `session_env.py` builds the sessions' own
+  environment from the bundle's `session.lock`, `--require-hashes
+  --no-build`. `single_user.py` is HD7's gate and its one `config.yaml`
+  write. `isolation_report.py` logs what the container lets a process do, then
+  the math tools' confinement verdict.
+- `scripts/build_demo_bundle.py` (new): the bundle, from the npm `files`
+  allowlist plus `deploy/`, with the generated shim, README, requirements,
+  `.gitattributes`, `BUILD_INFO.json` and `session.lock`.
+- `security/confine.py` (new): HD11's four walls and the self-test that
+  proves them. `tools/isolation.py` turns them on in a shared deployment: the
+  child locks itself down after importing the tool and before reading its
+  params, and a wall that will not go up means the call does not run.
+  `security/hosted.py` refuses the six math tools in a shared session unless
+  the bridge set `VENASTINE_CONFINEMENT=verified`, through `refused_tools()`,
+  which `is_tool_allowed` now consults; and gains `die_with_parent()`, which
+  `main.py` calls after `make_undumpable()`.
+- `tui/app.py`: a shared deployment offers -- banner, `/connect`'s list, the
+  command panel -- only the sign-ins that work there, and `/connect
+  huggingface` without a client id says so in one sentence.
+- `config.yaml`: `hf_oauth_client_id` names the project's own public app,
+  registered by the owner today. `.github/gitleaks.toml` allowlists that one
+  line by its shape.
+- `.github/workflows/pip-audit.yml` audits `deploy/hosted/requirements.txt`;
+  `requirements-test.txt` and pyproject's `test` extra name `starlette`, which
+  the new bridge tests import directly.
+
+### What measuring found
+
+- **The Space's build installs `gradio[oauth,mcp]` beside the bundle's
+  requirements.** The first deploy failed on 4.44.0 (its client's
+  `websockets<13` against `google-genai`'s `>=13`), the second on 6.30.0's
+  `mcp` extra (`mcp<2`, `pydantic<=2.12.5` against the harness's pins). The
+  owner chose a second environment, built at container start: 3 s on the
+  Space, 18 s from an empty cache under WSL.
+- **The Space runs sessions as root**, with Docker's default capabilities less
+  `NET_RAW` -- no `SYS_PTRACE`, so HD6 holds, but `DAC_OVERRIDE`. Landlock is
+  at ABI 7 and a seccomp filter installs. `HOME` is `/root` at mode 700, and a
+  probe that dropped to `nobody` could not import SymPy from the session
+  environment beneath it, so the environment moved to `/opt` as root.
+- **The proxy appends to `X-Forwarded-For`**: a hand-sent TEST-NET-2 entry
+  arrived first and the real address last. The rate limit had keyed on the
+  first.
+- **A session outlived its bridge** under WSL: a SIGTERM to the bridge left
+  `main.py --tui` re-parented to init. `PR_SET_PDEATHSIG` fixes it, and the
+  new test was checked to fail without it.
+- **An unread stderr pipe would stall a chatty session at 64 KB**; stderr
+  goes to a file in the session, whose tail is logged when a session never
+  starts.
+- **An upload with `delete_patterns=["*"]` keeps a Space's `.gitattributes`**,
+  which still listed stray files from an earlier upload; the builder writes a
+  clean one, and the Space's history was squashed with the owner's go-ahead.
+- **The new bundle tests found three refusal gaps** before anything shipped:
+  `core/providers.json`, `deploy/hosted/logs/app.log` and a nested
+  `.venastine/mcp.json` would have been bundled, because the builder matched
+  `exact` and `dir` patterns at the root only. A build of the real repository
+  shows nothing legitimate is refused by the stricter matchers.
+- **On the Space, `/connect huggingface` printed the token fallback and then
+  refused the token**, because the banner offered a sign-in that had no client
+  id. Fixed in the UI before the client id arrived.
+- **gitleaks' `generic-api-key` reads the client id as a key** (`oauth`
+  contains `auth`). Allowlisted by shape -- rule, root `config.yaml`, and the
+  exact `hf_oauth_client_id: "<uuid>"` line -- and probed: a non-UUID value on
+  that line, a similar key name and the same line in another file all still
+  fire. A first draft anchored on `^hf_` matched only a first-line copy,
+  because the line gitleaks matches carries the newline before it.
+- **A cancelled handler left a session's whole directory behind**: the
+  end-to-end test found it, because Starlette's test client cancels the
+  websocket handler when the socket closes. The stop is shielded now and the
+  session forgotten only once stopped.
+- **Under WSL, `/mnt/c` failed a 2-second budget test three times out of three**
+  that passed on a `git archive HEAD` export and on a working-tree export in
+  the Linux filesystem, so the WSL runs below use such a copy.
+
+### What the gates caught
+
+- bandit: eight B108s on `/tmp` literals -- confine.py's list of places the
+  child may NOT read, the test that asserts it, and the single-user state
+  directory's default -- annotated with why.
+- `test_every_test_name_cited_in_production_code_resolves` read
+  "Starlette's TestClient" in a supervisor comment as a test citation;
+  reworded.
+- `test_the_documented_doc_read_bound_is_not_understated` went to 63 once the
+  new files were listed by `git ls-files` (marked intent-to-add, so the gates
+  saw what will ship rather than an untracked tree); AGENTS.md names the 63rd.
+- **pip-audit: CVE-2026-59951 in `mcp==2.0.0`**, the harness's existing pin
+  (fixed in 2.2.0). The advisory is about an MCP SERVER on Streamable HTTP
+  keeping unbounded session state; the harness is an MCP client and the bridge
+  never starts Gradio's MCP server, so neither is exposed by the advisory's own
+  test. Not ignored and not upgraded here: the workflow's rule is a fix or an
+  inline `--ignore-vuln` with its reason, and that is the owner's choice. Until
+  then the scheduled run, and any pull request touching a dependency file,
+  goes red on it. **The owner chose the fix; see the follow-up below.**
+
+### Verification
+
+`python -m pytest -q` is green on Windows: 7627 passed, 64 skipped -- 7691,
+199 more than batch 164 -- in 1:49. The touched suites pass again with
+`AGENT_WORKSPACE` unset (407 passed, 21 skipped). Under WSL, on a working-tree
+export in the Linux filesystem with `providers.json` made from the example as
+CI makes it: 7653 passed and 5 failed -- the two matplotlib charts and
+`test_config_loader`'s HOME redirection, which fail there on every run, and two
+tests that need the git repository an export is not. The wall tests run there
+with Landlock and seccomp applied, and fourteen mutations -- each wall, each
+switch, and each bridge fix in this batch -- were each killed. `ruff check .`
+is clean; bandit with the CI flags over 262 files against the rewritten
+baseline copy finds nothing new, and the count check reports 62 pairs, none
+grown; pip-audit is clean for `requirements-test.txt` and
+`deploy/hosted/requirements.txt` and finds the one advisory above in
+`requirements.txt`; gitleaks is clean over the repository and over a built
+bundle scanned from its root. On the owner's private Space: the session
+environment builds in 3 s in `/opt`, the self-test verifies the walls as uid
+65534 with eleven escapes and the way back to root all refused, a session
+opens through Hugging Face's proxy, `/connect huggingface` issues a device
+code, and the proxy's shape is logged without an address in it.
+
+### Follow-up: `mcp` 2.2.0, for CVE-2026-59951 (its own commit)
+
+The owner chose the upgrade over an ignore. `mcp==2.0.0` -> `mcp==2.2.0`, and
+`mcp-types` moves with it in lockstep. The advisory is a Streamable HTTP
+SERVER keeping every session with no expiry and no cap; this harness is an
+MCP client, so the bump is for the audit gate rather than for an exposure.
+
+Taken the way `requirements.txt` says a move must be: the split read first,
+from the SDK's release notes. 2.1.0 withholds a crashed tool's text from the
+client (what batch 32 pinned away from, and `test_mcp_client.py` was written to
+hold on both sides of it) and stops advertising `outputSchema` for tools that
+return content blocks; 2.2.0 follows redirects only within one origin and no
+longer honours a passed-in client's `follow_redirects`. No runtime dependency
+changed. The one version-tied claim in the code was re-measured rather than
+renumbered: `Tool.model_fields["name"]` is still a bare required `str` with no
+metadata, so `registration.py`'s 64-character bound still has nothing upstream
+doing its job. `THIRD_PARTY_NOTICES.md`, AGENTS.md's pin sentence, the two
+BREAKING_CHANGES rows about loosening it and the hosted bridge's two notes name
+2.2.0; the dated records of what was measured on 2.0.0 keep saying 2.0.0.
+
+Verified on 2.2.0: pip-audit finds no known vulnerability in any of the three
+files; `python -m pytest -q` is green on Windows, 7627 passed and 64 skipped,
+in 1:48; the MCP suites, the doc gates and the bridge's tests pass again with
+`AGENT_WORKSPACE` unset; the three `integration` tests, which start real stdio
+servers, pass on Windows and under WSL; and the WSL suite on a working-tree
+export fails the same five it failed on 2.0.0 and nothing else. `ruff check .`
+is clean, bandit finds nothing new across 262 files with the count check at
+62 pairs, none grown, and gitleaks is clean. The Space still runs 2.0.0 in its
+session environment until the next bundle compiles a new lock.
+
+### Follow-up: `uv` 0.13.4, for PYSEC-2026-4321 (its own commit)
+
+Found by batch 166's pip-audit run, two days after batch 165's was clean:
+`uv` before 0.13.4 trusts a root certificate whose intermediates' keys were
+compromised and revoked (GHSA-hq85-5cpj-mr62), so a holder of one could stand
+in for any host uv talks to. In the bridge, uv's one network job is
+installing the session lock, and it does that `--require-hashes`: a forged
+connection could make the install fail, not change what it installs. The bump
+is for the audit gate, the choice the owner made for `mcp`.
+
+Taken as `mcp` was, with the release notes read first. 0.13.0's breaking
+changes touch none of the two commands `session_env.py` runs -- `uv venv`
+names its interpreter, and the install reads no constraints file -- and a new
+environment on Python 3.10+ no longer carries the `_virtualenv` distutils
+patch, which nothing here uses. Measured rather than inferred: in a clean
+`python:3.12-slim` container, uv 0.13.4 built the session environment from the
+real `session.lock` in 18 s from an empty cache, as 0.12.23 did, and the
+harness's imports load from it. The Space's own install line and the
+ModelScope bridge lock both still resolve with it. pip-audit is clean for
+`deploy/hosted/requirements.txt`; the unit suite never runs a real uv, so its
+green run beside batch 166 says nothing about this pin either way.
+
+## Batch 166 -- ModelScope as a Docker Studio, and no pasted keys on a shared deployment (2026-10-22)
+
+### What was built
+
+ROADMAP_v3 §79's fourth slice (HD2, HD8, HD9 and HD11 amended; HD12, new), on
+`hosted-demo` after the `mcp` and `uv` follow-ups. Measured on a private
+ModelScope Studio, `Venastine-Research/VenastineHarnessDemo`, before anything
+here was written, and the plan put to the owner with the measurements.
+
+- `scripts/build_demo_bundle.py`: the ModelScope bundle is a Docker image. It
+  carries a generated `Dockerfile` (`python:3.12-slim` by digest, the bridge
+  installed `--require-hashes --no-deps --only-binary=:all:` from
+  `deploy/hosted/bridge.lock`, the session environment built INTO the image,
+  port 7860), `bridge.lock` itself (Gradio at the Space's version and the
+  bridge's requirements, compiled by uv with hashes), and a `.dockerignore`
+  generated from the bundle's own file list as an allowlist -- everything
+  left out, exactly the bundle's files let back in, caches left out again --
+  which refuses a path it cannot name literally. No root `requirements.txt`,
+  which nothing on a Docker Studio would install. `compile_lock` runs uv
+  from its input's folder, because uv writes that path into the lock's
+  `# via -r` notes and the bridge lock is compiled from a temporary file.
+  The start-up shim sets `GRADIO_ANALYTICS_ENABLED=False` unless the operator
+  already has, on both platforms.
+- `deploy/hosted/requirements.txt` declares `websockets==17.3`.
+- `deploy/hosted/web.py`: the rate limit keys on the `X-Forwarded-For` entry
+  each platform's proxy writes, `FORWARDED_FOR_ENTRY` by the platform in
+  `BUILD_INFO.json` -- the last on Hugging Face, the first on ModelScope --
+  and the landing page says where a key can go in each mode.
+- `tui/app.py`: a shared deployment's refusal of a pasted key, and
+  `/connect`'s listing there, say why and name the installed harness and a
+  private single-user duplicate, in Hugging Face's own steps. The refusal
+  offers only the sign-ins that work on that deployment.
+- `deploy/hosted/session_env.py`'s docstring: where the environment is built
+  on each platform.
+
+### What measuring found
+
+- **A Gradio-SDK Studio passes no websocket and owns `/`.** ModelScope's
+  gateway -- Envoy in front of Alibaba Function Compute -- answered every
+  upgrade, on every path, with an empty HTTP 200, and served its own Gradio
+  front end at `/` even to an anonymous visitor of a private Studio. The same
+  Studio on the Docker SDK passed both: our page at `/`, the bridge's own
+  refusal for a bad ticket, and a full session -- banner, `/connect`, a
+  Hugging Face device code -- with an idle websocket still open after 16
+  minutes. ModelScope's builder pulled the slim base from Docker Hub by
+  digest and installed from pypi.org; nothing asked for a linked cloud
+  account.
+- **The bridge never declared its websocket library.** A clean image answered
+  every upgrade 404: uvicorn upgrades nothing without one. A Space's install
+  line adds `websockets>=10.4`, and ModelScope's image ships it, which is the
+  only reason it had worked.
+- **ModelScope's proxy replaces `X-Forwarded-For`**, twice measured with a
+  TEST-NET-2 entry that never arrived; the header is `[client, hop, hop]`.
+  Keyed on the last entry, every visitor shared one of ModelScope's hops.
+- **No Landlock on ModelScope** (Alibaba's 5.10 kernel), so the math tools'
+  self-test fails there and a shared Studio refuses them -- HD11 as written.
+- **Gradio's analytics called huggingface.co and api.gradio.app at every
+  start**; with them off, none of the three calls was made.
+- **The `.dockerignore`**, built by hand from the bundle's list first, was
+  proved on a real image with `.git`, `providers.json`, a stray file and two
+  caches planted in the context: 184 files in, exactly the bundle's, none of
+  the planted ones.
+
+### The pasted-key decision (HD12)
+
+The owner asked whether a provider without a sign-in could take a pasted key
+securely on a shared deployment, and to add it only if so. Holding one is not
+the problem -- a sign-in's key is already held in memory, non-dumpable, and
+dropped at disconnect. What no code here can fix: the deployment's
+controllers can use whatever a session holds, which a sign-in bounds through
+the provider and a pasted key does not; a public Space can be duplicated to
+look identical, and would then collect pasted keys where a sign-in happens on
+the provider's own page; the providers' key guidance stops short of the bar
+HD5 set; and typed keys cross the platform's TLS-terminating proxy. So the
+refusal stays, as a recorded decision, and now says where a key belongs. The
+OpenAI article was read from a search excerpt; the page refused a direct
+fetch.
+
+### What the gates caught
+
+- **My own deploy step pushed past a gitleaks finding.** Scanning the
+  prototype from outside its folder flagged the public client id in
+  `config.yaml`, which the allowlist matches only from the bundle root, and
+  the one-off command went on to push. Nothing secret was in it -- from the
+  root the scan is clean -- but batch 167's deploy script scans from the root
+  and refuses to push on any finding.
+- **uv's lock notes name their input relative to where uv runs.** A bridge
+  lock compiled from a temporary file from the repository root would have
+  carried a path of the build machine; `compile_lock` now runs from the
+  input's folder, and a test holds it there.
+
+### Verification
+
+`python -m pytest -q` is green on Windows: 7655 passed, 64 skipped -- 7719,
+the count the three documents state. The changed suites, the doc gates and
+`test_connect.py` pass again with `AGENT_WORKSPACE` unset (276 passed, 7
+skipped). Under WSL, from a working-tree export, the suite fails the same five
+causes it failed before and nothing else; the repository-build test now
+counts twice, once per platform, and both cases pass under WSL against the
+git checkout. The `integration` test built the real ModelScope image, with
+uv 0.13.4 inside it, from a context with `.git`, `providers.json`, a stray
+file and a cache planted, and the image held exactly the bundle's files.
+Thirteen mutations, one per rule this batch added, were each killed.
+`ruff check .` is clean; bandit finds nothing new across 262 files and the
+count check holds at 62 pairs, none grown; pip-audit is clean for all three
+dependency files; gitleaks, run as CI runs it, is clean. The Space's own
+install line and the ModelScope bridge lock both resolve with
+`websockets==17.3`.
+
+## Batch 167 -- ModelScope's sign-in, completed by the bridge (2026-10-22)
+
+### What was built
+
+ROADMAP_v3 §79's fifth slice (HD5 and HD6 amended; HD13, new), on
+`hosted-demo`, planned with the owner before any of it was written. The
+owner, opening ModelScope's form for registering an OAuth app, found the
+scope this needed, `api-inference`, which ModelScope's published metadata
+leaves out; the owner chose how the token reaches a session, and that both
+platforms offer it.
+
+- `deploy/hosted/sign_in.py`: ModelScope's authorization-code flow, completed
+  by the bridge with the app's client secret. One flow per session; a 256-bit
+  state bound to it for ten minutes and spent at its first use; a callback
+  page that shows a one-time handle and repeats nothing it was sent; a handle
+  redeemed only by the session that started the flow, five tries at most; an
+  exchange that refuses an `error` in an HTTP 200 and a token without
+  `api-inference`, and drops the refresh and id tokens. The public client id
+  is a constant there, `VENASTINE_MODELSCOPE_CLIENT_ID` for a fork's own app.
+- `deploy/hosted/supervisor.py`: a session's three requests to it (start,
+  the pasted handle, cancel), every flow keyed by the session's own id; the
+  exchange in a thread inside a task, so neither this session's screen nor
+  any other session waits on ModelScope. Sessions run under
+  `tui/hosted_driver.py`'s driver and are told `VENASTINE_BRIDGE_SIGN_IN` --
+  the name of the offer, never the secret.
+- `deploy/hosted/web.py`: `GET /oauth/modelscope/callback`, rate-limited per
+  address with the ticket limiter's counting, served `no-store`,
+  `no-referrer` and under a CSP that lets nothing run or frame it, from a new
+  `sign_in.html`.
+- `deploy/hosted/app.py`: `main()` takes `VENASTINE_MODELSCOPE_CLIENT_SECRET`
+  out of the environment before anything starts, then makes the bridge
+  non-dumpable.
+- `tui/hosted_driver.py`: Textual's web driver plus the bridge's three answer
+  packets, turned into app messages. `security/hosted.py` binds the offer at
+  import and honours it only in a hosted session. `core/connect.py`: the
+  `modelscope` preset signs in, and the module's ruling names a third
+  provider. `tui/app.py`: `/connect modelscope` through the bridge where it is
+  offered -- an answer for any request but the one waiting ignored, a wrong
+  handle asked again while the bridge allows it, a cancel and a minute of
+  silence both telling the bridge to drop the flow -- and a pasted key
+  everywhere else, as before; the revoke page is ModelScope's own "OAuth
+  connected apps" route.
+
+### What reading found
+
+- **ModelScope's discovery document** (`/.well-known/openid-configuration`
+  on modelscope.ai) lists the authorization-code grant and nothing else, and
+  a token endpoint that authenticates the app only by `client_secret_basic`
+  or `client_secret_post` -- so the secret is mandatory and the sign-in is
+  hosted-only. Its `oauth-protected-resource` document lists four scopes and
+  not `api-inference`; the app form offers it.
+- **The redirect URL is where the code arrives**, so it is a route of ours on
+  each app host, `/oauth/modelscope/callback` -- not the Studio's page on
+  modelscope.ai, which is ModelScope's own and would receive the code
+  instead. Gradio reserves `/login/*` and `/logout`, not `/oauth/*`.
+- **Where a user revokes an app** is ModelScope's route `/my/settings/apps`,
+  labelled "OAuth互联应用" in its page bundle; the docs page itself renders
+  only in a browser, and the browser pane is not allowed either ModelScope
+  host.
+- **The Space, redeployed with batch 166** at the owner's go-ahead: no
+  analytics call in its start-up log, Gradio's MCP server not started,
+  confinement verified (Landlock ABI 7), and a full session through to the
+  Hugging Face device code.
+
+### Delivery: copied, not delivered (HD13)
+
+Delivering the token straight to the session that started the sign-in would
+save one paste. It would also let anyone start a sign-in, send the consent
+link to someone else, and receive that person's token in their own session
+when they approved -- ModelScope's consent page would show this project's
+real app, so nothing would look wrong. A cookie binding the approving browser
+to the session would stop that, but the Space is embedded in huggingface.co,
+where Safari and Firefox partition the cookie away from the tab the sign-in
+opens. The owner chose the copy: the callback shows a handle only the
+starting session can redeem, so a forwarded link leaves its approver with a
+code they have nowhere to paste. Hugging Face's device code flow has the
+remote-phishing exposure RFC 8628 §5.4 describes; SECURITY.md says so, and
+changing it is the owner's call.
+
+### What the gates caught
+
+- **Bandit flagged three empty-string defaults on secret-named parameters**
+  (B107: `build`, `build_bridge` and `from_env`). They default to `None` now
+  rather than being baselined; the count check holds at 62 pairs.
+- **The new end-to-end test left a pipe open on Windows.** It closed its
+  client before the shielded stop had finished the session; it now waits
+  inside the client, the way `TestTheRoutes.test_end_to_end` already did.
+- **The local container showed a refused trade nowhere but the visitor's
+  screen.** The bridge now logs it, by ModelScope's error code alone, and a
+  test holds the line free of the handle and the secret.
+
+### Verification
+
+`python -m pytest -q` is green on Windows: 7726 passed, 64 skipped -- 7790,
+the count the three documents state. The changed suites, the doc gates and
+the bundle tests pass again with `AGENT_WORKSPACE` unset (347 passed, 7
+skipped). Under WSL, from a Linux-filesystem export, the suite fails the same
+five causes as batch 166 (six tests, one counted per platform) and nothing
+else. Eighteen mutations, one per rule this batch added, were each killed.
+`ruff check .` is clean; bandit finds nothing new across 265 files and the
+count check holds at 62 pairs, none grown; pip-audit is clean for all three
+dependency files; gitleaks, run as CI runs it, is clean.
+
+The ModelScope bundle's real image ran locally with a made-up client id and
+secret. The bridge reported itself non-dumpable, and another root process in
+the container was refused its `/proc/1/environ`; the math self-test still
+passed beside it. A session under the hosted driver showed the offer and its
+revoke page and opened the consent URL with exactly `openid api-inference`,
+this deployment's callback and a 43-character state. A forged state, and the
+real one used twice, got 400. The callback page showed a 22-character handle
+and not the code, `no-store`, `no-referrer` and the CSP. A wrong handle was
+refused and asked for again, and the right one reached ModelScope's real
+token endpoint, which refused the made-up app (`invalid_grant`); the session
+showed that by its code, and the log named no secret, code or state. Not
+done yet: a real approval and a model turn, which wait on the owner's app.
+
+### Follow-up: the project's ModelScope app (its own commit)
+
+The owner registered the app on modelscope.ai -- scopes `openid` and
+`api-inference`, both deployments' `/oauth/modelscope/callback` -- and its
+public client id is now `MODELSCOPE_CLIENT_ID` in `deploy/hosted/sign_in.py`;
+a test holds a deployment with no override to it. The secret is the owner's,
+set by the owner as a platform secret on both deployments and never in the
+repository or a conversation. The owner also confirmed
+https://www.modelscope.ai/my/settings/apps as where a user removes an app
+they authorized, the page the banner and `/connect` name. gitleaks, run as
+CI runs it and from a bundle's root, finds nothing in the new line, so no
+allowlist entry was added for it.
+
+### Follow-up: the callback page, framed by the platform's own site
+
+The owner's first live sign-in, on the private Studio, reached ModelScope's
+consent page only after the app's redirect URL was corrected -- the form had
+kept the Studio's own page there, and ModelScope refused the bridge's
+`redirect_uri` as unregistered; read back through ModelScope's app API with
+the secret field never printed, then confirmed exact for both deployments.
+Approved, the redirect to the Studio's host came back as
+`www.modelscope.ai/studios/...?mode=full&app_path=/oauth/modelscope/callback?...`,
+ModelScope's Studio page with the callback in an iframe, and the callback's
+`frame-ancestors 'none'` left Firefox showing nothing. The bridge had run it
+-- "approved" is in the Studio's log -- so the handle existed and nobody
+could see it. The page may now be framed by the platform's own site and no
+other, from `BUILD_INFO.json`'s platform as the rate limit's entry is:
+`https://www.modelscope.ai` on a Studio, `https://huggingface.co` on a
+Space, whose page frames its app the same way, and no site anywhere else.
+The page has nothing to click and nothing that runs, so a frame can take
+nothing from it. Four tests hold the choice per platform; the suite is 7794.
+
+### Follow-up: ModelScope's preset promises streaming usage
+
+The first live turn through the ModelScope sign-in (DeepSeek-V4-Pro-0813 on
+the private Studio) showed its duration and no token counts. Not a defect in
+the meter: the preset said ModelScope does not report streaming usage, so the
+harness asked for none and claimed none. Measured with the owner's own
+credentials, tiny streamed calls through the `openai` SDK as `core/client.py`
+makes them, each with and without `stream_options: {"include_usage": true}`:
+
+- **ModelScope API-Inference (modelscope.ai)**, four models answered
+  (DeepSeek-V4-Pro-0813, Qwen3.5-27B, Qwen3.8-27B, Nex-N2.5-mini). With the
+  option, every one sent real counts on every chunk, the last in a chunk with
+  no choices. Without it, three of the four sent usage of zero on every chunk
+  -- which is what the meter saw. Four others are listed but were refused to
+  this account or have "no provider supported".
+- **OpenRouter**, two free models answered (minimax-m3.1-flash,
+  nemotron-3.5-lightning): one usage chunk at the end, asked for or not.
+  Three free models were rate-limited upstream. The preset's own default,
+  `nvidia/nemotron-3-super-120b-a12b:free`, answered 404 three times in ten
+  minutes, and OpenRouter's endpoint list showed its single endpoint
+  (Nvidia) at no uptime over the last thirty -- an outage upstream, recorded
+  here because a default resting on one free endpoint is fragile.
+- **Hugging Face's router** could not be measured: the local CLI token lacks
+  the Inference Providers permission (403 on every call).
+
+So the `modelscope` preset now sets `supports_stream_usage` (the owner's
+choice, ModelScope only); OpenRouter and Hugging Face keep theirs off. D21
+applies from here: a ModelScope model whose stream ended without usage would
+fail its turn with "completed without usage data" rather than account zero,
+and that message would name the provider. The template has no ModelScope
+entry, so only the preset changed; modelscope.cn's endpoint was not measured
+and keeps the flag off. A test pins which presets carry the promise.
+
+---
+## Batch 168 -- the pre-public fixes (2026-10-22)
+
+### What was built
+
+ROADMAP_v3 §79's sixth slice (HD4, HD8 and HD13 amended), on `hosted-demo`,
+planned with the owner first. Two items the owner approved in batch 166
+(`/secrets` refused when shared, stale session directories swept), the
+landing page's missing `/connect modelscope`, and what the owner chose for
+the rest: idle redraws stopped in hosted sessions only, OpenRouter's default
+measured before the owner picked one, and both cosmetics.
+
+- **`/secrets` is refused in a shared deployment**, mirroring `/config`. The
+  store holds SSH and sudo passwords for the shell tools, which shared mode
+  refuses, so a secret set there has no use, and typing a password into a
+  server every visitor shares is what HD12 refuses for keys. Nothing else in
+  a shared session reaches the store: its consumers are the sandbox, askpass
+  and SSH paths of the refused shell tools, and `policy_enforcement` only
+  redacts with it. Single-user and local are unchanged.
+- **An idle hosted session draws nothing.** `RavenPanel(still_when_idle=)`
+  holds the first frame with its timer paused while idle, and never undoes
+  a pause the app asked for during a token stream; `PromptInput` does not
+  blink. A local install keeps both.
+- **`sweep_stale_sessions`** (`deploy/hosted/supervisor.py`), called by
+  `app.py`'s `main()` once before the server listens, deletes the
+  `venastine-session-*` directories a killed bridge left: directories only,
+  never a link, never another user's on POSIX, never the single-user state.
+  It is a module function rather than a Supervisor method because `build()`
+  keeps the bridge to itself, and it shares `SESSION_PREFIX` and
+  `default_session_root()` with the Supervisor so the two cannot drift.
+- **The landing page names `/connect modelscope`** -- with a revoke link on
+  every provider's line now -- only when the bridge holds the ModelScope
+  secret. The line is hidden with the `hidden` attribute through `_page`'s
+  escaping, so no raw-HTML path was added to the page renderer.
+- **The header and the session banner** say `no model connected | type
+  /connect` in a hosted session until a provider is connected, then `no
+  model chosen | type /model` until the pair in use is; both said
+  `ANTHROPIC | claude-sonnet-5`, a pair the session held no key for. The
+  banner was found by the live check below, after the header alone had
+  been fixed and tested; one helper, `_unconnected_hint`, now feeds both.
+- **The `[mcp] created ...` startup notice** is not shown in a shared
+  deployment, where it printed a temporary session path about a file
+  nothing there can edit. The file is still created.
+- **OpenRouter's default is `minimax/minimax-m3.1-flash:free`**, the
+  owner's pick.
+
+### What was measured, and what it found
+
+**The idle bandwidth was one widget, and it had broken the idle limit.** A
+real session through the bridge's `Supervisor` in WSL, with a socket stub
+counting the bytes relayed to the browser, idle for a minute at 160x45:
+
+| variant | idle bytes/s | packets/s |
+|---|---|---|
+| as shipped | 6,872 | 5.0 |
+| raven still | 0 | 0 |
+| cursor still | 6,872 | 5.0 |
+| both | 0 | 0 |
+| raven still, tab focused | 566 | 2.0 |
+| both, tab focused | 0 | 0 |
+
+The 6.9 KB/s matches what a silent tab received on the live Studio in
+batch 166. The cursor blinks only once the browser sends `focus`, which the
+first runs' stub did not -- so the first table said the cursor cost nothing,
+and a second run with the focus event sent found its 0.6 KB/s. Reading the
+relay while looking for the source showed the larger consequence:
+`_pump_child` stamps `last_activity` on every chunk the session writes, so a
+blinking raven kept every abandoned tab "active", and the 20-minute idle
+limit never fired -- a tab held one of the four slots for the full two-hour
+lifetime. Counting output as activity is right (a research run the person is
+watching must not be cut off), so the fix is the quiet screen, not the
+relay. The browser side was already fine: `textual.js` pings once, when the
+socket opens.
+
+**OpenRouter's free models each have one endpoint.** The public models list
+had 18 free models, and the endpoints API gave every one of them exactly one,
+so "two or more endpoints" found nothing. The previous default,
+`nvidia/nemotron-3-super-120b-a12b:free`, had 0% uptime over both the last 30
+minutes and the last day and answered 404 to both calls. Four candidates at
+100% over a day answered a plain call and made a correct tool call with the
+owner's credential: minimax-m3.1-flash (served by MiniMax itself, 1M
+context, the fastest), nemotron-3.5-lightning and nemotron-3-ultra-550b
+(Nvidia), and flint-v1.0 (Recursive). The two Thinking Machines models
+answered 403, "only available on agentic harnesses". The owner chose
+minimax-m3.1-flash.
+
+### Verified
+
+- Every new test was checked against a mutation of the fix it pins: 20 of 20
+  killed on an export copy of the working tree, with green controls on
+  Windows and under WSL (the ownership and symlink rows run only on POSIX).
+- The idle measurement re-run on the fixed code, with no patch of the
+  measurement's own: 0 bytes in a minute, with and without the focus event.
+- A live check against the ModelScope bundle in a local container: a
+  planted `venastine-session-*` directory gone at start ("swept 1 stale
+  session directories"), the landing page's ModelScope line hidden with no
+  secret and shown with one, and a real session through the websocket
+  showing the header's hint, no mcp.json notice, 0 bytes in 30 idle seconds
+  with the tab focused, and `/secrets` refused. That session also showed
+  the banner still naming the unconnected pair, fixed above.
+- ModelScope's discovery document, re-read for the OAuth report, now also
+  lists `client_id_metadata_supported: true` and a `registration_endpoint`.
+  Its token endpoint still names only `client_secret_basic` and
+  `client_secret_post` and it advertises no PKCE method, so HD13's reason
+  stands; a public client is what would reopen it, and this is where one
+  would first show.
+
+---
+## Batch 169 -- the deploy workflow, gated on every CI check (2026-10-23)
+
+### What was built
+
+ROADMAP_v3 §79's seventh and last slice (HD9 amended) and a new §80, on
+`hosted-demo`, planned with the owner first. The owner's requirement for the
+deploy: every CI check passes before the deployment ever runs. Their choices:
+a gate job where the last CI workflow to finish triggers the deploy; "every
+check" meaning every check run on the commit; pip-audit run on pushes to
+`main` as well, and the deploy auditing the locks it ships; ModelScope kept
+manual, because it has no fine-grained tokens or trusted CI; and, added this
+batch, a workflow that keeps the copyright year current, written as a range.
+
+- **`scripts/deploy_gate.py`** decides from GitHub's record of the commit.
+  Every check run must be success or skipped, except the deploy workflow's
+  own and GitHub's `dynamic` runs; every workflow a push to `main` runs --
+  read from the workflow files, refusing a path-filtered push trigger --
+  must have a successful push run; the commit must be `main`'s tip; and a
+  `workflow_run` trigger must be a push to `main` in this repository. It
+  asks about the tip first, because GitHub answers 422 for a commit it has
+  never seen. Verdicts: deploy, rehearse, wait, superseded, refuse.
+- **`.github/workflows/deploy-demo.yml`** wakes on each of the seven CI
+  workflows finishing on `main`. Its `gate` job holds no secret; `deploy-hf`
+  is the only job in environment `demo` and runs only on the gate's deploy
+  verdict, one at a time; `rehearse` builds, scans and audits both bundles
+  for a manual dry run or a run off `main`. Event values reach scripts only
+  through `env:`.
+- **`scripts/deploy_demo.py`** is the one path for both platforms: build
+  from a clean commit, gitleaks from the bundle's root, pip-audit of the
+  locks it installs, the gate once more, then the send. A Space is done
+  when its page names the build; a Studio when its run log shows the
+  bridge serving it. A missing secret or target makes a dry run.
+  `VENASTINE_SINGLE_USER` is declared empty on the Space for duplicates and
+  never overwritten. ModelScope's git token rides in a header through
+  `GIT_CONFIG_*`, and the push is never forced. `--unverified` skips the
+  gate for a private test deploy; the workflow never passes it.
+- **The bridge logs `serving build <sha>` at start** (`app.py`, through
+  `web.build_label`, which the page footer already used), so a private
+  Studio -- which answers an anonymous request with 403 -- can be confirmed
+  from its log. This session's own redeploy poller had waited on that 403.
+- **pip-audit runs on a push to `main`**, and codeql and pip-audit key
+  their concurrency on the event, so a scheduled run can no longer cancel
+  the push run the gate waits for.
+- **`.github/workflows/copyright-year.yml` and
+  `scripts/bump_copyright_year.py`** (§80, LY1-LY3): at 23:59 UTC on
+  December 31 and again at 06:07 on January 1, a range from the first
+  year, written to LICENSE's appendix and NOTICE together.
+
+### What was measured, and what it found
+
+**`main` requires nothing.** Its ruleset blocks deletion and force pushes
+only, so no pull request's checks can be leaned on; the gate judges the
+commit that landed.
+
+**The gate refused main's real tip, for the right reason.** Run read-only
+against the API for 819848f, it answered `refuse` naming one check:
+pip-audit's Monday run, which failed on mcp 2.0.0 (CVE-2026-59951, fixed on
+this branch). Every push check on that commit had passed, so a gate that
+read workflow verdicts only, or push runs only, would have deployed it.
+Dependabot's five `dynamic` runs on the same commit were ignored and
+codeql's skipped jobs accepted. The first attempt at a commit that was never
+pushed got a 422, which is why the tip is now asked about first.
+
+**The first audit of what a bundle installs found what nothing had
+audited.** pip-audit.yml audits the bridge's own requirements but never
+Gradio's dependencies, because a Space installs Gradio itself. Resolved for
+the platform, they pin pillow 12.3.0 -- Gradio 6.30.0, the latest release,
+requires `pillow<13` -- and pillow 12.3.0 has 35 advisories, all fixed in
+13.0.0. Both live deployments already run it. Read in Gradio's source: the
+upload route copies a file without decoding it, pillow opens only the
+deployment's own favicon, and image decoding lives in components and the
+MCP server, neither of which the bridge registers or starts. The owner
+accepted the 35 by ID; each entry applies only while a lock pins 12.3.0,
+and a new ID still refuses. `session.lock`, which runs the harness, pins
+13.0.0 and was clean.
+
+**The copyright script's first run against the real files refused.**
+LICENSE is CRLF in this worktree and NOTICE LF, and the holder pattern read
+LICENSE's CR, so the two "disagreed". Its own CRLF test had written both
+files CRLF and agreed with itself; the test now writes the real mix.
+
+**A known gap, stated rather than closed:** CodeQL on a push uploads its
+alerts and fails nothing -- the `CodeQL` check is posted on pull requests
+only -- so a new alert on a direct push to `main` does not hold a deploy.
+
+### Verified
+
+- Every new test was checked against a mutation of the fix it pins: 65 of
+  65 killed on an export copy of the working tree, across the gate, the
+  deploy script, the copyright script, the workflow files and the bridge's
+  start-up log. The first pass killed 64: the copyright test for UTC had
+  picked two times where local and UTC gave the same year, so dropping the
+  conversion changed nothing; it now uses two where they differ.
+- The ModelScope token test first checked only for the raw token in an
+  argument; it now also refuses its Basic form, which a mutation passing
+  the header as `git -c http.extraheader=...` would have put in every
+  process listing.
+- Both platforms' paths, for real and with nothing sent:
+  `deploy_demo.py --platform hf --dry-run` and `--platform modelscope
+  --dry-run` built the bundle, found no leaks from its root and audited
+  both locks clean, with the 35 accepted pillow IDs named as accepted. The
+  first HF dry run is what found pillow.
+- The gate against the real API, read-only: main's tip refused for its
+  scheduled pip-audit failure alone; this branch's commit superseded; a
+  fork's pull request from a branch called main refused.
+- The full suite is green on Windows (7881 passed, 66 skipped, 7947); the
+  changed suites again with AGENT_WORKSPACE unset (273 passed, 6 skipped),
+  and the new and changed hosted suites under WSL (201 passed). The first
+  full run failed one test: AGENTS.md's map of decision families did not
+  name LY, which it now does.
+- ruff, bandit and its count check (62 pairs, none grew), pip-audit over the
+  three requirements files, and gitleaks (`--no-git`) are clean.
+- Not verifiable here: the workflow runs only from the default branch, so
+  its first real run is the merge, and it rehearses until the owner creates
+  environment `demo` with `HF_TOKEN` and `DEMO_HF_SPACE`. The copyright
+  job's first scheduled run is 2026-12-31; a manual dispatch can rehearse it
+  after the merge.
+
+---
+## Batch 170 -- a code scanning gate, and every open alert triaged (2026-10-23)
+
+### What was built
+
+The gap batch 169 stated rather than closed, closed, and the owner's
+follow-on request: check every open code scanning alert, fix the ones that
+need it, close the false positives. The owner chose the gate's threshold,
+how to handle the one high alert, and comments over dismissal for the empty
+`except` blocks.
+
+- **The deploy gate reads the code scanning alerts on `main`**
+  (`deploy_gate.fetch_alerts`) and refuses while one of security severity
+  high or critical is open. CodeQL on a push uploads its alerts and fails
+  nothing -- the `CodeQL` check is posted on pull requests only -- so this
+  is the only place a new alert on a direct push is seen. A list it cannot
+  read (code scanning off, or a token without `security-events: read`)
+  stops the deploy instead of reading as empty. Both jobs that run the gate
+  gained `security-events: read`, pinned by test.
+- **The MCP consent store is `0o600`.** `known_mcp_servers.json` decides
+  whether a server starts without asking -- the same class of data as the
+  trust store, which was already `0o600` -- and it took `open()`'s mode less
+  the umask, so under a umask of 002 anyone in the user's group could write
+  a consent.
+- **Seventeen empty `except` blocks say why**, on the `pass` line: closing
+  what is already closed, unlinking what may not exist, a widget that is not
+  mounted at shutdown, a numeric form that does not exist for an exact
+  answer. No behaviour changed.
+- **Two dead values are gone**: an assignment to `used` after the last
+  read of it in `file_ops`' paging loop, and `config_edit._NULL_WORDS`, the
+  private name `NULL_WORDS` had before it was made public, which nothing
+  read.
+
+### What the triage found
+
+51 alerts were open, all on `main`, and only one was a security alert: #15,
+high, `py/overly-permissive-file` on `json_store`'s `0o666` default. That
+default is deliberate and documented -- it is the mode `open()` passes, so
+the umask decides, which is right for the files the agent writes in a
+workspace -- and every store holding a secret passes `0o600`. Following its
+callers is what found the consent store without a mode. #15 was dismissed as
+won't fix, with that reason.
+
+The other 50 came from the weekly security-and-quality run. Nineteen are
+fixed in code above and close themselves when `main` is next scanned after
+the merge. Thirty-one more were dismissed, each with its reason: twelve false
+positives (a sentence wrapped across lines in a list, read as a missing
+comma; `BaseException` caught and re-raised; two globals the rule thought
+unread, both read in the function that declares them; a probe import and a
+side-effect import), seventeen won't-fix (twelve cyclic imports, each closed
+by a function-level import that breaks the cycle at call time, and five
+modules imported both ways for different jobs), and two used-in-tests
+(`inner` in place of `self` in conftest, so the enclosing `self` stays in
+view). Four of the dismissal comments were wrong in the first draft --
+two named the wrong mechanism, one the wrong branch, one the wrong scope --
+and were corrected against the code before anything was sent.
+
+Run read-only against the API after the dismissals, the gate refuses main's
+tip for one reason only: pip-audit's scheduled failure on mcp 2.0.0, which
+this branch fixes.
+
+### Verified
+
+- Every behaviour change was checked against a mutation of it: 8 of 8
+  killed -- the alert threshold both ways, a dismissed alert, an unreadable
+  list read as empty, alerts that never reach the verdict, the `ref` query,
+  the workflow's `security-events` permission, and the consent store's mode,
+  that last one under WSL, where POSIX modes exist.
+- The gate, read-only against the real API, before and after the
+  dismissals: main's tip refused for #15 and pip-audit's scheduled failure,
+  then for the pip-audit failure alone.
+- The full suite is green on Windows (7891 passed, 67 skipped, 7958); the
+  changed suites again with AGENT_WORKSPACE unset (372 passed, 6 skipped);
+  ruff, bandit and its count check, pip-audit over the three requirements
+  files, and gitleaks (`--no-git`) are clean.
+- Not verifiable here: the 19 alerts fixed in code close only when CodeQL
+  next scans `main`, which is after the merge.
+
+---
+## Batch 171 -- an image a tool reads, delivered to a model that can see it (2026-10-15; numbered 159 until 2026-10-25)
+
+**ROADMAP_v3 §81. Owner rulings, IM1-IM8.** The owner asked whether a
+multimodal model behind a compatible API could take non-text input by reading
+it from the workspace, with no attachment channel in the harness. It could not,
+and every path was checked rather than assumed: `add_user_message(text: str)`,
+`add_tool_result`'s `str(result)`, `read`'s markitdown-or-`errors="replace"`,
+`fetch_url`'s `raw.decode(..., errors="replace")`, and MCP's `_normalize`, which
+drops image blocks by recorded decision (A32).
+
+### The question asked first
+
+The owner asked whether this was a small-blast-radius change, to be built at
+once, or one with design decisions to discuss. It was the second. The pinned
+SDKs were installed in a scratch venv and their types read, rather than recalled:
+
+- anthropic 0.116.0: `ToolResultBlockParam.content` is
+  `Union[str, Iterable[Content]]`, where Content covers text, image, search
+  result, document and tool reference blocks.
+- openai 2.45.0: `ChatCompletionToolMessageParam.content` is
+  `Required[Union[str, Iterable[ChatCompletionContentPartTextParam]]]`, text
+  parts only.
+- google-genai 1.0.0: `FunctionResponse` fields are `id`, `name` and
+  `response`.
+
+Seven decisions were put to the owner with a recommendation each. The owner
+agreed the channel (a dedicated tool) and the storage (a column, in the
+database). They limited delivery to Anthropic and the OpenAI-compatible wire,
+deferred Google, and confirmed the recommendations for compaction, redaction,
+MCP and the pipeline.
+
+### What was built
+
+- `tools/builtin/file_ops.py`: `view_image`, with `read`'s path rules, format
+  read from magic bytes, the `max_image_bytes` cap, and the bytes handed to
+  `memory.attach_image`. It returns one sentence.
+- `core/memory.py` / `storage.py`: `attach_image` holds images by call id, and
+  `add_tool_result` writes them into the new `MessageLog.images` column of the
+  same row. `_decode_images` follows `_decode_thinking`'s degrade rule.
+  `ensure_columns()` migrates existing databases with no new code, because it
+  reads the metadata.
+- `tools/base.py` / `tools/registry.py` / `tools/context.py` / `core/loop.py`:
+  `ToolSpec.returns_images`; `schemas`, `is_advertised` and `headless_hidden`
+  take `images=` (default False); `image_hidden()` feeds a once-only WARNING;
+  `RunInfo.images` is computed once by `_images_deliverable`.
+- `core/client.py`: `accepts_images()` (strict `is True`, GOOGLE never, warned
+  once). `_messages_for_provider` takes `images=`. Anthropic gets image blocks
+  inside the `tool_result`. The OpenAI-compatible wire gets one harness user
+  message after the tool batch. Google, and any provider not flagged, gets
+  `_image_note`.
+- `core/compaction.py`: `IMAGE_TOKEN_ESTIMATE` = 1,600, with `_row_chars`
+  behind every row-size sum and the images counted in `_chars` too.
+- Config: `max_image_bytes: 3932160`, and `view_image: false` in both tool
+  tables. `providers.json.example` sets `accepts_images: true` for ANTHROPIC
+  only.
+
+### Why not a ContextVar, the SS17 precedent
+
+The shell-session tools are hidden in research passes by an argument-less
+`available_check` reading a ContextVar that the CALLERS set around a run. That
+did not transfer. The answer here depends on the run's provider and its
+thread's kind, both of which only `_run_steps` holds, and setting a ContextVar
+inside a generator leaks it across yields into whoever is iterating. So the
+answer travels explicitly: `RunInfo.images` for the handler, and
+`schemas(images=)` for the list.
+
+### Deviations
+
+None from the owner's rulings. Two calls were made inside them and recorded as
+decisions rather than left implicit:
+
+- The OpenAI-compatible note on the tool message ("the attached image(s)
+  follow") is part of IM4. Without it the model meets a tool result naming an
+  attachment and an unrelated-looking user message.
+- `providers.json.example` flags ANTHROPIC and not OPENAI. On Anthropic,
+  `accepts_images` is true for every model. On OpenAI it depends on the model,
+  and `echoes_reasoning`'s precedent is to ship a per-model fact off.
+
+### Verification
+
+Full suite 7214 -> 7283, stated in `AGENTS.md`, `README.md` and
+`docs/ARCHITECTURE.md`. New `tests/test_image_input.py`, 67 tests. `test_storage_e2e.py` gains the
+real-SQLite round trip (53 -> 54), and `test_fake_storage_mirror.py` gains the
+image row (17 -> 18). The pinned counts moved: tools 30 -> 31, authority
+leaves 56 -> 58, settable scalars 145 -> 148, registered tools 30 -> 31 in
+ARCHITECTURE's headless paragraph. A mutation pass reverted each of thirteen
+fixes in place; every one turned a test red, including the two that
+disconnect `RunInfo.images` from the loop's schema list.
+
+---
+## Batch 172 -- Gemini 3's thought signatures, and a pin that could not carry them (2026-10-25)
+
+**ROADMAP_v3 §82, GS1-GS4.** The owner asked for Google image input on this
+branch. The shape that needed had to be measured against the real API, and the
+owner added a free-tier key for it. The measurement found a defect under the
+request: no GOOGLE tool loop could finish. The owner chose to fix it first, as
+its own batch, by moving the SDK pin (GS1). The images are batch 173.
+
+### What was measured
+
+Over raw REST and through the SDK, 2026-10-25:
+
+- `gemini-2.5-flash` answers 404, "no longer available to new users". Every
+  model this key can call is Gemini 3.
+- A Gemini 3 function call carries a `thoughtSignature` on its part, on the
+  first call of a parallel batch only.
+- Replayed without it, the call is refused: 400, "Function call is missing a
+  thought_signature in functionCall parts", on gemini-3.1-flash-lite and
+  gemini-3.8-flash alike. Only the current turn is checked.
+- google-genai 1.0.0 drops the signature in the parse, because its `Part` has
+  no field for it. Plain chat and streaming worked on 1.0.0.
+- Google's placeholder `skip_thought_signature_validator` is accepted in place
+  of a real signature.
+
+### What was built
+
+- **The pin**: google-genai 1.0.0 -> 2.29.0 (GS1), the newest release at least
+  two weeks old. It installs google-auth 2.62.0, which still requires
+  `cryptography`. Its transport is httpx, which the error classifier already
+  named, and with no `retry_options` it still makes one attempt.
+- **The signature**: the GOOGLE stream records one block per function call in
+  `ModelResponse.thinking`, §44's reasoning record, with the signature in
+  base64 or null (GS2). `_messages_for_provider` hands each call back exactly
+  what it came with when the record is this model's, and Google's placeholder
+  on the first call of a turn it did not write (GS3). The record already had a
+  column and already bypassed the redactor, so nothing new is stored anywhere
+  new, and replay renders nothing for it.
+- **The schema keys**: the first live tool request on 2.29.0 was refused, 400
+  `Unknown name "additional_properties"`. The new SDK's `Schema` carries Vertex
+  AI fields, and `_google_schema_keys` read every field as sendable.
+  `_GOOGLE_SCHEMA_VERIFIED` narrows it to the 22 fields 1.0.0 had, the ones
+  verified on the wire (GS4). A new SDK field is now a decision to measure.
+- **Google effort is on**: 2.29.0 carries `ThinkingConfig.thinking_budget`, so
+  `_google_supports_thinking_budget()` answers True. The owner accepted this
+  when choosing the bump. Every configured budget, and 0, was accepted by
+  gemini-3.1-flash-lite.
+- **A chunk with no parts** no longer raises: `Content.parts` is Optional on
+  the pinned type.
+
+### Verified
+
+- Live, through the harness's own `call_model_stream` on gemini-3.1-flash-lite,
+  with the real registry's 16 declarations: a tool call, then the second
+  request three ways -- this model's own signature, the placeholder for
+  another model's turn, and no record at all (a row from before this batch).
+  All three returned the tool's value. The same run with effort `high` passed.
+- gemini-3.8-flash took the first request and its signature was recorded (356
+  characters). The second request met the free tier's limit of 20 requests a
+  day for that model (429 RESOURCE_EXHAUSTED), so it is unverified there. Its
+  budget probe returned 200 for low, medium and max and 503 "high demand" for
+  the rest, which is capacity, not a refusal.
+- Full suite 7283 -> 7304 (new `tests/test_thought_signatures.py`, 19;
+  `test_sdk_conformance.py` 19 -> 21): 7255 passed and 49 skipped on Windows.
+  One test, `test_a_crlf_checkout_stays_crlf`, failed first because the branch
+  switch had left `config.yaml` CRLF in the worktree, and that test makes its
+  own CRLF copy. With the worktree copy back to LF, which git stores anyway,
+  all 98 in that file pass.
+- The changed suites with `AGENT_WORKSPACE` unset: 426 passed, 4 skipped.
+- Mutations: 16 of 16 killed. The first run let two survive and both were real
+  gaps -- a `-k` that missed hyphenated parameter ids, and a test whose foreign
+  turn did not record its own call, so bypassing the provider/model gate
+  changed nothing. The test now records it. A third row was re-aimed at
+  `description`, because `nullable` is added after the reduction whatever the
+  key list says.
+- ruff clean; bandit 0 new, and its count check shows no pair grew; gitleaks
+  8.30.1 found no leaks; pip-audit finds only mcp 2.0.0's CVE-2026-59951,
+  which hosted-demo already fixed and the merge brings in.
+
+---
+## Batch 173 -- a tool's image, delivered to Gemini (2026-10-25)
+
+**ROADMAP_v3 §81 amended, IM9-IM10.** The owner's request: image support
+for Google, on the branch that had built it for Anthropic and the
+OpenAI-compatible wire (batch 171) and left Google deferred behind IM5's note.
+Batch 172 had to come first, because no GOOGLE tool loop could finish.
+
+### The owner's rulings
+
+- **The wire: a separate user turn on the pinned SDK** (IM9), over bumping
+  for `FunctionResponse.parts`, which Gemini 2.5 refuses.
+- **Measured before it ships**, with the owner's free-tier key, and with the
+  owner's instruction to tell a billing or quota failure apart from a real one.
+- **GIF: a note instead of the image** (IM10). The owner chose it on the
+  documented type list, and kept it after the measurement showed two Gemini 3
+  models reading a GIF correctly.
+
+### What was measured
+
+On gemini-3.1-flash-lite and gemini-3.8-flash, over raw REST: a tool's PNG in
+a user turn after the function response is read correctly ("red fills the
+left half, blue the right"); so is one placed as a sibling part inside the
+function-response Content; so are JPEG, WEBP and GIF. Gemini 2.5 refusing
+`FunctionResponse.parts` is Google's own forum (2025-09-30), not measured
+here: 2.5 is closed to new accounts. Google's ADK delivers a loaded artifact
+as a separate user Content after the function response.
+
+### What was built
+
+- `accepts_images("GOOGLE")` is honoured on the same strict test as every
+  other provider; the once-only warning went with the deferral.
+- The GOOGLE translation holds each tool row's images until the batch ends and
+  then sends one harness-labelled user turn: a text part naming the call, then
+  `inline_data` parts with the bytes DECODED, because `Blob.data` is bytes.
+  The result text says the images follow, like the OpenAI-compatible wire's.
+- `_GOOGLE_IMAGE_TYPES` is PNG, JPEG and WEBP. A GIF becomes IM5's note naming
+  its type, and a PNG beside it in the same batch is still delivered.
+- A stored copy that will not decode becomes a note for that image alone.
+- `providers.json.example` flags GOOGLE, on the reasoning that flags ANTHROPIC:
+  every Gemini chat model takes images. OPENAI stays unflagged, because there it
+  depends on the model.
+
+### Recorded, not handled
+
+A thread's images all travel with every request, and nothing bounds their
+sum. Google documents a 20 MB request limit (a later announcement raises
+inline data to 100 MB) and Anthropic's is 32 MB, so a thread of several
+maximum-size images can outgrow a request on any wire.
+
+### Verified
+
+- Live through the harness's own translation and `call_model_stream` on
+  gemini-3.5-flash-lite (flash-lite answered 503 "high demand" for several
+  minutes): the model called `view_image`; with the PNG delivered it answered
+  "Red fills the left half and blue fills the right half"; with a GIF, and with
+  the provider unflagged, it reported receiving no image.
+- Full suite 7304 -> 7315 (`test_image_input.py` 67 -> 77,
+  `test_sdk_conformance.py` 21 -> 22): 7266 passed and 49 skipped on Windows.
+- Mutations: 13 of 13 killed -- delivery off, base64 text for bytes, GIF sent,
+  WEBP dropped, the last turn or the mid-thread turn not sent, the "follow"
+  sentence or the GIF note missing, an unreadable copy failing the request, the
+  GOOGLE flag ignored, the label not naming the call, an unflagged provider
+  delivered to, and the real types handed text.
+- ruff clean; bandit 0 new and no pair grew; gitleaks found no leaks.
+
+---
+## Batch 174 -- image input merged into the hosted demo's branch, and the tool the merge left reachable (2026-10-25)
+
+**ROADMAP_v3 §79, HD4 amended.** The owner asked for `image-input` to be
+merged into `hosted-demo` locally rather than both reaching `main` through pull
+requests. The merge commit carries batches 171-173 and resolves the conflicts;
+this batch is the one thing the merge needed that no conflict showed.
+
+### The merge
+
+Eight files conflicted, and every resolution kept both sides:
+`core/client.py`, where `forget_client` (§79) and `accepts_images` (§81)
+had both been added after `api_initialization`; `test_config_edit.py`'s count
+of settable scalars, now 149 (146 here plus §81's three); and six records
+whose new entries sat at the same place -- DEVLOG and BREAKING_CHANGES in batch
+order, ROADMAP_v3's §82 and §81 above §80, AGENTS' map naming §79-§82
+and the HD, LY, IM and GS families together. `requirements.txt` merged without
+conflict and pins both mcp 2.2.0 (this branch) and google-genai 2.29.0 (the
+image branch), so pip-audit's one finding on the image branch, mcp 2.0.0's
+CVE-2026-59951, is gone.
+
+### What no conflict showed
+
+`SHARED_REFUSED_TOOLS` (HD4) lists the tools that reach the container itself,
+because a shared deployment runs every visitor in one container as one user.
+`view_image` reads a workspace file under `read`'s rules (§81, IM1) and was
+built on a branch that had no hosted mode, so it merged without joining the
+list. It ships disabled, and no hosted provider is marked `accepts_images`, so
+nothing offered it -- but HD4's layer exists for the deployment whose
+`config.yaml` says otherwise, and for that deployment the merged tree would
+have run it. It is in the set now, and
+`test_every_tool_that_takes_the_file_approval_check_is_refused` ties the set to
+`file_ops._file_approval_check` rather than to names, so the next file tool
+cannot arrive the same way.
+
+### Verified
+
+- Full suite 8059 -> 8061 (`test_hosted_mode.py` 78 -> 80): 7994 passed and 67 skipped on Windows.
+  On the merge commit itself the suite was 7992 passed and 67 skipped; one docs
+  test there first counted 75 readable documents instead of 63, because the
+  index still held the six conflicted docs' three stages each, and passed once
+  they were staged.
+- Mutations: 2 of 2 killed -- `view_image` and `write` each removed from the set.
+- ruff clean; bandit 0 new and no pair grew; gitleaks found no leaks; pip-audit
+  clean on all three requirement files.
+
+---
+## Batch 175 -- two pillow advisories accepted by ID, after the same reading (2026-10-25)
+
+**ROADMAP_v3 §79, HD9; the owner's call.** The deploy dry runs after the image
+merge refused `bridge.lock`: pillow 12.3.0 had two advisories published after
+batch 169 accepted its 35, CVE-2026-114501 (GHSA-654x-cwwv-5j9c) and
+CVE-2026-112398 (GHSA-5x8w-8jj5-q52h), both fixed in 13.0.0. That is the
+mechanism working -- a new ID for an accepted version refuses until someone
+triages it. The owner chose to accept both by ID with a reason, like the 35.
+
+### What was read
+
+- Gradio 6.30.0 is still the latest release and still requires `pillow<13`.
+- CVE-2026-114501 leaks heap memory into an Arrow export when
+  `PILLOW_ALIGNMENT` is above 1. Nothing in `deploy/` sets the variable, and
+  neither the bridge nor Gradio's source exports an image to Arrow.
+- CVE-2026-112398 overflows the FlashPix decoder, reached by `Image.open` on an
+  untrusted file with `olefile` installed. `olefile` is not in `bridge.lock`
+  (built 2026-10-25), so pillow cannot open FlashPix at all; and the bridge
+  opens no uploaded file -- Gradio's `Image.open` calls it could reach are the
+  favicon and `gr.Workflow`, which the bridge does not use.
+
+### What was built
+
+A second `ACCEPTED` entry for pillow 12.3.0 with those reasons, rather than two
+IDs added to the first: one entry per triage, so each reason says what was
+read and when. `audit` already passed every entry that pins the version; two
+tests now hold that, and that no ID is accepted twice.
+
+### Verified
+
+- Both deploy dry runs: built, gitleaks clean, `session.lock` clean,
+  `bridge.lock` clean with 37 accepted by ID, nothing sent.
+- Full suite 8061 -> 8063 (`test_deploy_demo.py` 60 -> 62): 7996 passed and 67 skipped on Windows.
+- Mutations: 2 of 2 killed -- the audit passing only the first entry for a
+  version, and an ID duplicated across entries.
+- ruff clean; bandit 0 new and no pair grew; gitleaks found no leaks.
+
+---
+## Batch 176 -- modelscope.cn, ModelScope's second site, signs in too (2026-10-26)
+
+**ROADMAP_v3 §79, HD13 and HD5 amended; the owner's request and choices.**
+The owner asked to add modelscope.cn as an OAuth provider if it was
+available, since modelscope.ai seemed to be a different site, and to check
+first whether registering an app there needs a modelscope.cn account.
+
+### What was measured (2026-10-26, read-only)
+
+- modelscope.cn runs its own OAuth server:
+  `/.well-known/openid-configuration` names the issuer
+  `https://www.modelscope.cn` and its own token endpoint, with the same
+  shape as .ai's -- the authorization-code grant only, and a token endpoint
+  that takes only `client_secret_basic` or `client_secret_post`. Both sites
+  also advertise `registration_endpoint` and `client_id_metadata_supported`;
+  neither was tried, since a test would register something on their server,
+  and neither removes the secret.
+- Separate accounts: .cn signs in through `passport.modelscope.cn`
+  (Alibaba's sign-in); .ai has no passport host and offers email, GitHub,
+  Google and "pcl", and no way in with a .cn account.
+- Registering an app needs a .cn account: the form is
+  `/my/settings/apps` ("OAuth互联应用"), and its API,
+  `/api/v1/oauth/apps`, answers "当前操作需要登录" without a session.
+- The same test HD5 sets: the scope list, public at
+  `/api/v1/console/config/list/business/OAuth`, is identical on both sites
+  and includes `api-inference`; the form carries "用户可以通过ModelScope OAuth 授权您的应用获得用户相关的魔搭权限", the
+  original of the invitation HD13 quotes from .ai.
+- The built-in browser's site permissions block modelscope.cn, so the form
+  was read from the site's own bundle and public endpoints with curl.
+
+### What the owner chose
+
+- Build now, with the client id empty, rather than wait for the .cn app.
+- A callback path of its own, `/oauth/modelscope-cn/callback`, over one
+  shared path with the site bound to the state.
+
+### What was built
+
+- `deploy/hosted/sign_in.py`: a `Site` per ModelScope site -- name, label,
+  origin, the project's app id ("" for .cn until registered), the id and
+  secret variables, the callback path -- and `ModelScopeSignIn` takes one;
+  every word it shows or logs names its own site and command. `offered()`
+  builds each site this deployment has an id, a secret and a public URL
+  for.
+- `deploy/hosted/app.py`: `take_secrets()` takes every site's secret out of
+  the environment first, as `take_secret()` took one.
+- `deploy/hosted/supervisor.py`: `sign_ins` by site name. A start packet
+  names its site and must be one this bridge offers; starting one drops any
+  flow the session had open on the other, and a code goes to the site last
+  started. A cancel and a closed tab drop both. The session is told every
+  offered name, sorted.
+- `deploy/hosted/web.py`: a callback route per site, each answering only
+  with its own site's flows; the landing page has a line per site.
+- `security/hosted.py`, `core/connect.py`, `tui/app.py`: `modelscope-cn`
+  is a bridge sign-in name, its preset signs in where its bridge can, its
+  revoke page is .cn's `/my/settings/apps`, and the consent line, the
+  messages and the unanswered-sign-in error name the site and command the
+  session asked for. A local install still takes a pasted .cn key.
+
+### What the owner does to switch it on
+
+1. Register an app on modelscope.cn (a .cn account), with the scopes
+   `openid api-inference` and both callbacks:
+   `https://<space host>/oauth/modelscope-cn/callback` and
+   `https://venastine-research-venastineharnessdemo.ms.fun/oauth/modelscope-cn/callback`.
+2. Set its secret as the platform secret
+   `VENASTINE_MODELSCOPE_CN_CLIENT_SECRET` on both deployments.
+3. Send the client id, to go into `MODELSCOPE_CN` in sign_in.py (or set
+   `VENASTINE_MODELSCOPE_CN_CLIENT_ID` meanwhile).
+
+### Not yet measured
+
+.cn's token endpoint's answers, held to .ai's reading since it runs the same
+server; whether .cn's API-Inference needs the account linked to Alibaba
+Cloud first, as secondary guides say; and the `modelscope-cn` preset's
+streaming usage, which stays off until measured.
+
+### Verified
+
+- Full suite 8063 -> 8094 (`test_hosted_sign_in.py` 33 -> 43,
+  `test_hosted_bridge.py` 74 -> 86, `test_hosted_mode.py` 80 -> 89): 8027
+  passed, 67 skipped on Windows.
+- Mutations: 22 of 22 killed on an export copy -- among them a code sent to
+  the first site rather than the one started, the other site's flow left
+  open on a start, a cancel or a closed tab, every callback path answering
+  with .ai's flows, every site built with .ai's secret or trading at .ai's
+  token endpoint, the secrets read rather than taken out, and the session
+  asking for .ai whatever was typed.
+- ruff clean; bandit 0 new and no pair grew; gitleaks found no leaks; both
+  deploy dry runs clean.
+
+---
+## Batch 177 -- the Studio signs in through ModelScope's Studio OAuth (2026-10-26)
+
+**ROADMAP_v3 §79, HD13 amended; the owner's request and choices.** The
+owner asked whether the Studio's sign-in had been wired by hand rather than
+through ModelScope's own Studio OAuth, and if so to pivot to it.
+
+### What was found
+
+- It had been wired by hand: the client id in `sign_in.py` is the app the
+  owner registered on 2026-10-22, its secret reaches the bridge as
+  `VENASTINE_MODELSCOPE_CLIENT_SECRET`, and nothing read what Studio OAuth
+  injects.
+- ModelScope's docs ("Using OAuth in Studios", read 2026-10-26 from its
+  documentation CDN, since the built-in browser blocks modelscope.ai):
+  turning on a Studio's OAuth settings creates an app for it, with the
+  scopes (API Inference among them) and token lifetime chosen there, and
+  injects `OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET`, `OAUTH_SCOPES`,
+  `OPENID_PROVIDER_URL`, `STUDIO_ID` and `STUDIO_HOST`, plus `SYSTEM`,
+  `SPACE_ID` and `SPACE_HOST` for Gradio. Docker Studios are supported. The
+  hand-registered connected app is what the docs prescribe for apps outside
+  a Studio.
+- Gradio 6.30.0's source (read from its tag on GitHub): `SYSTEM=spaces` with
+  a `SPACE_ID` makes `utils.get_space()` true, and then `http_server.py`
+  starts `SpacesReloader` with `watchfn_spaces`, which imports
+  `spaces.reloading` -- the Studio image has `spaces` 0.51.3 -- and
+  `blocks.py` closes `api_open` and turns `pwa` on.
+
+### What the owner chose
+
+- The Studio's own app on the Studio; the Hugging Face Space keeps the
+  hand-registered app; modelscope.cn stays a hand-registered app.
+- The copy-code flow, over the docs' Authlib example.
+- Endpoints from each site's discovery document, read once at start.
+
+### What was built
+
+- `deploy/hosted/sign_in.py`: `discover()` reads a provider's discovery
+  document and refuses one whose endpoints are not https on the issuer's
+  host or whose token endpoint does not take `client_secret_post`.
+  `from_env` reads its site's document and refuses another issuer's.
+  `from_studio` builds the sign-in through the Studio's own app for the site
+  its provider is, only when its scopes grant openid and api-inference,
+  returning to `https://{STUDIO_HOST}/auth/callback`. `offered()` prefers it
+  for its site and logs a hand-registered secret left there as unused.
+  `SECRET_ENVS` adds `OAUTH_CLIENT_SECRET`.
+- `deploy/hosted/app.py`: `take_secrets()` takes every one, keyed by
+  variable; `drop_spaces_flag()` removes `SYSTEM` where `STUDIO_ID` says
+  this is a Studio, logged.
+- `deploy/hosted/web.py`: callback routes by path, `/auth/callback`
+  included, each answered by the offered sign-in whose callback it is; the
+  Studio's host is one the bridge answers for.
+
+### What the owner does to switch it on
+
+1. In the Studio's settings, Adjust deployment settings: turn on OAuth
+   settings with the scopes `openid` and API Inference, and a token
+   lifetime; save, then redeploy.
+2. Confirm in the run log `ModelScope sign-in: offered through this
+   Studio's own app` and `SYSTEM=spaces removed`, then sign in once.
+3. Remove `VENASTINE_MODELSCOPE_CLIENT_SECRET` from the Studio's secrets
+   (the log names it as unused), and the Studio's callback from the
+   hand-registered app, which keeps the Space's.
+
+### Not yet measured
+
+Which callback paths the platform's app accepts -- `/auth/callback` is the
+one its docs show -- and what else the injected variables change, until the
+settings are on.
+
+### Verified
+
+- Full suite 8094 -> 8122 (`test_hosted_sign_in.py` 43 -> 67,
+  `test_hosted_bridge.py` 86 -> 90): 8055 passed, 67 skipped on Windows.
+  A parallel run of the four hosted suites once failed
+  `test_the_raven_is_still_except_during_a_turn[SHARED]`, a test this batch
+  does not touch; it passed three runs of its own and the full suite.
+- Mutations: 20 of 20 killed on an export copy -- among them an endpoint
+  on another host or a document naming another issuer taken, settings
+  without API Inference taken, the Studio's app always .ai's or returning to
+  the hand-registered path, the hand-registered app overriding it, its
+  secret left in the environment, SYSTEM never dropped or dropped on a
+  Space, and the flow going to the usual paths instead of the document's.
+  One row first scored a survivor because its selector matched no test; it
+  was re-run with the right one and killed.
+- ruff clean; bandit 0 new and no pair grew; gitleaks found no leaks; both
+  deploy dry runs clean.
+
+---
+## Batch 178 -- discovery documents are always read over https (2026-10-26)
+
+**ROADMAP_v3 §79, HD13 amended; the owner's call.** The first live start
+of f2b1952 with the Studio's OAuth settings on -- after the owner cleared an
+"app name already exists" refusal when saving them -- logged everything
+batch 177 meant to: `SYSTEM=spaces removed`, the .ai sign-in offered through
+the Studio's own app returning to `/auth/callback`, and the hand-registered
+secret named as unused. It also logged the discovery request as
+`GET http://www.modelscope.ai/.well-known/openid-configuration`: the Studio
+injects `OPENID_PROVIDER_URL` as plain http, so the document was read in
+the clear. Its issuer and endpoints were still https on www.modelscope.ai,
+and those checks hold, but a document read in the clear could be rewritten
+on the way.
+
+### What was built
+
+`discover()` now reads every document over https whatever scheme its
+provider names, and refuses a provider that is not an http or https address
+with a host. The Studio tests use the provider as measured, `http://`.
+
+### Verified
+
+- Full suite 8122 -> 8129 (`test_hosted_sign_in.py` 67 -> 74):
+  8062 passed, 67 skipped on Windows.
+- Mutations: 4 of 4 killed -- the document read with the provider's own
+  scheme (twice: in discover's tests and through the bridge's Studio
+  test), and a provider of any scheme or with no host read.
+- ruff clean; bandit 0 new and no pair grew; gitleaks found no leaks; both
+  deploy dry runs clean.
+
+### Still to try
+
+A real sign-in on the Studio, to see the platform's app accept
+`/auth/callback`.
+
+## Batch 179 -- the masked prompt opens in the middle, and every modal is in the sweep (2026-10-26)
+
+**#112's rule, which one screen had escaped.** A screenshot from the owner's
+sign-in on the Studio showed "Paste the code the sign-in page showed you"
+pinned to the top-left corner. That prompt is a `SecretScreen`, which is
+every masked prompt the app has -- an API key for `/connect`, the secrets
+store's passphrase, a value for `/secrets`, the hosted sign-in's code -- and
+`SecretScreen` had no `align: center middle` rule. #112 gave every modal
+one; this screen came later (9048427, 2026-09-24) and missed it.
+
+Nothing went red because the #112 sweep only pushes the screens
+`_modal_cases()` lists, and that table shadows the constructors by hand. Its
+docstring asked for a row per new screen, and BREAKING_CHANGES said a tenth
+screen without its rules would go red; nothing enforced either. Three
+screens had no row: `SecretScreen`, the run picker (§47) and the kill
+picker (§49, SS2). The two pickers had their rules and measure centred.
+
+### What was built
+
+- `SecretScreen { align: center middle; }` in tui/app.tcss, beside the
+  other #112 rules, and that block's comment no longer claims the sweep
+  would have caught it.
+- `_modal_cases()` gains `agent-picker`, `session-kill` and `secret`;
+  `_overflowing_modal_cases()` gains `secret-sign-in`, the sign-in prompt
+  with a fallback link as long as a real one.
+- `test_the_table_has_a_row_for_every_modal_screen` walks every
+  `ModalScreen` subclass in a `tui` module (Textual's own, such as the
+  command palette, are left out) and fails on a screen with no row. It
+  also fails on a row whose screen the walk did not find, so a walk that
+  found nothing cannot pass.
+
+### Verified
+
+- Before the fix, the new `secret` row failed: the dialog sat at
+  `Region(x=0, y=0, width=72, height=12)` on 80x24. After it, a probe of
+  the sign-in prompt measured x=4, y=3 at 80x24 and x=52, y=17 at 200x50,
+  the computed centre both times.
+- Full suite 8129 -> 8148 (`test_tui.py` 474 -> 493; the modal sweep's
+  node ids 3 x 19 = 57 -> 3 x 23 = 69): 8081 passed, 67 skipped on
+  Windows. The first full run caught ARCHITECTURE.md's total still at
+  8129. `test_tui.py` and `test_docs_consistency.py` pass again with
+  `AGENT_WORKSPACE` unset.
+- Mutations: 4 of 4 killed -- the align rule removed, the `secret` row
+  removed, the walk narrowed to one module so it finds nothing, and the
+  walk taking Textual's own modals as the app's.
+- ruff clean; bandit 0 new and no pair grew; gitleaks found no leaks;
+  both deploy dry runs build, scan clean and audit clean.
+
+## Batch 180 -- §83 decided: a ChatGPT plan, spent in a local install (2026-10-26)
+
+**Specified, not built.** The owner asked whether any other major provider now
+passes HD5's test for a sign-in. A re-survey of primary pages found one:
+OpenAI's Sign in with ChatGPT, launched at DevDay this month, invites
+open-source and locally hosted apps to let Plus and Pro subscribers spend
+their plan. A remotely hosted or paid app goes through OpenAI's interest form
+first, so the hosted demo is out. Nothing else qualified: Anthropic's legal
+page forbids third-party Claude.ai login, Google's Gemini OAuth guide covers a
+project's own access, GitHub Models was retired on 2026-07-30, and Qwen Code's
+free OAuth tier ended on 2026-04-15.
+
+Measured without an account: OpenAI's discovery document at
+`auth.openai.com` lists the documented endpoints, a revocation endpoint,
+public clients, S256 PKCE and refresh grants, and no device-code endpoint.
+
+The owner's choices, CG2, CG4, CG5, CG7, CG8 and CG9: CHATGPT as its own
+provider; its tokens in their own 0600 file; a loopback listener with a
+pasted-address fallback for SSH; measurement on the owner's own account
+before the Responses translation is written; OpenAI's UI guidelines followed;
+and `/disconnect` for every provider rather than for ChatGPT alone. CG1, CG3,
+CG6 and CG10 follow from OpenAI's pages.
+
+Next is slice 0, which needs the owner to sign in on a Plus or Pro account.
+
+## Batch 181 -- §83 slice 0, first run: the sign-in measured, the streams missed (2026-10-26)
+
+**Recorded, not built.** The owner ran the slice 0 probe on their own
+account. The sign-in, the tokens, the refresh, the revocation, the model
+list and every refusal measured cleanly, and three findings differ from
+OpenAI's pages: the token response carries `earliest_refresh_at`, which no
+page mentions; a reused refresh token was accepted rather than refused; and
+revocation kills the access token at once. Chat Completions answered 401, so
+CG3's Responses-only path is measured rather than read.
+
+The probe lost every admitted request's body. The plan route streams with no
+`Content-Type` header, and the probe read a missing type as "not a stream".
+Reproduced against the offline fake with the header dropped (five checks
+fail on the first run's handling, none on the fix). The probe also kept the
+value of an opaque `x-codex-turn-state` response header in its scratch
+results; that value is not in the repository, and the fixed probe records
+its length only. A second run is owed before slice 2.
+
+## Batch 182 -- §83 slice 0, second run: what the plan route returns (2026-10-26)
+
+**Recorded, not built.** The owner ran the fixed probe, and every admitted
+request streamed to completion. Function tools work, two calls in parallel
+and their results handed back with item ids, despite the model list's
+`code_mode_only`. Usage arrives on `response.completed`. The route accepts
+efforts low to max and refuses `ultra`, though the model list offers it.
+Encrypted reasoning arrives without being asked for. A system item was
+accepted and obeyed, against OpenAI's preview-limitations page.
+`earliest_refresh_at` is advice about six minutes before expiry, not a
+floor. A reused refresh token was accepted again.
+
+The image result is recorded as one sample: a solid red 8x8 PNG, verified
+red, was delivered and called "Peach", so CG7 keeps images off until a real
+image is tried. The usage-settings address is still owed by the owner.
+
+## Batch 183 -- §83 slice 0 complete: the usage-settings address (2026-10-26)
+
+**Recorded, not built.** The owner read ChatGPT's usage-settings address,
+which no API reports: `https://chatgpt.com/settings/usage?tab=overview`.
+CG8's Manage usage link points there. That was the last thing slice 0 owed;
+slice 1, signing in and out, is next.
+
+## Batch 184 -- §83 slice 1: signing in to a ChatGPT plan, and /disconnect for every provider (2026-10-26)
+
+**Built, the sign-in half.** Planned with the owner first, who chose six
+things before any code: slice 1 ships on its own with `/model CHATGPT`
+refused until slice 2 (CG11); one ChatGPT account per install, forgettable
+(CG12); `/disconnect` blanks a key and keeps the entry (CG13), asks first
+(CG14), and may remove the provider in use, saying so (CG15); PyJWT
+declared (CG16).
+
+### What was built
+
+- `core/chatgpt_auth.py`:
+  - discovery checked to OpenAI's host;
+  - the one-shot 127.0.0.1 listener, which never logs the request line
+    the code arrives in;
+  - the PKCE exchange, and the ID token checked with RS256 pinned before
+    any key is chosen;
+  - `chatgpt_auth.json` (0600, atomic) under an OS lock held across
+    processes;
+  - a refresh that re-reads the file after taking the lock and writes the
+    replacement before returning it;
+  - the revocation, and status.
+- `/connect chatgpt` with a paste prompt that closes itself when the
+  browser comes back, and CG8's one-time `NoticeScreen` in OpenAI's words.
+- `/disconnect [name [--forget]]` for every provider, through the new
+  `credentials.forget_key`.
+- `PyJWT>=2.10.1,<3` in requirements.txt, and `chatgpt_auth.json` with its
+  lock file in `neverDistribute`, `.gitignore` and `.gitattributes`.
+
+### What the checks found
+
+- **`/disconnect` moved the slash panel.** It sorts in before `/effort`, so
+  three of `TestTheWindowSlidesOverTheMatches`' tests reached `/embedder`
+  a step early. The window was measured at every step (80x24): the case
+  the class exists for -- one entry dropped, two gained, five shown within
+  the row budget -- still happens, one step later. The counts were
+  corrected, not the assertions.
+- **A mutation survived the first draft of the TUI tests.** With the
+  paste prompt's auto-dismissal removed, the prompt stayed up UNDER the
+  notice, and every test still passed, because none asked what was left
+  once the notice closed. That test now asserts the prompt is gone; the
+  mutation was re-run against the old test (survived) and the new one
+  (killed).
+- **Bandit** flagged five lines in the two new test files (`subprocess`,
+  `urlopen`), each now carrying a `nosec` with its reason, in the
+  repository's form.
+
+### Not measured
+
+Which tab of ChatGPT's settings lists connected apps. The revoke page is
+`https://chatgpt.com/settings`, said as such in the code. The owner's live
+check of slice 1 reads it.
+
+### Verified
+
+- Full suite 8148 -> 8248 (`test_chatgpt_auth.py` 67 and
+  `test_chatgpt_tui.py` 23, new; `test_connect.py` 63 -> 68;
+  `test_tui.py` 493 -> 498; the modal sweep 3 x 23 = 69 -> 3 x 24 = 72):
+  8180 passed, 68 skipped on Windows.
+- The changed suites with `AGENT_WORKSPACE` unset: 871 passed, 8 skipped.
+- Under Linux in WSL: `test_chatgpt_auth.py` and `test_connect.py`, 135
+  passed with no skips -- the 0600 mode and the `fcntl` lock held by a
+  second process included -- on PyJWT 2.10.1, the declared floor.
+- Mutations: 17 of 17 killed. They covered the state check, the RS256
+  pin, the audience, the nonce, the refresh margin, `earliest_refresh_at`,
+  write-before-return, the unusable list, the OS lock, `--forget`,
+  key-only blanking, the account check, the request-line log, the paste
+  prompt's port, the hosted refusal, the `/model` refusal, and the
+  prompt's auto-dismissal.
+- ruff clean; bandit 0 new and no pair grew; pip-audit on requirements.txt
+  found no known vulnerabilities; gitleaks found no leaks; both deploy dry
+  runs build, scan clean and audit clean.
+
+## Batch 185 -- §83 slice 1 checked live, and /disconnect says what it keeps (2026-10-27)
+
+**The owner's live check of slice 1 passed.** In a local TUI on their own
+account: `/connect chatgpt`, `/model CHATGPT`, `/disconnect chatgpt`,
+`/connect chatgpt` again and `/disconnect chatgpt --forget` -- the sign-in
+and the sign-out worked both times. The token file afterwards, read by its
+structure and never its values, held the host id and the endpoints only,
+and git ignores it and its lock file.
+
+**The one finding:** plain `/disconnect` and `--forget` looked the same.
+They are not -- the registration stays or goes, and that shows at the next
+sign-in -- but only `--forget`'s result mentioned the registration at all.
+CG12 is amended: both forms say what happens to it, in the confirmation and
+in the result, from one function so the two cannot drift.
+
+**Not reported, so not recorded as measured:** whether OpenAI asked for
+consent again on the second sign-in, and the connected-apps tab of
+ChatGPT's settings, which leaves the revoke page at the settings root.
+
+### Verified
+
+- Full suite, 8248 tests: 8180 passed, 68 skipped on Windows,
+  and the changed suites again with `AGENT_WORKSPACE` unset. The two sign-out tests now assert
+  each form's sentence, and the other form's absence, in both places; the
+  count is unchanged.
+- Mutations: 4 of 4 killed -- each form saying the other's sentence, and
+  the sentence left out of the confirmation or of the result.
+- ruff clean; bandit 0 new and no pair grew; gitleaks found no leaks;
+  both deploy dry runs build, scan clean and audit clean.
+
+## Batch 186 -- §83 slice 2 planned, and the probe its build waits on (2026-10-27)
+
+**Planned with the owner, not built.** Slice 2 makes the plan answer, and
+the owner chose six things first (CG17-CG22): measure the shapes a second
+turn sends before writing the translation; hand reasoning back to the model
+that wrote it and show its summaries; carry "Using ChatGPT plan" and a
+Manage usage click in the header; give CHATGPT a keyless `providers.json`
+entry; send through the openai SDK with a callable key and no SDK retries;
+and offer the effort levels the model list names, filtered to the route's
+vocabulary.
+
+**Why a third measurement.** Slice 0 sent single requests. A second turn
+sends an earlier reply, the harness's own calls without item ids, another
+provider's call ids after a switch, and a reasoning item handed back -- and
+the registry's fifteen real schemas, none of which meets strict mode's
+rules. None of that was ever sent on the plan route.
+
+**Checked here before the SDK was chosen**, against the pinned 2.45.0:
+
+- a callable `api_key` is called before every request;
+- the stream path never reads `Content-Type`;
+- the stream raises only on an event with a top-level `error` object, so
+  `error` and `response.failed` events are the translation's to read.
+
+**The probe**, for the owner to run, lives outside the repository like
+slice 0's: `probe_chatgpt_turns.py`. It reuses slice 0's sign-in, guard and
+sign-out unchanged, and it sends its requests through the SDK the build
+will use. It was run end to end against an extended offline fake first.
+
+### Verified
+
+- Full suite, 8248 tests: 8180 passed, 68 skipped on Windows, and the
+  docs tests again with `AGENT_WORKSPACE` unset. Docs only, so the count
+  is unchanged.
+- The probe's offline run through the real openai 2.45.0: every check
+  passed, and none of the fake's planted secrets reached the output. Two
+  guard mutations -- the results file unscrubbed, and a printed line
+  unscrubbed -- were both caught.
+- ruff clean; gitleaks found no leaks on an export copy; both deploy dry
+  runs build, scan clean and audit clean.
+
+## Batch 187 -- §83 slice 2a measured: what a second turn sends (2026-10-27)
+
+**The owner ran the turns probe**: 25 requests on `gpt-6.1-sol` through
+the openai SDK, set up as slice 2b will set it up, then a sign-out. The
+guard withheld nothing, and a scan of the results file found no token,
+email, client id or refresh token.
+
+**What it settled**, every item for the first time on the plan route:
+
+- an earlier reply goes back as a plain assistant message;
+- the registry's fifteen schemas are taken without `strict`, although none
+  meets strict mode's rules, at about 3,600 input tokens a request;
+- a call goes back without its `fc_` id, and under another provider's call
+  ids, so nothing new needs keeping;
+- a reasoning item goes back before the next user message, with or without
+  its id;
+- `reasoning.summary: "auto"` streams summary deltas when the server
+  chooses to write one: once of the two times it was asked;
+- `max_output_tokens: 16000` is accepted;
+- CG22's rule gives exactly the route's levels on the two models that
+  refuse `none`. The other six accept `none`, which their list entries do
+  not name;
+- the SDK's key function ran once per request, 25 of 25.
+
+**The finding the build must not miss:** the SDK parses an event it does not
+know as the wrong class. `response.metadata` arrived as a
+`ResponseAudioDeltaEvent` that still says `response.metadata` in its
+`type`, so slice 2b dispatches on `type` alone.
+
+**Not measured, and the owner's to decide before the build:**
+
+- a reasoning item handed back inside a tool loop. The model never reasoned
+  before a trivial call, at xhigh or at max;
+- whether `/effort` offers `none` on the six models that take it.
+
+### Verified
+
+- Full suite, 8248 tests: 8180 passed, 68 skipped on Windows, and the
+  docs tests again with `AGENT_WORKSPACE` unset. Docs only, so the count
+  is unchanged.
+- ruff clean; gitleaks found no leaks on an export copy; both deploy dry
+  runs build, scan clean and audit clean.
+
+## Batch 188 -- §83 slice 2b: the ChatGPT plan answers (2026-10-27)
+
+**Built.** `/model CHATGPT <model>` chats on the plan, through the
+Responses API and the openai SDK. The owner settled the two things slice 2a
+left open (CG23, CG24):
+
+- reasoning goes back to the model that wrote it on every turn, the tool
+  loop included;
+- `/effort` never offers `none`.
+
+**What it rests on**, every shape measured except one:
+
+- the client is pointed at OpenAI's address alone, whatever the entry says,
+  with the token function as its key and no SDK retries;
+- an earlier reply, a call without its item id, tools without `strict`, and
+  reasoning handed back, all as slice 2a sent them;
+- dispatch on an event's `type`, because the SDK parses an unknown event as
+  the wrong class.
+
+The exception is CG23's tool-loop echo, which the owner's live check is
+where it is seen.
+
+**CG10, code by code:**
+
+- a usage limit leads with Manage usage and is never retried;
+- an ineligible account is told once;
+- an unsupported field is named;
+- a 401 refreshes once and the request goes again -- a refresh spent once
+  however many requests were refused together;
+- a refresh that could not be made is retried like a dropped connection.
+
+**The header** says "Using ChatGPT plan" with a Manage usage click, through
+an `App.format_title` override. The sign-in writes CHATGPT's keyless
+`providers.json` entry, which `/disconnect` keeps, and `/model CHATGPT`
+refuses only while signed out (CG11 lifted).
+
+### Verified
+
+- Full suite, 8306 tests: 8238 passed, 68 skipped on Windows; the changed
+  suites again with `AGENT_WORKSPACE` unset, 488 passed and 6 skipped. 58
+  new tests, 43 of them in `tests/test_chatgpt_client.py` and six against
+  the real openai 2.45.0 in `tests/test_sdk_conformance.py`.
+- Mutations: 19 of 19 killed, among them: the echo's pair gate off, a
+  tool-loop turn not echoed, `none` offered, `ultra` unfiltered, a usage
+  limit made transient, the 401 resend removed, `replacing=` ignored, a
+  failed refresh not a ConnectionError, `store` true, the SDK left to
+  retry, the entry not written, the header link on every provider, the
+  hosted refusal removed, and `strict` sent.
+- ruff clean; bandit 0 new and no pair grew; gitleaks found no leaks on an
+  export copy; both deploy dry runs build, scan clean and audit clean.
+  pip-audit not run: no requirement changed.
+- AGENTS.md's ceiling on what `read_project_doc` reaches is raised from
+  5 MB to 6 MB, as batch 144 raised it from 4 to 5: this entry took the
+  documents to 5.00 MB with the file count unchanged at 63, and nothing
+  the tool can reach was widened.
+- Not every run was clean. Of three full runs of the final tree, one had
+  two failures that passed when re-run on their own, and their names
+  were not kept. The run after it was clean, and so were five repeated
+  parallel runs of every ChatGPT test file this batch touched.
+- **Owed:** the owner's live check, CG23's tool-loop case inside it.
+
+## Batch 189 -- §83 slice 2b checked live, and its two warnings fixed (2026-10-27)
+
+**The owner's live check of slice 2b passed** in a local TUI on their own
+account, read from their screenshot and from the stored thread's structure
+alone:
+
+- the sign-in, and the header's "Using ChatGPT plan" with Manage usage;
+- the 272k window off the plan's list, and summaries shown as thinking;
+- a two-turn chat, and a tool loop at `/effort xhigh`;
+- CG23's one unmeasured case. The symbolic_math call's turn stored a
+  reasoning item, and the request that handed it back before the call's
+  output completed.
+
+**Two warnings it found, both fixed:**
+
+- **"CHATGPT has no API_KEY ... calls will fail"**, in red, at launch and
+  after every `/model CHATGPT`, about a plan that was answering. Three sites
+  tested the key; one function, `credentials.missing_credential_message`,
+  now asks the plan about its sign-in and every other provider about its
+  key.
+- **The static table's warning for a misspelt plan model.** It told the
+  owner to add a config entry and named `ultra`. An unlisted name is now
+  said against the plan's own list.
+
+**Observed, not acted on:** the model sent `null` for every optional
+symbolic_math parameter without a default, which that tool accepted.
+**Not reported:** what Manage usage opened, and `/disconnect` followed by a
+message.
+
+### Verified
+
+- Full suite, 8313 tests: 8245 passed, 68 skipped on Windows, with every
+  failure's name kept (`-rf`) and none to keep; the changed suites again
+  with `AGENT_WORKSPACE` unset, 377 passed and 6 skipped.
+- Mutations: 5 of 5 killed -- the plan asked about a key again, and
+  launch, `/model` and `/critic` each testing the key on its own again;
+  and an unlisted plan model falling to the static table's advice.
+- ruff clean; bandit 0 new and no pair grew; gitleaks found no leaks on an
+  export copy; both deploy dry runs build, scan clean and audit clean.
+  pip-audit not run: no requirement changed.
+
+## Batch 190 -- the plan's nulls checked, and pin and remember settled (2026-10-27)
+
+**Checked offline, at the owner's request.** The ChatGPT plan's model does
+not send stray nulls: the live check's symbolic_math call was exactly that
+tool's declared defaults, nulls included. Each tool's arguments were built
+from its own schema and validated by its own parameter model, with no tool
+run:
+
+- arguments at the declared defaults: accepted by all sixteen tools that
+  have a model;
+- every optional parameter null: refused by thirteen of them, which the
+  model does not do;
+- the five tools without a model declared no defaults. `pin`/`unpin`
+  refused a null `last_n` and `remember` a null `scope`, each with a
+  readable error that cost a turn.
+
+**Fixed:** `pin` and `unpin` declare `last_n: 1` and `remember` declares
+`scope: "project"`, the defaults the code already used, and an explicit null
+is read as absent in both handlers. An empty or wrong value is still
+refused, never coerced. `ask_user` and `read_project_doc` already read a
+null as absent.
+
+### Verified
+
+- Full suite, 8316 tests: 8248 passed, 68 skipped on Windows, with every
+  failure's name kept and none to keep; the changed suites again with
+  `AGENT_WORKSPACE` unset, 114 passed and 4 skipped.
+- Mutations: 5 of 5 killed -- a null `last_n` refused again, pin's
+  default undeclared, a null scope refused again, an empty scope coerced
+  to the default, and remember's default undeclared.
+- ruff clean; bandit 0 new and no pair grew; gitleaks found no leaks on an
+  export copy; both deploy dry runs build, scan clean and audit clean.
+  pip-audit not run: no requirement changed.
+
+## Batch 191 -- the bridge's rate limits forget a stale address (2026-10-27)
+
+**Found by the owner's pre-public security review** of the hosted code
+since the Space's last build: 6247be4..HEAD over `deploy/hosted/`,
+`security/` and `tui/hosted_driver.py`. It was the one defect found.
+
+**The defect.** Both per-address limits in `deploy/hosted/web.py` -- the
+session tickets (HD8) and the sign-in callbacks (HD13) -- kept each
+address's requests in a dict that gained an entry for every address it ever
+counted and never lost one. A probe counted one request from each of 5,000
+addresses, moved a fake clock on an hour, and found all 5,000 still held,
+every one past the window. So a sender with many addresses -- an IPv6 /64 is
+one machine -- could grow the bridge until its container restarted, ending
+every visitor's session. The limits themselves held.
+
+**Fixed.** `_RateBook` holds one limit and forgets an address once its
+newest request has left the 60-second window. Forgetting costs no limit:
+all of a forgotten address's requests were already outside it. The sweep
+runs at most once a window, because on every request it would make each
+one cost as much as the addresses counted -- the same attack, spent on CPU.
+So a stale address waits at most one more window, and a book holds at most
+the last two windows' addresses.
+
+### What the review found holding
+
+- The client secrets are out of the environment before anything starts,
+  and the bridge is non-dumpable. A secret goes only in the request body,
+  to the issuer's https token endpoint, and httpx follows no redirect.
+- Discovery is always read over https; the issuer must be a ModelScope
+  site and both endpoints on its host.
+- The state is 256-bit, single-use and lives ten minutes; the handle is
+  128-bit, compared in constant time, allows five tries, and is bound to
+  the bridge's own session id, never the packet's.
+- Browser input reaches a session only as screen data, so no page can
+  forge a bridge packet; the session takes a token only for the sign-in
+  it is waiting for.
+- The callback page escapes every value and is sent `no-store`,
+  `no-referrer`, under a CSP that lets nothing run, framed only by the
+  platform's own site.
+- No access log line carries a callback's query string: Gradio 6.30.0
+  starts uvicorn at `log_level="warning"`, read in its source.
+
+**Offered and not taken:** a sentence on the code page warning against
+sharing the code, against HD13's accepted residue -- a consent link sent to
+someone else, whose code is then handed back, lends the sender that
+person's ModelScope quota for a session's lifetime.
+
+### Verified
+
+- Full suite, 8321 tests: 8253 passed, 68 skipped on Windows on eight
+  workers, with no failure. Two earlier runs of the same tree on all
+  sixteen took 11:44 and 12:18 on a loaded machine and failed a
+  different set each time, none near the bridge: `test_storage_e2e`'s
+  eight concurrent writers, then `test_hosted_mode`'s idle raven in
+  both modes and one `test_tui` modal scroll. Each passed five times of
+  five on its own. The changed suite again with `AGENT_WORKSPACE`
+  unset: 93 passed, 2 skipped.
+- Mutations: 6 of 6 killed -- a book that never sweeps, a sweep reading
+  the oldest request, a sweep on every request, a sweep waiting past the
+  window's edge, a sweep time never moved on, and an address never
+  allowed breaking the sweep.
+- ruff clean; bandit 0 new and no pair grew; gitleaks found no leaks on an
+  export copy.
+- **Both deploy dry runs build and scan clean, and REFUSE at the
+  audit.** `bridge.lock`'s pillow 12.3.0 has a new advisory,
+  PYSEC-2026-4327 (CVE-2026-112394, GHSA-4558-3h8r-v8xp): the raw
+  decoders for P;2L and P;4L can read up to three heap bytes past a
+  buffer, or crash, fixed in 13.0.0, which Gradio 6.30.0 does not
+  allow. No requirement changed here; the advisory reached the audit's
+  database after batch 190's dry runs. **Owed:** the owner's triage by
+  ID, as in batches 169 and 175. pip-audit not otherwise run: no
+  requirement changed.
+
+## Batch 192 -- a third pillow advisory accepted by ID, after reading again (2026-10-27)
+
+**The owner's call** (ROADMAP_v3 §79, HD9). Batch 191's dry runs refused
+`bridge.lock`: pillow 12.3.0 has PYSEC-2026-4327 (CVE-2026-112394,
+GHSA-4558-3h8r-v8xp), published 2026-10-19 and in the audit's database by
+2026-10-27. Its raw decoders for P;2L and P;4L can read up to three heap
+bytes past a buffer, or crash, on crafted data; 13.0.0 fixes it. Gradio
+6.30.0 is still the newest release and its wheel still requires
+`pillow<13.0`, so the pin cannot move.
+
+**Read again before accepting**, in the wheels `bridge.lock` pins by hash
+-- Gradio's matched against its lock hash, `spaces` and `hf-gradio`
+downloaded under `--require-hashes` -- rather than from batch 169's notes:
+
+- The bridge's own code (`deploy/`) imports no pillow.
+- `spaces` touches only `torch.frombuffer`, and torch is not in the lock;
+  `hf-gradio` uses no pillow.
+- Gradio decodes images in five places: `image_utils`, which only its
+  components import; its MCP server's reader for a tool's output; its
+  pipeline helpers; `gr.Workflow`; and the PWA icon route. The bridge
+  registers one API endpoint, `status`, which takes nothing, and no
+  component. It starts no MCP server (`GRADIO_MCP_SERVER` is never set),
+  calls no helper, and sets no `favicon_path`, so the icon route answers
+  404 without opening anything. The upload route copies a file into the
+  cache and decodes nothing.
+
+That last point sharpens batch 169's reading, which said pillow opens only
+the deployment's own favicon: the deployment has none, so it opens nothing.
+
+**A third `ACCEPTED` entry** carries that reading as its reason, one entry
+per triage as batch 175 set. The existing tests already hold it to an ID
+pip-audit names, no ID accepted twice, and every entry for a pinned version
+reaching pip-audit, so no test was added.
+
+### Verified
+
+- Both deploy dry runs build, scan clean and audit clean, `bridge.lock`
+  with 38 accepted by ID. Batch 191's, on the same tree without the
+  entry, refused on exactly this ID, which is the evidence the entry is
+  what lets it through.
+- Full suite, 8321 tests: 8253 passed, 68 skipped on Windows on eight
+  workers, with no failure; `test_deploy_demo.py` again with
+  `AGENT_WORKSPACE` unset, 62 passed.
+- ruff clean; bandit 0 new and no pair grew; gitleaks found no leaks on an
+  export copy. No mutation run: the change is one data entry, and the
+  dry runs before and after it are the test of it. pip-audit is the
+  dry runs' own.
+
+## Batch 193 -- an HTTP error is no proof that a deployment is private (2026-10-28)
+
+**The security audit's demonstrated finding, fixed under HD7.** With
+`VENASTINE_SINGLE_USER=1` on a public deployment, the anonymous `/healthz`
+probe could return a startup or proxy error. `ReachabilityGate._check`
+refused only a 200 containing the bridge's marker and accepted every other
+response, so a 503 unlocked shell/file tools and left an approval cached
+for a minute after the public app started answering. A session admitted
+in that window shared the single-user state and optional provider seed.
+
+**One producer changed:** `deploy/hosted/single_user.py`. A private answer
+is now an explicit set of login redirects (301/302/303/307/308) and access
+denials (401/403/404). The public marker overrides every status. All other
+answers are indeterminate and refuse with their HTTP status, including a
+200 without the marker -- the old synthetic sign-in-page test was no proof
+of privacy either. No body is quoted. The minute cache is unchanged: a
+failed check caches a refusal, and the next recognized private answer can
+recover. No new config key or design-decision family.
+
+**Regression evidence:** the revised 200 case and all four new tests fail
+against the original gate (5 failed, 6 passed in the focused run). The
+status test covers 100 through 599 beside the accepted controls. The route
+test drives the startup check, cached refusal and expiry for an unmarked
+200, 429, 500, 502, 503 and 504: no config unlock, no terminal ticket and no
+websocket session, including with a ticket issued before the check. The
+public marker is tested under 200, 302, 403 and 404; recovery to a private
+404 is tested at the cache boundary.
+
+### Verified
+
+- Hosted bridge: 97 passed, 2 skipped on Windows; the four added tests bring
+  its collected count to 99 and the suite to 8325.
+- Full suite on eight workers: 8257 passed, 68 skipped, no failure (5:44).
+  The first run caught a missed ARCHITECTURE total and the secret scan's
+  temporary source export inside the checkout: `test_line_pattern` scans
+  Python even under `.pytest_cache`. Both were corrected before this run;
+  source exports belong outside the checkout.
+- ruff clean; bandit 0 new, with none of the 62 baselined file/test pairs
+  growing; gitleaks found no leaks in an export of the tracked changes.
+- No requirement changed and no deploy was made. Live platform behavior
+  was not re-probed; the HTTP answers and clock are controlled in the
+  regression tests, with the actual bridge routes and configuration writer.
+
+## Batch 194 -- a redirect is no proof that a deployment is private (2026-10-28)
+
+**From the owner's review of 4168c92 (batch 193), under HD7; the owner chose
+to refuse every redirect.** Batch 193 made every reply but a privacy answer
+refuse, and it listed the privacy answers as the login redirects (301, 302,
+303, 307, 308) and the access denials (401, 403, 404). The redirects were an
+assumption, carried from the module's first docstring, and the review
+measured them false before reading on:
+
+- an anonymous `GET /healthz`, exactly as the gate sends it, answered 404 from
+  the private Space and 403 from the private Studio (ModelScope's own JSON:
+  "Unauthorized, please login or input valid ModelScope SDK token"). Neither
+  carried the marker, so both deployments stay inside the new rule;
+- the same request over plain http answered 301 from the Space, to the https
+  address, before Hugging Face asked whether the Space was private. So
+  `VENASTINE_PUBLIC_URL=http://...hf.space` with `VENASTINE_SINGLE_USER` on a
+  PUBLIC Space was judged private, and its first allowed check unlocked
+  `config.yaml` for every visitor. The Studio answered http with the same 403.
+
+The gate's original code allowed that case too, so batch 193 did not add it,
+but it was exactly the class batch 193 set out to refuse. A redirect says
+where to look, not who may look: http to https, a trailing slash and a moved
+host all redirect a public app as readily as a private one.
+
+**One producer changed:** `_PRIVATE_STATUSES` in
+`deploy/hosted/single_user.py` is 401, 403 and 404, and the module docstring
+names what was measured. A redirect now refuses like any other indeterminate
+answer, naming its status. Were Hugging Face ever to answer a private Space
+with a login redirect, single-user mode would refuse and say "answered HTTP
+302": closed, and the reason readable in the log.
+
+### Tests
+
+- `test_a_redirect_is_not_privacy`: all five redirect statuses refuse, on an
+  http URL, the measured case.
+- `test_it_runs_only_while_no_stranger_can_reach_it`: its 302 row now
+  refuses, and a new row allows the Studio's measured 403 body.
+- `test_only_privacy_responses_allow_single_user_mode`: the accepted set is
+  401, 403 and 404 across 100 to 599.
+- `test_startup_errors_never_unlock_or_admit_a_public_session` also drives a
+  301 through the bridge's start: no unlock, no ticket, no session.
+- Mutations on an export copy, 4/4 killed: 4168c92's set restored; the 301
+  alone restored, once against the gate test and once against the bridge's
+  start; and 403 dropped, which the Studio row catches.
+
+### Verified
+
+- Full suite, 8327 tests: 8259 passed, 68 skipped on Windows on eight
+  workers, with no failure (7:56); `test_hosted_bridge.py` again with
+  `AGENT_WORKSPACE` unset, 99 passed and 2 skipped.
+- Both deploy dry runs build, scan clean and audit clean, `bridge.lock`
+  with 38 accepted by ID. ruff clean; bandit 0 new and none of the 62
+  pairs grew; gitleaks found no leaks on an export copy.
+- No deploy in this commit; the measurements above were anonymous reads
+  of the two private deployments' `/healthz`, nothing sent.
+
+## Batch 195 -- a hosted deployment says why the plan is not there (2026-10-28)
+
+**From the pre-public review, under CG1; the owner asked for the review's
+open issues fixed.** On any hosted deployment `/model CHATGPT <name>`
+answered "The ChatGPT plan is not signed in ... /connect chatgpt signs in",
+and `/connect chatgpt` there refuses (CG1), so the hint was a dead end.
+`/critic` and the launch warning said the same through
+`credentials.missing_credential_message`. Reading the switch found a second
+case: a token file carried onto a single-user deployment passed the
+signed-in check, the switch went through, and the next turn failed in
+`core/client.py`, which refuses the plan on any hosted deployment.
+
+**What changed:** the CG1 sentence moved from `tui/app.py`
+(`_CHATGPT_LOCAL_ONLY`) to `core/chatgpt_auth.LOCAL_ONLY`, so
+`credentials.py` can say it in the same words. On a hosted deployment
+`missing_credential_message` returns it for CHATGPT before asking about the
+sign-in, which covers launch and `/critic`, and `/model CHATGPT` refuses with
+it before its signed-out check. `/connect chatgpt`'s refusal reads the
+moved constant and says what it said.
+
+### Tests
+
+- `test_model_chatgpt_on_a_hosted_deployment_says_why_not`, signed out and
+  with a carried token file: the provider is not switched, the sentence is
+  said and "/connect chatgpt" is not.
+- `test_a_hosted_deployment_says_the_plan_is_local_only`, both ways: the
+  launch check's one issue is the sentence.
+- `test_a_hosted_deployment_refuses_it` reads the moved constant.
+- Mutations on an export copy, 4/4 killed: `/model`'s hosted check removed;
+  the credential check's removed; it moved after the signed-in check, which
+  the carried token file catches; and `/model` refusing with the signed-out
+  sentence instead.
+
+### Verified
+
+- Full suite, 8331 tests. The first run on eight workers failed two tests
+  this batch does not touch -- `test_it_serves_the_secret_the_prompt_asks_for`
+  (askpass) and `test_a_code_block_in_the_viewer_matches_the_live_pane` --
+  in a 12:05 run, against 4 to 8 minutes usually: the machine was loaded.
+  Both passed alone, and the whole suite again on eight workers passed
+  clean, 8263 passed and 68 skipped (4:21). The changed suites again with
+  `AGENT_WORKSPACE` unset: 151 passed, 1 skipped.
+- ruff clean; bandit 0 new and none of the 62 pairs grew; gitleaks found
+  no leaks on an export copy. The deploy dry runs were left to batch 196,
+  whose tree holds this one: no requirement or lock changed here.
+
+## Batch 196 -- the code page warns whoever did not start the sign-in (2026-10-28)
+
+**The pre-public review's optional hardening, which the owner took this
+time.** HD13 accepted that a consent link can be forwarded: someone starts
+`/connect modelscope`, sends the link, and if the person who opens it
+approves and hands back the code, the sender's session runs on their
+ModelScope inference quota. The code is the step that needs the person's
+help, so the page that shows it now says, after "It works once, in that
+session only, for the next 10 minutes.": "If you did not type /connect in
+this demo yourself, close this page and share this code with no one."
+
+One producer, `ModelScopeSignIn.callback` in `deploy/hosted/sign_in.py`;
+the page template already escapes the text. Pages with no code -- expired,
+declined, refused, rate-limited -- do not carry it.
+
+### Tests
+
+- `test_the_code_page_warns_whoever_did_not_start_it`, on both sites through
+  the real route: the sentence beside the handle on the 200 page, and not on
+  a spent state's 400.
+- Mutations on an export copy, 3/3 killed: the sentence dropped; reworded
+  without "share this code with no one"; and added to the expired page,
+  which has no code.
+
+### Verified
+
+- Full suite, 8333 tests, twice on eight workers while other programs held
+  the machine's CPU. Each run failed ONE test, a different one, neither in
+  anything this batch touches: `test_the_raven_is_still_except_during_a_turn
+  [SINGLE_USER]` (a frame advanced once; 8264 passed, 68 skipped, 7:25), then
+  `test_quitting_by_gesture_releases_a_blocked_worker` (8264 passed, 68
+  skipped, 6:04). Each passed alone with its class. Batch 195's first run
+  failed two others the same way: the shifting set
+  `full-suite-takes-seven-minutes` describes, and no run here was clean.
+  The clean full run is batch 197's, on a tree holding this one, before
+  the deploys. `test_hosted_bridge.py` again with `AGENT_WORKSPACE` unset:
+  101 passed, 2 skipped.
+- ruff clean; bandit 0 new and none of the 62 pairs grew; gitleaks found
+  no leaks on an export copy. The deploy dry runs are batch 197's, on the
+  tree the deploys send.
+
+## Batch 197 -- the hosted banner asks for a GitHub star (2026-10-28)
+
+**The owner's request, mid-session.** A hosted session's banner -- the
+lines it shows before anything is typed (HD4) -- now ends with "Like it?
+Star the repo on GitHub to support its development:
+https://github.com/YahyaHammad/Venastine-Research-Harness". The owner chose
+the place (the last line, on the shared demo and on a private single-user
+deployment alike, after the connect hint) and the wording. The repository
+is public, checked that day, so the request can be met.
+
+One producer: `_STAR_LINE` beside `_REVOKE_PAGES` in `tui/app.py`, appended
+by `_hosted_banner`. A local install's banner is empty, so it never says it.
+The line is static text: an idle hosted session still draws nothing (batch
+168).
+
+### Tests
+
+- `TestTheBannerAsksForAStar::test_it_is_the_last_line_on_either_kind`,
+  shared and single-user, with and without a connected model: the last
+  line, said once, ending in the repository's address.
+- `test_a_session_says_it_after_the_connect_hint`, through a real shared
+  session's transcript.
+- `test_no_banner_and_the_file_warnings_stand` also holds a local install
+  to saying nothing of it.
+- Mutations on an export copy, 4/4 killed: the line dropped; moved above
+  the connect hint; said on the shared demo only; and said on a local
+  install too.
+
+### Verified
+
+- Full suite, 8338 tests: 8270 passed, 68 skipped on Windows on eight
+  workers, with no failure (9:32) -- the clean run batches 195 and 196
+  point to, on a tree holding both. `test_hosted_mode.py` again with
+  `AGENT_WORKSPACE` unset: 92 passed, 2 skipped.
+- Both deploy dry runs build, scan clean and audit clean, `bridge.lock`
+  with 38 accepted by ID, on this tree. ruff clean; bandit 0 new and none
+  of the 62 pairs grew; gitleaks found no leaks on an export copy.
+
+## Batch 198 -- a cover image, and the Space's README names it (2026-10-28)
+
+**The owner's request: a landscape cover, drawn by code.**
+`docs/assets/Venastine_Research_Harness_Cover.png`, 1280x640, is rendered
+by a headless Edge from `Venastine_Research_Harness_Cover.html` beside it:
+the title, the sentence the Space's README opens with, and a research run
+drawn in the TUI's layout and the `matrix` theme's colours, over a backdrop
+of claims tied to their sources that a seeded script draws. The page says
+how to render it, that the font is named rather than bundled, and that the
+run is a sample -- its pass names are the pipeline's
+(`core/reasoning/orchestrator.py`), its counts illustrative. Rendered from
+the scratch copy and again from the committed page, the two PNGs were
+byte-identical. The owner chose this size and to commit the page too; at
+1280x640 and under 1 MB the file is also what GitHub advises and allows for
+a social preview, so one file serves both.
+
+**The Space names it (HD9, amended).** Hugging Face's configuration
+reference, read that day, gives `thumbnail` as a "URL for defining a custom
+thumbnail for social sharing", and `docs/assets/` is not in the bundle
+(package.json's `files` leaves it out). So `scripts/build_demo_bundle.py`
+writes `thumbnail:` with the file's address on GitHub's `main` -- the
+owner's choice over the build's own commit, which an unpushed or rebased
+commit would break. `raw.githubusercontent.com` served `main`'s screenshot
+that day (200); the cover's address answers 404 until this commit merges
+there. A Studio's README carries no frontmatter, so nothing here sets a
+Studio's cover.
+
+**THIRD_PARTY_NOTICES restated.** Its enumeration had drifted a second
+time: 200 Python files had become 277, and 34 other files 43. Both sweeps
+were run again -- no `SPDX-License-Identifier` and no copyright header in
+any tracked `.py`, and the "adapted from" sweep still returns only this
+project's prose -- and everything added since batch 83 is first-party:
+the hosted demo's page templates, two requirements files, the scanner
+configuration. The cover makes 45, and the notice says its font is named
+and rendered, never bundled.
+
+### Tests
+
+- `test_a_shared_link_to_the_space_shows_the_cover`: the README's
+  `thumbnail` is the cover's address on `main`, of the repository
+  package.json's `homepage` names.
+- `test_the_cover_is_a_png_github_takes_as_a_social_preview`: a PNG,
+  1280x640, under 1 MB, with its page beside it -- found in a CI checkout,
+  which holds tracked files alone.
+- Mutations on an export copy, 4/4 killed: no `thumbnail:` line; the
+  address on another branch; a cover that is not there; the screenshot
+  named instead.
+
+### Verified
+
+- Full suite, 8342 tests, on a tree holding batch 199 too: 8274 passed,
+  68 skipped on Windows on eight workers, with no failure (3:37). This
+  commit's own tree, exported from the index into a scratch repository:
+  `test_docs_consistency.py` and `test_demo_bundle.py`, 132 passed, 4
+  skipped. `test_demo_bundle.py` with `AGENT_WORKSPACE` unset: 58 passed.
+- Both deploy dry runs build, scan clean and audit clean, `bridge.lock`
+  with 38 accepted by ID; the built Space's README carries the
+  `thumbnail:` line, and its 189 files hold no image. ruff clean; bandit
+  0 new and none of the 62 pairs grew; gitleaks found no leaks on an
+  export copy.
+
+## Batch 199 -- the star line in its own colour, its address clickable (2026-10-28)
+
+**The owner's request.** Batch 197's star line was drawn like every other
+banner line: `system`, dim italic, the harness narrating itself, which is
+meant to recede (`test_dim_is_the_system_role_alone` says so) -- so the one
+line asking the reader to do something was read past. It now has a role of
+its own, `invite`, which only it uses. The owner's choices:
+
+- **Bold, in the theme's success colour** (`#5aa86f` on dark-plain), over
+  the theme's amber -- GitHub's star colour, but the warning hue everywhere
+  else in the transcript -- and its accent, a light grey-blue on dark-plain,
+  the hosted default, which is grey but for its three severities. Bold
+  keeps it apart from `success`, which is plain.
+- **Its address ctrl+clickable.** `invite` joins `LINKED_ROLES` and takes
+  the links-only scanner. Batch 65 left the harness's own voice out of that
+  set because nothing had asked to click one; this is the first line the
+  harness writes to be clicked, and `system`, `error` and `warning` stay
+  unarmed (`test_the_harness_own_voice_is_not_armed`).
+- It is META, beside `system`, so `/copy conversation` leaves it out.
+
+Only the star line: the rest of the banner stays `system`. `on_mount`
+writes `_STAR_LINE` through `write_role("invite", ...)` and every other
+banner line through `write_system`, as before.
+
+Measured on a real shared session's screen (Textual's compositor,
+dark-plain): the line `bold #5aa86f`, its address `bold underline #5aa86f`
+with the URL in its metadata. The first screenshot came out grey: the shell
+it ran from set `NO_COLOR=1`, which Rich honours by dropping every colour
+and keeping bold and underline. Without it the export shows the green. At
+80 columns the transcript pane is narrower than the address and its last
+five characters are out of view, as any word that long would be --
+measured, and not this batch's to change; the test reads it at a width
+that shows the whole address.
+
+### Tests
+
+- `test_it_is_drawn_apart_from_the_rest_of_the_banner`
+  (`test_hosted_mode.py`): in a real shared session the star line's entry
+  is `invite`, and every other banner line's `system`.
+- `test_but_the_star_line_is` (`test_live_output.py`): every cell of the
+  address armed, and only those.
+- `invite` joins `MESSAGE_ROLES` and `EXPECTED_ROLE_KEYS` in
+  `test_themes.py`, so on every theme it is distinct from every other
+  message role, undimmed, and classified.
+- Mutations on an export copy, 7/7 killed: drawn as `system`; the whole
+  banner drawn as `invite`; unarmed; the same style as `success`; dimmed;
+  the `system` style; unclassified.
+
+### Verified
+
+- Full suite, 8342 tests: 8274 passed, 68 skipped on Windows on eight
+  workers, with no failure (3:37). `test_themes.py`, `test_hosted_mode.py`
+  and `test_live_output.py` with `AGENT_WORKSPACE` unset, beside
+  `test_demo_bundle.py`: 731 passed, 2 skipped.
+- ruff clean; bandit 0 new and none of the 62 pairs grew; gitleaks found
+  no leaks on an export copy. Both deploy dry runs clean: batch 198's, on
+  this tree.
+
+## Batch 200 -- a tick the raven had taken back, and three alerts that read a name as a secret (2026-10-28)
+
+**PR #265's checks.** The owner held the merge on two red checks. Both are
+traced here, and one was a bug.
+
+### The raven froze with its eye shut
+
+`compat`'s `py313-info` failed `test_the_raven_is_still_except_during_a_turn`
+in both runs on f10ff5c (`assert 1 == 0` on `_frame`), where the 3.11
+`pytest` job passed it. The test was right. Textual 8.2.8's `Timer._run`
+sleeps out its interval and then waits on an `asyncio.Event` before it
+ticks. `resume()` sets the event, which completes the waiting task's
+future; `pause()` clears it, and cannot un-complete that future. At a
+turn's end the app calls `resume_animation()` and then sets the raven
+`IDLE` (`on_one_shot_finished`, and the end of a run), with no await
+between, and on a hosted session the second pauses the timer again. When
+the stream had held the raven longer than one interval, the timer task was
+already parked on that event: the resume released it, and one tick ran
+after `watch_state` had reset the frame. `IDLE` has two frames, the second
+its blink, so the raven sat still with its eye shut until the next turn.
+
+- **Reproduced.** With `ANIMATION_INTERVAL` shrunk to 1 ms both cases
+  failed 5 of 5 with CI's exact assertion; at 0.4 s a local run passed,
+  because each `pilot.pause()` came back before a tick was due. CI's runner
+  was slower -- `pilot.pause()` ends on a CPU heuristic, floored at 20 ms
+  and capped at 1 s (AGENTS.md) -- and reached the condition by accident.
+  Timing, not the version: `asyncio.Event` is the same on 3.11 and 3.13.
+- **Measured at the real interval**, in a probe of a hosted shared session
+  ending a turn exactly as `on_one_shot_finished` does: a 0.1 s stream left
+  frame 0 (`<o )`), and streams of 1 s and 2 s, two of each, left frame 1
+  (`<- )`) with the timer paused. So a hosted demo has shown it after
+  nearly every turn since batch 168. Not looked at in the live demos.
+- **The fix**, in `RavenPanel._advance`: a tick that arrives while the
+  panel holds its timer paused -- held for a token stream, or idle on a
+  hosted session -- is dropped. Those are the only two conditions under
+  which the panel pauses the timer, so such a tick is always the stale one.
+  Reordering the two call sites instead was weighed and not taken: the next
+  caller would write resume-then-idle again, and the widget is where the
+  invariant lives. The held half covers a sequence the app does not
+  produce in one step today, a resume taken back by `pause_animation()`;
+  it is the same release, and `pause_animation()`'s promise is that nothing
+  undoes it.
+
+Two other timers have the same shape, read and left: `ThinkingIndicator`
+(a stale tick after `stop()` moves a hidden widget's frame, and `start()`
+resets it to 0) and the usage meter (`_sync_meter_timer` resumes or pauses
+once per change of busy, and `_refresh_meter` repaints only a changed
+string).
+
+### Three alerts that read a name as a secret
+
+GitHub's `CodeQL` check failed on three new high alerts, all
+`py/clear-text-logging-sensitive-data` in `deploy/hosted/sign_in.py`: the
+first pull-request analysis of the ModelScope sign-in code. Batch 158's
+shape again. The PR analysis's SARIF names each source, and each is the
+NAME of an environment variable:
+
+| # | site | source | what reaches the log | verdict |
+|---|---|---|---|---|
+| 66 | `sign_in.py:311` | `site.secret_env` (line 306) | "not offered, no VENASTINE_MODELSCOPE_CLIENT_SECRET" | false positive |
+| 67 | `sign_in.py:340` | the literal `"OAUTH_CLIENT_SECRET"` (line 130) | the Studio's "not offered, no ..." | false positive |
+| 68 | `sign_in.py:545` | `site.secret_env` | "... is set and unused ... it can be removed" | false positive |
+
+In the first two the secret's value only decides whether its name joins
+`missing`; the flow CodeQL drew runs through the tuple's name element. By
+A66 all three were dismissed as false positives with those reasons, through
+the API, on the owner's go-ahead -- not renamed, not suppressed inline, not
+configured away. GitHub keeps one alert across every ref it is found on
+(alert #14, dismissed in batch 158, has instances on twelve refs, `main`
+among them), and `deploy_gate.py` reads only alerts whose state is `open`,
+so after the merge these do not stop the deploy from `main`. The check's
+other line, "1 configuration not found: analyze-quality", is a warning:
+that job runs on a schedule only.
+
+### Tests
+
+- `test_a_turn_that_streamed_past_a_tick_ends_on_the_open_eye`
+  (`test_hosted_mode.py`, both hosted kinds): with the interval shrunk to
+  1 ms, a turn animates; a hold outlasts a tick; ended as the app ends one,
+  the raven is still, on frame 0, drawing the open eye.
+- `test_a_tick_released_by_a_resume_does_not_break_a_hold`
+  (`test_tui.py`): unheld it animates; a resume that `pause_animation()`
+  takes back before the task runs moves no frame; a resume that stands
+  animates again.
+- Both wait the way AGENTS.md says pilot tests wait: `settle` for what must
+  become true, `pump` for what must not happen, and a plain sleep only
+  where elapsed time is itself the condition.
+- Mutations on an export copy, 8/8 killed, each on its own assertion: no
+  guard (in each test); the idle half dropped; the held half dropped (one
+  extra frame, 170 against 169); every tick dropped (in each test); a
+  hosted raven that never animates; a resume that stands not ending the
+  hold. Two of them -- every tick dropped, and a hosted raven that never
+  animates -- first SURVIVED every raven test in the suite. Before the
+  guard a running timer was a moving raven, so every test read the timer;
+  both new tests now read the frame as well.
+
+### Verified
+
+- Full suite, 8345 tests, on Windows on eight workers, twice. The first:
+  8276 passed, 68 skipped and 1 failed (6:39) -- `test_tui.py`'s
+  `test_what_does_not_fit_the_payload_block_can_be_scrolled_to`, End
+  landing on row 1 of 8, the contention flake TECHNICAL_DEBT 30 names
+  by name; alone it passed 6 of 6, and it touches no raven. The second:
+  8277 passed, 68 skipped, with no failure (6:38).
+  `test_hosted_mode.py` and `test_tui.py` with `AGENT_WORKSPACE` unset:
+  594 passed, 2 skipped.
+- ruff clean; bandit 0 new and none of the 62 pairs grew; gitleaks found
+  no leaks on an export copy. `test_docs_consistency.py`: 77 passed, 1
+  skipped. Alerts #66-#68 read back `dismissed`, `false positive`, with
+  their comments.

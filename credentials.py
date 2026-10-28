@@ -60,11 +60,46 @@ def unknown_provider_message(provider_name: str, providers: dict) -> str:
     )
 
 
-def load_provider_data() -> dict:
+# ROADMAP_v3 §79 (HD5). Providers connected for THIS PROCESS ONLY, never
+# written anywhere. A shared hosted demo runs every visitor in one container
+# as one Unix user, so a key in a file is a key one bug away from the next
+# visitor; a key in this dict lives as long as the session's process does.
+# Entries here win over the file's, and the file is never told about them.
+_SESSION_PROVIDERS: dict = {}
+
+
+def set_session_provider(provider_name: str, entry: dict) -> None:
+    """Connect a provider for this process without writing it to disk (HD5).
+
+    A COPY is stored, so the caller's dict cannot change it afterwards.
+    """
+    _SESSION_PROVIDERS[provider_name] = dict(entry)
+
+
+def clear_session_providers() -> None:
+    _SESSION_PROVIDERS.clear()
+
+
+def _load_file_data() -> dict:
     if not os.path.exists(LLM_PROVIDERS_FILE):
         return {}
     with open(LLM_PROVIDERS_FILE, encoding="utf-8") as file:
         return json.load(file)
+
+
+def load_provider_data() -> dict:
+    """Every configured provider: the file's entries, with any connected for
+    this session only laid over them (HD5).
+
+    Callers get fresh dicts each time, so mutating the answer changes
+    neither the file nor the session's entries. `save_credentials` reads the
+    FILE alone, which is what keeps a session-only key from being written
+    back by the next save of some other provider.
+    """
+    data = _load_file_data()
+    for name, entry in _SESSION_PROVIDERS.items():
+        data[name] = dict(entry)
+    return data
 
 
 # 0600 -- owner read/write, nobody else. This file holds every LLM
@@ -120,7 +155,9 @@ def save_credentials(
     is_v1_compatible: bool = True,
     supports_stream_usage: bool = False,
 ) -> None:
-    provider_data = load_provider_data()
+    # The FILE, never the merged view: a session-only entry (HD5) read here
+    # would be written to disk by this save.
+    provider_data = _load_file_data()
 
     if provider_name in provider_data:
         provider_data[provider_name]["API_KEY"] = api_key
@@ -137,6 +174,29 @@ def save_credentials(
         }
 
     _write_provider_data(provider_data)
+
+
+def forget_key(provider_name: str) -> "str | None":
+    """Remove `provider_name`'s key; say where it was (ROADMAP_v3 §83, CG13).
+
+    `/disconnect`'s one writer. A session-only entry (HD5) is dropped whole,
+    since it exists only to carry the key, and the file is not touched --
+    a shared deployment never writes it. Otherwise the file entry's
+    `API_KEY` is blanked and EVERY OTHER FIELD STAYS: the URL, the two
+    flags, `echoes_reasoning`, `accepts_images` -- exactly what
+    `save_credentials` keeps when a key is replaced, so a later `/connect`
+    comes back to the same entry. Returns "session", "file", or None when
+    there was no key to forget.
+    """
+    if _SESSION_PROVIDERS.pop(provider_name, None) is not None:
+        return "session"
+    provider_data = _load_file_data()
+    entry = provider_data.get(provider_name)
+    if not entry or not entry.get("API_KEY"):
+        return None
+    entry["API_KEY"] = ""
+    _write_provider_data(provider_data)
+    return "file"
 
 
 def load_credentials(provider_name: str) -> tuple[str, str]:
@@ -169,12 +229,48 @@ def missing_key_message(provider_name: str) -> str:
             f"needs none.")
 
 
+def missing_credential_message(provider_name: str,
+                               entry: dict) -> "str | None":
+    """What to say when `provider_name` has nothing to authenticate with, or
+    None when it has something. The ONE test, for launch and for every
+    command that switches a provider.
+
+    A key for every provider but one. The ChatGPT plan's entry holds no key
+    BY DESIGN (ROADMAP_v3 §83, CG20) and its credential is the sign-in in
+    `chatgpt_auth.json`, so testing the key said "calls will fail" -- in
+    red, at launch and after each `/model CHATGPT` -- about a plan that was
+    signed in and answering (batch 189, the owner's live check). Three call
+    sites each tested the key on their own, which is why one fix here rather
+    than three there.
+
+    On a hosted deployment the plan has no credential at all (CG1): the
+    answer there is why, never "/connect chatgpt signs in", which that
+    deployment refuses (batch 195). Signed in or not -- a token file
+    carried onto one still cannot reach the plan (core/client.py).
+    """
+    if provider_name == "CHATGPT":
+        # Imported here: core.chatgpt_auth imports this module.
+        from core import chatgpt_auth
+        from security import hosted
+
+        if hosted.is_hosted():
+            return chatgpt_auth.LOCAL_ONLY
+        if chatgpt_auth.status().signed_in:
+            return None
+        return ("The ChatGPT plan is not signed in, so CHATGPT cannot answer. "
+                "/connect chatgpt signs in.")
+    if entry.get("API_KEY"):
+        return None
+    return missing_key_message(provider_name)
+
+
 def provider_startup_issues(provider_name: str) -> list:
     """What launch should say about the provider setup, before either
     shell starts (#138).
 
     The same three checks /model performs on a switch -- file present,
-    provider configured, key non-empty -- applied at the moment the user
+    provider configured, a credential present (a key, or for the ChatGPT
+    plan its sign-in: `missing_credential_message`) -- applied at the moment the user
     chose the provider, instead of at the first model call, which is a
     dead end away from the mistake that caused it. WARN-ONLY, never a
     refusal: an OpenAI-compatible endpoint running locally legitimately
@@ -190,6 +286,6 @@ def provider_startup_issues(provider_name: str) -> list:
         return [no_providers_message()]
     if provider_name not in providers:
         return [unknown_provider_message(provider_name, providers)]
-    if not providers[provider_name].get("API_KEY"):
-        return [missing_key_message(provider_name)]
-    return []
+    message = missing_credential_message(provider_name,
+                                         providers[provider_name])
+    return [message] if message else []

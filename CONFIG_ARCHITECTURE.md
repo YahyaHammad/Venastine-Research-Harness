@@ -231,7 +231,9 @@ Batch 91. Nothing retried a model call before this, and the SDKs cover less
 than they appear to: openai and anthropic retry a request that fails BEFORE
 its stream opens (408/409/429/5xx, connection errors, twice each), but an
 error sent inside a stream that opened with 200 is raised straight up by
-both, and google-genai 1.0 retries nothing at all. OpenRouter reports an
+both, and google-genai retries nothing at all unless told to (1.0.0, and
+2.29.0 since batch 172: with no `retry_options` it makes one attempt).
+OpenRouter reports an
 overloaded upstream exactly that way -- "The service is temporarily
 unavailable", "Upstream idle timeout exceeded" -- which failed four nested
 subagents in the run that prompted this.
@@ -643,6 +645,14 @@ Google expresses reasoning depth as an integer token budget rather than an
 enum, so a level has to be mapped to a number at the boundary. -1 is the
 SDK's "decide dynamically" sentinel.
 
+Live since batch 172 (ROADMAP_v3 §82). Until then this map was never sent:
+the google-genai pin, 1.0.0, had no `thinking_budget`, so Google reported
+no levels. The 2.29.0 pin has it. Measured on Gemini 3: every budget here,
+and 0, was accepted by gemini-3.1-flash-lite. Gemini 3's native control
+is `thinking_level`; this map sends budgets, which it still takes. A Gemini
+model with no `model_effort_levels` entry gets `default_effort_levels` and a
+WARNING, like any other unlisted model.
+
 ## Database
 
 ### `db_path`
@@ -742,6 +752,25 @@ max lines per read call
 ### `max_read_chars`
 
 max chars per read call
+
+### `max_image_bytes`
+
+ROADMAP_v3 §81 (IM7). The largest image file `view_image` will attach:
+3,932,160 bytes, which is 3.75 MiB.
+
+The number is derived, not chosen. An image travels as base64, which is 4/3
+the size of the file, so 3.75 MiB of file is 5 MiB on the wire. 5 MiB is
+Anthropic's per-image limit, the smallest of the wires §81 delivers to;
+OpenAI's is larger, and Google's limit (a wire since batch 173) is on the whole
+request rather than per image. A cap at 5 MiB of FILE would put a 6.7 MiB payload
+on the wire, and Anthropic would reject it with a 400 that names neither the
+file nor this key.
+
+It is also a cost bound, separate from `max_file_size_bytes` (25 MB). That
+key limits what a tool may operate on; this one limits what is resent with
+every request for as long as the image stays in the conversation's view.
+Raising it toward the 25 MB general limit would not be consistent, it would
+break: the provider would reject the request.
 
 ## /init (ROADMAP_v2 §24)
 
@@ -1546,7 +1575,7 @@ against the PINNED SDKs and did not survive:
                        core/client.py already retrieves to read
                        capabilities.effort. The answer was in hand and
                        being dropped; reading it costs no extra call.
-  google-genai 1.0.0   types.Model.input_token_limit, one field.
+  google-genai 2.29.0  types.Model.input_token_limit, one field (as 1.0.0).
   openai 2.45.0        Model is declared extra="allow", so a provider's
                        own field survives onto .model_extra. That makes
                        the OpenAI-compatible side ONE alias reader --
@@ -1625,6 +1654,27 @@ deployment, whose operator knows the number and can say it once with
 /window -- which is the case this default cannot serve and does not try
 to. Erring low here would compact every unknown model early forever to
 protect the rarer case that has an owner who can answer.
+
+## Connecting a model (ROADMAP_v3 §79)
+
+### `hf_oauth_client_id`
+
+ROADMAP_v3 §79 (HD5). The Hugging Face OAuth app `/connect huggingface` signs
+in through. The default is the project's own app, registered by the owner on
+2026-10-20, so the sign-in works in every install and every hosted deployment
+without anyone registering another. Another app's id signs in through that app
+instead; empty hides the sign-in and leaves a pasted token working.
+
+**A client id is public, and that is what makes it a `config.yaml` value.** The
+app is registered with NO secret (Hugging Face calls this a public app), with
+the device code flow enabled, so nothing about it needs hiding: it names which
+app asks, and the person approving the request sees that name on Hugging
+Face's own page. The scopes live on the app's registration (`openid profile
+inference-api`), not here, so editing this value can change WHICH app asks but
+not what it may do.
+
+**Not an authority key.** It cannot widen a tool permission or an approval, and
+`settings.json` cannot set it at all, like every other key in this file.
 
 ## Tool permissions and approvals (ROADMAP_v2 §15, D24)
 

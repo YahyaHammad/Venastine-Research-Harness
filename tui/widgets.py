@@ -240,7 +240,10 @@ META_ROLES = frozenset({
     # harness to start a turn. The model reads it, but nobody in the
     # conversation SAID it, so /copy conversation leaves it out as it leaves
     # out a routed warning -- and the answer it prompted still copies.
-    "wake"})
+    "wake",
+    # Batch 199: the hosted banner's star line. The harness's voice, like
+    # the `system` lines around it, so /copy conversation leaves it out.
+    "invite"})
 
 # Batch 65 (TECHNICAL_DEBT 16). The lines whose URLs are armed for
 # ctrl+click, beside the two sets above for their reason: which roles a
@@ -257,11 +260,27 @@ META_ROLES = frozenset({
 # They take the LINKS-ONLY scanner, never the prose grammar. A tool
 # line is a digest, and `markdown.link_spans` says at length what the
 # full grammar does to one.
-LINKED_ROLES = frozenset({"tool", "pipeline_tool", "tool_error"})
+#
+# Batch 199 adds `invite`, the hosted banner's star line, by the owner's
+# choice: the one line the harness writes so that it is clicked. Same
+# links-only scanner; `system`, `error` and `warning` stay unarmed.
+LINKED_ROLES = frozenset({"tool", "pipeline_tool", "tool_error", "invite"})
 
 
 class RavenPanel(Static):
-    """Corner raven: what the harness is doing right now."""
+    """Corner raven: what the harness is doing right now.
+
+    `still_when_idle` (ROADMAP_v3 §79, batch 168) is for a hosted session,
+    whose screen is relayed to a browser. There the idle blink was the whole
+    of what a silent tab received -- 6.9 KB/s, five packets a second,
+    measured through the bridge -- and the bridge counts a session's output
+    as activity, so the 20-minute idle limit could never fire and an
+    abandoned tab held its slot for the full two-hour lifetime. Idle, the
+    raven draws its first frame and its timer stays paused; every other
+    state animates as before, and a pause the app asked for (a token
+    stream) is never undone by a state change. A local install keeps the
+    blink.
+    """
 
     # NOT always_update=True. Every token_delta reassigns state to
     # THINKING, so always_update fired watch_state once per token for the
@@ -270,24 +289,51 @@ class RavenPanel(Static):
     # pause_animation exists to eliminate. Genuine transitions still fire.
     state = reactive(ravens.IDLE)
 
-    def __init__(self, animations: bool = True, **kwargs):
+    def __init__(self, animations: bool = True, still_when_idle: bool = False,
+                 **kwargs):
         super().__init__(**kwargs)
         self._animations = animations
+        self._still_when_idle = still_when_idle
+        self._held = False  # the app paused it, for a token stream
         self._frame = 0
         self._timer = None
 
     def on_mount(self) -> None:
         if self._animations:
             self._timer = self.set_interval(ANIMATION_INTERVAL, self._advance)
+            self._hold_still_if_idle()
         self._render_state()
 
     def _advance(self) -> None:
+        # Batch 200. A tick can arrive while this panel holds its timer
+        # paused. Textual's timer task waits on an asyncio.Event, resume()
+        # releases it, and a pause() before the task runs clears the event
+        # but cannot recall the release. The app does exactly that at a
+        # turn's end -- resume_animation(), then IDLE -- so a stream that
+        # held the raven past one interval let a tick through after
+        # watch_state had reset the frame, and a hosted raven sat still
+        # with its eye shut. Both conditions are the ones under which this
+        # panel pauses the timer, so a tick that meets either is stale.
+        if self._held or self._idle_and_still():
+            return
         self._frame += 1
         self._render_state()
 
     def watch_state(self) -> None:
         self._frame = 0
         self._render_state()
+        self._hold_still_if_idle()
+
+    def _idle_and_still(self) -> bool:
+        return self._still_when_idle and self.state is ravens.IDLE
+
+    def _hold_still_if_idle(self) -> None:
+        if self._timer is None or not self._still_when_idle:
+            return
+        if self._idle_and_still():
+            self._timer.pause()
+        elif not self._held:
+            self._timer.resume()
 
     def _render_state(self) -> None:
         frames = self.state.frames
@@ -296,11 +342,13 @@ class RavenPanel(Static):
 
     def pause_animation(self) -> None:
         """Called while a token stream is active. Idempotent."""
+        self._held = True
         if self._timer is not None:
             self._timer.pause()
 
     def resume_animation(self) -> None:
-        if self._timer is not None:
+        self._held = False
+        if self._timer is not None and not self._idle_and_still():
             self._timer.resume()
 
 
@@ -2890,6 +2938,15 @@ class Transcript(RichLog):
         did not survive.
         """
         if not markdown.clickable(url):
+            return
+
+        # ROADMAP_v3 §79. In a browser tab (Textual's web driver) the
+        # platform's browser is the SERVER's: `webbrowser.open` there opens
+        # nothing the reader can see and reports failure. The driver sends
+        # the URL to the reader's own browser instead, and the tab opening is
+        # the confirmation, as it is here.
+        if self.app.is_web:
+            self.app.open_url(url)
             return
 
         def work() -> None:

@@ -1774,6 +1774,22 @@ class TestAToolLineArmsItsURL:
 
         assert cells == []
 
+    @pytest.mark.asyncio
+    async def test_but_the_star_line_is(self):
+        """Batch 199, the owner's choice: the hosted banner's star line
+        is the one harness line written to be clicked. Every cell of the
+        address is armed, and only the address. Wide enough to show the
+        whole address: in a pane narrower than it (80 columns, measured)
+        its end is out of view, as any word that long would be."""
+        from tui.app import _STAR_LINE
+
+        url = "https://github.com/YahyaHammad/Venastine-Research-Harness"
+        cells, _rows = await _harness_line("invite", _STAR_LINE,
+                                           size=(180, 30))
+
+        assert {found for _x, _y, found in cells} == {url}
+        assert len(cells) == len(url)
+
 
 class TestADigestIsNotProse:
     """The reason tool lines take a links-only scanner.

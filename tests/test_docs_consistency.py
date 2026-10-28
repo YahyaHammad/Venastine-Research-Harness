@@ -1410,10 +1410,12 @@ def test_a_range_citation_does_not_report_its_own_endpoint():
 #
 # What is deliberately NOT here: an audit of the real tarball. That needs
 # `npm pack`, and npm is not a dependency of this suite -- the suite is
-# offline, Python-only, and runs in a container that has no Node. The tarball
+# offline, Python-only, and has to run where there is no Node. The tarball
 # audit lives in scripts/prepublish-check.mjs, which runs from
 # `prepublishOnly` on a machine that by definition has npm. These three check
 # the allowlist as TEXT, which is what a Python suite can honestly verify.
+# (The release-tag half below is the exception, batch 162: it runs that
+# script under Node with a fake npm, and skips where there is no Node.)
 
 _PACKAGE_JSON = os.path.join(ROOT, "package.json")
 
@@ -1444,6 +1446,132 @@ def test_the_npm_package_and_pyproject_state_the_same_version():
     assert _package_json()["version"] == versions[0], (
         f"package.json says {_package_json()['version']!r} and pyproject.toml "
         f"says {versions[0]!r}. They describe one release -- bump both.")
+
+
+# The release TAG is a third copy of the version, and the two tests above
+# cannot see it: a tag exists only on the run it started. So this half is
+# behavioural, and it is the one place this file runs Node -- the real
+# prepublish-check.mjs, with GITHUB_REF_TYPE/GITHUB_REF_NAME set the way the
+# runner sets them. It needs Node and NOT npm: the `npm` it finds is a fake
+# that records being called and fails, so nothing is ever packed, nothing
+# touches the network, and "refused before anything is packed" becomes a
+# file that does or does not exist.
+
+_PREPUBLISH_CHECK = os.path.join(ROOT, "scripts", "prepublish-check.mjs")
+
+
+def _run_prepublish_check(tmp_path, ref_type, ref_name):
+    """Run the real check as a run from `ref_type`/`ref_name` would.
+
+    Returns the finished process and whether the script reached `npm`, which
+    it calls for exactly one thing: `npm pack --dry-run`.
+
+    GITHUB_* is stripped from the inherited environment before the two are
+    set. This suite runs in CI, and on a tag push the runner's own
+    GITHUB_REF_TYPE is `tag` -- the publish job runs this test on exactly
+    that push.
+
+    A missing `node` skips here and FAILS in CI. A revert check cannot see a
+    test that skips (tests/BREAKING_CHANGES.md says why), and GitHub's
+    ubuntu image ships node, so a skip there would mean this guard had
+    quietly stopped running where it matters.
+    """
+    node = shutil.which("node")
+    if node is None:
+        if os.environ.get("GITHUB_ACTIONS"):
+            pytest.fail("node is not on PATH in CI, so the release-tag check "
+                        "in scripts/prepublish-check.mjs is untested")
+        pytest.skip("node is not on PATH; the release-tag check is JavaScript")
+
+    fake_bin = tmp_path / "fake-npm"
+    fake_bin.mkdir()
+    called = tmp_path / "npm-was-called"
+    if os.name == "nt":
+        # spawnSync(..., {shell: true}) on Windows: cmd finds npm.cmd by PATHEXT.
+        (fake_bin / "npm.cmd").write_text(
+            f'@echo called> "{called}"\r\n@exit /b 3\r\n', encoding="ascii")
+    else:
+        fake = fake_bin / "npm"
+        fake.write_text(f'#!/bin/sh\necho called > "{called}"\nexit 3\n',
+                        encoding="ascii")
+        fake.chmod(0o755)
+
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GITHUB_")}
+    env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
+    if ref_type is not None:
+        env["GITHUB_REF_TYPE"] = ref_type
+        env["GITHUB_REF_NAME"] = ref_name
+
+    proc = subprocess.run(  # nosec B603 - node, resolved to an absolute path, running this repo's own script
+        [node, _PREPUBLISH_CHECK], cwd=ROOT, env=env,
+        capture_output=True, text=True, timeout=120)
+    return proc, called.exists()
+
+
+@pytest.mark.parametrize("tag", [
+    pytest.param("v{version}-rc.1", id="a-prerelease-of-the-version"),
+    pytest.param("{version}", id="the-version-without-its-v"),
+    pytest.param("", id="no-tag-name"),
+])
+def test_a_release_tag_that_is_not_the_version_is_refused_before_packing(
+        tmp_path, tag):
+    """Register item 115, ROADMAP_v3 A78.
+
+    `v0.3.0` and `v0.3.1` were pushed on commits whose files said 0.2.0, and
+    the v0.3.1 `publish (npm)` run packed @yahyahammad/venastine@0.2.0 and
+    reported the check passed. Nothing compared the tag with anything.
+
+    Each tag here is a near miss, which is the point. A prerelease tag
+    begins with the right version, so a prefix comparison lets it through.
+    A tag without its `v` contains the right version, so a substring
+    comparison lets it through. An empty name has to refuse rather than
+    compare equal to nothing. And the refusal has to come before `npm` is
+    reached at all: with the call removed, the script goes on to pack.
+    """
+    version = _package_json()["version"]
+    tag = tag.format(version=version)
+
+    proc, packed = _run_prepublish_check(tmp_path, "tag", tag)
+
+    assert proc.returncode == 1, (
+        f"the check let tag {tag!r} through for package version {version}.\n"
+        f"stdout: {proc.stdout}\nstderr: {proc.stderr}")
+    assert f"so its tag is v{version}" in proc.stderr, (
+        f"the check failed for some other reason than the tag:\n{proc.stderr}")
+    assert not packed, (
+        f"the check refused tag {tag!r}, but only after calling npm. The "
+        f"comparison has to come before anything is packed.")
+
+
+@pytest.mark.parametrize("ref_type,ref_name", [
+    pytest.param("tag", "v{version}", id="the-tag-that-names-the-version"),
+    pytest.param("branch", "main", id="a-run-from-a-branch"),
+    pytest.param(None, None, id="a-local-npm-publish"),
+])
+def test_a_run_the_tag_check_has_no_quarrel_with_goes_on_to_pack(
+        tmp_path, ref_type, ref_name):
+    """The controls for the test above: the check refuses only what it is for.
+
+    A tag that is `v` + the version goes on to pack. So does a run from a
+    branch, which names no version, and a local `npm publish`, which has
+    neither variable. Each one reaches the fake `npm`, so each ends in that
+    fake's own failure and never in the tag refusal.
+    """
+    version = _package_json()["version"]
+    if ref_name is not None:
+        ref_name = ref_name.format(version=version)
+
+    proc, packed = _run_prepublish_check(tmp_path, ref_type, ref_name)
+
+    assert "so its tag is" not in proc.stderr, (
+        f"the check refused a {ref_type!r} run named {ref_name!r} for "
+        f"version {version}:\n{proc.stderr}")
+    assert packed, (
+        f"the check never reached `npm pack` for a {ref_type!r} run named "
+        f"{ref_name!r}.\nstdout: {proc.stdout}\nstderr: {proc.stderr}")
+    assert "`npm pack --dry-run` failed" in proc.stderr, (
+        f"the fake npm was called but its failure was not reported:\n"
+        f"{proc.stderr}")
 
 
 def test_the_test_extra_matches_requirements_test():
@@ -2146,6 +2274,153 @@ def test_pip_audit_covers_every_declared_dependency_file():
         f"pip-audit.yml audits neither of {missing}. A requirements file "
         f"nothing audits is a dependency set with no supply-chain gate, and "
         f"the whole point of this job is that it is the only one.")
+
+
+# ---------------------------------------------------------------------------
+# ROADMAP_v3 §79 HD9, amended in batch 169: the hosted demo deploys a commit
+# only when EVERY CI check on it passed (the owner's rule), and §80's
+# New Year job is the one workflow that writes to the repository. Each test
+# below is a property of the workflow files that a later edit could break
+# without any run noticing until it mattered.
+# ---------------------------------------------------------------------------
+
+def _workflow_yaml(name: str) -> dict:
+    import yaml
+
+    return yaml.safe_load(_workflow_text()[name])
+
+
+def _deploy_gate():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "deploy_gate_for_docs", os.path.join(ROOT, "scripts", "deploy_gate.py"))
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _on(doc: dict) -> dict:
+    # PyYAML reads the bare key `on` as True.
+    return doc.get("on", doc.get(True)) or {}
+
+
+def test_the_deploy_waits_for_every_workflow_a_push_to_main_runs():
+    """deploy-demo.yml wakes when one of the workflows it lists finishes,
+    and its gate waits for every workflow a push to main runs. A CI
+    workflow missing from the list cannot wake it: if that one finished
+    last, nothing would ever deploy that commit; a list naming a workflow
+    that no push runs wakes the gate for nothing."""
+    gate = _deploy_gate()
+    listed = sorted(_on(_workflow_yaml("deploy-demo.yml"))["workflow_run"]
+                    ["workflows"])
+    required = sorted(wf.name for wf in gate.required_workflows())
+    assert listed == required, (
+        f"deploy-demo.yml's workflow_run list {listed} is not the set of "
+        f"workflows a push to main runs, {required}. Make them the same.")
+    assert {"tests", "pip-audit"} <= set(required), (
+        "the suite and the audit are among the checks the owner named")
+
+
+def test_only_the_deploy_job_holds_a_secret_and_only_after_the_gate():
+    jobs = _workflow_yaml("deploy-demo.yml")["jobs"]
+    holders = sorted(name for name, job in jobs.items()
+                     if "secrets." in json.dumps(job)
+                     or job.get("environment"))
+    assert holders == ["deploy-hf"], (
+        f"jobs that can read a secret or enter an environment: {holders}. "
+        f"Only the deploy job may, and only after the gate.")
+    deploy = jobs["deploy-hf"]
+    assert deploy["needs"] == "gate"
+    assert deploy["if"] == "needs.gate.outputs.verdict == 'deploy'"
+    assert deploy["environment"] == "demo"
+    assert deploy["concurrency"]["cancel-in-progress"] is False
+    # security-events: read is the code scanning alerts (batch 170); the
+    # gate stops when it cannot read them, so losing it holds every deploy.
+    reads = {"actions": "read", "checks": "read", "contents": "read",
+             "security-events": "read"}
+    assert jobs["gate"]["permissions"] == reads
+    assert deploy["permissions"] == reads
+    assert _workflow_yaml("deploy-demo.yml")["permissions"] == {}
+
+
+def test_the_gate_judges_only_a_push_to_main_from_this_repository():
+    """A workflow_run job's github.ref is the default branch whatever woke
+    it, so an environment's branch rule cannot make this check; the job's
+    `if:` and deploy_gate.py both do. A fork's pull request from a branch
+    it named `main` matches `branches: [main]`; its event is not push."""
+    condition = " ".join(
+        _workflow_yaml("deploy-demo.yml")["jobs"]["gate"]["if"].split())
+    for clause in ("github.event.workflow_run.event == 'push'",
+                   "github.event.workflow_run.head_branch == 'main'",
+                   "github.event.workflow_run.head_repository.full_name == "
+                   "github.repository"):
+        assert clause in condition, f"the gate's `if:` lost {clause!r}"
+
+
+@pytest.mark.parametrize("name", ["deploy-demo.yml", "copyright-year.yml"])
+def test_no_expression_is_pasted_into_a_shell_line(name):
+    """A branch name is chosen by whoever pushed it. Values reach these
+    workflows' scripts through `env:`, where the shell cannot read them as
+    code."""
+    for job_name, job in _workflow_yaml(name)["jobs"].items():
+        for step in job.get("steps", []):
+            assert "${{" not in step.get("run", ""), (
+                f"{name}:{job_name}: an expression inside `run:` -- move it "
+                f"to the step's `env:`")
+
+
+def test_the_workflow_never_deploys_unverified():
+    assert "--unverified" not in _workflow_text()["deploy-demo.yml"], (
+        "`--unverified` skips the CI gate; it exists for the owner's private "
+        "test deploys and never for the workflow")
+
+
+def test_a_schedule_cannot_cancel_a_push_run_the_gate_waits_for():
+    """codeql and pip-audit run on a push and on a schedule. Keyed on the
+    ref alone, the two share a cancel-in-progress group, and a cancelled
+    push run is a failed check to the deploy gate."""
+    for name in _workflow_text():
+        doc = _workflow_yaml(name)
+        on = _on(doc)
+        concurrency = doc.get("concurrency") or {}
+        if not (isinstance(on, dict) and "push" in on and "schedule" in on
+                and concurrency.get("cancel-in-progress")):
+            continue
+        assert "github.event_name" in concurrency["group"], (
+            f"{name}: push and schedule share the group "
+            f"{concurrency['group']!r}")
+
+
+def test_license_and_notice_carry_the_same_copyright():
+    """§80: copyright-year.yml rewrites both or neither, and refuses when
+    they disagree -- so a hand edit to one would stop it every New Year."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "bump_copyright_year_for_docs",
+        os.path.join(ROOT, "scripts", "bump_copyright_year.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    lines = {}
+    for name in module.FILES:
+        with open(os.path.join(ROOT, name), encoding="utf-8",
+                  newline="") as f:
+            m = module._notice(f.read(), name)
+        lines[name] = (m["first"], m["last"], m["holder"])
+    assert len(set(lines.values())) == 1, lines
+
+
+def test_the_copyright_job_is_the_only_workflow_that_writes():
+    doc = _workflow_yaml("copyright-year.yml")
+    crons = [entry["cron"] for entry in _on(doc)["schedule"]]
+    assert crons == ["59 23 31 12 *", "7 6 1 1 *"], (
+        "23:59 UTC on Dec 31 is the owner's time; the Jan 1 run is the "
+        "catch-up for a delayed or dropped first one")
+    writers = sorted(name for name, text in _workflow_text().items()
+                     if "contents: write" in text)
+    assert writers == ["copyright-year.yml"], writers
 
 
 def test_the_launcher_never_sets_the_two_variables_that_would_break_it():

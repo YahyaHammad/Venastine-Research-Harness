@@ -6123,7 +6123,7 @@ demonstrated consequence -- and a second answer to a question the loader
 already answers is the fix-at-the-consumer shape AGENTS.md names. The
 measurement worth having first is whether any caller ever will.
 
-## 115. A release tag is not compared with the version it publishes (open, found batch 161)
+## 115. A release tag is not compared with the version it publishes (closed, batch 162 -- compared before anything is packed)
 
 **Found reading the `v0.3.1` tag's runs**, while diagnosing the `tests` failure
 ROADMAP_v3 §77 fixes. Severity `S3`, `stability`: nothing is wrong yet, and the
@@ -6149,6 +6149,36 @@ files to the tags, or retagging -- is the owner's call, and so is whether
 `v0.3.0`/`v0.3.1` were meant as package versions at all.
 
 **Not:** arming the channel, or bumping either file here.
+
+**CLOSED (batch 162, ROADMAP_v3 §78, A78), with the shape above.** The owner
+ruled on the three questions this entry left open. Both tags were meant as
+releases, and the bump was missed. Neither the version files nor the tags move:
+npm received nothing from either tag, and the next release bumps both files and
+tags the commit that carries the bump. The check lives in
+`scripts/prepublish-check.mjs`, as the first thing it does, rather than as a
+workflow step.
+
+It is keyed on the ref and not the event: `GITHUB_REF_TYPE` is `tag` on a tag
+push and on a manual run started from a tag. In either case `GITHUB_REF_NAME`
+must equal `v` + `package.json`'s version, or the script refuses and exits before
+`npm pack --dry-run`. It runs twice on the publish path, once at the explicit
+step and again inside `npm publish`'s `prepublishOnly`.
+
+`test_a_release_tag_that_is_not_the_version_is_refused_before_packing` runs the
+real script under Node with a fake `npm` on `PATH`. Its three near misses are a
+prerelease of the version, the version without its `v`, and an empty name. Each
+must be refused without `npm` being called. Removing the call, comparing by
+prefix or substring, moving it below the pack, and keying it on the event each
+fail it. Re-run against `v0.3.1` at this commit, the check refuses: "package.json
+says 0.2.0, so its tag is v0.2.0".
+
+**This entry's example was wrong about its own consequence** (measured in batch
+162). npm already holds `0.1.0` and `0.2.0`. Neither carries a provenance
+attestation, so both came from outside the workflow's real publish step. An armed
+`v0.3.1` run would therefore have been refused by npm as a republish of 0.2.0, and
+the step would have gone red. What this closure prevents is the silent case the
+example stands for: a tag on a commit whose files name a version npm does not
+have yet.
 
 ## Review-marathon arrivals at open issues with no register entry
 

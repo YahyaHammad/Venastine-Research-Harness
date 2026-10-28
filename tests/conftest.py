@@ -497,11 +497,18 @@ def clear_client_cache():
     import core.session
 
     core.session.clear()
+    # ROADMAP_v3 §79 (HD5): providers `/connect` kept in memory for one
+    # session are module state for the same reason, and a key one test
+    # connected must not answer another test's api_initialization.
+    import credentials
+
+    credentials.clear_session_providers()
     yield
     core.client._client_cache.clear()
     core.client._context_window_cache.clear()
     core.client._context_window_failures.clear()
     core.session.clear()
+    credentials.clear_session_providers()
 
 
 @pytest.fixture(autouse=True)
@@ -1031,6 +1038,7 @@ class FakeMemory:
         self.user_messages = []
         self.assistant_messages = []
         self.tool_results = []  # list of (tool_call_id, result)
+        self.attached_images = []  # list of (tool_call_id, media_type, data)
         self._next_messages = []
         self.thread_id = thread_id or uuid4()
         self.kind = kind
@@ -1059,6 +1067,11 @@ class FakeMemory:
 
     def add_tool_result(self, tool_call_id, result):
         self.tool_results.append((tool_call_id, result))
+
+    def attach_image(self, tool_call_id, media_type, data):
+        # ROADMAP_v3 §81 (IM3). Recorded, never paired with a result: this
+        # double has no rows, and what a loop test asks is what was held.
+        self.attached_images.append((tool_call_id, media_type, data))
 
     def record_input_tokens(self, tokens):
         self.recorded_tokens.append(tokens)
@@ -1252,7 +1265,8 @@ class FakeStorage:
         return self._first_user_message(thread_id)
 
     def save_message(self, thread_id, role, content, name=None,
-                     tool_call_id=None, thinking=None, harness=None):
+                     tool_call_id=None, thinking=None, harness=None,
+                     images=None):
         # Stores content exactly as given -- production's save_message
         # json.dumps'es it and get_session_history json.loads'es it back,
         # and round-trip is identity for any JSON-encodable value, so the
@@ -1281,6 +1295,8 @@ class FakeStorage:
             # the round trip is identity, and the reconstruction is what
             # has to mirror production.
             "harness": harness,
+            # ROADMAP_v3 §81 (IM2). The list, as `harness` holds its dict.
+            "images": images,
         })
         # (#32) Mirrors production: any archived row stamps the thread,
         # in the same write.
@@ -1505,6 +1521,17 @@ class FakeStorage:
                     payload["thinking"] = thinking
             elif role == "tool":
                 payload = {"role": "tool", "tool_call_id": row["tool_call_id"], "content": content}
+                # ROADMAP_v3 §81 (IM2), mirroring storage._decode_images
+                # against the list this fake holds: only usable entries, and
+                # the key only when one survives.
+                images = [entry for entry in (row.get("images") or [])
+                          if isinstance(entry, dict)
+                          and isinstance(entry.get("media_type"), str)
+                          and entry["media_type"]
+                          and isinstance(entry.get("data"), str)
+                          and entry["data"]]
+                if images:
+                    payload["images"] = images
             else:
                 payload = {"role": role, "content": content}
                 if row.get("tool_call_id"):
@@ -1970,6 +1997,16 @@ REDACTION_CASES = [
     ("npm token",
      "publish failed with npm_" + "a1b2c3d4" * 4 + "a1b2",
      "npm_" + "a1b2c3d4" * 4 + "a1b2"),
+    # ROADMAP_v3 §79 (HD5): the three credentials /connect introduces.
+    ("hugging face token",
+     "router said 401 for hf_" + "a1b2c3d4" * 4 + "a1",
+     "hf_" + "a1b2c3d4" * 4 + "a1"),
+    ("openrouter key",
+     "401 for sk-or-v1-" + "a1b2c3d4" * 8,
+     "sk-or-v1-" + "a1b2c3d4" * 8),
+    ("modelscope token",
+     "auth failed: ms-" + "a1b2c3d4-a1b2-a1b2-a1b2-" + "a1b2c3d4" + "a1b2",
+     "ms-" + "a1b2c3d4-a1b2-a1b2-a1b2-" + "a1b2c3d4" + "a1b2"),
     ("pem private key block",
      "key: -----BEGIN RSA " + "PRIVATE KEY" "-----\n"
      + "MIIEowIBAAKCAQEA" + "a1b2c3d4" * 6 + "\n-----END RSA "

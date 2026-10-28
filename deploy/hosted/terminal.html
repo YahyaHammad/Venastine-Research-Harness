@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Venastine Research Harness</title>
+  <link rel="stylesheet" href="$static/css/xterm.css">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto%20Mono">
+  <script src="$static/js/textual.js"></script>
+  <style>
+    html, body { margin: 0; height: 100%; background: #0c181f; overflow: hidden; }
+    #terminal { position: absolute; inset: 0; }
+    body .textual-terminal { opacity: 0; transition: opacity 0.3s ease-out; }
+    body.-first-byte .textual-terminal { opacity: 1; }
+    .notice {
+      position: absolute; inset: 0; display: flex; align-items: center;
+      justify-content: center; color: #e6edf1; z-index: 10;
+      font-family: "Roboto Mono", Menlo, Consolas, monospace;
+    }
+    .notice div { background: #12232d; padding: 28px 36px; text-align: center; }
+    .notice a { color: #9fd3ff; }
+    body.-first-byte .starting { display: none; }
+    .ended { display: none; }
+    body.-closed .ended { display: flex; }
+    body.-closed .starting { display: none; }
+  </style>
+</head>
+<body>
+  <div class="notice starting"><div>Starting a session&hellip;</div></div>
+  <div class="notice ended"><div>
+    <p>Session ended.</p>
+    <p><a href="terminal">Start a new one</a> &middot; <a href="./">Back</a></p>
+  </div></div>
+  <div id="terminal" class="textual-terminal" data-ticket="$ticket"
+       data-font-size="16"></div>
+  <script>
+    // textual.js connects on window.onload to `data-session-websocket-url`
+    // plus "?width=..&height=..", so the ticket travels in the path. The
+    // scheme and host are the page's own, as the visitor's browser sees them.
+    (function () {
+      var el = document.getElementById("terminal");
+      var scheme = location.protocol === "https:" ? "wss://" : "ws://";
+      var base = location.pathname.replace(/terminal$/, "");
+      el.dataset.sessionWebsocketUrl =
+        scheme + location.host + base + "ws/" + el.dataset.ticket;
+      window.addEventListener("beforeunload", function (event) {
+        if (!document.body.classList.contains("-closed")) {
+          event.preventDefault();
+          event.returnValue = "";
+        }
+      });
+    })();
+  </script>
+</body>
+</html>

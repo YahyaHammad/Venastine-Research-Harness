@@ -246,7 +246,7 @@ class _Listener:
                 try:
                     conn.close()
                 except OSError:
-                    pass
+                    pass  # the connection is finished either way; a failed close says nothing
 
     def _answer(self, conn) -> None:
         conn.settimeout(_CLIENT_TIMEOUT_S)
@@ -305,7 +305,7 @@ class _Listener:
         try:
             self._sock.close()
         except OSError:
-            pass
+            pass  # already closed; shutting down goes on
         self._thread.join(timeout=3)
 
     @property

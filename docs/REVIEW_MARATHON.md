@@ -785,7 +785,7 @@ machine. Most were fixed; the shapes are the brief.
   not the same as granting the call (gotcha #70) — and the resulting denial reported a cause that was
   not the cause.
 - Blocking work on the UI thread, and a second reader on one stdin (shared with S16 — name the seam).
-- The modal sweep is 3 sizes × 19 cases, gated by
+- The modal sweep is 3 sizes × 24 cases, gated by
   `test_agents_md_states_the_real_modal_parametrisation`. That is the shape of the current coverage,
   not a guarantee of its depth.
 

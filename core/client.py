@@ -1,3 +1,5 @@
+import base64
+import binascii
 import json
 import logging
 import os
@@ -61,7 +63,11 @@ def api_initialization(provider_name: str):
 
     entry = provider_data[provider_name]
 
-    if entry.get("is_v1_compatible", False):
+    # ROADMAP_v3 §83. Routed by NAME, before the flag: the plan is not
+    # v1-compatible and must never fall to the Chat Completions branch.
+    if provider_name == "CHATGPT":
+        client = _chatgpt_client()
+    elif entry.get("is_v1_compatible", False):
         from openai import OpenAI
         client = OpenAI(base_url=entry["API_URL"], api_key=entry["API_KEY"])
     elif provider_name == "GOOGLE":
@@ -76,6 +82,69 @@ def api_initialization(provider_name: str):
 
     _client_cache[provider_name] = client
     return client
+
+
+def _chatgpt_client():
+    """The openai SDK, set up for the ChatGPT plan (ROADMAP_v3 §83, CG21).
+
+    `api_key` is a FUNCTION, `chatgpt_auth.access_token`: the SDK calls it
+    before every request (measured 25 of 25 in slice 2a), so the hourly
+    refresh needs no other plumbing and a cached client never holds a
+    stale token. `max_retries=0`, so CG10 decides every retry and the SDK
+    decides none: its own would resend a usage-limit 429.
+
+    The address is `chatgpt_auth.RESOURCE` and never the entry's `API_URL`.
+    The token is minted for that resource alone, and a hand-edited entry
+    must not be able to send it anywhere else.
+
+    Refused on a hosted deployment (CG1), as the sign-in already is, so a
+    `providers.json` carried onto one cannot reach the plan either.
+    """
+    from security import hosted
+
+    if hosted.is_hosted():
+        raise ValueError(
+            "The ChatGPT plan answers on a local install only (ROADMAP_v3 "
+            "§83, CG1): OpenAI offers it to open-source apps running on your "
+            "own machine.")
+    from openai import OpenAI
+
+    from core import chatgpt_auth
+
+    return OpenAI(base_url=chatgpt_auth.RESOURCE,
+                  api_key=chatgpt_auth.access_token, max_retries=0)
+
+
+def forget_client(provider_name: str) -> None:
+    """Drop the cached client for `provider_name`, so the next call builds a
+    new one from what `providers.json` (or the session) says NOW.
+
+    `/connect` is the caller (ROADMAP_v3 §79, HD5): the cache above is keyed
+    by provider name for the life of the process, so a key added or replaced
+    mid-session was otherwise ignored until a restart, with every call still
+    going out under the old one.
+    """
+    _client_cache.pop(provider_name, None)
+
+
+def accepts_images(provider_name: str) -> bool:
+    """ROADMAP_v3 §81 (IM4). Whether an image in a tool result is DELIVERED
+    to this provider, as opposed to replaced by a note saying it was not.
+
+    Opt-in per provider through `accepts_images` in providers.json, on
+    `echoes_reasoning`'s terms: whether a provider takes an image depends on
+    the endpoint and often the model, cannot be discovered, and must not be
+    guessed, so it lives beside the endpoint and defaults to the
+    conservative answer. The test is `is True`, never truthiness:
+    `bool("false")` is True, and a quoted flag is a hand edit away (A29).
+
+    GOOGLE is honoured like the others since batch 173 (IM9). Until then it
+    was never delivered to and a flag on it was warned about: the old pin's
+    FunctionResponse had no field an image could go in, and the wire that
+    does work -- a harness turn after the batch -- had not been measured.
+    """
+    entry = load_provider_data().get(provider_name, {})
+    return isinstance(entry, dict) and entry.get("accepts_images") is True
 
 
 # ============================================================================
@@ -187,9 +256,10 @@ def _tool_arguments(raw_args: str, tool_name: str,
     """(input, parse_error) for one provider `arguments` string.
 
     The ONLY place a wire string is parsed as JSON. Google and Anthropic
-    hand back dicts, so this is the OpenAI-compatible branch's alone --
-    which is the branch a local model server takes, and truncated or
-    malformed tool arguments are likeliest there.
+    hand back dicts, so this is the OpenAI-compatible branch's -- which is
+    the branch a local model server takes, and truncated or malformed tool
+    arguments are likeliest there -- and, since ROADMAP_v3 §83, CHATGPT's,
+    whose Responses function calls carry `arguments` as a string too.
 
     §33 W1 (#37): a failure is RETURNED, not raised. `dispatch()` turning
     handler exceptions into {"error": ...} is the whole reason a raising
@@ -282,7 +352,7 @@ def _token_count(usage_obj, field: str) -> Optional[int]:
     (batch 147), because the three reasons are different and only one of
     them is visible in a type annotation:
 
-      google-genai 1.0.0   every field of
+      google-genai 2.29.0  every field of (as on 1.0.0 before it)
                            GenerateContentResponseUsageMetadata is
                            Optional[int] = None, and a bare instance is
                            TRUTHY -- so `if usage_meta:` passes and then
@@ -370,23 +440,47 @@ def _stream_usage(provider_name: str, counts: dict,
 # ---- Tool schema translation ------------------------------------------------
 # ============================================================================
 
+#: ROADMAP_v3 §82 (GS4). The `Schema` fields the Gemini API is known to take:
+#: the 22 google-genai 1.0.0 had, which batch 132 and §9 verified on the
+#: wire. The SDK serves Vertex AI as well, and 2.29.0 added three fields for
+#: it -- `additional_properties`, which the Gemini API refused when measured
+#: in batch 172 (400, `Unknown name "additional_properties"`), `defs` and
+#: `ref`. One refused key fails every GOOGLE call, because the declarations
+#: travel together, so a new SDK field waits to be measured.
+_GOOGLE_SCHEMA_VERIFIED = frozenset({
+    "any_of", "default", "description", "enum", "example", "format",
+    "items", "max_items", "max_length", "max_properties", "maximum",
+    "min_items", "min_length", "min_properties", "minimum",
+    "nullable", "pattern", "properties", "property_ordering",
+    "required", "title", "type",
+})
+
+
 def _google_schema_keys(genai_types) -> set:
-    """Every key the pinned `types.Schema` will accept, read OFF the SDK.
+    """Every key the pinned `types.Schema` will accept AND the Gemini API is
+    known to take, read off the SDK.
 
     Field names plus their camelCase aliases, because `Schema` sets
     `populate_by_name` and JSON Schema spells things `anyOf`/`maxItems`
-    while the model declares `any_of`/`max_items`. Computed from the SDK
-    rather than written down so that a version which adds a field starts
-    carrying it with no change here -- and read at CALL time, not import
-    time, because the root `conftest.py` puts a fake `google.genai` in
-    `sys.modules` before collection and an import-time constant would bind
-    the fake's fields for the whole test session.
+    while the model declares `any_of`/`max_items`. Read off the SDK so that
+    a field the installed version lacks is never sent -- and read at CALL
+    time, not import time, because the root `conftest.py` puts a fake
+    `google.genai` in `sys.modules` before collection and an import-time
+    constant would bind the fake's fields for the whole test session.
+
+    It used to take EVERY field, on the reasoning that a version which adds
+    one should carry it with no change here. The 2.29.0 pin disproved that
+    (§82): a field on the type is not a field the Gemini API accepts. So the
+    SDK's set is narrowed to `_GOOGLE_SCHEMA_VERIFIED`.
     """
-    keys = set(genai_types.Schema.model_fields)
+    keys = set()
     # NOT `field`: this module imports dataclasses.field at the top, and
     # shadowing it here is what ruff F402 flagged in batch 141 -- found only
     # then, because the lint job is not on main and so has never run.
-    for model_field in genai_types.Schema.model_fields.values():
+    for name, model_field in genai_types.Schema.model_fields.items():
+        if name not in _GOOGLE_SCHEMA_VERIFIED:
+            continue
+        keys.add(name)
         alias = getattr(model_field, "alias", None)
         if alias:
             keys.add(alias)
@@ -421,6 +515,10 @@ def _reduce_for_google(node, accepted: set):
 
     `docs/ARCHITECTURE.md` 4.7 said the raw dict "auto-converts to
     `types.Schema`". It does not; it validates, and refuses.
+
+    Since batch 172 (§82) the pin is 2.29.0, whose `Schema` HAS
+    `additional_properties` -- and the Gemini API refuses it, so it is
+    still dropped: `accepted` is the verified set, not the SDK's.
     """
     if isinstance(node, list):
         return [_reduce_for_google(item, accepted) for item in node]
@@ -486,6 +584,22 @@ def _tools_for_provider(provider_name: str, tool_schemas: list[dict]):
                 for s in tool_schemas
             ]
         )]
+
+    if provider_name == "CHATGPT":
+        # ROADMAP_v3 §83. The Responses API's FLAT function shape, and no
+        # `strict`. Slice 2a measured it: the registry's fifteen schemas,
+        # none of which meets strict mode's rules, completed a call without
+        # the key -- and cost fewer input tokens than with `strict: false`.
+        # Never a hosted tool (CG3): only what the harness itself runs.
+        return [
+            {
+                "type": "function",
+                "name": s["name"],
+                "description": s["description"],
+                "parameters": s["input_schema"],
+            }
+            for s in tool_schemas
+        ]
 
     # OpenAI-compatible providers
     return [
@@ -569,16 +683,220 @@ def _echoed_blocks(provider_name: str, model: Optional[str],
     return [b for b in record.get("blocks") or [] if isinstance(b, dict)]
 
 
+def _chatgpt_reasoning(model: Optional[str], msg: dict) -> list:
+    """The reasoning items a CHATGPT turn goes back with (ROADMAP_v3 §83,
+    CG18, CG23): exactly as the SDK parsed them, `None` fields left out,
+    and only to the model that wrote them -- §44's pair, through
+    `_echoed_blocks`.
+
+    EVERY turn this model wrote, the ones that ended in calls included
+    (CG23, the owner's choice). Slice 2a measured the item accepted under
+    `store: false`, with its id and without, before a user message; inside a
+    tool loop it was never sent, because the model did not reason before a
+    trivial call. The item type is the same and so is the list it sits in,
+    and the tool loop is where a reasoning model most needs what it already
+    worked out. A refusal would fail that step with a 400 naming the input,
+    which is the owner's live check to see."""
+    return [b for b in _echoed_blocks("CHATGPT", model, msg)
+            if b.get("type") == "reasoning"]
+
+
+#: ROADMAP_v3 §82 (GS3). Google's stand-in for a thought signature, for a
+#: function call the target model did not write. Gemini 3 refuses a request
+#: whose current turn holds an unsigned call, and a thread that switched
+#: provider or model mid-turn has exactly that. Measured accepted on
+#: gemini-3.1-flash-lite (batch 172); a real signature is always preferred.
+_GOOGLE_FOREIGN_SIGNATURE = b"skip_thought_signature_validator"
+
+
+def _google_signature_block(call_id: str, signature: Optional[bytes]) -> dict:
+    """One function call's thought signature, as §44's record holds it
+    (§82, GS2). One block per call, INCLUDING a call that carried none --
+    Gemini 3 signs only the first of a parallel batch, and a model that
+    does not think signs nothing -- so "this model wrote the turn and
+    attached nothing" stays distinguishable from "nothing is known". Base64
+    in the record, because the record is JSON; and no `text` or `thinking`
+    key, so replay renders nothing for it."""
+    return {"type": "thought_signature", "call_id": call_id,
+            "signature": (base64.b64encode(signature).decode("ascii")
+                          if signature else None)}
+
+
+def _google_signatures(model: Optional[str], msg: dict) -> Optional[dict]:
+    """{call_id: signature bytes or None} for a turn THIS model wrote, or
+    None when it wrote nothing here (§82, GS2/GS3).
+
+    The gate is §44's pair, read through `_echoed_blocks`: a signature goes
+    back unchanged to the model that produced it and to nothing else. A
+    stored value that will not decode costs that call its signature and
+    gets the placeholder instead, `_decode_thinking`'s rule: an unreadable
+    entry costs the entry, never the request."""
+    blocks = [b for b in _echoed_blocks("GOOGLE", model, msg)
+              if b.get("type") == "thought_signature"]
+    if not blocks:
+        return None
+    signatures: dict = {}
+    for block in blocks:
+        value = block.get("signature")
+        if value is None:
+            signatures[block.get("call_id")] = None
+            continue
+        try:
+            signatures[block.get("call_id")] = base64.b64decode(
+                value, validate=True)
+        except (binascii.Error, TypeError, ValueError):
+            signatures[block.get("call_id")] = _GOOGLE_FOREIGN_SIGNATURE
+    return signatures
+
+
+#: ROADMAP_v3 §81 (IM10). The image types GOOGLE is sent: Gemini's documented
+#: list (PNG, JPEG, WEBP, HEIC, HEIF) met with what `view_image` attaches.
+#: GIF is left out, the owner's choice. Two Gemini 3 models read one correctly
+#: when measured, but it is not documented, and an image the endpoint refused
+#: would stay in the thread and fail every request after it.
+_GOOGLE_IMAGE_TYPES = frozenset({"image/png", "image/jpeg", "image/webp"})
+
+#: What a tool message says on the two wires that deliver images after the
+#: batch, so the model meets the images knowing whose they are (IM4, IM9).
+_IMAGES_FOLLOW = ("[The attached image(s) follow these tool results, in a "
+                  "harness message.]")
+
+
+def _image_note(images: list,
+                reason: str = "this provider is not set up to receive images"
+                ) -> str:
+    """What a tool result's images become on a wire that does not receive
+    them (ROADMAP_v3 §81, IM5): a sentence saying so, never the bytes and
+    never silence. One rule for every way to get here -- a provider not
+    marked `accepts_images`, a thread that switched to one after the image
+    was attached, and since batch 173 an image GOOGLE is not sent (IM10). A
+    model told nothing would answer from a result that reads as complete,
+    which is A32's lesson about MCP's placeholder."""
+    kinds = ", ".join(sorted({image["media_type"] for image in images}))
+    return (f"[{len(images)} image(s) attached to this result ({kinds}) were "
+            f"not sent: {reason}.]")
+
+
+def _with_image_note(msg: dict) -> str:
+    """A tool row's text, with the IM5 note appended when it carries images
+    this wire will not receive."""
+    images = msg.get("images")
+    if not images:
+        return msg["content"]
+    return f"{msg['content']}\n{_image_note(images)}"
+
+
+def _openai_image_turn(pending: list) -> dict:
+    """The user-role message that carries a tool batch's images on the
+    OpenAI-compatible wire (IM4).
+
+    A tool message there holds TEXT PARTS ONLY -- the installed SDK types its
+    content as text parts, and the API rejects an image part in it -- so an
+    image a tool returned can only travel in a user message. It goes AFTER
+    the whole batch: every tool message must directly follow the assistant
+    turn that called it, so one placed between two of them would break the
+    pairing. Built here and never persisted, like the compaction summary
+    (M8): the archive keeps the tool row with its images, and each request
+    derives this message from it again. It says it is the harness speaking,
+    so the model does not read the images as something the user sent.
+    """
+    parts: list = []
+    for tool_call_id, images in pending:
+        parts.append({"type": "text", "text": (
+            f"[Harness: the image(s) attached to the result of tool call "
+            f"{tool_call_id}. A tool message on this API carries text only, "
+            f"so they are delivered here.]")})
+        for image in images:
+            parts.append({"type": "image_url", "image_url": {
+                "url": f"data:{image['media_type']};base64,{image['data']}"}})
+    return {"role": "user", "content": parts}
+
+
+def _google_tool_images(msg: dict, images: bool) -> tuple:
+    """(result text, [(media_type, bytes)]) for one tool row on GOOGLE
+    (ROADMAP_v3 §81, IM9/IM10).
+
+    The bytes go out DECODED: `Blob.data` is bytes on the pinned type, and
+    a base64 string handed to it would be sent as the text of the base64.
+    Each image that is not sent says why in the result: the provider is not
+    marked (IM5), the type is not one Google is sent (IM10), or the stored
+    copy will not decode -- `_decode_thinking`'s rule, so one unreadable
+    image costs that image, never the request."""
+    attached = msg.get("images") or []
+    if not attached:
+        return msg["content"], []
+    if not images:
+        return _with_image_note(msg), []
+    sent, refused, unreadable = [], [], []
+    for image in attached:
+        if image["media_type"] not in _GOOGLE_IMAGE_TYPES:
+            refused.append(image)
+            continue
+        try:
+            sent.append((image["media_type"],
+                         base64.b64decode(image["data"], validate=True)))
+        except (binascii.Error, TypeError, ValueError):
+            unreadable.append(image)
+    text = msg["content"]
+    if refused:
+        kinds = ", ".join(sorted({image["media_type"] for image in refused}))
+        text += "\n" + _image_note(refused, f"this provider is not sent {kinds}")
+    if unreadable:
+        text += "\n" + _image_note(unreadable,
+                                   "the stored copy could not be read")
+    if sent:
+        text += "\n" + _IMAGES_FOLLOW
+    return text, sent
+
+
+def _google_image_turn(pending: list, genai_types):
+    """The user-role Content that carries a tool batch's images on GOOGLE
+    (ROADMAP_v3 §81, IM9).
+
+    A FunctionResponse cannot carry them on the models a new account can
+    call: Gemini 2.5 answers "multimodal function responses are not
+    supported", and only Gemini 3 takes `FunctionResponse.parts`. A harness
+    turn after the WHOLE batch can, measured on two Gemini 3 models, and it
+    is the shape Google's own ADK uses for an artifact a tool loads. After
+    the batch, so the function responses still answer the call turn
+    directly; derived per request and never persisted, `_openai_image_turn`'s
+    rule; and it says it is the harness speaking."""
+    parts: list = []
+    for tool_call_id, images in pending:
+        parts.append(genai_types.Part(text=(
+            f"[Harness: the image(s) attached to the result of tool call "
+            f"{tool_call_id}. A function response on this API carries no "
+            f"image, so they are delivered here.]")))
+        for media_type, data in images:
+            parts.append(genai_types.Part(inline_data=genai_types.Blob(
+                mime_type=media_type, data=data)))
+    return genai_types.Content(role="user", parts=parts)
+
+
 def _messages_for_provider(provider_name: str, neutral_messages: list[dict],
                            model: Optional[str] = None,
-                           echo_reasoning: bool = False) -> list:
+                           echo_reasoning: bool = False,
+                           images: bool = False) -> list:
     """The wire shape for one provider.
 
     `model` and `echo_reasoning` are §44's: they decide whether a stored
     thinking record may travel. Both DEFAULT to the pre-§44 behaviour --
     no model means no echo, and the OpenAI-compatible side is opt-in per
     provider -- so a caller that does not pass them gets exactly the
-    translation this function produced before.
+    translation this function produced before. On GOOGLE `model` also
+    decides whether a function call's thought signature goes back (§82),
+    and the echo is not opt-in there: Gemini 3 refuses a turn without one.
+
+    `images` is ROADMAP_v3 §81's (IM4): whether a tool row's images are
+    delivered to this provider, or replaced by `_image_note`. It defaults
+    to the note, so a caller that does not pass it sends no bytes. GOOGLE
+    reads it too since batch 173 (IM9); it ignored it while that wire was
+    deferred.
+
+    CHATGPT (ROADMAP_v3 §83) gets the Responses API's `input` items, each
+    shape measured on the plan route in slice 2a. Its reasoning goes back
+    on §44's pair rule like Anthropic's, and is not opt-in: OpenAI's own
+    stateless pattern hands it back (CG18, CG23).
     """
     # One rule, above the split (#13, #36). Note this can leave two
     # consecutive user turns -- which is the shape Google's branch has
@@ -587,6 +905,41 @@ def _messages_for_provider(provider_name: str, neutral_messages: list[dict],
     # asserted.
     neutral_messages = [m for m in neutral_messages
                         if not _is_empty_assistant_turn(m)]
+
+    if provider_name == "CHATGPT":
+        # Slice 2a, item by item: an earlier reply as a plain assistant
+        # message, two user turns in a row, and a call WITHOUT its `fc_`
+        # item id -- under any call id, another provider's included, which
+        # is what a thread holds after a /model switch. So nothing beyond
+        # the neutral {id, name, input} has to be kept for a call.
+        translated: list = []
+        for msg in neutral_messages:
+            role = msg["role"]
+            if role == "user":
+                translated.append({"role": "user", "content": msg["content"]})
+            elif role == "assistant":
+                # The reasoning FIRST: the order the model emitted it in.
+                translated.extend(_chatgpt_reasoning(model, msg))
+                if msg.get("text"):
+                    translated.append(
+                        {"role": "assistant", "content": msg["text"]})
+                for tc in msg.get("tool_calls", []):
+                    translated.append({
+                        "type": "function_call", "call_id": tc["id"],
+                        "name": tc["name"],
+                        "arguments": json.dumps(tc["input"]),
+                    })
+            elif role == "tool":
+                # CG7: no image is delivered on this wire. One swatch was
+                # misread in slice 0, and delivering one is a measurement and
+                # a translation still to come, so a result's images become
+                # IM5's note whatever `accepts_images` says.
+                translated.append({
+                    "type": "function_call_output",
+                    "call_id": msg["tool_call_id"],
+                    "output": _with_image_note(msg),
+                })
+        return translated
 
     if provider_name == "GOOGLE":
         from google.genai import types as genai_types
@@ -600,8 +953,17 @@ def _messages_for_provider(provider_name: str, neutral_messages: list[dict],
                     call_id_to_name[tc["id"]] = tc["name"]
 
         translated = []
+        # §81 (IM9). (tool_call_id, [(media_type, bytes)]) for the tool
+        # batch being translated, sent as one harness turn when the batch
+        # ends -- see _google_image_turn.
+        pending_images: list = []
         for msg in neutral_messages:
             role = msg["role"]
+
+            if role != "tool" and pending_images:
+                translated.append(
+                    _google_image_turn(pending_images, genai_types))
+                pending_images = []
 
             if role == "user":
                 translated.append(genai_types.Content(
@@ -613,13 +975,21 @@ def _messages_for_provider(provider_name: str, neutral_messages: list[dict],
                 parts = []
                 if msg.get("text"):
                     parts.append(genai_types.Part(text=msg["text"]))
-                for tc in msg.get("tool_calls", []):
+                # §82 (GS2/GS3). Each call goes back with exactly what this
+                # model attached to it. A turn it did not write gets the
+                # placeholder on its FIRST call -- the one Gemini 3 checks --
+                # and nothing on the rest, which is how it signs its own.
+                own = _google_signatures(model, msg)
+                for index, tc in enumerate(msg.get("tool_calls", [])):
+                    fallback = _GOOGLE_FOREIGN_SIGNATURE if index == 0 else None
                     parts.append(genai_types.Part(
                         function_call=genai_types.FunctionCall(
                             name=tc["name"],
                             args=tc["input"],
                             id=tc["id"],
-                        )
+                        ),
+                        thought_signature=(fallback if own is None
+                                           else own.get(tc["id"], fallback)),
                     ))
                 # Google rejects Content with empty parts. The turn that
                 # produced them is now dropped above the branch split, so
@@ -634,14 +1004,21 @@ def _messages_for_provider(provider_name: str, neutral_messages: list[dict],
                         f"Tool result references tool_call_id={msg['tool_call_id']!r} "
                         f"but no assistant message in the history made that call"
                     )
+                # §81 (IM9/IM10). The images wait for the harness turn after
+                # the batch; the result says they follow, or why not.
+                result, sent = _google_tool_images(msg, images)
+                if sent:
+                    pending_images.append((msg["tool_call_id"], sent))
                 part = genai_types.Part(
                     function_response=genai_types.FunctionResponse(
                         name=name,
-                        response={"result": msg["content"]},
+                        response={"result": result},
                     )
                 )
                 # Batch consecutive tool results into a single user
                 # Content — Google requires strict user/model alternation.
+                # The harness image turn comes only after the batch, so it
+                # never sits between two of them.
                 if (translated
                         and translated[-1].role == "user"
                         and all(p.function_response is not None for p in translated[-1].parts)):
@@ -649,6 +1026,8 @@ def _messages_for_provider(provider_name: str, neutral_messages: list[dict],
                 else:
                     translated.append(genai_types.Content(role="user", parts=[part]))
 
+        if pending_images:
+            translated.append(_google_image_turn(pending_images, genai_types))
         return translated
 
     if provider_name == "ANTHROPIC":
@@ -679,10 +1058,30 @@ def _messages_for_provider(provider_name: str, neutral_messages: list[dict],
                 # blocks, not one message per result -- merge consecutive
                 # tool-role entries into the same message rather than
                 # appending a new one each time.
+                #
+                # §81 (IM4). An image travels INSIDE its tool_result here --
+                # the one wire of the three whose tool result takes an image
+                # block -- after the text, as a content array. The text
+                # block is omitted when empty, because the API rejects an
+                # empty text block.
+                content = msg["content"]
+                if msg.get("images"):
+                    if images:
+                        content = (
+                            [{"type": "text", "text": msg["content"]}]
+                            if msg["content"] else [])
+                        content += [{
+                            "type": "image",
+                            "source": {"type": "base64",
+                                       "media_type": image["media_type"],
+                                       "data": image["data"]},
+                        } for image in msg["images"]]
+                    else:
+                        content = _with_image_note(msg)
                 block = {
                     "type": "tool_result",
                     "tool_use_id": msg["tool_call_id"],
-                    "content": msg["content"],
+                    "content": content,
                 }
                 if translated and translated[-1]["role"] == "user" and _is_tool_result_message(translated[-1]):
                     translated[-1]["content"].append(block)
@@ -693,8 +1092,15 @@ def _messages_for_provider(provider_name: str, neutral_messages: list[dict],
 
     # OpenAI-compatible: close to 1:1, each tool result is its own message
     translated = []
+    # §81 (IM4). (tool_call_id, images) for the tool batch being translated,
+    # sent as one user message when the batch ends -- see _openai_image_turn.
+    pending_images: list = []
     for msg in neutral_messages:
         role = msg["role"]
+
+        if role != "tool" and pending_images:
+            translated.append(_openai_image_turn(pending_images))
+            pending_images = []
 
         if role == "user":
             translated.append({"role": "user", "content": msg["content"]})
@@ -727,10 +1133,20 @@ def _messages_for_provider(provider_name: str, neutral_messages: list[dict],
             translated.append(entry)
 
         elif role == "tool":
+            content = msg["content"]
+            if msg.get("images"):
+                if images:
+                    pending_images.append(
+                        (msg["tool_call_id"], msg["images"]))
+                    content = f"{content}\n{_IMAGES_FOLLOW}"
+                else:
+                    content = _with_image_note(msg)
             translated.append({
-                "role": "tool", "tool_call_id": msg["tool_call_id"], "content": msg["content"],
+                "role": "tool", "tool_call_id": msg["tool_call_id"], "content": content,
             })
 
+    if pending_images:
+        translated.append(_openai_image_turn(pending_images))
     return translated
 
 
@@ -769,6 +1185,59 @@ _context_window_cache: dict[tuple[str, str], Optional[int]] = {}
 _context_window_failures: dict[tuple[str, str], int] = {}
 MAX_CONTEXT_WINDOW_QUERY_ATTEMPTS = 3
 
+#: ROADMAP_v3 §83 (CG22). The plan route's whole effort vocabulary, read off
+#: slice 0's `invalid_value` refusal of `ultra`. The model list names a level
+#: the route refuses (`ultra`), so a level reaches /effort only when the list
+#: names it AND this does. Slice 2a found the rule exact on both models whose
+#: refusal lists their levels.
+CHATGPT_EFFORT_VOCABULARY = ("none", "minimal", "low", "medium", "high",
+                             "xhigh", "max")
+#: CG24, the owner's choice. Six models accepted `none` in slice 2a and two
+#: refused it; no list entry names it, and a table of the six would go stale
+#: with a roster that changed between two runs a day apart.
+CHATGPT_NEVER_OFFERED = frozenset({"none"})
+
+
+def _chatgpt_listing(client) -> list:
+    """The plan's model list, every entry (ROADMAP_v3 §83).
+
+    `client.get("/models", cast_to=object)`, because the plan's list is
+    `{"models": [...]}` keyed by `slug`, which the SDK's `models.list()` --
+    built for `{"data": [...]}` -- cannot read; slice 2a read it this way.
+    Raises when the list cannot be read, which each caller counts as a
+    failed query.
+    """
+    body = client.get("/models", cast_to=object)
+    entries = body.get("models") if isinstance(body, dict) else None
+    if not isinstance(entries, list):
+        raise ValueError(
+            "the ChatGPT plan's model list carried no `models` array")
+    return [entry for entry in entries if isinstance(entry, dict)]
+
+
+def _chatgpt_entry(entries: list, model: str) -> Optional[dict]:
+    """`model`'s entry, or None when the list does not name it. Any entry
+    counts, a `visibility: hide` one included: a hidden model works when
+    named, and its levels and window are its own."""
+    return next((e for e in entries if e.get("slug") == model), None)
+
+
+def _chatgpt_unlisted(model: str, entries: list) -> None:
+    """Say that the plan does not list `model`, and what it does list.
+
+    Batch 189, the owner's live check: a typo (`gpt-6-luba`) fell through to
+    the static table's warning, which advised adding a config entry and
+    named `ultra` -- a level the CHATGPT filter removes after that warning
+    is written. On the plan an unlisted name is likeliest misspelt, and the
+    list that would show it was already in hand.
+    """
+    listed = [e.get("slug") for e in entries
+              if e.get("visibility") == "list" and e.get("slug")]
+    logger.warning(
+        "%r is not in your ChatGPT plan's model list, so the next turn will "
+        "probably be refused. The plan lists: %s.", model,
+        ", ".join(listed) or "no models")
+
 
 def _sampling_kwargs(provider_name: str, model: str, temperature) -> dict:
     """Sampling parameters for this call, or {} when the model rejects them.
@@ -797,6 +1266,13 @@ def _sampling_kwargs(provider_name: str, model: str, temperature) -> dict:
     against this harness's own default model.
     """
     if temperature is None:
+        return {}
+    if provider_name == "CHATGPT":
+        # ROADMAP_v3 §83: the plan route answers a temperature with 400
+        # "Unsupported parameter" (slice 0), on every model.
+        logger.warning(
+            "Dropping temperature=%s: the ChatGPT plan's route refuses "
+            "sampling parameters.", temperature)
         return {}
     if model in config.MODELS_REJECTING_SAMPLING_PARAMS:
         logger.warning(
@@ -935,6 +1411,30 @@ def _effort_levels(client, provider_name: str, model: str) -> tuple:
                 "Could not read effort capabilities for %r from the Anthropic "
                 "Models API (%s); falling back to the static table.", model, e,
             )
+    if provider_name == "CHATGPT":
+        try:
+            entries = _chatgpt_listing(client)
+        except Exception as e:
+            query_failed = True
+            logger.warning(
+                "Could not read effort levels for %r from the ChatGPT plan's "
+                "model list (%s); falling back to the static table.", model, e)
+        else:
+            entry = _chatgpt_entry(entries, model)
+            if entry is not None:
+                # ONE read, TWO readings, as Anthropic's retrieve: the entry
+                # carries the window too.
+                _record_window(provider_name, model,
+                               entry.get("context_window"))
+                levels = [lv.get("effort") if isinstance(lv, dict) else lv
+                          for lv in entry.get("supported_reasoning_levels")
+                          or []]
+            else:
+                # The list answered and does not name the model: said in
+                # the plan's own terms, and the default set is filtered
+                # below like any other, without the static table's advice.
+                _chatgpt_unlisted(model, entries)
+                levels = list(config.DEFAULT_EFFORT_LEVELS)
 
     if levels is None:
         levels = config.MODEL_EFFORT_LEVELS.get(model)
@@ -945,6 +1445,12 @@ def _effort_levels(client, provider_name: str, model: str) -> tuple:
                 model, provider_name, config.DEFAULT_EFFORT_LEVELS,
             )
             levels = list(config.DEFAULT_EFFORT_LEVELS)
+
+    if provider_name == "CHATGPT":
+        # CG22 and CG24, applied to the static table's answer as well: its
+        # default set ends in `ultra`, which the route refuses.
+        levels = [lv for lv in levels if lv in CHATGPT_EFFORT_VOCABULARY
+                  and lv not in CHATGPT_NEVER_OFFERED]
 
     if query_failed:
         # Do NOT cache a failure-derived guess. Caching it made one
@@ -1107,6 +1613,10 @@ def context_window_for(client, provider_name: str, model: str) -> tuple:
                   makes no call at all.
       GOOGLE      models.get(...).input_token_limit, one field on the
                   pinned google-genai type.
+      CHATGPT     the plan's model list, `context_window` on the model's
+                  entry (ROADMAP_v3 §83) -- not the larger
+                  `max_context_window`. Usually a cache hit too: _effort_levels
+                  records it off the same read.
       v1-compat   ONE alias sniff over model_extra, not thirteen adapters,
                   because openai.types.Model allows extra fields -- over
                   whichever of models.retrieve() and models.list() answers
@@ -1136,6 +1646,11 @@ def context_window_for(client, provider_name: str, model: str) -> tuple:
             return _record_window(
                 provider_name, model,
                 getattr(info, "input_token_limit", None)), True
+        if provider_name == "CHATGPT":
+            entry = _chatgpt_entry(_chatgpt_listing(client), model)
+            return _record_window(
+                provider_name, model,
+                entry.get("context_window") if entry else None), True
         info = _model_info(client, model)
         if info is _NOT_LISTED:
             # Asked and answered by a listing that did not name it.
@@ -1169,16 +1684,16 @@ _google_budget_support: Optional[bool] = None
 def _google_supports_thinking_budget() -> bool:
     """Whether the INSTALLED google-genai can express a thinking budget.
 
-    Checked rather than assumed, and the check earns its keep: the pinned
-    google-genai (1.0.0) ships a ThinkingConfig whose only field is
-    `include_thoughts` -- `thinking_budget` arrived in a later release. So
-    the obvious implementation, ThinkingConfig(thinking_budget=N), raises a
-    TypeError against the version this repo actually pins.
+    Checked rather than assumed, and the check earned its keep: the old pin,
+    google-genai 1.0.0, shipped a ThinkingConfig whose only field was
+    `include_thoughts`, so ThinkingConfig(thinking_budget=N) raised a
+    TypeError and reasoning effort was unavailable on Google.
 
-    Rather than bump the pin (which would put §9's verified Google
-    implementation back in play for a feature Google users can do without),
-    reasoning effort is simply unavailable on Google until the pin moves.
-    D22's rule, applied: check the dependency's real shape, don't assume it.
+    The pin moved in batch 172 (ROADMAP_v3 §82, GS1) -- for thought
+    signatures, not for effort -- and 2.29.0 carries the field, so this now
+    answers True and Google effort is on. The check stays: it is still the
+    dependency's real shape that decides, D22's rule, and a downgrade would
+    turn effort off again rather than send a field the SDK cannot carry.
     """
     from google.genai import types as genai_types
 
@@ -1220,7 +1735,21 @@ def _thinking_for_provider(provider_name: str, effort: Optional[str]) -> dict:
     Returned keys are merged into the provider's own kwargs by the caller;
     the Google entry is nested inside GenerateContentConfig rather than sent
     top-level, matching how that provider takes every other setting.
+
+    CHATGPT is the one provider that sends something with no effort set
+    (ROADMAP_v3 §83, CG18). Every request asks for a reasoning summary and
+    for the encrypted reasoning: both were accepted with and without an
+    effort in slice 2a, the encrypted reasoning arrives unasked anyway, and
+    asking says what this code relies on rather than leaning on a default.
+    "auto" leaves the summary to the server, which wrote one on one of the
+    two requests that asked.
     """
+    if provider_name == "CHATGPT":
+        reasoning = {"summary": "auto"}
+        if effort:
+            reasoning["effort"] = effort
+        return {"reasoning": reasoning,
+                "include": ["reasoning.encrypted_content"]}
     if not effort:
         return {}
     if provider_name == "ANTHROPIC":
@@ -1251,6 +1780,281 @@ def _thinking_for_provider(provider_name: str, effort: Optional[str]) -> dict:
 
 
 # ============================================================================
+# ---- The ChatGPT plan's Responses path (ROADMAP_v3 §83, slice 2) -----------
+# ============================================================================
+#
+# The one route the plan answers on is the Responses API (CG3), carried by the
+# openai SDK (CG21). Every shape below was measured on the owner's account in
+# slices 0 and 2a, except CG23's reasoning inside a tool loop, which is said
+# where it is sent (_chatgpt_reasoning).
+
+class ChatGPTPlanError(RuntimeError):
+    """A plan request OpenAI refused for a reason another attempt cannot fix
+    (CG10). The message is the person's to read.
+
+    ITS OWN TYPE, WITH NO `status_code`, and that is what makes it permanent
+    to `core/provider_errors.py`, which reads a failure by its class names
+    and its `status_code` and `body` and finds none of them here. So the
+    loop's generic 429 retry never sees a usage limit, which CG10 says is
+    never retried.
+    """
+
+
+class ChatGPTUsageLimit(ChatGPTPlanError):
+    """The plan's usage limit. Its message LEADS with Manage usage (CG8)."""
+
+
+class ChatGPTNotEligible(ChatGPTPlanError):
+    """This account cannot share its plan, or its sign-in was kept without
+    the plan scope (CG6)."""
+
+
+class ChatGPTUnsupported(ChatGPTPlanError):
+    """A field the plan does not support. The message names it, and the
+    same request is not sent again (CG10)."""
+
+
+#: §83's adopted default: an ineligible account is told the whole story once
+#: per process and briefly after that.
+_ineligible_explained = False
+
+
+def _wire_dict(obj) -> dict:
+    """An SDK object as the plain dict the wire spelled, `None` fields left
+    out: what goes into §44's record and back unchanged, the shape slice 2a
+    handed back."""
+    if isinstance(obj, dict):
+        return {k: v for k, v in obj.items() if v is not None}
+    dump = getattr(obj, "model_dump", None)
+    if callable(dump):
+        return dump(exclude_none=True, mode="json")
+    return {}
+
+
+def _chatgpt_fields(body) -> tuple:
+    """(code, param, message) off an error body, whichever of OpenAI's two
+    shapes it came in: the standard error object, or `{"detail": ...}`."""
+    error = body.get("error") if isinstance(body, dict) and isinstance(
+        body.get("error"), dict) else body
+    if not isinstance(error, dict):
+        return None, None, None
+    return (error.get("code"), error.get("param"),
+            error.get("message") or error.get("detail"))
+
+
+def _chatgpt_refusal(body) -> Optional[Exception]:
+    """CG10's exception for a refusal its code names, or None.
+
+    None hands the failure back to `core/provider_errors.py`, as for every
+    other provider: a 503, another 429 or a dropped connection is retried
+    with the loop's bounded backoff, and anything else fails the turn.
+    """
+    global _ineligible_explained
+    from core import chatgpt_auth
+
+    code, param, message = _chatgpt_fields(body)
+    said = (f" OpenAI said: {' '.join(str(message).split())[:300]}"
+            if message else "")
+    if code == "subscription_sharing_usage_limit_exceeded":
+        return ChatGPTUsageLimit(
+            f"Manage usage: {chatgpt_auth.USAGE_URL} -- this ChatGPT plan "
+            f"has reached its usage limit, so the request was not sent again. "
+            f"Your next message tries once more.{said}")
+    if code == "subscription_sharing_user_not_eligible":
+        if _ineligible_explained:
+            return ChatGPTNotEligible(
+                "This ChatGPT account cannot share its plan (said above).")
+        _ineligible_explained = True
+        return ChatGPTNotEligible(
+            f"This ChatGPT account cannot share its plan with an app, so "
+            f"nothing was sent again and no new sign-in was asked for. Switch "
+            f"with /model, or sign out with /disconnect chatgpt.{said}")
+    if code == "subscription_sharing_unsupported_capability":
+        return ChatGPTUnsupported(
+            f"The ChatGPT plan does not support "
+            f"{param or 'a field this request sent'}, so the request was not "
+            f"sent again.{said}")
+    return None
+
+
+def _chatgpt_open(client, request: dict):
+    """The stream, opened with CG10's one forced refresh on a 401.
+
+    The SDK called `chatgpt_auth.access_token` for the token it sent and
+    holds that token as `client.api_key`. `replacing=` refreshes only while
+    the file still holds it, so two requests refused together spend one
+    refresh between them. A refresh refused as unusable raises `SignedOut`
+    with the session cleared; a second 401 after a good refresh says to sign
+    in again and keeps the tokens, because only an unusable refresh clears
+    them (CG10). A refresh that could not be made at all is a
+    `ConnectionError`, which the loop retries like any dropped connection.
+
+    THE ONE RESEND THIS FILE MAKES, and it is not a retry in AGENTS.md's
+    sense, which this file does not own: nothing was wrong with the request
+    or the weather, the credential was stale, and the second attempt is made
+    with a different one. Every retry for a failure the provider might not
+    repeat is still `core/loop.py`'s, asked of `core/provider_errors.py`.
+    """
+    from core import chatgpt_auth
+
+    for attempt in (1, 2):
+        try:
+            return client.responses.create(**request)
+        except chatgpt_auth.Transient as exc:
+            raise ConnectionError(str(exc)) from exc
+        except chatgpt_auth.ChatGPTAuthError:
+            raise
+        except Exception as exc:
+            refusal = _chatgpt_refusal(getattr(exc, "body", None))
+            if refusal is not None:
+                raise refusal from exc
+            if getattr(exc, "status_code", None) != 401:
+                raise
+            if attempt == 2:
+                raise ChatGPTPlanError(
+                    "OpenAI refused the ChatGPT plan's sign-in again after a "
+                    "refresh. /connect chatgpt signs in again; the stored "
+                    "tokens are kept.") from exc
+            try:
+                chatgpt_auth.access_token(
+                    replacing=getattr(client, "api_key", None) or None)
+            except chatgpt_auth.Transient as again:
+                raise ConnectionError(str(again)) from again
+    raise AssertionError("unreachable: the second attempt returns or raises")
+
+
+def _chatgpt_stream_failure(source) -> Exception:
+    """An `error` event or a `response.failed` as an exception. Neither has
+    been seen: nothing failed in slice 2a.
+
+    The openai SDK raises only on an event whose top-level `error` key is an
+    object, which neither of these has, so they arrive as events and this
+    reads them. CG10's type when the code names one; otherwise the rule
+    `core/provider_errors.py` applies to a stream that failed after it
+    opened, on every provider.
+    """
+    from core import provider_errors
+
+    body = _wire_dict(source)
+    refusal = _chatgpt_refusal(body)
+    if refusal is not None:
+        return refusal
+    code, _, message = _chatgpt_fields(body)
+    text = (f"The ChatGPT plan's response failed ({code or 'no code'}): "
+            f"{message or 'no message'}")
+    if provider_errors.open_stream_error_is_transient(body):
+        return ConnectionError(text)
+    return ChatGPTPlanError(text)
+
+
+def _chatgpt_stream(client, model: str, items: list, system_prompt: str,
+                    tools, reasoning: dict, supports_stream_usage: bool):
+    """The CHATGPT branch of `call_model_stream`.
+
+    DISPATCH IS ON `event.type` ALONE. The SDK parses an event it does not
+    know as whichever class its union tries first: slice 2a's
+    `response.metadata` came out as a `ResponseAudioDeltaEvent` whose `type`
+    still said `response.metadata`. A class check would have read it as
+    audio; the string is the one thing that is right.
+
+    Never sent: `temperature` (refused, slice 0), `previous_response_id`
+    (the whole history goes in `input`), `service_tier`, a hosted tool, and
+    the Codex instructions the model list carries (CG3).
+    """
+    from core import chatgpt_auth
+
+    state = chatgpt_auth.status()
+    if state.signed_in and not state.plan_usage:
+        raise ChatGPTNotEligible(
+            "This ChatGPT sign-in did not share the plan: OpenAI did not "
+            "grant chatgpt.tokens.use.direct, so nothing is sent on it (CG6). "
+            "/connect chatgpt signs in again.")
+    request = dict(model=model, instructions=system_prompt, input=items,
+                   store=False, stream=True,
+                   max_output_tokens=config.MAX_TOKENS)
+    if tools:
+        request["tools"] = tools
+    request.update(reasoning)
+
+    stream = _chatgpt_open(client, request)
+    text_parts: list = []
+    pending_calls: list = []
+    reasoning_items: list = []
+    # None rather than 0, for the Google branch's reason (D21).
+    usage = {"input_tokens": None, "output_tokens": None}
+    finish_reason = None
+    summary_started = False
+    try:
+        for event in stream:
+            kind = getattr(event, "type", None)
+            if kind == "response.output_text.delta":
+                delta = getattr(event, "delta", None)
+                if isinstance(delta, str) and delta:
+                    text_parts.append(delta)
+                    yield StreamToken(text_delta=delta)
+            elif kind == "response.reasoning_summary_part.added":
+                # §38: a summary in several parts reads as paragraphs.
+                if summary_started:
+                    yield StreamToken(thinking_delta="\n\n")
+                summary_started = True
+            elif kind == "response.reasoning_summary_text.delta":
+                delta = getattr(event, "delta", None)
+                if isinstance(delta, str) and delta:
+                    yield StreamToken(thinking_delta=delta)
+            elif kind == "response.output_item.done":
+                item = getattr(event, "item", None)
+                item_type = getattr(item, "type", None)
+                if item_type == "function_call":
+                    pending_calls.append(item)
+                elif item_type == "reasoning":
+                    reasoning_items.append(_wire_dict(item))
+            elif kind in ("response.completed", "response.incomplete"):
+                response = getattr(event, "response", None)
+                usage_obj = getattr(response, "usage", None)
+                for key in ("input_tokens", "output_tokens"):
+                    reported = _token_count(usage_obj, key)
+                    if reported is not None:
+                        usage[key] = reported
+                details = getattr(response, "incomplete_details", None)
+                if getattr(details, "reason", None) == "max_output_tokens":
+                    finish_reason = "length"
+            elif kind == "response.failed":
+                raise _chatgpt_stream_failure(
+                    getattr(getattr(event, "response", None), "error", None))
+            elif kind == "error":
+                raise _chatgpt_stream_failure(event)
+    except Exception as exc:
+        # An error the SDK raised mid-stream may still carry a code CG10
+        # names; anything else, ours included, goes up as it is.
+        refusal = _chatgpt_refusal(getattr(exc, "body", None))
+        if refusal is None:
+            raise
+        raise refusal from exc
+    finally:
+        close = getattr(stream, "close", None)
+        if callable(close):
+            close()
+
+    usage = _stream_usage("CHATGPT", usage, supports_stream_usage)
+    calls = []
+    for item in pending_calls:
+        name = getattr(item, "name", None) or ""
+        parsed, parse_error = _tool_arguments(
+            getattr(item, "arguments", None) or "", name, finish_reason)
+        if parse_error is not None:
+            logger.warning(
+                "%s: %s (finish_reason=%r)", name, parse_error, finish_reason)
+        calls.append(ToolCallRequest(
+            # The id rule the other branches keep (batch 76).
+            id=getattr(item, "call_id", None) or str(uuid4()),
+            name=name, input=parsed, parse_error=parse_error))
+    yield StreamToken(final_response=ModelResponse(
+        text="".join(text_parts), tool_calls=calls, usage=usage,
+        thinking=_thinking_record("CHATGPT", model, reasoning_items),
+    ))
+
+
+# ============================================================================
 # ---- Streaming call + helpers -----------------------------------------------
 # ============================================================================
 
@@ -1270,10 +2074,11 @@ def call_model_stream(
     final_response for the terminal ModelResponse with accumulated tool
     calls and usage.
 
-    Three provider implementations — Anthropic typed events, Google
+    Four provider implementations — Anthropic typed events, Google
     chunked candidates, OpenAI-compatible index-accumulated tool-call
-    fragments — which must agree with each other about the ModelResponse
-    they produce for the same inputs.
+    fragments, and since ROADMAP_v3 §83 the ChatGPT plan's Responses events
+    (_chatgpt_stream) — which must agree with each other about the
+    ModelResponse they produce for the same inputs.
 
     There used to be a non-streaming `call_model()` beside this, and this
     docstring used to promise the two were identical. They were not: it
@@ -1307,9 +2112,19 @@ def call_model_stream(
     )
 
     translated_messages = _messages_for_provider(
-        provider_name, messages, model, echoes_reasoning)
+        provider_name, messages, model, echoes_reasoning,
+        images=accepts_images(provider_name))
     sampling = _sampling_kwargs(provider_name, model, temperature)
     thinking = _thinking_for_provider(provider_name, effort)
+
+    if provider_name == "CHATGPT":
+        # ROADMAP_v3 §83. `sampling` is always {} here: _sampling_kwargs
+        # drops a temperature for this provider, which the route refuses.
+        yield from _chatgpt_stream(
+            client, model, translated_messages, system_prompt,
+            _tools_for_provider(provider_name, tool_schemas), thinking,
+            supports_stream_usage)
+        return
 
     if provider_name == "ANTHROPIC":
         stream_kwargs = dict(
@@ -1411,6 +2226,10 @@ def call_model_stream(
 
         text_parts = []
         calls = []
+        # §82 (GS2). One block per function call, read off the part that
+        # carried the call: Gemini 3 refuses the next request unless each
+        # call goes back with the signature it came with.
+        signatures = []
         # None rather than 0: "not reported" has to stay distinguishable
         # from "reported as zero" until D21 has looked at it, or the
         # partial-report case the widened rule exists for arrives here
@@ -1424,18 +2243,26 @@ def call_model_stream(
         ):
             candidate = chunk.candidates[0] if chunk.candidates else None
             content = candidate.content if candidate else None
-            parts = content.parts if content else []
+            # `or []`: Content.parts is Optional on the pinned type, and a
+            # chunk can carry a content with no parts at all.
+            parts = (content.parts if content else None) or []
             for p in parts:
                 if p.text is not None:
                     text_parts.append(p.text)
                     yield StreamToken(text_delta=p.text)
                 if p.function_call is not None:
                     fc = p.function_call
+                    call_id = fc.id or str(uuid4())
                     calls.append(ToolCallRequest(
-                        id=fc.id or str(uuid4()),
+                        id=call_id,
                         name=fc.name,
                         input=fc.args or {},
                     ))
+                    # getattr: the field is on every pinned Part
+                    # (test_sdk_conformance asks the real one), but not on
+                    # the bare namespaces the stream tests build parts from.
+                    signatures.append(_google_signature_block(
+                        call_id, getattr(p, "thought_signature", None)))
             # PER FIELD, and only when the field was reported. The
             # guard used to be `if usage_meta:` -- which passes for a bare
             # instance, because every field is Optional and the object is
@@ -1463,6 +2290,7 @@ def call_model_stream(
 
         yield StreamToken(final_response=ModelResponse(
             text="".join(text_parts), tool_calls=calls, usage=usage,
+            thinking=_thinking_record(provider_name, model, signatures),
         ))
         return
 
@@ -1659,13 +2487,15 @@ class EmbeddingResult:
 # ANTHROPIC IS NOT AN OVERSIGHT. There is no Anthropic embeddings API; the
 # recommended route is a third-party embedder, which this harness reaches
 # as its own provider entry. OPENROUTER proxies chat completions only.
+# CHATGPT is the plan, which answers on the Responses API and nothing else
+# (ROADMAP_v3 §83, CG3).
 #
 # INCOMPLETE ON PURPOSE, and safe when incomplete -- the same posture as
 # MODELS_REJECTING_SAMPLING_PARAMS. An unlisted provider that turns out to
 # have no endpoint fails loudly on the probe `/embedder` runs at selection
 # time, which is a measurement rather than a guess and is why there is no
 # `supports_embeddings` table to keep in step with the world.
-PROVIDERS_WITHOUT_EMBEDDINGS = frozenset({"ANTHROPIC", "OPENROUTER"})
+PROVIDERS_WITHOUT_EMBEDDINGS = frozenset({"ANTHROPIC", "OPENROUTER", "CHATGPT"})
 
 
 def embed_texts(provider_name: str, model: str, texts,

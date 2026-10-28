@@ -161,13 +161,23 @@ class ToolRegistry:
         self._tools.pop(tool_name, None)
         self._injectable.pop(tool_name, None)
 
-    def _advertised(self, name: str, spec, context) -> bool:
+    def _advertised(self, name: str, spec, context,
+                    images: bool = False) -> bool:
         """The two §15 filters, shared by schemas() and
         headless_hidden(): policy allowability plus the tool's own
-        "nothing to act on" signal."""
+        "nothing to act on" signal -- and, since ROADMAP_v3 §81 (IM6), a
+        third: a tool whose result carries an image is offered only where
+        the caller says images can be delivered.
+
+        `images` DEFAULTS FALSE, so a caller that never heard of images
+        hides such a tool rather than offering one whose result the model
+        could not see. The loop is the one caller that knows the answer,
+        and it passes it."""
         if not is_tool_allowed(name, context):
             return False
         if spec.available_check is not None and not spec.available_check():
+            return False
+        if spec.returns_images and not images:
             return False
         return True
 
@@ -228,6 +238,7 @@ class ToolRegistry:
         self, tool_name: str, context: Optional["ToolContext"] = None,
         callable_only: bool = False,
         granted: Optional[set] = None,
+        images: bool = False,
     ) -> bool:
         """Whether schemas() would advertise this tool right now.
 
@@ -255,7 +266,7 @@ class ToolRegistry:
         spec = self._tools.get(tool_name)
         if spec is None:
             return False
-        if not self._advertised(tool_name, spec, context):
+        if not self._advertised(tool_name, spec, context, images):
             return False
         return not (callable_only
                     and self.approval_needed(tool_name, {}, context)
@@ -265,6 +276,7 @@ class ToolRegistry:
         self, context: Optional["ToolContext"] = None,
         callable_only: bool = False,
         granted: Optional[set] = None,
+        images: bool = False,
     ) -> list[dict]:
         """What gets sent to the LLM's `tools` parameter each call.
 
@@ -291,6 +303,9 @@ class ToolRegistry:
           * granted (§25 R15) -- names a pre-flight grant already answered
             for. Those stay advertised even with no channel, because the
             approval question HAS an answer; see _answered_by_grant.
+          * images (ROADMAP_v3 §81, IM6) -- whether an image in a tool
+            result can reach the model in this run. A tool that declares
+            `returns_images` is dropped when it cannot; see _advertised.
 
         WHAT callable_only GUARANTEES, stated because the converse does not
         hold and #158 is what assuming it costs: it means SOME call shape
@@ -305,11 +320,12 @@ class ToolRegistry:
         """
         return [spec.schema for name, spec in self._tools.items()
                 if self.is_advertised(name, context, callable_only,
-                                      granted)]
+                                      granted, images)]
 
     def headless_hidden(
         self, context: Optional["ToolContext"] = None,
         granted: Optional[set] = None,
+        images: bool = False,
     ) -> list[str]:
         """Names that would be advertised with a response_channel but
         are dropped by schemas(callable_only=True) -- i.e. advertised yet
@@ -330,8 +346,28 @@ class ToolRegistry:
         # disagrees with itself.
         return [
             name for name in self._tools
-            if self.is_advertised(name, context, False, granted)
-            and not self.is_advertised(name, context, True, granted)
+            if self.is_advertised(name, context, False, granted, images)
+            and not self.is_advertised(name, context, True, granted, images)
+        ]
+
+    def image_hidden(
+        self, context: Optional["ToolContext"] = None,
+        granted: Optional[set] = None,
+    ) -> list[str]:
+        """ROADMAP_v3 §81 (IM6). Names that would be advertised if images
+        could be delivered, and are dropped because they cannot. The loop
+        logs exactly this list, once, for headless_hidden()'s reason: a
+        tool the user enabled and the model never sees is named and
+        explained, not silently absent.
+
+        Written as the two calls it means, like headless_hidden() above,
+        so the list and the schemas can only disagree if is_advertised
+        disagrees with itself.
+        """
+        return [
+            name for name in self._tools
+            if self.is_advertised(name, context, False, granted, True)
+            and not self.is_advertised(name, context, False, granted, False)
         ]
 
     def approval_needed(
@@ -942,6 +978,10 @@ registry.register(ToolSpec("geometry", geometry.TOOL_SCHEMA, geometry.run, grant
 # anyway. The handlers re-test -- the refusal_check is the
 # prompt-suppression half, not the enforcement.
 registry.register(ToolSpec("read", file_ops.READ_TOOL_SCHEMA, file_ops.read_run, approval_check=file_ops._file_approval_check, refusal_check=file_ops._refusal_for("read"), grant_policy=GRANT_NEVER, budget=BUDGET_IO))
+# ROADMAP_v3 §81 (IM1, IM6). `read`'s path rules exactly -- the same approval
+# check and the same refusal shape -- plus `returns_images`, which keeps it
+# off the schema list wherever the image could not reach the model.
+registry.register(ToolSpec("view_image", file_ops.VIEW_IMAGE_TOOL_SCHEMA, file_ops.view_image_run, approval_check=file_ops._file_approval_check, refusal_check=file_ops._refusal_for("view_image"), grant_policy=GRANT_NEVER, budget=BUDGET_IO, returns_images=True))
 registry.register(ToolSpec("write", file_ops.WRITE_TOOL_SCHEMA, file_ops.write_run, approval_check=file_ops._file_approval_check, refusal_check=file_ops._refusal_for("write"), grant_policy=GRANT_NEVER, budget=BUDGET_IO))
 registry.register(ToolSpec("edit", file_ops.EDIT_TOOL_SCHEMA, file_ops.edit_run, approval_check=file_ops._file_approval_check, refusal_check=file_ops._refusal_for("edit"), grant_policy=GRANT_NEVER, budget=BUDGET_IO))
 # §28: approval_notice carries the capability profile into the prompt.

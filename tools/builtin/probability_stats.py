@@ -116,7 +116,7 @@ def _maybe_evalf(value, do_eval: bool, precision: int):
         if hasattr(value, "evalf"):
             return value.evalf(precision)
     except Exception:
-        pass
+        pass  # no numeric form; the exact value is still a correct answer
     return value
 
 
