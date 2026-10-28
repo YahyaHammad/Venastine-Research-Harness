@@ -700,8 +700,9 @@ class TestTheSingleUserGate:
 
     @pytest.mark.parametrize("answer, allowed", [
         ((200, f"<p>{single_user.HEALTH_MARKER}</p>"), False),
-        ((302, ""), True),
+        ((302, ""), False),
         ((404, "Not found"), True),
+        ((403, '{"Message":"Unauthorized, please login"}'), True),
         ((200, "a sign-in page"), False),
     ])
     def test_it_runs_only_while_no_stranger_can_reach_it(self, answer, allowed):
@@ -712,13 +713,25 @@ class TestTheSingleUserGate:
     def test_only_privacy_responses_allow_single_user_mode(self):
         """An error, startup page or unknown reply is not a privacy check.
         Check the whole HTTP status range beside the accepted controls."""
-        private = {301, 302, 303, 307, 308, 401, 403, 404}
+        private = {401, 403, 404}
         for status in range(100, 600):
             gate = single_user.ReachabilityGate(
                 "https://x.hf.space", get=lambda url, s=status: (s, ""))
             assert gate.allowed() is (status in private), status
             if status not in private:
                 assert f"HTTP {status}" in gate.reason
+
+    def test_a_redirect_is_not_privacy(self):
+        """Batch 194, measured: Hugging Face answers plain http with a 301
+        to https before it asks whether the Space is private, so an http
+        public URL drew the same redirect from a public Space as from a
+        private one. Neither platform answers privacy with a redirect: a
+        private Space says 404 and a private Studio 403."""
+        for status in (301, 302, 303, 307, 308):
+            gate = single_user.ReachabilityGate(
+                "http://x.hf.space", get=lambda url, s=status: (s, ""))
+            assert not gate.allowed(), status
+            assert f"HTTP {status}" in gate.reason
 
     def test_a_public_marker_overrides_a_privacy_status(self):
         for status in (200, 302, 403, 404):
@@ -908,7 +921,7 @@ class TestTheRoutes:
         bridge: no config write, ticket or websocket session may follow."""
         from starlette.websockets import WebSocketDisconnect
 
-        for status in (200, 429, 500, 502, 503, 504):
+        for status in (200, 301, 429, 500, 502, 503, 504):
             calls, now, unlocked = [], [0.0], []
             answer = [(status, "Starting")]
 

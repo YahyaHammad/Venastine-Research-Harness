@@ -11,11 +11,16 @@ operator's keys, so the request is honoured only while the app does not
 answer an ANONYMOUS request: the bridge asks its own public URL for
 `/healthz` with no credentials, and a reply carrying the bridge's own marker
 means anyone can reach it, whatever the status. A private deployment answers
-with a login redirect or an access denial (401, 403 or 404), never the marker.
-Anything that cannot be decided -- no public URL, a network error, an error
-page or a 200 without the marker -- refuses, because "could not tell" is not
-"private". In particular, a proxy's startup 503 must never unlock the tools
-and leave a cached approval once the public app starts answering.
+with an access denial (401, 403 or 404), never the marker: measured in batch
+194, a private Space answers 404 and a private Studio 403. Anything that
+cannot be decided -- no public URL, a network error, an error page, a
+redirect or a 200 without the marker -- refuses, because "could not tell"
+is not "private". In particular, a proxy's startup 503 must never unlock
+the tools and leave a cached approval once the public app starts answering,
+and neither may a redirect: Hugging Face answers plain http with a 301 to
+https before it asks whether the Space is private, so an `http://`
+`VENASTINE_PUBLIC_URL` draws one from a public Space as readily as from a
+private one.
 
 ONE LOCATION, WRITTEN ONCE. `config.yaml` is the only place a tool permission
 lives (D24, and `config.py`'s docstring says why there is no override
@@ -37,10 +42,12 @@ logger = logging.getLogger(__name__)
 
 HEALTH_MARKER = "venastine-hosted"
 CACHE_S = 60.0
-# HD7. Only the familiar login redirects and access denials count as a
-# private response from the deployment's own public URL. Every other status
-# is indeterminate, not evidence that anonymous access is denied.
-_PRIVATE_STATUSES = frozenset({301, 302, 303, 307, 308, 401, 403, 404})
+# HD7. Only an access denial counts as a private response from the
+# deployment's own public URL. Every other status is indeterminate, not
+# evidence that anonymous access is denied -- a redirect included (batch
+# 194): neither platform answers privacy with one, and Hugging Face sends
+# its 301 to https before it checks.
+_PRIVATE_STATUSES = frozenset({401, 403, 404})
 
 # What single-user mode turns on. Interactive sessions are not in it: they
 # need Docker or Podman, which no Space has, and there is no fallback for

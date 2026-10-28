@@ -27549,3 +27549,59 @@ public marker is tested under 200, 302, 403 and 404; recovery to a private
 - No requirement changed and no deploy was made. Live platform behavior
   was not re-probed; the HTTP answers and clock are controlled in the
   regression tests, with the actual bridge routes and configuration writer.
+
+## Batch 194 -- a redirect is no proof that a deployment is private (2026-10-28)
+
+**From the owner's review of 4168c92 (batch 193), under HD7; the owner chose
+to refuse every redirect.** Batch 193 made every reply but a privacy answer
+refuse, and it listed the privacy answers as the login redirects (301, 302,
+303, 307, 308) and the access denials (401, 403, 404). The redirects were an
+assumption, carried from the module's first docstring, and the review
+measured them false before reading on:
+
+- an anonymous `GET /healthz`, exactly as the gate sends it, answered 404 from
+  the private Space and 403 from the private Studio (ModelScope's own JSON:
+  "Unauthorized, please login or input valid ModelScope SDK token"). Neither
+  carried the marker, so both deployments stay inside the new rule;
+- the same request over plain http answered 301 from the Space, to the https
+  address, before Hugging Face asked whether the Space was private. So
+  `VENASTINE_PUBLIC_URL=http://...hf.space` with `VENASTINE_SINGLE_USER` on a
+  PUBLIC Space was judged private, and its first allowed check unlocked
+  `config.yaml` for every visitor. The Studio answered http with the same 403.
+
+The gate's original code allowed that case too, so batch 193 did not add it,
+but it was exactly the class batch 193 set out to refuse. A redirect says
+where to look, not who may look: http to https, a trailing slash and a moved
+host all redirect a public app as readily as a private one.
+
+**One producer changed:** `_PRIVATE_STATUSES` in
+`deploy/hosted/single_user.py` is 401, 403 and 404, and the module docstring
+names what was measured. A redirect now refuses like any other indeterminate
+answer, naming its status. Were Hugging Face ever to answer a private Space
+with a login redirect, single-user mode would refuse and say "answered HTTP
+302": closed, and the reason readable in the log.
+
+### Tests
+
+- `test_a_redirect_is_not_privacy`: all five redirect statuses refuse, on an
+  http URL, the measured case.
+- `test_it_runs_only_while_no_stranger_can_reach_it`: its 302 row now
+  refuses, and a new row allows the Studio's measured 403 body.
+- `test_only_privacy_responses_allow_single_user_mode`: the accepted set is
+  401, 403 and 404 across 100 to 599.
+- `test_startup_errors_never_unlock_or_admit_a_public_session` also drives a
+  301 through the bridge's start: no unlock, no ticket, no session.
+- Mutations on an export copy, 4/4 killed: 4168c92's set restored; the 301
+  alone restored, once against the gate test and once against the bridge's
+  start; and 403 dropped, which the Studio row catches.
+
+### Verified
+
+- Full suite, 8327 tests: 8259 passed, 68 skipped on Windows on eight
+  workers, with no failure (7:56); `test_hosted_bridge.py` again with
+  `AGENT_WORKSPACE` unset, 99 passed and 2 skipped.
+- Both deploy dry runs build, scan clean and audit clean, `bridge.lock`
+  with 38 accepted by ID. ruff clean; bandit 0 new and none of the 62
+  pairs grew; gitleaks found no leaks on an export copy.
+- No deploy in this commit; the measurements above were anonymous reads
+  of the two private deployments' `/healthz`, nothing sent.
