@@ -7315,6 +7315,12 @@ def _signs_in_here(preset) -> bool:
     return preset.sign_in is not None
 
 
+# The banner's last line on either kind of hosted deployment (batch 197,
+# the owner's request and wording). A local install says nothing of it.
+_STAR_LINE = ("Like it? Star the repo on GitHub to support its development: "
+              "https://github.com/YahyaHammad/Venastine-Research-Harness")
+
+
 def _shared_offers() -> list:
     """The presets a shared deployment offers: the ones that sign in here,
     because it takes no pasted key (HD5)."""
@@ -7383,6 +7389,7 @@ def _hosted_banner() -> list:
         ]
     if not model_connect.connected_providers():
         lines.append("No model is connected yet. Type /connect to choose one.")
+    lines.append(_STAR_LINE)
     return lines
 
 

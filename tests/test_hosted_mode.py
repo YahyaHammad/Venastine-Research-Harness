@@ -521,6 +521,41 @@ class TestTheSingleUserTui:
         assert "secret" in text.lower()
 
 
+class TestTheBannerAsksForAStar:
+    """Batch 197, the owner's request: the last line of either hosted
+    banner, after whatever it says about connecting a model."""
+
+    @pytest.mark.parametrize("connected", [False, True],
+                             ids=["no-model-yet", "a-model-connected"])
+    @pytest.mark.parametrize("mode", [hosted.SHARED, hosted.SINGLE_USER])
+    def test_it_is_the_last_line_on_either_kind(self, monkeypatch, mode,
+                                                connected):
+        from core import connect as model_connect
+        from tui.app import _STAR_LINE, _hosted_banner
+
+        monkeypatch.setattr(hosted, "MODE", mode)
+        monkeypatch.setattr(model_connect, "connected_providers",
+                            lambda: ["OPENROUTER"] if connected else [])
+        lines = _hosted_banner()
+        assert lines[-1] == _STAR_LINE
+        assert lines.count(_STAR_LINE) == 1
+        assert _STAR_LINE.endswith(
+            ": https://github.com/YahyaHammad/Venastine-Research-Harness")
+
+    @pytest.mark.asyncio
+    async def test_a_session_says_it_after_the_connect_hint(
+            self, shared, providers_file):
+        from tui.app import _STAR_LINE, VenastineApp
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test():
+            text = app._transcript.as_text()
+        assert "Star the repo on GitHub" in text
+        assert text.index("No model is connected yet") < text.index(
+            "Star the repo on GitHub")
+        assert _STAR_LINE.startswith("Like it? Star the repo on GitHub")
+
+
 class TestALocalInstallIsUnchanged:
     @pytest.mark.asyncio
     async def test_no_banner_and_the_file_warnings_stand(self, monkeypatch,
@@ -534,6 +569,7 @@ class TestALocalInstallIsUnchanged:
             text = app._transcript.as_text()
         assert "shared demo" not in text
         assert "single-user" not in text
+        assert "Star the repo" not in text
 
     @pytest.mark.asyncio
     async def test_the_header_names_the_configured_pair(self, monkeypatch,

@@ -27692,3 +27692,41 @@ declined, refused, rate-limited -- do not carry it.
 - ruff clean; bandit 0 new and none of the 62 pairs grew; gitleaks found
   no leaks on an export copy. The deploy dry runs are batch 197's, on the
   tree the deploys send.
+
+## Batch 197 -- the hosted banner asks for a GitHub star (2026-10-28)
+
+**The owner's request, mid-session.** A hosted session's banner -- the
+lines it shows before anything is typed (HD4) -- now ends with "Like it?
+Star the repo on GitHub to support its development:
+https://github.com/YahyaHammad/Venastine-Research-Harness". The owner chose
+the place (the last line, on the shared demo and on a private single-user
+deployment alike, after the connect hint) and the wording. The repository
+is public, checked that day, so the request can be met.
+
+One producer: `_STAR_LINE` beside `_REVOKE_PAGES` in `tui/app.py`, appended
+by `_hosted_banner`. A local install's banner is empty, so it never says it.
+The line is static text: an idle hosted session still draws nothing (batch
+168).
+
+### Tests
+
+- `TestTheBannerAsksForAStar::test_it_is_the_last_line_on_either_kind`,
+  shared and single-user, with and without a connected model: the last
+  line, said once, ending in the repository's address.
+- `test_a_session_says_it_after_the_connect_hint`, through a real shared
+  session's transcript.
+- `test_no_banner_and_the_file_warnings_stand` also holds a local install
+  to saying nothing of it.
+- Mutations on an export copy, 4/4 killed: the line dropped; moved above
+  the connect hint; said on the shared demo only; and said on a local
+  install too.
+
+### Verified
+
+- Full suite, 8338 tests: 8270 passed, 68 skipped on Windows on eight
+  workers, with no failure (9:32) -- the clean run batches 195 and 196
+  point to, on a tree holding both. `test_hosted_mode.py` again with
+  `AGENT_WORKSPACE` unset: 92 passed, 2 skipped.
+- Both deploy dry runs build, scan clean and audit clean, `bridge.lock`
+  with 38 accepted by ID, on this tree. ruff clean; bandit 0 new and none
+  of the 62 pairs grew; gitleaks found no leaks on an export copy.
