@@ -49,8 +49,17 @@ download the shared Python installer completely, then execute it. It resolves
 runtime dependencies in an isolated environment. It does not install Python.
 
 The source lives under `~/.local/share/venastine/app`, with a `venastine`
-command in `~/.local/bin` (`venastine.cmd` on Windows). Add that directory to
-your user PATH if needed; the installer also prints the full command path.
+command in `~/.local/bin` (`venastine.cmd` on Windows). When that directory is
+not on your PATH yet, the installer puts it there for the terminals you open
+afterwards, the way npm's global commands already are. On Windows it appends
+it to your user PATH, and to the PowerShell window that ran the installer. On
+macOS and Linux it adds a marked block to your own shell's startup file —
+`~/.zshrc`, `~/.bashrc`, fish's `conf.d/venastine.fish`, or `~/.profile` for
+other shells, plus the bash login file you already have on macOS. Running it
+again adds nothing twice. To leave PATH alone, set
+`VENASTINE_NO_MODIFY_PATH=1` or pass `--no-modify-path`. If another
+`venastine` — an npm install, say — comes first on your PATH, the installer
+names it and prints this command's full path instead.
 Then, from your project directory, run `venastine --tui` and use `/connect`.
 `venastine --venastine-doctor` shows the installed version, commit, interpreter,
 and state paths. Credentials and conversation state follow the same rules
@@ -67,7 +76,8 @@ never replaced.
 
 Choose a branch, tag, or full commit ID with `VENASTINE_REF`; choose locations
 with `VENASTINE_INSTALL_DIR` and `VENASTINE_BIN_DIR`, or a Python executable
-with `VENASTINE_PYTHON`. Set these before running either command. The default
+with `VENASTINE_PYTHON`; `VENASTINE_NO_MODIFY_PATH=1` leaves PATH alone. Set
+these before running either command. The default
 ref is `main`; older refs without `bin/venastine.py` cannot use this installer.
 The installer itself is downloaded from `main`, even when selecting another
 source ref. Bash also forwards options to the helper:
@@ -78,8 +88,10 @@ curl -fsSL https://raw.githubusercontent.com/YahyaHammad/Venastine-Research-Harn
 
 From a checkout, `python scripts/install.py --help` lists the same options
 without downloading or installing anything. To remove a GitHub installation,
-remove its command, install directory, and the `github-*` runtime directories
-it created; other state in `~/.config/venastine` and artifacts in your projects
+remove its command, install directory, the `github-*` runtime directories it
+created, and the PATH entry it added — from your user PATH on Windows, or the
+block between the `venastine GitHub installer` markers in your shell's startup
+file; other state in `~/.config/venastine` and artifacts in your projects
 remain separate.
 
 ### From npm
@@ -991,7 +1003,7 @@ note that shell approval is governed solely by `shell_approval_mode` -- `tool_ap
 deliberately has no `shell` key, so an old file carrying one is refused at startup
 naming the key — see `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 8418 tests, fully offline, no API keys needed. The suite's own packages are `requirements-test.txt`, separate from `requirements.txt` since batch 136: they used to be in the shipped dependency list, so installing the harness also installed a test runner. It runs in parallel by default (`pytest-xdist`, 70% of your cores): **1:26 on a 16-core machine, against 9:06 single-process.** `pytest -n0` forces the old serial run, which is what you want under a debugger or when something is parsing the output. Four further tests are marked `integration` and excluded by default: three spawn a real stdio MCP server, the fourth runs an external program through the host fallback shell (`pytest -m integration`).
+Run the test suite with `pytest` — 8428 tests, fully offline, no API keys needed. The suite's own packages are `requirements-test.txt`, separate from `requirements.txt` since batch 136: they used to be in the shipped dependency list, so installing the harness also installed a test runner. It runs in parallel by default (`pytest-xdist`, 70% of your cores): **1:26 on a 16-core machine, against 9:06 single-process.** `pytest -n0` forces the old serial run, which is what you want under a debugger or when something is parsing the output. Four further tests are marked `integration` and excluded by default: three spawn a real stdio MCP server, the fourth runs an external program through the host fallback shell (`pytest -m integration`).
 
 ## Documentation
 

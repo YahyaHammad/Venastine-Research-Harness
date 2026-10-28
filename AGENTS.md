@@ -60,7 +60,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 8418 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
+pytest                                            # 8428 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -177,7 +177,15 @@ The shell installers download `scripts/install.py`, which requires Python
 and installs `requirements.txt` in an isolated environment. No Node/npm,
 Git checkout, system Python changes, or administrator privileges are needed.
 The default install is `~/.local/share/venastine`, with its command under
-`~/.local/bin` on every platform. `bin/venastine.py` launches it, preserving
+`~/.local/bin` on every platform. **That directory goes on PATH by default**
+(batch 206, the owner's choice; `--no-modify-path` or
+`VENASTINE_NO_MODIFY_PATH=1` opts out), because npm's global bin already is
+and `~/.local/bin` is not on Windows or macOS: the user PATH in the registry
+on Windows, keeping the value's type, and a marked block, replaced in place,
+in the user's own shell's startup file elsewhere, picked by `$SHELL`. Never
+create `~/.bash_profile`: once it exists, a login bash skips `~/.profile`.
+`install()` changes PATH only when `main()` asks, so no test can reach the
+real registry or a real startup file. `bin/venastine.py` launches it, preserving
 cwd, arguments, explicit environment settings, and the npm launcher's global
 state/local-artifact rules. It never installs dependencies during launch.
 Updates build the environment before swapping source, mirror the old settings

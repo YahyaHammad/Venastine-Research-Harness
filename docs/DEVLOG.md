@@ -28286,3 +28286,146 @@ Validation:
   local runtime state. No dependency change, live model call or account
   access. The branch keeps its identity and completes this batch as beta 2;
   the npm/Python version pair agrees. Nothing pushed.
+
+## Batch 206 -- the GitHub installers put `venastine` on PATH (2026-10-28, rebased 2026-10-31)
+
+**The owner's question**, about batch 202's installers: do they install the
+harness in a global directory, and add `venastine` as a command that runs
+from anywhere, the way npm does?
+
+**What they did.** A per-user global install, yes: the source under
+`~/.local/share/venastine/app`, its environment under
+`~/.config/venastine/runtime/github-*`, no administrator needed. A command,
+yes: `~/.local/bin/venastine`, or `venastine.cmd` on Windows. On PATH, no --
+`scripts/install.py` printed "Add ... to your user PATH" and stopped there.
+npm needs nothing more because its global bin is already on PATH. Where
+`~/.local/bin` stands:
+
+- Windows: not on the user PATH by default. On the owner's machine it was
+  there already, holding other tools' commands (`claude.exe`, `hf.exe`),
+  so a check there would have passed for a reason a fresh machine lacks.
+- macOS: not on the default PATH of zsh or bash.
+- Ubuntu and Debian: `~/.profile` adds it if it exists AT LOGIN, so a
+  first install worked only from the next login (measured in WSL:
+  `~/.profile` lines 25-26).
+
+**The owner's choices.** Put it on PATH by default, with an opt-out
+(`--no-modify-path`, or `VENASTINE_NO_MODIFY_PATH=1`, which `irm | iex`
+can carry), the way uv's and rustup's installers do (pipx needs a separate
+`pipx ensurepath`, which the question put to the owner had wrong); and on
+macOS and Linux edit only
+the user's own shell's startup file.
+
+**Built**, in `scripts/install.py`, so both shells behave alike:
+
+- **Windows:** the directory is appended to `HKCU\Environment\Path` through
+  `winreg`, keeping the value's type, so an unexpanded `%VARIABLE%` entry
+  stays one, then `WM_SETTINGCHANGE` is broadcast as `setx` does. An entry
+  that already names the directory, however spelled, adds nothing; a value
+  that is not text is refused rather than rewritten. `install.ps1` then gives
+  the window it runs in the entries the helper added, and only those, so
+  `venastine` works there at once.
+- **macOS and Linux:** `$SHELL` picks the file: `~/.zshrc` (or
+  `$ZDOTDIR`'s), `~/.bashrc`, fish's `conf.d/venastine.fish`, and `~/.profile`
+  for anything else. Bash on macOS also gets the login file the user already
+  has -- `.bash_profile`, then `.bash_login`, else `.profile` -- and a missing
+  `.bash_profile` is never created, because once it exists a login bash skips
+  `.profile`. The block sits between two marker lines and is replaced in
+  place, so a second install adds nothing and a moved `--bin-dir` leaves no
+  stale entry; it prepends only when the directory is absent, as Ubuntu's own
+  `~/.profile` line does. `curl | bash` runs in a child, so the helper prints
+  the `export` for the terminal at hand.
+- **Never fatal, and checked last.** The PATH step runs after the swap; a
+  failure prints why and the full command path. If another `venastine` comes
+  first on the resulting PATH -- npm's, say -- it is named, and the final line
+  gives this command's full path rather than a name that runs the other one.
+- **Tests cannot reach the real thing.** `install()` changes PATH only when
+  `main()` passes `modify_path`, so every test that calls it directly leaves
+  the registry and startup files alone; the PATH tests use a fake registry
+  and files under `tmp_path`.
+
+### Verified
+
+- **A real install, end to end, in WSL Ubuntu** with `HOME` in a scratch
+  folder, `SHELL=/bin/bash` and `PATH` without the directory: this
+  `scripts/install.py` from the working tree, `--ref main`, so the archive
+  and every dependency came from the network. It wrote the block to the
+  scratch `.bashrc` and said so; a second install said "Already added" and
+  wrote nothing; then a NEW interactive bash with only `/usr/bin:/bin` on
+  its PATH answered `command -v venastine` with the scratch
+  `~/.local/bin/venastine`, and `venastine --venastine-doctor` ran from the
+  installed environment.
+- **The registry code against the real `winreg` API**, on a throwaway key
+  under `HKCU\Software` holding a COPY of the owner's user PATH
+  (`REG_EXPAND_SZ`, 18 entries): the directory it already names changed
+  nothing; a new one was appended once, the type kept, every `%` entry
+  kept unexpanded, and a real `WM_SETTINGCHANGE` broadcast returned
+  without error. The key was deleted, and the real user PATH read back
+  unchanged.
+- `install.ps1` parses with no error, and its window loop -- lifted from
+  the file, with the two registry reads stood in -- gives the window
+  exactly the entries the helper added in four cases: one added, none,
+  one the window already had, and no user PATH before.
+- Mutations on an export copy, 12/12 killed, each on its assertion: a
+  created `.bash_profile`, a second block appended, the sh guard gone
+  (in WSL, where the real-sh test runs), fish quoted the sh way, the
+  value rewritten as `REG_SZ`, no duplicate check, entries compared
+  unexpanded, a non-text value written over, PATH changed where it
+  already works, the library default changing PATH, the opt-out
+  ignored, and another `venastine` left unnamed.
+- Full suite, 8391 tests, on Windows on eight workers: 8322 passed, 69
+  skipped, no failure (7:01). `test_installers.py` also under WSL Ubuntu:
+  27 passed, 1 skipped (the Windows-spelling test), the real-sh test
+  among the passes. `test_installers.py`, `test_docs_consistency.py` and
+  `test_versioning.py` with `AGENT_WORKSPACE` unset: 118 passed, 5
+  skipped.
+- ruff clean; bandit 0 new against the baseline; gitleaks, run as CI
+  runs it, found no leaks on an export copy.
+- **Version**, by `scripts/version.py`: this branch is
+  `0.2.0-b.1.installer-path.rb0705ebe789b` (Python
+  `0.2.0b1+installer.path.rb0705ebe789b`). Its base is 0.2.0 because
+  `main` still carried pillow-floor's beta when the branch was cut: PR
+  #267's merge had allocated no clean release, which batch 202's policy
+  asks of a merge. `main` has since allocated 0.3.2 and 0.3.3; the base
+  stays 0.2.0 for this branch's lifetime, and its merge allocates the next
+  unused patch.
+
+### Rebased onto 0.3.3 (2026-10-31)
+
+The branch was cut from `2c602de` and never pushed, and `main` moved six
+commits past it: the 0.3.2 allocation, PR #268 (batches 203-205) and 0.3.3.
+**The owner's choices:** rebase it as one commit on `main` rather than merge
+`main` into it, and renumber it from 203 to 206, since `main` had used 203
+for the ChatGPT header. A rebased copy of an unpublished batch keeps its
+beta identity, so the version lines stay as above.
+
+`main` had changed no installer file in between, so `scripts/install.py`,
+`install.ps1` and `tests/test_installers.py` applied as written; against
+`3a2ff6c` they differ only in the two comments that carried the batch
+number. The conflicts were the stated test count (`main` said 8418), the
+`test_installers.py` line in the tree (18 tests on `main`, 28 here), the
+two version lines, and this file's tail.
+
+One failure on the way, an artifact rather than a defect:
+`test_the_documented_doc_read_bound_is_not_understated` read 75 readable
+documents against the stated 63 while the rebase was stopped, because
+`git ls-files` lists an unmerged path once per stage and all six
+conflicted files are ones `read_project_doc` admits (6 x 2 extra = 12). It
+passed as soon as the resolutions were staged.
+
+Verified again on the rebased tree:
+
+- 8428 tests collected: `main`'s 8418 plus this batch's 10.
+- Full suite on Windows on eight workers: 8358 passed, 70
+  skipped, no failure (9:01).
+- `test_installers.py`, `test_docs_consistency.py` and
+  `test_versioning.py` with `AGENT_WORKSPACE` set and unset: 118 passed, 5
+  skipped each way.
+- `test_installers.py` under WSL Ubuntu: 27 passed, 1 skipped (the
+  Windows-spelling test), the real-sh test among the passes.
+- ruff clean; bandit 0 new against the baseline and the count check's 62
+  pairs unchanged; gitleaks, run as CI runs it, found no leaks on an export
+  of the index; pip-audit found nothing in either requirements file, which
+  are unchanged from `main`.
+- Not repeated: the end-to-end WSL install and the throwaway registry key.
+  The code they exercised is the same bytes.
