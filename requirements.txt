@@ -209,6 +209,40 @@ cryptography>=42.0,<52
 # tests/test_chatgpt_auth.py), and `PyJWKSet` still reads OpenAI's JWKS.
 PyJWT>=2.10.1,<3
 
+# Batch 201, the owner's call. Imported nowhere in the harness:
+# matplotlib requires it, as `pillow>=8` with no ceiling, so a FRESH
+# install already resolved the newest release, 13.0.0 -- measured with
+# pip's dry-run resolve on 2026-10-28. What the declaration buys is the
+# environment that is not fresh. pip leaves an installed package alone
+# while it still satisfies what requires it, so a venv built before
+# 13.0.0 was released (2026-10-16) kept 12.3.0 -- the owner's own did --
+# with every advisory scripts/deploy_demo.py's ACCEPTED waves through for
+# the hosted demo's bridge. A floor makes the next
+# `pip install -r requirements.txt` upgrade it, and changes the hash
+# bin/venastine.mjs keys its runtime venv on, so an npm install builds a
+# fresh one.
+#
+# 12.3.0 belongs to the BRIDGE alone: Gradio 6.30.0 (and 6.31.0, the
+# newest when this was written) requires pillow<13. The bridge has an
+# environment of its own -- deploy/hosted/requirements.txt says why -- and
+# scripts/build_demo_bundle.py copies only textual's line from this file
+# into it, so this floor reaches the sessions' lock, which pinned 13.0.0
+# already, and never Gradio. NOT two pyproject extras, `hosted` with the
+# old pillow and `local` with the new: an extra only adds, so `hosted`
+# would have to carry Gradio itself, whose mcp and pydantic ranges are
+# the reason the bridge was separated (HD2), and neither platform installs
+# from pyproject. tests/test_deploy_demo.py holds every accepted version
+# outside what this file installs.
+#
+# A FLOOR AND A CEILING, for `cryptography`'s reason: an exact pin would
+# fight matplotlib's own floor, and the ceiling is D22's rule. What to
+# re-measure when it moves: pip-audit is clean on the release, and
+# matplotlib still saves a figure through it
+# (core/reasoning/output_writer.py, tests/test_output_writer.py).
+# MIT-CMU; its wheels carry a C extension and the image libraries it
+# links, which THIRD_PARTY_NOTICES.md names.
+pillow>=13.0.0,<14
+
 # TECHNICAL_DEBT 18, batch 116. A PRODUCTION dependency: `arxiv.py` imports
 # it at module load, and pyproject.toml reads this file for its dependency
 # list via `dynamic = ["dependencies"]`.

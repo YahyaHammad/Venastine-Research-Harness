@@ -14,10 +14,13 @@ import base64
 import importlib.util
 import json
 import sys
+from importlib import metadata
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 
 ROOT = Path(__file__).resolve().parents[1]
 _spec = importlib.util.spec_from_file_location(
@@ -92,6 +95,32 @@ class TestTheScan:
         run = Recorder(_done(1, "Finding: REDACTED\nFile: config.yaml"))
         with pytest.raises(deploy.DeployError, match="gitleaks refused"):
             deploy.scan(tmp_path, "gitleaks", run)
+
+
+def _what_the_harness_installs() -> dict:
+    """Every distribution `pip install -r requirements.txt` brings, by
+    canonical name, with each specifier put on it along the way: the
+    file's own lines, then what each installed distribution requires,
+    its extras and markers followed the way pip follows them."""
+    lines = [line.split("#", 1)[0].strip() for line in
+             (ROOT / "requirements.txt").read_text(
+                 encoding="utf-8").splitlines()]
+    todo = [Requirement(line) for line in lines if line]
+    wants, walked = {}, set()
+    while todo:
+        req = todo.pop()
+        name = canonicalize_name(req.name)
+        wants.setdefault(name, []).append(req.specifier)
+        for extra in {"", *req.extras}:
+            if (name, extra) in walked:
+                continue
+            walked.add((name, extra))
+            for line in metadata.requires(name) or ():
+                child = Requirement(line)
+                if (child.marker is None
+                        or child.marker.evaluate({"extra": extra})):
+                    todo.append(child)
+    return wants
 
 
 class TestTheAudit:
@@ -169,6 +198,37 @@ class TestTheAudit:
         removing one entry would leave it accepted by the other."""
         ids = [i for entry in deploy.ACCEPTED for i in entry["ids"]]
         assert len(ids) == len(set(ids))
+
+    def test_no_accepted_version_is_one_the_harness_can_install(self):
+        """Batch 201. ACCEPTED is for the BRIDGE, whose Gradio caps
+        pillow below 13 in an environment of its own. The harness reaches
+        pillow too, through matplotlib's uncapped `pillow>=8`: a fresh
+        install got 13.0.0, and an environment built before that release
+        kept 12.3.0, because pip leaves an installed package alone while
+        it satisfies what requires it. So every accepted version must be
+        refused by some constraint on the harness's way to it -- for
+        pillow, requirements.txt's floor, which the next install upgrades
+        to. A package only the bridge installs is not the harness's."""
+        wants = _what_the_harness_installs()
+        # Guard the walk: it follows matplotlib down to pillow, it follows
+        # extras (linkify-it-py arrives only as textual's
+        # `markdown-it-py[linkify]`), and Gradio is nowhere in it. Empty, it
+        # would pass everything below.
+        assert {"matplotlib", "kiwisolver", "pillow",
+                "linkify-it-py"} <= wants.keys()
+        assert "gradio" not in wants
+        for entry in deploy.ACCEPTED:
+            name = canonicalize_name(entry["package"])
+            if name not in wants:
+                continue
+            assert any(not spec.contains(entry["version"], prereleases=True)
+                       for spec in wants[name]), (
+                f"{entry['package']} {entry['version']} has advisories "
+                f"accepted for the hosted demo's bridge, and nothing stops "
+                f"the harness installing it: the constraints on the way "
+                f"are {[str(s) or '(any)' for s in wants[name]]}. An "
+                f"environment built while it was current keeps it. Floor "
+                f"it above that version in requirements.txt (batch 201).")
 
     def test_every_entry_for_a_pinned_version_is_passed(self, tmp_path):
         """Two entries for pillow 12.3.0 must BOTH reach pip-audit; an
