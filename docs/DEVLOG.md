@@ -28190,3 +28190,63 @@ base and takes its own beta identity, batch counter 1.
 - Gitleaks on an export of the tracked working files: no leaks.
 - Version pair and git diff whitespace checks pass. No dependency changed;
   pip-audit was not needed. No real account or model call was made.
+
+## Batch 204 — project file mentions in the prompt
+
+**Owner request:** implement ROADMAP_v3 §54. Before code, verified the existing
+`SlashSuggest`/`PromptInput` seam and the conversation prompt tiers. The old
+specification equated project and workspace; the current resolver can separate
+them. The owner chose the project root, both basename/path matching, quoted
+names, folders without expansion, deleted-path pass-through, eager background
+indexing, 50,000 cached paths, 200 matches, and session-only ignored-file control.
+Recorded as AT9–AT13 beside the existing AT1–AT8.
+
+`core/file_mentions.py` indexes names through optional git, including its nested,
+info and global ignores, and caches the ignored half too. Without a usable git
+listing a bounded traversal uses built-in skips and identifies that source.
+Subprocess time/output and traversal bounds produce a partial-index notice.
+No directory links are traversed by fallback; git supplies folders from listed
+descendants, so empty directories are absent on that source.
+
+The TUI passes a cached callback into the existing prompt and suggestion panel.
+Completion replaces only the cursor's token, preserves the rest of the message,
+and works in command arguments too. API assignments and recalled input retain
+their previous dismissal behavior. `/mentions` reports state; `ignored on|off`
+changes only the session's cached view.
+
+Successful `write` creation marks relevant indexes dirty at the producer,
+including writes by a subagent. A timer checks that event without probing the
+filesystem. Overwrites, failures, unrelated projects and manual file creation
+leave the cache alone. Manual creations appear after restart.
+
+`with_file_mentions` adds the latest actual user's names and resolved project
+root to conversation prompts, without opening files or changing permissions.
+Wakes retain that turn's guidance; the next user message replaces it. Injection
+is limited to chat threads: a spawned task's text is still its task, and internal
+compaction/review payloads cannot introduce mention instructions. A regression
+drives the shared assembler with non-chat thread kinds and an `@` in its input.
+The first full suite exposed
+one-shot ordering: `/grill-me` assembles before its message is stored. It now
+supplies its own new text explicitly, with the existing catalog test asserting
+that the named path reaches the model-bound prompt. TECHNICAL_DEBT 19 stays open.
+
+Measured locally: 116.84 ms for a complete snapshot (418 visible names and
+852 ignored, including folders); 9.3 ms to match 50,000 synthetic names, offering
+200 with the total stated. Single measurements, not a latency guarantee.
+
+Validation:
+
+- Full offline suite: 8,349 passed, 69 skipped, 57 warnings on Windows,
+  114.98 seconds (8,418 collected). After tightening internal-task scope,
+  affected conversation/compaction/review/wake tests: 382 passed, 1 skipped.
+- Four negative controls in a disposable copy: removing the model-bound
+  mention fragment, removing creation invalidation, replacing the whole
+  message on completion, and allowing the fragment into internal tasks
+  each failed its intended assertion. Sources were restored afterward.
+- Ruff clean; changed Python files compile. Bandit passes with the CI
+  flags and a throwaway Windows-path baseline; 62 baselined pairs, none
+  grew. Fixed-argv git/test subprocess sites were triaged locally without
+  changing the committed baseline.
+- Gitleaks on the 387 candidate source paths: no leaks. No dependency
+  change, live model request or account access. Version pair and diff
+  whitespace checks pass; the branch's first completed batch is beta 1.

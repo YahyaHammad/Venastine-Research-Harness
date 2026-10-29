@@ -664,6 +664,18 @@ The first connection to a **user-level** server asks once, showing the resolved 
 
 ### The TUI
 
+Type `@` in a chat message to complete a file or folder from the project directory. Match by
+filename or relative path, use arrows to choose and Tab or Enter to insert. Names with spaces
+are quoted, such as `@"docs/my notes.md"`. A mention tells the agent what to inspect; it does
+not attach file contents. Normal file-access permissions still apply.
+
+The path list loads in the background at startup. Files created by the agent's `write` tool
+refresh it automatically; files you create yourself appear after restart. Ignored paths are
+hidden by default; `/mentions ignored on` includes them for this session, and `/mentions`
+shows the source and any limits. Git is optional: without a usable repository/binary, a
+fallback skips common build/cache directories. The panel labels that fallback. Up to 50,000
+paths are cached and 200 matches offered; narrow the query when a limit is shown.
+
 | Command | What it does |
 |---|---|
 | `/help` | List every registered command with its usage |
@@ -693,6 +705,7 @@ The first connection to a **user-level** server asks once, showing the resolved 
 | `/summary` | Distil this conversation and show it. Describes; does **not** fold — that is `/compact` |
 | `/ref [--list\|--clear]` | Pick another conversation and attach its summary to this one as standing context; `--list` and `--clear` manage attachments |
 | `/init [--software\|--research] [--config]` | Scaffold the project documentation set; `--config` adds `.venastine/settings.json` and `mcp.json` with default values, and on its own is the whole command |
+| `/mentions [ignored on\|off]` | Show file mention status or include ignored paths for this session |
 | `/quit` | Leave the harness, on one invocation — a typed command is already deliberate. `/exit` and `/bye` are the same command under other names; type toward either and the suggestion list says so |
 
 Keys: **ctrl+c** twice quits — the first press arms it and the footer changes to say so, and it goes back to `Quit` after a couple of seconds; a **ctrl+c** over selected text copies instead and arms nothing, so nothing you copy can end the session. **ctrl+q** quits on a single press, from anywhere, including under a dialog · **ctrl+t** thread picker · **ctrl+l** claims view · **ctrl+j** (or **shift+enter**) newline in the prompt · **up/down** and **enter**/**tab** to pick a slash command, **escape** to dismiss the list · **ctrl+click** a URL in an answer — or in a tool line — to open it, or the name on a `spawn_subagent` line to read what that agent did, or the name on a `shell_background`, `shell_monitor` or `shell_interactive` line to read that session -- its command, why it was started, what it printed, and what became of it. A session the harness no longer holds (it aged out, or you restarted) opens the same way and shows what the agent was given, saying so; a live one refreshes as it writes. While sessions are running the sidebar lists them, and clicking a row opens it; **ctrl+g** lists the runs going on right now and opens one from the keyboard · **ctrl+b** stops a background session, and always asks which one rather than killing on a single press. While background sessions are running the prompt and most commands are refused — `ctrl+b`, `/kill`, answering a dialog and quitting stay usable, because they are the ways out.
@@ -962,7 +975,7 @@ Deliberately not settings.json keys: editing these means editing the harness's o
 
 **Built:** ROADMAP.md §1–§12 (§10's ensemble mode rebuilt by its revisit — diversity now comes from a roster of different models) and ROADMAP_v2.md §13 (streaming loop), §14 (config loader + workspace trust), §15 (permissions), §16 (TUI), §17 (MCP), §18 (agents), §19 (skills), §20 (post-pipeline review), §21a (compaction + `pin`), §21b (durable memory), §22 (live pipeline progress), §25 (authorised tool use in the pipeline), §26 (research legibility: per-pass tool calls, code-stage announcements, the claims view, role colour, `/copy`), §27 (thread legibility: transcript replay on resume, a conversations-only thread picker), §21c (session summaries and cross-thread referencing — §21 is now complete), §24 (`/init`), §23 (interactive tools: the response channel, per-tool subagent sign-off, `ask_user`, and the todo list), §28 (the shell capability classifier).
 
-**Remaining:** nothing in `ROADMAP.md` or `ROADMAP_v2.md`, and §10's revisit is now closed. `ROADMAP_v3.md` §49–§52, §55, §58 and §61–§83 are built. The remaining sections are §53 (rolling network-I/O budgets), §54 (`@` file references), §56 (a decision-model shell classifier), §57 (`/submodel`), §59 (memory selection and agent cycling), and §60 (Unified Harness Protocol compliance), each specified and awaiting detailed design. §58 supplies a short harness identity that follows the current model; §83's final live checks are confirmed, and the ChatGPT header distinguishes a selected provider from an active sign-in. TECHNICAL_DEBT.md items 9 and 10 are open, and two live checks are recorded against §10 (see DEVLOG) that cannot be settled offline: the default `temperature` on OpenAI and Google, and whether OpenAI's reasoning models belong in `config.MODELS_REJECTING_SAMPLING_PARAMS`.
+**Remaining:** nothing in `ROADMAP.md` or `ROADMAP_v2.md`, and §10's revisit is now closed. `ROADMAP_v3.md` §49–§52, §54, §55, §58 and §61–§83 are built. The remaining sections are §53 (rolling network-I/O budgets), §56 (a decision-model shell classifier), §57 (`/submodel`), §59 (memory selection and agent cycling), and §60 (Unified Harness Protocol compliance), each specified and awaiting detailed design. §54 completes project file/folder mentions without loading contents; §58 supplies a short harness identity that follows the current model; §83's final live checks are confirmed, and the ChatGPT header distinguishes a selected provider from an active sign-in. TECHNICAL_DEBT.md items 9 and 10 are open, and two live checks are recorded against §10 (see DEVLOG) that cannot be settled offline: the default `temperature` on OpenAI and Google, and whether OpenAI's reasoning models belong in `config.MODELS_REJECTING_SAMPLING_PARAMS`.
 
 **Not finished, though: an audit is open.** Both roadmaps being built is not the same as the
 code being clean, and saying only the first would be the "built and runs are different claims"
@@ -978,7 +991,7 @@ note that shell approval is governed solely by `shell_approval_mode` -- `tool_ap
 deliberately has no `shell` key, so an old file carrying one is refused at startup
 naming the key — see `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 8385 tests, fully offline, no API keys needed. The suite's own packages are `requirements-test.txt`, separate from `requirements.txt` since batch 136: they used to be in the shipped dependency list, so installing the harness also installed a test runner. It runs in parallel by default (`pytest-xdist`, 70% of your cores): **1:26 on a 16-core machine, against 9:06 single-process.** `pytest -n0` forces the old serial run, which is what you want under a debugger or when something is parsing the output. Four further tests are marked `integration` and excluded by default: three spawn a real stdio MCP server, the fourth runs an external program through the host fallback shell (`pytest -m integration`).
+Run the test suite with `pytest` — 8418 tests, fully offline, no API keys needed. The suite's own packages are `requirements-test.txt`, separate from `requirements.txt` since batch 136: they used to be in the shipped dependency list, so installing the harness also installed a test runner. It runs in parallel by default (`pytest-xdist`, 70% of your cores): **1:26 on a 16-core machine, against 9:06 single-process.** `pytest -n0` forces the old serial run, which is what you want under a debugger or when something is parsing the output. Four further tests are marked `integration` and excluded by default: three spawn a real stdio MCP server, the fourth runs an external program through the host fallback shell (`pytest -m integration`).
 
 ## Documentation
 

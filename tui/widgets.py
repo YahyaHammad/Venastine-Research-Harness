@@ -1616,13 +1616,14 @@ class SlashSuggest(Static):
 
     # -- what the prompt drives ---------------------------------------------
 
-    def offer(self, matches: list) -> None:
+    def offer(self, matches: list, label: str | None = None) -> None:
         """Replace the list, hiding the panel when it is empty.
 
         `refresh(layout=True)`, not `update()`: the render is a function of
         the width, so the panel has to be re-MEASURED, not just repainted.
         """
         self._matches = list(matches)
+        self._label = label
         self._selected = 0
         self._first = 0
         self._groups = []
@@ -1702,7 +1703,7 @@ class SlashSuggest(Static):
         long, and the description is the half this panel exists for. The
         flags are what truncates.
         """
-        body = "/" + command.name + SUGGEST_SEP + command.summary
+        body = getattr(command, "prefix", "/") + command.name + SUGGEST_SEP + command.summary
         if command.usage:
             body += "  " + command.usage
         lines = list(Text(body).wrap(Console(width=inner), inner, no_wrap=False))
@@ -1779,7 +1780,7 @@ class SlashSuggest(Static):
             span = str(len(groups))
         else:
             span = f"{first + 1}-{first + len(groups)}"
-        title = f"{span} of {len(self._matches)} · /help for all"
+        title = f"{span} of {len(self._matches)} · {getattr(self, '_label', None) or '/help for all'}"
         if self.border_title != title:
             self.border_title = title
         # Batch 62. The same honesty rule one row down, applied to a
@@ -1947,6 +1948,8 @@ class PromptInput(TextArea):
     _api_edit = False       # the next Changed came from .value, not a key
     _dismissed = False      # escape latched the panel shut
     _completing = False     # ...and that .value came from tab or enter
+    file_completion = None  # app supplies a cached, I/O-free callback
+    _suggest_enabled = False
 
     class Submitted(Message):
         """Posted when enter is pressed. `Input.Submitted`'s shape.
@@ -1977,9 +1980,11 @@ class PromptInput(TextArea):
         transcript and textual does not re-pin a scroll on shrink.
         """
 
-        def __init__(self, prompt: "PromptInput", matches: list) -> None:
+        def __init__(self, prompt: "PromptInput", matches: list,
+                     label: str | None = None) -> None:
             self.prompt = prompt
             self.matches = matches
+            self.label = label
             super().__init__()
 
         @property
@@ -2027,7 +2032,34 @@ class PromptInput(TextArea):
         # See the docstring: this is the API half of the API/keyboard
         # split, and `.value =` reaches it through `.text =`.
         self._api_edit = True
+        self._suggest_enabled = False
         super().load_text(text)
+
+    def _mention_cursor_offset(self) -> int:
+        row, column = self.cursor_location
+        return sum(len(line) + 1 for line in self.text.split("\n")[:row]) + column
+
+    def _location(self, offset: int) -> tuple[int, int]:
+        before = self.text[:offset]
+        return before.count("\n"), len(before.rsplit("\n", 1)[-1])
+
+    def refresh_suggestions(self) -> None:
+        """Re-filter cached rows after typing, cursor movement or indexing."""
+        label = None
+        context = (self.file_completion(self.text, self._mention_cursor_offset())
+                   if self.file_completion else None)
+        if context is not None:
+            _, matches, label = context
+        else:
+            matches = commands.matching(self.text)
+        if not matches:
+            self._dismissed = False
+        self.post_message(self.SuggestionsChanged(
+            self, [] if self._dismissed else matches, label))
+
+    def on_text_area_selection_changed(self, event: TextArea.SelectionChanged) -> None:
+        if self._suggest_enabled and not self._api_edit:
+            self.refresh_suggestions()
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         if self._api_edit:
@@ -2039,19 +2071,13 @@ class PromptInput(TextArea):
                 # ...except the one assignment a keystroke made. See
                 # `_complete`.
                 self._completing = False
-                self.post_message(
-                    self.SuggestionsChanged(self, commands.matching(self.text)))
+                self._suggest_enabled = True
+                self.refresh_suggestions()
                 return
             self.post_message(self.SuggestionsChanged(self, []))
             return
-        matches = commands.matching(self.text)
-        if not matches:
-            # Nothing to dismiss any more, so the latch is spent. This is
-            # what lets a dismissed panel come back: type a space (or clear
-            # the line) and the next bare slash token offers again.
-            self._dismissed = False
-        self.post_message(
-            self.SuggestionsChanged(self, [] if self._dismissed else matches))
+        self._suggest_enabled = True
+        self.refresh_suggestions()
 
     def _panel_open(self) -> bool:
         return self.suggest is not None and self.suggest.display
@@ -2063,6 +2089,19 @@ class PromptInput(TextArea):
         command = self.suggest.chosen
         if command is None:
             return False
+        if getattr(command, "prefix", "/") == "@":
+            context = self.file_completion(self.text, self._mention_cursor_offset())
+            if context is None:
+                return False
+            mention, _, _ = context
+            replacement = "@" + command.name
+            # Reuse an existing separating space without losing the suffix.
+            reuse = self.text[mention.end:mention.end + 1] == " "
+            self.replace(replacement + ("" if reuse else " "),
+                         self._location(mention.start), self._location(mention.end),
+                         maintain_selection_offset=False)
+            self.move_cursor(self._location(mention.start + len(replacement) + 1))
+            return True
         # The TRAILING SPACE is doing two jobs: for a command with no
         # argument completer `matching()` is empty once the line has a
         # space in it, so the panel closes on its own, and deleting that

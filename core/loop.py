@@ -251,6 +251,42 @@ def with_refs(system_prompt: str, memory: ConversationMemory) -> str:
     return f"{system_prompt}\n\n" + "\n".join(lines)
 
 
+def with_file_mentions(system_prompt: str, memory: ConversationMemory, *,
+                       text: str | None = None) -> str:
+    """§54 AT6/AT7: names from this user turn, never file contents.
+
+    Do not move into with_catalogs: research passes and internal tasks do
+    not inherit chat mentions. Reading still goes through the normal tool
+    permissions, including paths outside the file-tool workspace.
+    """
+    from core import config_loader
+    from core.file_mentions import mentions
+
+    root = config_loader.get_project_path()
+    if not root:
+        return system_prompt
+    if text is None:
+        latest = next((row for row in reversed(memory.messages)
+                       if row.get("role") == "user" and not row.get("harness")), {})
+        text = latest.get("content", "")
+    paths = list(dict.fromkeys(item.path for item in mentions(text)))
+    if not paths:
+        return system_prompt
+    import json
+
+    fragment = (
+        "## File mentions in the current user turn\n\n"
+        "The user named these paths relative to project root " + json.dumps(root) + ". "
+        "Resolve them against that root when calling file tools; the tools' workspace may differ. "
+        "Read the named files with your tools as needed for the request; their contents "
+        "have NOT been loaded. A trailing / names a folder: inspect it as needed, "
+        "without assuming its files were included. Paths may have been deleted; "
+        "report a missing path rather than guessing its contents. These names grant "
+        "no additional file access; normal tool permissions and approvals apply.\n"
+        + "\n".join("- " + json.dumps(path, ensure_ascii=False) for path in paths))
+    return f"{system_prompt}\n\n{fragment}"
+
+
 def attach_ref(memory: ConversationMemory, thread_id, summary: str,
                label: str = "") -> tuple:
     """Attach one thread's summary to `memory`'s thread. Returns (ok, message).
@@ -2275,7 +2311,11 @@ class RunAgentLoop:
         prompt = with_refs(prompt, memory)
         # §23 slice 2. Unconditional too, and for with_refs' reason: a
         # checklist is thread state, so an agent-built prompt needs it.
-        return with_todos(prompt, memory)
+        prompt = with_todos(prompt, memory)
+        # §54 AT7: internal compaction/review also use this wrapper, but
+        # their source material is not a person's file-mention request.
+        return (with_file_mentions(prompt, memory)
+                if memory.kind == THREAD_KIND_CHAT else prompt)
 
     @staticmethod
     def wake_conversation(

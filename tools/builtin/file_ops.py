@@ -479,11 +479,16 @@ def write_run(params: dict) -> dict:
         # newline="" and a replace rather than a truncating write -- the
         # module docstring's BYTES section says what each buys, and
         # `write_text_atomic` says why it owns both.
+        created = not os.path.exists(resolved)
         write_text_atomic(resolved, parsed.content)
     except Exception as e:
         logger.exception("write tool failed on %s", parsed.path)
         return {"error": f"Could not write file: {e}"}
 
+    if created:
+        from core.file_mentions import note_file_created
+
+        note_file_created(resolved)
     return {"result": f"Wrote {len(parsed.content)} characters to {parsed.path}"}
 
 

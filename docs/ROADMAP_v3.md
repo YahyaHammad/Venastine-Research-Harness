@@ -35,7 +35,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§51. Paging for network tool results** — **(BUILT in batch 105)** (`fetch_url` and `arxiv_search` truncate with no offset, so the agent cannot reach past the first page without shelling out to a raw HTTP request)
 - **§52. Redact before the cut, and a bound on the held body** — **(BUILT in batch 106)** (§51 cut the page out of the body before the redactor saw it, so a credential straddling character 5,000 reached the corpus whole; and the body it began holding was unredacted, in a cache whose entry count nothing bounded)
 - **§53. A rolling bound on what the harness pulls and pushes** — **(NOT BUILT: requested batch 122, specified, not designed)** (nothing anywhere counts a byte over the wire, so a user on a metered connection has no ceiling and a tool that fetches something enormous is bounded only by one tool's own per-request cap)
-- **§54. `@` names a file, and the tree is read once** — **(NOT BUILT: requested batch 122, specified, not designed)** (naming a file in the prompt means typing its path exactly, from memory, with no completion and no way to say "this folder")
+- **§54. `@` names a file, and the tree is read once** — **(BUILT in batch 204)** (project paths and folders complete in the existing panel; names guide the agent to read, without loading contents)
 - **§55. The whole command, and what it printed** — **(BUILT in batch 125)** (a shell call shows a 140-character digest and its output is never rendered at all, so what the agent ran and what came back are both off screen)
 - **§56. A decision model as the shell classifier** — **(NOT BUILT: requested batch 122, specified, not designed)** (the gate decides from a word list and a token scan, so every judgement it cannot express as a rule costs an approval prompt, and the rules cannot be tuned per user)
 - **§57. One model for the subagents** — **(NOT BUILT: requested batch 122, specified, not designed)** (an agent definition can pin a model and nothing can set one for the subagents as a class, so a cheap child runs on the parent's expensive model)
@@ -1006,7 +1006,7 @@ with completion, carries the path relative to the project root, allows folders, 
 files by default, and does **not** load the file into context -- it tells the agent to read what was
 named.
 
-### What the code does today
+### What the code did when specified (2026-10-03)
 
 - **The completion machinery already exists and is good.** `tui/widgets.py`'s `SlashSuggest` (batch
   55, window sliding added in 56) does a row-budgeted, keyboard-navigable, sliding-window suggestion
@@ -1044,14 +1044,43 @@ named.
 | **AT7** | **The fragment is assembled where the other thread-state tiers are** (`with_goal` / `with_refs` / `with_todos` in `core/loop.py`) and MUST NOT move into `with_catalogs`. That function feeds `pass_prompt()`, so a file mentioned in a chat session would land in all ten research passes. §19's K6, and this is its fifth instance -- see TECHNICAL_DEBT 19 |
 | **AT8** | **`git` is a new external dependency on this path, and that is stated.** It is the first subprocess call to git this project makes. It is also optional by construction (AT3's fallback), so the dependency is on the QUALITY of the list, never on the feature working |
 
-### What must be settled before this is built
+### Implementation decisions (AT9–AT13, owner discussion, batch 204)
 
-- Whether the startup read is eager or lazy on the first `@` -- 18 ms here, and this repository is
-  326 files.
-- The cap on offered entries, and what the panel does in a 50,000-file checkout.
-- Whether `@` matches on the basename, on the whole relative path, or on both.
-- What a mention of a since-deleted file does: pass through, or say so in the prompt box.
-- Whether a folder mention expands to its files in the fragment or is named as a folder.
+The owner selected the project root, the mention rules, and the proposed startup limits and
+controls before implementation. The earlier workspace-root premise above is superseded by AT9:
+the resolved project and the file tools' workspace can differ. The claim about no git subprocesses
+describes batch 122; batch 202's version helper already uses git. This is the first runtime
+completion path to depend on it, and it remains optional.
+
+| # | Decision |
+|---|---|
+| **AT9** | **Browse the resolved project directory**, from `config_loader.get_project_path()`. State that root in the model's fragment. A project path outside the file-tool workspace still needs the ordinary file-tool approval; mentioning it grants no access. With no initialized project there is no tree to guess |
+| **AT10** | **Index eagerly in a background worker at startup.** Cache at most 50,000 distinct file/folder names, default-visible names first, and offer at most 200 matches with a limit notice. Both visible and ignored names are cached at startup so toggling never scans. Each git process has a five-second deadline and a 16 MiB output bound; fallback traversal has a five-second deadline and visits at most 50,000 entries. Partial results are identified. The fallback uses a bounded `os.scandir` traversal, does not follow directory links, and calls its source `fallback skips`, not git ignores |
+| **AT11** | **Match both basename and full relative path**, case-insensitively, prefix matches before other substring matches. Complete the token at the cursor, preserving surrounding text. Use `@path` for simple names and `@"path with spaces"` with JSON string escaping for names needing quotes. Email addresses embedded in a word do not trigger completion |
+| **AT12** | **Name folders without expansion and pass deleted names through.** A trailing `/` marks a folder. The short fragment names paths from the latest actual user message, deduplicated, so wake turns retain that turn's guidance and a new message replaces it. No contents are preloaded and no filesystem check runs at turn assembly. The model is told to report missing paths |
+| **AT13** | **`/mentions ignored on|off` is session-only.** `/mentions` reports the root, source, ignore state and any limits. Successful creation through the `write` producer invalidates project indexes, including creation by a subagent; overwrites, failures, unrelated projects and files created manually do not. A timer checks the dirty flag, never the filesystem, and starts the refresh worker |
+
+### Built and measured (batch 204)
+
+`core/file_mentions.py` owns the path grammar, bounded snapshot and cached matching. The TUI supplies
+an I/O-free callback to `PromptInput`, which keeps the existing panel, row budget, keys and
+transcript pin. `core/loop.py::with_file_mentions` adds the names beside the other conversation
+tiers, shared with manual mentions in CLI conversations. Injection is limited to chat threads;
+spawned tasks, research passes, compaction and pipeline review keep their task prompts. The parent
+can still name files in a spawned task's ordinary text.
+
+On the working tree, the complete visible/ignored snapshot took 116.84 ms (418 visible names,
+852 ignored names, including derived folders). Matching 50,000 synthetic names took 9.3 ms and
+offered 200 with the total and limit stated. These are single local measurements, not a latency
+guarantee. Git's file list supplies folders through their listed descendants; empty directories
+are available through fallback traversal but are not represented by git's file list.
+
+Acceptance checks cover real git tracked/untracked files and all three ignore sources, fallback,
+process deadlines/output bounds, capped matching, quoted names, middle-of-message completion,
+folders, deleted paths, session reset, startup responsiveness, creation refresh through real
+dispatch, active-agent and plain-chat model prompts, and names without content injection.
+
+**Status: BUILT in batch 204.**
 
 ---
 
