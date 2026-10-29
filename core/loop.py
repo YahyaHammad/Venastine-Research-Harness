@@ -126,6 +126,19 @@ def with_goal(system_prompt: str, memory: ConversationMemory) -> str:
     return f"{system_prompt}\n\n## Persistent objective\n{goal}"
 
 
+def with_persona(system_prompt: str, model: str, provider_name: str) -> str:
+    """Append the live chat identity (ROADMAP_v3 §58, PR1-PR4).
+
+    Callers resolve agent overrides first. Kept outside with_catalogs so
+    research passes, the compactor and the reviewer retain their own
+    task-specific prompts.
+    """
+    return (
+        f"{system_prompt}\n\nYou are running in Venastine Research Harness, "
+        "a tool-using assistant with a separate multi-pass research mode. "
+        f"Your current model is {model} from {provider_name}.")
+
+
 def with_todos(system_prompt: str, memory: ConversationMemory) -> str:
     """Append §23's todo list to a prompt. No-op when the thread has none.
 
@@ -236,6 +249,42 @@ def with_refs(system_prompt: str, memory: ConversationMemory) -> str:
         lines.append(f"\n### {label}\n(thread {ref.get('thread_id')})\n"
                      f"{ref.get('summary', '')}")
     return f"{system_prompt}\n\n" + "\n".join(lines)
+
+
+def with_file_mentions(system_prompt: str, memory: ConversationMemory, *,
+                       text: str | None = None) -> str:
+    """§54 AT6/AT7: names from this user turn, never file contents.
+
+    Do not move into with_catalogs: research passes and internal tasks do
+    not inherit chat mentions. Reading still goes through the normal tool
+    permissions, including paths outside the file-tool workspace.
+    """
+    from core import config_loader
+    from core.file_mentions import mentions
+
+    root = config_loader.get_project_path()
+    if not root:
+        return system_prompt
+    if text is None:
+        latest = next((row for row in reversed(memory.messages)
+                       if row.get("role") == "user" and not row.get("harness")), {})
+        text = latest.get("content", "")
+    paths = list(dict.fromkeys(item.path for item in mentions(text)))
+    if not paths:
+        return system_prompt
+    import json
+
+    fragment = (
+        "## File mentions in the current user turn\n\n"
+        "The user named these paths relative to project root " + json.dumps(root) + ". "
+        "Resolve them against that root when calling file tools; the tools' workspace may differ. "
+        "Read the named files with your tools as needed for the request; their contents "
+        "have NOT been loaded. A trailing / names a folder: inspect it as needed, "
+        "without assuming its files were included. Paths may have been deleted; "
+        "report a missing path rather than guessing its contents. These names grant "
+        "no additional file access; normal tool permissions and approvals apply.\n"
+        + "\n".join("- " + json.dumps(path, ensure_ascii=False) for path in paths))
+    return f"{system_prompt}\n\n{fragment}"
 
 
 def attach_ref(memory: ConversationMemory, thread_id, summary: str,
@@ -2038,7 +2087,8 @@ class RunAgentLoop:
         # ROADMAP_v3 §49: shared with wake_conversation, so a turn a
         # background session starts runs under the same prompt tiers.
         prompt = RunAgentLoop._conversation_prompt(
-            memory, system_prompt, authorization=authorization,
+            memory, system_prompt, model=model, provider_name=provider_name,
+            authorization=authorization,
             response_channel=response_channel, granted_tools=granted_tools)
         auth_kwargs = (
             _authorization_kwargs(authorization) if authorization is not None
@@ -2226,7 +2276,8 @@ class RunAgentLoop:
         return response
 
     @staticmethod
-    def _conversation_prompt(memory, system_prompt, *, authorization=None,
+    def _conversation_prompt(memory, system_prompt, *, model, provider_name,
+                             authorization=None,
                              response_channel=None, granted_tools=None) -> str:
         """The system prompt a conversation turn runs under -- ONE copy, for a
         turn the user started and a turn a background session's result
@@ -2243,7 +2294,8 @@ class RunAgentLoop:
             system_prompt
             if system_prompt is not None
             else system_prompts.with_catalogs(
-                DEFAULT_SYSTEM_PROMPT, callable_only=_callable_only,
+                with_persona(DEFAULT_SYSTEM_PROMPT, model, provider_name),
+                callable_only=_callable_only,
                 granted=_granted),
             memory,
         )
@@ -2259,7 +2311,11 @@ class RunAgentLoop:
         prompt = with_refs(prompt, memory)
         # §23 slice 2. Unconditional too, and for with_refs' reason: a
         # checklist is thread state, so an agent-built prompt needs it.
-        return with_todos(prompt, memory)
+        prompt = with_todos(prompt, memory)
+        # §54 AT7: internal compaction/review also use this wrapper, but
+        # their source material is not a person's file-mention request.
+        return (with_file_mentions(prompt, memory)
+                if memory.kind == THREAD_KIND_CHAT else prompt)
 
     @staticmethod
     def wake_conversation(
@@ -2315,7 +2371,8 @@ class RunAgentLoop:
         agent_activity.bind(activity, memory.thread_id)
         memory.add_harness_message(text, harness)
         prompt = RunAgentLoop._conversation_prompt(
-            memory, system_prompt, authorization=authorization,
+            memory, system_prompt, model=model, provider_name=provider_name,
+            authorization=authorization,
             response_channel=response_channel, granted_tools=granted_tools)
         auth_kwargs = (
             _authorization_kwargs(authorization) if authorization is not None

@@ -28118,3 +28118,171 @@ subprocess imports; each now has a rationale matching its explicit argv-only
 calls. The changed modules pass Bandit, and the repository count gate reports
 no increase in its 62 baselined pairs. Gitleaks found no leaks on an export of
 tracked files plus these new files. Work remains uncommitted and untagged.
+
+
+## Batch 203 -- the ChatGPT header says whether the plan is connected, and chat knows its harness (2026-10-29)
+
+**The owner's final §83 checks:** Manage usage opens the usage tab for the
+logged-in user in their browser, and a message after disconnect correctly
+errors as signed out. The same run showed Using ChatGPT plan in the header
+after disconnect, and the owner reported it through restarts.
+
+**Verified before fixing:** `refresh_status` added the label whenever the
+selected provider was CHATGPT. Disconnect already refreshed, and the
+remembered pair was deliberately retained; startup refreshed the same
+provider-only decision. Three new regressions failed against production:
+both disconnect forms and sign-in without plan access.
+
+**Fixed at that producer:** the header reads `chatgpt_auth.status()`, shows
+Signed out with use /connect or add API key while signed out, names
+ungranted plan access separately with the same connection hint, and offers
+the plan label and Manage usage only with both. A real sign-in and sign-out, with only OpenAI's network faked, is
+driven through the remembered restart and reconnect for keep and --forget.
+The connected header's click test now signs in first instead of assuming
+that assigning the provider creates a sign-in.
+
+**The owner's wording follow-up, before this batch was committed:** the
+hint says `use /connect or add API key`, rather than naming ChatGPT alone.
+The harness also supports other OAuth providers and manually configured
+API keys; neither disconnected state should imply a subscription is the
+only route back to inference. The existing restart/reconnect and missing
+plan-access assertions follow that wording. This is the same uncommitted
+batch and retains its beta counter.
+
+**§58, after the owner settled its wording and scope (PR6):**
+`core.loop.with_persona` owns the short identity paragraph, naming the
+harness, tool-using chat, separate research mode and the effective model
+and provider. Default CLI chat and wakes compose it at turn time; TUI
+chat and one-shot turns and spawned agents compose it with their actual
+pair before the agent body. An already-built prompt is retained, which
+keeps internal compaction and pipeline review on their own task prompts.
+Research passes never receive the paragraph through with_catalogs.
+TECHNICAL_DEBT 19's convergence remains open and records the built member.
+
+**Cost measured, not inferred from characters:** a temporary local
+`tiktoken 0.12.0` / `o200k_base` instrument wrapped the real model-switching
+TUI test's loop boundary, with only the model reply stubbed. The system
+prompt went 125 to 164 tokens for ANTHROPIC / claude-sonnet-5 (+39), then
+125 to 161 for OPENAI / gpt-4o (+36); 167 and 155 added characters,
+including the separator. These are local tokenizer counts on actual
+assembled prompts, not provider-billed usage. No tokenizer dependency is
+added to the project or its distribution, and no account request was sent.
+
+The roadmap marks §58 built and §83 complete. Its index, AGENTS map and
+README agree; the README's earlier §53–§60 blanket also wrongly included
+§55, built in batch 125, and is corrected. This branch keeps 0.3.2 as its
+base and takes its own beta identity, batch counter 1.
+
+### Verified
+
+- Affected chat, agent, wake, compaction, review and TUI suites: 407 passed.
+- The three header regressions failed before the fix; the final focused
+  identity and header selection passed all 12 cases.
+- Full suite: 8,317 passed, 68 skipped on Windows (8,385 collected),
+  123.71 seconds. No failed tests.
+- Negative controls in a disposable source snapshot: removing the persona
+  failed the ordinary chat and pinned TUI assertions; putting the identity
+  in DEFAULT_SYSTEM_PROMPT failed the internal compactor and reviewer
+  assertions. Both mutations were killed, and the snapshot was restored.
+- Ruff clean; touched Python files compile; Bandit with the CI flags and
+  a throwaway Windows-path baseline reports no new issues;
+  bandit-count-check reports 62 baselined pairs, none grew.
+- Gitleaks on an export of the tracked working files: no leaks.
+- Version pair and git diff whitespace checks pass. No dependency changed;
+  pip-audit was not needed. No real account or model call was made.
+
+## Batch 204 — project file mentions in the prompt
+
+**Owner request:** implement ROADMAP_v3 §54. Before code, verified the existing
+`SlashSuggest`/`PromptInput` seam and the conversation prompt tiers. The old
+specification equated project and workspace; the current resolver can separate
+them. The owner chose the project root, both basename/path matching, quoted
+names, folders without expansion, deleted-path pass-through, eager background
+indexing, 50,000 cached paths, 200 matches, and session-only ignored-file control.
+Recorded as AT9–AT13 beside the existing AT1–AT8.
+
+`core/file_mentions.py` indexes names through optional git, including its nested,
+info and global ignores, and caches the ignored half too. Without a usable git
+listing a bounded traversal uses built-in skips and identifies that source.
+Subprocess time/output and traversal bounds produce a partial-index notice.
+No directory links are traversed by fallback; git supplies folders from listed
+descendants, so empty directories are absent on that source.
+
+The TUI passes a cached callback into the existing prompt and suggestion panel.
+Completion replaces only the cursor's token, preserves the rest of the message,
+and works in command arguments too. API assignments and recalled input retain
+their previous dismissal behavior. `/mentions` reports state; `ignored on|off`
+changes only the session's cached view.
+
+Successful `write` creation marks relevant indexes dirty at the producer,
+including writes by a subagent. A timer checks that event without probing the
+filesystem. Overwrites, failures, unrelated projects and manual file creation
+leave the cache alone. Manual creations appear after restart.
+
+`with_file_mentions` adds the latest actual user's names and resolved project
+root to conversation prompts, without opening files or changing permissions.
+Wakes retain that turn's guidance; the next user message replaces it. Injection
+is limited to chat threads: a spawned task's text is still its task, and internal
+compaction/review payloads cannot introduce mention instructions. A regression
+drives the shared assembler with non-chat thread kinds and an `@` in its input.
+The first full suite exposed
+one-shot ordering: `/grill-me` assembles before its message is stored. It now
+supplies its own new text explicitly, with the existing catalog test asserting
+that the named path reaches the model-bound prompt. TECHNICAL_DEBT 19 stays open.
+
+Measured locally: 116.84 ms for a complete snapshot (418 visible names and
+852 ignored, including folders); 9.3 ms to match 50,000 synthetic names, offering
+200 with the total stated. Single measurements, not a latency guarantee.
+
+Validation:
+
+- Full offline suite: 8,349 passed, 69 skipped, 57 warnings on Windows,
+  114.98 seconds (8,418 collected). After tightening internal-task scope,
+  affected conversation/compaction/review/wake tests: 382 passed, 1 skipped.
+- Four negative controls in a disposable copy: removing the model-bound
+  mention fragment, removing creation invalidation, replacing the whole
+  message on completion, and allowing the fragment into internal tasks
+  each failed its intended assertion. Sources were restored afterward.
+- Ruff clean; changed Python files compile. Bandit passes with the CI
+  flags and a throwaway Windows-path baseline; 62 baselined pairs, none
+  grew. Fixed-argv git/test subprocess sites were triaged locally without
+  changing the committed baseline.
+- Gitleaks on the 387 candidate source paths: no leaks. No dependency
+  change, live model request or account access. Version pair and diff
+  whitespace checks pass; the branch's first completed batch is beta 1.
+
+## Batch 205 -- PR #268's CLI spies and askpass assertion ordering (2026-10-29)
+
+The owner's PR ran the full suite on Python 3.11 and 3.13. Both failed the
+same two CLI tests: the final batch-204 chat-only mention guard reads
+`memory.kind`, while their `SpyMemory` classes accepted that constructor
+argument but never exposed it. Real `ConversationMemory` already provides
+the property. Both spies now retain `kind`; the production guard stays
+strict so internal tasks cannot inherit chat mentions. The earlier full
+suite preceded that final guard, and its focused rerun omitted `test_cli`.
+
+One of the two Python 3.13 runs also exposed an existing askpass test race.
+`_answer` sends a successful reply before appending its logical name to
+`served`. Receiving the reply does not establish that the append ran.
+The test now checks `served` and `refusal` after leaving `serving`, whose
+cleanup joins the listener. No production transport, secret handling,
+refusal ordering or timeout changed; no polling or sleep was added.
+
+Validation:
+
+- Both CLI failures reproduced before the fix. The CLI, askpass and file
+  mention tests pass afterward: 215 passed, 2 skipped on Windows.
+- A disposable pytest plugin holds the second successful send immediately
+  after its bytes reach the client, releasing it when the context closes.
+  The fixed test passes under that schedule; an in-memory restoration of
+  the old assertion placement fails before bookkeeping is recorded.
+- Full offline suite on Python 3.13/Windows after both fixes: 8,349 passed,
+  69 skipped, 57 warnings in 120.09 seconds (8,418 collected). No test was
+  added or removed, so the documented counts remain unchanged.
+- Ruff clean; both changed Python files compile. Bandit passes with the
+  CI flags and a throwaway Windows-path baseline; all 62 baselined pairs
+  stay within their accepted counts. The committed baseline is unchanged.
+- Gitleaks covers a clean export of the candidate tracked files, excluding
+  local runtime state. No dependency change, live model call or account
+  access. The branch keeps its identity and completes this batch as beta 2;
+  the npm/Python version pair agrees. Nothing pushed.

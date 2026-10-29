@@ -73,7 +73,7 @@ def _open(url):
         return response.status
 
 
-async def _signed_in(app, pilot, openai):
+async def _signed_in(app, pilot, openai, *, notice_due=True):
     """Drive a whole sign-in through the listener and acknowledge the
     notice, leaving the app idle."""
     from tui.app import _cmd_connect
@@ -82,8 +82,9 @@ async def _signed_in(app, pilot, openai):
     _cmd_connect(app, "chatgpt")
     assert await settle(pilot, lambda: isinstance(app.screen, SecretScreen))
     assert await asyncio.to_thread(_open, _callback(app, openai)) == 200
-    assert await settle(pilot, lambda: isinstance(app.screen, NoticeScreen))
-    app.screen.dismiss(None)
+    if notice_due:
+        assert await settle(pilot, lambda: isinstance(app.screen, NoticeScreen))
+        app.screen.dismiss(None)
     assert await settle(pilot, lambda: app._connect_wait is None
                         and not isinstance(app.screen, NoticeScreen))
 
@@ -371,13 +372,14 @@ class TestUsingThePlan:
 
     @pytest.mark.asyncio
     async def test_the_header_says_so_and_manage_usage_opens_the_page(
-            self, providers_file):
+            self, providers_file, openai):
         """CG8 and CG19: OpenAI's words beside the model, and one fixed click
         action in Textual's header -- clicked here as a person would."""
         from textual.widgets._header import HeaderTitle
 
         app = _app()
         async with app.run_test(size=(160, 30)) as pilot:
+            await _signed_in(app, pilot, openai)
             opened = []
             app._transcript.open_url = opened.append
             app.provider_name, app.model = "CHATGPT", "gpt-6.1-sol"
@@ -423,6 +425,60 @@ class TestUsingThePlan:
 
 
 class TestDisconnecting:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("forget", [False, True], ids=["keep", "forget"])
+    async def test_signing_out_changes_the_header_through_restart_and_reconnect(
+            self, providers_file, openai, forget):
+        from tui.app import VenastineApp, _cmd_disconnect, _cmd_model
+        from tui.screens import ConfirmScreen
+
+        app = _app()
+        async with app.run_test(size=(160, 30)) as pilot:
+            await _signed_in(app, pilot, openai)
+            _cmd_model(app, "CHATGPT gpt-6.1-sol")
+            assert "Using ChatGPT plan" in app.sub_title
+            _cmd_disconnect(app, "chatgpt --forget" if forget else "chatgpt")
+            assert await settle(pilot, lambda: isinstance(app.screen,
+                                                          ConfirmScreen))
+            app.screen.dismiss(True)
+            assert await settle(pilot, lambda: "Signed out of the ChatGPT "
+                                "plan" in _text(app))
+            assert not chatgpt_auth.status().signed_in
+            assert app.sub_title == (
+                "CHATGPT | gpt-6.1-sol | Signed out | use /connect or add API key")
+            assert "Manage usage" not in app.format_title(
+                app.title, app.sub_title).plain
+
+        # A new App reads the remembered pair and the actual signed-out
+        # token file. Keeping the selected provider must not imply auth.
+        restarted = VenastineApp("ANTHROPIC", "test-model", {})
+        async with restarted.run_test(size=(160, 30)) as pilot:
+            assert restarted.provider_name == "CHATGPT"
+            assert restarted.sub_title == (
+                "CHATGPT | gpt-6.1-sol | Signed out | use /connect or add API key")
+            assert "Manage usage" not in restarted.format_title(
+                restarted.title, restarted.sub_title).plain
+            await _signed_in(restarted, pilot, openai, notice_due=forget)
+            assert restarted.sub_title == (
+                "CHATGPT | gpt-6.1-sol | Using ChatGPT plan")
+            assert "Manage usage" in restarted.format_title(
+                restarted.title, restarted.sub_title).plain
+
+    @pytest.mark.asyncio
+    async def test_identity_only_sign_in_does_not_claim_plan_usage(
+            self, providers_file, monkeypatch):
+        from tui.app import VenastineApp
+
+        monkeypatch.setattr(chatgpt_auth, "status", lambda: chatgpt_auth.Status(
+            signed_in=True, plan_usage=False, registered=True, expires_at=None))
+        connect.store_chatgpt_entry()
+        app = VenastineApp("CHATGPT", "gpt-6.1-sol", {})
+        async with app.run_test():
+            assert app.sub_title == (
+                "CHATGPT | gpt-6.1-sol | Plan access not granted | use /connect or add API key")
+            assert "Manage usage" not in app.format_title(
+                app.title, app.sub_title).plain
+
     @pytest.mark.asyncio
     async def test_nothing_connected_says_so(self, providers_file):
         from tui.app import _cmd_disconnect

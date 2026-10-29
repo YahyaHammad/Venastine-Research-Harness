@@ -920,6 +920,18 @@ gaining a member. ROADMAP_v3 §54 (AT7) is the other claimant: an `@` file
 mention is thread state and must not reach `pass_prompt()` either, which
 makes §19's K6 trap five instances deep.
 
+**`with_persona` is now built** (batch 203, ROADMAP_v3 §58 PR1–PR6).
+It names the effective pair in ordinary chat, active agents and spawned
+subagents, and stays out of internal compaction, pipeline review and
+research passes. The owner settled that feature's scope; the convergence
+question in this item remains open.
+
+**`with_file_mentions` is now built too** (batch 204, ROADMAP_v3 §54 AT6/AT7,
+AT9–AT13). It appends names from the current user turn to conversation prompts,
+including an active agent and wake continuation, without loading contents or
+changing `with_catalogs`. This adds the specified member; it does not settle
+the signature and conditionality convergence question.
+
 **Rechecked in the review marathon (batch 138), which found two errors in the
 issue that carries the other half of this family (#9).** The defect itself is
 real and unchanged -- `with_goal(prompt, memory)`, `with_todos(prompt,

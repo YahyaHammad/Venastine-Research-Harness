@@ -454,7 +454,8 @@ class TestTheOneShotPromptSpeaksForTheRun:
             side_effect=lambda **kw: (captured.update(kw),
                                       make_model_response(text="ok"))[1])
 
-        self._bare_app().run_one_shot(self._grill_agent(), "grill")
+        self._bare_app().run_one_shot(self._grill_agent(), "grill @fresh.txt")
+        assert '- "fresh.txt"' in captured["system_prompt"]
 
         authorization = captured.get("authorization")
         assert authorization is not None, \

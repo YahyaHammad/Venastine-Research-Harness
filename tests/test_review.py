@@ -999,6 +999,7 @@ class TestReviewHardening:
 
         assert "load_skill" not in captured["system_prompt"]
         assert "spawn_subagent" not in captured["system_prompt"]
+        assert "You are running in Venastine Research Harness" not in captured["system_prompt"]
 
 
 class TestTheReviewerInheritsTheRunsAuthorization:

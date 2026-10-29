@@ -65,13 +65,16 @@ from core.client import (
     api_initialization,
     effort_levels_for_model,
 )
+from core.file_mentions import FileIndex, active_mention
 from core.loop import (
     DEFAULT_PROVIDER,
     DEFAULT_SYSTEM_PROMPT,
     RunAgentLoop,
     advertisement_facts,
+    with_file_mentions,
     with_goal,
     with_memories,
+    with_persona,
     with_refs,
     with_todos,
 )
@@ -142,6 +145,10 @@ from tui.widgets import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class FileMentionsReady(Message):
+    """The background path snapshot has been replaced (§54)."""
 
 
 #: The two tools whose call the transcript shows as a diff (§41, X4).
@@ -1335,6 +1342,11 @@ class VenastineApp(App):
         # each other, and a PromptInput built bare (which the suite does)
         # keeps `suggest = None` and behaves exactly as it did in batch 54.
         prompt.suggest = self.query_one("#slash-suggest", SlashSuggest)
+        self._mention_index = FileIndex(config_loader.get_project_path())
+        self._mention_scan_running = False
+        prompt.file_completion = self._file_completion
+        self._refresh_mention_index()
+        self.set_interval(0.25, self._refresh_mention_index)
         prompt.focus()
         if self.effort and self._effort_named:
             # A persisted effort level was trusted as-is and sent on every
@@ -1734,7 +1746,15 @@ class VenastineApp(App):
         """
         pair = f"{self.provider_name} | {self.model}"
         if self.provider_name == "CHATGPT":
-            pair += f" | {_USING_PLAN}"
+            from core import chatgpt_auth
+
+            state = chatgpt_auth.status()
+            if not state.signed_in:
+                pair += " | Signed out | use /connect or add API key"
+            elif not state.plan_usage:
+                pair += " | Plan access not granted | use /connect or add API key"
+            else:
+                pair += f" | {_USING_PLAN}"
         self.sub_title = self._unconnected_hint() or pair
 
     def format_title(self, title: str, sub_title: str) -> Content:
@@ -2985,7 +3005,7 @@ class VenastineApp(App):
         pushes a screen clears `.value`, which posts one of these).
         """
         panel = event.prompt.suggest
-        self._change_suggestions(panel, lambda: panel.offer(event.matches))
+        self._change_suggestions(panel, lambda: panel.offer(event.matches, event.label))
 
     def on_prompt_input_suggestions_moved(
             self, event: PromptInput.SuggestionsMoved) -> None:
@@ -3064,6 +3084,35 @@ class VenastineApp(App):
 
     # -- the turn ------------------------------------------------------------
 
+    def _file_completion(self, text, cursor):
+        mention = active_mention(text, cursor)
+        if mention is None:
+            return None
+        typed = active_mention(text[:cursor], cursor)
+        matches, label = self._mention_index.matching(typed.path if typed else mention.path)
+        return mention, matches, label
+
+    def _refresh_mention_index(self) -> None:
+        # No filesystem work on this timer. Successful writes, including
+        # subagent writes, set the producer's dirty event (§54 AT2).
+        if self._mention_scan_running or not self._mention_index.dirty.is_set():
+            return
+        self._mention_scan_running = True
+
+        def work():
+            try:
+                self._mention_index.refresh()
+            finally:
+                self.post_message(FileMentionsReady())
+
+        self.run_worker(work, thread=True, exit_on_error=False, name="file-mentions")
+
+    def on_file_mentions_ready(self, event: FileMentionsReady) -> None:
+        self._mention_scan_running = False
+        prompt = self.screen_stack[0].query_one("#prompt", PromptInput)
+        if prompt._suggest_enabled:
+            prompt.refresh_suggestions()
+
     def run_agent_turn(self, user_input: str) -> None:
         self._busy = True
         self._transcript.write_user(user_input)
@@ -3099,18 +3148,20 @@ class VenastineApp(App):
         if self.active_agent is not None:
             agent = self.active_agent
             context = manager.active_context(agent)
-            base_prompt = manager.system_prompt_for(
-                agent, DEFAULT_SYSTEM_PROMPT, self.active_skills,
-                context=context)
             model = agent.model or self.model
             provider = agent.provider or self.provider_name
+            base_prompt = manager.system_prompt_for(
+                agent, with_persona(DEFAULT_SYSTEM_PROMPT, model, provider),
+                self.active_skills,
+                context=context)
             max_steps = agent.max_steps or config.MAX_ITERATIONS
         else:
             context = None
-            base_prompt = system_prompts.with_catalogs(
-                DEFAULT_SYSTEM_PROMPT, self.active_skills)
             model = self.model
             provider = self.provider_name
+            base_prompt = system_prompts.with_catalogs(
+                with_persona(DEFAULT_SYSTEM_PROMPT, model, provider),
+                self.active_skills)
             max_steps = config.MAX_ITERATIONS
         prompt = with_goal(base_prompt, self.memory)
         # §21b (M13). Only for a plain turn -- an active agent already got
@@ -3123,6 +3174,7 @@ class VenastineApp(App):
         prompt = with_refs(prompt, self.memory)
         # §23 slice 2. Unconditional too: a checklist is thread state.
         prompt = with_todos(prompt, self.memory)
+        prompt = with_file_mentions(prompt, self.memory)
         # §19 K1/K6: active skill bodies are pinned HERE, beside with_goal,
         # and deliberately NOT inside with_catalogs -- that function feeds
         # pass_prompt(), so pinning there would inject a skill activated in
@@ -3407,7 +3459,8 @@ class VenastineApp(App):
         callable_only, granted = advertisement_facts(
             response_channel=channel)
         base_prompt = manager.system_prompt_for(
-            agent, DEFAULT_SYSTEM_PROMPT, self.active_skills,
+            agent, with_persona(DEFAULT_SYSTEM_PROMPT, model, provider),
+            self.active_skills,
             callable_only=callable_only, granted=granted)
         # §18/§21c/§23. Unconditional, for with_refs' documented reason:
         # goal, references and checklist are thread state, not an agent's
@@ -3417,6 +3470,8 @@ class VenastineApp(App):
         prompt = with_goal(base_prompt, self.memory)
         prompt = with_refs(prompt, self.memory)
         prompt = with_todos(prompt, self.memory)
+        # continue_conversation writes this message later, on the worker.
+        prompt = with_file_mentions(prompt, self.memory, text=message)
         # K1 holds for one-shot turns too (review §19-20 f22 decision):
         # an activated skill governs the /grill-me turn in the same
         # thread, mirroring run_agent_turn's pinning.
@@ -8217,11 +8272,26 @@ def _finish_disconnect(app: "VenastineApp", message: DisconnectFinished) -> None
     app.refresh_status()
 
 
+def _cmd_mentions(app: VenastineApp, args: str) -> None:
+    if args and args not in ("ignored on", "ignored off"):
+        app._transcript.write_error("Usage: /mentions [ignored on|off]")
+        return
+    index = app._mention_index
+    if args:
+        index.show_ignored = args == "ignored on"
+    _, label = index.matching("")
+    app._transcript.write_system(
+        f"@ files: {label}. Project: {index.root or 'not initialized'}. "
+        "User-created files appear after restart; files created by write refresh automatically.")
+
+
 def register_builtin_commands() -> None:
     """Idempotent — registering by name overwrites, so a re-import or a
     second app instance in the test suite does not duplicate entries."""
     for command in (
         SlashCommand("help", "list commands", _cmd_help),
+        SlashCommand("mentions", "show file mention status or include ignored paths",
+                     _cmd_mentions, "[ignored on|off]"),
         SlashCommand("theme", "switch colour theme", _cmd_theme, "[name]"),
         SlashCommand("effort", "switch reasoning effort", _cmd_effort, "[level|auto]"),
         SlashCommand("thinking", "show or hide reasoning inline",

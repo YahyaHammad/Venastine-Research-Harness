@@ -136,8 +136,10 @@ class TestTheTransport:
                 KEY_PASS.encode() + b"\n"
             assert _speak(port, token, REAL_KBDINT_PROMPT) == \
                 LOGIN_PASS.encode() + b"\n"
-            assert live.served == [askpass.KEY_PASSPHRASE, askpass.LOGIN]
-            assert live.refusal == ""
+        # Receiving a reply does not join the listener: successful sends
+        # are recorded afterward. Context exit joins it before inspection.
+        assert live.served == [askpass.KEY_PASSPHRASE, askpass.LOGIN]
+        assert live.refusal == ""
         assert secrets.is_unlocked()
 
     def test_more_than_one_prompt_per_connection_is_normal(self, answers):

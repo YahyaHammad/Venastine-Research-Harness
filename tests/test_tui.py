@@ -2323,22 +2323,31 @@ class TestTheWindowAndTheTrigger:
         _mocked_loop.patch("core.loop.registry.approval_needed", return_value=False)
         stream = _mocked_loop.patch(
             "core.loop.call_model_stream",
-            side_effect=make_stream_sequence(make_model_response(text="hi")),
+            side_effect=make_stream_sequence(make_model_response(text="hi"),
+                                             make_model_response(text="hello")),
         )
 
         app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
         async with app.run_test() as pilot:
+            app.query_one("#prompt").value = "hello"
+            await pilot.press("enter")
+            assert await settle(pilot, lambda: stream.called and not app._busy)
             app.query_one("#prompt").value = "/model OPENAI gpt-4o"
             await pilot.press("enter")
             await pilot.pause()
 
             app.query_one("#prompt").value = "hello"
             await pilot.press("enter")
-            assert await settle(pilot, lambda: stream.called)
+            assert await settle(pilot, lambda: stream.call_count == 2
+                                and not app._busy)
 
         # call_model_stream(client, provider, model, messages, system, tools, ...)
         assert stream.call_args[0][1] == "OPENAI"
         assert stream.call_args[0][2] == "gpt-4o"
+        assert "Your current model is claude-sonnet-5 from ANTHROPIC." in (
+            stream.call_args_list[0][0][4])
+        assert "Your current model is gpt-4o from OPENAI." in stream.call_args[0][4]
+        assert "Your current model is claude-sonnet-5" not in stream.call_args[0][4]
 
 
 # ---------------------------------------------------------------------------
@@ -2598,6 +2607,8 @@ class TestThreadStateAndInputHandling:
                 "/grill-me never ran"
 
         assert continue_conv.call_args.kwargs["thread_id"] == expected
+        assert "Your current model is test-model from ANTHROPIC." in (
+            continue_conv.call_args.kwargs["system_prompt"])
 
 
     @pytest.mark.asyncio
@@ -2908,11 +2919,13 @@ class TestAnActiveAgentStillGetsItsTiers:
         mocker.patch("tui.app.with_todos", side_effect=_spy("with_todos"))
 
         agent = AgentDef(
-            name="sec", description="d", model=None, provider=None,
+            name="sec", description="d", model="agent-model", provider="OPENAI",
             allowed_tools=None, approval_overrides={},
             use_project_context=False, use_memory=False, max_steps=None,
             body="BODY", tier="harness", path="/sec.md")
 
+        stream = mocker.patch("core.loop.call_model_stream", side_effect=
+                              make_stream_sequence(make_model_response(text="ok")))
         app = VenastineApp("ANTHROPIC", "test-model", {})
         async with app.run_test() as pilot:
             app.active_agent = agent
@@ -2926,6 +2939,11 @@ class TestAnActiveAgentStillGetsItsTiers:
             "an active agent lost its references (M19)"
         assert counts["todos"] >= 1, \
             "an active agent lost its checklist"
+        assert stream.call_args[0][1:3] == ("OPENAI", "agent-model")
+        prompt = stream.call_args[0][4]
+        assert "BODY" in prompt
+        assert prompt.count("Your current model is agent-model from OPENAI.") == 1
+        assert "Your current model is test-model" not in prompt
 
 
     @pytest.mark.asyncio

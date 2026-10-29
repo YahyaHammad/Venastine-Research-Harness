@@ -162,6 +162,8 @@ def test_ac2_spawn_builds_child_context_and_inherits_run(_roots, mocker,
     assert captured["effort"] == "high"
     # The agent's body is in the system prompt, not the task message.
     assert "Agent body." in captured["system_prompt"]
+    assert captured["system_prompt"].count("Your current model is ") == 1
+    assert "Your current model is parent-model from OPENAI." in captured["system_prompt"]
 
 
 # ---------------------------------------------------------------------------
@@ -846,6 +848,8 @@ def test_an_agents_declared_model_beats_the_parent_runs(_roots, mocker,
 
     assert captured["model"] == "agent-model"
     assert captured["provider_name"] == "GOOGLE"
+    assert "Your current model is agent-model from GOOGLE." in captured["system_prompt"]
+    assert "parent-model" not in captured["system_prompt"]
 
 
 def test_spawn_forwards_the_channel_and_the_grant(_roots, _mcp_tool, mocker,
@@ -1206,6 +1210,7 @@ def test_run_agent_conversation_forwards_system_prompt_to_the_loop(mocker):
         user_goal="t", model="m", system_prompt="CUSTOM AGENT PROMPT")
 
     assert "CUSTOM AGENT PROMPT" in captured["prompt"]
+    assert "You are running in Venastine Research Harness" not in captured["prompt"]
 
 
 def test_run_agent_conversation_defaults_to_the_catalog_prompt(mocker):
@@ -1222,7 +1227,13 @@ def test_run_agent_conversation_defaults_to_the_catalog_prompt(mocker):
     RunAgentLoop.run_agent_conversation(user_goal="t", model="m")
 
     assert "CUSTOM" not in captured["prompt"]
-    assert captured["prompt"]
+    assert "a separate multi-pass research mode" in captured["prompt"]
+    assert captured["prompt"].count("Your current model is m from ANTHROPIC.") == 1
+
+    RunAgentLoop.run_agent_conversation(
+        user_goal="t", model="other-model", provider_name="OPENAI")
+    assert "Your current model is other-model from OPENAI." in captured["prompt"]
+    assert "Your current model is m from ANTHROPIC." not in captured["prompt"]
 
 
 # ===========================================================================

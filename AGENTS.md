@@ -60,7 +60,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 8381 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
+pytest                                            # 8418 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -319,7 +319,7 @@ made the move free: no import changed, and `tests/test_docs_consistency.py` is t
 opens any of these files (its `DOCS` constant is where the path now comes from).
 
 - **docs/ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49–§52, §55, §61, §62, §63, §64, §65, §66, §67, §68, §69, §70, §71, §72, §73, §74, §75, §76, §77, §78, §79, §80, §81 and §82 built; §53, §54 and §56–§60 recorded from the owner's requests in batches 122 and 123, specified and not yet designed; §79 designed with the owner in batch 163 and built in seven slices through batch 169; §83 decided with the owner in batch 180, measured in batches 181-183, its sign-in slice built in batch 184, and its Responses slice planned in batch 186, measured in batch 187, built in batch 188 and checked live in batch 189) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A78 from §32 (A16 in ROADMAP_v3 §62, A17, A18 and A19 in §63, A20 and A21 in §64, A22, A23 and A24 in §65, A25, A26 and A27 in §66, A28, A29, A30, A31, A32 and A33 in §67, A34, A35, A36, A37, A38 and A39 in §68, A40, A41, A42, A43, A44 and A45 in §69, A46, A47, A48 and A49 in §70, A50, A51, A52 and A53 in §71, A54, A55, A56 and A57 in §72, A58, A59, A60, A61 and A62 in §73, A63, A64 and A65 in §74, A66 and A67 in §75, A68, A69, A70, A71, A72, A73, A74, A75 and A76 in §76, A77 in §77, A78 in §78), W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 SS1–SS72 from §49, NW1–NW5 from §50, PG1–PG9 from §51, RB1–RB7 from §52, IO1–IO7 from §53, AT1–AT8 from §54, TR1–TR15 from §55, JV1–JV10 from §56, SM1–SM4 from §57, PR1–PR5 from §58 UI1–UI4 from §59, UH1–UH12 from §60, CN1–CN12 from §61, HD1–HD13 from §79, LY1–LY3 from §80, IM1–IM10 from §81, GS1–GS4 from §82 and CG1–CG24 from §83). Section and D-numbers are stable and cross-referenced everywhere.
+- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49–§52, §54, §55, §58, §61, §62, §63, §64, §65, §66, §67, §68, §69, §70, §71, §72, §73, §74, §75, §76, §77, §78, §79, §80, §81 and §82 built; §53, §56, §57, §59 and §60 recorded from the owner's requests in batches 122 and 123, specified and not yet designed; §79 designed with the owner in batch 163 and built in seven slices through batch 169; §83 decided with the owner in batch 180, measured in batches 181-183, its sign-in slice built in batch 184, and its Responses slice planned in batch 186, measured in batch 187, built in batch 188, checked live in batch 189 and completed in batch 203; §58 built in batch 203; §54 built in batch 204) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A78 from §32 (A16 in ROADMAP_v3 §62, A17, A18 and A19 in §63, A20 and A21 in §64, A22, A23 and A24 in §65, A25, A26 and A27 in §66, A28, A29, A30, A31, A32 and A33 in §67, A34, A35, A36, A37, A38 and A39 in §68, A40, A41, A42, A43, A44 and A45 in §69, A46, A47, A48 and A49 in §70, A50, A51, A52 and A53 in §71, A54, A55, A56 and A57 in §72, A58, A59, A60, A61 and A62 in §73, A63, A64 and A65 in §74, A66 and A67 in §75, A68, A69, A70, A71, A72, A73, A74, A75 and A76 in §76, A77 in §77, A78 in §78), W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 SS1–SS72 from §49, NW1–NW5 from §50, PG1–PG9 from §51, RB1–RB7 from §52, IO1–IO7 from §53, AT1–AT13 from §54, TR1–TR15 from §55, JV1–JV10 from §56, SM1–SM4 from §57, PR1–PR6 from §58 UI1–UI4 from §59, UH1–UH12 from §60, CN1–CN12 from §61, HD1–HD13 from §79, LY1–LY3 from §80, IM1–IM10 from §81, GS1–GS4 from §82 and CG1–CG24 from §83). Section and D-numbers are stable and cross-referenced everywhere.
 
 **Six namespaces use the same `LETTER+NUMBER` shape, and only the first is the
 record.** An id that resolves to two places is a cross-reference that fails
@@ -3233,6 +3233,32 @@ Load-bearing: untrusted project content is **absent**, not loaded-and-disabled. 
 **A symlinked PROJECT tier root is treated as absent (#18).** `os.walk` follows the path handed to it as `top` but not symlinked subdirectories, and the two sides of the trust boundary start from different places: `workspace_trust` walks from `.venastine`, so `skills/` is a subdirectory it will not descend, while `_md_files` walks from `.venastine/skills`, so it *is* the top and gets followed. Directory names never enter the hash either, so the link contributed nothing — not even its own name. Behind it, definitions loaded as project tier while being absent from the trust prompt's listing **and** from the hash, so their bodies could be rewritten freely after one grant with `is_trusted()` still returning `True`. The payload is instructions, not data: a project-tier body becomes system-prompt content. Git stores symlinks natively, so this arrives on clone — D17's own stated threat. The guard is scoped to the **project** tier deliberately; nothing hashes the harness or user directories, and symlinking `~/.config/venastine/` into a dotfiles repo is legitimate. The invariant to keep however this is later refined: **the loader must read no file the trust listing omits** (`test_workspace_trust.py`).
 
 Progressive disclosure: system prompts list skills as name + one-line description only; full bodies enter context solely via the `load_skill` tool result. Assembly lives in one place — `prompts/system_prompts.py`'s `with_skill_catalog()` / `pass_prompt()` — so the catalog can't diverge between an attempt and its JSON retry.
+
+**Chat identity follows the live model** (ROADMAP_v3 §58, PR1–PR6, batch 203).
+`core.loop.with_persona` supplies the same short paragraph to ordinary chat,
+active agents and spawned subagents after their model/provider overrides
+resolve. Default CLI turns and wakes compose it in `_conversation_prompt`;
+agent prompts are supplied already composed. The TUI composes it for chat
+and one-shot turns. Keep it out of `with_catalogs`, research passes, the
+internal compactor and the pipeline reviewer. Their task prompts stay their
+own, and the current model must never be frozen into an import-time string.
+
+**The ChatGPT header reports access, not just selection** (§83 CG19, batch 203).
+A remembered CHATGPT pair may be signed out. `refresh_status` reads
+`chatgpt_auth.status()` and shows `Signed out | use /connect or add API key`, or
+`Plan access not granted | use /connect or add API key`, until both sign-in and plan
+access exist. Only then does the header offer Using ChatGPT plan and Manage
+usage. Disconnect, reconnect and startup already share that refresh.
+
+**File mentions browse the project** (ROADMAP_v3 §54 AT1–AT13, batch 204).
+`core/file_mentions.py` owns cached names and parsing. `PromptInput` receives a callback that
+does no I/O; it reuses `SlashSuggest` and replaces only the mention at the cursor. Startup and
+successful `write` creation refresh in a worker. No watcher, per-key scan, or rescan on overwrite.
+`/mentions ignored on|off` changes only this session's cached view. Git is optional; fallback
+skips and partial indexes are disclosed. The project root comes from `config_loader`, which can
+differ from the file-tool workspace. `with_file_mentions` states that root and the latest user's
+names without reading contents or granting access; keep it beside the conversation tiers,
+outside `with_catalogs`, so research passes and internal tasks do not inherit it.
 
 ## Conventions
 

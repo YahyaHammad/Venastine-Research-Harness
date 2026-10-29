@@ -234,6 +234,7 @@ def run(params: dict, parent_context=None, parent_run=None,
         DEFAULT_PROVIDER,
         DEFAULT_SYSTEM_PROMPT,
         RunAgentLoop,
+        with_persona,
     )
 
     parent = parent_context or ToolContext()
@@ -319,7 +320,8 @@ def run(params: dict, parent_context=None, parent_run=None,
         # catalogs must be decided by what IT can call -- the same
         # values handed to run_agent_conversation below.
         system_prompt=manager.system_prompt_for(
-            agent, DEFAULT_SYSTEM_PROMPT, context=child,
+            agent, with_persona(DEFAULT_SYSTEM_PROMPT, model, provider),
+            context=child,
             callable_only=response_channel is None,
             granted=granted),
         response_channel=response_channel,
