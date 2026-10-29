@@ -72,6 +72,7 @@ from core.loop import (
     advertisement_facts,
     with_goal,
     with_memories,
+    with_persona,
     with_refs,
     with_todos,
 )
@@ -1734,7 +1735,15 @@ class VenastineApp(App):
         """
         pair = f"{self.provider_name} | {self.model}"
         if self.provider_name == "CHATGPT":
-            pair += f" | {_USING_PLAN}"
+            from core import chatgpt_auth
+
+            state = chatgpt_auth.status()
+            if not state.signed_in:
+                pair += " | Signed out | use /connect or add API key"
+            elif not state.plan_usage:
+                pair += " | Plan access not granted | use /connect or add API key"
+            else:
+                pair += f" | {_USING_PLAN}"
         self.sub_title = self._unconnected_hint() or pair
 
     def format_title(self, title: str, sub_title: str) -> Content:
@@ -3099,18 +3108,20 @@ class VenastineApp(App):
         if self.active_agent is not None:
             agent = self.active_agent
             context = manager.active_context(agent)
-            base_prompt = manager.system_prompt_for(
-                agent, DEFAULT_SYSTEM_PROMPT, self.active_skills,
-                context=context)
             model = agent.model or self.model
             provider = agent.provider or self.provider_name
+            base_prompt = manager.system_prompt_for(
+                agent, with_persona(DEFAULT_SYSTEM_PROMPT, model, provider),
+                self.active_skills,
+                context=context)
             max_steps = agent.max_steps or config.MAX_ITERATIONS
         else:
             context = None
-            base_prompt = system_prompts.with_catalogs(
-                DEFAULT_SYSTEM_PROMPT, self.active_skills)
             model = self.model
             provider = self.provider_name
+            base_prompt = system_prompts.with_catalogs(
+                with_persona(DEFAULT_SYSTEM_PROMPT, model, provider),
+                self.active_skills)
             max_steps = config.MAX_ITERATIONS
         prompt = with_goal(base_prompt, self.memory)
         # §21b (M13). Only for a plain turn -- an active agent already got
@@ -3407,7 +3418,8 @@ class VenastineApp(App):
         callable_only, granted = advertisement_facts(
             response_channel=channel)
         base_prompt = manager.system_prompt_for(
-            agent, DEFAULT_SYSTEM_PROMPT, self.active_skills,
+            agent, with_persona(DEFAULT_SYSTEM_PROMPT, model, provider),
+            self.active_skills,
             callable_only=callable_only, granted=granted)
         # §18/§21c/§23. Unconditional, for with_refs' documented reason:
         # goal, references and checklist are thread state, not an agent's

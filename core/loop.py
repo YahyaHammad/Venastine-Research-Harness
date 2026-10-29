@@ -126,6 +126,19 @@ def with_goal(system_prompt: str, memory: ConversationMemory) -> str:
     return f"{system_prompt}\n\n## Persistent objective\n{goal}"
 
 
+def with_persona(system_prompt: str, model: str, provider_name: str) -> str:
+    """Append the live chat identity (ROADMAP_v3 §58, PR1-PR4).
+
+    Callers resolve agent overrides first. Kept outside with_catalogs so
+    research passes, the compactor and the reviewer retain their own
+    task-specific prompts.
+    """
+    return (
+        f"{system_prompt}\n\nYou are running in Venastine Research Harness, "
+        "a tool-using assistant with a separate multi-pass research mode. "
+        f"Your current model is {model} from {provider_name}.")
+
+
 def with_todos(system_prompt: str, memory: ConversationMemory) -> str:
     """Append §23's todo list to a prompt. No-op when the thread has none.
 
@@ -2038,7 +2051,8 @@ class RunAgentLoop:
         # ROADMAP_v3 §49: shared with wake_conversation, so a turn a
         # background session starts runs under the same prompt tiers.
         prompt = RunAgentLoop._conversation_prompt(
-            memory, system_prompt, authorization=authorization,
+            memory, system_prompt, model=model, provider_name=provider_name,
+            authorization=authorization,
             response_channel=response_channel, granted_tools=granted_tools)
         auth_kwargs = (
             _authorization_kwargs(authorization) if authorization is not None
@@ -2226,7 +2240,8 @@ class RunAgentLoop:
         return response
 
     @staticmethod
-    def _conversation_prompt(memory, system_prompt, *, authorization=None,
+    def _conversation_prompt(memory, system_prompt, *, model, provider_name,
+                             authorization=None,
                              response_channel=None, granted_tools=None) -> str:
         """The system prompt a conversation turn runs under -- ONE copy, for a
         turn the user started and a turn a background session's result
@@ -2243,7 +2258,8 @@ class RunAgentLoop:
             system_prompt
             if system_prompt is not None
             else system_prompts.with_catalogs(
-                DEFAULT_SYSTEM_PROMPT, callable_only=_callable_only,
+                with_persona(DEFAULT_SYSTEM_PROMPT, model, provider_name),
+                callable_only=_callable_only,
                 granted=_granted),
             memory,
         )
@@ -2315,7 +2331,8 @@ class RunAgentLoop:
         agent_activity.bind(activity, memory.thread_id)
         memory.add_harness_message(text, harness)
         prompt = RunAgentLoop._conversation_prompt(
-            memory, system_prompt, authorization=authorization,
+            memory, system_prompt, model=model, provider_name=provider_name,
+            authorization=authorization,
             response_channel=response_channel, granted_tools=granted_tools)
         auth_kwargs = (
             _authorization_kwargs(authorization) if authorization is not None

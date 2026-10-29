@@ -545,7 +545,7 @@ def test_compaction_records_a_checkpoint_and_rebuilds_the_view(
         fake_storage, summaries):
     memory = ConversationMemory()
     _thread(memory)
-    summaries("A short summary.")
+    calls = summaries("A short summary.")
     before = len(memory.messages)
 
     notice = compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC",
@@ -555,6 +555,7 @@ def test_compaction_records_a_checkpoint_and_rebuilds_the_view(
     assert fake_storage.latest_checkpoint(memory.thread_id)["strategy"] == "rederive"
     assert len(memory.messages) < before
     assert memory.messages[0]["content"].endswith("A short summary.")
+    assert "You are running in Venastine Research Harness" not in calls[0]["system_prompt"]
 
 
 def test_the_archive_is_untouched_by_repeated_compaction(

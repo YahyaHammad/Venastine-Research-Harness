@@ -39,11 +39,11 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§55. The whole command, and what it printed** — **(BUILT in batch 125)** (a shell call shows a 140-character digest and its output is never rendered at all, so what the agent ran and what came back are both off screen)
 - **§56. A decision model as the shell classifier** — **(NOT BUILT: requested batch 122, specified, not designed)** (the gate decides from a word list and a token scan, so every judgement it cannot express as a rule costs an approval prompt, and the rules cannot be tuned per user)
 - **§57. One model for the subagents** — **(NOT BUILT: requested batch 122, specified, not designed)** (an agent definition can pin a model and nothing can set one for the subagents as a class, so a cheap child runs on the parent's expensive model)
-- **§58. Who the agent is when you ask it** — **(NOT BUILT: requested batch 122, specified, not designed)** (the chat system prompt is "You are a helpful assistant.", so the model knows nothing about the harness it is running in)
+- **§58. Who the agent is when you ask it** — **(BUILT in batch 203)** (a short harness identity composed at turn time for ordinary chat, active agents and spawned subagents, naming their effective model/provider; internal compaction, review and research prompts stay task-specific; PR1–PR6)
 - **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
-- **§83. A ChatGPT plan, spent in a local install** - **(IN PROGRESS: decided with the owner in batch 180; slice 0, the measurement, complete across batches 181-183; slice 1, the sign-in and `/disconnect`, BUILT in batch 184 and checked live by the owner in batch 185; slice 2 planned in batch 186, measured in batch 187 and BUILT in batch 188 (CG17-CG24), and checked live by the owner in batch 189 with two of its steps unreported)** (OpenAI's Sign in with ChatGPT now invites open-source apps that run locally to spend a Plus or Pro subscriber's plan, the first provider since ModelScope to pass HD5's test; the harness has no Responses API path, no loopback listener, no credential that refreshes itself, and no way to sign out of anything)
+- **§83. A ChatGPT plan, spent in a local install** — **(COMPLETE: measurement in batches 181–183 and 187; sign-in BUILT in batch 184; Responses BUILT in batch 188 and checked live in batch 189; final owner checks and the signed-out header fixed in batch 203)** (a local install can sign in, refresh, use the plan and disconnect; the header distinguishes a selected CHATGPT provider from signed-in plan access)
 - **§82. Gemini 3's thought signatures, and a pin that could not carry them** - **(BUILT in batch 172)** (every model a new Google account can call is Gemini 3, which refuses a function call replayed without the signature it came with, and google-genai 1.0.0 had no field to hold one, so every GOOGLE tool loop failed on its second request. The pin moves to 2.29.0, each call's signature rides in §44's reasoning record, a turn another model wrote gets Google's placeholder, and the Schema keys sent are a verified list since 2.29.0's Vertex-only `additional_properties` was refused. Google effort is on as a consequence)
 - **§81. An image a tool reads, delivered to a model that can see it** - **(BUILT in batch 171; Google added in batch 173)** (nothing a model could read from the workspace reached it as anything but text: a tool result was `str(result)`, `read` decoded bytes with `errors="replace"`, and MCP dropped image blocks by decision. `view_image` attaches an image to its own result through the memory, into a new column, never through the redactor; Anthropic carries it inside the `tool_result`, the OpenAI-compatible wire in a harness message after the tool batch because its tool messages take text only, and since batch 173 Google in a harness turn after the batch too, because its function responses take no image on the models a new account can call (a GIF stays a note there); opt-in per provider with `accepts_images`, never in a research pass, and counted at a fixed weight by the compactor)
 - **§80. The copyright year, kept by a workflow** - **(BUILT in batch 169)** (the owner asked not to have to remember it: LICENSE's appendix and NOTICE both said `Copyright 2026`, and nothing would move either; a workflow at 23:59 UTC on December 31, and again on January 1 in case GitHub delayed or dropped that run, writes a range from the first year to both files together; LY1-LY3)
@@ -1320,7 +1320,7 @@ happens when a provider is down.
 is in -- name, purpose, that a research mode exists, and which model is underneath -- without being
 told to deny or conceal what it actually is, and without bloating the system prompt.
 
-### What the code does today
+### What was measured before implementation (batch 122)
 
 - **The chat system prompt is one sentence.** `DEFAULT_SYSTEM_PROMPT` (`core/loop.py:81`) is
   literally `"You are a helpful assistant."` plus the shared untrusted-content paragraph. §32's A8
@@ -1343,14 +1343,41 @@ told to deny or conceal what it actually is, and without bloating the system pro
 | **PR3** | **A few sentences, and leanness beats completeness.** The owner's rule: better to miss a detail than to grow the system prompt. The token cost is measured against a real turn before the wording is fixed, not estimated |
 | **PR4** | **It does not tell the model to deny or conceal its underlying identity.** The owner's rule, and it is also the right one: an instruction to misdescribe itself is the one thing in a persona that a user discovering it would read as deception, and the underlying model's name is already in the sidebar and the status line |
 | **PR5** | **`with_persona` is the FIFTH `with_*`,** and TECHNICAL_DEBT 19 -- the unresolved question of whether the convergence counts four tiers or five -- moves with it rather than gaining a sixth member in silence |
+| **PR6** | **The owner approved the wording and scope in batch 203.** Ordinary chat, active agents and spawned subagents receive: "You are running in Venastine Research Harness, a tool-using assistant with a separate multi-pass research mode. Your current model is {model} from {provider}." Agent bodies follow it. Internal compaction, pipeline review and research passes retain their own task prompts. Declined: ordinary chat alone; and adding it to the internal compactor/reviewer too |
 
-### What must be settled before this is built
+### Questions recorded before implementation (settled in batch 203 below)
 
 - The exact wording, and its measured token cost on a real turn.
 - Whether an agent with its own body gets it too. `system_prompt_for` already appends
   `## Agent: <name>` plus the body, which is an identity of its own.
 - Whether the compactor and the reviewer get it. They are chat-shaped runs that nobody converses
   with.
+
+### Built and measured (batch 203, 2026-10-29)
+
+`core.loop.with_persona` owns one paragraph. The CLI's default chat and
+wake prompts compose it at turn time; agent-built prompts already carry it,
+so the loop does not duplicate it. TUI chat resolves agent overrides before
+assembly, one-shot chat uses the pair it actually sends, and a spawned
+subagent uses its own effective pair. Compaction, pipeline review and all
+ten research passes retain their task-specific prompts. No persona is
+baked into `DEFAULT_SYSTEM_PROMPT` or added to `with_catalogs`.
+
+The wording was measured on the real model-switching TUI test's two system
+prompts, with the model response stubbed and local `tiktoken 0.12.0` using
+`o200k_base`: 125 → 164 tokens for ANTHROPIC / claude-sonnet-5 (+39), and
+125 → 161 for OPENAI / gpt-4o (+36). The added paragraphs including their
+separator are 167 and 155 characters. This measures that tokenizer on the
+actual assembled prompts, not the providers' billed token counts. The
+measurement dependency stays outside the repository and distribution.
+
+Regression assertions cover a model/provider switch, an active agent's pin,
+a spawned agent's pin and inherited pair, a plain wake and a one-shot chat,
+plus absence from internal compactor/reviewer prompts. TECHNICAL_DEBT 19's
+broader prompt-tier convergence remains open; this implementation adds the
+member PR5 already recorded, without deciding that separate design.
+
+**§58 is complete.**
 
 ---
 
@@ -2736,7 +2763,7 @@ leaked PID.
 
 ## §83. A ChatGPT plan, spent in a local install
 
-**Decided with the owner on 2026-10-26, in batch 180; not built.** The owner
+**Decided with the owner on 2026-10-26, in batch 180; BUILT across batches 184 and 188, and COMPLETE in batch 203.** The owner
 asked whether any other major provider now passes HD5's test -- its own
 documentation invites a third-party app to sign its users in -- and one does,
 for local installs only. OpenAI's Sign in with ChatGPT (DevDay, October 2026)
@@ -3229,7 +3256,7 @@ symbolic_math parameter, with `null` wherever a parameter has no default.
 symbolic_math accepted it. Whether every tool's parameter model accepts
 `null` for an optional field was not checked.
 
-**Not reported, so not recorded as checked:** what Manage usage opened, and
+**Not reported in batch 189:** what Manage usage opened, and
 `/disconnect chatgpt` followed by a message. The screenshot ends before
 them.
 
@@ -3262,6 +3289,29 @@ its own parameter model, with no tool run:
   string or any other wrong value is still refused, never coerced.
 
 MCP tools' schemas belong to their servers and were not checked.
+
+### Final owner checks and the header (batch 203, 2026-10-29)
+
+The owner confirmed the two unreported live steps: Manage usage opens the
+usage tab for the logged-in user in their browser, and a message after
+`/disconnect chatgpt` correctly errors because the plan is signed out.
+The owner's screenshot also showed Using ChatGPT plan after disconnect,
+and they reported the same label after restarting.
+
+Verified against production code before the fix: `refresh_status` added the
+label solely when the selected provider was CHATGPT. Disconnect already
+called that refresh and kept the remembered model; startup called it too.
+Neither path consulted the token file. Three regressions failed on the old
+code: both disconnect forms and a sign-in with no plan access.
+
+`refresh_status` now reads `chatgpt_auth.status()`: signed out shows
+`Signed out | use /connect or add API key`; a sign-in without plan scope shows
+`Plan access not granted | use /connect or add API key`. Only signed-in plan access
+gets Using ChatGPT plan and its Manage usage link. The real sign-in and
+sign-out path, with only OpenAI's transport faked, is checked through
+restart and reconnect with and without `--forget`.
+
+**§83 is complete.**
 
 ### What §83 deliberately does not change
 
@@ -3299,7 +3349,7 @@ transport; the harness speaks HTTP to every provider and keeps doing so.
 | **CG16** | **PyJWT is declared, `>=2.10.1,<3`; the owner's choice.** It checks the ID token (CG6) and was already in the hard closure through mcp, so declaring it adds nothing to an install and stops the check depending on mcp happening to pull it in. Declined: an RS256 check written here on `cryptography` |
 | **CG17** | **Slice 2 measures before it translates; the owner's choice.** A third probe run on the owner's account (slice 2a) sends what a conversation's second turn sends -- an earlier reply, the harness's own calls without item ids and with other providers' call ids, a reasoning item handed back, the registry's real schemas -- through the transport slice 2b uses, and its answers are written here before the translation is. CG7's rule, applied to the shapes slice 0 did not send. Declined: building on the documented shapes and letting the live check find what breaks |
 | **CG18** | **Reasoning goes back to the model that wrote it, and its summary is shown; the owner's choice.** A response's reasoning items are kept in §44's record (`ModelResponse.thinking`) as the SDK parsed them, and handed back unchanged, ahead of that turn's text and calls, when the record's provider and model are the ones being called; a switch drops them, §44's pair rule. `reasoning.summary` is requested, and its deltas stream as thinking the way every other provider's do (§38). Each half ships only if slice 2a shows the route accepts it. Declined: handing reasoning back without showing a summary; and dropping it, as OPENAI's Chat Completions path does |
-| **CG19** | **The header carries the indicator and the link; the owner's choice.** While CHATGPT is the provider the header reads `CHATGPT \| <model> \| Using ChatGPT plan · Manage usage`, and Manage usage is a click. Textual's header cannot hold a URL, so the app overrides `App.format_title` and the words carry one fixed action, `app.manage_usage`, which opens `chatgpt_auth.USAGE_URL` the way the transcript opens a link. The action is a constant: nothing a model or a provider sends reaches it. Declined: a line above the prompt, where OpenAI's guidelines place it; and the words alone, with a `/usage` command |
+| **CG19** | **The header carries the indicator and the link; the owner's choice.** While CHATGPT is the provider the header reads `CHATGPT \| <model> \| Using ChatGPT plan · Manage usage`, and Manage usage is a click. Textual's header cannot hold a URL, so the app overrides `App.format_title` and the words carry one fixed action, `app.manage_usage`, which opens `chatgpt_auth.USAGE_URL` the way the transcript opens a link. The action is a constant: nothing a model or a provider sends reaches it. Declined: a line above the prompt, where OpenAI's guidelines place it; and the words alone, with a `/usage` command **Amended in batch 203**, from the owner's live check: the label and link require both a sign-in and plan access from the token store. A selected but signed-out CHATGPT provider says Signed out with use /connect or add API key; a sign-in without plan scope names the missing access. Disconnect, reconnect and startup share that status producer |
 | **CG20** | **CHATGPT gets a keyless `providers.json` entry; the owner's choice.** A completed sign-in writes `API_URL` `https://api.openai.com/v1`, an empty `API_KEY`, `is_v1_compatible: false` and `supports_stream_usage: true`, so `/model`, the launch restore and the per-provider flags read it as they read every other entry, and CG7's `accepts_images` has a place to be set on a measurement. `/disconnect chatgpt` keeps it, as CG13 keeps a key's entry, and signs out; `/model CHATGPT` while signed out says to run `/connect chatgpt`. CG11's refusal is lifted when slice 2b lands. Declined: constants in code, with a CHATGPT case at each reader |
 | **CG21** | **The openai SDK carries the requests; the owner's choice.** `client.responses.create(stream=True)` on the pinned openai 2.45.0, with `api_key=chatgpt_auth.access_token` -- a callable the SDK calls before every request, so the hourly refresh rides on it -- and `max_retries=0`, so CG10 decides every retry and the SDK decides none. `test_sdk_conformance.py` pins what this rests on. Declined: httpx by hand, the probe's transport, which would add an SSE reader and a second error vocabulary for `core/provider_errors.py` |
 | **CG22** | **Effort levels are the model list's, filtered to the route's vocabulary; the owner's choice.** `/effort` on CHATGPT offers the levels `/v1/models` lists for the model that the route's own vocabulary contains: none, minimal, low, medium, high, xhigh and max, from slice 0's `invalid_value` refusal. For `gpt-6.1-sol` that is low to max, which is what was measured, and `ultra`, listed and refused, drops out. Slice 2a checks the rule on every listed model. Declined: a table of measured models only |

@@ -133,6 +133,26 @@ class TestTheTranscriptOpensANewTurn:
 
 class TestAWakeTurnRunsLikeTheRunItContinues:
 
+    def test_a_plain_wake_uses_its_current_model_identity(self, mocker,
+                                                       fake_storage):
+        from core.events import LoopEvent
+        from core.loop import RunAgentLoop
+        from core.memory import ConversationMemory
+        from tests.conftest import make_model_response
+
+        memory = ConversationMemory()
+        captured = []
+
+        def run(mem, prompt, *args, **kwargs):
+            captured.append(prompt)
+            yield LoopEvent(final_response=make_model_response(text="ok"),
+                            stop_reason="complete")
+
+        mocker.patch.object(RunAgentLoop, "_run", side_effect=run)
+        RunAgentLoop.wake_conversation(memory.thread_id, TEXT, WAKE,
+                                       model="wake-model", provider_name="OPENAI")
+        assert captured[0].count("Your current model is wake-model from OPENAI.") == 1
+
     def test_wake_conversation_writes_the_row_then_runs_the_loop(
             self, mocker, fake_storage):
         """The row is the thread's last message before the loop starts, the

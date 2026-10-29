@@ -28118,3 +28118,75 @@ subprocess imports; each now has a rationale matching its explicit argv-only
 calls. The changed modules pass Bandit, and the repository count gate reports
 no increase in its 62 baselined pairs. Gitleaks found no leaks on an export of
 tracked files plus these new files. Work remains uncommitted and untagged.
+
+
+## Batch 203 -- the ChatGPT header says whether the plan is connected, and chat knows its harness (2026-10-29)
+
+**The owner's final §83 checks:** Manage usage opens the usage tab for the
+logged-in user in their browser, and a message after disconnect correctly
+errors as signed out. The same run showed Using ChatGPT plan in the header
+after disconnect, and the owner reported it through restarts.
+
+**Verified before fixing:** `refresh_status` added the label whenever the
+selected provider was CHATGPT. Disconnect already refreshed, and the
+remembered pair was deliberately retained; startup refreshed the same
+provider-only decision. Three new regressions failed against production:
+both disconnect forms and sign-in without plan access.
+
+**Fixed at that producer:** the header reads `chatgpt_auth.status()`, shows
+Signed out with use /connect or add API key while signed out, names
+ungranted plan access separately with the same connection hint, and offers
+the plan label and Manage usage only with both. A real sign-in and sign-out, with only OpenAI's network faked, is
+driven through the remembered restart and reconnect for keep and --forget.
+The connected header's click test now signs in first instead of assuming
+that assigning the provider creates a sign-in.
+
+**The owner's wording follow-up, before this batch was committed:** the
+hint says `use /connect or add API key`, rather than naming ChatGPT alone.
+The harness also supports other OAuth providers and manually configured
+API keys; neither disconnected state should imply a subscription is the
+only route back to inference. The existing restart/reconnect and missing
+plan-access assertions follow that wording. This is the same uncommitted
+batch and retains its beta counter.
+
+**§58, after the owner settled its wording and scope (PR6):**
+`core.loop.with_persona` owns the short identity paragraph, naming the
+harness, tool-using chat, separate research mode and the effective model
+and provider. Default CLI chat and wakes compose it at turn time; TUI
+chat and one-shot turns and spawned agents compose it with their actual
+pair before the agent body. An already-built prompt is retained, which
+keeps internal compaction and pipeline review on their own task prompts.
+Research passes never receive the paragraph through with_catalogs.
+TECHNICAL_DEBT 19's convergence remains open and records the built member.
+
+**Cost measured, not inferred from characters:** a temporary local
+`tiktoken 0.12.0` / `o200k_base` instrument wrapped the real model-switching
+TUI test's loop boundary, with only the model reply stubbed. The system
+prompt went 125 to 164 tokens for ANTHROPIC / claude-sonnet-5 (+39), then
+125 to 161 for OPENAI / gpt-4o (+36); 167 and 155 added characters,
+including the separator. These are local tokenizer counts on actual
+assembled prompts, not provider-billed usage. No tokenizer dependency is
+added to the project or its distribution, and no account request was sent.
+
+The roadmap marks §58 built and §83 complete. Its index, AGENTS map and
+README agree; the README's earlier §53–§60 blanket also wrongly included
+§55, built in batch 125, and is corrected. This branch keeps 0.3.2 as its
+base and takes its own beta identity, batch counter 1.
+
+### Verified
+
+- Affected chat, agent, wake, compaction, review and TUI suites: 407 passed.
+- The three header regressions failed before the fix; the final focused
+  identity and header selection passed all 12 cases.
+- Full suite: 8,317 passed, 68 skipped on Windows (8,385 collected),
+  123.71 seconds. No failed tests.
+- Negative controls in a disposable source snapshot: removing the persona
+  failed the ordinary chat and pinned TUI assertions; putting the identity
+  in DEFAULT_SYSTEM_PROMPT failed the internal compactor and reviewer
+  assertions. Both mutations were killed, and the snapshot was restored.
+- Ruff clean; touched Python files compile; Bandit with the CI flags and
+  a throwaway Windows-path baseline reports no new issues;
+  bandit-count-check reports 62 baselined pairs, none grew.
+- Gitleaks on an export of the tracked working files: no leaks.
+- Version pair and git diff whitespace checks pass. No dependency changed;
+  pip-audit was not needed. No real account or model call was made.
