@@ -62,6 +62,7 @@ def test_run_agent_conversation_passes_thread_id_to_memory(mocker):
             # every kwarg breaks on each one added, which is the
             # coupling registry.dispatch()'s own stubs already dropped.
             captured_kwargs["lineage"] = lineage
+            self.kind = kind  # The prompt assembler distinguishes chat from internal tasks.
             self.thread_id = thread_id or uuid4()
             self.messages = []
             self.extra = {}  # §18: run_agent_conversation reads the goal
@@ -105,6 +106,7 @@ def test_run_agent_conversation_without_thread_id_starts_fresh(mocker):
             # every kwarg breaks on each one added, which is the
             # coupling registry.dispatch()'s own stubs already dropped.
             captured_kwargs["lineage"] = lineage
+            self.kind = kind  # Match ConversationMemory's public thread-kind property.
             self.thread_id = uuid4()
             self.messages = []
             self.extra = {}  # §18: run_agent_conversation reads the goal

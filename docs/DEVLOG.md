@@ -28250,3 +28250,39 @@ Validation:
 - Gitleaks on the 387 candidate source paths: no leaks. No dependency
   change, live model request or account access. Version pair and diff
   whitespace checks pass; the branch's first completed batch is beta 1.
+
+## Batch 205 -- PR #268's CLI spies and askpass assertion ordering (2026-10-29)
+
+The owner's PR ran the full suite on Python 3.11 and 3.13. Both failed the
+same two CLI tests: the final batch-204 chat-only mention guard reads
+`memory.kind`, while their `SpyMemory` classes accepted that constructor
+argument but never exposed it. Real `ConversationMemory` already provides
+the property. Both spies now retain `kind`; the production guard stays
+strict so internal tasks cannot inherit chat mentions. The earlier full
+suite preceded that final guard, and its focused rerun omitted `test_cli`.
+
+One of the two Python 3.13 runs also exposed an existing askpass test race.
+`_answer` sends a successful reply before appending its logical name to
+`served`. Receiving the reply does not establish that the append ran.
+The test now checks `served` and `refusal` after leaving `serving`, whose
+cleanup joins the listener. No production transport, secret handling,
+refusal ordering or timeout changed; no polling or sleep was added.
+
+Validation:
+
+- Both CLI failures reproduced before the fix. The CLI, askpass and file
+  mention tests pass afterward: 215 passed, 2 skipped on Windows.
+- A disposable pytest plugin holds the second successful send immediately
+  after its bytes reach the client, releasing it when the context closes.
+  The fixed test passes under that schedule; an in-memory restoration of
+  the old assertion placement fails before bookkeeping is recorded.
+- Full offline suite on Python 3.13/Windows after both fixes: 8,349 passed,
+  69 skipped, 57 warnings in 120.09 seconds (8,418 collected). No test was
+  added or removed, so the documented counts remain unchanged.
+- Ruff clean; both changed Python files compile. Bandit passes with the
+  CI flags and a throwaway Windows-path baseline; all 62 baselined pairs
+  stay within their accepted counts. The committed baseline is unchanged.
+- Gitleaks covers a clean export of the candidate tracked files, excluding
+  local runtime state. No dependency change, live model call or account
+  access. The branch keeps its identity and completes this batch as beta 2;
+  the npm/Python version pair agrees. Nothing pushed.
