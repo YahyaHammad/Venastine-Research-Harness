@@ -10,6 +10,14 @@ worth understanding, not a flaky mock to patch over.
 
 ---
 
+## No real browser, and the real SDKs imported once (batch 207)
+
+| Change | Test | Fix |
+|---|---|---|
+| Drop `browser_opens`' autouse, or stop standing in for one of `open` / `open_new` / `open_new_tab` | `TestNoTestReachesARealBrowser::test_every_module_level_opener_is_the_stand_in` | Put it back. It reads the stand-in's marker before anything opens, so it fails rather than opening a tab; without the fixture the sign-in tests open real OpenAI authorize pages |
+| Open a URL by some route other than `webbrowser.open` (`os.startfile`, a subprocess) | `TestNoTestReachesARealBrowser::test_the_transcripts_opener_reaches_it`, `TestSigningIn::test_the_browser_coming_back_closes_the_prompt_and_signs_in` | Route it through `webbrowser`, or give the new route its own stand-in in `tests/conftest.py` before any test reaches it |
+| Make `real_package` re-import every time, keep real modules in `sys.modules` after a block, or skip restoring the fakes | `test_a_block_restores_the_fakes_and_reuses_its_real_import` | Keep the per-root-set cache and the restore; a re-import costs ~6 s per block for `anthropic` here, and a leaked real module reaches every later test in the worker |
+
 ## GitHub installers and version policy (batch 202)
 
 | Change | Test | Fix |

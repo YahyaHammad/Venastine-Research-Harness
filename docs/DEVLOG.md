@@ -28429,3 +28429,99 @@ Verified again on the rebased tree:
   are unchanged from `main`.
 - Not repeated: the end-to-end WSL install and the throwaway registry key.
   The code they exercised is the same bytes.
+
+## Batch 207 -- no test opens a browser, and the real SDKs are imported once (2026-10-31)
+
+**The owner's question:** the suite takes nine minutes, when batch 114
+had it at 70-90 seconds, and something is throttling development.
+
+**What was measured first, on one commit and one machine.** The full suite
+took 9:01 on eight workers, then 17:14 on `-n auto` (eleven) with three
+timing failures, then 2:09 and 1:57 an hour later with none. In the slow
+run every worker was busy for the whole span, so no one group was setting
+the floor; the work itself had grown, to about 10,400 s of test time
+against about 1,000 s in the quiet run. The machine was saturated while it
+ran (1,300-1,600% of 1,600%), and the suite was not what saturated it:
+Firefox held ~400% of it, with 76 processes and 26.7 GB private memory,
+Defender's scanner 100-145%, and available memory sat at 1.0-2.1 GB.
+
+**The owner's diagnosis, and it was right:** the tests keep opening the
+ChatGPT sign-in page. Measured with a recording plugin loaded by `-p`,
+so no repository file changed while the suite ran: **17 real browser opens
+per full run**, every one `https://auth.openai.com/api/accounts/authorize`,
+from 14 tests in `test_chatgpt_tui.py`. `Transcript.open_url` hands a URL
+to `webbrowser.open` on a thread worker, and nothing in the suite stood in
+for it except two tests that patched it for their own assertions. So every
+run sent 17 real authorize requests from a suite that calls itself
+offline, and left 17 tabs; a day of runs is what Firefox was holding. The
+suite's 5-12 minute runs first appear in batches 190-191, straight after
+the §83 sign-in tests landed in 184-189.
+
+**Ruled out on the way, each by measurement:**
+
+- Textual's idle wait. `pilot.pause()` ends on `wait_for_idle(0)`, which
+  waits up to 1 s while the PROCESS uses CPU, and a leaked thread would
+  turn every later pause into a full second. A plugin timing every call:
+  2,544 waits in a full run, 0 at the cap; `test_tui.py` under six
+  synthetic busy cores went from 41 s to 71 s with 0 of 1,128 at the cap.
+- CPU scaling. Eleven concurrent CPU-bound processes run 1.5x slower each
+  than one, so the cores are there.
+- Bytecode caching. This shell sets `PYTHONDONTWRITEBYTECODE=1`; collection
+  is 4.4-5.5 s with it set or unset.
+
+**Built:**
+
+- `tests/conftest.py`'s autouse `browser_opens` stands in for
+  `webbrowser.open`, `open_new` and `open_new_tab`, records the URLs and
+  answers True, as a browser that opened does. Request it by name to
+  assert what would have opened.
+- `TestNoTestReachesARealBrowser` in `test_live_output.py`, beside the
+  opener: one test requests nothing and reads the stand-in's marker on all
+  three openers, so it checks the AUTOUSE (a test that asked for the
+  fixture by name would pass without it) and fails before opening
+  anything; the other drives `Transcript.open_url` through its thread
+  worker into the recorder.
+- `test_the_browser_coming_back_closes_the_prompt_and_signs_in` now asserts
+  the authorize URL was handed to the browser, once, so the open the flow
+  should make is checked rather than only made harmless.
+- **`test_sdk_conformance.py` imports each real SDK once per root set.**
+  `real_package` re-imported from scratch on every block, 30 a run, and
+  `import anthropic` measured 6.3 s here and `import openai` 4.1 s, so the
+  file was the largest scheduling group at 74 s. It now keeps the modules
+  one import left and reinstalls that exact set, so a block still sees one
+  consistent package, its own `httpx` included -- which is why the key is
+  the whole root set. Between blocks the fakes are back, as before. The
+  file runs in 5.7 s serially; it passes in collection order and reversed.
+  `test_a_block_restores_the_fakes_and_reuses_its_real_import` pins both
+  promises.
+
+### Verified
+
+- Mutations on an export copy, each run with the outer recorder loaded so
+  a surviving mutant still opened nothing real: the autouse dropped,
+  `open_new_tab` left out, a recorder that keeps nothing, and production
+  bypassing `webbrowser.open` -- 4/4 killed, 0 opens reached the outer
+  recorder. The cache: never reinstalled, fakes not restored, real
+  submodules left behind -- 3/3 killed. The third SURVIVED the first
+  version of the test, which checked `sys.modules["httpx"]` and not the
+  `httpx.*` names a real import leaves; the test compares the whole name
+  set now. A first run of the new test also failed on the unmutated tree
+  (`real_package` clears; the block's own import is what imports), so the
+  kills it scored then were discarded and the run repeated after the fix.
+- Full suite, 8431 tests, on Windows on eleven workers: 8361 passed, 70
+  skipped, no failure, in 1:37, with the outer recorder loaded: 0 opens
+  reached it. The touched files with `AGENT_WORKSPACE` unset: 477 passed,
+  5 skipped. Under WSL Ubuntu the live-output and ChatGPT TUI files pass;
+  `test_sdk_conformance.py` fails the same 7 Google checks there before
+  and after this change, because the distro's google-genai is still 1.0.0.
+- ruff clean; bandit 0 new against the baseline and the count check's 62
+  pairs unchanged; gitleaks, run as CI runs it, found no leaks on an
+  export of the tracked files.
+- **Version**, by `scripts/version.py bump`: `0.2.0-b.2.installer-path.rb0705ebe789b`.
+
+**Left as found:** on a quiet machine the suite is about 1,000 s of test
+work spread evenly over eleven workers, so 1:50-1:57 is the floor this
+batch reaches, not 70-90 s; batch 114's figure was taken on a smaller
+suite. Textual's idle waits are 210 s of that work. Nothing here changes
+`settle`, whose quiescing pause is a deadlock defence its docstring
+explains.

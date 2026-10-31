@@ -651,6 +651,46 @@ def isolate_model_windows(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def browser_opens(monkeypatch):
+    """Stand in for the platform's browser, and keep what a test opened.
+
+    Batch 207. `Transcript.open_url` hands a URL to `webbrowser.open` on a
+    worker thread, and before this nothing in the suite stood in for it
+    except two tests that patched it for their own assertions. So every
+    test that drove a sign-in opened a REAL tab: measured with a recording
+    plugin, 17 per full run, all `https://auth.openai.com/api/accounts/
+    authorize`, from 14 tests in `test_chatgpt_tui.py`. Each tab sent a
+    real authorize request to OpenAI from a suite that calls itself
+    offline, and the tabs accumulated: after a day of runs the owner's
+    Firefox held 76 processes, 27 GB and four cores, and the same commit
+    that runs in under two minutes on a quiet machine took 9 and 17.
+
+    AUTOUSE, for `isolate_ui_preferences`' reason: the side effect lands
+    outside the suite, so no test should be able to reach it by
+    forgetting. The recorder answers True, as a browser that opened does,
+    so nothing downstream sees a "Could not open" it would not see in
+    use. A test that patches `tui.widgets.webbrowser.open` itself still
+    can; monkeypatch puts this stand-in back after it, then the original.
+
+    Request it by name to assert what would have opened. It is the list
+    of URLs, in order; the opener runs on a thread worker, so settle on
+    it rather than reading it straight after the action.
+    """
+    import webbrowser
+
+    opened = []
+
+    def record(url, *_args, **_kwargs):
+        opened.append(str(url))
+        return True
+
+    record.stands_in_for_the_browser = True
+    for name in ("open", "open_new", "open_new_tab"):
+        monkeypatch.setattr(webbrowser, name, record)
+    return opened
+
+
+@pytest.fixture(autouse=True)
 def clear_scholar_cache():
     """Drop §45's OpenAlex response cache between tests.
 
