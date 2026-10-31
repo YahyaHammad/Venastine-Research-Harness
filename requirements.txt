@@ -22,11 +22,19 @@ openai==2.45.0
 # §9's Google implementation was retested live against it. Its
 # transport is httpx now, not requests.
 google-genai==2.29.0
-pydantic==2.13.4
-sympy==1.13.3
+# Batch 208, from Dependabot's group, the owner's choice of which: the
+# four below are packages the suite runs for real rather than faking, so
+# a green suite is evidence about them, and each release was at least two
+# weeks old. pydantic 2.14.0 fixed GHSA-gj4f-r7mf-jjxh (an unbounded
+# Fraction exponent) and GHSA-955g-x97g-8mcp (quadratic multi-host URL
+# validation). sympy 1.14.0 gives test_math_tools.py's measured expansion
+# the same 74,723 characters 1.13.3 did. matplotlib 3.11 overhauled its
+# text layout and needs Python >=3.11, which is this project's floor.
+pydantic==2.14.1
+sympy==1.14.0
 sqlmodel==0.0.39
-python-dotenv==1.2.2
-matplotlib==3.10.3
+python-dotenv==1.2.4
+matplotlib==3.11.2
 pyyaml==6.0.3
 # config.yaml, via config_schema.py. TWO YAML PARSERS IN ONE TREE IS
 # DELIBERATE -- do not "unify" them. pyyaml above parses agent/skill
@@ -132,7 +140,22 @@ rich>=14.2,<16
 # Neither touches what this client does. test_mcp_client.py,
 # test_mcp_config.py and the integration servers all pass on it, and
 # mcp-types moves with it in lockstep.
-mcp==2.2.0
+#
+# 2.3.0 SINCE BATCH 208, the deliberate way again. Its release notes'
+# behaviour changes, against this client: httpx2 >=2.10.0 is required
+# (it was 2.5.0); a 2025-11-25-or-earlier connection no longer sends an
+# empty `_meta` or `params`, and `initialize` leaves `experimental` out,
+# neither of which mcp_client/ sends or reads; a call the server rejects
+# with HeaderMismatch is re-listed and retried once, and a rejected call
+# never ran. ONE MORE CHANGE DOES TOUCH IT, which the notes' "the default
+# stays 1 MiB" hides: on 2.2.0's httpx2 a streamed answer had no size limit,
+# and 2.3.0 fails a call whose one server-sent event passes
+# `max_sse_event_size`, 1 MiB by default, which a streamed screenshot does.
+# The owner chose 16 MiB, as config.yaml's `mcp_max_event_bytes`;
+# CONFIG_ARCHITECTURE.md has the measurement and what it does not cover.
+# The registration fact in mcp_client/registration.py was re-measured on
+# it.
+mcp==2.3.0
 
 # ROADMAP_v3 §49 (SS8). The engine for a monitor session's pattern -- a
 # regex the MODEL wrote, matched against program output nobody controls,
@@ -181,13 +204,18 @@ google-re2==1.1.20251105
 #
 # A FLOOR AND A CEILING rather than an exact pin, like `rich`: an exact pin
 # here would fight google-auth's own floor on a resolver that has to
-# satisfy both. The floor is the AEAD API this uses, which has been stable
-# since 3.x; the ceiling is D22's rule, so a MAJOR cannot change behaviour
-# underneath CI. What to re-measure when it moves: `AESGCM` still raises
-# `cryptography.exceptions.InvalidTag` with NO message (the store relies on
-# the three failure causes being indistinguishable), and the wheel list
-# still covers this project's platforms.
-cryptography>=42.0,<52
+# satisfy both. The ceiling is D22's rule, so a MAJOR cannot change
+# behaviour underneath CI. The floor was the AEAD API this uses, stable
+# since 3.x, until batch 208 raised it to 50.0.0 for pillow's reason
+# below: pip leaves an installed package alone while it still satisfies
+# the range, and 42.0 through 49.x carry between 15 and 2 known
+# advisories (OSV, measured 2026-10-31), so a venv built earlier kept
+# one. 50.0.0 is the first release with none. What to re-measure when it
+# moves: `AESGCM` still raises `cryptography.exceptions.InvalidTag` with NO
+# message (the store relies on the three failure causes being
+# indistinguishable), and the wheel list still covers this project's
+# platforms.
+cryptography>=50.0.0,<52
 
 # ROADMAP_v3 §83 (CG6, CG16). Checks the ID token a ChatGPT-plan sign-in
 # returns against OpenAI's published keys: RS256, issuer, audience, expiry
@@ -196,18 +224,25 @@ cryptography>=42.0,<52
 # and this library is the one everybody else gets it right with.
 #
 # DECLARING IT ADDS NOTHING TO AN INSTALL, measured the way `cryptography`'s
-# entry was: mcp==2.2.0 -> pyjwt[crypto]>=2.10.1, with no marker, so it is
+# entry was: mcp==2.3.0 -> pyjwt[crypto]>=2.10.1, with no marker, so it is
 # already in the hard closure of the mcp line above. What the declaration
 # buys is that a check this project's sign-in rests on no longer depends on
 # mcp happening to pull it in. MIT, so THIRD_PARTY_NOTICES.md's no-copyleft
 # claim holds; pure Python.
 #
 # A FLOOR AND A CEILING, for `cryptography`'s reason: an exact pin here
-# would fight mcp's own floor, which is this floor. The ceiling is D22's
-# rule. What to re-measure when it moves: `jwt.decode` still refuses an
-# algorithm outside the list it is given (the `none` and HS256 tests in
-# tests/test_chatgpt_auth.py), and `PyJWKSet` still reads OpenAI's JWKS.
-PyJWT>=2.10.1,<3
+# would fight mcp's own floor, `>=2.10.1`. The ceiling is D22's rule. The
+# floor was mcp's until batch 208 raised it to 2.15.0, for pillow's reason
+# below: the owner's venv held 2.13.0, which the old floor allowed and
+# which carries 29 known advisories (OSV, measured 2026-10-31), two of
+# them in exactly the calls core/chatgpt_auth.py makes -- a RecursionError
+# out of `jwt.decode` on a deeply nested header (GHSA-8wjv-2p76-3863), and
+# one malformed RSA key aborting a whole `PyJWKSet` (GHSA-w6j9-cwv2-h6wq).
+# 2.15.0 is the first release with none. What to re-measure when it
+# moves: `jwt.decode` still refuses an algorithm outside the list it is
+# given (the `none` and HS256 tests in tests/test_chatgpt_auth.py), and
+# `PyJWKSet` still reads OpenAI's JWKS.
+PyJWT>=2.15.0,<3
 
 # Batch 201, the owner's call. Imported nowhere in the harness:
 # matplotlib requires it, as `pillow>=8` with no ceiling, so a FRESH

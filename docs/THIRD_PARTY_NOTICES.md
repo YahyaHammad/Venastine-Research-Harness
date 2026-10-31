@@ -19,26 +19,26 @@ The dependencies listed below are **not** part of the project's own source but a
 | httpx | `==0.28.1` | BSD-3-Clause | Yes | https://pypi.org/project/httpx/ |
 | openai | `==2.45.0` | Apache-2.0 | Yes | https://pypi.org/project/openai/ |
 | google-genai | `==2.29.0` | Apache-2.0 | Yes | https://pypi.org/project/google-genai/ |
-| pydantic | `==2.13.4` | MIT | Yes | https://pypi.org/project/pydantic/ |
-| sympy | `==1.13.3` | BSD-3-Clause | Yes | https://pypi.org/project/sympy/ |
+| pydantic | `==2.14.1` | MIT | Yes | https://pypi.org/project/pydantic/ |
+| sympy | `==1.14.0` | BSD-3-Clause | Yes | https://pypi.org/project/sympy/ |
 | sqlmodel | `==0.0.39` | MIT | Yes | https://pypi.org/project/sqlmodel/ |
-| python-dotenv | `==1.2.2` | BSD-3-Clause | Yes | https://pypi.org/project/python-dotenv/ |
-| matplotlib | `==3.10.3` | PSF / BSD-Compatible | Yes | https://pypi.org/project/matplotlib/ |
+| python-dotenv | `==1.2.4` | BSD-3-Clause | Yes | https://pypi.org/project/python-dotenv/ |
+| matplotlib | `==3.11.2` | PSF / BSD-Compatible | Yes | https://pypi.org/project/matplotlib/ |
 | pyyaml | `==6.0.3` | MIT | Yes | https://pypi.org/project/PyYAML/ |
 | ruamel.yaml | `==0.19.1` | MIT | Yes | https://pypi.org/project/ruamel.yaml/ |
 | textual | `==8.2.8` | MIT | Yes | https://pypi.org/project/textual/ |
 | rich | `>=14.2,<16` | MIT | Yes | https://pypi.org/project/rich/ |
-| mcp | `==2.2.0` | MIT | Yes | https://pypi.org/project/mcp/ |
+| mcp | `==2.3.0` | MIT | Yes | https://pypi.org/project/mcp/ |
 | google-re2 | `==1.1.20251105` | BSD-3-Clause | Yes | https://pypi.org/project/google-re2/ |
-| cryptography | `>=42.0,<52` | Apache-2.0 OR BSD-3-Clause | Yes | https://pypi.org/project/cryptography/ |
-| PyJWT | `>=2.10.1,<3` | MIT | Yes | https://pypi.org/project/PyJWT/ |
+| cryptography | `>=50.0.0,<52` | Apache-2.0 OR BSD-3-Clause | Yes | https://pypi.org/project/cryptography/ |
+| PyJWT | `>=2.15.0,<3` | MIT | Yes | https://pypi.org/project/PyJWT/ |
 | pillow | `>=13.0.0,<14` | MIT-CMU | Yes | https://pypi.org/project/pillow/ |
 
 `google-re2` (added 2026-09-15, ROADMAP_v3 §49) and `cryptography` (added 2026-09-24, ROADMAP_v3 §49 slice 5a) are the dependencies above that ship **compiled native code**. Taking `google-re2` first: its wheels carry the RE2 C++ library (BSD-3-Clause) and, as RE2 depends on it, Abseil (Apache-2.0). The paragraph under *What this means* holds for it unchanged — pip fetches the wheel onto the user's machine and this project redistributes nothing — so no inbound `NOTICE` obligation arises. Where no wheel exists (musl/Alpine, glibc older than 2.28), pip builds the source distribution locally, which is the user's build rather than a distribution by this project.
 
 `cryptography` was **already in the install closure** before it was declared — `google-genai==1.0.0` → `google-auth>=2.14.1` → `cryptography>=38.0.3`, with no extra marker (re-measured on the 2.29.0 pin in batch 172: `google-auth>=2.56.0` → `cryptography>=38.0.3`, still unmarked) — so declaring it added no package to an install and no licence surface that was not already present; it made an existing transitive dependency into a pinned direct one, because the harness-held secret store (ROADMAP_v3 §49 slice 5a, SS57) rests on it. Its wheels carry a **Rust** extension and a statically linked **OpenSSL** (Apache-2.0); the dual licence above is the project's own, and the paragraph under *What this means* holds for it unchanged — pip fetches the wheel onto the user's machine and this project redistributes nothing, so no inbound `NOTICE` obligation arises. Wheels exist for CPython 3.7+ on Windows (x64, x86), macOS (arm64, x86_64) and manylinux/musllinux (x86_64, aarch64); where none does, pip builds the sdist locally and needs a Rust toolchain, which is the user's build rather than a distribution by this project.
 
-`pillow` (declared 2026-10-28, batch 201) was **already in the install closure** before it was declared, the way `cryptography` was — `matplotlib==3.10.3` requires `pillow>=8`, unmarked — so declaring it added no package and no licence surface; it puts a floor under an existing transitive dependency, because an environment built before 13.0.0 kept 12.3.0, whose advisories the hosted demo accepts for its Gradio bridge alone (see the note beside the pin in `requirements.txt`). Pillow itself is MIT-CMU. Its wheels carry C extensions and bundle the libraries their `LICENSE` file lists — measured in the CPython 3.13 Windows wheel: brotli, FreeType (the FreeType License, offered beside GPLv2 at the recipient's choice), HarfBuzz, Little CMS, libavif, libjpeg-turbo, libpng, libwebp, OpenJPEG, LibTIFF, xz and zlib-ng. The paragraph under *What this means* holds for it unchanged: pip fetches the wheel onto the user's machine and this project redistributes nothing, so no inbound `NOTICE` obligation arises.
+`pillow` (declared 2026-10-28, batch 201) was **already in the install closure** before it was declared, the way `cryptography` was — `matplotlib==3.10.3` required `pillow>=8`, unmarked (`matplotlib==3.11.2` requires `pillow>=9`, batch 208) — so declaring it added no package and no licence surface; it puts a floor under an existing transitive dependency, because an environment built before 13.0.0 kept 12.3.0, whose advisories the hosted demo accepts for its Gradio bridge alone (see the note beside the pin in `requirements.txt`). Pillow itself is MIT-CMU. Its wheels carry C extensions and bundle the libraries their `LICENSE` file lists — measured in the CPython 3.13 Windows wheel: brotli, FreeType (the FreeType License, offered beside GPLv2 at the recipient's choice), HarfBuzz, Little CMS, libavif, libjpeg-turbo, libpng, libwebp, OpenJPEG, LibTIFF, xz and zlib-ng. The paragraph under *What this means* holds for it unchanged: pip fetches the wheel onto the user's machine and this project redistributes nothing, so no inbound `NOTICE` obligation arises.
 
 ## Test dependencies (not used by end users during runtime, only for CI and developer testing)
 

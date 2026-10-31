@@ -2828,6 +2828,21 @@ because nothing is exploitable past resource exhaustion and the model is
 handed too much rather than something false. Unchanged: choosing the number,
 or the truncate-versus-refuse question, is what this entry is deferred for,
 and §31 H7 and §51 PG8 giving two different answers is the stated reason.
+
+**Batch 208: a transport bound arrived with mcp 2.3.0, and it is not this
+entry's bound.** 2.3.0 fails a call whose one Streamable HTTP server-sent
+event exceeds `max_sse_event_size`, 1 MiB by default, where 2.2.0 on its
+httpx2 had no limit. The owner set it to 16 MiB as config.yaml's
+`mcp_max_event_bytes`, because 1 MiB fails a tool that streams back a
+screenshot, text and all. It bounds the MEMORY a streamed answer takes and
+refuses rather than truncates, but three things keep this entry open, each
+measured in batch 208 (CONFIG_ARCHITECTURE.md has the figures): an answer
+sent as plain JSON -- what mcp 2.3.0's own server sends on 2026-07-28 -- is
+read whole with no limit, 40 MB of it in the measurement; stdio has no such
+bound; and 16 MiB is a transport ceiling, about 335 times `max_read_chars`,
+not a bound on what reaches the model. The total-size bound in
+`_normalize` that this entry prescribes is still the fix.
+
 # The review marathon's deferred findings (items 49-86)
 
 `docs/REVIEW_MARATHON.md` scoped a pre-merge review of `navigable-agents` into

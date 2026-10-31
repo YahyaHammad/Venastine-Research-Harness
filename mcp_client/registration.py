@@ -34,7 +34,7 @@ NAME_PREFIX = "mcp__"
 # all publish the same rule -- `^[a-zA-Z0-9_-]{1,64}$` -- and BOTH halves
 # of the composed name are outside this repository's control: the server
 # half is a free-form key in mcp.json, the tool half comes from the server.
-# Verified against the installed mcp==2.0.0, and again on 2.2.0:
+# Verified against the installed mcp==2.0.0, and again on 2.2.0 and 2.3.0:
 # Tool.model_fields["name"] is a bare required `str` with empty metadata --
 # no pattern, no max length.
 #

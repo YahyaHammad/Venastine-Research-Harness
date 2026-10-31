@@ -10,6 +10,14 @@ worth understanding, not a flaky mock to patch over.
 
 ---
 
+## mcp 2.3.0's ceiling on one streamed event (batch 208)
+
+| Change | Test | Fix |
+|---|---|---|
+| Hand `Client()` a bare URL again for an http server without headers | `test_an_http_server_without_headers_is_never_handed_a_bare_url` | A URL string takes the SDK's 1 MiB, which a streamed screenshot passes; build `streamable_http_client` with `mcp_max_event_bytes` on both branches |
+| Stop passing `max_sse_event_size`, pass a constant, or read the key at import | `test_the_configured_event_ceiling_reaches_the_http_transport` | Read `config.MCP_MAX_EVENT_BYTES` per connection and pass it, with or without headers |
+| Change the shipped 16 MiB | `test_the_shipped_event_ceiling_is_sixteen_mebibytes` | It is the owner's number; CONFIG_ARCHITECTURE.md's `mcp_max_event_bytes` entry says why, and what it does not bound |
+
 ## No real browser, and the real SDKs imported once (batch 207)
 
 | Change | Test | Fix |
@@ -786,7 +794,7 @@ ten-pass run, and every warning it logged scribbled over the Textual screen.
 | Drop `/trigger`'s eager validation | `test_a_trigger_below_its_dependent_floors_is_REFUSED` | The `ValueError` surfaces later inside `should_compact()` — hot path, mid-turn, far from the command that caused it |
 | Refuse a `/window` above the reported window | `test_window_warns_but_does_not_refuse_above_the_reported_window` | Raising it is the command's best use: a beta-gated 1M window reads as 200k until the account is asked with the right header |
 | Add `context_window` to `_KNOWN_COMPACTION` | `test_nothing_reaches_the_settings_schema` | A settings key makes it persistable, so a cloned project could ship one behind a trust prompt — the shape G7 and R12 both rejected |
-| Loosen `mcp==2.2.0` back to a range | `test_ac6_is_error_becomes_the_error_convention_without_raising` (the batch-32 CI break) | A minor bump changed server behaviour underneath the range: 2.1.0 withholds a crashed tool's text. CI then depended on when it ran, and was not testing what anyone runs locally |
+| Loosen `mcp==2.3.0` back to a range | `test_ac6_is_error_becomes_the_error_convention_without_raising` (the batch-32 CI break) | A minor bump changed server behaviour underneath the range: 2.1.0 withholds a crashed tool's text. CI then depended on when it ran, and was not testing what anyone runs locally |
 | Assert a CRASHED tool's own message reaches the client | `test_ac6_is_error_becomes_the_error_convention_without_raising` | That is the SERVER's policy, not this client's contract, and in production the server is someone else's. AC6 claims the failure does not RAISE |
 | Make the deliberate-failure probe raise a bare exception | `test_ac6_a_deliberate_tool_failure_carries_its_message` | Only `ToolError` has its message forwarded on both pinned versions; a bare exception is a crash and 2.1.0 withholds its text, so the assertion would pass on one version and fail on the other |
 
@@ -5396,7 +5404,7 @@ the only reason it lands now is that the review happened now.
 | **Adding or removing a name in `_ALLOWED_NAMES`, or a node in `_ALLOWED_NODES`** | `test_agents_md_states_the_real_sympy_allowlist_sizes` | Both are module constants and both are gated exactly. Widening either is "a decision about a KIND of thing" per the `safe_parse` rules, so the document moving with it is the point |
 | **Turning that gate's `dir(sympy)` window into an equality** | nothing locally, and a red run on another machine | `dir()` on a PACKAGE grows as submodules import: `probability_stats.py` imports `sympy.stats`, so the count is 926 or 927 in the same checkout depending on what loaded first, and 928 under an unpinned SymPy. The window is deliberate; `abs(live - stated) <= 5` is the claim |
 | **Relaxing `_one_number`'s `len(found) == 1` to `>=`** | nothing, until two sentences match the pattern | Then the gate silently reads the first and calls it authoritative. Scored KILLED only once its control duplicated the figure UNCHANGED -- with a different number the count assertion catches it, which probes a different guard |
-| **Re-loosening `mcp==2.2.0` to `mcp>=2.0,<3`** | nothing in the suite, and CI on a schedule nobody controls | `requirements.txt` carries the history: under the range a minor release went red on main while every local run stayed green. `AGENTS.md` stated the range until batch 128, which is how a document invites the defect back |
+| **Re-loosening `mcp==2.3.0` to `mcp>=2.0,<3`** | nothing in the suite, and CI on a schedule nobody controls | `requirements.txt` carries the history: under the range a minor release went red on main while every local run stayed green. `AGENTS.md` stated the range until batch 128, which is how a document invites the defect back |
 | **Restoring "`real_storage` is the suite's only non-function-scoped fixture"** | nothing -- and that is the point of this row | It was false from batch 110, in `AGENTS.md` and in this file, and no test could see it. `grep -rn 'scope="module"' tests/` returns `real_storage` AND `_schema_cache_is_put_back`. The RULE both sentences support is unchanged: one FILE has the problem, so that file declares no test class |
 | **Re-adding a `file.py:NNN` citation to `AGENTS.md`** | nothing, and it is still wrong | That file carries zero line-number citations in 2,891 lines, which is why none of batch 128's drift was a line number. Cite the symbol |
 | **Removing `PATHEXT` from `_SAFE_ENV_KEYS`** | `test_the_fallback_shell_is_given_pathext`, and `test_a_real_program_is_reported_with_its_own_exit_code` under `-m integration` | Batch 130. Without it `powershell -c "& 'prog' args"` starts an external program and returns immediately, so the fallback reports `return_code=0` and empty output 0.37s after launch while the work is only starting -- and the wall clock, the route's one bound on Windows, is gone before it. Measured: 1 of the 65 names `_scrubbed_env()` drops changes this, and PowerShell builtins never show it, so a probe using `Start-Sleep` reads the route as healthy |

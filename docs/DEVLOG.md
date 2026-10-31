@@ -28525,3 +28525,117 @@ batch reaches, not 70-90 s; batch 114's figure was taken on a smaller
 suite. Textual's idle waits are 210 s of that work. Nothing here changes
 `settle`, whose quiescing pause is a deadlock defence its docstring
 explains.
+
+## Batch 208 -- Dependabot's group, taken where the suite is evidence, and an MCP ceiling the owner chose (2026-10-31)
+
+**The owner's question:** which of the python-deps group Dependabot proposed
+(PR #266, fifteen changes) can be bumped without breaking anything.
+
+**What decided it.** The suite fakes `openai`, `anthropic`, `google-genai`,
+`ddgs`, `sqlmodel` and `markitdown` (the root conftest), so a green run is
+evidence about those only where `test_sdk_conformance.py` and
+`test_storage_e2e.py` reach the real package. The owner took the
+recommended set: the packages the suite runs for real, each release at
+least two weeks old with its notes read, plus two security floors.
+
+| change | why |
+|---|---|
+| pydantic 2.13.4 -> 2.14.1 | 2.14.0 fixed GHSA-gj4f-r7mf-jjxh and GHSA-955g-x97g-8mcp |
+| sympy 1.13.3 -> 1.14.0 | `test_math_tools.py`'s measured expansion is still 74,723 characters |
+| python-dotenv 1.2.2 -> 1.2.4 | fixes only |
+| matplotlib 3.10.3 -> 3.11.2 | text layout overhaul; requires Python >=3.11, this project's floor |
+| mcp 2.2.0 -> 2.3.0 | below |
+| cryptography floor 42.0 -> 50.0.0 | 42.0-49.x carry 15 to 2 advisories (OSV) |
+| PyJWT floor 2.10.1 -> 2.15.0 | the owner's venv held 2.13.0: 29 advisories |
+
+**Declined:** the `rich` floor (no advisory; 14.2 is textual's own floor).
+**Deferred to their own batches:** anthropic 0.116 -> 2.x and openai 2.45 ->
+3.x, which both move their HTTP stack to httpx2 -- `requirements.txt`'s mcp
+paragraph says anthropic and openai still need `httpx`, and
+`core/provider_errors.py` reads httpx's exception names -- and anthropic 2.0
+moves to a new API version; and the faked SDK minors (google-genai, ddgs,
+sqlmodel, markitdown, protobuf), where the evidence would be the conformance
+file alone and google-genai wants a live check with the owner's key.
+
+**The floors, for pillow's reason (batch 201).** pip leaves an installed
+package alone while it satisfies the range, so CI's pip-audit -- which
+resolves the newest -- was green while the owner's own environment held
+PyJWT 2.13.0. Two of its advisories are in exactly the calls
+`core/chatgpt_auth.py` makes: a RecursionError out of `jwt.decode` on a
+deeply nested header (GHSA-8wjv-2p76-3863) and one malformed RSA key
+aborting a whole `PyJWKSet` (GHSA-w6j9-cwv2-h6wq). 2.15.0 and cryptography
+50.0.0 are the first releases with none.
+
+**mcp 2.3.0 changed one thing this client does, and its notes hid it.**
+They say "the default stays 1 MiB" for the new `max_sse_event_size`; on
+2.2.0's httpx2 (2.9.1) `EventSource` took no limit at all, and on 2.3.0
+(httpx2 2.16.0) one server-sent event over 1 MiB fails the call with
+"SSE stream failed: Server-sent event exceeded the 1048576 byte limit."
+The session survives. 1 MiB fails a tool that streams back a screenshot,
+text and all, although this harness keeps the text and replaces the image
+with a note. **The owner chose a bound, higher: 16 MiB, as an ordinary
+config.yaml key**, `mcp_max_event_bytes`, beside `max_read_chars` -- the
+math tools' precedent of a config value over a constant. A resource bound,
+not harness authority.
+
+- `mcp_client/client.py` passes it on BOTH streamable HTTP branches, read
+  per connection. The header-less branch used to return a bare URL, which
+  `Client()` turns into a transport with the SDK's 1 MiB, so it builds the
+  transport too now, with the SDK's own client as `Client()` would.
+  `test_an_http_server_without_headers_hands_client_a_bare_url` pinned the
+  old shape and is replaced by its inverse.
+- The legacy "sse" transport keeps the SDK's fixed 1 MiB: `sse_client`
+  takes no size.
+- **What it covers, measured rather than read.** A server may answer as SSE
+  or as plain JSON. mcp 2.3.0's own server, on 2026-07-28, answered every
+  request as `application/json`, which the client reads whole with no
+  limit: 4 MB and 40 MB arrived at 16 MiB and at 1 MiB alike. Against an
+  in-process mock that streams every answer, through `mcp_client` and
+  httpx2's MockTransport: 2 MB passed at 16 MiB and failed at 1 MiB with
+  "MCP call failed: SSE stream failed: Server-sent event exceeded the
+  1048576 byte limit."; 16,000,000 characters passed at 16 MiB and
+  20,000,000 failed naming 16777216.
+- TECHNICAL_DEBT 48 is amended rather than closed: plain-JSON answers and
+  stdio are still unbounded, and 16 MiB is a transport ceiling about 335
+  times `max_read_chars`, not a bound on what reaches the model.
+
+**Also moved with the pins:** `mcp_client/registration.py`'s fact that
+`Tool.name` is a bare required `str` with no metadata, re-measured on
+2.3.0; the hosted bridge's two notes naming the harness's mcp and pydantic
+pins; THIRD_PARTY_NOTICES' table and its pillow sentence (matplotlib 3.11.2
+requires `pillow>=9`); and `bin/venastine.mjs`'s comment, which said "2 of
+the 18 are ranges" beside the code that counts them, when it was 4 of 20.
+It names no count now.
+
+### Verified
+
+- A scratch venv built from the edited `requirements.txt` and
+  `requirements-test.txt` resolves with `pip check` clean: pydantic 2.14.1,
+  sympy 1.14.0, python-dotenv 1.2.4, matplotlib 3.11.2, mcp 2.3.0
+  (httpx2 2.16.0), cryptography 50.0.2, PyJWT 2.15.1.
+- Full suite in that venv, 8434 tests, eleven workers: 8364 passed, 70
+  skipped, no failure, in 2:11, with batch 207's outer recorder loaded and
+  0 opens past the stand-in. The touched files there with `AGENT_WORKSPACE`
+  unset: 713 passed, 12 skipped.
+- Mutations on an export copy, in that venv: a bare URL without headers,
+  the ceiling not passed, the ceiling as a constant, headers dropped, and
+  the shipped value at 1 MiB -- 5/5 killed. "Headers dropped" is killed
+  only by the new parametrised test: M19's
+  `test_headers_are_carried_on_both_http_transports_not_discarded` asserts
+  "not a bare string", which every http transport now is, so the new
+  test's `http_client is None` exactly when there are no headers is what
+  holds M19's property from here.
+- pip-audit: nothing in the resolved venv, nothing in `requirements.txt`
+  or `requirements-test.txt` as CI runs it. ruff clean; bandit 0 new
+  against the baseline and the count check's 62 pairs unchanged; gitleaks,
+  run as CI runs it, found no leaks on an export of the tracked files.
+- Not run: WSL, whose distro environment is stale (google-genai 1.0.0,
+  batch 207) and so says nothing about these pins; and a live provider
+  call, since no SDK pin moved.
+- **Version**, by `scripts/version.py bump`:
+  `0.2.0-b.3.installer-path.rb0705ebe789b`.
+
+**A local environment needs `pip install -r requirements.txt` after this**:
+the new code passes `max_sse_event_size`, which mcp 2.2.0 does not accept.
+The npm launcher rebuilds its runtime on the requirements hash and the
+GitHub installers reinstall on update; a developer checkout does neither.

@@ -60,7 +60,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 8431 tests, offline. 1:37 on 16 cores at batch 207 (9:06 serial at batch 114; +~5s first run: matplotlib font cache)
+pytest                                            # 8434 tests, offline. 1:37 on 16 cores at batch 207 (9:06 serial at batch 114; +~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -1660,7 +1660,7 @@ would never clear.
 
 **The package is `mcp_client/`, never `mcp/`.** The project root is on `sys.path`, so a top-level `mcp/` shadows the installed SDK — the `logging.py` incident again. §17's spec sketches `mcp/client.py`; don't follow it there. Every SDK symbol lives inside this package so a version migration touches one directory.
 
-**Pinned to `mcp==2.2.0`, EXACTLY, and the range is what it was pinned away FROM** (2.0.0 until batch 165's follow-up, which took 2.2.0 for CVE-2026-59951 -- a server-side advisory this client was never exposed to -- after reading the split the next sentences describe). `requirements.txt` carries the reason: under `>=2.0,<3` a minor release went red on main while every local run stayed green, so CI's result depended on WHEN it ran and CI was not testing what anyone runs locally. Moving it is deliberate: read 2.1.0's split first. v2 is not v1: fields are snake_case (`.content` / `.structured_content` / `.is_error`), `Tool.input_schema`, timeouts are `float`, the exception is `MCPError`, and `Client(server)` replaces `ClientSession` + a separate transport CM. Reading the v1 spellings against v2 doesn't crash — `getattr` returns `None` and every failed call silently looks successful.
+**Pinned to `mcp==2.3.0`, EXACTLY, and the range is what it was pinned away FROM** (2.0.0 until batch 165's follow-up, which took 2.2.0 for CVE-2026-59951 -- a server-side advisory this client was never exposed to -- after reading the split the next sentences describe; 2.3.0 since batch 208, whose ceiling on one streamed event is config.yaml's `mcp_max_event_bytes`). `requirements.txt` carries the reason: under `>=2.0,<3` a minor release went red on main while every local run stayed green, so CI's result depended on WHEN it ran and CI was not testing what anyone runs locally. Moving it is deliberate: read 2.1.0's split first. v2 is not v1: fields are snake_case (`.content` / `.structured_content` / `.is_error`), `Tool.input_schema`, timeouts are `float`, the exception is `MCPError`, and `Client(server)` replaces `ClientSession` + a separate transport CM. Reading the v1 spellings against v2 doesn't crash — `getattr` returns `None` and every failed call silently looks successful.
 
 **The manager task is required.** `AsyncExitStack` cannot be entered in `connect_all()` and closed in `disconnect_all()`: anyio binds cancel scopes to the **task**, and `run_coroutine_threadsafe()` makes a new task per call, so the right *loop* is necessary but not sufficient. One long-lived `_manager()` task enters every context, signals ready, and parks until shutdown. If `RuntimeError: Attempted to exit cancel scope in a different task` appears, something moved an enter/exit across a task boundary.
 

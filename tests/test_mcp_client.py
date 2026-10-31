@@ -144,10 +144,51 @@ def test_an_sse_server_always_builds_its_own_transport_never_a_bare_url(monkeypa
     assert hasattr(transport, "__aenter__")
 
 
-def test_an_http_server_without_headers_hands_client_a_bare_url():
+def test_an_http_server_without_headers_is_never_handed_a_bare_url():
+    """Batch 208. A bare URL was this branch's answer until mcp 2.3.0 began
+    failing a call whose one event exceeds `max_sse_event_size`: a URL
+    string takes the SDK's 1 MiB, so the transport is built here instead,
+    with `mcp_max_event_bytes`. Still streamable HTTP, still the SDK's own
+    client when there are no headers."""
     c = MCPClient({"r": _cfg("r", transport="http",
                              url="https://example.test/mcp")})
-    assert isinstance(c._transport_for(c.server_configs["r"]), str)
+    transport = c._transport_for(c.server_configs["r"])
+    assert not isinstance(transport, str)
+    assert hasattr(transport, "__aenter__")
+
+
+@pytest.mark.parametrize("headers", [{}, {"Authorization": "Bearer tok"}])
+def test_the_configured_event_ceiling_reaches_the_http_transport(
+        monkeypatch, headers):
+    """`mcp_max_event_bytes` reaches the SDK on both streamable branches,
+    read per connection rather than at import -- so a value set after this
+    module loaded is the one used."""
+    import config
+    from mcp_client import client as client_module
+
+    seen = []
+    monkeypatch.setattr(client_module, "streamable_http_client",
+                        lambda url, **kw: seen.append((url, kw)) or object())
+    monkeypatch.setattr(config, "MCP_MAX_EVENT_BYTES", 12_345)
+    c = MCPClient({"r": _cfg("r", transport="http",
+                             url="https://example.test/mcp",
+                             headers=headers)})
+
+    c._transport_for(c.server_configs["r"])
+
+    assert len(seen) == 1
+    url, kwargs = seen[0]
+    assert url == "https://example.test/mcp"
+    assert kwargs["max_sse_event_size"] == 12_345
+    assert (kwargs["http_client"] is None) == (not headers)
+
+
+def test_the_shipped_event_ceiling_is_sixteen_mebibytes():
+    """The owner's number (batch 208), against the SDK's 1 MiB, which a
+    tool returning a screenshot exceeds. CONFIG_ARCHITECTURE.md says why."""
+    import config
+
+    assert config.MCP_MAX_EVENT_BYTES == 16 * 1024 * 1024
 
 
 def test_headers_are_carried_on_both_http_transports_not_discarded(monkeypatch):

@@ -545,6 +545,17 @@ init_max_steps: 12
 teardown_budget_s: 10.0
 
 # ======================================================================
+# MCP results
+# ======================================================================
+
+# Largest single server-sent event, in bytes, a Streamable HTTP ("http")
+# MCP server may stream back. A bigger one fails that tool call with an
+# error naming the limit; the session survives. An answer sent as plain
+# JSON is not an event and is not bounded by this. Legacy "sse" servers
+# keep the MCP SDK's own 1 MiB, which it gives no way to change. 16 MiB.
+mcp_max_event_bytes: 16777216
+
+# ======================================================================
 # Shell and sandbox
 # ======================================================================
 

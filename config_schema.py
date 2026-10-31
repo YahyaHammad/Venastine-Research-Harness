@@ -375,6 +375,9 @@ class HarnessConfig(_Model):
     # -- MCP teardown ------------------------------------------------------
     teardown_budget_s: PositiveNumber
 
+    # -- MCP results -------------------------------------------------------
+    mcp_max_event_bytes: PositiveInt
+
     # -- Shell / sandbox ---------------------------------------------------
     shell_binary: str
     allow_insecure_sandbox_fallback: StrictBool
