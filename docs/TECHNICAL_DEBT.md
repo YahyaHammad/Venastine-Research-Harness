@@ -3779,7 +3779,7 @@ anything NA12 cares about, or the lock could be acquired around the park alone.
 **Not:** adding a timeout to `_ask_lock`, which would put a `config.py` number
 into a leaf module that deliberately imports nothing first-party.
 
-## 70. Three widgets measure the terminal in characters, not cells (open, deferred batch 138)
+## 70. Three widgets measure the terminal in characters, not cells (closed, batch 214)
 
 **Issue:** #224.
 
@@ -3825,6 +3825,8 @@ asserting row count, padded cell width and fitted cell width.
 are correct; font or combining-mark policy beyond `cell_len`, which is the
 terminal's own answer; truncation of diff *content*, where the 40-row cap stays
 the bound.
+
+**CLOSED (batch 214).** All three measure cells now, with `rich.cells.cell_len`, the measure `markdown.wrap_display`, `plain_wrap` and `display_len` already used. `wrap_source` cuts at the most characters that fit the row's cells and still breaks at the last space within them; a glyph wider than the row goes whole, so the wrap always makes progress. `AgentPanel._fit` (and `SessionPanel`, which shares it) truncates to `width - 1` cells before the ellipsis and drops a glyph that would straddle it. `_write_padded` pads with `total - cell_len(text)` spaces instead of `ljust`. Six tests in `tests/test_diff_view.py`'s `TestCellsNotCharacters`, wide text held in a variable per the cp1252 rule: the issue's 20-in-20 case is two rows, an 18-cell box holds 8 wide characters and the ellipsis, a padded row is exactly `total` cells for wide and ASCII text alike. Five fail without the fix; the sixth, a glyph wider than its row, is the progress guard the new loop needs and passes on either.
 
 ## 71. A live chat turn shows neither reasoning nor tool lines; a replay of it shows both (open, deferred batch 138)
 

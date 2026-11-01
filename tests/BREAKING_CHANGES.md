@@ -10,6 +10,12 @@ worth understanding, not a flaky mock to patch over.
 
 ---
 
+## The terminal is measured in cells (batch 214)
+
+| Change | Test | Fix |
+|---|---|---|
+| Measure a row with `len()`, or pad with `ljust`, in `wrap_source`, `AgentPanel._fit` or `Transcript._write_padded` | `TestCellsNotCharacters` | `rich.cells.cell_len`, as `tui/markdown.py`'s wrap already does (#224). Keep wide text in a variable (`chr(12354)`), never a literal, for the cp1252 console |
+
 ## Five stability fixes from the review marathon (batch 213)
 
 | Change | Test | Fix |

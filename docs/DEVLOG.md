@@ -28901,3 +28901,38 @@ issues stay open until the change reaches `main`.
   no-lookup and unlistable-project tests, 18 passed.
 - **Version**, by `scripts/version.py bump`:
   `0.2.0-b.8.installer-path.rb0705ebe789b`.
+
+## Batch 214 -- the terminal is measured in cells, not characters (2026-11-01)
+
+**#224, register item 70, the owner's choice of batch.** Three widgets
+sized rows in Python characters where the terminal draws cells. For
+single-width text the two agree, which is why nothing had failed; for
+double-width text (CJK, many emoji) they part.
+
+- `tui/diffs.py`'s `wrap_source` broke on `len(text)`: twenty wide
+  characters in twenty columns were "one row", Rich wrapped them into
+  two, and the padding that carries an added line's background landed on
+  the first -- the half-green row the pre-wrap exists to prevent. It cuts
+  at the most characters that fit the row's cells now, still at the last
+  space among them, and a glyph wider than the row goes whole so the loop
+  always advances.
+- `AgentPanel._fit`, which `SessionPanel` shares, said "Truncate to
+  `width` cells" and measured `len`: ten wide characters passed an 18-cell
+  box whole and drew 20. It keeps `width - 1` cells before the ellipsis
+  and drops a glyph that would straddle it.
+- `Transcript._write_padded` padded with `ljust(total)`; it pads by
+  `total - cell_len(text)` now.
+
+All three use `rich.cells.cell_len`, the measure `tui/markdown.py`'s wrap
+already used -- which is how the streamed transcript and these three could
+disagree about where a row ends.
+
+### Verified
+
+- `tests/test_diff_view.py`: 6 new tests in `TestCellsNotCharacters`
+  (40 now), wide text held in a variable per the cp1252 rule. Five fail
+  with the fix reverted; the sixth, a glyph wider than its row, is the
+  new loop's progress guard and passes either way.
+- Full suite: 8489 tests, 8419 passed and 70 skipped, in 1:57. ruff clean.
+- **Version**, by `scripts/version.py bump`:
+  `0.2.0-b.9.installer-path.rb0705ebe789b`.

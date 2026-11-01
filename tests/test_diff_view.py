@@ -150,6 +150,73 @@ class TestTheWrap:
         assert diffs.wrap_source("anything at all", 0) == ["anything at all"]
 
 
+# Double-width text is held in variables, never typed as a literal, per the
+# review marathon's cp1252 rule for anything a console may print.
+WIDE = chr(12354)          # HIRAGANA LETTER A: one character, two cells
+
+
+class TestCellsNotCharacters:
+    """#224, batch 214. Three widgets measured the terminal in characters
+    where the terminal measures cells; for double-width text the row they
+    sized was not the row drawn."""
+
+    def test_double_width_text_wraps_by_cells(self):
+        """The issue's own case: twenty wide characters in twenty columns
+        were one row by `len` and two on screen, so the diff row's
+        background covered half of what Rich wrapped."""
+        from rich.cells import cell_len
+
+        rows = diffs.wrap_source(WIDE * 20, 20)
+        assert rows == [WIDE * 10, WIDE * 10]
+        assert all(cell_len(row) <= 20 for row in rows)
+
+    def test_a_space_that_fits_in_cells_is_still_where_it_breaks(self):
+        from rich.cells import cell_len
+
+        rows = diffs.wrap_source(f"{WIDE * 2} {WIDE * 2} {WIDE * 2}", 6)
+        assert rows == [WIDE * 2, WIDE * 2, WIDE * 2]
+        assert all(cell_len(row) <= 6 for row in rows)
+
+    def test_a_glyph_wider_than_the_row_survives_whole(self):
+        """One cell of room and a two-cell glyph: no row can hold it, and
+        cutting it in half is not an option, so each goes whole and the
+        wrap still ends."""
+        assert diffs.wrap_source(WIDE * 3, 1) == [WIDE, WIDE, WIDE]
+
+    def test_the_sidebar_fit_measures_cells(self):
+        """Ten wide characters are 20 cells; an 18-cell box drew them whole
+        and overflowed. ASCII is cut where it always was."""
+        from rich.cells import cell_len
+
+        from tui.widgets import AgentPanel
+
+        fitted = AgentPanel._fit(WIDE * 10, 18)
+        assert cell_len(fitted) <= 18 and fitted.endswith("…")
+        assert fitted == WIDE * 8 + "…"
+        assert AgentPanel._fit("pipeline-reviewer", 10) == "pipeline-…"
+        assert AgentPanel._fit(WIDE * 9, 18) == WIDE * 9
+
+    def test_a_glyph_that_would_straddle_the_ellipsis_is_dropped(self):
+        from tui.widgets import AgentPanel
+
+        assert AgentPanel._fit("a" + WIDE * 5, 5) == "a" + WIDE + "…"
+
+    def test_a_padded_row_fills_its_cells_not_its_characters(self):
+        """`ljust` padded wide text past `total`, so the row Rich drew
+        wrapped and its background did not reach the edge."""
+        from rich.cells import cell_len
+
+        from tui.widgets import Transcript
+
+        written = []
+        transcript = Transcript()
+        transcript.write = lambda text, **kw: written.append((text, kw))
+        transcript._write_padded(WIDE * 5, "", 20)
+        transcript._write_padded("ascii", "", 20)
+        assert [cell_len(text.plain) for text, _kw in written] == [20, 20]
+        assert all(kw["width"] == 20 for _text, kw in written)
+
+
 # ---------------------------------------------------------------------------
 # ---- Transcript._render_diff: the geometry ---------------------------------
 # ---------------------------------------------------------------------------
