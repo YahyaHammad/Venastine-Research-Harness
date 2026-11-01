@@ -10,6 +10,17 @@ worth understanding, not a flaky mock to patch over.
 
 ---
 
+## Research pipeline accuracy (batch 220)
+
+| Change | Test | Fix |
+|---|---|---|
+| Widen Pass 3a's or 3b's `claim_ids`, apply or scoring back to every claim | `TestPass3TouchesOnlyTheClaimsD0RoutedToIt` | Keep all three at `factual_claims`, D0's own list; a stray entry is dropped and traced (#247). A 3b severity on a speculative claim moves its tier |
+| Log a pass's drop line before its checkpoint line | `test_the_checkpoint_line_still_comes_first`, `TestTheCheckpointReportsWhatWasApplied` | `_trace_line` reads the FIRST line with a pass's prefix; call `_note_entries_outside_the_batch` after the checkpoint |
+| Drop Pass 6a's call to `_note_entries_outside_the_batch` | `test_and_the_trace_says_which_revision_landed_on_nothing` | Keep it: the count shows a drop, the line says which id (#248) |
+| Change the wording of 6b's drop line | `test_the_trace_names_the_ids_pass_6b_answered_about_outside_its_batch` | The helper builds it from `pass_id`, `scope`, `asked` and `why`; 6b passes the old words |
+| Return `tool_level or context_level` unwrapped | `test_a_programmatic_override_is_answered_as_a_bool` | `bool()` it; the truthiness must not change, since a truthy override tightens by design (#250) |
+| Silence the cap-bound small-window case again, or name the margins in it | `test_a_capped_window_names_the_read_and_not_the_margins` | It names `max_read_chars` and the value that fits (#246); A24's margin line stays floor-only |
+
 ## Crashes and hangs from the review marathon (batch 219)
 
 | Change | Test | Fix |

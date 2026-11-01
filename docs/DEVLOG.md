@@ -29174,3 +29174,53 @@ guard (yes), #212's warn-or-raise (warn and fall back) and #254's posture
   nothing outside the baseline.
 - **Version**, by `scripts/version.py bump`:
   `0.3.4-b.2.bugfixes.r57e749187eaf`.
+
+## Batch 220 -- research pipeline accuracy (2026-11-01)
+
+**#247, #248, #250 and #246, register items 98, 99, 101 and 96**, the
+"research pipeline accuracy" group the owner picked. The owner chose #247's
+policy (drop and trace, over a corrective retry) and #246's remedy (warn
+once, naming the read) before anything was written.
+
+- **#247, and 3b beside it.** Pass 3a is shown the factual claims and
+  nothing else, but it validated against, applied to and scored every
+  claim, so an entry naming a speculative claim marked it grounded. All
+  three now use `factual_claims`, D0's own list, and a stray entry is
+  dropped and traced after the checkpoint line. **Pass 3b had the same
+  shape on the next line, with a worse effect**: a non-factual claim's
+  score IS its capped critic component, and measured, a stray severity
+  took a speculative claim from MEDIUM to LOW at 0.5 and to UNVERIFIED at
+  0.8 -- which also sends it through 6a/6b rounds. Scoped the same way.
+  Validating against the factual ids makes a response that names ONLY
+  non-factual claims B5's total mismatch, so it gets the corrective retry
+  6b's equivalent already gets. ROADMAP_v3 §66's "Pass 3a keeps the wide
+  default" is amended, not rewritten.
+- **#248.** `_note_entries_outside_the_batch` takes the pass, its scope,
+  what it was asked and why an outside answer must not land, and Pass 6a
+  calls it after its checkpoint. 6b's line is word for word what it was.
+  §66's "6a's silent drop stays silent" is amended.
+- **#250.** `requires_approval` returns `bool(...)`. Truthiness is
+  unchanged -- a programmatic `"false"` still tightens, which is D14's
+  ratchet -- and no raise was added, per the register's "Not".
+- **#246.** `_warn_if_one_read_cannot_fit`, once per (provider, model):
+  where the headroom CAP (not the floor) leaves less than one bounded read,
+  it names `max_read_chars` and the value that fits -- 16,384 characters
+  at a 16k window, 32,768 at 32k -- and says the setting applies to every
+  model. A24's row in ROADMAP_v3 is amended: its margin-naming line still
+  fires only where the floor binds. The test that pinned silence at 16k
+  and 32k is split into a 64k-and-up control and the new line.
+
+### Verified
+
+- New tests: 8 (orchestrator +5, agents +2, compaction +1 net after the
+  control's split). Without the orchestrator change 4 of the 5 new
+  orchestrator tests fail (the fifth is the control); without the `bool()`
+  both #250 cases fail.
+- Full suite on Windows with `AGENT_WORKSPACE` unset: 8612 tests, 8538
+  passed and 74 skipped, in 2:30. The first run failed one check,
+  `test_every_decision_id_cited_in_production_code_resolves`: the new
+  orchestrator comments and trace lines said a bare `D0`, which is not a
+  record id; they say `gate D0`, as the rest of the file does. ruff,
+  bandit as CI runs it and gitleaks on an export are clean.
+- **Version**, by `scripts/version.py bump`:
+  `0.3.4-b.3.bugfixes.r57e749187eaf`.

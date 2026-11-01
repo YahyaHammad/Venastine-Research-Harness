@@ -180,7 +180,12 @@ def requires_approval(
         if context is not None
         else False
     )
-    return tool_level or context_level
+    # bool(), because the signature says so and an override is only typed
+    # where a definition is PARSED (§67 A28): a ToolContext built in code
+    # with {"web_search": "false"} returned the string 'false' (batch 220,
+    # #250). Truthiness is unchanged -- that string still TIGHTENS, which is
+    # the ratchet above working, not a leak -- only the type is.
+    return bool(tool_level or context_level)
 
 
 def assert_permissions_declared(tool_names: Iterable[str]) -> None:

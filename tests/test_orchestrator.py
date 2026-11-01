@@ -1909,6 +1909,102 @@ class TestTheCheckpointReportsWhatWasApplied:
             "Pass 6a: revised 1 of 1 claim(s) in this retry round."
         )
 
+    def test_and_the_trace_says_which_revision_landed_on_nothing(self, mocker):
+        """#248, batch 220. The count above shows a drop and not its cause;
+        6b has traced its drops since §66, and 6a now does the same."""
+        payloads = _one_claim_stuck_through_retry_payloads()
+        payloads["Pass 6a"] = [
+            json.dumps([{"claim_id": "C2", "revised_text": "better"},
+                        {"claim_id": "C9", "revised_text": "for a claim that ended"}])
+            for _ in range(config.MAX_PIPELINE_RETRIES)
+        ]
+        mocker.patch.object(
+            RunAgentLoop, "stream_deep_research_mode",
+            side_effect=pass_stream(_build_pass_mock([], payloads)))
+
+        run = run_pipeline(
+            user_query="q", model="claude-test", provider_name="ANTHROPIC")
+
+        dropped = [line for line in run.trace if line.startswith("Pass 6a:")
+                   and "outside this round's batch" in line]
+        assert dropped, run.trace
+        assert "'C9'" in dropped[0] and "1 claim id(s)" in dropped[0]
+
+
+def _with_a_speculative_claim(extra_3a=(), extra_3b=()):
+    """The clean payloads plus C4, a speculative claim D0 routes past 3a and
+    3b, with each of those passes optionally answering about it anyway. A
+    bounded retry loop is canned in case a stray answer flags it."""
+    payloads = _clean_pipeline_payloads()
+    claims = json.loads(payloads["Pass 2"])
+    claims.append({"id": "C4", "text": "RSA may fall within a decade.",
+                   "type": "speculative", "entities": ["RSA"],
+                   "source_span": "32:50"})
+    payloads["Pass 2"] = json.dumps(claims)
+    payloads["Pass 3a"] = json.dumps(json.loads(payloads["Pass 3a"]) + list(extra_3a))
+    payloads["Pass 3b"] = json.dumps(json.loads(payloads["Pass 3b"]) + list(extra_3b))
+    payloads["Pass 6a"] = [json.dumps([]) for _ in range(config.MAX_PIPELINE_RETRIES)]
+    payloads["Pass 6b"] = [json.dumps({"grounding": [], "critic": []})
+                           for _ in range(config.MAX_PIPELINE_RETRIES)]
+    return payloads
+
+
+def _run_with(mocker, payloads):
+    mocker.patch.object(
+        RunAgentLoop, "stream_deep_research_mode",
+        side_effect=pass_stream(_build_pass_mock([], payloads)))
+    return run_pipeline(user_query="q", model="claude-test",
+                        provider_name="ANTHROPIC")
+
+
+class TestPass3TouchesOnlyTheClaimsD0RoutedToIt:
+    """#247, batch 220, and the 3b half found beside it. Both passes are
+    shown the factual claims and nothing else, and both applied to every
+    claim. A 3a entry marked a speculative claim grounded, which D0 says
+    cannot happen; a 3b severity moved its tier, because a non-factual
+    claim's score IS its capped critic component -- measured, MEDIUM to
+    UNVERIFIED at 0.8. The owner chose drop-and-trace over a corrective
+    retry."""
+
+    def test_the_premise_an_untouched_speculative_claim_is_medium(self, mocker):
+        """And the control: an answer only about the factual claims leaves
+        nothing to trace."""
+        run = _run_with(mocker, _with_a_speculative_claim())
+
+        assert run.claim_by_id("C4").confidence_tier == "MEDIUM"
+        assert not [line for line in run.trace
+                    if "outside the factual claims" in line], run.trace
+
+    def test_a_grounding_entry_for_it_does_not_land(self, mocker):
+        run = _run_with(mocker, _with_a_speculative_claim(extra_3a=[
+            {"claim_id": "C4", "sources": [_source()], "status": "grounded"}]))
+
+        c4 = run.claim_by_id("C4")
+        assert c4.grounding_status is None and c4.grounding_sources == []
+        dropped = [line for line in run.trace if line.startswith("Pass 3a:")
+                   and "outside the factual claims" in line]
+        assert dropped and "'C4'" in dropped[0], run.trace
+
+    def test_a_critic_severity_for_it_does_not_move_its_tier(self, mocker):
+        run = _run_with(mocker, _with_a_speculative_claim(extra_3b=[
+            {"claim_id": "C4", "fallacies": ["a fallacy"], "contradictions": [],
+             "severity": 0.8}]))
+
+        c4 = run.claim_by_id("C4")
+        assert c4.critic_severity == 0.0 and c4.fallacies == []
+        assert c4.confidence_tier == "MEDIUM", c4.confidence_tier
+        dropped = [line for line in run.trace if line.startswith("Pass 3b:")
+                   and "outside the factual claims" in line]
+        assert dropped and "'C4'" in dropped[0], run.trace
+
+    def test_the_checkpoint_line_still_comes_first(self, mocker):
+        """`_trace_line` reads the FIRST line with a pass's prefix, and the
+        checkpoint tests above rely on it being the count."""
+        run = _run_with(mocker, _with_a_speculative_claim(extra_3a=[
+            {"claim_id": "C4", "sources": [_source()], "status": "grounded"}]))
+
+        assert _trace_line(run, "Pass 3a:").startswith("Pass 3a: grounded 3 of 3")
+
 
 # ===========================================================================
 # ---- ROADMAP_v2 §30 (B6): one id resolution -------------------------------

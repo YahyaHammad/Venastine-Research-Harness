@@ -63,16 +63,19 @@ def _forget_context_window_warnings():
     fallback-warning test below pass or fail depending on WHICH TESTS RAN
     FIRST -- the kind of order dependency that reads as a flake.
 
-    BOTH SETS. Batch 148 added `_floor_warned` for A24's small-window
+    ALL THREE SETS. Batch 148 added `_floor_warned` for A24's small-window
     warning, which is the same kind of state with the same exposure: a test
     that primes a 4,096-token window warms it, and the test that asserts the
-    line is emitted would then pass or fail on test order.
+    line is emitted would then pass or fail on test order. Batch 220 added
+    `_read_warned`, for the 16k-32k case, with the same exposure again.
     """
     compaction._context_window_warned.clear()
     compaction._floor_warned.clear()
+    compaction._read_warned.clear()
     yield
     compaction._context_window_warned.clear()
     compaction._floor_warned.clear()
+    compaction._read_warned.clear()
 
 
 def _thread(memory, turns=6, body="x" * 200):
@@ -1997,15 +2000,12 @@ class TestASmallWindowSaysThatItCannotCompact:
         assert "191 tokens of headroom" in lines[0], lines[0]
         assert "NEVER" not in lines[0]
 
-    @pytest.mark.parametrize("window", [16384, 32768, 64000, 200000, 1000000])
-    def test_a_window_the_floor_does_not_bind_says_nothing(self, mocker,
-                                                           caplog, window):
-        """THE CONTROL, and A24's ruling in a test. 16,384 and 32,768 leave
-        less headroom than one bounded read too, but the headroom CAP is
-        what bound them, the cap is deliberate, and the only remedy there is
-        a bigger model -- so a line naming two settings would name the wrong
-        thing. TECHNICAL_DEBT 96 records that case instead. A warning that
-        fired here would also be a warning on every stock install."""
+    @pytest.mark.parametrize("window", [64000, 200000, 1000000])
+    def test_a_window_with_room_for_one_read_says_nothing(self, mocker,
+                                                          caplog, window):
+        """THE CONTROL. Above the floor, and with at least one bounded
+        read's room between the trigger and the window, neither line fires
+        -- a warning here would be a warning on every stock install."""
         model = self._window(mocker, window)
 
         with caplog.at_level("WARNING"):
@@ -2014,6 +2014,40 @@ class TestASmallWindowSaysThatItCannotCompact:
         assert trigger < window
         assert [r.getMessage() for r in caplog.records
                 if r.levelname == "WARNING"] == []
+
+    @pytest.mark.parametrize("window, headroom", [(16384, 4096),
+                                                  (32768, 8192)])
+    def test_a_capped_window_names_the_read_and_not_the_margins(
+            self, mocker, caplog, window, headroom):
+        """#246, batch 220 -- A24's excluded case, which the owner chose to
+        announce. The CAP bound these, so A24's ruling still holds for the
+        margin-naming line: it does not fire. The new line names
+        max_read_chars, the setting that helps, with the value that fits."""
+        model = self._window(mocker, window)
+
+        with caplog.at_level("WARNING"):
+            compaction.derived_trigger(model, "P")
+            compaction.derived_trigger(model, "P")
+
+        lines = [r.getMessage() for r in caplog.records
+                 if r.levelname == "WARNING"]
+        assert len(lines) == 1, lines
+        assert f"leaving {headroom} tokens of headroom" in lines[0], lines[0]
+        assert f"max_read_chars of {headroom * 4} or less" in lines[0]
+        assert "warning_margin_tokens" not in lines[0]
+        assert "NEVER" not in lines[0]
+
+    def test_the_floor_case_gets_only_the_floor_line(self, mocker, caplog):
+        """The two lines split the cases between them: at 8,192 the floor
+        binds, so A24's line fires and this one stays out of its way."""
+        model = self._window(mocker, 8192)
+
+        with caplog.at_level("WARNING"):
+            compaction.derived_trigger(model, "P")
+
+        lines = [r.getMessage() for r in caplog.records
+                 if r.levelname == "WARNING"]
+        assert len(lines) == 1 and "max_read_chars" not in lines[0], lines
 
     def test_a_second_pair_is_still_reported(self, mocker, caplog):
         """The dedup is keyed on (provider, model), not on the model alone:

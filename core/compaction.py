@@ -168,6 +168,11 @@ _context_window_warned: set = set()
 # one set would also mean whichever fired first silenced the other.
 _floor_warned: set = set()
 
+# And a third, for the case A24 left out on purpose: the headroom CAP, not
+# the floor, leaves less room than one bounded read (TECHNICAL_DEBT 96,
+# batch 220). Its own set, keyed the same way and for the same reasons.
+_read_warned: set = set()
+
 
 # A trailing release date, as Anthropic and Google spell it.
 _DATE_SUFFIX = re.compile(r"-\d{8}$")
@@ -446,7 +451,8 @@ def _warn_if_the_floor_left_no_room(model: str, provider_name: Optional[str],
     (12,500 proxy tokens), but the CAP is what bound it, the cap is
     deliberate (see headroom_for), and the only remedy there is a bigger
     model -- so a warning naming two settings would name the wrong thing.
-    That case is TECHNICAL_DEBT 96, recorded rather than announced.
+    That case is TECHNICAL_DEBT 96, and since batch 220 it has a line of its
+    own, `_warn_if_one_read_cannot_fit`, naming the read instead.
 
     Two wordings for one condition, because the remedy differs: at or above
     the window the trigger cannot be reached at all, and just below it the
@@ -482,6 +488,47 @@ def _warn_if_the_floor_left_no_room(model: str, provider_name: Optional[str],
         "so the step after a fold can still overflow. The floor is one token "
         "above the larger of %s -- lowering them lowers it.",
         model, where, window - trigger, window, trigger, one_read, settings)
+
+
+def _warn_if_one_read_cannot_fit(model: str, provider_name: Optional[str],
+                                 window: int, share: int, floor: int,
+                                 trigger: int) -> None:
+    """Say ONCE, per (provider, model), that one read can overflow the window.
+
+    TECHNICAL_DEBT 96 (#246, batch 220): the case the warning above leaves
+    out on purpose. On a 16,384- or 32,768-token window the floor does not
+    bind; headroom_for's CAP does, and it leaves 4,096 or 8,192 tokens
+    between the trigger and the window -- less than one bounded read's
+    12,500. A thread just under the trigger takes one large `read`, the
+    prompt overflows, and nothing in core/ recovers from that.
+
+    A24 was right that naming the two margins would name the wrong remedy.
+    The right one is the READ: `max_read_chars` is a setting, and a value
+    that fits the headroom keeps one read inside the window. The owner chose
+    to say so over shrinking reads per model, which would need the window
+    plumbed into every tool that reads the global. It applies to every
+    model, and the line says that too.
+    """
+    if floor >= share:
+        return  # the floor binds; the warning above owns that case
+    one_read = int(config.MAX_READ_CHARS) // CHARS_PER_TOKEN
+    headroom = window - trigger
+    if headroom >= one_read:
+        return
+    key = (provider_name or "", model)
+    if key in _read_warned:
+        return
+    _read_warned.add(key)
+    where = f" on {provider_name}" if provider_name else ""
+    logger.warning(
+        "Compaction for %r%s fires at %s tokens of a %s-token window, leaving "
+        "%s tokens of headroom: less than one bounded tool read "
+        "(max_read_chars is %s characters, about %s tokens), so one large "
+        "read just below the trigger can overflow the window and end the "
+        "turn. A max_read_chars of %s or less in config.yaml keeps a read "
+        "inside it; it applies to every model.",
+        model, where, trigger, window, headroom, config.MAX_READ_CHARS,
+        one_read, headroom * CHARS_PER_TOKEN)
 
 
 def derived_trigger(model: str, provider_name: Optional[str] = None) -> int:
@@ -540,6 +587,8 @@ def derived_trigger(model: str, provider_name: Optional[str] = None) -> int:
     trigger = max(1, share, floor)
     _warn_if_the_floor_left_no_room(model, provider_name, window, share,
                                     floor, trigger)
+    _warn_if_one_read_cannot_fit(model, provider_name, window, share, floor,
+                                 trigger)
     return trigger
 
 

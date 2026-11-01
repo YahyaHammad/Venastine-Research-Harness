@@ -497,6 +497,17 @@ def test_s2_parent_approval_tightenings_reach_the_child(_roots):
     assert requires_approval("web_search", {}, child) is True
 
 
+@pytest.mark.parametrize("override, expected", [("false", True), (0, False)])
+def test_a_programmatic_override_is_answered_as_a_bool(override, expected):
+    """#250, batch 220. Overrides are typed where a definition is PARSED
+    (§67 A28); a ToolContext built in code is parsed by nothing, and
+    {"web_search": "false"} returned the string 'false'. That string still
+    tightens -- it is truthy, and D14's ratchet only ever adds -- so what
+    changed is the type, which `is` checks and `==` would not."""
+    context = ToolContext(approval_overrides={"web_search": override})
+    assert requires_approval("web_search", {}, context) is expected
+
+
 def test_s2_union_only_carries_true_entries(_roots):
     """A False override is indistinguishable from absent under D14's OR,
     so carrying it would imply a relaxation the ratchet cannot express."""

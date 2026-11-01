@@ -556,8 +556,9 @@ def _run_pass_with_json_retry(
     reviewer shares retry_until_json's contract; re-parsing a short string
     is cheaper than moving twenty seams in the batch that adds the check.
 
-    `claim_ids` is the set the APPLY step will resolve against -- every
-    claim for 3a/3b/5/6c, the currently-flagged batch for 6a -- because
+    `claim_ids` is the set the APPLY step will resolve against -- the
+    factual claims for 3a/3b (batch 220), every claim for 4, the
+    currently-flagged batch for 6a/6b -- because
     validating against a wider set would accept an entry that then lands
     on nothing.
 
@@ -705,9 +706,10 @@ def _ground_and_score(run: PipelineRun, grounding_entries: list[dict], corpus,
     had already gathered -- the failure path being where an unattended
     run's record matters most.
 
-    `claims` NARROWS BOTH HALVES, and defaults to the whole run, which is
-    Pass 3a -- the first grounding, where every claim is in play.
-    §66 (A26) passes the 6a/6b loop's current batch instead, and it has to
+    `claims` NARROWS BOTH HALVES, and defaults to the whole run. Pass 3a
+    passes the factual claims since batch 220 (#247), the only ones it is
+    shown: the default let an entry naming a speculative claim mark it
+    grounded. §66 (A26) passes the 6a/6b loop's current batch, and it has to
     reach the SCORING as well as the apply: `score_grounding_sources`
     "rewrite[s] EVERY claim's grounding_sources with computed scores" by
     default, so a 6b round recomputed the sources of claims D1 had already
@@ -766,8 +768,9 @@ def _apply_critic(claims: list[Claim], critic_entries: list[dict]) -> int:
 
 
 def _note_entries_outside_the_batch(run: PipelineRun, batch: list[Claim],
-                                   *entry_lists) -> int:
-    """Say that Pass 6b answered about a claim it was not asked about.
+                                   *entry_lists, pass_id: str, scope: str,
+                                   asked: str, why: str) -> int:
+    """Say that a pass answered about a claim it was not asked about.
 
     §66 (A26). The apply is scoped to the batch, so such an entry lands on
     nothing -- and `review.py` settled the policy for exactly this shape:
@@ -775,6 +778,15 @@ def _note_entries_outside_the_batch(run: PipelineRun, batch: list[Claim],
     silence is indistinguishable from applying. 6b's own checkpoint line
     reports how many claims came out clean, which is an effect and
     therefore cannot report this.
+
+    FOUR PASSES SINCE BATCH 220. 6a made the same
+    drop twenty lines above 6b and said nothing (#248), and 3a and 3b,
+    shown only the factual claims, applied to every claim (#247): a 3a
+    entry could mark a speculative claim grounded, which gate D0 says cannot
+    happen, and a 3b severity on one moved its tier -- measured, MEDIUM to
+    LOW at 0.5 and to UNVERIFIED at 0.8, which then cost it 6a/6b rounds.
+    Each caller says its own `scope`, what it `asked` about and `why` an
+    answer outside it must not land.
 
     The id cross-check does not cover it and is not meant to: B5 makes a
     TOTAL mismatch the error and a partial one deliberately not, since a
@@ -790,12 +802,11 @@ def _note_entries_outside_the_batch(run: PipelineRun, batch: list[Claim],
                      - known - {None})
     if outside:
         run.log(
-            f"Pass 6b: {len(outside)} claim id(s) in the response name a "
-            f"claim outside this round's batch "
-            f"({', '.join(repr(i) for i in outside[:3])}) -- dropped. 6b was "
-            f"asked about {len(known)} flagged claim(s); applying an answer "
-            f"to a claim D1 had already finished with would change its "
-            f"grounding without recomputing its tier."
+            f"{pass_id}: {len(outside)} claim id(s) in the response name a "
+            f"claim outside {scope} "
+            f"({', '.join(repr(i) for i in outside[:3])}) -- dropped. "
+            f"{pass_id.removeprefix('Pass ')} was asked about {len(known)} "
+            f"{asked}; {why}"
         )
     return len(outside)
 
@@ -1271,10 +1282,20 @@ def stream_deep_research_pipeline(
                 f"Deduplicated entities to research (search each ONCE, map results back "
                 f"to every claim referencing it):\n{json.dumps(unique_entities)}"
             )
-            grounding_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3a", pass3a_input, critic_model, critic_provider, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, claim_ids=[c.id for c in run.claims], effort=effort, activity=activity)))
+            # SCOPED TO `factual_claims`, like 6b to its batch (batch 220,
+            # #247): 3a is shown the factual claims and nothing else, so an
+            # entry naming another claim is dropped and traced rather than
+            # marking a claim grounded that gate D0 routed past grounding.
+            grounding_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3a", pass3a_input, critic_model, critic_provider, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, claim_ids=[c.id for c in factual_claims], effort=effort, activity=activity)))
             grounded = _ground_and_score(run, grounding_json, corpus, scorer,
-                                         scoring_knobs, scholar)
+                                         scoring_knobs, scholar,
+                                         claims=factual_claims)
             yield from progress.checkpoint(f"Pass 3a: grounded {grounded} of {len(factual_claims)} factual claim(s), across {len(unique_entities)} deduplicated entities.")
+            _note_entries_outside_the_batch(
+                run, factual_claims, grounding_json, pass_id="Pass 3a",
+                scope="the factual claims", asked="factual claim(s)",
+                why="Gate D0 routes every other claim past 3a/3b, so grounding "
+                    "one would record a check gate D0 says never ran.")
 
             # E13/#77. Two or more survivors: the claims were extracted
             # from the UNION of the candidates, so the critic sees every
@@ -1296,9 +1317,18 @@ def stream_deep_research_pipeline(
                     f"Raw response:\n{run.raw_response}\n\n"
                     f"Factual claims with grounding:\n{json.dumps([vars(c) for c in factual_claims])}"
                 )
-            critic_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3b", pass3b_input, critic_model, critic_provider, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, claim_ids=[c.id for c in run.claims], effort=effort, activity=activity)))
-            critiqued = _apply_critic(run.claims, critic_json)
+            critic_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3b", pass3b_input, critic_model, critic_provider, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, claim_ids=[c.id for c in factual_claims], effort=effort, activity=activity)))
+            # The same scope as 3a, for a stronger reason: a non-factual
+            # claim's score IS its capped critic component, so a severity
+            # landing on one moved its tier (measured, batch 220).
+            critiqued = _apply_critic(factual_claims, critic_json)
             yield from progress.checkpoint(f"Pass 3b: critique applied to {critiqued} of {len(factual_claims)} factual claim(s).")
+            _note_entries_outside_the_batch(
+                run, factual_claims, critic_json, pass_id="Pass 3b",
+                scope="the factual claims", asked="factual claim(s)",
+                why="Gate D0 routes every other claim past 3a/3b, and a "
+                    "severity on one would lower the score Pass 5 gives "
+                    "it.")
         else:
             # A stage, not a silence. "3a/3b did not run" is a fact about
             # the run's shape -- it means nothing was factual -- and a
@@ -1387,6 +1417,15 @@ def stream_deep_research_pipeline(
                     yield PipelineEvent(kind="retry", claim_id=claim.id,
                                         attempt=claim.retry_count)
             yield from progress.checkpoint(f"Pass 6a: revised {revised} of {len(flagged)} claim(s) in this retry round.")
+            # The count above shows that something was dropped, not why
+            # (#248). The comment on the loop bound is about the BOUND,
+            # which the round counter settled; a reader of the trace still
+            # needs to tell an omission from a misdirected revision.
+            _note_entries_outside_the_batch(
+                run, flagged, revisions, pass_id="Pass 6a",
+                scope="this round's batch", asked="flagged claim(s)",
+                why="a revision to a claim D1 had already finished with "
+                    "would replace its text without re-validating it.")
 
             # --- Pass 6b: re-validate the revised subset only (batched, reuses Pass 5's code) ---
             pass6b_input = json.dumps([vars(c) for c in flagged])
@@ -1409,8 +1448,13 @@ def stream_deep_research_pipeline(
             _ground_and_score(run, grounding_entries, corpus,
                               scorer, scoring_knobs, scholar, claims=flagged)
             _apply_critic(flagged, critic_entries)
-            _note_entries_outside_the_batch(run, flagged, grounding_entries,
-                                            critic_entries)
+            _note_entries_outside_the_batch(
+                run, flagged, grounding_entries, critic_entries,
+                pass_id="Pass 6b", scope="this round's batch",
+                asked="flagged claim(s)",
+                why="applying an answer to a claim D1 had already finished "
+                    "with would change its grounding without recomputing "
+                    "its tier.")
             # 6b's own checkpoint below already reports an EFFECT -- how
             # many claims came out clean -- rather than what it was asked
             # about, so it needs no count from these two.

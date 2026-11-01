@@ -5414,7 +5414,7 @@ and RB3's arithmetic holds; the monitor's raw view keeps every character. A
 multi-line PEM block straddling the gap is A71's: an unterminated block is taken
 from its header, an orphan footer from below.
 
-## 96. A window below ~50,000 tokens cannot hold one bounded read in its headroom (open, measured and filed batch 148)
+## 96. A window below ~50,000 tokens cannot hold one bounded read in its headroom (closed, batch 220)
 
 **Issue:** #246.
 
@@ -5466,6 +5466,8 @@ install of a 32k model.
 Recorded here rather than in a warning, so that the next person reading
 `headroom_for`'s floor-and-cap argument finds the measurement instead of
 re-deriving it.
+
+**CLOSED (batch 220), the second shape above, on the owner's choice.** `compaction._warn_if_one_read_cannot_fit` says once per (provider, model), in a set of its own, that a window whose headroom CAP leaves less than one bounded read can overflow after a large read. It names `max_read_chars` with the value that fits the headroom -- 16,384 characters at a 16,384-token window and 32,768 at 32,768 -- and says the setting applies to every model. A24's ruling stands for the margin-naming line, which still fires only where the floor binds; ROADMAP_v3's A24 row is amended to say so. The old control test, which pinned silence at 16k and 32k, is split: 64k and up stay silent, 16k and 32k get exactly one line that does not name the margins, and 8,192 still gets only the floor's line.
 
 ## 97. Two timing-sensitive tests failed in SLOW full-suite runs and neither reproduced (the resize half fixed batch 151; the secrets half open, and deliberately untouched)
 
@@ -5569,7 +5571,7 @@ reasoned carefully about timing without questioning the count.
 **The secrets half is untouched**, as this entry asks. It has not recurred;
 if it does, the comparison is the measurement above.
 
-## 98. Pass 3a is asked about the FACTUAL claims and applied to every claim (open, measured and filed batch 149)
+## 98. Pass 3a is asked about the FACTUAL claims and applied to every claim (closed, batch 220)
 
 **Issue:** #247.
 
@@ -5604,7 +5606,9 @@ which is now a one-argument change, plus `claim_ids` to match -- and the
 decision to make first is whether a 3a entry about a non-factual claim is
 worth a corrective retry or a dropped-and-traced entry.
 
-## 99. Pass 6a drops an unknown claim id in silence, where 6b now says so (open, filed batch 149)
+**CLOSED (batch 220), drop-and-trace on the owner's choice over a corrective retry, and wider than filed.** Pass 3a validates against, applies to and scores only `factual_claims`, D0's own list, and an entry naming any other claim is dropped with a trace line after the checkpoint. Pass 3b had the same shape on the next line, and there it DID move a tier: a non-factual claim's score is its capped critic component, so a stray severity took a speculative claim from MEDIUM to LOW at 0.5 and to UNVERIFIED at 0.8, which also cost it 6a/6b rounds. It is scoped the same way. One consequence of validating against the factual ids: a response naming ONLY non-factual claims is now B5's total mismatch and gets the corrective retry, as 6b's does for its batch. ROADMAP_v3 §66's "Pass 3a keeps the wide default" is amended. `TestPass3TouchesOnlyTheClaimsD0RoutedToIt`: 4 of its 5 tests fail without the fix; the fifth is the control.
+
+## 99. Pass 6a drops an unknown claim id in silence, where 6b now says so (closed, batch 220)
 
 **Issue:** #248.
 
@@ -5632,6 +5636,8 @@ visible as a count but not as a cause.
 and the batch had already grown past both of them; the fix is
 `_note_entries_outside_the_batch(run, flagged, revisions)` with the message
 reworded for a revision, which is the same helper.
+
+**CLOSED (batch 220), with the shape suggested.** `_note_entries_outside_the_batch` takes its pass, scope, question and reason as arguments now, and Pass 6a calls it after its checkpoint line, so `_trace_line`'s first-match readers still see the count. 6b's message is unchanged word for word, since two tests pin its wording. The round counter still bounds the loop. ROADMAP_v3 §66's "Pass 6a's silent drop stays silent" is amended.
 
 ## 100. An MCP tool's description is read as harness-authored instruction (closed, batch 160 -- ruled data, and the prompt says so)
 
@@ -5668,7 +5674,7 @@ server's and cannot add to or change the model's instructions -- present only
 when `schemas()` would offer an `mcp__` tool under the same three facts, so a
 prompt without one is byte-identical. A31's bound and prefix are unchanged.
 
-## 101. `requires_approval` can still return a non-boolean (open, filed batch 150)
+## 101. `requires_approval` can still return a non-boolean (closed, batch 220)
 
 **Issue:** #250.
 
@@ -5696,6 +5702,8 @@ same pair would apply here. The reason it is not done in batch 150 is that
 advertisement, and adding a raise to it for a case no caller in the tree
 produces is a cost with no demonstrated consequence -- which is B4's rule,
 applied to this item rather than against it.
+
+**CLOSED (batch 220), without the raise.** `requires_approval` returns `bool(tool_level or context_level)`. Truthiness is unchanged -- a programmatic `"false"` still tightens, which is D14's ratchet working -- and only the type the signature claims is now true. No raise, per Not above. `test_a_programmatic_override_is_answered_as_a_bool` checks with `is`, which `==` could not, and both of its cases fail without the fix.
 
 ## 102. Under WSL, a test that spawns a subprocess cannot import this project's dependencies (open, measured and filed batch 150)
 
