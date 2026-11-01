@@ -28783,3 +28783,70 @@ the rule beside the three it already called load-bearing.
   release tag lands on `main`.
 - **Version**, by `scripts/version.py bump`:
   `0.2.0-b.6.installer-path.rb0705ebe789b`.
+
+## Batch 212 -- the confidence chart is SVG, and matplotlib leaves the install (2026-11-01)
+
+**The owner's question:** are the unused packages removed from
+`requirements.txt`, to make a fresh install lighter? Every package it
+names is imported by the harness; the leftovers in the owner's own
+environment (`google-ai-generativelanguage`, `grpcio-status` and the rest
+of `google-generativeai` 0.8.6) were never in it. What WAS heavy, measured
+per distribution in a venv built from the file: **367 MB of runtime
+closure, 126 MB of it matplotlib** -- matplotlib 33.6, numpy 54.0,
+fonttools 18.0, pillow 16.3 and seven small packages -- for one bar chart
+of five tier counts per research run. The owner chose to draw that chart
+as SVG with the standard library and drop matplotlib, over an optional
+extra (which would have left default installs with no chart).
+
+- `core/reasoning/output_writer.py`: `confidence_svg(tiers, counts)` is a
+  pure function returning one standalone SVG -- title, y-axis label,
+  gridlines in 1/2/5 steps (`_axis_step`, at most ten), each bar with its
+  count above and its tier below, a white background for dark viewers.
+  `confidence_chart.png` is `confidence_chart.svg` now. The #81 contract is
+  unchanged: any failure is contained and warned, never fatal. Rendered
+  with headless Edge to check it reads.
+- **A test caught a bug before it shipped.** `escape()` leaves `"`, so a
+  label with a quote ended the `data-tier` attribute and broke the XML;
+  attributes pass `{'"': "&quot;"}` now. The labels are fixed tier names
+  today, which is why nothing had noticed.
+- `requirements.txt` drops `matplotlib==3.11.2` and batch 201's
+  `pillow>=13.0.0,<14`: nothing else the harness installs reaches pillow,
+  so the floor guards nothing. The two floors that cited "pillow's reason
+  below" cite it without the "below".
+- The root `conftest.py` no longer gives each xdist worker its own
+  `MPLCONFIGDIR`, and AGENTS.md and ARCHITECTURE.md no longer charge
+  "+~5s first run" for a font cache. That cache was the cost batch 210's
+  first full run paid: the one worker left rebuilt it for ten minutes,
+  py-spy showed, the first time after batch 208's 3.11 upgrade.
+- `test_granted_calls_artifact.py` patched `write_confidence_chart` with
+  `create=True`, a name that never existed, so its stub stubbed nothing
+  and the real chart rendered. It patches `_write_confidence_chart` now.
+- `test_no_accepted_version_is_one_the_harness_can_install` guards its walk
+  with packages the harness still reaches (PyJWT, cryptography,
+  pydantic-core, linkify-it-py) and now asserts that matplotlib, pillow and
+  numpy are not among them.
+- THIRD_PARTY_NOTICES loses both rows and pillow's paragraph, with a line
+  saying where they went; the bridge still installs pillow in its own
+  environment.
+
+**What a user sees.** The npm launcher rebuilds its runtime when the
+requirements hash changes and the GitHub installers build a fresh
+environment on update, so both drop the packages on their next update. An
+existing developer venv keeps matplotlib until it is removed by hand;
+nothing imports it.
+
+### Verified
+
+- `tests/test_output_writer.py`: 27 tests (was 12). The chart is parsed
+  back with defusedxml for one bar per tier holding the run's own counts,
+  heights proportional, labels escaped, an empty run, round axis steps,
+  and a drawing failure and an unwritable path each warned and contained.
+- Full suite: 8463 tests, 8393 passed and 70 skipped, in 1:50. This
+  environment still has matplotlib installed, so the chart tests were run
+  again with `matplotlib`, `PIL` and `numpy` blocked in `sys.modules`: 32
+  passed.
+- ruff clean over the whole tree. A fresh install measured 367 MB of
+  runtime closure before and 241 MB after, from the same venv's metadata
+  with matplotlib and pillow taken out of the roots.
+- **Version**, by `scripts/version.py bump`:
+  `0.2.0-b.7.installer-path.rb0705ebe789b`.

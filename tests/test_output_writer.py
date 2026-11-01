@@ -6,9 +6,9 @@ write_run_artifacts(). Each test builds a PipelineRun with known data,
 points config.OUTPUT_DIR at a tmp_path, and verifies the artifact
 directory's file layout and contents.
 
-matplotlib is a hard project dependency (requirements.txt), so the
-confidence chart is normally produced -- but every failure inside the
-two supplementary writers is contained and WARNED (#81): the guards
+The confidence chart is SVG drawn with the standard library since batch
+212, so it is always produced -- but every failure inside the two
+supplementary writers is contained and WARNED (#81): the guards
 exist so a completed run is never lost over a chart or a PDF, and #49's
 rule means containment is never silent. The degrade tests below pin
 both halves of that contract. PDF rendering (markdown + weasyprint) is
@@ -28,7 +28,12 @@ import pytest
 
 import config
 from core.reasoning.base import Claim, PipelineRun
-from core.reasoning.output_writer import _tier_counts, write_run_artifacts
+from core.reasoning.output_writer import (
+    _axis_step,
+    _tier_counts,
+    confidence_svg,
+    write_run_artifacts,
+)
 
 # ---------------------------------------------------------------------------
 # ---- Helper ---------------------------------------------------------------
@@ -71,7 +76,7 @@ def _make_full_run() -> PipelineRun:
 def test_write_run_artifacts_creates_all_expected_files(tmp_path, monkeypatch):
     """write_run_artifacts must create the full file layout under
     OUTPUT_DIR/<run_id>/: every numbered artifact, trace.md, report.md,
-    confidence_chart.png, and the sources/ + code/ subdirectories."""
+    confidence_chart.svg, and the sources/ + code/ subdirectories."""
     monkeypatch.setattr(config, "OUTPUT_DIR", str(tmp_path))
     run = _make_full_run()
 
@@ -92,7 +97,7 @@ def test_write_run_artifacts_creates_all_expected_files(tmp_path, monkeypatch):
         "06_revisions.json",  # C2 has revision_text
         "trace.md",
         "report.md",
-        "confidence_chart.png",
+        "confidence_chart.svg",
     ]
     for filename in expected_files:
         path = os.path.join(output_dir, filename)
@@ -244,22 +249,66 @@ def test_write_run_artifacts_raises_on_none_run_id(tmp_path, monkeypatch):
         write_run_artifacts(run)
 
 
-def test_confidence_chart_is_valid_png(tmp_path, monkeypatch):
-    """confidence_chart.png must be a real, non-empty file with the
-    PNG magic bytes (matplotlib is a hard dependency, so the chart is
-    always produced)."""
+def _bars(svg_text):
+    """{tier: (count, height)} read back out of the chart's own XML."""
+    from defusedxml.ElementTree import fromstring
+
+    root = fromstring(svg_text)
+    ns = "{http://www.w3.org/2000/svg}"
+    assert root.tag == f"{ns}svg"
+    return {bar.get("data-tier"): (int(bar.get("data-count")),
+                                   float(bar.get("height")))
+            for bar in root.iter(f"{ns}rect") if bar.get("class") == "bar"}
+
+
+def test_confidence_chart_is_a_valid_svg_of_the_run(tmp_path, monkeypatch):
+    """Batch 212: confidence_chart.svg, drawn with the standard library,
+    where matplotlib wrote a PNG. It must parse as SVG and carry one bar
+    per tier, holding the run's own counts -- which the PNG's magic-bytes
+    check could never say."""
     monkeypatch.setattr(config, "OUTPUT_DIR", str(tmp_path))
     run = _make_full_run()
 
     output_dir = write_run_artifacts(run)
 
-    chart_path = os.path.join(output_dir, "confidence_chart.png")
-    assert os.path.isfile(chart_path)
-    with open(chart_path, "rb") as f:
-        header = f.read(8)
-    # PNG magic bytes: \x89PNG\r\n\x1a\n
-    assert header[:4] == b"\x89PNG", f"Not a valid PNG: {header!r}"
-    assert os.path.getsize(chart_path) > 0
+    assert not os.path.exists(os.path.join(output_dir, "confidence_chart.png"))
+    with open(os.path.join(output_dir, "confidence_chart.svg"),
+              encoding="utf-8") as f:
+        bars = _bars(f.read())
+    assert {tier: count for tier, (count, _) in bars.items()} == {
+        "HIGH": 1, "MEDIUM": 0, "LOW": 1, "UNVERIFIED": 0,
+        "UNVERIFIED_COVERAGE": 1}
+
+
+def test_bar_heights_are_proportional_to_their_counts():
+    bars = _bars(confidence_svg(["A", "B", "C"], [3, 6, 0]))
+    assert bars["C"][1] == 0
+    assert bars["B"][1] == pytest.approx(2 * bars["A"][1])
+    assert bars["B"][1] > 0
+
+
+def test_every_label_is_escaped():
+    """The tier names are fixed today; a label that is not must not be
+    able to write markup into the file."""
+    svg = confidence_svg(['<script>alert("x")</script>', "A&B"], [1, 2])
+    assert "<script>" not in svg
+    assert set(_bars(svg)) == {'<script>alert("x")</script>', "A&B"}
+
+
+def test_an_empty_run_still_draws_an_axis():
+    """No claims at all: five zero bars over an axis that still reads 0
+    to 1, rather than a division by zero inside the guard."""
+    bars = _bars(confidence_svg(["A", "B"], [0, 0]))
+    assert [count for count, _ in bars.values()] == [0, 0]
+
+
+@pytest.mark.parametrize("top, step", [
+    (1, 1), (7, 1), (10, 1), (11, 2), (20, 2), (21, 5), (50, 5), (51, 10),
+    (100, 10), (101, 20), (999, 100), (1000, 100),
+])
+def test_the_axis_reads_in_round_steps_with_at_most_ten_lines(top, step):
+    assert _axis_step(top) == step
+    assert top / step <= 10
 
 
 def test_tier_counts_matches_run_data():
@@ -288,13 +337,13 @@ class TestSupplementaryDegradation:
     def test_a_chart_failure_does_not_kill_the_artifacts(self, tmp_path,
                                                          monkeypatch, mocker,
                                                          caplog):
-        """plt.subplots() raising -- the documented rendering-error case,
+        """The drawing raising -- the documented rendering-error case,
         and pre-#81 an UnboundLocalError escaping the guard's own
         finally -- must leave every essential artifact on disk, no chart,
         and a WARNING naming what was skipped."""
         monkeypatch.setattr(config, "OUTPUT_DIR", str(tmp_path))
-        mocker.patch("matplotlib.pyplot.subplots",
-                     side_effect=RuntimeError("no usable backend"))
+        mocker.patch("core.reasoning.output_writer.confidence_svg",
+                     side_effect=RuntimeError("cannot draw"))
         run = _make_full_run()
 
         with caplog.at_level(logging.WARNING,
@@ -304,32 +353,31 @@ class TestSupplementaryDegradation:
         assert os.path.isfile(os.path.join(output_dir, "report.md"))
         assert os.path.isfile(os.path.join(output_dir, "trace.md"))
         assert not os.path.exists(
-            os.path.join(output_dir, "confidence_chart.png"))
+            os.path.join(output_dir, "confidence_chart.svg"))
         warnings = [r.getMessage() for r in caplog.records
                     if r.levelno == logging.WARNING]
         assert any("Confidence chart" in w and "render failed" in w
-                   for w in warnings), warnings
+                   and "cannot draw" in w for w in warnings), warnings
 
-    def test_a_backend_failure_skips_with_a_warning(self, tmp_path,
-                                                    monkeypatch, mocker,
-                                                    caplog):
-        """matplotlib.use() raising on a bad backend escapes nothing and
-        warns -- the import guard is Exception-wide now, not
-        ImportError-only (#81)."""
+    def test_a_chart_that_cannot_be_written_skips_with_a_warning(
+            self, tmp_path, monkeypatch, caplog):
+        """Batch 212 replaced the backend failure this tested -- there is
+        no backend now -- with the one left: the file cannot be written.
+        A directory squatting on the chart's name makes the open fail."""
         monkeypatch.setattr(config, "OUTPUT_DIR", str(tmp_path))
-        mocker.patch("matplotlib.use",
-                     side_effect=RuntimeError("unrecognized backend"))
         run = _make_full_run()
+        os.makedirs(os.path.join(str(tmp_path), str(run.run_id),
+                                 "confidence_chart.svg"))
 
         with caplog.at_level(logging.WARNING,
                              logger="core.reasoning.output_writer"):
             output_dir = write_run_artifacts(run)
 
-        assert not os.path.exists(
-            os.path.join(output_dir, "confidence_chart.png"))
+        assert os.path.isfile(os.path.join(output_dir, "report.md"))
         warnings = [r.getMessage() for r in caplog.records
                     if r.levelno == logging.WARNING]
-        assert any("matplotlib unavailable" in w for w in warnings), warnings
+        assert any("Confidence chart" in w and "render failed" in w
+                   for w in warnings), warnings
 
     def test_a_pdf_render_failure_degrades_with_a_warning(self, tmp_path,
                                                           monkeypatch,

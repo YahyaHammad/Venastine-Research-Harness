@@ -23,18 +23,23 @@ openai==2.45.0
 # transport is httpx now, not requests.
 google-genai==2.29.0
 # Batch 208, from Dependabot's group, the owner's choice of which: the
-# four below are packages the suite runs for real rather than faking, so
+# packages below are ones the suite runs for real rather than faking, so
 # a green suite is evidence about them, and each release was at least two
 # weeks old. pydantic 2.14.0 fixed GHSA-gj4f-r7mf-jjxh (an unbounded
 # Fraction exponent) and GHSA-955g-x97g-8mcp (quadratic multi-host URL
 # validation). sympy 1.14.0 gives test_math_tools.py's measured expansion
-# the same 74,723 characters 1.13.3 did. matplotlib 3.11 overhauled its
-# text layout and needs Python >=3.11, which is this project's floor.
+# the same 74,723 characters 1.13.3 did.
+#
+# NO matplotlib SINCE BATCH 212, the owner's choice. It drew one bar chart
+# per research run, and with numpy, fonttools, pillow and seven smaller
+# packages it was 126 MB of a 367 MB install, measured in a fresh venv;
+# core/reasoning/output_writer.py draws the chart as SVG with the standard
+# library now. pillow's floor (batch 201) went with it: nothing else here
+# reaches pillow.
 pydantic==2.14.1
 sympy==1.14.0
 sqlmodel==0.0.39
 python-dotenv==1.2.4
-matplotlib==3.11.2
 pyyaml==6.0.3
 # config.yaml, via config_schema.py. TWO YAML PARSERS IN ONE TREE IS
 # DELIBERATE -- do not "unify" them. pyyaml above parses agent/skill
@@ -206,8 +211,8 @@ google-re2==1.1.20251105
 # here would fight google-auth's own floor on a resolver that has to
 # satisfy both. The ceiling is D22's rule, so a MAJOR cannot change
 # behaviour underneath CI. The floor was the AEAD API this uses, stable
-# since 3.x, until batch 208 raised it to 50.0.0 for pillow's reason
-# below: pip leaves an installed package alone while it still satisfies
+# since 3.x, until batch 208 raised it to 50.0.0 for the reason batch
+# 201 floored pillow (a floor batch 212 removed with matplotlib): pip leaves an installed package alone while it still satisfies
 # the range, and 42.0 through 49.x carry between 15 and 2 known
 # advisories (OSV, measured 2026-10-31), so a venv built earlier kept
 # one. 50.0.0 is the first release with none. What to re-measure when it
@@ -232,8 +237,8 @@ cryptography>=50.0.0,<52
 #
 # A FLOOR AND A CEILING, for `cryptography`'s reason: an exact pin here
 # would fight mcp's own floor, `>=2.10.1`. The ceiling is D22's rule. The
-# floor was mcp's until batch 208 raised it to 2.15.0, for pillow's reason
-# below: the owner's venv held 2.13.0, which the old floor allowed and
+# floor was mcp's until batch 208 raised it to 2.15.0, for `cryptography`'s
+# reason above: the owner's venv held 2.13.0, which the old floor allowed and
 # which carries 29 known advisories (OSV, measured 2026-10-31), two of
 # them in exactly the calls core/chatgpt_auth.py makes -- a RecursionError
 # out of `jwt.decode` on a deeply nested header (GHSA-8wjv-2p76-3863), and
@@ -243,40 +248,6 @@ cryptography>=50.0.0,<52
 # given (the `none` and HS256 tests in tests/test_chatgpt_auth.py), and
 # `PyJWKSet` still reads OpenAI's JWKS.
 PyJWT>=2.15.0,<3
-
-# Batch 201, the owner's call. Imported nowhere in the harness:
-# matplotlib requires it, as `pillow>=8` with no ceiling, so a FRESH
-# install already resolved the newest release, 13.0.0 -- measured with
-# pip's dry-run resolve on 2026-10-28. What the declaration buys is the
-# environment that is not fresh. pip leaves an installed package alone
-# while it still satisfies what requires it, so a venv built before
-# 13.0.0 was released (2026-10-16) kept 12.3.0 -- the owner's own did --
-# with every advisory scripts/deploy_demo.py's ACCEPTED waves through for
-# the hosted demo's bridge. A floor makes the next
-# `pip install -r requirements.txt` upgrade it, and changes the hash
-# bin/venastine.mjs keys its runtime venv on, so an npm install builds a
-# fresh one.
-#
-# 12.3.0 belongs to the BRIDGE alone: Gradio 6.30.0 (and 6.31.0, the
-# newest when this was written) requires pillow<13. The bridge has an
-# environment of its own -- deploy/hosted/requirements.txt says why -- and
-# scripts/build_demo_bundle.py copies only textual's line from this file
-# into it, so this floor reaches the sessions' lock, which pinned 13.0.0
-# already, and never Gradio. NOT two pyproject extras, `hosted` with the
-# old pillow and `local` with the new: an extra only adds, so `hosted`
-# would have to carry Gradio itself, whose mcp and pydantic ranges are
-# the reason the bridge was separated (HD2), and neither platform installs
-# from pyproject. tests/test_deploy_demo.py holds every accepted version
-# outside what this file installs.
-#
-# A FLOOR AND A CEILING, for `cryptography`'s reason: an exact pin would
-# fight matplotlib's own floor, and the ceiling is D22's rule. What to
-# re-measure when it moves: pip-audit is clean on the release, and
-# matplotlib still saves a figure through it
-# (core/reasoning/output_writer.py, tests/test_output_writer.py).
-# MIT-CMU; its wheels carry a C extension and the image libraries it
-# links, which THIRD_PARTY_NOTICES.md names.
-pillow>=13.0.0,<14
 
 # TECHNICAL_DEBT 18, batch 116. A PRODUCTION dependency: `arxiv.py` imports
 # it at module load, and pyproject.toml reads this file for its dependency

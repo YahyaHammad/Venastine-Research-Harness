@@ -10,6 +10,15 @@ worth understanding, not a flaky mock to patch over.
 
 ---
 
+## The confidence chart is SVG, and matplotlib is gone (batch 212)
+
+| Change | Test | Fix |
+|---|---|---|
+| Bring back a chart library, or write `confidence_chart.png` | `test_confidence_chart_is_a_valid_svg_of_the_run` | The owner removed matplotlib for its 126 MB; the chart is `confidence_svg()` in `core/reasoning/output_writer.py`. The test parses the file back with defusedxml and reads each bar's `data-tier` / `data-count` |
+| Escape a label with `escape()` alone inside an attribute | `test_every_label_is_escaped` | `escape()` leaves `"`, which ends the attribute; pass `{'"': "&quot;"}` |
+| Re-add matplotlib, pillow or numpy to what `requirements.txt` installs | `test_no_accepted_version_is_one_the_harness_can_install` | It asserts none of the three is reached. pillow 12.3.0 carries advisories accepted for the bridge alone |
+| The per-worker `MPLCONFIGDIR` row in the batch 109 table below | Nothing | Removed from the root `conftest.py` with matplotlib; the row is history |
+
 ## A release tag's runs no longer strand the deploy (batch 211)
 
 | Change | Test | Fix |
