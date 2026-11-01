@@ -29062,3 +29062,45 @@ had not.
   bandit and its count check clean; gitleaks, as CI runs it on an export
   of the tracked files, finds no leaks.
 - **Version**, by `scripts/version.py bump`: `0.2.0-b.12.installer-path.rb0705ebe789b`.
+
+## Batch 218 -- a reaped session is a gone session (2026-11-01)
+
+The first batch on `bugfixes`, a branch for bug fixes in general, cut from
+main at 3afcae1 (release 0.3.4).
+
+0.3.4's release commit failed one test in the `tests` run for its push to
+main (run 41305992126, Python 3.11 on Linux), while the run for the
+`v0.3.4` tag passed on the same commit:
+`test_hosted_mode.py::TestAHostedSessionHardensItself::test_a_session_does_not_outlive_its_bridge`
+raised `ProcessLookupError: [Errno 3] No such process` from inside its
+`alive()` poll. The deploy gate refused the commit for it, so 0.3.4 did
+not reach the Space; re-running the job is the owner's.
+
+- **The product was right; the test's poll raced the reaper.** The session
+  did die with its bridge. `alive()` opens `/proc/<pid>/status` and reads
+  it, and it caught only `FileNotFoundError`, which is what the open raises
+  once the pid is gone. When the orphan is reaped between the open and the
+  read, the open succeeds and the read fails with ESRCH instead. Measured
+  under WSL with the window widened (open, SIGKILL, reap, then read):
+  `ProcessLookupError: [Errno 3] No such process`, the CI error exactly.
+  Before the reap, the same file reads `State: Z (zombie)`, which the poll
+  already counts as gone.
+- `alive()` now counts `ProcessLookupError` as gone too. The tree's two
+  other `/proc/<pid>` reads (`security/confine.py`'s escape list and
+  `tests/_confine_probe.py`) read the parent, which is alive by
+  construction, and both catch every `OSError` anyway.
+
+### Verified
+
+- WSL: the test passed 20 runs of 20; `test_hosted_mode.py` 95 passed,
+  2 skipped.
+- Full suite on Windows with `AGENT_WORKSPACE` unset: 8545 tests, 8475
+  passed and 70 skipped, in 2:22 (the changed test is Linux-only and
+  skips there). The first run also failed
+  `test_a_crlf_checkout_stays_crlf`, the known local false red once a
+  branch switch leaves `config.yaml` CRLF in the worktree; written back
+  as LF, git saw no change and the rerun was clean.
+- ruff, the bandit count check, and gitleaks on an export of the tracked
+  files: clean.
+- **Version**, by `scripts/version.py branch` and `bump`:
+  `0.3.4-b.1.bugfixes.r57e749187eaf`.

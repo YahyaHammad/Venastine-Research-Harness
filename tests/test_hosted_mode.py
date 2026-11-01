@@ -203,10 +203,12 @@ class TestAHostedSessionHardensItself:
         assert ok == "True"
 
         def alive() -> bool:
+            # A reap between the open and the read fails the read with ESRCH
+            # rather than the open with ENOENT; both mean the session is gone.
             try:
                 with open(f"/proc/{pid}/status", encoding="utf-8") as handle:
                     return "\nState:\tZ" not in handle.read()
-            except FileNotFoundError:
+            except (FileNotFoundError, ProcessLookupError):
                 return False
 
         deadline = time.monotonic() + 10
