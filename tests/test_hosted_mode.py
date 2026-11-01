@@ -286,7 +286,14 @@ class TestTheSharedTui:
         assert "OpenRouter — sign in" in listed
         # HD12: where a key CAN go, by name.
         assert "Other providers need a key" in listed
-        assert "npm install -g @yahyahammad/venastine" in listed
+        # Batch 209: the GitHub installers, exactly as README.md has them.
+        readme = open(os.path.join(os.path.dirname(__file__), os.pardir,
+                                   "README.md"), encoding="utf-8").read()
+        for command in ("install.sh | bash", "install.ps1 | iex"):
+            line = next(ln for ln in readme.splitlines()
+                        if ln.endswith(command) and " -s " not in ln)
+            assert line in listed, line
+        assert "npm install" not in listed
         assert "VENASTINE_SINGLE_USER=1" in listed
         # One sentence that says both halves, not the token fallback followed
         # by the pasted-key refusal.

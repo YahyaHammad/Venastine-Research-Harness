@@ -10,6 +10,13 @@ worth understanding, not a flaky mock to patch over.
 
 ---
 
+## The hosted demo recommends the GitHub installers (batch 209)
+
+| Change | Test | Fix |
+|---|---|---|
+| Recommend npm again on the landing page, or let its install commands drift from README.md's | `TestTheRoutes::test_the_landing_page_offers_the_readme_installers_not_npm` | The owner's call: the installers need no npm and install `main` as it stands. Change README's commands and the page's together; the test reads both |
+| The same in the hosted TUI's "where a key can go" sentence (`_OWN_COPY`) | `test_without_a_hugging_face_app_only_openrouter_is_offered` | Same fix, in `tui/app.py` |
+
 ## mcp 2.3.0's ceiling on one streamed event (batch 208)
 
 | Change | Test | Fix |

@@ -28639,3 +28639,42 @@ It names no count now.
 the new code passes `max_sse_event_size`, which mcp 2.2.0 does not accept.
 The npm launcher rebuilds its runtime on the requirements hash and the
 GitHub installers reinstall on update; a developer checkout does neither.
+
+## Batch 209 -- the hosted demo recommends the GitHub installers (2026-11-01)
+
+**The owner's request:** the landing page's footer said "Install it
+yourself: `npm install -g @yahyahammad/venastine`"; recommend the
+PowerShell and Bash installers instead. They are lower friction on both
+sides: a visitor needs Python and not npm, and whatever lands on `main` is
+installable at once, with no npm release in between.
+
+- `deploy/hosted/landing.html`'s footer gives both commands, exactly as
+  README.md's "Install directly from GitHub" has them, with the Python
+  3.11 floor and a link to README's Setup for the other ways. The commands
+  wrap anywhere, so a phone-width page does not scroll sideways (checked at
+  375 px and at desktop width in the browser pane).
+- The hosted TUI said the same thing in `_OWN_COPY`, the sentence a shared
+  demo prints where a key cannot go; it names the two installers now.
+- README's "These commands become available when the installer files land
+  on `main`" is gone: batch 202 landed them (PR #267).
+- `test_the_landing_page_offers_the_readme_installers_not_npm` reads both
+  commands out of README.md and finds each, whole, in the page of both
+  modes; the hosted TUI's test reads them the same way. Neither page can
+  drift from the README now, and neither may say `npm install`.
+
+**Found while redeploying, not changed here:** `main`'s tip has not
+deployed since the release commits started carrying tags. Pushing
+`v0.3.3` re-ran every CI workflow on 4a08b96, and `deploy_gate.py`
+counts those runs; deploy-demo.yml wakes only for runs on `main`, so its
+last wake (12:07:07) found the tag's `tests` and `compat` still running,
+said WAIT, and nothing woke it again when they finished (12:08:24,
+12:09:10). All seven runs for 4a08b96 ended in WAIT.
+Batch 210 fixes it, the owner's choice; this batch only reports it.
+
+### Verified
+
+- Full suite: 8435 tests, 8365 passed and 70 skipped, in 2:41.
+- ruff clean on the changed Python files. No dependency moved, so
+  pip-audit has nothing new to say.
+- **Version**, by `scripts/version.py bump`:
+  `0.2.0-b.4.installer-path.rb0705ebe789b`.
