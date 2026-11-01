@@ -1336,7 +1336,12 @@ def compact(memory, model: str, provider_name: str,
     # state the cut in both places the summary travels.
     segment_text, truncation_notice = _truncate_oldest(segment_text, budget)
     if truncation_notice:
+        # Both, as the forced-chain branch above does (#216, batch 213).
+        # The target used to stay the untruncated length's, so the
+        # instruction named one length and capped against another, and
+        # the strength the user set came out looser by their ratio.
         original = len(segment_text)
+        target = _target_chars(original, settings["strength"])
 
     _set_compacting(True)
     try:

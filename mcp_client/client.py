@@ -445,6 +445,17 @@ class MCPClient:
         ordinary startup code; the bridge does the rest."""
         if not self.server_configs:
             return
+        if self._task is not None:
+            # #219, batch 213, the owner's choice of raising over tearing
+            # down first. Every attribute below is rebound, so a second call
+            # used to abandon the first generation's manager parked on a
+            # `_shutdown` nothing could set any more -- its child processes
+            # with it, and no straggler warning. Nothing reconnects today
+            # (one call site, main.py); F7's runtime /mcp would, and it has
+            # to disconnect on purpose.
+            raise RuntimeError(
+                "connect_all() on an MCP client that is already connected; "
+                "call disconnect_all() first")
         loop = _ensure_loop()
 
         async def _start():
@@ -623,5 +634,8 @@ class MCPClient:
 
         self.clients.clear()
         self._catalogs.clear()
+        # #219. Keyed by server name, so a clean close kept from this
+        # generation would answer for the next one's straggler check.
+        self._closed.clear()
         self._task = None
         _shutdown_loop(join_timeout=max(0.5, remaining()))

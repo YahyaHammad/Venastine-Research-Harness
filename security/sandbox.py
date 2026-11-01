@@ -2333,6 +2333,12 @@ def _run_inert(
             cwd=workspace_dir,
             env=_scrubbed_env(),
             capture_output=True,
+            # DEVNULL rather than INHERITED (#203, batch 213), as the
+            # fallback has had since batch 142: a bare `cat` is INERT and
+            # auto-approved, and with the console as its stdin it read
+            # the user's type-ahead -- a second reader beside the shell's
+            # own (N1) -- or sat until the timeout waiting for an EOF.
+            stdin=subprocess.DEVNULL,
             text=True,
             timeout=config.SANDBOX_TIMEOUT_SECONDS,
             shell=False,  # nosec B603 - EXECUTION ROUTE: carries the model's command by design. List form and no shell, so there is nothing to inject into; the bound is upstream -- mode gate G3, the INERT allowlist, the dangerous-flag check and the approval prompt -- not this call (ROUTE_INERT_HOST)
@@ -2728,6 +2734,10 @@ def _run_docker(
             docker_args,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            # #203, batch 213. The CLI ran without `-i`, so it held the
+            # inherited console and never read it; DEVNULL anyway, so no
+            # route but the sessions' own PIPE hands a child the console.
+            stdin=subprocess.DEVNULL,
             text=True,
         )
         stdout, stderr = proc.communicate(

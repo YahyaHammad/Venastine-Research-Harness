@@ -921,6 +921,45 @@ def test_a_wedged_server_is_named_and_the_budget_holds(monkeypatch, caplog):
         "a server that closed cleanly was reported as a straggler")
 
 
+def test_a_second_connect_all_on_a_live_client_raises(client):
+    """#219, batch 213. A second call rebound the manager's events and
+    abandoned the first generation's children with no warning; it raises
+    now, and the generation it refused is still the one serving."""
+    first = client._task
+    with pytest.raises(RuntimeError, match="disconnect_all"):
+        client.connect_all()
+    assert client._task is first
+    assert client.call_tool("probe", "add",
+                            {"a": 2, "b": 3})["result"] == {"result": 5}
+
+
+def test_each_cycle_names_its_own_stragglers(monkeypatch, caplog):
+    """#219's other half. The clean-close record is keyed by server name
+    and outlived disconnect_all, so a server that closed cleanly in one
+    cycle answered for itself when it wedged in the next. Reconnecting
+    after a disconnect is allowed; the record starts empty each time."""
+    srv = _build_server()
+    wedged = {"now": False}
+    monkeypatch.setattr(MCPClient, "_transport_for",
+                        lambda self, cfg: None if wedged["now"] else srv)
+    monkeypatch.setattr("mcp_client.client.Client", _HangsOnCloseForNone)
+    monkeypatch.setattr("mcp_client.client.TEARDOWN_BUDGET_S", 4.0)
+    c = MCPClient({"probe": _cfg()})
+
+    c.connect_all(timeout=10.0)
+    c.disconnect_all()
+    assert c._closed == set()
+    wedged["now"] = True
+    c.connect_all(timeout=10.0)
+    with caplog.at_level("WARNING", logger="mcp_client.client"):
+        c.disconnect_all()
+
+    stragglers = [r.getMessage() for r in caplog.records
+                  if "did not confirm a clean close" in r.getMessage()]
+    assert stragglers and "probe" in stragglers[0], (
+        "the first cycle's clean close hid the second cycle's wedge")
+
+
 def test_a_clean_teardown_names_nobody(monkeypatch, caplog):
     """Control for the straggler line: every session closed cleanly means
     no warning, on the same code path."""

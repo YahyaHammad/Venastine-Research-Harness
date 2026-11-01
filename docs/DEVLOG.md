@@ -28850,3 +28850,54 @@ nothing imports it.
   with matplotlib and pillow taken out of the roots.
 - **Version**, by `scripts/version.py bump`:
   `0.2.0-b.7.installer-path.rb0705ebe789b`.
+
+## Batch 213 -- five stability fixes from the review marathon (2026-11-01)
+
+**The owner's choice of batch**, from the open register: #203, #216, #219,
+#255 and #207 (register items 49, 62, 65, 108 and 53). Two needed a
+decision, and the owner took the recommended one each time: #219 raises
+rather than tearing down first, and #255 takes both halves.
+
+- **#203, one-shots and the console.** `_run_inert` and the container
+  one-shot in `_run_docker` pass `stdin=subprocess.DEVNULL`, as the host
+  fallback has since batch 142. A bare `cat` is INERT and auto-approved,
+  and with the console inherited it read the user's type-ahead -- §29 N1's
+  second reader -- or waited out the whole timeout. Every one-shot route
+  gives a child no console now.
+- **#216, a truncated fold.** The truncation branch recomputes `target`
+  with `original`, as the forced-chain branch eight lines up already did,
+  so the instruction's cap is the strength's fraction of the length it
+  names.
+- **#219, a second `connect_all()`.** It raises `RuntimeError` naming
+  `disconnect_all()` while a manager is live, instead of rebinding the
+  events and abandoning the first generation's children without a word.
+  `disconnect_all()` clears the clean-close record in place (`_TrackClose`
+  holds the same set), so a server clean in one cycle cannot answer for
+  itself wedged in the next.
+- **#255, an unlistable project.** The kind question's two walks turn an
+  `OSError` into an `InitError` naming it, and the CLI also catches
+  `OSError` -- never `Exception` -- so `--init` ends with a line where it
+  ended with a traceback.
+- **#207, numeric hosts.** `is_url_permitted(resolve=False)` asks the
+  resolver with `AI_NUMERICHOST` when `ipaddress` cannot read the host.
+  Measured on Windows and in WSL before writing it: `2130706433`,
+  `0x7f.0.0.1`, `0x7F000001`, `127.1`, octal and the 169.254.169.254
+  spellings all parse; names, `999.1.1.1` and a trailing-dot quad fail and
+  stay names; and the flag never looks anything up, which is
+  `resolve=False`'s reason to exist. web_search drops those results where
+  fetch_url would refuse them, and its comment says "every spelling" again.
+
+The register closes all five. AGENTS.md's "recorded, not changed" line
+for the one-shots and ROADMAP_v3 SS70 say they are closed. The GitHub
+issues stay open until the change reaches `main`.
+
+### Verified
+
+- 20 new tests. Each fix was reverted, and its tests failed without it:
+  #203 (2/2), #216 (1/1), #219 (2/2), #255 (4/4), #207 (10 of 11, the
+  eleventh being the public-address control).
+- Full suite: 8483 tests, 8413 passed and 70 skipped, in 1:54. ruff clean.
+  In WSL, the resolver this depends on on POSIX: the numeric-host,
+  no-lookup and unlistable-project tests, 18 passed.
+- **Version**, by `scripts/version.py bump`:
+  `0.2.0-b.8.installer-path.rb0705ebe789b`.

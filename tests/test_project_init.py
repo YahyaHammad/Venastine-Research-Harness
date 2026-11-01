@@ -2825,3 +2825,51 @@ class TestReadingOnePageCostsOnePage:
 
         assert result["content"] == ""
         assert result["truncated"] is False
+
+
+class TestAnUnlistableProjectEndsInALine:
+    """#255, batch 213. The kind question's two walks ran before the write
+    `try`, so an OSError from either left generate() as itself, and the
+    CLI, which catches InitError, printed a traceback. The owner took both
+    halves: those walks raise InitError, and the CLI catches OSError for
+    whatever escapes next."""
+
+    @pytest.mark.parametrize("walk", ["is_blank", "propose_kind"])
+    def test_a_walk_that_cannot_list_is_an_init_error(
+            self, project, monkeypatch, walk):
+        def refuse(_root):
+            raise PermissionError(13, "Permission denied", str(project))
+
+        target = manifest if walk == "is_blank" else generator
+        monkeypatch.setattr(target, walk, refuse)
+        with pytest.raises(generator.InitError,
+                           match="Could not read the project directory"):
+            _generate(project_path=str(project))
+
+    def _cli(self, monkeypatch, project):
+        import main
+
+        monkeypatch.setattr(main.sys.stdin, "isatty", lambda: False)
+        args = main.build_parser().parse_args(["--init"])
+        return main.run_init_command(args, "ANTHROPIC", "m")
+
+    def test_the_cli_reports_the_walk_and_fails(self, project, monkeypatch,
+                                               capsys):
+        def refuse(_root):
+            raise PermissionError(13, "Permission denied", str(project))
+
+        monkeypatch.setattr(manifest, "is_blank", refuse)
+        assert self._cli(monkeypatch, project) == 1
+        assert "Could not read the project directory" in capsys.readouterr().out
+
+    def test_the_cli_reports_an_os_error_nothing_converted(
+            self, project, monkeypatch, capsys):
+        """The half for the next escape: an OSError from anywhere in
+        generate() ends the CLI with a line and exit 1, not a stack."""
+        def escape(**_kwargs):
+            raise NotADirectoryError(20, "Not a directory", str(project))
+
+        monkeypatch.setattr(generator, "generate", escape)
+        assert self._cli(monkeypatch, project) == 1
+        out = capsys.readouterr().out
+        assert "[--init stopped:" in out and "Not a directory" in out

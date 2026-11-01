@@ -620,6 +620,27 @@ class TestBackendInternals:
         assert len(result["stdout"]) == 10
         assert len(result["stderr"]) == 10
 
+    def test_the_inert_route_is_given_no_console(self):
+        """#203, batch 213. `cat` with no file is INERT and auto-approved;
+        with the console inherited it read what the user typed for the
+        next prompt, or waited out the whole timeout for an EOF."""
+        with patch("security.sandbox.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="", stderr="",
+                                              returncode=0)
+            _run_inert("cat", "/tmp/ws")  # nosec B108 - fixture path string, as above
+        assert mock_run.call_args.kwargs["stdin"] == subprocess.DEVNULL
+
+    def test_the_container_one_shot_is_given_no_console(self):
+        """#203. No `-i`, so it never read the handle it held; DEVNULL
+        all the same, so only a session's own PIPE reaches a child."""
+        with patch("security.sandbox.subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            mock_proc.communicate.return_value = ("", "")
+            mock_proc.returncode = 0
+            mock_popen.return_value = mock_proc
+            _run_docker("cat", "/tmp/ws")  # nosec B108 - fixture path string, as above
+        assert mock_popen.call_args.kwargs["stdin"] == subprocess.DEVNULL
+
     def test_run_docker_network_none(self):
         """Verify --network none is passed when network=False."""
         with patch("security.sandbox.subprocess.Popen") as mock_popen:

@@ -60,7 +60,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 8463 tests, offline. 1:37 on 16 cores at batch 207 (9:06 serial at batch 114)
+pytest                                            # 8483 tests, offline. 1:37 on 16 cores at batch 207 (9:06 serial at batch 114)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -2364,8 +2364,8 @@ Slice 5b (batch 104) -- a command the harness runs as root (SS65-SS72):
   `sudo_refusal()` is the ONE copy, read by the gate, by `run_sandboxed` and by `start_sandboxed`.
 * **A WSL one-shot used to inherit this process's stdin** (SS70) -- measured, a command in the distro
   read a string written to the harness's own. That is §29 N1's second reader on a route written before
-  the rule. It is DEVNULL now, or a PIPE carrying one line. The container, inert and host-fallback
-  one-shots have the same gap and are recorded, not changed.
+  the rule. It is DEVNULL now, or a PIPE carrying one line. The host fallback got DEVNULL in batch
+  142 and the inert and container one-shots in batch 213 (#203), so every one-shot route has it now.
 * **With `needs_root` false, both argvs are byte-identical to `9048427`'s**, WSL and SSH, proved
   against the pre-patch module rather than against a literal typed twice.
 

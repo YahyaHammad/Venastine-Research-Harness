@@ -2889,7 +2889,7 @@ how an entry should be read:
   that recorded it was wrong about its own mechanism, and the correction is in
   the entry.
 
-## 49. Three one-shot executors inherit the harness's console stdin (open, deferred batch 138)
+## 49. Three one-shot executors inherit the harness's console stdin (closed, batch 213)
 
 **Issue:** #203.
 
@@ -2931,6 +2931,8 @@ change -- which is the shipped-behaviour change the SS70 deferral was protecting
 **Not:** the WSL/SSH/session paths (already correct); a timeout or a prompt (the
 command was already approved, so the defect is the descriptor and not the
 decision).
+
+**CLOSED (batch 213), with the shape above.** `_run_inert`'s `subprocess.run` and the container one-shot's `Popen` in `_run_docker` pass `stdin=subprocess.DEVNULL`, as `_run_subprocess_fallback` has since batch 142, so every one-shot route gives a child no console now; a session still gets its own `PIPE`. `test_the_inert_route_is_given_no_console` and `test_the_container_one_shot_is_given_no_console` assert the argument on the real call, the way batch 142's fallback test does. A real `cat` run under pytest was not used as the test: in an xdist worker the inherited stdin is execnet's pipe, so the negative control would read the worker's own channel. AGENTS.md's "recorded, not changed" line and ROADMAP_v3 SS70 say it is closed.
 
 ## 50. `run_isolated` buffers the child's whole output before bounding it (open, deferred batch 138)
 
@@ -3067,7 +3069,7 @@ Two findings in the building, both in DEVLOG batch 160: a lazy BEGIN-to-END
 match ate the prose between two quoted markers, and the obvious footer regex is
 quadratic on a megabyte of base64.
 
-## 53. `resolve=False` checks dotted IP literals and no other numeric form (open for the BEHAVIOUR, comment corrected batch 156)
+## 53. `resolve=False` checks dotted IP literals and no other numeric form (closed, batch 213)
 
 **Issue:** #207.
 
@@ -3104,6 +3106,8 @@ reason a later reader might think the behaviour is too.
 **Not:** any change to `fetch_url`, which is correct; DNS at filter time for
 names, where the documented latency tradeoff stands; any change to
 `is_url_permitted`'s `resolve=True` path.
+
+**CLOSED (batch 213), the behaviour half.** `is_url_permitted(resolve=False)` now asks the resolver with `AI_NUMERICHOST` when `ipaddress` cannot read the host: that flag reads a number and never looks anything up, so the reason `resolve=False` exists -- no DNS per search hit -- still holds. Measured on Windows and in WSL: `2130706433`, `0x7f.0.0.1`, `0x7F000001`, `127.1`, `0177.0.0.1`, `017700000001`, `2852039166` and `0xa9fea9fe` all parse, to 127.0.0.1 or 169.254.169.254, and `example.com`, `localhost`, `999.1.1.1` and `127.0.0.1.` fail with `gaierror` and stay names. Seven spellings are refused through `is_url_permitted`, #207's three are dropped through `web_search._normalize`'s real filter, `134744072` (8.8.8.8) still passes as the control, and the two no-DNS tests now allow a numeric read and refuse a lookup. Without the fix, 10 of the 11 new tests fail; the eleventh is the control. web_search's comment says "every spelling" again, and is true this time.
 
 ## 54. `probability_stats._build_distribution` is dead and is a second answer (open, deferred batch 138)
 
@@ -3455,7 +3459,7 @@ and asserts one `tool_result` row per tool that actually ran.
 is stated; treating the `shutdown(wait=True)` block as a separate finding, since
 it is a consequence of the same window.
 
-## 62. A truncated fold is measured against the length it no longer has (open, deferred batch 138)
+## 62. A truncated fold is measured against the length it no longer has (closed, batch 213)
 
 **Issue:** #216.
 
@@ -3495,6 +3499,8 @@ line. `summarize_thread` needs nothing: its target is
 are already correct.
 
 **Not:** changing `_truncate_oldest`, the budget, or the target ratios.
+
+**CLOSED (batch 213), with the one line suggested.** The truncation branch recomputes `target` beside `original`, as the forced-chain branch does. `test_a_truncated_fold_is_targeted_at_the_length_it_kept` reads both numbers out of the instruction a truncated fold sends and requires the cap to be the strength's ratio of the stated length; it fails without the line.
 
 ## 63. Batch 119's yield logs a standing condition per step (open, deferred batch 138)
 
@@ -3583,7 +3589,7 @@ line, and the run completes.
 not fix itself on retry; changing the give-up-on-first-outage policy, which is
 load-bearing (SQ10).
 
-## 65. A second `connect_all()` abandons a generation of MCP children silently (open, deferred batch 138)
+## 65. A second `connect_all()` abandons a generation of MCP children silently (closed, batch 213)
 
 **Issue:** #219.
 
@@ -3635,6 +3641,8 @@ that is not the server name.
 **Not:** building reconnect or the `/mcp` command F7 defers; anything about
 `_ensure_loop`/`_shutdown_loop`'s module-level globals, which are a related
 single-instance assumption and would be the same future section's problem.
+
+**CLOSED (batch 213), raising, the owner's choice** over disconnecting first, which would be the reconnect F7 defers. A `connect_all()` on a client whose manager task is live raises `RuntimeError` naming `disconnect_all()`; a failed connect already sets `_task` to None, so a retry after one is unaffected. `disconnect_all()` clears `_closed` with `clients` and `_catalogs`, and since `_TrackClose` holds the same set object, the next generation's clean closes land in it. `test_a_second_connect_all_on_a_live_client_raises` (the first generation still serves a call) and `test_each_cycle_names_its_own_stragglers` (a server clean in cycle one and wedged in cycle two is named) both fail without the fix. The straggler set is still keyed by server name, which is enough while a generation must end before the next begins.
 
 ## 66. A `_blocking_modal` comment states a park that does not happen (open, deferred batch 138)
 
@@ -5952,7 +5960,7 @@ repairing one command.
 message could name the path, since the `OSError` carries `filename`. That
 is a one-line change and does not touch the gate.
 
-## 108. `generate()`'s other pre-write filesystem calls are still outside its `try` (open, measured batch 153)
+## 108. `generate()`'s other pre-write filesystem calls are still outside its `try` (closed, batch 213)
 
 **Issue:** #255.
 
@@ -5982,6 +5990,8 @@ right and is a decision rather than an edit.
 one and says why it is acceptable there (a worker thread whose death takes
 the app); the CLI has a process to end cleanly and a traceback is more
 useful than a swallowed bug.
+
+**CLOSED (batch 213), both halves, the owner's choice.** `generate()` wraps the kind question's two walks, `manifest.is_blank` and `propose_kind`, and turns an `OSError` from either into an `InitError` that names the error and says to re-run with `--software` or `--research`; `_config_plan` and `_existing_documents` call `os.path.exists`, which does not raise, and stay as they are. `main.run_init_command` also catches `OSError` and ends with `[--init stopped: ...]` and exit 1, for whatever escapes next -- not a blanket `except Exception`, so a bug still shows its stack. Four tests in `TestAnUnlistableProjectEndsInALine`, each failing without the fix.
 
 ## 109. Nothing resolves the test names `tests/BREAKING_CHANGES.md` cites (open, measured batch 153)
 

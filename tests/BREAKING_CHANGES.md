@@ -10,6 +10,16 @@ worth understanding, not a flaky mock to patch over.
 
 ---
 
+## Five stability fixes from the review marathon (batch 213)
+
+| Change | Test | Fix |
+|---|---|---|
+| Spawn a one-shot without `stdin=` | `test_the_inert_route_is_given_no_console`, `test_the_container_one_shot_is_given_no_console` | `stdin=subprocess.DEVNULL` on every one-shot (#203). Do not test it with a real stdin-reading child under xdist: the inherited stdin there is the worker's own channel |
+| Truncate a fold's input without recomputing its target | `test_a_truncated_fold_is_targeted_at_the_length_it_kept` | Recompute `target` with `original`, as the forced-chain branch does (#216) |
+| Let a second `connect_all()` rebind a live manager, or keep `_closed` across a disconnect | `test_a_second_connect_all_on_a_live_client_raises`, `test_each_cycle_names_its_own_stragglers` | Raise until `disconnect_all()`; clear the set in place, since `_TrackClose` holds it (#219) |
+| Let an `OSError` leave `generate()`'s walks, or narrow the CLI's handler back to `InitError` | `TestAnUnlistableProjectEndsInALine` | Convert the walks' errors to `InitError`, and catch `OSError` in `run_init_command` -- not `Exception` (#255) |
+| Read a host with `ipaddress` alone when `resolve=False`, or look a host up there | `test_every_numeric_spelling_of_a_private_address_is_checked`, `test_a_numeric_spelling_of_loopback_is_dropped`, `test_resolve_false_issues_no_lookup`, `test_filtering_results_issues_no_dns` | `getaddrinfo(..., flags=AI_NUMERICHOST)` reads numbers and looks nothing up; the two no-DNS fakes allow exactly that flag (#207) |
+
 ## The confidence chart is SVG, and matplotlib is gone (batch 212)
 
 | Change | Test | Fix |
