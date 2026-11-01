@@ -209,3 +209,107 @@ class TestSplitAtMirrorsProduction:
 
     def test_an_empty_thread_is_zero_on_both_sides(self):
         assert FakeStorage()._split_at([], uuid4()) == storage._split_at([], uuid4()) == 0
+
+
+# ---------------------------------------------------------------------------
+# ---- 3. The pinned span and the turn opener (#231, batch 216) --------------
+# ---------------------------------------------------------------------------
+#
+# The two transcriptions of a published algorithm the fake carried with
+# nothing comparing them: `pinned_through`'s keep-set (#88's tool-result
+# re-inclusion) and batch 120's turn opener. `pinned_through` reads the
+# database, so batch 216 split its index computation into the pure
+# `storage._pinned_indices`, and the fake's copy into
+# `FakeStorage._pinned_indices`, and these compare the two -- the shape
+# `_to_neutral` and `_split_at` already had. Rows need only `role` and
+# `pinned`; the neutral rows only `tool_call_id` and `tool_calls`, so both
+# sides are handed the same ones and the comparison is of the algorithm.
+
+def _turns(*specs):
+    """`(role, pinned, tool_call_ids)` -> (rows, neutral). An assistant's
+    ids are the calls it makes; a tool row's single id is the one it
+    answers."""
+    rows, neutral = [], []
+    for role, pinned, ids in specs:
+        rows.append({"role": role, "pinned": pinned})
+        message = {"role": role, "content": ""}
+        if role == "assistant" and ids:
+            message["tool_calls"] = [{"id": i, "name": "t", "input": {}}
+                                     for i in ids]
+        if role == "tool":
+            message["tool_call_id"] = ids[0]
+        neutral.append(message)
+    return rows, neutral
+
+
+_PINNED_CASES = {
+    # A pinned assistant call whose result was not pinned: the result is
+    # re-included, or the view carries an unanswered tool_use (#88).
+    "re-includes the result": [
+        ("user", False, ()), ("assistant", True, ("a",)),
+        ("tool", False, ("a",)), ("assistant", False, ()),
+        ("user", False, ())],
+    # Two calls, one result pinned already and one not.
+    "only what is missing": [
+        ("user", False, ()), ("assistant", True, ("a", "b")),
+        ("tool", True, ("a",)), ("tool", False, ("b",)),
+        ("user", False, ())],
+    # A result for a call that was not pinned stays out.
+    "not an unrelated result": [
+        ("user", True, ()), ("assistant", False, ("a",)),
+        ("tool", False, ("a",)), ("user", False, ())],
+    # A watermark inside a turn: the turn's request comes back verbatim.
+    "the opener of a cut turn": [
+        ("user", False, ()), ("assistant", False, ()),
+        ("user", False, ()), ("assistant", False, ("a",)),
+        ("tool", False, ("a",)), ("assistant", False, ())],
+    # The opener already pinned: one copy, in archive order.
+    "a pinned opener once": [
+        ("user", True, ()), ("assistant", False, ("a",)),
+        ("tool", False, ("a",)), ("assistant", False, ())],
+    "nothing pinned, turn-aligned": [
+        ("user", False, ()), ("assistant", False, ()),
+        ("user", False, ()), ("assistant", False, ())],
+}
+
+
+class TestThePinnedSpanMirrorsProduction:
+
+    @pytest.mark.parametrize("name", sorted(_PINNED_CASES))
+    @pytest.mark.parametrize("cut", [0, 1, 2, 3, 4, 5, 6])
+    def test_the_indices_agree(self, name, cut):
+        rows, neutral = _turns(*_PINNED_CASES[name])
+        span, part = rows[:cut], neutral[:cut]
+        real = storage._pinned_indices(rows, span, part)
+        assert FakeStorage()._pinned_indices(rows, span, part) == real
+        assert real == sorted(set(real)), "archive order, each row once"
+
+    def test_the_comparison_can_see_the_re_inclusion(self):
+        """Reach, not a constant: the case #88 is about must come out
+        with the result in it, on the production side."""
+        rows, neutral = _turns(*_PINNED_CASES["re-includes the result"])
+        assert storage._pinned_indices(rows, rows[:4], neutral[:4]) == [1, 2]
+
+    def test_the_comparison_can_see_the_opener(self):
+        rows, neutral = _turns(*_PINNED_CASES["the opener of a cut turn"])
+        assert storage._pinned_indices(rows, rows[:4], neutral[:4]) == [2]
+
+
+class TestTheTurnOpenerMirrorsProduction:
+    """`_turn_opener_index` is pure on both sides, so it is compared
+    directly: turn-aligned, mid-turn, an empty span, a span that is every
+    row, and a kept prefix with no user row at all."""
+
+    @pytest.mark.parametrize("roles, cut, expected", [
+        (("user", "assistant", "user", "assistant"), 2, []),
+        (("user", "assistant", "assistant"), 2, [0]),
+        (("user", "assistant", "tool", "assistant"), 3, [0]),
+        (("user", "assistant"), 0, []),
+        (("user", "assistant"), 2, []),
+        (("assistant", "tool", "assistant"), 2, []),
+    ])
+    def test_the_index_agrees(self, roles, cut, expected):
+        rows = [{"role": role, "pinned": False} for role in roles]
+        span = rows[:cut]
+        real = storage._turn_opener_index(rows, span)
+        assert FakeStorage()._turn_opener_index(rows, span) == real == expected

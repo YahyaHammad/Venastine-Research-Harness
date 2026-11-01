@@ -1087,6 +1087,25 @@ class TestAnAnswerCoversOneCallOnly:
         wide.allowed_tools = None
         assert not set(manager.candidate_approvals(wide)) & param_gated
 
+    def test_the_filter_drops_a_param_gated_tool_policy_allows(
+            self, real_harness_tier, gated_pair):
+        """#236, batch 216. The test above cannot fail from the filter's
+        removal: its four names are denied by global config, so they never
+        reach grantable() at all. This is the case the filter exists for --
+        a param-gated tool that policy ALLOWS -- with the plain sibling
+        offered beside it, which proves the helper is answering rather
+        than empty."""
+        config_loader.initialize(str(real_harness_tier))
+        wide = manager.child_context(manager.get("explore"), ToolContext())
+        wide.allowed_tools = None
+
+        offered = set(manager.candidate_approvals(wide))
+
+        assert "mcp__t__plain" in offered, "the control: a grantable tool"
+        assert "mcp__t__paramwise" not in offered, (
+            "a tool whose approval depends on its params was offered for a "
+            "name-level grant")
+
     def test_a_signoff_answer_naming_shell_grants_nothing(self):
         """The other end of the same rule. A shell (or a compromised one)
         answering with a tool nobody offered must not thereby grant it --

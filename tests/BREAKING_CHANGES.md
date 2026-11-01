@@ -10,6 +10,15 @@ worth understanding, not a flaky mock to patch over.
 
 ---
 
+## Four tests that could not fail, made to (batch 216)
+
+| Change | Test | Fix |
+|---|---|---|
+| Remove `grantable()` from `candidate_approvals` | `test_the_filter_drops_a_param_gated_tool_policy_allows` | Keep it: a param-gated tool is not grantable by name (R2). The older test's four names never reach the filter (#236) |
+| Read `ATTENDED_APPROVAL_TIMEOUT_S` anywhere but when the modal parks -- a default argument, a module constant | `test_the_modal_park_reads_the_timeout_when_it_parks` | Read it at call time, or the autouse shrink stops working without turning anything red (#235) |
+| Add a directory of modules without tree entries, or narrow the walk | `test_the_tree_names_every_production_module`, `test_the_module_walk_reaches_what_the_typed_list_did_and_more` | List the module in ARCHITECTURE.md, or in `_UNLISTED_MODULES` on purpose (#232) |
+| Change `storage._pinned_indices` or `_turn_opener_index` without the fake, or the other way round | `TestThePinnedSpanMirrorsProduction`, `TestTheTurnOpenerMirrorsProduction` | Change both identically; that is what the comparison is for (#231) |
+
 ## The trust prompt says where each description goes (batch 215)
 
 | Change | Test | Fix |

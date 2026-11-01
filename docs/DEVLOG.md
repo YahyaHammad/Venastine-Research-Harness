@@ -28980,3 +28980,50 @@ holds and still says what it withheld.
   that edit set aside was green.)
 - **Version**, by `scripts/version.py bump`:
   `0.2.0-b.10.installer-path.rb0705ebe789b`.
+
+## Batch 216 -- four tests that could not fail, made to (2026-11-01)
+
+**#236, #235, #232 and #231, register items 84, 82, 79 and 78**, the
+review marathon's vacuity findings the owner chose. Each test was written
+to pin something, and each was measured unable to fail from its removal.
+
+- **#236, R2's grant filter.** `test_the_signoff_never_offers_a_param_gated_tool`
+  checked four names global config already denies, so they never reached
+  `grantable()`. The new test uses `gated_pair`'s param-gated tool that
+  policy ALLOWS, beside a plain sibling that must be offered. Mutating
+  the filter to `if True` fails it; the old test still passes that mutant.
+- **#235, the approval-timeout shrink.** Pinned by its value, so an
+  import-time default would have kept the fixture running and stopped it
+  working. The new test drives the real `_blocking_modal` on a bare app
+  nobody answers, with the timeout patched to 0.2 s, in a thread joined
+  at 10 s. With the park fixed at 600 s it fails at the join, not after
+  ten minutes.
+- **#232, the module tree's domain.** A typed list of sixteen
+  directories became a walk, less what `git check-ignore` reports, with
+  an empty exclusion list. The walk found the gap the entry measured as
+  absent: `deploy/hosted/`, added later, was never in the typed list, and
+  is in the tree only because its authors remembered. Two traps on the way,
+  both measured: a plain walk went red on this machine for `review/`,
+  gitignored scratch CI cannot see; and Windows' text-mode pipe turned
+  each newline into CRLF, so git was asked about `path\r` and ignored
+  nothing until the paths went NUL-separated. A probe directory with an
+  unlisted module turned the gate red.
+- **#231, the fake's two transcribed algorithms.** `pinned_through`'s
+  keep-set became the pure `storage._pinned_indices` (behaviour
+  unchanged) and the fake's copy the same shape, so they are compared like
+  `_to_neutral` and `_split_at`: six thread shapes cut at every position,
+  and `_turn_opener_index` directly. Four mutations of the fake's copy,
+  4/4 caught. **Partly closed:** the ordering claims that need real SQLite
+  to compare (`list_threads`, `child_threads`, `list_memories`,
+  `mark_turn_failed`) remain, and belong beside `test_storage_e2e.py`'s
+  module-scoped `real_storage`.
+
+### Verified
+
+- 53 new tests (50 of them the mirror's parametrised table). Every new
+  check was shown to fail on the defect it guards: #236 and #235 by
+  mutating production, #232 with a probe module, #231 by four mutations
+  of the fake (the unmutated run passing first).
+- Full suite: 8545 tests, 8475 passed and 70 skipped, in 1:56. ruff clean.
+- **Version**, by `scripts/version.py bump`:
+  `0.2.0-b.11.installer-path.rb0705ebe789b`.

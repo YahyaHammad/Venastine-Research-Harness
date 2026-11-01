@@ -4149,7 +4149,7 @@ giving the real one.
 **Not:** moving the test out of the `integration` marker. `pytest.ini:3-6`'s
 offline default is a locked decision and the marker is what implements it.
 
-## 78. `FakeStorage` makes eleven mirror claims and two are compared (open, deferred batch 138)
+## 78. `FakeStorage` makes eleven mirror claims and two are compared (algorithm half closed, batch 216 -- the two transcriptions are compared; the ordering claims remain)
 
 **Issue:** #231.
 
@@ -4225,7 +4225,9 @@ deliberately current and argues the cost is zero today because the guard is
 pinned against real SQLite and the fake's version is only ever used to arrange a
 compacted view. That argument is sound and is not reopened.
 
-## 79. `test_the_tree_names_every_production_module` quantifies over a typed list (open, deferred batch 138)
+**PARTLY CLOSED (batch 216), the half this entry called worth naming.** The two transcriptions of a published algorithm are compared now. `pinned_through` reads the database, so its index computation became the pure `storage._pinned_indices(rows, span, neutral)` -- behaviour unchanged, `pinned_through` maps it over the reconstructed rows -- and the fake's copy `FakeStorage._pinned_indices` has the same shape. `TestThePinnedSpanMirrorsProduction` compares them over six thread shapes cut at every position (#88's re-inclusion, a half-pinned pair, an unrelated result, a cut turn's opener, an opener already pinned, nothing pinned), plus two reach checks on the production side; `TestTheTurnOpenerMirrorsProduction` compares `_turn_opener_index` directly over the five cases above plus a kept prefix with no user row. Mutating the fake's copy -- the re-inclusion dropped, the opener never added, archive order not restored, the opener added on a turn-aligned cut -- is caught 4/4. **Still open:** the ordering claims that need real SQLite to compare (`list_threads`' COALESCE, `child_threads`' tiebreaker, `list_memories`' AC6 filter, `mark_turn_failed`), which this entry recommended only where the fake re-derives logic, and which belong beside `test_storage_e2e.py`'s module-scoped `real_storage` rather than in a pure-function file; the #31 plain-dict claims stay out, as recommended.
+
+## 79. `test_the_tree_names_every_production_module` quantifies over a typed list (closed, batch 216)
 
 **Issue:** #232.
 
@@ -4276,6 +4278,8 @@ already covered for the test half in both directions; the fence split at `:406`,
 which reads the document's first fenced block and would be a finding if the
 `assert entries` guard at `:409` were absent -- it is present, so a moved or
 reformatted tree fails loudly.
+
+**CLOSED (batch 216), with the shape suggested, and it found the live gap the entry measured as absent.** `_MAPPED_DIRS` is gone. `_production_modules()` walks the tree with `_walk_project`, skips `tests/`, and drops what `git check-ignore` reports, so `review/` -- gitignored local scratch, which a plain walk turned red on this machine and CI would never see -- stays out; the paths go to git NUL-separated, because in text mode Windows wrote each newline as CRLF and git was asked about `path\r`. `_UNLISTED_MODULES` is an exclusion list, empty. The walk reaches `deploy/hosted/`, which batch 163 added after this entry was measured and which the typed list never named: its seven modules are in the tree, so nothing failed, but only because their authors remembered. `test_the_module_walk_reaches_what_the_typed_list_did_and_more` holds the reach, and the entry's own failure path -- a new `plugins_probe_216/loader.py` with no tree entry -- now fails the gate, measured.
 
 ## 80. Five once-per-process globals are reset only by local fixtures (open, deferred batch 138)
 
@@ -4428,7 +4432,7 @@ with a distro installed and is a larger decision.
 host must still be able to run the suite and the skip is the right mechanism;
 what is missing is that nothing in CI ever supplies the variables.
 
-## 82. The approval-timeout fixture is pinned by its value, not its effect (open, deferred batch 138)
+## 82. The approval-timeout fixture is pinned by its value, not its effect (closed, batch 216)
 
 **Issue:** #235.
 
@@ -4494,6 +4498,8 @@ value, and neither asserts that `_blocking_modal` reads it at call time.
 **Not:** reviewing `_blocking_modal`'s dismissal paths, the `on_timeout`
 narration, or whether every dismissal produces a boolean -- item 5 is open as
 that brief. The `settle`/`pump` pair was read and is sound.
+
+**CLOSED (batch 216), asserting the effect as suggested.** `test_the_modal_park_reads_the_timeout_when_it_parks` drives the real `_blocking_modal` on a bare app whose modal is never answered, with `config.ATTENDED_APPROVAL_TIMEOUT_S` patched to 0.2 s, in a thread joined with a 10 s bound, and requires it to return None well inside that. With the park changed to `channel.get(timeout=600)` -- what an import-time default would bind -- it fails at the join instead of stalling the suite. The value assertion stays, answering its own question.
 
 ## 83. The spawn sign-off has no reachable configuration on the shipped roster (closed, batch 139 -- ruled a deliberate scope and recorded)
 
@@ -4647,7 +4653,7 @@ off.
 is that leaving them in "would make the sign-off notice promise authority the
 grant does not carry, which is worse than not offering it."
 
-## 84. The test that pins R2's grant filter cannot fail from its removal (open, found and filed batch 138)
+## 84. The test that pins R2's grant filter cannot fail from its removal (closed, batch 216)
 
 **Issue:** #236.
 
@@ -4711,6 +4717,8 @@ argument for it is stated at `tools/registry.py:414-433`. Also not widening
 the four names the existing assertion uses: they are the right names for the
 claim "the modal the user ticks never offers a per-call tool", and the gap is
 the missing allowed case, not the chosen denied ones.
+
+**CLOSED (batch 216), with the three lines suggested.** `test_the_filter_drops_a_param_gated_tool_policy_allows` uses `gated_pair`: with the widest child, `mcp__t__paramwise` -- param-gated, allowed by policy -- is not offered and its plain sibling is, which proves the helper is answering. Replacing `if registry.grantable(name)` with `if True` in `candidate_approvals` fails it; the original test still passes that mutant, as measured in batch 138, and stays for what it does check.
 
 ## 85. Six pilot tests assert worker-thread state after a raw `pause()` (closed, batch 151; ONE of the six needed it, and this entry was wrong about why)
 

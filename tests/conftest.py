@@ -1391,7 +1391,11 @@ class FakeStorage:
         rows = self._messages_by_thread.get(thread_id, [])
         span = rows[:self._split_at(rows, message_id)]
         neutral = self._reconstruct(span)
+        return [neutral[i] for i in self._pinned_indices(rows, span, neutral)]
 
+    def _pinned_indices(self, rows, span, neutral):
+        """Mirrors storage._pinned_indices; compared against it in
+        tests/test_fake_storage_mirror.py since batch 216 (#231)."""
         keep = [i for i, r in enumerate(span) if r["pinned"]]
         have = {neutral[i].get("tool_call_id") for i in keep}
         need = {call["id"] for i in keep
@@ -1402,7 +1406,7 @@ class FakeStorage:
                  and neutral[i].get("tool_call_id") in need]
         keep += self._turn_opener_index(rows, span)
 
-        return [neutral[i] for i in sorted(set(keep))]
+        return sorted(set(keep))
 
     def _turn_opener_index(self, rows, span):
         """Mirrors storage._turn_opener_index (batch 120): the user row
