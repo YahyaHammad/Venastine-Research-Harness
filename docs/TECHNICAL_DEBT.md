@@ -6090,7 +6090,7 @@ not; `json.loads(None)` raising is the guard most likely to differ.
 the DBAPI seam, which is now driven for real. It is the standing risk that
 the persistence layer's own tests prove the fake and the code agree.
 
-## 112. The trust prompt says every project agent's description enters every system prompt, and most never do (open, measured batch 155)
+## 112. The trust prompt says every project agent's description enters every system prompt, and most never do (closed, batch 215)
 
 **Issue:** #259.
 
@@ -6115,7 +6115,9 @@ mid-batch.
 S08-03 the finding itself declined, recorded so the next person reading
 that header does not re-derive it.
 
-## 113. A trust-prompt entry shadowed by a harness or user definition is displayed as the project's (open, measured batch 155)
+**CLOSED (batch 215), with the owner's wording.** The header is "what each project agent and skill would tell the model:", and each entry carries a line saying where its description goes: a skill's is "listed wherever load_skill is offered"; a spawnable agent's "spawnable: listed wherever spawn_subagent is offered"; any other agent's "not spawnable: in no system prompt; /agent can still pick it". Nothing claims EVERY system prompt any more -- the skill half was nearer true, but it too reaches only a run that is offered load_skill. `test_each_entry_says_where_its_description_goes` pins all three lines and the header's absence of the old claim; the no-catalog control now looks for the new header.
+
+## 113. A trust-prompt entry shadowed by a harness or user definition is displayed as the project's (closed, batch 215)
 
 **Issue:** #260.
 
@@ -6136,6 +6138,8 @@ do. Over-disclosure again, like item 112.
 
 **What it would have caught.** Nothing in batch 155; S08-03 names it and
 declines it for the same reason.
+
+**CLOSED (batch 215), as suggested: listed, and annotated.** `_shadowing_names` reads the harness and user tiers with `_tier_dirs` and `_parse_md_file` -- `_discover`'s own order and parser -- and a project entry whose name either has says `shadowed by the harness's own "<name>"` (or `your own (user configuration)`), `which is what loads; this file is used only if that one goes away`. It stays listed, because the grant covers its bytes. `test_a_shadowed_entry_is_listed_and_says_what_loads` covers a harness and a user shadow, and `test_what_it_calls_shadowed_is_what_the_loader_ignores` trusts the project, initializes, and checks the note against what the loader registered, with an unshadowed project agent as the control. All three new tests fail without the change.
 
 ## 114. `AgentManager`'s two `set()` calls have no belt, where `max_steps` does (open, measured batch 155)
 

@@ -10,6 +10,13 @@ worth understanding, not a flaky mock to patch over.
 
 ---
 
+## The trust prompt says where each description goes (batch 215)
+
+| Change | Test | Fix |
+|---|---|---|
+| Say again that every description enters EVERY system prompt, or drop an entry's reach line | `test_each_entry_says_where_its_description_goes` | Skills: wherever load_skill is offered; agents: only if spawnable (#259). The no-catalog control looks for the new header |
+| Decide shadowing by a second rule, or drop a shadowed entry from the listing | `test_a_shadowed_entry_is_listed_and_says_what_loads`, `test_what_it_calls_shadowed_is_what_the_loader_ignores` | Read the upper tiers with `_tier_dirs` and `_parse_md_file`, as `_discover` does; keep the entry, since the grant covers it (#260) |
+
 ## The terminal is measured in cells (batch 214)
 
 | Change | Test | Fix |

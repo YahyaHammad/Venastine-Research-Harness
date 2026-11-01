@@ -28936,3 +28936,47 @@ disagree about where a row ends.
 - Full suite: 8489 tests, 8419 passed and 70 skipped, in 1:57. ruff clean.
 - **Version**, by `scripts/version.py bump`:
   `0.2.0-b.9.installer-path.rb0705ebe789b`.
+
+## Batch 215 -- the trust prompt says where each description goes (2026-11-01)
+
+**#259 and #260, register items 112 and 113, with the owner's wording**
+(chosen from two previews). The consent screen's catalog section said
+"these descriptions enter EVERY system prompt in this project". Two ways
+that overclaimed, both in the fail-safe direction, which is why they were
+recorded rather than fixed when found:
+
+- **#259.** A project agent's description reaches a prompt only if the
+  agent is spawnable, and the project tier's agents are not unless they
+  say so (§32 A3/A4); a skill's reaches every run offered load_skill.
+- **#260.** A project definition whose name a harness or user one already
+  has never loads -- `_discover` is first-wins, harness > user > project
+  (D29) -- yet it was shown as the text that would be used.
+
+The section is headed "what each project agent and skill would tell the
+model:" now, and under each entry a line says where it goes: "listed
+wherever load_skill is offered", "spawnable: listed wherever
+spawn_subagent is offered", "not spawnable: in no system prompt; /agent
+can still pick it", or, for a shadowed one, `shadowed by the harness's
+own "<name>"` (or "your own (user configuration)"), "which is what loads;
+this file is used only if that one goes away". A shadowed entry stays
+listed: the grant covers its bytes, and renaming the other makes it live
+with no new prompt.
+
+Shadowing is read with `_tier_dirs` and `_parse_md_file` in `_discover`'s
+own order, so the prompt and the loader cannot disagree, and a test checks
+the note against what `initialize()` actually registered. Each entry now
+takes two or three lines of the section's 60-line bound, which still
+holds and still says what it withheld.
+
+### Verified
+
+- `tests/test_catalog_text.py`: 3 new tests, all failing without the
+  change; the no-catalog control now looks for the new header, since the
+  old string would make it pass vacuously.
+- Full suite: 8492 tests, 8422 passed and 70 skipped, in 2:01. ruff clean.
+  (A first run failed `test_the_subprocess_collection_agrees_with_the_session`
+  alone, because a test was added to another file mid-run -- AGENTS.md's
+  rule against editing during a run, broken and paid for; the rerun with
+  that edit set aside was green.)
+- **Version**, by `scripts/version.py bump`:
+  `0.2.0-b.10.installer-path.rb0705ebe789b`.
