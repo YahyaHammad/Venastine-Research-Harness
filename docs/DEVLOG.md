@@ -28727,3 +28727,59 @@ and the deploy says so, once Gradio allows pillow 13.
   cache written was green. Batch 212 removes matplotlib.
 - **Version**, by `scripts/version.py bump`:
   `0.2.0-b.5.installer-path.rb0705ebe789b`.
+
+## Batch 211 -- a release tag's runs no longer strand the deploy (2026-11-01)
+
+**Found redeploying in batch 209.** `main`'s tip, 4a08b96, never deployed.
+Every deploy-demo run for it, seven, ended in WAIT. Pushing `v0.3.3` to
+that commit re-ran every CI workflow there, and `deploy_gate.py` counts
+those runs: the owner's rule is every check on the commit. But
+deploy-demo.yml's `workflow_run` trigger wakes it for runs on `main`, so
+the last of `main`'s runs (tests, 12:07:07) found the tag's `tests` and
+`compat` still going, said WAIT and ended, and when those finished
+(12:08:24, 12:09:10) nothing woke the deploy again. Every release puts a
+tag on `main`'s tip, so no release commit had deployed since the tags
+began; the demo ran 2c527c4, deployed by hand.
+
+**The owner chose to keep waiting**, over counting `main`'s runs alone
+(which would have let a failed npm publish or tag run through) and over
+deploying by hand after each release.
+
+- `decide()` marks a WAIT **stranded** when every unfinished run is one
+  that cannot wake the deploy: a tag push's, a schedule's, a manual run's
+  or another app's check. Only a push run on `main` of a workflow the
+  trigger lists wakes it, and a required workflow with no push run yet is
+  one of those to come.
+- `main()` takes `--linger SECONDS` and, while the wait is stranded, asks
+  again every 30 s within that budget. A wait `main`'s own runs will end is
+  left to them, as before, so only the last gate lingers. When the budget
+  runs out the verdict is still WAIT, and its reasons now say to run the
+  workflow by hand once the runs finish.
+- deploy-demo.yml passes `--linger 1200`; the gate job's timeout went from
+  5 to 25 minutes to outlive it. The tag's CI on 4a08b96 finished within
+  two minutes of `main`'s.
+- The tag's runs still count. A failed one refuses, as before; lingering
+  waits for them and does not judge them differently.
+
+ROADMAP_v3 §79 HD9 is amended, and AGENTS.md's hosted-demo paragraph names
+the rule beside the three it already called load-bearing.
+
+### Verified
+
+- 13 new tests in `tests/test_deploy_gate.py` (72 now): a tag's runs on
+  4a08b96's shape strand the wait, `main`'s own unfinished or unstarted
+  runs do not (alone or beside the tag's), schedules, manual runs and
+  another app's checks strand it, the tag's runs still decide refuse and
+  deploy, `--linger` asks again on a fake clock until a DEPLOY, stops at
+  its budget, does not linger on a wait `main` will end, says how to
+  finish by hand, and fits inside the gate job's timeout in the real
+  workflow file.
+- Mutations on an export copy, 7/7 killed: stranded never set, every
+  pending check counted as waking, a missing required run not waking, a
+  tag's branch counted as `main`, the linger ignored, the linger
+  unbounded, and the hand-run hint dropped.
+- Full suite: 8448 tests, 8378 passed and 70 skipped, in 1:50. ruff clean.
+- Not verifiable here: the live path. It runs on GitHub after the next
+  release tag lands on `main`.
+- **Version**, by `scripts/version.py bump`:
+  `0.2.0-b.6.installer-path.rb0705ebe789b`.

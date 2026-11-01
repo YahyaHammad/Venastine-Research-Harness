@@ -37,8 +37,21 @@ THE VERDICTS, in the order they are decided:
     latest analysis is this commit's once its codeql run has finished, and
     an alert list that cannot be read stops the deploy rather than passing.
   * wait -- a required workflow has no push run yet, or a counted check run
-    has not finished.
+    has not finished. A wait is STRANDED when nothing it waits for will
+    wake deploy-demo.yml again: every unfinished run is a tag push's, a
+    schedule's, a manual run's or another app's, never a push to `main` of
+    a workflow the deploy listens for.
   * deploy -- none of the above.
+
+A STRANDED WAIT IS ASKED AGAIN, NOT ENDED (batch 211, the owner's choice).
+Pushing a release tag re-runs CI on `main`'s tip, and those runs count: the
+rule is every check on the commit. But deploy-demo.yml wakes only for runs
+on `main`, so the last of those found the tag's runs still going, said
+WAIT, and ended, and nothing woke the deploy again. No release commit
+deployed: all seven runs for 4a08b96 (v0.3.3) ended in WAIT. With
+`--linger SECONDS` the gate asks again every LINGER_POLL_S while the wait
+is stranded, up to that budget; a wait `main`'s own runs will end is left
+to them, as before.
 
 WHICH WORKFLOWS ARE REQUIRED comes from the workflow files themselves: every
 one with a `push` trigger that reaches `main`. deploy-demo.yml's
@@ -53,6 +66,7 @@ import fnmatch
 import json
 import os
 import sys
+import time
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
@@ -76,6 +90,12 @@ IGNORED_EVENTS = frozenset({"dynamic"})
 # deploy. Medium and low security alerts, and quality notes, which carry no
 # security severity at all, are triaged rather than gated.
 BLOCKING_SEVERITIES = frozenset({"critical", "high"})
+# How often a stranded wait asks again. A release tag's CI finished within
+# two minutes of main's on 4a08b96; deploy-demo.yml gives it twenty.
+LINGER_POLL_S = 30
+# Seams for the tests, which must not wait in real time.
+_clock = time.monotonic
+_sleep = time.sleep
 
 
 class GateError(Exception):
@@ -103,6 +123,8 @@ class Trigger:
 class Verdict:
     verdict: str
     reasons: list = field(default_factory=list)
+    # A WAIT that nothing still running will end by waking the deploy.
+    stranded: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -210,16 +232,23 @@ def decide(sha: str, main_sha: str, required: list, runs: list,
             f"{sha[:12]} is not {branch}'s tip ({main_sha[:12]})"])
 
     failed, pending = [], []
+    # Whether anything unfinished will wake deploy-demo.yml when it ends:
+    # only a push run on `branch` of a required workflow does, since those
+    # are exactly the workflows its `workflow_run` trigger lists.
+    wakes = False
+    required_paths = {wf.path for wf in required}
     for wf in required:
         mine = [r for r in runs
                 if r.get("path") == wf.path and r.get("event") == "push"
                 and r.get("head_branch") == branch]
         if not mine:
             pending.append(f"{wf.name}: no push run yet")
+            wakes = True
             continue
         run = max(mine, key=lambda r: r.get("id", 0))
         if run.get("status") != "completed":
             pending.append(f"{wf.name}: {run.get('status')}")
+            wakes = True
         elif run.get("conclusion") != "success":
             failed.append(f"{wf.name}: {run.get('conclusion')}")
 
@@ -238,6 +267,10 @@ def decide(sha: str, main_sha: str, required: list, runs: list,
         label = f"{check.get('name')} in {where}"
         if check.get("status") != "completed":
             pending.append(f"{label}: {check.get('status')}")
+            if (run is not None and run.get("event") == "push"
+                    and run.get("head_branch") == branch
+                    and run.get("path") in required_paths):
+                wakes = True
         elif check.get("conclusion") not in PASSED:
             failed.append(f"{label}: {check.get('conclusion')}")
 
@@ -255,7 +288,7 @@ def decide(sha: str, main_sha: str, required: list, runs: list,
     if failed:
         return Verdict(REFUSE, failed)
     if pending:
-        return Verdict(WAIT, pending)
+        return Verdict(WAIT, pending, stranded=not wakes)
     return Verdict(DEPLOY, [
         f"{len(required)} workflows and {counted} check runs on "
         f"{sha[:12]}, every one passed",
@@ -373,19 +406,34 @@ def main(argv=None) -> int:
     parser.add_argument("--ref", default="")
     parser.add_argument("--dry-run", default="false",
                         help="the dispatch input, true or false")
+    parser.add_argument("--linger", type=float, default=0.0,
+                        help="seconds to keep asking while the only runs "
+                             "still going will not wake the deploy again")
     args = parser.parse_args(argv)
     trigger = Trigger(args.trigger, args.repo, args.run_event,
                       args.head_branch, args.head_repo, args.ref,
                       args.dry_run.strip().lower() == "true")
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN", "")
+    api = os.environ.get("GITHUB_API_URL", API)
     try:
         if not token and _trigger_verdict(trigger, BRANCH) is None:
             raise GateError("no GITHUB_TOKEN or GH_TOKEN to read the checks with")
-        verdict = evaluate(trigger, args.sha, token,
-                           os.environ.get("GITHUB_API_URL", API))
+        deadline = _clock() + args.linger
+        verdict = evaluate(trigger, args.sha, token, api)
+        while (verdict.verdict == WAIT and verdict.stranded
+               and _clock() + LINGER_POLL_S <= deadline):
+            print(f"deploy gate: waiting on runs that will not wake this "
+                  f"workflow ({'; '.join(verdict.reasons)}); asking again "
+                  f"in {LINGER_POLL_S}s", flush=True)
+            _sleep(LINGER_POLL_S)
+            verdict = evaluate(trigger, args.sha, token, api)
     except GateError as exc:
         print(f"deploy gate: {exc}", file=sys.stderr)
         return 2
+    if verdict.verdict == WAIT and verdict.stranded:
+        verdict.reasons.append(
+            "nothing still running will wake deploy-demo.yml again: once it "
+            "finishes, run the workflow by hand on main")
     _report(verdict, args.sha)
     return 0
 

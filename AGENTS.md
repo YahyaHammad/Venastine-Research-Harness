@@ -60,7 +60,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 8435 tests, offline. 1:37 on 16 cores at batch 207 (9:06 serial at batch 114; +~5s first run: matplotlib font cache)
+pytest                                            # 8448 tests, offline. 1:37 on 16 cores at batch 207 (9:06 serial at batch 114; +~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -290,7 +290,11 @@ push to `main` in this repository, because a `workflow_run` job's `github.ref` i
 branch and an environment's branch rule therefore cannot. And event values reach a script through
 `env:`, never pasted into `run:`. pip-audit runs on a push to main for this (batch 169), and codeql
 and pip-audit key their concurrency on the event too, so a schedule cannot cancel the push run the
-gate waits for. **ModelScope is deployed by the owner** with the same script and the same gate
+gate waits for. **A release tag's runs wake nothing** (batch 211): pushing `vX.Y.Z` re-runs CI on
+main's tip, the gate counts those runs, and `workflow_run` wakes the deploy for runs on `main` only,
+so until then no release commit deployed. A wait whose every unfinished run is one that cannot wake
+the deploy is *stranded*, and `--linger 1200` keeps that gate asking every 30 s; the gate job's
+timeout must outlive the linger, and a test holds the two together. **ModelScope is deployed by the owner** with the same script and the same gate
 (`--platform modelscope`): it has no fine-grained tokens and no trusted CI. `--unverified` skips the
 gate for a private test deploy and the workflow never passes it. Audit findings are accepted only BY
 ID in `deploy_demo.ACCEPTED`, each entry applying only while its version is pinned -- pillow 12.3.0

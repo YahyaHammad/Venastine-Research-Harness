@@ -10,6 +10,13 @@ worth understanding, not a flaky mock to patch over.
 
 ---
 
+## A release tag's runs no longer strand the deploy (batch 211)
+
+| Change | Test | Fix |
+|---|---|---|
+| Shorten the gate job's `timeout-minutes`, or drop `--linger` from its step | `TestLingering::test_the_workflow_lingers_inside_its_jobs_timeout` | The job must outlive the linger with room to report; a job killed mid-linger writes no verdict. Without `--linger` no release commit deploys again |
+| Let a tag's, a schedule's or another app's unfinished run count as one that wakes the deploy | `TestAStrandedWait` | Only a push run on `main` of a workflow `deploy-demo.yml` listens for wakes it; anything else strands the wait |
+
 ## The hosted demo recommends the GitHub installers (batch 209)
 
 | Change | Test | Fix |

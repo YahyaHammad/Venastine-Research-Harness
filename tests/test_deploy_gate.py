@@ -226,6 +226,171 @@ class TestTheVerdict:
             f"{SHA[:12]} is not main's tip ({OTHER[:12]})"]
 
 
+def _with_the_tags_runs(runs, checks, *, status="in_progress",
+                        conclusion=None):
+    """4a08b96's shape: v0.3.3 pushed onto main's tip re-ran every CI
+    workflow there, and main's own runs finished first."""
+    runs = runs + [_run("tests", 7, branch="v0.3.3", status=status,
+                        conclusion=conclusion),
+                   _run("compat", 8, branch="v0.3.3", status=status,
+                        conclusion=conclusion)]
+    checks = checks + [_check("pytest", 7, status=status,
+                              conclusion=conclusion),
+                       _check("py313-info", 8, status=status,
+                              conclusion=conclusion)]
+    return runs, checks
+
+
+class TestAStrandedWait:
+    """Batch 211. Nothing woke deploy-demo.yml once a release tag's runs
+    outlasted main's, so no release commit deployed. A wait is stranded
+    when everything unfinished is a run that will not wake it."""
+
+    def test_a_release_tags_runs_still_going_strand_the_wait(self):
+        verdict = _decide(*_with_the_tags_runs(*_green()))
+        assert verdict.verdict == gate.WAIT
+        assert verdict.stranded
+        assert "pytest in tests (push): in_progress" in verdict.reasons
+
+    def test_mains_own_runs_still_going_are_not_stranded(self):
+        """They wake the deploy when they end, so this run need not stay.
+        Alongside the tag's too: one waking run is enough."""
+        runs, checks = _green()
+        runs[1]["status"] = "in_progress"
+        checks[3]["status"] = "in_progress"
+        assert not _decide(runs, checks).stranded
+        assert not _decide(*_with_the_tags_runs(runs, checks)).stranded
+
+    def test_a_required_workflow_not_started_yet_is_not_stranded(self):
+        runs, checks = _with_the_tags_runs(*_green())
+        del runs[1]
+        verdict = _decide(runs, checks)
+        assert verdict.verdict == gate.WAIT and not verdict.stranded
+
+    @pytest.mark.parametrize("kind", ["schedule", "dispatch", "other app"])
+    def test_runs_that_wake_nothing_strand_it_too(self, kind):
+        runs, checks = _green()
+        if kind == "other app":
+            check = _check("external-ci", 99, status="queued",
+                           conclusion=None)
+            check["app"] = {"slug": "some-ci"}
+            checks.append(check)
+        else:
+            event = {"schedule": "schedule",
+                     "dispatch": "workflow_dispatch"}[kind]
+            runs.append(_run("codeql", 9, event=event,
+                             status="in_progress", conclusion=None))
+            checks.append(_check("analyze", 9, status="in_progress",
+                                 conclusion=None))
+        verdict = _decide(runs, checks)
+        assert verdict.verdict == gate.WAIT and verdict.stranded
+
+    def test_the_tags_runs_still_count(self):
+        """The owner's rule is every check on the commit; lingering waits
+        for the tag's runs, it does not stop counting them."""
+        runs, checks = _with_the_tags_runs(*_green(), status="completed",
+                                           conclusion="failure")
+        assert _decide(runs, checks).verdict == gate.REFUSE
+        runs, checks = _with_the_tags_runs(*_green(), status="completed",
+                                           conclusion="success")
+        assert _decide(runs, checks).verdict == gate.DEPLOY
+
+    def test_a_deploy_or_refusal_is_never_stranded(self):
+        assert not _decide(*_green()).stranded
+        runs, checks = _with_the_tags_runs(*_green())
+        checks[0]["conclusion"] = "failure"
+        verdict = _decide(runs, checks)
+        assert verdict.verdict == gate.REFUSE and not verdict.stranded
+
+
+class TestLingering:
+    """`--linger` in main(): ask again while the wait is stranded, on a
+    fake clock, since the tests must not wait in real time."""
+
+    @pytest.fixture
+    def clock(self, monkeypatch):
+        now = {"t": 0.0}
+        slept = []
+
+        def sleep(seconds):
+            slept.append(seconds)
+            now["t"] += seconds
+
+        monkeypatch.setattr(gate, "_clock", lambda: now["t"])
+        monkeypatch.setattr(gate, "_sleep", sleep)
+        monkeypatch.setenv("GITHUB_TOKEN", "t")
+        monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+        return slept
+
+    def _answers(self, monkeypatch, *verdicts):
+        queue = list(verdicts)
+        asked = []
+
+        def evaluate(*_a, **_k):
+            asked.append(1)
+            return queue.pop(0) if len(queue) > 1 else queue[0]
+
+        monkeypatch.setattr(gate, "evaluate", evaluate)
+        return asked
+
+    def _run(self, tmp_path, monkeypatch, *extra):
+        out = tmp_path / "out"
+        monkeypatch.setenv("GITHUB_OUTPUT", str(out))
+        assert gate.main(["--repo", REPO, "--sha", SHA, "--trigger",
+                          "local", *extra]) == 0
+        return out.read_text(encoding="utf-8")
+
+    def _stranded(self):
+        return gate.Verdict(gate.WAIT, ["pytest in tests (push): queued"],
+                            stranded=True)
+
+    def test_it_asks_again_until_the_tags_runs_finish(
+            self, tmp_path, monkeypatch, clock):
+        asked = self._answers(monkeypatch, self._stranded(), self._stranded(),
+                              gate.Verdict(gate.DEPLOY, ["all passed"]))
+        assert self._run(tmp_path, monkeypatch,
+                         "--linger", "1200") == "verdict=deploy\n"
+        assert len(asked) == 3
+        assert clock == [gate.LINGER_POLL_S] * 2
+
+    def test_without_linger_a_stranded_wait_ends_and_says_what_to_do(
+            self, tmp_path, monkeypatch, clock, capsys):
+        self._answers(monkeypatch, self._stranded())
+        assert self._run(tmp_path, monkeypatch) == "verdict=wait\n"
+        assert clock == []
+        assert "run the workflow by hand" in capsys.readouterr().out
+
+    def test_a_wait_mains_runs_will_end_is_not_lingered_on(
+            self, tmp_path, monkeypatch, clock, capsys):
+        asked = self._answers(monkeypatch, gate.Verdict(
+            gate.WAIT, ["compat: in_progress"]))
+        assert self._run(tmp_path, monkeypatch,
+                         "--linger", "1200") == "verdict=wait\n"
+        assert len(asked) == 1 and clock == []
+        assert "by hand" not in capsys.readouterr().out
+
+    def test_it_stops_at_its_budget(self, tmp_path, monkeypatch, clock):
+        asked = self._answers(monkeypatch, self._stranded())
+        assert self._run(tmp_path, monkeypatch,
+                         "--linger", "100") == "verdict=wait\n"
+        # 30, 60 and 90 fit in 100; a fourth wait would end at 120.
+        assert clock == [gate.LINGER_POLL_S] * 3
+        assert len(asked) == 4
+
+    def test_the_workflow_lingers_inside_its_jobs_timeout(self):
+        """deploy-demo.yml passes --linger, and the gate job's timeout
+        outlives it; a job killed mid-linger reports nothing."""
+        import yaml
+
+        doc = yaml.safe_load((ROOT / ".github" / "workflows"
+                              / "deploy-demo.yml").read_text(encoding="utf-8"))
+        job = doc["jobs"]["gate"]
+        step = next(s for s in job["steps"] if s.get("id") == "gate")
+        linger = float(step["run"].split("--linger")[1].split()[0])
+        assert linger >= 10 * 60
+        assert job["timeout-minutes"] * 60 >= linger + 2 * 60
+
+
 class TestTheTrigger:
     @pytest.mark.parametrize("event,branch,head", [
         ("pull_request", "main", REPO),
