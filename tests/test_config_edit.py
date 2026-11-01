@@ -307,7 +307,9 @@ class TestTheRoundTripIsLossless:
         # table (IM1, IM7).
         # 150 since batch 208: `mcp_max_event_bytes`, the ceiling mcp 2.3.0
         # puts on one Streamable HTTP event.
-        assert touched == 150, f"{touched} settable scalars, expected 150"
+        # 152 since batch 221: `init_max_hub_chars` and
+        # `init_diff_shown_lines`, /init's bounds on the existing hub (#226).
+        assert touched == 152, f"{touched} settable scalars, expected 152"
         assert config_edit._dump(tree) == text
 
     def test_a_one_value_change_is_a_one_line_diff(self, tmp_path,

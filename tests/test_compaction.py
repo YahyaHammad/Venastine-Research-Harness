@@ -67,15 +67,18 @@ def _forget_context_window_warnings():
     warning, which is the same kind of state with the same exposure: a test
     that primes a 4,096-token window warms it, and the test that asserts the
     line is emitted would then pass or fail on test order. Batch 220 added
-    `_read_warned`, for the 16k-32k case, with the same exposure again.
+    `_read_warned`, for the 16k-32k case, with the same exposure again, and
+    batch 221 `_yield_logged`, for the once-per-thread yield line.
     """
     compaction._context_window_warned.clear()
     compaction._floor_warned.clear()
     compaction._read_warned.clear()
+    compaction._yield_logged.clear()
     yield
     compaction._context_window_warned.clear()
     compaction._floor_warned.clear()
     compaction._read_warned.clear()
+    compaction._yield_logged.clear()
 
 
 def _thread(memory, turns=6, body="x" * 200):
@@ -1454,6 +1457,27 @@ class TestTheTurnCountFloorYieldsInsteadOfBlockingEveryFold:
 
         assert ids.index(yielded) > ids.index(one_less), (
             "the count was relaxed by one step instead of yielding")
+
+    def test_the_yield_is_said_once_per_thread_not_once_per_step(
+            self, fake_storage, caplog):
+        """#217, batch 221. compactable_span runs on every evaluation while
+        a thread is over the trigger, and the INFO line repeated each time:
+        four identical lines in four steps in the S11-01 probe. A standing
+        condition is said once; a SECOND thread is still news."""
+        first, second = ConversationMemory(), ConversationMemory()
+        _thread(first, turns=3)
+        _thread(second, turns=3)
+        held = {**OVERRIDES, "keep_recent_turns": 3}
+
+        with caplog.at_level("DEBUG", logger="core.compaction"):
+            for _ in range(4):
+                compaction.compactable_span(first, overrides=held)
+            compaction.compactable_span(second, overrides=held)
+
+        said = [(r.levelname, r.getMessage().split(":")[0])
+                for r in caplog.records if "so it yielded" in r.getMessage()]
+        assert [level for level, _ in said] == [
+            "INFO", "DEBUG", "DEBUG", "DEBUG", "INFO"], said
 
 # ---------------------------------------------------------------------------
 # ---- Batch 120: a fold INSIDE one turn, when nothing else is legal ---------

@@ -536,6 +536,13 @@ init_read_chars: 20000
 # Step ceiling for the /init run when its agent names none.
 init_max_steps: 12
 
+# Largest existing AGENTS.md /init will revise, in characters. Above it
+# /init stops before any model call: the reply replaces the whole file.
+init_max_hub_chars: 1000000
+
+# Most lines of the proposed diff /init prints before asking.
+init_diff_shown_lines: 2000
+
 # ======================================================================
 # MCP teardown
 # ======================================================================

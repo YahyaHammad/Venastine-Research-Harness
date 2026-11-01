@@ -2934,7 +2934,7 @@ decision).
 
 **CLOSED (batch 213), with the shape above.** `_run_inert`'s `subprocess.run` and the container one-shot's `Popen` in `_run_docker` pass `stdin=subprocess.DEVNULL`, as `_run_subprocess_fallback` has since batch 142, so every one-shot route gives a child no console now; a session still gets its own `PIPE`. `test_the_inert_route_is_given_no_console` and `test_the_container_one_shot_is_given_no_console` assert the argument on the real call, the way batch 142's fallback test does. A real `cat` run under pytest was not used as the test: in an xdist worker the inherited stdin is execnet's pipe, so the negative control would read the worker's own channel. AGENTS.md's "recorded, not changed" line and ROADMAP_v3 SS70 say it is closed.
 
-## 50. `run_isolated` buffers the child's whole output before bounding it (open, deferred batch 138)
+## 50. `run_isolated` buffers the child's whole output before bounding it (closed, batch 221)
 
 **Issue:** #204.
 
@@ -2965,6 +2965,8 @@ read. `tools/isolation.py` only.
 
 **Not:** lowering `MAX_CHILD_OUTPUT_BYTES` (the result bound is correct);
 thread-based collection (the module's process decision, H2, stands).
+
+**CLOSED (batch 221), the first shape above, on the owner's choice.** `run_isolated` gives the child two temporary files instead of pipes and reads at most the result bound plus one byte from stdout -- `min(limit, size)`, because `read(n)` allocates `n` up front, which the test measured as 4 MB held for a forty-byte result -- and the last 1,600 bytes of stderr. On POSIX `_resource_limits` adds `RLIMIT_FSIZE` at twice the result bound, so a flood fails its own writes. On Windows the clock is still the only bound, now on disk rather than in memory. No thread reads anything (H2), and ROADMAP_v2's H3 row is amended. Measured with tracemalloc: a child writing 6 MB of stderr held 12.6 MB in the parent before and stays under 3 MB after; on Linux a 16 MB flood is stopped with "did not return a usable result". The module comment that said the size was bounded "on the CHILD side" now says which half that was.
 
 ## 51. A session's refused credential is never quarantined (closed, batch 160 -- the session manager hands the exit to the quarantine)
 
@@ -3402,7 +3404,7 @@ inventing a cap would add a failure mode to the largest legitimate manifests.
 
 **CLOSED (batch 219): guarded, on the owner's answer to the question above, and wider than the finding.** Measured under WSL before the fix, the clone-carried shape is worse than a FIFO: a skill symlinked to `/dev/zero`, which exists on every POSIX machine, made `describe_project_content` -- the trust prompt's listing, before any grant -- raise MemoryError in 1.5 s under a 1 GiB cap, while `_content_hash` stepped over it. The same function read the hub, `settings.json` and `mcp.json` the same way. All of them, plus `initialize`'s hub read, `_read_settings_file` and `mcp_client`'s `_read_file`, now go through `json_store.read_regular_text`, which opens non-blocking and refuses whatever `fstat` does not call a regular file, with an OSError each caller already reported or skipped. `tests/test_json_store.py` drives a FIFO and a `/dev/zero` link in a child capped at 1 GiB and 20 s, and every reader end to end. With `O_NONBLOCK` removed the FIFO test times out, and with the `fstat` check removed three tests fail. Regular-file reads stay uncapped, per **Not** above.
 
-## 61. A parallel batch widens the window between "the tool ran" and "the row is durable" (open, deferred batch 138)
+## 61. A parallel batch widens the window between "the tool ran" and "the row is durable" (closed, batch 221)
 
 **Issue:** #215.
 
@@ -3463,6 +3465,8 @@ and asserts one `tool_result` row per tool that actually ran.
 is stated; treating the `shutdown(wait=True)` block as a separate finding, since
 it is a consequence of the same window.
 
+**CLOSED (batch 221), the second shape above, on the owner's choice, and wider than filed.** `_dispatch_parallel` catches `GeneratorExit` at its drain, waits for its workers as the pool's exit already did, records every finished call in the model's order, and raises it again; a record that fails is logged rather than replacing the close. The settle loop had a second window after the drain: `_settle_one` was a generator that wrote one row, yielded, and only then wrote the next, so a consumer gone at the first `tool_result` lost the later rows. It is a plain function now that records and returns its events, and the batch records every row before announcing any. NA11 is untouched. ARCHITECTURE 4.8's `_pump` sentence is corrected: the TUI closes its generator on shutdown and otherwise drops it to the garbage collector. Both windows have a test that fails without the fix. Not changed: `close()` still blocks for the slowest tool in the batch, which the pool's exit always did.
+
 ## 62. A truncated fold is measured against the length it no longer has (closed, batch 213)
 
 **Issue:** #216.
@@ -3506,7 +3510,7 @@ are already correct.
 
 **CLOSED (batch 213), with the one line suggested.** The truncation branch recomputes `target` beside `original`, as the forced-chain branch does. `test_a_truncated_fold_is_targeted_at_the_length_it_kept` reads both numbers out of the instruction a truncated fold sends and requires the cap to be the strength's ratio of the stated length; it fails without the line.
 
-## 63. Batch 119's yield logs a standing condition per step (open, deferred batch 138)
+## 63. Batch 119's yield logs a standing condition per step (closed, batch 221)
 
 **Issue:** #217.
 
@@ -3542,6 +3546,8 @@ the line to DEBUG and let `_maybe_compact` say it once per run under the existin
 **Not:** the yield itself, which is batch 119's fix and correct; the
 `_sub_turn_span` INFO at `:715-719`, which fires at most once per thread per fold
 and is not a standing condition.
+
+**CLOSED (batch 221), with the module's own once-only discipline rather than a notice.** The line's first time on a thread is INFO, and every repeat on that thread is DEBUG, through `_yield_logged`, a set keyed on the thread id beside the three warning sets. A notice through `_maybe_compact` would have shown the user a standing condition with nothing to do about it. The test drives four evaluations on one thread and one on another: INFO, DEBUG, DEBUG, DEBUG, INFO. `_sub_turn_span`'s INFO is untouched, per Not above.
 
 ## 64. Two scoring helpers raise where the scope says nothing raises (closed, batch 219)
 
@@ -3869,7 +3875,7 @@ asserting a live tool line and no live thinking content.
 handling in the CLI, explicitly not required; any TUI work. Do not leak thinking
 content into research-style volume lines.
 
-## 72. The existing hub document is read, diffed, embedded and printed whole (open, deferred batch 138)
+## 72. The existing hub document is read, diffed, embedded and printed whole (closed, batch 221)
 
 **Issue:** #226.
 
@@ -3911,6 +3917,8 @@ below the cap, byte-identical to today.
 **Not:** changing tool read caps or stub rendering; a manifest listing cap, since
 each listing line is already small and the count is bounded by the directory
 rather than by this file.
+
+**CLOSED (batch 221), as a refusal rather than head-plus-notice, on the owner's choice.** The initializer's reply REPLACES the hub, so a model shown its head would write it back without its tail. Above `init_max_hub_chars` (1,000,000 characters, about three times this repository's own 347 KB hub) /init stops with one line before any model call. Far past it, the refusal comes from the size in bytes before the file is read, since four bytes per character makes that safe. Below it nothing changes, except that the shown diff is cut at `init_diff_shown_lines` (2,000) with a line saying how many more there are. The read is regular-files-only too (batch 219). Both values are `config.yaml` keys with CONFIG_ARCHITECTURE sections.
 
 ## 73. `_tree` is the one manifest section with no second screen (open, deferred batch 138)
 

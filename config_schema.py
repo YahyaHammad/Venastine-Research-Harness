@@ -371,6 +371,8 @@ class HarnessConfig(_Model):
     initializer_agent: str
     init_read_chars: PositiveInt
     init_max_steps: PositiveInt
+    init_max_hub_chars: PositiveInt
+    init_diff_shown_lines: PositiveInt
 
     # -- MCP teardown ------------------------------------------------------
     teardown_budget_s: PositiveNumber

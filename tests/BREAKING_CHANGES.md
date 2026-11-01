@@ -10,6 +10,18 @@ worth understanding, not a flaky mock to patch over.
 
 ---
 
+## Unbounded output (batch 221)
+
+| Change | Test | Fix |
+|---|---|---|
+| Go back to `capture_output`, or read the stdout file with `read(limit)` | `test_a_flooding_child_is_not_held_in_the_parents_memory` | Temporary files, `min(limit, size)` from one and a tail from the other; `read(n)` allocates `n` up front (#204) |
+| Drop `RLIMIT_FSIZE` from `_resource_limits` | `test_past_the_file_cap_the_child_is_stopped` | Keep it: on POSIX it is what bounds the files themselves (H3, amended) |
+| Make `_settle_one` a generator again, or announce a batch's first result before recording the rest | `test_closed_at_the_first_result_every_call_is_recorded` | Record every row of the group, then announce (#215) |
+| Let `GeneratorExit` out of `_dispatch_parallel`'s drain unhandled | `test_closed_during_the_drain_every_finished_call_is_recorded` | Hold it, wait for the workers, record in the model's order, raise it again |
+| Log the turn count's yield at INFO every time | `test_the_yield_is_said_once_per_thread_not_once_per_step` | Once per thread through `_yield_logged`, DEBUG after (#217) |
+| Send a hub past `init_max_hub_chars` to the model, or truncate it for the task | `test_a_hub_past_the_cap_stops_before_any_model_call` | Refuse it: the reply replaces the whole hub, so a head would lose the tail (#226) |
+| Print the whole diff again | `test_a_long_diff_is_cut_with_a_line_saying_so` | `_shown()` cuts the print at `init_diff_shown_lines`; the whole diff still decides |
+
 ## Research pipeline accuracy (batch 220)
 
 | Change | Test | Fix |

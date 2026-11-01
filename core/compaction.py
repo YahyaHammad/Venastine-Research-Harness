@@ -173,6 +173,11 @@ _floor_warned: set = set()
 # batch 220). Its own set, keyed the same way and for the same reasons.
 _read_warned: set = set()
 
+# Threads whose turn count has already been reported as yielding (#217,
+# batch 221), so the INFO line is said once per thread. Keyed on the
+# THREAD, not the model: the condition is a property of the conversation.
+_yield_logged: set = set()
+
 
 # A trailing release date, as Anthropic and Google spell it.
 _DATE_SUFFIX = re.compile(r"-\d{8}$")
@@ -905,7 +910,17 @@ def compactable_span(memory, current_turn_start: Optional[int] = None,
     if preferred >= 1:
         cutoff = preferred
     elif cutoff >= 1:
-        logger.info(
+        # A STANDING CONDITION, said once per thread (batch 221, #217).
+        # This runs once per compact(), which _maybe_compact calls after
+        # every step while the thread is over the trigger -- so at INFO it
+        # repeated per step for the life of the conversation, the shape #44
+        # took out of this module. The first time a thread yields says it;
+        # the rest are DEBUG, like the no-progress line that follows them.
+        level = (logging.DEBUG if memory.thread_id in _yield_logged
+                 else logging.INFO)
+        _yield_logged.add(memory.thread_id)
+        logger.log(
+            level,
             "Compaction on thread %s: keep_recent_turns=%d would have held "
             "all %d turns and blocked every fold, so it yielded. The current "
             "turn and keep_recent_tokens still hold.",

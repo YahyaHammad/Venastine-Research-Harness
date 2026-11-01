@@ -795,6 +795,28 @@ different axis from spend and from the number of reads.
 The number of reads, which neither budget nor read size bounds: a model
 can spend an unbounded number of small reads inside any ceiling.
 
+### `init_max_hub_chars`
+
+Batch 221 (#226, TECHNICAL_DEBT 72). The existing hub was the one read on
+/init's path with no bound at all: measured, a 5.4 MB `AGENTS.md` became a
+5.4 MB model task and a 5.4 MB diff in the transcript. A cap with a notice
+("the first N characters are shown") was rejected, because the initializer's
+reply REPLACES the whole file -- a model shown the head would write the hub
+back without its tail. So past this size /init stops before any model call
+and says to trim the file or edit it by hand. 1,000,000 characters is about
+three times this repository's own 347 KB hub and past what most model
+windows hold anyway, so an ordinary hand-grown hub never meets it. The owner
+chose the shape and the number.
+
+### `init_diff_shown_lines`
+
+The other half of #226: below the cap a hub can still produce a diff of
+tens of thousands of lines, and printing it whole is the transcript freeze
+S15 removed. Only the PRINT is cut, with a line saying how many lines were
+not shown; the whole diff still decides whether anything changed, and the
+write is still the whole proposal. 2,000 lines is enough to judge a rewrite
+by -- this repository's own hub is about 3,300 lines.
+
 ## MCP teardown (ROADMAP_v2 §37 F6, #64)
 
 ### `teardown_budget_s`

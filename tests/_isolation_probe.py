@@ -41,3 +41,16 @@ def tick_forever(params: dict) -> dict:
 def echo(params: dict) -> dict:
     """The control: a handler that returns promptly and normally."""
     return {"echoed": params.get("value")}
+
+
+def flood_stderr(params: dict) -> dict:
+    """Write `megabytes` MB to stderr, then answer normally (#204): the
+    ordinary misbehaviour -- a warning flood, progress spam -- whose whole
+    volume the parent used to hold in memory."""
+    import sys
+
+    chunk = "x" * (1 << 20)
+    for _ in range(params.get("megabytes", 1)):
+        sys.stderr.write(chunk)
+    sys.stderr.flush()
+    return {"flooded": True}

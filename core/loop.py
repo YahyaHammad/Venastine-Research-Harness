@@ -1319,6 +1319,7 @@ def _dispatch_parallel(calls, *, context, run_info, response_channel,
             conduit.put(("done", None))
 
     workers = max(1, min(len(calls), config.SUBAGENT_MAX_PARALLEL))
+    abandoned = False
     with ThreadPoolExecutor(max_workers=workers,
                             thread_name_prefix="venastine-call") as pool:
         futures = []
@@ -1326,12 +1327,24 @@ def _dispatch_parallel(calls, *, context, run_info, response_channel,
             futures.append(
                 (call, pool.submit(copy_context().run, _work, call)))
         outstanding = len(calls)
-        while outstanding:
-            kind, payload = conduit.get()
-            if kind == "done":
-                outstanding -= 1
-            else:
-                yield payload
+        # ABANDONED MID-BATCH, the window #215 names (batch 221). A
+        # consumer that goes away at one of these yields -- the TUI closes
+        # its generator on shutdown -- used to take every finished call's
+        # outcome with it: D20 had written their `tool_use` blocks, the
+        # tools had run, and no row answered them. So the GeneratorExit is
+        # held while the workers finish, which the pool's own exit already
+        # waited for, and every outcome is recorded in the model's order
+        # below before it is raised again. NA11 is untouched: nothing is
+        # recorded out of order, only no longer dropped.
+        try:
+            while outstanding:
+                kind, payload = conduit.get()
+                if kind == "done":
+                    outstanding -= 1
+                else:
+                    yield payload
+        except GeneratorExit:
+            abandoned = True
         for call, future in futures:
             try:
                 settled_calls.append((call, future.result(), None))
@@ -1377,21 +1390,43 @@ def _dispatch_parallel(calls, *, context, run_info, response_channel,
                     call.name, failure)})))
         else:
             ordered.append((call, outcome))
+    if abandoned:
+        # Recorded, never announced: there is nobody left to announce to,
+        # and a generator that yields after GeneratorExit is a
+        # RuntimeError. A failure to record is logged rather than raised,
+        # so it cannot replace the close the consumer asked for.
+        for call, outcome in ordered:
+            try:
+                _settle_one(call, outcome, memory, [], [])
+            except Exception:  # noqa: BLE001 -- see above
+                logger.exception("Could not record %s's result while the "
+                                 "batch was being closed", call.id)
+        raise GeneratorExit
     return ordered
 
 
-def _settle_one(call, outcome, memory, granted_calls, notices):
-    """Record and announce ONE finished call, at its turn in call order.
+def _settle_one(call, outcome, memory, granted_calls, notices) -> list:
+    """Record ONE finished call, at its turn in call order, and return the
+    events that announce it.
 
     Split out of the per-call body so both drivers reach it identically,
     and so everything that touches `memory` or the turn's shared lists
     happens on the generator's own thread in the model's own order (NA11).
     A reordered turn is a thread that will not resume: `add_tool_result`
     pairs each result to its `tool_use` by id (M4/D20).
+
+    A FUNCTION, NOT A GENERATOR, since batch 221 (#215). As a generator it
+    yielded between one call's row and the next one's, so a batch closed
+    at its first `tool_result` lost the rows of every call after it, and
+    `_dispatch_parallel` had nothing to record its finished calls with
+    once its own consumer had gone. Returning the events lets the batch
+    record every result before announcing any, and lets the abandoned path
+    record without announcing at all.
     """
     granted_calls.extend(outcome.granted)
     notices.extend(outcome.notices)
     result = outcome.result
+    events = []
 
     # §23 slice 2 (J10). A tool may attach a `notice` to its
     # result for the shell to show; it is forwarded as a
@@ -1409,7 +1444,7 @@ def _settle_one(call, outcome, memory, granted_calls, notices):
     if isinstance(result, dict) and "notice" in result:
         notice = result.pop("notice")
         if isinstance(notice, dict) and notice.get("kind"):
-            yield LoopEvent(notice=notice)
+            events.append(LoopEvent(notice=notice))
         else:
             # A malformed notice is a bug in the tool, not a
             # reason to fail the call -- the result is still
@@ -1429,7 +1464,8 @@ def _settle_one(call, outcome, memory, granted_calls, notices):
     # lines. The event carries nothing the persist needs, so
     # the order is free.
     memory.add_tool_result(call.id, result)
-    yield LoopEvent(tool_result={"id": call.id, "result": result})
+    events.append(LoopEvent(tool_result={"id": call.id, "result": result}))
+    return events
 
 
 def _finish_cancelled(memory, response, *, partial_text, unrun, reason,
@@ -1959,10 +1995,16 @@ class RunAgentLoop:
                         response_channel=response_channel, memory=memory,
                         activity=activity, cancel=cancel)
 
-                # NA11. In the MODEL'S order, whatever order they finished in.
-                for call, outcome in settled:
-                    yield from _settle_one(
-                        call, outcome, memory, granted_calls, notices)
+                # NA11. In the MODEL'S order, whatever order they finished in
+                # -- and EVERY row of the group recorded before ANY event is
+                # announced (#215, batch 221). #42's persist-before-emit
+                # held per call and not per group: a consumer gone at the
+                # first call's `tool_result` left the later calls' tools run
+                # and their rows never written.
+                announced = [event for call, outcome in settled
+                             for event in _settle_one(call, outcome, memory,
+                                                      granted_calls, notices)]
+                yield from announced
 
             # The mid-turn valve (M3). A single turn can add far more than
             # any buffer covers -- MAX_READ_CHARS alone is ~12.5k tokens

@@ -29224,3 +29224,61 @@ once, naming the read) before anything was written.
   bandit as CI runs it and gitleaks on an export are clean.
 - **Version**, by `scripts/version.py bump`:
   `0.3.4-b.3.bugfixes.r57e749187eaf`.
+
+## Batch 221 -- unbounded output (2026-11-01)
+
+**#204, #215, #217 and #226, register items 50, 61, 63 and 72**, the
+"unbounded output" group. The owner chose #204's transport (temporary
+files), #226's policy (refuse past 1 MB) and #215's shape (save what
+finished on close) first.
+
+- **#204.** `run_isolated` hands the child two temporary files in place of
+  pipes and reads at most the result bound from stdout and 1,600 bytes from
+  the end of stderr. On POSIX `RLIMIT_FSIZE` at twice the result bound caps
+  the files themselves; Windows stays on the clock alone. Measured with
+  tracemalloc: a child writing 6 MB of stderr held 12.6 MB in the parent
+  before, and under 3 MB after. The first attempt still peaked at 4 MB,
+  because `read(n)` allocates `n` up front and n was the 4 MB bound; it
+  reads `min(n, size)` now. The files decode as the text-mode pipes did,
+  universal newlines included. ROADMAP_v2's H3 row is amended.
+- **#215, wider than filed.** The window the issue named is the drain:
+  closed at a sibling's narration, the batch recorded nothing.
+  `_dispatch_parallel` now holds the `GeneratorExit`, waits for its
+  workers, records every finished call in the model's order and raises it
+  again. A second window sat one step later: `_settle_one` wrote a row,
+  yielded, then wrote the next, so closing at the first `tool_result` lost
+  the rest. It is a plain function now, and a group records every row
+  before announcing any. NA11 is untouched. ARCHITECTURE 4.8's `_pump`
+  sentence, which named a function that does not exist, is corrected.
+- **#217.** The yield line is INFO once per thread and DEBUG after,
+  through `_yield_logged` beside the three warning sets. A user-facing
+  notice, the issue's other suggestion, would have reported a condition
+  the user has nothing to do about.
+- **#226.** `/init` refuses a hub past `init_max_hub_chars` (1,000,000
+  characters) before any model call, checking the size in bytes before
+  the read when it is far past. Below that, only the printed diff is cut,
+  at `init_diff_shown_lines` (2,000). Two new `config.yaml` keys, with
+  CONFIG_ARCHITECTURE sections; `test_config_edit`'s settable-scalar count
+  and ARCHITECTURE's sentence about it go from 150 to 152. The hub read is
+  regular-files-only too, through batch 219's reader.
+
+### Verified
+
+- New tests: 9 (`test_tool_budgets.py` +2, `test_parallel_calls.py` +2,
+  `test_compaction.py` +1, `test_project_init.py` +4). With each fix
+  stashed: the flood test fails (12.6 MB held), both #215 tests fail, the
+  #217 test errors on the fixture's missing set (the line was INFO five
+  times), and the #226 tests have no refusal to find.
+- WSL, on a Linux-filesystem copy: the tool-budget, parallel-call,
+  `/init`, compaction and math files, 702 passed, including the
+  `RLIMIT_FSIZE` test Windows skips. One `/init` CLI test fails there,
+  and fails identically on a `git archive` of HEAD: the copy has no
+  `providers.json`, which CI creates from the example.
+- Full suite on Windows with `AGENT_WORKSPACE` unset: 8621 tests, 8546
+  passed and 75 skipped, in 2:39. The first run failed only the
+  decision-id check: `_shown`'s docstring cited a review-marathon scope
+  as a bare `S15`, which no namespace covers; it names the thing now.
+  ruff (one UP028, a `yield` loop made `yield from`), bandit as CI runs
+  it and gitleaks on an export are clean.
+- **Version**, by `scripts/version.py bump`:
+  `0.3.4-b.4.bugfixes.r57e749187eaf`.
