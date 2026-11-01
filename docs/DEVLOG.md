@@ -28669,7 +28669,7 @@ counts those runs; deploy-demo.yml wakes only for runs on `main`, so its
 last wake (12:07:07) found the tag's `tests` and `compat` still running,
 said WAIT, and nothing woke it again when they finished (12:08:24,
 12:09:10). All seven runs for 4a08b96 ended in WAIT.
-Batch 210 fixes it, the owner's choice; this batch only reports it.
+Batch 211 fixes it, the owner's choice; this batch only reports it.
 
 ### Verified
 
@@ -28678,3 +28678,52 @@ Batch 210 fixes it, the owner's choice; this batch only reports it.
   pip-audit has nothing new to say.
 - **Version**, by `scripts/version.py bump`:
   `0.2.0-b.4.installer-path.rb0705ebe789b`.
+
+## Batch 210 -- a fourth pillow 12.3.0 advisory, accepted by ID for the bridge (2026-11-01)
+
+**What stopped the redeploy.** Batch 209's Space deploy built, scanned and
+audited the bundle and refused before sending: the bridge's packages,
+resolved for the Space, pin pillow 12.3.0, and PYSEC-2026-4332
+(CVE-2026-112403, GHSA-8g5g-8vmr-9782) was published against it after
+batch 192's triage. The refusal named no package: pip-audit's output was
+forty lines of cache warnings, and the deploy prints the last 3,000
+characters. Reproduced with the deploy's own lock compile and pip-audit
+in JSON form.
+
+**The advisory.** Pillow's JPEG decoder can write a full-width scanline
+into a buffer sized for a requested draft scale, when an 8-bit lossless
+JPEG meets libjpeg-turbo 3.x. A caller has to ask for downscaling: through
+`Image.draft()`, or `Image.thumbnail()`, which is the only caller of
+`draft()` inside pillow. 13.0.0 fixes it, and Gradio still caps pillow
+below 13 -- 6.31.0, released 2026-10-28, as much as the 6.30.0
+`bridge.lock` pins.
+
+**What was read**, in the wheels `bridge.lock` pins by hash, downloaded
+whole on 2026-11-01: gradio 6.30.0, gradio-client 2.7.2, spaces 0.51.3,
+hf-gradio 0.4.1 and textual-serve 1.1.3. None calls `draft()` or
+`thumbnail()`. Gradio's one resize helper,
+`processing_utils.resize_and_crop`, uses `ImageOps.fit`, which does not
+draft, and nothing in Gradio calls the helper. gradio-client,
+textual-serve and the bridge's own code (`deploy/hosted/`) import no
+pillow at all. The sessions, which run the harness, install from
+`session.lock`, which pins 13.0.0.
+
+**The owner accepted it by ID**, as batches 169, 175 and 192 accepted
+pillow 12.3.0's earlier advisories: a fourth `ACCEPTED` entry in
+`scripts/deploy_demo.py`, one per triage, saying what was read and when.
+An entry applies only while a lock pins exactly 12.3.0, so it goes stale,
+and the deploy says so, once Gradio allows pillow 13.
+
+### Verified
+
+- `tests/test_deploy_demo.py`: 63 passed, including the checks that every
+  accepted ID is triaged, accepted once, and not a version the harness
+  itself can install.
+- Full suite: 8435 tests, 8365 passed and 70 skipped, in 1:55. The
+  first run failed three of `test_tool_budgets.py`'s compute-clock tests
+  in 13:48, and py-spy showed why: the one worker left was rebuilding
+  matplotlib's font cache, the first since batch 208's 3.11 upgrade,
+  for ten minutes. The 14 tests passed alone, and the rerun with the
+  cache written was green. Batch 212 removes matplotlib.
+- **Version**, by `scripts/version.py bump`:
+  `0.2.0-b.5.installer-path.rb0705ebe789b`.
