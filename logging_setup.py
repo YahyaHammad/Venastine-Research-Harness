@@ -173,16 +173,33 @@ def _resolve_level(level):
     """Accepts a logging level as int, a name string ("INFO"), a numeric
     string ("20"), or None (in which case AGENT_LOG_LEVEL / the default
     is consulted)."""
-    if level is None:
+    from_env = level is None
+    if from_env:
         level = os.environ.get("AGENT_LOG_LEVEL", _DEFAULT_LEVEL)
     if isinstance(level, str):
         # First try a named level ("INFO" -> logging.INFO); fall back to
-        # parsing as an int ("20"). Anything else raises ValueError, which
-        # is the right failure mode for a misconfigured env var.
+        # parsing as an int ("20").
         named = getattr(logging, level.upper(), None)
         if isinstance(named, int):
             return named
-        return int(level)
+        try:
+            return int(level)
+        except ValueError:
+            # A typo in AGENT_LOG_LEVEL warns and falls back, as an
+            # unwritable AGENT_LOG_FILE does below (batch 219, #212). It
+            # used to raise, and this is called before anything can log:
+            # `verbose` made startup one traceback, from the subsystem that
+            # would have reported the mistake legibly. A bad level handed in
+            # by a CALLER still raises, because that is a bug in the code.
+            if not from_env:
+                raise
+            print(
+                f"Warning: AGENT_LOG_LEVEL={level!r} is not a logging level "
+                f"(use DEBUG, INFO, WARNING, ERROR, CRITICAL or a number); "
+                f"logging at {_DEFAULT_LEVEL}.",
+                file=sys.stderr,
+            )
+            return getattr(logging, _DEFAULT_LEVEL)
     return int(level)
 
 

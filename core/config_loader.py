@@ -34,6 +34,7 @@ import yaml
 
 import config_schema
 from core import workspace_trust
+from json_store import read_regular_text
 
 logger = logging.getLogger(__name__)
 
@@ -377,8 +378,11 @@ def _parse_md_file(path: str, kind: str, tier: str, category: str = ""):
         # ^--- no longer sits at position 0 and the file is skipped with
         # the false diagnosis "does not begin with a YAML frontmatter
         # block". utf-8-sig strips a BOM and is a no-op without one.
-        with open(path, encoding="utf-8-sig") as f:
-            text = f.read()
+        # Regular files only (batch 219, #214): this runs for the trust
+        # prompt's listing, before any grant, and a cloned skill linked to
+        # /dev/zero was read until memory ran out. The refusal is an
+        # OSError, so it warns and skips below like any broken definition.
+        text = read_regular_text(path)
         fm, body = _parse_frontmatter(text)
     except (OSError, ValueError, yaml.YAMLError) as e:
         logger.warning("Skipping %s file %s: %s", kind, path, e)
@@ -1082,9 +1086,9 @@ def _read_settings_file(path: str) -> dict:
     if not os.path.exists(path):
         return {}
     # utf-8-sig for the same reason as _parse_md_file: a BOM'd
-    # settings.json makes json.load raise at the first character.
-    with open(path, encoding="utf-8-sig") as f:
-        data = json.load(f)  # json.JSONError propagates as ValueError
+    # settings.json makes json.load raise at the first character. And
+    # regular files only, for the same reason too (batch 219).
+    data = json.loads(read_regular_text(path))  # a JSONDecodeError is a ValueError
     _validate_settings(data, path)
     return data
 
@@ -1203,8 +1207,7 @@ def initialize(project_path: str) -> None:
             # -- including plain chat, which never reads the file. Every
             # other malformed content file in this module warns and skips.
             try:
-                with open(context_path, encoding="utf-8-sig") as f:
-                    context = f.read()
+                context = read_regular_text(context_path)
             except (OSError, UnicodeDecodeError) as e:
                 logger.warning(
                     "Could not read %s; continuing without project "
@@ -1621,9 +1624,11 @@ def describe_project_content(project_path: str) -> str:
     hub = os.path.join(os.path.realpath(project_path),
                        workspace_trust.PROJECT_CONTEXT_FILENAME)
     if os.path.exists(hub):
+        # Every read in this function is of content nobody has consented
+        # to yet, so each is regular-files-only (batch 219, #214): a hub
+        # linked to /dev/zero would otherwise be read until memory ran out.
         try:
-            with open(hub, encoding="utf-8-sig") as f:
-                body = f.read()
+            body = read_regular_text(hub)
         except (OSError, UnicodeDecodeError) as e:
             lines.append(
                 f"{workspace_trust.PROJECT_CONTEXT_FILENAME}: could not be "
@@ -1649,8 +1654,7 @@ def describe_project_content(project_path: str) -> str:
         if not os.path.exists(path):
             continue
         try:
-            with open(path, encoding="utf-8-sig") as f:
-                body = f.read()
+            body = read_regular_text(path)
         except (OSError, UnicodeDecodeError) as e:
             # This function runs ONLY for untrusted projects, i.e. content
             # that is adversarial by definition. UnicodeDecodeError is a

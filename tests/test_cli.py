@@ -323,6 +323,39 @@ def test_f1_bad_settings_key_exits_cleanly_with_the_reason(tmp_path, monkeypatch
     assert "Traceback" not in err
 
 
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0,
+                    reason="chmod 000 refuses a read only to a non-root "
+                           "POSIX user")
+def test_an_unreadable_project_file_is_named_in_the_one_line(
+        tmp_path, monkeypatch, capsys):
+    """#254, batch 219: measured, and the complaint did not reproduce. The
+    trust hash's OSError carries the file's name, so the one line says
+    which file to unlock. Pinned so it stays that way. Refusing to start,
+    rather than starting untrusted, stays the posture (A48); the owner
+    confirmed it."""
+    from main import load_project_config
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("HOME", str(home))
+    skills = tmp_path / "proj" / ".venastine" / "skills"
+    skills.mkdir(parents=True)
+    locked = skills / "x.md"
+    locked.write_text("---\nname: x\ndescription: d\n---\nbody\n",
+                      encoding="utf-8")
+    locked.chmod(0)
+    try:
+        with pytest.raises(SystemExit) as exc_info:
+            load_project_config(str(tmp_path / "proj"), True)
+    finally:
+        locked.chmod(0o644)
+
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "Configuration error" in err
+    assert os.path.join(".venastine", "skills", "x.md") in err
+
+
 @pytest.mark.parametrize("body", ["{not json", "[]", '"a string"'])
 def test_f1_corrupt_trust_store_fails_closed_instead_of_exiting(
         tmp_path, monkeypatch, capsys, body):

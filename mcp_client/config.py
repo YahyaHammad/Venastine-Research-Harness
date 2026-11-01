@@ -41,7 +41,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from json_store import write_json_atomic
+from json_store import read_regular_text, write_json_atomic
 
 logger = logging.getLogger(__name__)
 
@@ -324,9 +324,10 @@ def _read_file(path: str, tier: str) -> dict:
     try:
         # utf-8-sig: mcp.json is commonly copied between hosts and hand
         # edited, so a BOM is realistic and would otherwise be reported as
-        # invalid JSON at character 0.
-        with open(path, encoding="utf-8-sig") as f:
-            data = json.load(f)
+        # invalid JSON at character 0. Regular files only (batch 219, #214):
+        # the project tier's copy arrives with a clone, and one linked to
+        # /dev/zero would be read until memory ran out.
+        data = json.loads(read_regular_text(path))
     except (OSError, ValueError) as e:
         logger.warning("Could not read %s-level mcp.json at %s: %s", tier, path, e)
         return {}

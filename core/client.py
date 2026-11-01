@@ -2,6 +2,7 @@ import base64
 import binascii
 import json
 import logging
+import math
 import os
 from dataclasses import dataclass, field
 from typing import Optional
@@ -2598,18 +2599,31 @@ def _embed_google(client, model, items, task_type):
 
 
 def _check_vectors(provider_name, model, vectors, expected) -> None:
-    """Three ways a successful response is still unusable.
+    """Four ways a successful response is still unusable.
 
-    All three produce a WRONG NUMBER rather than an error downstream: a
-    short batch pairs texts with the wrong vectors, a ragged batch makes
+    The first three produce a WRONG NUMBER rather than an error downstream:
+    a short batch pairs texts with the wrong vectors, a ragged batch makes
     cosine compare different spaces, and an empty vector makes every
     cosine zero -- which reads as "no source supports this claim" and is
     indistinguishable from a real finding.
+
+    The fourth (batch 219, #218) is a component that is not a finite
+    number. A string or None raised TypeError in `l2_normalize`, outside
+    every handler, and flipped a run that had already grounded and scored
+    to `status='failed'`; a NaN or an infinity raised nothing and scored
+    NaN, the wrong-number class again. As an EmbeddingError it takes the
+    path every other unusable response takes: the scorer gives up for the
+    run and the stage falls back, with the cause in the trace.
     """
     if len(vectors) != expected:
         raise EmbeddingError(
             f"{provider_name} returned {len(vectors)} embedding(s) for "
             f"{expected} input(s) with model {model!r}.")
+    if not all(isinstance(v, (list, tuple))
+               and all(_is_finite_number(c) for c in v) for v in vectors):
+        raise EmbeddingError(
+            f"{provider_name} returned an embedding whose components are not "
+            f"all finite numbers for model {model!r}.")
     dimensions = {len(v) for v in vectors}
     if len(dimensions) > 1:
         raise EmbeddingError(
@@ -2619,3 +2633,10 @@ def _check_vectors(provider_name, model, vectors, expected) -> None:
         raise EmbeddingError(
             f"{provider_name} returned empty embeddings for model "
             f"{model!r}.")
+
+
+def _is_finite_number(component) -> bool:
+    """An int or a float, not a bool, and not NaN or an infinity."""
+    return (isinstance(component, (int, float))
+            and not isinstance(component, bool)
+            and math.isfinite(component))

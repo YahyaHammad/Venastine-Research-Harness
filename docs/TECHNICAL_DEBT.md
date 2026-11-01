@@ -3276,7 +3276,7 @@ also asserts that importing and reading wrote none of three decoys into the
 environment, which the old import did. Whether `.env` joins D17's content hash
 was left where this entry left it.
 
-## 58. One env-var misconfiguration warns and the other raises (open, deferred batch 138)
+## 58. One env-var misconfiguration warns and the other raises (closed, batch 219)
 
 **Issue:** #212.
 
@@ -3314,6 +3314,8 @@ back to the `INFO` default. The two branches then agree about what a bad
 environment variable costs.
 
 **Not:** having `configure_logging` validate anything else.
+
+**CLOSED (batch 219), with the shape above, on the owner's choice.** `_resolve_level` catches the `ValueError` for a value read from `AGENT_LOG_LEVEL`, prints one stderr line naming the variable, the value and the accepted forms, and returns INFO, as the `OSError` branch does for `AGENT_LOG_FILE`. A bad `level=` passed in by code still raises, because that is a bug rather than a typo. README's "garbage is a startup error" sentence says what happens now. `TestABadLogLevelWarnsLikeABadLogPath` (5 tests) pins the warning, the fallback, the forms that still parse without a word, and the raise for code.
 
 ## 59. The config schema checks shape where fitness also matters, unevenly (open, deferred batch 138)
 
@@ -3361,7 +3363,7 @@ is deliberate and documented at `config_schema.py:271-283` and validated
 downstream with a better error; `default_effort`, which is already cross-checked;
 `tui.effort`, which downstream per-model validation owns.
 
-## 60. The loader reads `.md` files the trust hash refuses to (open, deferred batch 138)
+## 60. The loader reads `.md` files the trust hash refuses to (closed, batch 219)
 
 **Issue:** #214.
 
@@ -3397,6 +3399,8 @@ subprocess timeout as the harness, since a removed guard hangs rather than fails
 
 **Not:** capping regular-file reads. Measured adequate at 0.66 s per 100 MB;
 inventing a cap would add a failure mode to the largest legitimate manifests.
+
+**CLOSED (batch 219): guarded, on the owner's answer to the question above, and wider than the finding.** Measured under WSL before the fix, the clone-carried shape is worse than a FIFO: a skill symlinked to `/dev/zero`, which exists on every POSIX machine, made `describe_project_content` -- the trust prompt's listing, before any grant -- raise MemoryError in 1.5 s under a 1 GiB cap, while `_content_hash` stepped over it. The same function read the hub, `settings.json` and `mcp.json` the same way. All of them, plus `initialize`'s hub read, `_read_settings_file` and `mcp_client`'s `_read_file`, now go through `json_store.read_regular_text`, which opens non-blocking and refuses whatever `fstat` does not call a regular file, with an OSError each caller already reported or skipped. `tests/test_json_store.py` drives a FIFO and a `/dev/zero` link in a child capped at 1 GiB and 20 s, and every reader end to end. With `O_NONBLOCK` removed the FIFO test times out, and with the `fstat` check removed three tests fail. Regular-file reads stay uncapped, per **Not** above.
 
 ## 61. A parallel batch widens the window between "the tool ran" and "the row is durable" (open, deferred batch 138)
 
@@ -3539,7 +3543,7 @@ the line to DEBUG and let `_maybe_compact` say it once per run under the existin
 `_sub_turn_span` INFO at `:715-719`, which fires at most once per thread per fold
 and is not a standing condition.
 
-## 64. Two scoring helpers raise where the scope says nothing raises (open, deferred batch 138)
+## 64. Two scoring helpers raise where the scope says nothing raises (closed, batch 219)
 
 **Issue:** #218.
 
@@ -3588,6 +3592,8 @@ line, and the run completes.
 **Not:** retrying a malformed payload -- unlike model JSON, a provider shape will
 not fix itself on retry; changing the give-up-on-first-outage policy, which is
 load-bearing (SQ10).
+
+**CLOSED (batch 219), and wider than the two sites.** Probed with a DOI `doi_for` accepts (a first probe used one it rejects and reported nothing, because no lookup ran), 104 malformed shapes raised out of `authority_for`: the authorship loop, and also `primary_location`, its `source` and `type`, `type`, `primary_topic`, a field id and the authors payload. Every read now goes through `_obj` / `_text`, which turn a shape the module cannot read into an absent signal, and the same probe finds none that raise. On the vector side a fourth check sits in `_check_vectors` beside its three siblings: a component that is not a finite number (a string, None, a bool, NaN or an infinity -- the last two raised nothing and scored NaN) is an `EmbeddingError`, so the scorer gives up for the run and the stage falls back with the cause in the trace. **One departure from Not above:** `_embed` retries any EmbeddingError twice before giving up, and this one is retried like the count, ragged and empty checks beside it. Retrying by cause would change SQ10's policy, which this batch did not touch. Tests: 38 in `test_scholar.py`, 33 of which fail without the fix, and 6 in `test_embeddings.py`.
 
 ## 65. A second `connect_all()` abandons a generation of MCP children silently (closed, batch 213)
 
@@ -5186,7 +5192,7 @@ open. That needs the manifest either way.
 **Not:** removing issue numbers from comments. They are the most useful kind
 of citation in the tree -- the question is only what keeps them true.
 
-## 92. An atomic doc write can fail where a truncating one succeeded (open, filed batch 146)
+## 92. An atomic doc write can fail where a truncating one succeeded (closed, batch 219)
 
 **Issue:** #242.
 
@@ -5217,6 +5223,8 @@ remedy is "close the file" -- which needs the errno distinguished, and WinError
 **Not:** a Windows-only branch that falls back to a truncating write. That is
 item 90 reintroduced on the platform where a case-insensitive filesystem makes
 the rest of this surface hardest to reason about.
+
+**CLOSED (batch 219), the message as suggested.** Measured on Windows: a destination another process holds open and a read-only one both refuse `os.replace` with WinError 5, and an `r+b` open succeeds on the first and fails on the second. After sweeping the temp file, `_replace_through_temp` now asks that question (WinError 32 answers it outright) and raises `json_store.DestinationInUse`, a `PermissionError` chained to the original, saying the file is open in another program and to close it there. Every caller already reported an OSError, so `write`, `edit`, `write_project_doc` and the JSON stores all carry the remedy now. The trade is unchanged and the write still refuses, per **Not** above. Two Windows tests drive the real cases, and two contract tests pin the wrapping and the unchanged re-raise on every platform.
 
 ## 93. An environment override that is SET BUT EMPTY is honoured as a value (closed, batch 160 -- refused before it resolves)
 
@@ -5934,7 +5942,7 @@ rebuild.
 is the boundary A44 states, and `mutate152.py`'s D4 is the must-survive
 control that would turn red when somebody crosses it.
 
-## 107. `is_trusted()` raises for an unreadable file, and every caller pays for that differently (open, measured batch 153)
+## 107. `is_trusted()` raises for an unreadable file, and every caller pays for that differently (closed, batch 219)
 
 **Issue:** #254.
 
@@ -5969,6 +5977,8 @@ repairing one command.
 **The cheap half, if only one thing is done:** `load_project_config`'s
 message could name the path, since the `OSError` carries `filename`. That
 is a one-line change and does not touch the gate.
+
+**CLOSED (batch 219), measured: the message half did not reproduce, and the owner kept the posture.** Under WSL with a redirected HOME, a `chmod 000` skill gives `Configuration error: [Errno 13] Permission denied: '<project>/.venastine/skills/x.md'`: the `PermissionError` from `_content_hash`'s `open` carries `filename`, and its `str()` includes it, so the line already names the file to unlock. The message quoted above had lost that tail. Asked, the owner kept refusing to start over answering False (A48). `test_an_unreadable_project_file_is_named_in_the_one_line` (POSIX, non-root) pins the measured line; no code changed.
 
 ## 108. `generate()`'s other pre-write filesystem calls are still outside its `try` (closed, batch 213)
 

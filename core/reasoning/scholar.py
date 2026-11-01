@@ -92,10 +92,29 @@ def doi_for(url: str) -> str | None:
 # ---- Pure scoring ---------------------------------------------------------
 # ---------------------------------------------------------------------------
 
+def _obj(value) -> dict:
+    """`value` if OpenAlex sent an object there, else an empty one.
+
+    Batch 219 (#218). Every read of a record used to trust its shape --
+    `(x or {}).get(...)` survives a null and nothing else -- so one
+    non-object where an object was expected raised AttributeError out of
+    an optional stage and failed a run that had already grounded and
+    scored. Driven: 104 malformed shapes across ten keys. A shape this
+    module cannot read is a signal that is absent, and every term here
+    already knows how to drop an absent one.
+    """
+    return value if isinstance(value, dict) else {}
+
+
+def _text(value) -> str:
+    """`value` if it is a string, else "" -- `_obj`'s rule for a leaf."""
+    return value if isinstance(value, str) else ""
+
+
 def _location_type(work: dict) -> str:
-    location = work.get("primary_location") or {}
-    source = location.get("source") or {}
-    return (source.get("type") or "").lower()
+    location = _obj(work.get("primary_location"))
+    source = _obj(location.get("source"))
+    return _text(source.get("type")).lower()
 
 
 def is_peer_reviewed(work: dict) -> bool:
@@ -108,8 +127,8 @@ def is_peer_reviewed(work: dict) -> bool:
     publisher's own answer where there is one. A record has to survive all
     three to count.
     """
-    location = work.get("primary_location") or {}
-    if (work.get("type") or "").lower() == "preprint":
+    location = _obj(work.get("primary_location"))
+    if _text(work.get("type")).lower() == "preprint":
         return False
     if _location_type(work) not in ("journal", "conference", "book series"):
         return False
@@ -277,7 +296,7 @@ class ScholarLookup:
                                       "select": "id"})
         if not isinstance(payload, dict):
             return None
-        count = (payload.get("meta") or {}).get("count")
+        count = _obj(payload.get("meta")).get("count")
         return count if isinstance(count, int) else None
 
     def citation_percentile(self, work: dict, today: date | None = None):
@@ -298,9 +317,10 @@ class ScholarLookup:
         if not isinstance(cites, int) or isinstance(cites, bool):
             return None, "insufficient_cohort"
 
-        field = ((work.get("primary_topic") or {}).get("field") or {}).get("id")
-        domain = ((work.get("primary_topic") or {}).get("domain") or {}).get("id")
-        work_type = (work.get("type") or "").lower() or "article"
+        topic = _obj(work.get("primary_topic"))
+        field = _text(_obj(topic.get("field")).get("id")) or None
+        domain = _text(_obj(topic.get("domain")).get("id")) or None
+        work_type = _text(work.get("type")).lower() or "article"
         published = date.fromisoformat(work["publication_date"][:10])
 
         minimum = self.knobs.get("min_cohort_size", config.SCHOLAR_MIN_COHORT_SIZE)
@@ -327,9 +347,12 @@ class ScholarLookup:
         pass someone is waiting on.
         """
         ids = []
-        for authorship in (work.get("authorships") or [])[:_MAX_AUTHORS]:
-            author = (authorship or {}).get("author") or {}
-            identifier = (author.get("id") or "").rsplit("/", 1)[-1]
+        authorships = work.get("authorships")
+        if not isinstance(authorships, list):
+            authorships = []
+        for authorship in authorships[:_MAX_AUTHORS]:
+            author = _obj(_obj(authorship).get("author"))
+            identifier = _text(author.get("id")).rsplit("/", 1)[-1]
             if identifier.startswith("A"):
                 ids.append(identifier)
         if not ids:
@@ -339,8 +362,9 @@ class ScholarLookup:
             "select": "id,summary_stats", "per-page": len(ids)})
         if not isinstance(payload, dict):
             return None
-        indexes = [((entry or {}).get("summary_stats") or {}).get("h_index")
-                   for entry in payload.get("results") or []]
+        results = payload.get("results")
+        indexes = [_obj(_obj(entry).get("summary_stats")).get("h_index")
+                   for entry in (results if isinstance(results, list) else [])]
         return author_standing(
             indexes, self.knobs.get("h_saturation", config.SCHOLAR_H_SATURATION))
 

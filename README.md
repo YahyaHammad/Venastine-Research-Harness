@@ -860,7 +860,7 @@ Subagents spawned in one model response run **concurrently**, up to `SUBAGENT_MA
 
 ### Logging
 
-Two sinks from startup: stderr, and a rotating file — `logs/app.log` in the working directory, 1 MB per file, three backups kept. `AGENT_LOG_LEVEL` sets verbosity (a name like `INFO` or a number like `20`; garbage is a startup error rather than a silent fallback) and `AGENT_LOG_FILE` moves the file, creating the parent directory if needed. The file formatter redacts secret-shaped strings on the way out — the same patterns tool outputs get — because a failing tool's traceback routinely carries the request that produced it, and for an HTTP client that is a URL with the key in it.
+Two sinks from startup: stderr, and a rotating file — `logs/app.log` in the working directory, 1 MB per file, three backups kept. `AGENT_LOG_LEVEL` sets verbosity (a name like `INFO` or a number like `20`; anything else prints a warning naming the value and runs at `INFO`, as an unwritable `AGENT_LOG_FILE` does) and `AGENT_LOG_FILE` moves the file, creating the parent directory if needed. The file formatter redacts secret-shaped strings on the way out — the same patterns tool outputs get — because a failing tool's traceback routinely carries the request that produced it, and for an HTTP client that is a URL with the key in it.
 
 In the TUI stderr is detached before the screen is taken (anything written there would paint over the rendered UI and vanish on the next repaint); the rotating file keeps everything, and WARNING-and-above is routed into the transcript so warnings stay visible where you are looking.
 
@@ -1002,7 +1002,7 @@ note that shell approval is governed solely by `shell_approval_mode` -- `tool_ap
 deliberately has no `shell` key, so an old file carrying one is refused at startup
 naming the key — see `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 8545 tests, fully offline, no API keys needed. The suite's own packages are `requirements-test.txt`, separate from `requirements.txt` since batch 136: they used to be in the shipped dependency list, so installing the harness also installed a test runner. It runs in parallel by default (`pytest-xdist`, 70% of your cores): **1:26 on a 16-core machine, against 9:06 single-process.** `pytest -n0` forces the old serial run, which is what you want under a debugger or when something is parsing the output. Four further tests are marked `integration` and excluded by default: three spawn a real stdio MCP server, the fourth runs an external program through the host fallback shell (`pytest -m integration`).
+Run the test suite with `pytest` — 8604 tests, fully offline, no API keys needed. The suite's own packages are `requirements-test.txt`, separate from `requirements.txt` since batch 136: they used to be in the shipped dependency list, so installing the harness also installed a test runner. It runs in parallel by default (`pytest-xdist`, 70% of your cores): **1:26 on a 16-core machine, against 9:06 single-process.** `pytest -n0` forces the old serial run, which is what you want under a debugger or when something is parsing the output. Four further tests are marked `integration` and excluded by default: three spawn a real stdio MCP server, the fourth runs an external program through the host fallback shell (`pytest -m integration`).
 
 ## Documentation
 

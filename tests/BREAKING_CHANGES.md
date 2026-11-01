@@ -10,6 +10,18 @@ worth understanding, not a flaky mock to patch over.
 
 ---
 
+## Crashes and hangs from the review marathon (batch 219)
+
+| Change | Test | Fix |
+|---|---|---|
+| Read a cloned project's hub, `settings.json`, `mcp.json` or a definition with plain `open().read()` | `test_every_reader_of_cloned_content_refuses_a_link_to_dev_zero` | Use `json_store.read_regular_text`; a link to /dev/zero or a FIFO otherwise allocates or blocks before any grant (#214) |
+| Drop `O_NONBLOCK` or the `fstat` check from `read_regular_text` | `test_a_fifo_is_refused_without_blocking`, `test_a_link_to_dev_zero_is_refused_without_reading` | Keep both: the open blocks on a FIFO without the first, and the read never ends without the second. The child's 20 s timeout is the symptom |
+| Re-raise every rename failure unchanged again, or change `_held_open_elsewhere`'s probe | `TestAHeldOpenDestinationSaysToCloseIt` | A held-open destination is a `DestinationInUse` chained to the original; a read-only one stays a plain `PermissionError` (#242) |
+| Make a bad `AGENT_LOG_LEVEL` raise again | `test_a_typo_in_the_variable_warns_and_runs_at_info` | It warns and runs at INFO, like a bad `AGENT_LOG_FILE`. A bad `level=` from code still raises (#212) |
+| Read an OpenAlex record with `(x or {}).get(...)` | `TestAMalformedRecordIsAnAbsentSignal` | Go through `_obj` / `_text`: a non-object where an object belongs is an absent signal, not an AttributeError that fails the run (#218) |
+| Accept an embedding component that is not a finite number | `test_a_component_that_is_not_a_finite_number_raises` | `_check_vectors` refuses it as an EmbeddingError, which the scorer gives up on (#218) |
+| Lose the file name from startup's configuration-error line | `test_an_unreadable_project_file_is_named_in_the_one_line` | Print the OSError whole; its `filename` is what names the file to unlock (#254) |
+
 ## Four tests that could not fail, made to (batch 216)
 
 | Change | Test | Fix |

@@ -29104,3 +29104,73 @@ not reach the Space; re-running the job is the owner's.
   files: clean.
 - **Version**, by `scripts/version.py branch` and `bump`:
   `0.3.4-b.1.bugfixes.r57e749187eaf`.
+
+## Batch 219 -- crashes and hangs from the review marathon (2026-11-01)
+
+**#218, #214, #254, #212 and #242, register items 64, 60, 107, 58 and 92**,
+the "crashes and hangs" group the owner picked from the marathon's open
+findings. Three needed the owner first, asked with measurements: #214's
+guard (yes), #212's warn-or-raise (warn and fall back) and #254's posture
+(keep refusing). Two came out wider than filed and one did not reproduce.
+
+- **#214, wider: every reader of a cloned project's content.** The finding
+  was a FIFO, which Windows cannot make. A clone cannot carry a FIFO, but it
+  can carry a symlink, and `/dev/zero`, `/dev/urandom` and `/dev/tty` are on
+  every POSIX machine. Measured under WSL: a skill linked to `/dev/zero`
+  made `describe_project_content` -- the trust prompt's listing, before any
+  grant -- raise MemoryError in 1.5 s at a 1 GiB cap, while the trust hash
+  stepped over it. The same function read the hub, `settings.json` and
+  `mcp.json` the same way. `json_store.read_regular_text` is now the one
+  reader: it opens non-blocking (so a FIFO's open returns) and refuses what
+  `fstat` does not call a regular file, as an OSError. Six read sites go
+  through it: `_parse_md_file`, `initialize`'s hub, `_read_settings_file`,
+  the listing's hub and its two JSON files, and `mcp_client`'s `_read_file`.
+  Each already handled an OSError, so a refusal is the existing "could not
+  be read" line, skip or configuration error. AGENTS.md says new readers use
+  it.
+- **#218, wider: 104 shapes, not one.** The issue named the authorship loop
+  and `l2_normalize`. A fuzz over every key `authority_for` reads, three bad
+  values each, raised at ten keys and the authors payload. A first probe
+  used a DOI `doi_for` rejects and reported zero, because no lookup ran --
+  caught only because zero was not believable. `_obj` and `_text` now guard
+  every read, and the probe finds none that raise. Embeddings: a fourth
+  check in `_check_vectors` refuses a component that is not a finite number.
+  Strings and None used to raise TypeError past every handler; NaN and inf
+  raised nothing and scored NaN. One departure from the register's "Not":
+  this EmbeddingError is retried twice by `_embed` like its three siblings,
+  because retrying by cause would change SQ10's policy.
+- **#254, did not reproduce.** Under WSL with a redirected HOME, a
+  `chmod 000` skill gives `Configuration error: [Errno 13] Permission
+  denied: '<project>/.venastine/skills/x.md'`. The OSError carries the file
+  name and prints it; the issue's quoted message had lost the tail. The
+  owner kept "refuse to start" (A48). One POSIX test pins the line.
+- **#212.** A bad `AGENT_LOG_LEVEL` prints one line naming the variable,
+  value and accepted forms and runs at INFO, as a bad `AGENT_LOG_FILE`
+  already did. A bad `level=` from code still raises. README updated.
+- **#242.** Measured on Windows: a destination held open elsewhere and a
+  read-only one both fail `os.replace` with WinError 5, and an `r+b` open
+  succeeds only on the first. After the sweep, `_replace_through_temp` asks
+  that and raises `DestinationInUse`, a chained `PermissionError` whose
+  message says to close the file. The path is left to each caller's prefix,
+  so it is not printed twice.
+
+### Verified
+
+- New tests: 59. `test_json_store.py` (new, 9), `test_scholar.py` +38,
+  `test_embeddings.py` +6, `test_logging_setup.py` +5, `test_cli.py` +1.
+- WSL, on a Linux-filesystem copy: `test_json_store.py` 7 passed (2 are
+  Windows-only). With `O_NONBLOCK` removed the FIFO test fails at its 20 s
+  timeout; with the `fstat` check removed 3 fail. The reader files (391
+  passed) fail only `test_re_importing_config_re_reads_the_file`, the known
+  HOME-redirect failure on that distro. The #254 test passes there and
+  skips on Windows.
+- Without the scholar fix, 33 of its 38 new tests fail; the five that pass
+  read a key the old code happened to survive.
+- Full suite on Windows with `AGENT_WORKSPACE` unset: 8604 tests, 8530
+  passed and 74 skipped, in 2:39. ruff clean; gitleaks on an export of the
+  tracked files clean. Bandit, run as CI runs it, found one new issue: B103
+  on the read-only test's `chmod(0o666)` restore. It now restores owner
+  read/write (`S_IREAD | S_IWRITE`), the file reran green, and bandit has
+  nothing outside the baseline.
+- **Version**, by `scripts/version.py bump`:
+  `0.3.4-b.2.bugfixes.r57e749187eaf`.
