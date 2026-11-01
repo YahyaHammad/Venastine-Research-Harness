@@ -29027,3 +29027,38 @@ to pin something, and each was measured unable to fail from its removal.
 - Full suite: 8545 tests, 8475 passed and 70 skipped, in 1:56. ruff clean.
 - **Version**, by `scripts/version.py bump`:
   `0.2.0-b.11.installer-path.rb0705ebe789b`.
+
+## Batch 217 -- what the branch-wide gates found (2026-11-01)
+
+Batches 209-216 were each verified by the full suite and ruff. Run across
+the branch as CI runs them, bandit and gitleaks each found one thing those
+had not.
+
+- **bandit B406, from batch 212.** The SVG chart imported
+  `xml.sax.saxutils.escape`, and importing `xml.sax` is B406 whatever is
+  used from it -- `bandit-count-check.py` showed
+  `core/reasoning/output_writer.py B406 0 -> 1`, which CI's bandit job
+  would have refused. It uses `html.escape` now, which escapes both quotes
+  by default, so the `{'"': "&quot;"}` special case batch 212 added for
+  attributes went with it. `test_every_label_is_escaped` passes unchanged.
+  After it: no finding outside the baseline, and the count check's 62
+  (file, test) pairs unchanged.
+- **gitleaks, from batch 213.** `.gitleaksignore` blesses the planted fake
+  secrets in `tests/test_policy_enforcement.py` by line, and batch 213's
+  new tests in that file moved all five (by 1 for the three above the
+  added import, by 45 for the two below the new tests). Run as CI runs it,
+  on an export of the tracked files: 6 leaks, every one a fixture -- each
+  flagged line was checked against the same line before the move. The
+  fingerprints are re-blessed at 58, 70, 82, 397 and 907, and the scan is
+  clean. This is #238 (register item 87) happening, not a new finding: a
+  blessing pinned by line number re-fires on any edit above it.
+
+### Verified
+
+- Full suite with `AGENT_WORKSPACE` unset, before these two fixes: 8545
+  tests, 8475 passed, 70 skipped.
+- pip-audit on `requirements.txt`: no known vulnerabilities.
+- After both: full suite 8545 tests, 8475 passed and 70 skipped, in 1:57;
+  bandit and its count check clean; gitleaks, as CI runs it on an export
+  of the tracked files, finds no leaks.
+- **Version**, by `scripts/version.py bump`: `0.2.0-b.12.installer-path.rb0705ebe789b`.

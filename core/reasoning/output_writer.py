@@ -253,7 +253,10 @@ def confidence_svg(tiers: list, counts: list) -> str:
     the chart reads in a dark-themed viewer too. Every label is escaped,
     though today they are the fixed tier names.
     """
-    from xml.sax.saxutils import escape
+    # html.escape, not xml.sax.saxutils.escape (batch 217): it escapes
+    # both quotes by default, which an attribute needs, and importing
+    # xml.sax is bandit's B406 whatever is used from it.
+    from html import escape
 
     width, height = 640, 400
     left, right, top_pad, bottom = 64, 40, 56, 52
@@ -292,8 +295,7 @@ def confidence_svg(tiers: list, counts: list) -> str:
         x = left + slot * index + (slot - bar_w) / 2
         y = y_of(count)
         centre = x + bar_w / 2
-        # In an attribute the quote must go too, which escape() leaves.
-        label = escape(str(tier), {'"': "&quot;"})
+        label = escape(str(tier))
         out.append(f'<rect class="bar" data-tier="{label}" '
                    f'data-count="{int(count)}" x="{x:g}" y="{y:g}" '
                    f'width="{bar_w:g}" height="{base - y:g}" '
