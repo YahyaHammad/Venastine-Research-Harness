@@ -185,10 +185,12 @@ function isReady(rt) {
 }
 
 // Non-comment lines in requirements.txt. NOT a count of pins, which is what
-// it was called until batch 140: 2 of the 18 are ranges (`rich>=14.2,<16`,
-// `cryptography>=42.0,<52`), so the screen that said "N pinned packages"
-// was promising something the file does not say. The exact set is in the
-// file the screen names, which is what makes the count enough.
+// it was called until batch 140: some lines are ranges (a floor and a
+// ceiling, like `rich`'s), so the screen that said "N pinned packages" was
+// promising something the file does not say. The exact set is in the file
+// the screen names, which is what makes the count enough. (This comment
+// said "2 of the 18" until batch 208, by when it was 4 of 20: a count in
+// prose beside the code that computes it is the copy that drifts.)
 function countRequirements() {
   return fs.readFileSync(REQUIREMENTS, 'utf8')
     .split(/\r?\n/)

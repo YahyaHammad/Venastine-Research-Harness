@@ -894,6 +894,26 @@ class TestTheRoutes:
         assert "VENASTINE_SINGLE_USER=1" not in landing
         assert "$" not in landing
 
+    def test_the_landing_page_offers_the_readme_installers_not_npm(
+            self, tmp_path):
+        """Batch 209, the owner's call: the footer recommends the GitHub
+        installers, which need no npm and install `main` as it stands. The
+        commands are taken from README.md, where the installers are
+        documented, so the page cannot drift from them."""
+        readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(
+            encoding="utf-8")
+        commands = re.findall(r"^(?:curl -fsSL \S+/install\.sh \| bash"
+                              r"|irm \S+/install\.ps1 \| iex)$", readme, re.M)
+        assert len(commands) == 2, commands
+        for bridge in (web.Bridge(_supervisor(tmp_path)),
+                       web.Bridge(_supervisor(tmp_path),
+                                  single_user_requested=True)):
+            with self._client(bridge) as client:
+                landing = client.get("/").text
+            for command in commands:
+                assert f"<code>{command}</code>" in landing, command
+            assert "npm install" not in landing
+
     @pytest.mark.parametrize("answer, status", [
         ((200, single_user.HEALTH_MARKER), 403),
         ((404, ""), 200),

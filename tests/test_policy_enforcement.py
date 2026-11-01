@@ -6,6 +6,7 @@ blocked domain checking, output policy enforcement, and registry
 integration (dispatch redacts secrets from tool output).
 """
 
+import socket
 import sys
 
 import pytest
@@ -225,12 +226,46 @@ class TestIsUrlPermitted:
         attributes.
         """
         monkeypatch.setattr("safety.policy_enforcement.BLOCKED_DOMAINS", set())
-
-        def _boom(*a, **kw):
-            raise AssertionError("getaddrinfo called with resolve=False")
-
-        monkeypatch.setattr("safety.policy_enforcement.socket.getaddrinfo", _boom)
+        monkeypatch.setattr("safety.policy_enforcement.socket.getaddrinfo",
+                            _numeric_only(
+                                "getaddrinfo called with resolve=False"))
         assert is_url_permitted("https://example.com/page", resolve=False) is None
+
+    @pytest.mark.parametrize("host", [
+        "2130706433", "0x7f.0.0.1", "0x7F000001", "127.1", "0177.0.0.1",
+        "2852039166", "0xa9fea9fe",
+    ])
+    def test_every_numeric_spelling_of_a_private_address_is_checked(
+            self, monkeypatch, host):
+        """#207, batch 213. All of these are 127.0.0.1 or 169.254.169.254
+        to the platform's resolver, and `ipaddress` reads none of them, so
+        resolve=False took them on trust as names. Measured on Windows and
+        in WSL: AI_NUMERICHOST reads each one, with no lookup."""
+        monkeypatch.setattr("safety.policy_enforcement.BLOCKED_DOMAINS", set())
+        monkeypatch.setattr("safety.policy_enforcement.socket.getaddrinfo",
+                            _numeric_only("a numeric host was LOOKED UP"))
+        refusal = is_url_permitted(f"http://{host}/", resolve=False)
+        assert refusal is not None and "non-public" in refusal, host
+
+    def test_a_numeric_spelling_of_a_public_address_still_passes(
+            self, monkeypatch):
+        """The control: 134744072 is 8.8.8.8, so the numeric read is a
+        read, not a refusal of anything that is not dotted."""
+        monkeypatch.setattr("safety.policy_enforcement.BLOCKED_DOMAINS", set())
+        assert is_url_permitted("http://134744072/", resolve=False) is None
+
+
+def _numeric_only(message):
+    """getaddrinfo that reads numbers and refuses to look anything up --
+    what resolve=False may ask of the resolver since batch 213 (#207)."""
+    real = socket.getaddrinfo
+
+    def lookup(host, port, *args, **kwargs):
+        flags = kwargs.get("flags", args[3] if len(args) > 3 else 0)
+        if not flags & socket.AI_NUMERICHOST:
+            raise AssertionError(message)
+        return real(host, port, *args, **kwargs)
+    return lookup
 
 
 class TestWebSearchUsesTheSameChecker:
@@ -285,14 +320,24 @@ class TestWebSearchUsesTheSameChecker:
 
         monkeypatch.setattr("safety.policy_enforcement.BLOCKED_DOMAINS", set())
 
-        def _boom(*a, **kw):
-            raise AssertionError(
-                "web_search resolved DNS while filtering results; its call "
-                "to is_url_permitted must pass resolve=False")
-
-        monkeypatch.setattr("safety.policy_enforcement.socket.getaddrinfo",
-                            _boom)
+        monkeypatch.setattr(
+            "safety.policy_enforcement.socket.getaddrinfo",
+            _numeric_only("web_search resolved DNS while filtering results; "
+                          "its call to is_url_permitted must pass "
+                          "resolve=False"))
         assert len(web_search._normalize(self._hit("https://example.com/p"))) == 1
+
+    @pytest.mark.parametrize("url", [
+        "http://2130706433/", "http://0x7f.0.0.1/", "http://0x7F000001/",
+    ])
+    def test_a_numeric_spelling_of_loopback_is_dropped(self, monkeypatch,
+                                                         url):
+        """#207's own three, through the real filter: dropped here, as
+        fetch_url would refuse them, rather than offered to the model."""
+        from tools.builtin import web_search
+
+        monkeypatch.setattr("safety.policy_enforcement.BLOCKED_DOMAINS", set())
+        assert web_search._normalize(self._hit(url)) == []
 
 
 class TestIsUrlPermittedResolution:

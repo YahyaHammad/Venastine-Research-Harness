@@ -142,7 +142,9 @@ def is_url_permitted(url: str, resolve: bool = True) -> str | None:
        <that URL>" to a grounding pass that obliges.
 
     `resolve=False` answers from the literal text only -- an IP literal
-    is still checked, a NAME is taken on trust. That is for `web_search`,
+    is still checked, in every spelling the platform's resolver reads as
+    a number (#207: `2130706433` and `0x7f.0.0.1` too, not only dotted
+    quads), and a NAME is taken on trust. That is for `web_search`,
     which filters results rather than fetching them: a DNS lookup per
     search hit is real latency for a check whose failure mode is "the
     model is shown a URL that fetch_url will refuse anyway". The caller
@@ -172,6 +174,21 @@ def is_url_permitted(url: str, resolve: bool = True) -> str | None:
         literal = ipaddress.ip_address(host)
     except ValueError:
         literal = None
+
+    if literal is None and not resolve:
+        # #207, batch 213. `ipaddress` reads dotted quads and IPv6 only, so
+        # `2130706433`, `0x7f.0.0.1` and `127.1` -- all 127.0.0.1 to the
+        # platform's resolver -- were taken on trust as NAMES here, and
+        # only fetch_url refused them. AI_NUMERICHOST asks that resolver to
+        # read the text as a number and never to look anything up, so it
+        # costs no network, which was the whole reason for resolve=False.
+        # Measured on Windows and in WSL: the same spellings parse, and a
+        # name fails with gaierror.
+        try:
+            literal = ipaddress.ip_address(socket.getaddrinfo(
+                host, None, flags=socket.AI_NUMERICHOST)[0][4][0])
+        except (socket.gaierror, ValueError, IndexError):
+            literal = None
 
     if literal is not None:
         addresses = [literal]

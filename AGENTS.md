@@ -60,7 +60,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 8418 tests, offline. 1:26 on 16 cores, 9:06 serial (+~5s first run: matplotlib font cache)
+pytest                                            # 8545 tests, offline. 1:37 on 16 cores at batch 207 (9:06 serial at batch 114)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -177,7 +177,15 @@ The shell installers download `scripts/install.py`, which requires Python
 and installs `requirements.txt` in an isolated environment. No Node/npm,
 Git checkout, system Python changes, or administrator privileges are needed.
 The default install is `~/.local/share/venastine`, with its command under
-`~/.local/bin` on every platform. `bin/venastine.py` launches it, preserving
+`~/.local/bin` on every platform. **That directory goes on PATH by default**
+(batch 206, the owner's choice; `--no-modify-path` or
+`VENASTINE_NO_MODIFY_PATH=1` opts out), because npm's global bin already is
+and `~/.local/bin` is not on Windows or macOS: the user PATH in the registry
+on Windows, keeping the value's type, and a marked block, replaced in place,
+in the user's own shell's startup file elsewhere, picked by `$SHELL`. Never
+create `~/.bash_profile`: once it exists, a login bash skips `~/.profile`.
+`install()` changes PATH only when `main()` asks, so no test can reach the
+real registry or a real startup file. `bin/venastine.py` launches it, preserving
 cwd, arguments, explicit environment settings, and the npm launcher's global
 state/local-artifact rules. It never installs dependencies during launch.
 Updates build the environment before swapping source, mirror the old settings
@@ -282,16 +290,20 @@ push to `main` in this repository, because a `workflow_run` job's `github.ref` i
 branch and an environment's branch rule therefore cannot. And event values reach a script through
 `env:`, never pasted into `run:`. pip-audit runs on a push to main for this (batch 169), and codeql
 and pip-audit key their concurrency on the event too, so a schedule cannot cancel the push run the
-gate waits for. **ModelScope is deployed by the owner** with the same script and the same gate
+gate waits for. **A release tag's runs wake nothing** (batch 211): pushing `vX.Y.Z` re-runs CI on
+main's tip, the gate counts those runs, and `workflow_run` wakes the deploy for runs on `main` only,
+so until then no release commit deployed. A wait whose every unfinished run is one that cannot wake
+the deploy is *stranded*, and `--linger 1200` keeps that gate asking every 30 s; the gate job's
+timeout must outlive the linger, and a test holds the two together. **ModelScope is deployed by the owner** with the same script and the same gate
 (`--platform modelscope`): it has no fine-grained tokens and no trusted CI. `--unverified` skips the
 gate for a private test deploy and the workflow never passes it. Audit findings are accepted only BY
 ID in `deploy_demo.ACCEPTED`, each entry applying only while its version is pinned -- pillow 12.3.0
-is the first, held there by Gradio 6.30.0's `pillow<13`, with one entry per triage (35 IDs in
-batch 169, two in batch 175, one in batch 192), so a new advisory refuses until someone reads it.
-**An accepted version stays the bridge's** (batch 201): the harness reaches pillow through
-matplotlib, so `requirements.txt` floors it at 13.0.0 -- an environment built before that release
-kept 12.3.0 -- and `test_no_accepted_version_is_one_the_harness_can_install` walks what
-`requirements.txt` installs and fails on any accepted version nothing on the way refuses. The owner's one-time setup: environment
+is the first, held there by Gradio's `pillow<13`, with one entry per triage (35 IDs in
+batch 169, two in batch 175, one each in batches 192 and 210), so a new advisory refuses until someone reads it.
+**An accepted version stays the bridge's** (batch 201): `test_no_accepted_version_is_one_the_harness_can_install`
+walks what `requirements.txt` installs and fails on any accepted version nothing on the way refuses.
+The harness reached pillow through matplotlib, floored at 13.0.0 for that reason, until batch 212
+drew the confidence chart as SVG and removed both. The owner's one-time setup: environment
 `demo` with deployment branches `main` only, the secret `HF_TOKEN` (a fine-grained token with write
 access to the one Space) and the variable `DEMO_HF_SPACE`; until both exist, every deploy is a dry
 run.
@@ -1652,7 +1664,7 @@ would never clear.
 
 **The package is `mcp_client/`, never `mcp/`.** The project root is on `sys.path`, so a top-level `mcp/` shadows the installed SDK — the `logging.py` incident again. §17's spec sketches `mcp/client.py`; don't follow it there. Every SDK symbol lives inside this package so a version migration touches one directory.
 
-**Pinned to `mcp==2.2.0`, EXACTLY, and the range is what it was pinned away FROM** (2.0.0 until batch 165's follow-up, which took 2.2.0 for CVE-2026-59951 -- a server-side advisory this client was never exposed to -- after reading the split the next sentences describe). `requirements.txt` carries the reason: under `>=2.0,<3` a minor release went red on main while every local run stayed green, so CI's result depended on WHEN it ran and CI was not testing what anyone runs locally. Moving it is deliberate: read 2.1.0's split first. v2 is not v1: fields are snake_case (`.content` / `.structured_content` / `.is_error`), `Tool.input_schema`, timeouts are `float`, the exception is `MCPError`, and `Client(server)` replaces `ClientSession` + a separate transport CM. Reading the v1 spellings against v2 doesn't crash — `getattr` returns `None` and every failed call silently looks successful.
+**Pinned to `mcp==2.3.0`, EXACTLY, and the range is what it was pinned away FROM** (2.0.0 until batch 165's follow-up, which took 2.2.0 for CVE-2026-59951 -- a server-side advisory this client was never exposed to -- after reading the split the next sentences describe; 2.3.0 since batch 208, whose ceiling on one streamed event is config.yaml's `mcp_max_event_bytes`). `requirements.txt` carries the reason: under `>=2.0,<3` a minor release went red on main while every local run stayed green, so CI's result depended on WHEN it ran and CI was not testing what anyone runs locally. Moving it is deliberate: read 2.1.0's split first. v2 is not v1: fields are snake_case (`.content` / `.structured_content` / `.is_error`), `Tool.input_schema`, timeouts are `float`, the exception is `MCPError`, and `Client(server)` replaces `ClientSession` + a separate transport CM. Reading the v1 spellings against v2 doesn't crash — `getattr` returns `None` and every failed call silently looks successful.
 
 **The manager task is required.** `AsyncExitStack` cannot be entered in `connect_all()` and closed in `disconnect_all()`: anyio binds cancel scopes to the **task**, and `run_coroutine_threadsafe()` makes a new task per call, so the right *loop* is necessary but not sufficient. One long-lived `_manager()` task enters every context, signals ready, and parks until shutdown. If `RuntimeError: Attempted to exit cancel scope in a different task` appears, something moved an enter/exit across a task boundary.
 
@@ -2352,8 +2364,8 @@ Slice 5b (batch 104) -- a command the harness runs as root (SS65-SS72):
   `sudo_refusal()` is the ONE copy, read by the gate, by `run_sandboxed` and by `start_sandboxed`.
 * **A WSL one-shot used to inherit this process's stdin** (SS70) -- measured, a command in the distro
   read a string written to the harness's own. That is §29 N1's second reader on a route written before
-  the rule. It is DEVNULL now, or a PIPE carrying one line. The container, inert and host-fallback
-  one-shots have the same gap and are recorded, not changed.
+  the rule. It is DEVNULL now, or a PIPE carrying one line. The host fallback got DEVNULL in batch
+  142 and the inert and container one-shots in batch 213 (#203), so every one-shot route has it now.
 * **With `needs_root` false, both argvs are byte-identical to `9048427`'s**, WSL and SSH, proved
   against the pre-patch module rather than against a literal typed twice.
 
@@ -3298,7 +3310,7 @@ The guard is now `_validate_ast`: `parse_expr` is split into its two halves (`st
 
 ### Testing
 
-All tests run offline: zero network, zero real API keys. The **root** `conftest.py` stubs 6 SDK packages into `sys.modules` at import time (`openai`, `anthropic`, `google`/`google.genai`, `sqlmodel`, `httpx`, `ddgs`) — plus `markitdown`, which is not an SDK but is an optional extra since #144, so a default install does not have it and `test_file_ops.py` patches it by string target — fixtures run too late, since `core/client.py`'s imports fire during collection. `pydantic` and `sympy` are deliberately *not* faked. Tests needing real SQLite monkeypatch the fake `sqlmodel` away (pattern documented in `test_memory_write_through.py`'s docstring).
+All tests run offline: zero network, zero real API keys. The **root** `conftest.py` stubs 6 SDK packages into `sys.modules` at import time (`openai`, `anthropic`, `google`/`google.genai`, `sqlmodel`, `httpx`, `ddgs`) — plus `markitdown`, which is not an SDK but is an optional extra since #144, so a default install does not have it and `test_file_ops.py` patches it by string target — fixtures run too late, since `core/client.py`'s imports fire during collection. `pydantic` and `sympy` are deliberately *not* faked. Tests needing real SQLite monkeypatch the fake `sqlmodel` away (pattern documented in `test_memory_write_through.py`'s docstring). **No test opens a browser** (batch 207): `tests/conftest.py`'s autouse `browser_opens` stands in for `webbrowser.open`, `open_new` and `open_new_tab` and records the URLs, because before it the ChatGPT sign-in tests opened 17 real OpenAI authorize tabs per run -- real requests from an "offline" suite, and tabs that piled up until the owner's Firefox held 27 GB and four cores and the suite took 9-17 minutes instead of two. Request it by name to assert what would have opened.
 
 **Waiting in a Textual pilot test: `settle`, never a pump count** (`tests/conftest.py`, TECHNICAL_DEBT 8). `await settle(pilot, predicate)` waits on a wall-clock deadline and quiesces once the predicate holds; `await pump(pilot, n)` gives the loop `n` turns and is for *negative* assertions only ("prove X did not happen"), where there is no predicate and a deadline would make every such site pay its full timeout. Do not hand-roll either — there were five copies with five budgets and two orderings, and the two bugs in them were invisible to 1246 passing tests, so `test_pilot_wait.py` now fails on a sixth. Two facts behind this: `pilot.pause()` is **not** a fixed unit of time (21ms with nothing burning CPU in-process, 1021ms with one busy sibling thread — its exit condition is a process-wide CPU heuristic), and a predicate like `isinstance(app.screen, SomeModal)` goes true *before* the worker reaches `channel.get()`, so joining that thread from the event-loop thread deadlocks both ways.
 

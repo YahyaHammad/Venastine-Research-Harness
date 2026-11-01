@@ -17,6 +17,13 @@
 # fails nothing, so without that a new alert passed every check above.
 # deploy_gate.py's docstring has the full rule.
 #
+# A RELEASE TAG'S RUNS WAKE NOTHING (batch 211). Pushing `vX.Y.Z` re-runs
+# CI on main's tip, the gate counts those runs, and the list below wakes
+# this workflow for runs on main only -- so the last main run found the
+# tag's still going, waited, and nothing woke it again: no release commit
+# deployed. `--linger` keeps that one gate asking every 30 s, for up to 20
+# minutes, while everything unfinished is a run that will not wake it.
+#
 # The list under `workflows:` must be EXACTLY the workflows a push to main
 # runs. deploy_gate.py derives that list from the files themselves, and
 # test_docs_consistency.py fails when the two disagree, so a new CI
@@ -74,7 +81,9 @@ jobs:
        github.event.workflow_run.head_branch == 'main' &&
        github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # Batch 211: the gate may linger 20 minutes for a release tag's runs
+    # (below), so its job outlives that with room to report.
+    timeout-minutes: 25
     # security-events: read is the code scanning alerts on main (batch 170):
     # an open high or critical one holds the deploy.
     permissions:
@@ -124,6 +133,7 @@ jobs:
           --repo "$GITHUB_REPOSITORY" --sha "$SHA" --trigger "$TRIGGER"
           --run-event "$RUN_EVENT" --head-branch "$HEAD_BRANCH"
           --head-repo "$HEAD_REPO" --ref "$REF" --dry-run "${DRY_RUN:-false}"
+          --linger 1200
 
   deploy-hf:
     needs: gate

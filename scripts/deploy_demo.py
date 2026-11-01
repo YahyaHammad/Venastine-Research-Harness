@@ -76,7 +76,8 @@ SINGLE_USER_DESCRIPTION = ("Set to 1 in a PRIVATE duplicate for single-user "
                            "mode: your own keys and the file tools.")
 
 # Audit findings triaged and accepted BY ID, the owner's call (batch 169,
-# batch 175 for two published after it, and batch 192 for a third). An
+# batch 175 for two published after it, batch 192 for a third and batch
+# 210 for a fourth). An
 # entry applies only to a lock that pins exactly its version; once the pin
 # moves it is passed to nothing and the run says it is stale. A new ID for
 # the same version still refuses until someone triages it -- which is how
@@ -140,6 +141,23 @@ ACCEPTED = (
          "set), calls no helper, and sets no favicon_path, so that route "
          "answers 404 without opening anything."),
      "ids": ("PYSEC-2026-4327",)},
+    {"package": "pillow", "version": "12.3.0",
+     # The deploy's audit first refused it on 2026-11-01, batch 209's
+     # redeploy; accepted in batch 210, the owner's call.
+     "reason": (
+         "The same pin, for the same reason: Gradio 6.31.0, now the latest "
+         "release, still requires pillow<13. Read on 2026-11-01, in the "
+         "gradio 6.30.0, gradio-client 2.7.2, spaces, hf-gradio and "
+         "textual-serve wheels bridge.lock pins by hash. PYSEC-2026-4332 "
+         "(CVE-2026-112403) overruns a heap buffer in the JPEG decoder when "
+         "a caller asks for downscaling, through Image.draft() or "
+         "Image.thumbnail(), which is the only caller of draft() in pillow "
+         "itself. None of those packages calls either: Gradio's one resize "
+         "helper, processing_utils.resize_and_crop, uses ImageOps.fit, "
+         "which does not draft, and nothing in Gradio calls the helper; "
+         "gradio-client, textual-serve and the bridge's own code import no "
+         "pillow at all."),
+     "ids": ("PYSEC-2026-4332",)},
 )
 
 

@@ -10,6 +10,77 @@ worth understanding, not a flaky mock to patch over.
 
 ---
 
+## Four tests that could not fail, made to (batch 216)
+
+| Change | Test | Fix |
+|---|---|---|
+| Remove `grantable()` from `candidate_approvals` | `test_the_filter_drops_a_param_gated_tool_policy_allows` | Keep it: a param-gated tool is not grantable by name (R2). The older test's four names never reach the filter (#236) |
+| Read `ATTENDED_APPROVAL_TIMEOUT_S` anywhere but when the modal parks -- a default argument, a module constant | `test_the_modal_park_reads_the_timeout_when_it_parks` | Read it at call time, or the autouse shrink stops working without turning anything red (#235) |
+| Add a directory of modules without tree entries, or narrow the walk | `test_the_tree_names_every_production_module`, `test_the_module_walk_reaches_what_the_typed_list_did_and_more` | List the module in ARCHITECTURE.md, or in `_UNLISTED_MODULES` on purpose (#232) |
+| Change `storage._pinned_indices` or `_turn_opener_index` without the fake, or the other way round | `TestThePinnedSpanMirrorsProduction`, `TestTheTurnOpenerMirrorsProduction` | Change both identically; that is what the comparison is for (#231) |
+
+## The trust prompt says where each description goes (batch 215)
+
+| Change | Test | Fix |
+|---|---|---|
+| Say again that every description enters EVERY system prompt, or drop an entry's reach line | `test_each_entry_says_where_its_description_goes` | Skills: wherever load_skill is offered; agents: only if spawnable (#259). The no-catalog control looks for the new header |
+| Decide shadowing by a second rule, or drop a shadowed entry from the listing | `test_a_shadowed_entry_is_listed_and_says_what_loads`, `test_what_it_calls_shadowed_is_what_the_loader_ignores` | Read the upper tiers with `_tier_dirs` and `_parse_md_file`, as `_discover` does; keep the entry, since the grant covers it (#260) |
+
+## The terminal is measured in cells (batch 214)
+
+| Change | Test | Fix |
+|---|---|---|
+| Measure a row with `len()`, or pad with `ljust`, in `wrap_source`, `AgentPanel._fit` or `Transcript._write_padded` | `TestCellsNotCharacters` | `rich.cells.cell_len`, as `tui/markdown.py`'s wrap already does (#224). Keep wide text in a variable (`chr(12354)`), never a literal, for the cp1252 console |
+
+## Five stability fixes from the review marathon (batch 213)
+
+| Change | Test | Fix |
+|---|---|---|
+| Spawn a one-shot without `stdin=` | `test_the_inert_route_is_given_no_console`, `test_the_container_one_shot_is_given_no_console` | `stdin=subprocess.DEVNULL` on every one-shot (#203). Do not test it with a real stdin-reading child under xdist: the inherited stdin there is the worker's own channel |
+| Truncate a fold's input without recomputing its target | `test_a_truncated_fold_is_targeted_at_the_length_it_kept` | Recompute `target` with `original`, as the forced-chain branch does (#216) |
+| Let a second `connect_all()` rebind a live manager, or keep `_closed` across a disconnect | `test_a_second_connect_all_on_a_live_client_raises`, `test_each_cycle_names_its_own_stragglers` | Raise until `disconnect_all()`; clear the set in place, since `_TrackClose` holds it (#219) |
+| Let an `OSError` leave `generate()`'s walks, or narrow the CLI's handler back to `InitError` | `TestAnUnlistableProjectEndsInALine` | Convert the walks' errors to `InitError`, and catch `OSError` in `run_init_command` -- not `Exception` (#255) |
+| Read a host with `ipaddress` alone when `resolve=False`, or look a host up there | `test_every_numeric_spelling_of_a_private_address_is_checked`, `test_a_numeric_spelling_of_loopback_is_dropped`, `test_resolve_false_issues_no_lookup`, `test_filtering_results_issues_no_dns` | `getaddrinfo(..., flags=AI_NUMERICHOST)` reads numbers and looks nothing up; the two no-DNS fakes allow exactly that flag (#207) |
+
+## The confidence chart is SVG, and matplotlib is gone (batch 212)
+
+| Change | Test | Fix |
+|---|---|---|
+| Bring back a chart library, or write `confidence_chart.png` | `test_confidence_chart_is_a_valid_svg_of_the_run` | The owner removed matplotlib for its 126 MB; the chart is `confidence_svg()` in `core/reasoning/output_writer.py`. The test parses the file back with defusedxml and reads each bar's `data-tier` / `data-count` |
+| Escape a label with `xml.sax.saxutils.escape` inside an attribute | `test_every_label_is_escaped` | It leaves `"`, which ends the attribute, and importing `xml.sax` is bandit's B406; `html.escape` escapes both quotes by default (batch 217) |
+| Re-add matplotlib, pillow or numpy to what `requirements.txt` installs | `test_no_accepted_version_is_one_the_harness_can_install` | It asserts none of the three is reached. pillow 12.3.0 carries advisories accepted for the bridge alone |
+| The per-worker `MPLCONFIGDIR` row in the batch 109 table below | Nothing | Removed from the root `conftest.py` with matplotlib; the row is history |
+
+## A release tag's runs no longer strand the deploy (batch 211)
+
+| Change | Test | Fix |
+|---|---|---|
+| Shorten the gate job's `timeout-minutes`, or drop `--linger` from its step | `TestLingering::test_the_workflow_lingers_inside_its_jobs_timeout` | The job must outlive the linger with room to report; a job killed mid-linger writes no verdict. Without `--linger` no release commit deploys again |
+| Let a tag's, a schedule's or another app's unfinished run count as one that wakes the deploy | `TestAStrandedWait` | Only a push run on `main` of a workflow `deploy-demo.yml` listens for wakes it; anything else strands the wait |
+
+## The hosted demo recommends the GitHub installers (batch 209)
+
+| Change | Test | Fix |
+|---|---|---|
+| Recommend npm again on the landing page, or let its install commands drift from README.md's | `TestTheRoutes::test_the_landing_page_offers_the_readme_installers_not_npm` | The owner's call: the installers need no npm and install `main` as it stands. Change README's commands and the page's together; the test reads both |
+| The same in the hosted TUI's "where a key can go" sentence (`_OWN_COPY`) | `test_without_a_hugging_face_app_only_openrouter_is_offered` | Same fix, in `tui/app.py` |
+
+## mcp 2.3.0's ceiling on one streamed event (batch 208)
+
+| Change | Test | Fix |
+|---|---|---|
+| Hand `Client()` a bare URL again for an http server without headers | `test_an_http_server_without_headers_is_never_handed_a_bare_url` | A URL string takes the SDK's 1 MiB, which a streamed screenshot passes; build `streamable_http_client` with `mcp_max_event_bytes` on both branches |
+| Stop passing `max_sse_event_size`, pass a constant, or read the key at import | `test_the_configured_event_ceiling_reaches_the_http_transport` | Read `config.MCP_MAX_EVENT_BYTES` per connection and pass it, with or without headers |
+| Change the shipped 16 MiB | `test_the_shipped_event_ceiling_is_sixteen_mebibytes` | It is the owner's number; CONFIG_ARCHITECTURE.md's `mcp_max_event_bytes` entry says why, and what it does not bound |
+
+## No real browser, and the real SDKs imported once (batch 207)
+
+| Change | Test | Fix |
+|---|---|---|
+| Drop `browser_opens`' autouse, or stop standing in for one of `open` / `open_new` / `open_new_tab` | `TestNoTestReachesARealBrowser::test_every_module_level_opener_is_the_stand_in` | Put it back. It reads the stand-in's marker before anything opens, so it fails rather than opening a tab; without the fixture the sign-in tests open real OpenAI authorize pages |
+| Open a URL by some route other than `webbrowser.open` (`os.startfile`, a subprocess) | `TestNoTestReachesARealBrowser::test_the_transcripts_opener_reaches_it`, `TestSigningIn::test_the_browser_coming_back_closes_the_prompt_and_signs_in` | Route it through `webbrowser`, or give the new route its own stand-in in `tests/conftest.py` before any test reaches it |
+| Make `real_package` re-import every time, keep real modules in `sys.modules` after a block, or skip restoring the fakes | `test_a_block_restores_the_fakes_and_reuses_its_real_import` | Keep the per-root-set cache and the restore; a re-import costs ~6 s per block for `anthropic` here, and a leaked real module reaches every later test in the worker |
+
 ## GitHub installers and version policy (batch 202)
 
 | Change | Test | Fix |
@@ -19,6 +90,9 @@ worth understanding, not a flaky mock to patch over.
 | Change global state defaults or launch from the install directory | `test_launcher_defaults_match_npm_and_local_files_win`, `test_launcher_forwards_arguments_cwd_environment_and_exit_status` | Preserve explicit environment and local credentials/database priority; forward argv/cwd/stdio to the real child. Do not set PYTHONPATH or AGENT_WORKSPACE. |
 | Reuse a retired version, assign clean releases to working branches, or accumulate parent suffixes | `test_wrong_branch_or_reused_version_does_not_modify_files`, `test_stacked_branch_replaces_parent_name_and_identity` | Apply AGENTS.md's lifecycle and use `scripts/version.py` for the pair. npm and Python beta spellings are equivalent, while clean releases remain identical. |
 | Reintroduce exact string comparison for branch-version parity | `test_the_npm_package_and_pyproject_state_the_same_version`, `test_version_mapping_produces_canonical_python` | Compare through the one conversion in `scripts/version.py`. Release-tag tests use controlled clean metadata so branch checkouts still exercise the publish path. |
+| Put the command's directory on PATH twice, in another shell's file, or create `~/.bash_profile` on macOS | `test_each_shell_gets_its_own_startup_file`, `test_the_block_is_written_once_and_moves_with_the_directory`, `test_a_real_sh_puts_the_directory_first_and_only_once`, `test_a_fish_block_quotes_the_directory_the_fish_way` | Batch 206. Pick the file from `$SHELL` and replace the marked block in place. A missing `.bash_profile` stays missing: once it exists, a login bash skips the user's `.profile` |
+| Rewrite the Windows user PATH's type, duplicate an entry, or overwrite a value that is not text | `test_the_windows_user_path_gains_the_directory_once_keeping_its_type`, `test_a_missing_user_path_is_created_and_a_non_text_one_is_left_alone`, `test_a_windows_entry_matches_however_it_is_spelled` | Batch 206. Append through `winreg` with the value's own type, so `%VARIABLE%` entries stay unexpanded, and compare entries expanded and case-folded |
+| Change PATH where it already works, ignore the opt-out, or claim `venastine` runs this install when another comes first | `test_install_puts_the_command_on_path_only_where_it_is_missing`, `test_the_opt_out_comes_from_the_flag_or_the_environment`, `test_another_venastine_earlier_on_path_is_named_and_not_assumed` | Batch 206. `install()` changes PATH only when `main()` passes `modify_path`, so a test calling it cannot reach the real registry; when another `venastine` wins, print this command's full path |
 
 ## 1. `test_orchestrator.py` — the most fragile mock in the suite
 
@@ -775,7 +849,7 @@ ten-pass run, and every warning it logged scribbled over the Textual screen.
 | Drop `/trigger`'s eager validation | `test_a_trigger_below_its_dependent_floors_is_REFUSED` | The `ValueError` surfaces later inside `should_compact()` — hot path, mid-turn, far from the command that caused it |
 | Refuse a `/window` above the reported window | `test_window_warns_but_does_not_refuse_above_the_reported_window` | Raising it is the command's best use: a beta-gated 1M window reads as 200k until the account is asked with the right header |
 | Add `context_window` to `_KNOWN_COMPACTION` | `test_nothing_reaches_the_settings_schema` | A settings key makes it persistable, so a cloned project could ship one behind a trust prompt — the shape G7 and R12 both rejected |
-| Loosen `mcp==2.2.0` back to a range | `test_ac6_is_error_becomes_the_error_convention_without_raising` (the batch-32 CI break) | A minor bump changed server behaviour underneath the range: 2.1.0 withholds a crashed tool's text. CI then depended on when it ran, and was not testing what anyone runs locally |
+| Loosen `mcp==2.3.0` back to a range | `test_ac6_is_error_becomes_the_error_convention_without_raising` (the batch-32 CI break) | A minor bump changed server behaviour underneath the range: 2.1.0 withholds a crashed tool's text. CI then depended on when it ran, and was not testing what anyone runs locally |
 | Assert a CRASHED tool's own message reaches the client | `test_ac6_is_error_becomes_the_error_convention_without_raising` | That is the SERVER's policy, not this client's contract, and in production the server is someone else's. AC6 claims the failure does not RAISE |
 | Make the deliberate-failure probe raise a bare exception | `test_ac6_a_deliberate_tool_failure_carries_its_message` | Only `ToolError` has its message forwarded on both pinned versions; a bare exception is a crash and 2.1.0 withholds its text, so the assertion would pass on one version and fail on the other |
 
@@ -5385,7 +5459,7 @@ the only reason it lands now is that the review happened now.
 | **Adding or removing a name in `_ALLOWED_NAMES`, or a node in `_ALLOWED_NODES`** | `test_agents_md_states_the_real_sympy_allowlist_sizes` | Both are module constants and both are gated exactly. Widening either is "a decision about a KIND of thing" per the `safe_parse` rules, so the document moving with it is the point |
 | **Turning that gate's `dir(sympy)` window into an equality** | nothing locally, and a red run on another machine | `dir()` on a PACKAGE grows as submodules import: `probability_stats.py` imports `sympy.stats`, so the count is 926 or 927 in the same checkout depending on what loaded first, and 928 under an unpinned SymPy. The window is deliberate; `abs(live - stated) <= 5` is the claim |
 | **Relaxing `_one_number`'s `len(found) == 1` to `>=`** | nothing, until two sentences match the pattern | Then the gate silently reads the first and calls it authoritative. Scored KILLED only once its control duplicated the figure UNCHANGED -- with a different number the count assertion catches it, which probes a different guard |
-| **Re-loosening `mcp==2.2.0` to `mcp>=2.0,<3`** | nothing in the suite, and CI on a schedule nobody controls | `requirements.txt` carries the history: under the range a minor release went red on main while every local run stayed green. `AGENTS.md` stated the range until batch 128, which is how a document invites the defect back |
+| **Re-loosening `mcp==2.3.0` to `mcp>=2.0,<3`** | nothing in the suite, and CI on a schedule nobody controls | `requirements.txt` carries the history: under the range a minor release went red on main while every local run stayed green. `AGENTS.md` stated the range until batch 128, which is how a document invites the defect back |
 | **Restoring "`real_storage` is the suite's only non-function-scoped fixture"** | nothing -- and that is the point of this row | It was false from batch 110, in `AGENTS.md` and in this file, and no test could see it. `grep -rn 'scope="module"' tests/` returns `real_storage` AND `_schema_cache_is_put_back`. The RULE both sentences support is unchanged: one FILE has the problem, so that file declares no test class |
 | **Re-adding a `file.py:NNN` citation to `AGENTS.md`** | nothing, and it is still wrong | That file carries zero line-number citations in 2,891 lines, which is why none of batch 128's drift was a line number. Cite the symbol |
 | **Removing `PATHEXT` from `_SAFE_ENV_KEYS`** | `test_the_fallback_shell_is_given_pathext`, and `test_a_real_program_is_reported_with_its_own_exit_code` under `-m integration` | Batch 130. Without it `powershell -c "& 'prog' args"` starts an external program and returns immediately, so the fallback reports `return_code=0` and empty output 0.37s after launch while the work is only starting -- and the wall clock, the route's one bound on Windows, is gone before it. Measured: 1 of the 65 names `_scrubbed_env()` drops changes this, and PowerShell builtins never show it, so a probe using `Start-Sleep` reads the route as healthy |

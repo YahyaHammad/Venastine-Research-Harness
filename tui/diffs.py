@@ -48,6 +48,8 @@ from __future__ import annotations
 import difflib
 from typing import Optional
 
+from rich.cells import cell_len
+
 #: Lines of unchanged context either side of a change.
 CONTEXT_LINES = 3
 
@@ -106,13 +108,21 @@ def wrap_source(text: str, width: int) -> list:
     would land on the first rendered row only, so a wrapped addition
     would be half green. Width <= 0 means nothing is measurable (a
     widget built bare in the suite) and the line is returned whole.
+
+    IN CELLS, NOT CHARACTERS (#224, batch 214), because the terminal
+    measures cells: twenty double-width characters are twenty `len` and
+    forty cells, so a row this sized as fitting was one Rich wrapped
+    itself, with the background landing on half of it -- the very thing
+    the pre-wrap exists to prevent. A glyph wider than the row is kept
+    whole for Rich to wrap, as `markdown.plain_split` does.
     """
-    if width <= 0 or len(text) <= width:
+    if width <= 0 or cell_len(text) <= width:
         return [text]
     rows, rest = [], text
-    while len(rest) > width:
-        space = rest.rfind(" ", 1, width + 1)
-        cut = space if space > 0 else width
+    while cell_len(rest) > width:
+        fit = _chars_within(rest, width)
+        space = rest.rfind(" ", 1, fit + 1)
+        cut = space if space > 0 else fit
         rows.append(rest[:cut])
         rest = rest[cut:].lstrip(" ") if space > 0 else rest[cut:]
         if not rest:
@@ -120,6 +130,17 @@ def wrap_source(text: str, width: int) -> list:
     if rest:
         rows.append(rest)
     return rows
+
+
+def _chars_within(text: str, width: int) -> int:
+    """How many leading characters of `text` fit in `width` cells -- at
+    least one, so a glyph wider than the row still makes progress."""
+    cells = 0
+    for index, char in enumerate(text):
+        cells += cell_len(char)
+        if cells > width:
+            return max(1, index)
+    return len(text)
 
 
 def build_replacement_block(path: str, old: str, new: str, *,

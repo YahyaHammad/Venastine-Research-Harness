@@ -26,6 +26,8 @@
     .start:hover { background: #ac5af4; }
     .full { display: none; margin-left: 16px; }
     footer { margin-top: 32px; color: #6f8794; font-size: 0.85rem; }
+    footer p { margin: 8px 0; }
+    footer code { overflow-wrap: anywhere; color: #b7c7d1; }
   </style>
 </head>
 <body>
@@ -73,8 +75,14 @@
   <a class="start" href="terminal">Start a session</a>
   <a class="full" id="full" href="./" target="_blank" rel="noopener">Open full screen</a>
 
-  <footer>Install it yourself: <code>npm install -g @yahyahammad/venastine</code>
-  &middot; $build</footer>
+  <footer>
+    <p>Install it yourself, with Python 3.11 or newer. On macOS or Linux:<br>
+    <code>curl -fsSL https://raw.githubusercontent.com/YahyaHammad/Venastine-Research-Harness/main/install.sh | bash</code></p>
+    <p>On Windows, in PowerShell:<br>
+    <code>irm https://raw.githubusercontent.com/YahyaHammad/Venastine-Research-Harness/main/install.ps1 | iex</code></p>
+    <p><a href="https://github.com/YahyaHammad/Venastine-Research-Harness#setup"
+    target="_blank" rel="noopener">Other ways to install</a> &middot; $build</p>
+  </footer>
 </main>
 <script>
   if (window.self !== window.top) {

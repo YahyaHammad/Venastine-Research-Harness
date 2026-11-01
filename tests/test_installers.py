@@ -4,6 +4,7 @@ See tests/BREAKING_CHANGES.md. Failure tests keep the old executable app alive;
 the launcher test uses a real child to observe argv, cwd, and environment.
 """
 
+import contextlib
 import importlib.util
 import io
 import json
@@ -213,3 +214,159 @@ def test_windows_shim_quotes_spaces_and_escapes_percent_paths():
     assert '"C:/my python/python.exe"' in result.replace("\\", "/")
     assert "100%%" in result
     assert result.endswith('" %*\n')
+
+
+# Batch 206: the command's directory goes on PATH, as npm's global bin already
+# is. Nothing below touches the real registry or a real startup file.
+
+class FakeRegistry:
+    """winreg's surface that add_to_windows_path uses, held in a dict."""
+    HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE = "HKCU", 1, 2
+    REG_SZ, REG_EXPAND_SZ = 1, 2
+
+    def __init__(self, value=None, kind=2):
+        self.values = {} if value is None else {"Path": (value, kind)}
+        self.opened = []
+
+    def CreateKeyEx(self, root, sub_key, reserved, access):
+        self.opened.append((root, sub_key))
+        return contextlib.nullcontext(self)
+
+    def QueryValueEx(self, key, name):
+        if name not in self.values:
+            raise FileNotFoundError(name)
+        return self.values[name]
+
+    def SetValueEx(self, key, name, reserved, kind, value):
+        self.values[name] = (value, kind)
+
+
+def test_each_shell_gets_its_own_startup_file(tmp_path):
+    home = tmp_path / "home"
+    def files(shell, platform="linux", environ=None):
+        return install.shell_files(shell, home, platform, environ or {})
+    assert files("/bin/zsh") == [home / ".zshrc"]
+    assert files("/bin/zsh", environ={"ZDOTDIR": str(tmp_path / "z")}) == [tmp_path / "z" / ".zshrc"]
+    assert files("/usr/bin/fish") == [home / ".config" / "fish" / "conf.d" / "venastine.fish"]
+    assert files("/bin/bash") == [home / ".bashrc"]
+    # macOS starts login shells; a missing .bash_profile is never created,
+    # because its existence would make bash skip the user's .profile.
+    assert files("/bin/bash", "darwin") == [home / ".bashrc", home / ".profile"]
+    home.mkdir()
+    (home / ".bash_profile").touch()
+    assert files("/bin/bash", "darwin") == [home / ".bashrc", home / ".bash_profile"]
+    assert files("/bin/ksh") == files("") == [home / ".profile"]
+
+
+def test_the_block_is_written_once_and_moves_with_the_directory(tmp_path):
+    rc = tmp_path / ".zshrc"
+    rc.write_text("alias ll='ls -l'", encoding="utf-8")
+    assert install.add_to_shell_path(tmp_path / "bin one", [rc]) == [rc]
+    assert install.add_to_shell_path(tmp_path / "bin one", [rc]) == []
+    assert install.add_to_shell_path(tmp_path / "bin two", [rc]) == [rc]
+    text = rc.read_text(encoding="utf-8")
+    assert text.startswith("alias ll='ls -l'\n\n" + install.BLOCK_START)
+    assert text.count(install.BLOCK_START) == 1 and text.endswith(install.BLOCK_END + "\n")
+    assert "bin two" in text and "bin one" not in text
+
+
+def test_a_fish_block_quotes_the_directory_the_fish_way(tmp_path):
+    block = install.path_block("/a b/it's", fish=True)
+    assert "if not contains -- '/a b/it\\'s' $PATH" in block
+    assert "set -gx PATH '/a b/it\\'s' $PATH" in block
+    with pytest.raises(ValueError):
+        install.path_block("/a\nb")
+
+
+@pytest.mark.skipif(os.name == "nt" or not shutil.which("sh"), reason="needs a POSIX sh")
+def test_a_real_sh_puts_the_directory_first_and_only_once(tmp_path):
+    directory = tmp_path / "my bin's dir"
+    rc = tmp_path / "profile"
+    install.add_to_shell_path(directory, [rc])
+    result = subprocess.run(  # nosec B603 - a local sh reading the block twice, no network
+        [shutil.which("sh"), "-c", '. "$1"; . "$1"; printf %s "$PATH"', "sh", str(rc)],
+        env={"PATH": "/usr/bin:/bin"}, capture_output=True, text=True, timeout=30)
+    assert result.stdout == f"{directory}:/usr/bin:/bin", result.stderr
+
+
+def test_the_windows_user_path_gains_the_directory_once_keeping_its_type(tmp_path):
+    announced = []
+    registry = FakeRegistry("%USERPROFILE%\\tools;C:\\bin;", FakeRegistry.REG_EXPAND_SZ)
+    directory = tmp_path / "commands"
+    assert install.add_to_windows_path(directory, registry, lambda: announced.append(1))
+    assert registry.values["Path"] == (f"%USERPROFILE%\\tools;C:\\bin;{directory}",
+                                       FakeRegistry.REG_EXPAND_SZ)
+    assert registry.opened == [("HKCU", "Environment")]
+    assert not install.add_to_windows_path(directory, registry, lambda: announced.append(1))
+    assert announced == [1]
+
+
+def test_a_missing_user_path_is_created_and_a_non_text_one_is_left_alone(tmp_path):
+    registry = FakeRegistry()
+    assert install.add_to_windows_path(tmp_path, registry, lambda: None)
+    assert registry.values["Path"] == (str(tmp_path), FakeRegistry.REG_EXPAND_SZ)
+    odd = FakeRegistry(b"binary", kind=3)
+    with pytest.raises(ValueError):
+        install.add_to_windows_path(tmp_path, odd, lambda: None)
+    assert odd.values["Path"] == (b"binary", 3)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows spells one directory several ways")
+def test_a_windows_entry_matches_however_it_is_spelled(tmp_path, monkeypatch):
+    monkeypatch.setenv("VENASTINE_TEST_ROOT", str(tmp_path))
+    registry = FakeRegistry("C:\\bin;%VENASTINE_TEST_ROOT%\\COMMANDS\\")
+    assert not install.add_to_windows_path(tmp_path / "commands", registry, pytest.fail)
+
+
+@pytest.fixture
+def path_writes(monkeypatch):
+    """Record what install() would add to PATH instead of adding it."""
+    added = []
+    monkeypatch.setattr(install, "add_to_windows_path", lambda directory: added.append(directory) or True)
+    monkeypatch.setattr(install, "add_to_shell_path", lambda directory, files: added.append(directory) or files)
+    monkeypatch.setenv("SHELL", "/bin/zsh")
+    return added
+
+
+def test_install_puts_the_command_on_path_only_where_it_is_missing(tmp_path, offline, path_writes, monkeypatch, capsys):
+    root, commands = tmp_path / "install", tmp_path / "commands"
+    monkeypatch.setenv("PATH", str(tmp_path / "elsewhere"))
+    install.install("main", root, commands)  # the function's default leaves PATH alone
+    assert path_writes == []
+    assert f"Add {commands.resolve()} to your user PATH" in capsys.readouterr().out
+    install.install("main", root, commands, modify_path=True)
+    assert path_writes == [commands.resolve()]
+    out = capsys.readouterr().out
+    where = "your user PATH" if os.name == "nt" else "PATH in "
+    assert f"Added {commands.resolve()} to {where}" in out and out.endswith("\n  venastine --tui\n")
+    monkeypatch.setenv("PATH", str(commands))
+    install.install("main", root, commands, modify_path=True)
+    assert path_writes == [commands.resolve()]
+    assert capsys.readouterr().out.endswith("\n  venastine --tui\n")
+
+
+def test_another_venastine_earlier_on_path_is_named_and_not_assumed(tmp_path, offline, path_writes, monkeypatch, capsys):
+    root, commands, other = tmp_path / "install", tmp_path / "commands", tmp_path / "npm"
+    other.mkdir()
+    name = "venastine.cmd" if os.name == "nt" else "venastine"
+    (other / name).write_text("another tool", encoding="utf-8")
+    (other / name).chmod(0o755)
+    monkeypatch.setenv("PATH", os.pathsep.join([str(other), str(commands)]))
+    install.install("main", root, commands, modify_path=True)
+    out = capsys.readouterr().out
+    assert path_writes == []
+    assert f"Another 'venastine' comes first on PATH: {other}" in out
+    assert out.endswith(f"\n  {commands.resolve() / name} --tui\n")
+
+
+def test_the_opt_out_comes_from_the_flag_or_the_environment(monkeypatch):
+    seen = []
+    monkeypatch.setattr(install, "install", lambda ref, root, bin_dir, modify_path: seen.append(modify_path))
+    monkeypatch.delenv(install.NO_MODIFY_PATH, raising=False)
+    install.main([])
+    install.main(["--no-modify-path"])
+    monkeypatch.setenv(install.NO_MODIFY_PATH, "1")
+    install.main([])
+    monkeypatch.setenv(install.NO_MODIFY_PATH, "0")
+    install.main([])
+    assert seen == [True, False, False, True]

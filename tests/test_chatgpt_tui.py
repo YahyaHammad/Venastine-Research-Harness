@@ -103,7 +103,7 @@ class TestSigningIn:
 
     @pytest.mark.asyncio
     async def test_the_browser_coming_back_closes_the_prompt_and_signs_in(
-            self, providers_file, openai):
+            self, providers_file, openai, browser_opens):
         from tui.app import _cmd_connect
         from tui.screens import NoticeScreen, SecretScreen
 
@@ -113,6 +113,12 @@ class TestSigningIn:
             assert await settle(pilot, lambda: isinstance(app.screen,
                                                           SecretScreen))
             assert "Continue with ChatGPT: https://auth.openai.com/" in _text(app)
+            # Batch 207: the address shown is also the one handed to the
+            # browser -- conftest's stand-in, never a real tab.
+            assert await settle(pilot, lambda: browser_opens)
+            assert len(browser_opens) == 1
+            assert browser_opens[0].startswith(
+                "https://auth.openai.com/api/accounts/authorize?")
             assert await asyncio.to_thread(_open,
                                            _callback(app, openai)) == 200
             assert await settle(pilot, lambda: isinstance(app.screen,

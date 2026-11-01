@@ -2828,6 +2828,21 @@ because nothing is exploitable past resource exhaustion and the model is
 handed too much rather than something false. Unchanged: choosing the number,
 or the truncate-versus-refuse question, is what this entry is deferred for,
 and §31 H7 and §51 PG8 giving two different answers is the stated reason.
+
+**Batch 208: a transport bound arrived with mcp 2.3.0, and it is not this
+entry's bound.** 2.3.0 fails a call whose one Streamable HTTP server-sent
+event exceeds `max_sse_event_size`, 1 MiB by default, where 2.2.0 on its
+httpx2 had no limit. The owner set it to 16 MiB as config.yaml's
+`mcp_max_event_bytes`, because 1 MiB fails a tool that streams back a
+screenshot, text and all. It bounds the MEMORY a streamed answer takes and
+refuses rather than truncates, but three things keep this entry open, each
+measured in batch 208 (CONFIG_ARCHITECTURE.md has the figures): an answer
+sent as plain JSON -- what mcp 2.3.0's own server sends on 2026-07-28 -- is
+read whole with no limit, 40 MB of it in the measurement; stdio has no such
+bound; and 16 MiB is a transport ceiling, about 335 times `max_read_chars`,
+not a bound on what reaches the model. The total-size bound in
+`_normalize` that this entry prescribes is still the fix.
+
 # The review marathon's deferred findings (items 49-86)
 
 `docs/REVIEW_MARATHON.md` scoped a pre-merge review of `navigable-agents` into
@@ -2874,7 +2889,7 @@ how an entry should be read:
   that recorded it was wrong about its own mechanism, and the correction is in
   the entry.
 
-## 49. Three one-shot executors inherit the harness's console stdin (open, deferred batch 138)
+## 49. Three one-shot executors inherit the harness's console stdin (closed, batch 213)
 
 **Issue:** #203.
 
@@ -2916,6 +2931,8 @@ change -- which is the shipped-behaviour change the SS70 deferral was protecting
 **Not:** the WSL/SSH/session paths (already correct); a timeout or a prompt (the
 command was already approved, so the defect is the descriptor and not the
 decision).
+
+**CLOSED (batch 213), with the shape above.** `_run_inert`'s `subprocess.run` and the container one-shot's `Popen` in `_run_docker` pass `stdin=subprocess.DEVNULL`, as `_run_subprocess_fallback` has since batch 142, so every one-shot route gives a child no console now; a session still gets its own `PIPE`. `test_the_inert_route_is_given_no_console` and `test_the_container_one_shot_is_given_no_console` assert the argument on the real call, the way batch 142's fallback test does. A real `cat` run under pytest was not used as the test: in an xdist worker the inherited stdin is execnet's pipe, so the negative control would read the worker's own channel. AGENTS.md's "recorded, not changed" line and ROADMAP_v3 SS70 say it is closed.
 
 ## 50. `run_isolated` buffers the child's whole output before bounding it (open, deferred batch 138)
 
@@ -3052,7 +3069,7 @@ Two findings in the building, both in DEVLOG batch 160: a lazy BEGIN-to-END
 match ate the prose between two quoted markers, and the obvious footer regex is
 quadratic on a megabyte of base64.
 
-## 53. `resolve=False` checks dotted IP literals and no other numeric form (open for the BEHAVIOUR, comment corrected batch 156)
+## 53. `resolve=False` checks dotted IP literals and no other numeric form (closed, batch 213)
 
 **Issue:** #207.
 
@@ -3089,6 +3106,8 @@ reason a later reader might think the behaviour is too.
 **Not:** any change to `fetch_url`, which is correct; DNS at filter time for
 names, where the documented latency tradeoff stands; any change to
 `is_url_permitted`'s `resolve=True` path.
+
+**CLOSED (batch 213), the behaviour half.** `is_url_permitted(resolve=False)` now asks the resolver with `AI_NUMERICHOST` when `ipaddress` cannot read the host: that flag reads a number and never looks anything up, so the reason `resolve=False` exists -- no DNS per search hit -- still holds. Measured on Windows and in WSL: `2130706433`, `0x7f.0.0.1`, `0x7F000001`, `127.1`, `0177.0.0.1`, `017700000001`, `2852039166` and `0xa9fea9fe` all parse, to 127.0.0.1 or 169.254.169.254, and `example.com`, `localhost`, `999.1.1.1` and `127.0.0.1.` fail with `gaierror` and stay names. Seven spellings are refused through `is_url_permitted`, #207's three are dropped through `web_search._normalize`'s real filter, `134744072` (8.8.8.8) still passes as the control, and the two no-DNS tests now allow a numeric read and refuse a lookup. Without the fix, 10 of the 11 new tests fail; the eleventh is the control. web_search's comment says "every spelling" again, and is true this time.
 
 ## 54. `probability_stats._build_distribution` is dead and is a second answer (open, deferred batch 138)
 
@@ -3440,7 +3459,7 @@ and asserts one `tool_result` row per tool that actually ran.
 is stated; treating the `shutdown(wait=True)` block as a separate finding, since
 it is a consequence of the same window.
 
-## 62. A truncated fold is measured against the length it no longer has (open, deferred batch 138)
+## 62. A truncated fold is measured against the length it no longer has (closed, batch 213)
 
 **Issue:** #216.
 
@@ -3480,6 +3499,8 @@ line. `summarize_thread` needs nothing: its target is
 are already correct.
 
 **Not:** changing `_truncate_oldest`, the budget, or the target ratios.
+
+**CLOSED (batch 213), with the one line suggested.** The truncation branch recomputes `target` beside `original`, as the forced-chain branch does. `test_a_truncated_fold_is_targeted_at_the_length_it_kept` reads both numbers out of the instruction a truncated fold sends and requires the cap to be the strength's ratio of the stated length; it fails without the line.
 
 ## 63. Batch 119's yield logs a standing condition per step (open, deferred batch 138)
 
@@ -3568,7 +3589,7 @@ line, and the run completes.
 not fix itself on retry; changing the give-up-on-first-outage policy, which is
 load-bearing (SQ10).
 
-## 65. A second `connect_all()` abandons a generation of MCP children silently (open, deferred batch 138)
+## 65. A second `connect_all()` abandons a generation of MCP children silently (closed, batch 213)
 
 **Issue:** #219.
 
@@ -3620,6 +3641,8 @@ that is not the server name.
 **Not:** building reconnect or the `/mcp` command F7 defers; anything about
 `_ensure_loop`/`_shutdown_loop`'s module-level globals, which are a related
 single-instance assumption and would be the same future section's problem.
+
+**CLOSED (batch 213), raising, the owner's choice** over disconnecting first, which would be the reconnect F7 defers. A `connect_all()` on a client whose manager task is live raises `RuntimeError` naming `disconnect_all()`; a failed connect already sets `_task` to None, so a retry after one is unaffected. `disconnect_all()` clears `_closed` with `clients` and `_catalogs`, and since `_TrackClose` holds the same set object, the next generation's clean closes land in it. `test_a_second_connect_all_on_a_live_client_raises` (the first generation still serves a call) and `test_each_cycle_names_its_own_stragglers` (a server clean in cycle one and wedged in cycle two is named) both fail without the fix. The straggler set is still keyed by server name, which is enough while a generation must end before the next begins.
 
 ## 66. A `_blocking_modal` comment states a park that does not happen (open, deferred batch 138)
 
@@ -3756,7 +3779,7 @@ anything NA12 cares about, or the lock could be acquired around the park alone.
 **Not:** adding a timeout to `_ask_lock`, which would put a `config.py` number
 into a leaf module that deliberately imports nothing first-party.
 
-## 70. Three widgets measure the terminal in characters, not cells (open, deferred batch 138)
+## 70. Three widgets measure the terminal in characters, not cells (closed, batch 214)
 
 **Issue:** #224.
 
@@ -3802,6 +3825,8 @@ asserting row count, padded cell width and fitted cell width.
 are correct; font or combining-mark policy beyond `cell_len`, which is the
 terminal's own answer; truncation of diff *content*, where the 40-row cap stays
 the bound.
+
+**CLOSED (batch 214).** All three measure cells now, with `rich.cells.cell_len`, the measure `markdown.wrap_display`, `plain_wrap` and `display_len` already used. `wrap_source` cuts at the most characters that fit the row's cells and still breaks at the last space within them; a glyph wider than the row goes whole, so the wrap always makes progress. `AgentPanel._fit` (and `SessionPanel`, which shares it) truncates to `width - 1` cells before the ellipsis and drops a glyph that would straddle it. `_write_padded` pads with `total - cell_len(text)` spaces instead of `ljust`. Six tests in `tests/test_diff_view.py`'s `TestCellsNotCharacters`, wide text held in a variable per the cp1252 rule: the issue's 20-in-20 case is two rows, an 18-cell box holds 8 wide characters and the ellipsis, a padded row is exactly `total` cells for wide and ASCII text alike. Five fail without the fix; the sixth, a glyph wider than its row, is the progress guard the new loop needs and passes on either.
 
 ## 71. A live chat turn shows neither reasoning nor tool lines; a replay of it shows both (open, deferred batch 138)
 
@@ -4124,7 +4149,7 @@ giving the real one.
 **Not:** moving the test out of the `integration` marker. `pytest.ini:3-6`'s
 offline default is a locked decision and the marker is what implements it.
 
-## 78. `FakeStorage` makes eleven mirror claims and two are compared (open, deferred batch 138)
+## 78. `FakeStorage` makes eleven mirror claims and two are compared (algorithm half closed, batch 216 -- the two transcriptions are compared; the ordering claims remain)
 
 **Issue:** #231.
 
@@ -4200,7 +4225,9 @@ deliberately current and argues the cost is zero today because the guard is
 pinned against real SQLite and the fake's version is only ever used to arrange a
 compacted view. That argument is sound and is not reopened.
 
-## 79. `test_the_tree_names_every_production_module` quantifies over a typed list (open, deferred batch 138)
+**PARTLY CLOSED (batch 216), the half this entry called worth naming.** The two transcriptions of a published algorithm are compared now. `pinned_through` reads the database, so its index computation became the pure `storage._pinned_indices(rows, span, neutral)` -- behaviour unchanged, `pinned_through` maps it over the reconstructed rows -- and the fake's copy `FakeStorage._pinned_indices` has the same shape. `TestThePinnedSpanMirrorsProduction` compares them over six thread shapes cut at every position (#88's re-inclusion, a half-pinned pair, an unrelated result, a cut turn's opener, an opener already pinned, nothing pinned), plus two reach checks on the production side; `TestTheTurnOpenerMirrorsProduction` compares `_turn_opener_index` directly over the five cases above plus a kept prefix with no user row. Mutating the fake's copy -- the re-inclusion dropped, the opener never added, archive order not restored, the opener added on a turn-aligned cut -- is caught 4/4. **Still open:** the ordering claims that need real SQLite to compare (`list_threads`' COALESCE, `child_threads`' tiebreaker, `list_memories`' AC6 filter, `mark_turn_failed`), which this entry recommended only where the fake re-derives logic, and which belong beside `test_storage_e2e.py`'s module-scoped `real_storage` rather than in a pure-function file; the #31 plain-dict claims stay out, as recommended.
+
+## 79. `test_the_tree_names_every_production_module` quantifies over a typed list (closed, batch 216)
 
 **Issue:** #232.
 
@@ -4251,6 +4278,8 @@ already covered for the test half in both directions; the fence split at `:406`,
 which reads the document's first fenced block and would be a finding if the
 `assert entries` guard at `:409` were absent -- it is present, so a moved or
 reformatted tree fails loudly.
+
+**CLOSED (batch 216), with the shape suggested, and it found the live gap the entry measured as absent.** `_MAPPED_DIRS` is gone. `_production_modules()` walks the tree with `_walk_project`, skips `tests/`, and drops what `git check-ignore` reports, so `review/` -- gitignored local scratch, which a plain walk turned red on this machine and CI would never see -- stays out; the paths go to git NUL-separated, because in text mode Windows wrote each newline as CRLF and git was asked about `path\r`. `_UNLISTED_MODULES` is an exclusion list, empty. The walk reaches `deploy/hosted/`, which batch 163 added after this entry was measured and which the typed list never named: its seven modules are in the tree, so nothing failed, but only because their authors remembered. `test_the_module_walk_reaches_what_the_typed_list_did_and_more` holds the reach, and the entry's own failure path -- a new `plugins_probe_216/loader.py` with no tree entry -- now fails the gate, measured.
 
 ## 80. Five once-per-process globals are reset only by local fixtures (open, deferred batch 138)
 
@@ -4403,7 +4432,7 @@ with a distro installed and is a larger decision.
 host must still be able to run the suite and the skip is the right mechanism;
 what is missing is that nothing in CI ever supplies the variables.
 
-## 82. The approval-timeout fixture is pinned by its value, not its effect (open, deferred batch 138)
+## 82. The approval-timeout fixture is pinned by its value, not its effect (closed, batch 216)
 
 **Issue:** #235.
 
@@ -4469,6 +4498,8 @@ value, and neither asserts that `_blocking_modal` reads it at call time.
 **Not:** reviewing `_blocking_modal`'s dismissal paths, the `on_timeout`
 narration, or whether every dismissal produces a boolean -- item 5 is open as
 that brief. The `settle`/`pump` pair was read and is sound.
+
+**CLOSED (batch 216), asserting the effect as suggested.** `test_the_modal_park_reads_the_timeout_when_it_parks` drives the real `_blocking_modal` on a bare app whose modal is never answered, with `config.ATTENDED_APPROVAL_TIMEOUT_S` patched to 0.2 s, in a thread joined with a 10 s bound, and requires it to return None well inside that. With the park changed to `channel.get(timeout=600)` -- what an import-time default would bind -- it fails at the join instead of stalling the suite. The value assertion stays, answering its own question.
 
 ## 83. The spawn sign-off has no reachable configuration on the shipped roster (closed, batch 139 -- ruled a deliberate scope and recorded)
 
@@ -4622,7 +4653,7 @@ off.
 is that leaving them in "would make the sign-off notice promise authority the
 grant does not carry, which is worse than not offering it."
 
-## 84. The test that pins R2's grant filter cannot fail from its removal (open, found and filed batch 138)
+## 84. The test that pins R2's grant filter cannot fail from its removal (closed, batch 216)
 
 **Issue:** #236.
 
@@ -4686,6 +4717,8 @@ argument for it is stated at `tools/registry.py:414-433`. Also not widening
 the four names the existing assertion uses: they are the right names for the
 claim "the modal the user ticks never offers a per-call tool", and the gap is
 the missing allowed case, not the chosen denied ones.
+
+**CLOSED (batch 216), with the three lines suggested.** `test_the_filter_drops_a_param_gated_tool_policy_allows` uses `gated_pair`: with the widest child, `mcp__t__paramwise` -- param-gated, allowed by policy -- is not offered and its plain sibling is, which proves the helper is answering. Replacing `if registry.grantable(name)` with `if True` in `candidate_approvals` fails it; the original test still passes that mutant, as measured in batch 138, and stays for what it does check.
 
 ## 85. Six pilot tests assert worker-thread state after a raw `pause()` (closed, batch 151; ONE of the six needed it, and this entry was wrong about why)
 
@@ -5937,7 +5970,7 @@ repairing one command.
 message could name the path, since the `OSError` carries `filename`. That
 is a one-line change and does not touch the gate.
 
-## 108. `generate()`'s other pre-write filesystem calls are still outside its `try` (open, measured batch 153)
+## 108. `generate()`'s other pre-write filesystem calls are still outside its `try` (closed, batch 213)
 
 **Issue:** #255.
 
@@ -5967,6 +6000,8 @@ right and is a decision rather than an edit.
 one and says why it is acceptable there (a worker thread whose death takes
 the app); the CLI has a process to end cleanly and a traceback is more
 useful than a swallowed bug.
+
+**CLOSED (batch 213), both halves, the owner's choice.** `generate()` wraps the kind question's two walks, `manifest.is_blank` and `propose_kind`, and turns an `OSError` from either into an `InitError` that names the error and says to re-run with `--software` or `--research`; `_config_plan` and `_existing_documents` call `os.path.exists`, which does not raise, and stay as they are. `main.run_init_command` also catches `OSError` and ends with `[--init stopped: ...]` and exit 1, for whatever escapes next -- not a blanket `except Exception`, so a bug still shows its stack. Four tests in `TestAnUnlistableProjectEndsInALine`, each failing without the fix.
 
 ## 109. Nothing resolves the test names `tests/BREAKING_CHANGES.md` cites (open, measured batch 153)
 
@@ -6063,7 +6098,7 @@ not; `json.loads(None)` raising is the guard most likely to differ.
 the DBAPI seam, which is now driven for real. It is the standing risk that
 the persistence layer's own tests prove the fake and the code agree.
 
-## 112. The trust prompt says every project agent's description enters every system prompt, and most never do (open, measured batch 155)
+## 112. The trust prompt says every project agent's description enters every system prompt, and most never do (closed, batch 215)
 
 **Issue:** #259.
 
@@ -6088,7 +6123,9 @@ mid-batch.
 S08-03 the finding itself declined, recorded so the next person reading
 that header does not re-derive it.
 
-## 113. A trust-prompt entry shadowed by a harness or user definition is displayed as the project's (open, measured batch 155)
+**CLOSED (batch 215), with the owner's wording.** The header is "what each project agent and skill would tell the model:", and each entry carries a line saying where its description goes: a skill's is "listed wherever load_skill is offered"; a spawnable agent's "spawnable: listed wherever spawn_subagent is offered"; any other agent's "not spawnable: in no system prompt; /agent can still pick it". Nothing claims EVERY system prompt any more -- the skill half was nearer true, but it too reaches only a run that is offered load_skill. `test_each_entry_says_where_its_description_goes` pins all three lines and the header's absence of the old claim; the no-catalog control now looks for the new header.
+
+## 113. A trust-prompt entry shadowed by a harness or user definition is displayed as the project's (closed, batch 215)
 
 **Issue:** #260.
 
@@ -6109,6 +6146,8 @@ do. Over-disclosure again, like item 112.
 
 **What it would have caught.** Nothing in batch 155; S08-03 names it and
 declines it for the same reason.
+
+**CLOSED (batch 215), as suggested: listed, and annotated.** `_shadowing_names` reads the harness and user tiers with `_tier_dirs` and `_parse_md_file` -- `_discover`'s own order and parser -- and a project entry whose name either has says `shadowed by the harness's own "<name>"` (or `your own (user configuration)`), `which is what loads; this file is used only if that one goes away`. It stays listed, because the grant covers its bytes. `test_a_shadowed_entry_is_listed_and_says_what_loads` covers a harness and a user shadow, and `test_what_it_calls_shadowed_is_what_the_loader_ignores` trusts the project, initializes, and checks the note against what the loader registered, with an unshadowed project agent as the control. All three new tests fail without the change.
 
 ## 114. `AgentManager`'s two `set()` calls have no belt, where `max_steps` does (open, measured batch 155)
 

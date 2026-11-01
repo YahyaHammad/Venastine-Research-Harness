@@ -15,6 +15,7 @@ holes or as unfireable:
   M10 the ratio is measured by characters, and never compared to a token count
 """
 
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -863,6 +864,29 @@ def test_an_oversized_span_with_no_previous_is_truncated_and_says_so_twice(
         "the cut rides on the stored summary regardless of model compliance")
     assert checkpoint_strategy_is(fake_storage, memory, "rederive"), (
         "with no previous summary there is nothing to force chain ONTO")
+
+
+def test_a_truncated_fold_is_targeted_at_the_length_it_kept(
+        fake_storage, summaries, mocker):
+    """#216, batch 213. The instruction names the truncated length, and
+    the cap it states must be the strength's fraction of THAT length --
+    the forced-chain branch recomputed both, and this one only the first,
+    so a fold was looser than its strength by the ratio of the two."""
+    memory = ConversationMemory()
+    _thread(memory, turns=3, body="x" * 900)
+    calls = summaries("A tiny summary.")
+    mocker.patch("core.compaction._input_budget", return_value=50)
+
+    compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC",
+                       overrides=OVERRIDES)
+
+    instruction = calls[0]["user_goal"]
+    original, target = map(int, re.search(
+        r"The original is (\d+) characters\. Your summary must be at most "
+        r"(\d+) characters", instruction).groups())
+    assert "[Source truncated" in instruction
+    strength = config_loader.effective_compaction(OVERRIDES)["strength"]
+    assert target == int(original * config.COMPACTION_TARGET_RATIOS[strength])
 
 
 def checkpoint_strategy_is(fake_storage, memory, expected):

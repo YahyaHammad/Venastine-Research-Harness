@@ -41,8 +41,9 @@ class TestTheArtifact:
 
     def test_written_when_a_grant_was_spent(self, output_dir, mocker):
         mocker.patch("core.reasoning.output_writer._try_write_pdf")
-        mocker.patch("core.reasoning.output_writer.write_confidence_chart",
-                     create=True, side_effect=lambda *a, **kw: None)
+        # The real name since batch 212. This patched `write_confidence_chart`
+        # with create=True, which stubbed nothing: the chart rendered anyway.
+        mocker.patch("core.reasoning.output_writer._write_confidence_chart")
         run = _run_with([{"pass": "Pass 4", "tool": "mcp__lib__search",
                           "params": {"q": "x"}}])
         path = os.path.join(write_run_artifacts(run), "granted_calls.json")

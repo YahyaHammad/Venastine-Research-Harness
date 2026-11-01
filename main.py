@@ -1732,6 +1732,14 @@ def run_init_command(args, provider_name: str, model: str) -> int:
     except InitError as e:
         print(f"\n{ansi.for_display(e)}")
         return 1
+    except OSError as e:
+        # #255, batch 213, the owner's choice of both halves: generate()
+        # turns the walks it knows about into InitError, and this catches
+        # the filesystem error nobody has met yet, so the CLI ends with a
+        # line, as the TUI's worker does, instead of a traceback. Not a
+        # blanket Exception: a bug should still show its stack.
+        print(f"\n[--init stopped: {ansi.for_display(e)}]")
+        return 1
     print(f"\n{ansi.for_display(notice['text'])}")
     return 0
 

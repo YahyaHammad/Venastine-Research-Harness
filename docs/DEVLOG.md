@@ -28286,3 +28286,779 @@ Validation:
   local runtime state. No dependency change, live model call or account
   access. The branch keeps its identity and completes this batch as beta 2;
   the npm/Python version pair agrees. Nothing pushed.
+
+## Batch 206 -- the GitHub installers put `venastine` on PATH (2026-10-28, rebased 2026-10-31)
+
+**The owner's question**, about batch 202's installers: do they install the
+harness in a global directory, and add `venastine` as a command that runs
+from anywhere, the way npm does?
+
+**What they did.** A per-user global install, yes: the source under
+`~/.local/share/venastine/app`, its environment under
+`~/.config/venastine/runtime/github-*`, no administrator needed. A command,
+yes: `~/.local/bin/venastine`, or `venastine.cmd` on Windows. On PATH, no --
+`scripts/install.py` printed "Add ... to your user PATH" and stopped there.
+npm needs nothing more because its global bin is already on PATH. Where
+`~/.local/bin` stands:
+
+- Windows: not on the user PATH by default. On the owner's machine it was
+  there already, holding other tools' commands (`claude.exe`, `hf.exe`),
+  so a check there would have passed for a reason a fresh machine lacks.
+- macOS: not on the default PATH of zsh or bash.
+- Ubuntu and Debian: `~/.profile` adds it if it exists AT LOGIN, so a
+  first install worked only from the next login (measured in WSL:
+  `~/.profile` lines 25-26).
+
+**The owner's choices.** Put it on PATH by default, with an opt-out
+(`--no-modify-path`, or `VENASTINE_NO_MODIFY_PATH=1`, which `irm | iex`
+can carry), the way uv's and rustup's installers do (pipx needs a separate
+`pipx ensurepath`, which the question put to the owner had wrong); and on
+macOS and Linux edit only
+the user's own shell's startup file.
+
+**Built**, in `scripts/install.py`, so both shells behave alike:
+
+- **Windows:** the directory is appended to `HKCU\Environment\Path` through
+  `winreg`, keeping the value's type, so an unexpanded `%VARIABLE%` entry
+  stays one, then `WM_SETTINGCHANGE` is broadcast as `setx` does. An entry
+  that already names the directory, however spelled, adds nothing; a value
+  that is not text is refused rather than rewritten. `install.ps1` then gives
+  the window it runs in the entries the helper added, and only those, so
+  `venastine` works there at once.
+- **macOS and Linux:** `$SHELL` picks the file: `~/.zshrc` (or
+  `$ZDOTDIR`'s), `~/.bashrc`, fish's `conf.d/venastine.fish`, and `~/.profile`
+  for anything else. Bash on macOS also gets the login file the user already
+  has -- `.bash_profile`, then `.bash_login`, else `.profile` -- and a missing
+  `.bash_profile` is never created, because once it exists a login bash skips
+  `.profile`. The block sits between two marker lines and is replaced in
+  place, so a second install adds nothing and a moved `--bin-dir` leaves no
+  stale entry; it prepends only when the directory is absent, as Ubuntu's own
+  `~/.profile` line does. `curl | bash` runs in a child, so the helper prints
+  the `export` for the terminal at hand.
+- **Never fatal, and checked last.** The PATH step runs after the swap; a
+  failure prints why and the full command path. If another `venastine` comes
+  first on the resulting PATH -- npm's, say -- it is named, and the final line
+  gives this command's full path rather than a name that runs the other one.
+- **Tests cannot reach the real thing.** `install()` changes PATH only when
+  `main()` passes `modify_path`, so every test that calls it directly leaves
+  the registry and startup files alone; the PATH tests use a fake registry
+  and files under `tmp_path`.
+
+### Verified
+
+- **A real install, end to end, in WSL Ubuntu** with `HOME` in a scratch
+  folder, `SHELL=/bin/bash` and `PATH` without the directory: this
+  `scripts/install.py` from the working tree, `--ref main`, so the archive
+  and every dependency came from the network. It wrote the block to the
+  scratch `.bashrc` and said so; a second install said "Already added" and
+  wrote nothing; then a NEW interactive bash with only `/usr/bin:/bin` on
+  its PATH answered `command -v venastine` with the scratch
+  `~/.local/bin/venastine`, and `venastine --venastine-doctor` ran from the
+  installed environment.
+- **The registry code against the real `winreg` API**, on a throwaway key
+  under `HKCU\Software` holding a COPY of the owner's user PATH
+  (`REG_EXPAND_SZ`, 18 entries): the directory it already names changed
+  nothing; a new one was appended once, the type kept, every `%` entry
+  kept unexpanded, and a real `WM_SETTINGCHANGE` broadcast returned
+  without error. The key was deleted, and the real user PATH read back
+  unchanged.
+- `install.ps1` parses with no error, and its window loop -- lifted from
+  the file, with the two registry reads stood in -- gives the window
+  exactly the entries the helper added in four cases: one added, none,
+  one the window already had, and no user PATH before.
+- Mutations on an export copy, 12/12 killed, each on its assertion: a
+  created `.bash_profile`, a second block appended, the sh guard gone
+  (in WSL, where the real-sh test runs), fish quoted the sh way, the
+  value rewritten as `REG_SZ`, no duplicate check, entries compared
+  unexpanded, a non-text value written over, PATH changed where it
+  already works, the library default changing PATH, the opt-out
+  ignored, and another `venastine` left unnamed.
+- Full suite, 8391 tests, on Windows on eight workers: 8322 passed, 69
+  skipped, no failure (7:01). `test_installers.py` also under WSL Ubuntu:
+  27 passed, 1 skipped (the Windows-spelling test), the real-sh test
+  among the passes. `test_installers.py`, `test_docs_consistency.py` and
+  `test_versioning.py` with `AGENT_WORKSPACE` unset: 118 passed, 5
+  skipped.
+- ruff clean; bandit 0 new against the baseline; gitleaks, run as CI
+  runs it, found no leaks on an export copy.
+- **Version**, by `scripts/version.py`: this branch is
+  `0.2.0-b.1.installer-path.rb0705ebe789b` (Python
+  `0.2.0b1+installer.path.rb0705ebe789b`). Its base is 0.2.0 because
+  `main` still carried pillow-floor's beta when the branch was cut: PR
+  #267's merge had allocated no clean release, which batch 202's policy
+  asks of a merge. `main` has since allocated 0.3.2 and 0.3.3; the base
+  stays 0.2.0 for this branch's lifetime, and its merge allocates the next
+  unused patch.
+
+### Rebased onto 0.3.3 (2026-10-31)
+
+The branch was cut from `2c602de` and never pushed, and `main` moved six
+commits past it: the 0.3.2 allocation, PR #268 (batches 203-205) and 0.3.3.
+**The owner's choices:** rebase it as one commit on `main` rather than merge
+`main` into it, and renumber it from 203 to 206, since `main` had used 203
+for the ChatGPT header. A rebased copy of an unpublished batch keeps its
+beta identity, so the version lines stay as above.
+
+`main` had changed no installer file in between, so `scripts/install.py`,
+`install.ps1` and `tests/test_installers.py` applied as written; against
+`3a2ff6c` they differ only in the two comments that carried the batch
+number. The conflicts were the stated test count (`main` said 8418), the
+`test_installers.py` line in the tree (18 tests on `main`, 28 here), the
+two version lines, and this file's tail.
+
+One failure on the way, an artifact rather than a defect:
+`test_the_documented_doc_read_bound_is_not_understated` read 75 readable
+documents against the stated 63 while the rebase was stopped, because
+`git ls-files` lists an unmerged path once per stage and all six
+conflicted files are ones `read_project_doc` admits (6 x 2 extra = 12). It
+passed as soon as the resolutions were staged.
+
+Verified again on the rebased tree:
+
+- 8428 tests collected: `main`'s 8418 plus this batch's 10.
+- Full suite on Windows on eight workers: 8358 passed, 70
+  skipped, no failure (9:01).
+- `test_installers.py`, `test_docs_consistency.py` and
+  `test_versioning.py` with `AGENT_WORKSPACE` set and unset: 118 passed, 5
+  skipped each way.
+- `test_installers.py` under WSL Ubuntu: 27 passed, 1 skipped (the
+  Windows-spelling test), the real-sh test among the passes.
+- ruff clean; bandit 0 new against the baseline and the count check's 62
+  pairs unchanged; gitleaks, run as CI runs it, found no leaks on an export
+  of the index; pip-audit found nothing in either requirements file, which
+  are unchanged from `main`.
+- Not repeated: the end-to-end WSL install and the throwaway registry key.
+  The code they exercised is the same bytes.
+
+## Batch 207 -- no test opens a browser, and the real SDKs are imported once (2026-10-31)
+
+**The owner's question:** the suite takes nine minutes, when batch 114
+had it at 70-90 seconds, and something is throttling development.
+
+**What was measured first, on one commit and one machine.** The full suite
+took 9:01 on eight workers, then 17:14 on `-n auto` (eleven) with three
+timing failures, then 2:09 and 1:57 an hour later with none. In the slow
+run every worker was busy for the whole span, so no one group was setting
+the floor; the work itself had grown, to about 10,400 s of test time
+against about 1,000 s in the quiet run. The machine was saturated while it
+ran (1,300-1,600% of 1,600%), and the suite was not what saturated it:
+Firefox held ~400% of it, with 76 processes and 26.7 GB private memory,
+Defender's scanner 100-145%, and available memory sat at 1.0-2.1 GB.
+
+**The owner's diagnosis, and it was right:** the tests keep opening the
+ChatGPT sign-in page. Measured with a recording plugin loaded by `-p`,
+so no repository file changed while the suite ran: **17 real browser opens
+per full run**, every one `https://auth.openai.com/api/accounts/authorize`,
+from 14 tests in `test_chatgpt_tui.py`. `Transcript.open_url` hands a URL
+to `webbrowser.open` on a thread worker, and nothing in the suite stood in
+for it except two tests that patched it for their own assertions. So every
+run sent 17 real authorize requests from a suite that calls itself
+offline, and left 17 tabs; a day of runs is what Firefox was holding. The
+suite's 5-12 minute runs first appear in batches 190-191, straight after
+the §83 sign-in tests landed in 184-189.
+
+**Ruled out on the way, each by measurement:**
+
+- Textual's idle wait. `pilot.pause()` ends on `wait_for_idle(0)`, which
+  waits up to 1 s while the PROCESS uses CPU, and a leaked thread would
+  turn every later pause into a full second. A plugin timing every call:
+  2,544 waits in a full run, 0 at the cap; `test_tui.py` under six
+  synthetic busy cores went from 41 s to 71 s with 0 of 1,128 at the cap.
+- CPU scaling. Eleven concurrent CPU-bound processes run 1.5x slower each
+  than one, so the cores are there.
+- Bytecode caching. This shell sets `PYTHONDONTWRITEBYTECODE=1`; collection
+  is 4.4-5.5 s with it set or unset.
+
+**Built:**
+
+- `tests/conftest.py`'s autouse `browser_opens` stands in for
+  `webbrowser.open`, `open_new` and `open_new_tab`, records the URLs and
+  answers True, as a browser that opened does. Request it by name to
+  assert what would have opened.
+- `TestNoTestReachesARealBrowser` in `test_live_output.py`, beside the
+  opener: one test requests nothing and reads the stand-in's marker on all
+  three openers, so it checks the AUTOUSE (a test that asked for the
+  fixture by name would pass without it) and fails before opening
+  anything; the other drives `Transcript.open_url` through its thread
+  worker into the recorder.
+- `test_the_browser_coming_back_closes_the_prompt_and_signs_in` now asserts
+  the authorize URL was handed to the browser, once, so the open the flow
+  should make is checked rather than only made harmless.
+- **`test_sdk_conformance.py` imports each real SDK once per root set.**
+  `real_package` re-imported from scratch on every block, 30 a run, and
+  `import anthropic` measured 6.3 s here and `import openai` 4.1 s, so the
+  file was the largest scheduling group at 74 s. It now keeps the modules
+  one import left and reinstalls that exact set, so a block still sees one
+  consistent package, its own `httpx` included -- which is why the key is
+  the whole root set. Between blocks the fakes are back, as before. The
+  file runs in 5.7 s serially; it passes in collection order and reversed.
+  `test_a_block_restores_the_fakes_and_reuses_its_real_import` pins both
+  promises.
+
+### Verified
+
+- Mutations on an export copy, each run with the outer recorder loaded so
+  a surviving mutant still opened nothing real: the autouse dropped,
+  `open_new_tab` left out, a recorder that keeps nothing, and production
+  bypassing `webbrowser.open` -- 4/4 killed, 0 opens reached the outer
+  recorder. The cache: never reinstalled, fakes not restored, real
+  submodules left behind -- 3/3 killed. The third SURVIVED the first
+  version of the test, which checked `sys.modules["httpx"]` and not the
+  `httpx.*` names a real import leaves; the test compares the whole name
+  set now. A first run of the new test also failed on the unmutated tree
+  (`real_package` clears; the block's own import is what imports), so the
+  kills it scored then were discarded and the run repeated after the fix.
+- Full suite, 8431 tests, on Windows on eleven workers: 8361 passed, 70
+  skipped, no failure, in 1:37, with the outer recorder loaded: 0 opens
+  reached it. The touched files with `AGENT_WORKSPACE` unset: 477 passed,
+  5 skipped. Under WSL Ubuntu the live-output and ChatGPT TUI files pass;
+  `test_sdk_conformance.py` fails the same 7 Google checks there before
+  and after this change, because the distro's google-genai is still 1.0.0.
+- ruff clean; bandit 0 new against the baseline and the count check's 62
+  pairs unchanged; gitleaks, run as CI runs it, found no leaks on an
+  export of the tracked files.
+- **Version**, by `scripts/version.py bump`: `0.2.0-b.2.installer-path.rb0705ebe789b`.
+
+**Left as found:** on a quiet machine the suite is about 1,000 s of test
+work spread evenly over eleven workers, so 1:50-1:57 is the floor this
+batch reaches, not 70-90 s; batch 114's figure was taken on a smaller
+suite. Textual's idle waits are 210 s of that work. Nothing here changes
+`settle`, whose quiescing pause is a deadlock defence its docstring
+explains.
+
+## Batch 208 -- Dependabot's group, taken where the suite is evidence, and an MCP ceiling the owner chose (2026-10-31)
+
+**The owner's question:** which of the python-deps group Dependabot proposed
+(PR #266, fifteen changes) can be bumped without breaking anything.
+
+**What decided it.** The suite fakes `openai`, `anthropic`, `google-genai`,
+`ddgs`, `sqlmodel` and `markitdown` (the root conftest), so a green run is
+evidence about those only where `test_sdk_conformance.py` and
+`test_storage_e2e.py` reach the real package. The owner took the
+recommended set: the packages the suite runs for real, each release at
+least two weeks old with its notes read, plus two security floors.
+
+| change | why |
+|---|---|
+| pydantic 2.13.4 -> 2.14.1 | 2.14.0 fixed GHSA-gj4f-r7mf-jjxh and GHSA-955g-x97g-8mcp |
+| sympy 1.13.3 -> 1.14.0 | `test_math_tools.py`'s measured expansion is still 74,723 characters |
+| python-dotenv 1.2.2 -> 1.2.4 | fixes only |
+| matplotlib 3.10.3 -> 3.11.2 | text layout overhaul; requires Python >=3.11, this project's floor |
+| mcp 2.2.0 -> 2.3.0 | below |
+| cryptography floor 42.0 -> 50.0.0 | 42.0-49.x carry 15 to 2 advisories (OSV) |
+| PyJWT floor 2.10.1 -> 2.15.0 | the owner's venv held 2.13.0: 29 advisories |
+
+**Declined:** the `rich` floor (no advisory; 14.2 is textual's own floor).
+**Deferred to their own batches:** anthropic 0.116 -> 2.x and openai 2.45 ->
+3.x, which both move their HTTP stack to httpx2 -- `requirements.txt`'s mcp
+paragraph says anthropic and openai still need `httpx`, and
+`core/provider_errors.py` reads httpx's exception names -- and anthropic 2.0
+moves to a new API version; and the faked SDK minors (google-genai, ddgs,
+sqlmodel, markitdown, protobuf), where the evidence would be the conformance
+file alone and google-genai wants a live check with the owner's key.
+
+**The floors, for pillow's reason (batch 201).** pip leaves an installed
+package alone while it satisfies the range, so CI's pip-audit -- which
+resolves the newest -- was green while the owner's own environment held
+PyJWT 2.13.0. Two of its advisories are in exactly the calls
+`core/chatgpt_auth.py` makes: a RecursionError out of `jwt.decode` on a
+deeply nested header (GHSA-8wjv-2p76-3863) and one malformed RSA key
+aborting a whole `PyJWKSet` (GHSA-w6j9-cwv2-h6wq). 2.15.0 and cryptography
+50.0.0 are the first releases with none.
+
+**mcp 2.3.0 changed one thing this client does, and its notes hid it.**
+They say "the default stays 1 MiB" for the new `max_sse_event_size`; on
+2.2.0's httpx2 (2.9.1) `EventSource` took no limit at all, and on 2.3.0
+(httpx2 2.16.0) one server-sent event over 1 MiB fails the call with
+"SSE stream failed: Server-sent event exceeded the 1048576 byte limit."
+The session survives. 1 MiB fails a tool that streams back a screenshot,
+text and all, although this harness keeps the text and replaces the image
+with a note. **The owner chose a bound, higher: 16 MiB, as an ordinary
+config.yaml key**, `mcp_max_event_bytes`, beside `max_read_chars` -- the
+math tools' precedent of a config value over a constant. A resource bound,
+not harness authority.
+
+- `mcp_client/client.py` passes it on BOTH streamable HTTP branches, read
+  per connection. The header-less branch used to return a bare URL, which
+  `Client()` turns into a transport with the SDK's 1 MiB, so it builds the
+  transport too now, with the SDK's own client as `Client()` would.
+  `test_an_http_server_without_headers_hands_client_a_bare_url` pinned the
+  old shape and is replaced by its inverse.
+- The legacy "sse" transport keeps the SDK's fixed 1 MiB: `sse_client`
+  takes no size.
+- **What it covers, measured rather than read.** A server may answer as SSE
+  or as plain JSON. mcp 2.3.0's own server, on 2026-07-28, answered every
+  request as `application/json`, which the client reads whole with no
+  limit: 4 MB and 40 MB arrived at 16 MiB and at 1 MiB alike. Against an
+  in-process mock that streams every answer, through `mcp_client` and
+  httpx2's MockTransport: 2 MB passed at 16 MiB and failed at 1 MiB with
+  "MCP call failed: SSE stream failed: Server-sent event exceeded the
+  1048576 byte limit."; 16,000,000 characters passed at 16 MiB and
+  20,000,000 failed naming 16777216.
+- TECHNICAL_DEBT 48 is amended rather than closed: plain-JSON answers and
+  stdio are still unbounded, and 16 MiB is a transport ceiling about 335
+  times `max_read_chars`, not a bound on what reaches the model.
+
+**Also moved with the pins:** `mcp_client/registration.py`'s fact that
+`Tool.name` is a bare required `str` with no metadata, re-measured on
+2.3.0; the hosted bridge's two notes naming the harness's mcp and pydantic
+pins; THIRD_PARTY_NOTICES' table and its pillow sentence (matplotlib 3.11.2
+requires `pillow>=9`); and `bin/venastine.mjs`'s comment, which said "2 of
+the 18 are ranges" beside the code that counts them, when it was 4 of 20.
+It names no count now.
+
+### Verified
+
+- A scratch venv built from the edited `requirements.txt` and
+  `requirements-test.txt` resolves with `pip check` clean: pydantic 2.14.1,
+  sympy 1.14.0, python-dotenv 1.2.4, matplotlib 3.11.2, mcp 2.3.0
+  (httpx2 2.16.0), cryptography 50.0.2, PyJWT 2.15.1.
+- Full suite in that venv, 8434 tests, eleven workers: 8364 passed, 70
+  skipped, no failure, in 2:11, with batch 207's outer recorder loaded and
+  0 opens past the stand-in. The touched files there with `AGENT_WORKSPACE`
+  unset: 713 passed, 12 skipped.
+- Mutations on an export copy, in that venv: a bare URL without headers,
+  the ceiling not passed, the ceiling as a constant, headers dropped, and
+  the shipped value at 1 MiB -- 5/5 killed. "Headers dropped" is killed
+  only by the new parametrised test: M19's
+  `test_headers_are_carried_on_both_http_transports_not_discarded` asserts
+  "not a bare string", which every http transport now is, so the new
+  test's `http_client is None` exactly when there are no headers is what
+  holds M19's property from here.
+- pip-audit: nothing in the resolved venv, nothing in `requirements.txt`
+  or `requirements-test.txt` as CI runs it. ruff clean; bandit 0 new
+  against the baseline and the count check's 62 pairs unchanged; gitleaks,
+  run as CI runs it, found no leaks on an export of the tracked files.
+- Not run: WSL, whose distro environment is stale (google-genai 1.0.0,
+  batch 207) and so says nothing about these pins; and a live provider
+  call, since no SDK pin moved.
+- **Version**, by `scripts/version.py bump`:
+  `0.2.0-b.3.installer-path.rb0705ebe789b`.
+
+**A local environment needs `pip install -r requirements.txt` after this**:
+the new code passes `max_sse_event_size`, which mcp 2.2.0 does not accept.
+The npm launcher rebuilds its runtime on the requirements hash and the
+GitHub installers reinstall on update; a developer checkout does neither.
+
+## Batch 209 -- the hosted demo recommends the GitHub installers (2026-11-01)
+
+**The owner's request:** the landing page's footer said "Install it
+yourself: `npm install -g @yahyahammad/venastine`"; recommend the
+PowerShell and Bash installers instead. They are lower friction on both
+sides: a visitor needs Python and not npm, and whatever lands on `main` is
+installable at once, with no npm release in between.
+
+- `deploy/hosted/landing.html`'s footer gives both commands, exactly as
+  README.md's "Install directly from GitHub" has them, with the Python
+  3.11 floor and a link to README's Setup for the other ways. The commands
+  wrap anywhere, so a phone-width page does not scroll sideways (checked at
+  375 px and at desktop width in the browser pane).
+- The hosted TUI said the same thing in `_OWN_COPY`, the sentence a shared
+  demo prints where a key cannot go; it names the two installers now.
+- README's "These commands become available when the installer files land
+  on `main`" is gone: batch 202 landed them (PR #267).
+- `test_the_landing_page_offers_the_readme_installers_not_npm` reads both
+  commands out of README.md and finds each, whole, in the page of both
+  modes; the hosted TUI's test reads them the same way. Neither page can
+  drift from the README now, and neither may say `npm install`.
+
+**Found while redeploying, not changed here:** `main`'s tip has not
+deployed since the release commits started carrying tags. Pushing
+`v0.3.3` re-ran every CI workflow on 4a08b96, and `deploy_gate.py`
+counts those runs; deploy-demo.yml wakes only for runs on `main`, so its
+last wake (12:07:07) found the tag's `tests` and `compat` still running,
+said WAIT, and nothing woke it again when they finished (12:08:24,
+12:09:10). All seven runs for 4a08b96 ended in WAIT.
+Batch 211 fixes it, the owner's choice; this batch only reports it.
+
+### Verified
+
+- Full suite: 8435 tests, 8365 passed and 70 skipped, in 2:41.
+- ruff clean on the changed Python files. No dependency moved, so
+  pip-audit has nothing new to say.
+- **Version**, by `scripts/version.py bump`:
+  `0.2.0-b.4.installer-path.rb0705ebe789b`.
+
+## Batch 210 -- a fourth pillow 12.3.0 advisory, accepted by ID for the bridge (2026-11-01)
+
+**What stopped the redeploy.** Batch 209's Space deploy built, scanned and
+audited the bundle and refused before sending: the bridge's packages,
+resolved for the Space, pin pillow 12.3.0, and PYSEC-2026-4332
+(CVE-2026-112403, GHSA-8g5g-8vmr-9782) was published against it after
+batch 192's triage. The refusal named no package: pip-audit's output was
+forty lines of cache warnings, and the deploy prints the last 3,000
+characters. Reproduced with the deploy's own lock compile and pip-audit
+in JSON form.
+
+**The advisory.** Pillow's JPEG decoder can write a full-width scanline
+into a buffer sized for a requested draft scale, when an 8-bit lossless
+JPEG meets libjpeg-turbo 3.x. A caller has to ask for downscaling: through
+`Image.draft()`, or `Image.thumbnail()`, which is the only caller of
+`draft()` inside pillow. 13.0.0 fixes it, and Gradio still caps pillow
+below 13 -- 6.31.0, released 2026-10-28, as much as the 6.30.0
+`bridge.lock` pins.
+
+**What was read**, in the wheels `bridge.lock` pins by hash, downloaded
+whole on 2026-11-01: gradio 6.30.0, gradio-client 2.7.2, spaces 0.51.3,
+hf-gradio 0.4.1 and textual-serve 1.1.3. None calls `draft()` or
+`thumbnail()`. Gradio's one resize helper,
+`processing_utils.resize_and_crop`, uses `ImageOps.fit`, which does not
+draft, and nothing in Gradio calls the helper. gradio-client,
+textual-serve and the bridge's own code (`deploy/hosted/`) import no
+pillow at all. The sessions, which run the harness, install from
+`session.lock`, which pins 13.0.0.
+
+**The owner accepted it by ID**, as batches 169, 175 and 192 accepted
+pillow 12.3.0's earlier advisories: a fourth `ACCEPTED` entry in
+`scripts/deploy_demo.py`, one per triage, saying what was read and when.
+An entry applies only while a lock pins exactly 12.3.0, so it goes stale,
+and the deploy says so, once Gradio allows pillow 13.
+
+### Verified
+
+- `tests/test_deploy_demo.py`: 63 passed, including the checks that every
+  accepted ID is triaged, accepted once, and not a version the harness
+  itself can install.
+- Full suite: 8435 tests, 8365 passed and 70 skipped, in 1:55. The
+  first run failed three of `test_tool_budgets.py`'s compute-clock tests
+  in 13:48, and py-spy showed why: the one worker left was rebuilding
+  matplotlib's font cache, the first since batch 208's 3.11 upgrade,
+  for ten minutes. The 14 tests passed alone, and the rerun with the
+  cache written was green. Batch 212 removes matplotlib.
+- **Version**, by `scripts/version.py bump`:
+  `0.2.0-b.5.installer-path.rb0705ebe789b`.
+
+## Batch 211 -- a release tag's runs no longer strand the deploy (2026-11-01)
+
+**Found redeploying in batch 209.** `main`'s tip, 4a08b96, never deployed.
+Every deploy-demo run for it, seven, ended in WAIT. Pushing `v0.3.3` to
+that commit re-ran every CI workflow there, and `deploy_gate.py` counts
+those runs: the owner's rule is every check on the commit. But
+deploy-demo.yml's `workflow_run` trigger wakes it for runs on `main`, so
+the last of `main`'s runs (tests, 12:07:07) found the tag's `tests` and
+`compat` still going, said WAIT and ended, and when those finished
+(12:08:24, 12:09:10) nothing woke the deploy again. Every release puts a
+tag on `main`'s tip, so no release commit had deployed since the tags
+began; the demo ran 2c527c4, deployed by hand.
+
+**The owner chose to keep waiting**, over counting `main`'s runs alone
+(which would have let a failed npm publish or tag run through) and over
+deploying by hand after each release.
+
+- `decide()` marks a WAIT **stranded** when every unfinished run is one
+  that cannot wake the deploy: a tag push's, a schedule's, a manual run's
+  or another app's check. Only a push run on `main` of a workflow the
+  trigger lists wakes it, and a required workflow with no push run yet is
+  one of those to come.
+- `main()` takes `--linger SECONDS` and, while the wait is stranded, asks
+  again every 30 s within that budget. A wait `main`'s own runs will end is
+  left to them, as before, so only the last gate lingers. When the budget
+  runs out the verdict is still WAIT, and its reasons now say to run the
+  workflow by hand once the runs finish.
+- deploy-demo.yml passes `--linger 1200`; the gate job's timeout went from
+  5 to 25 minutes to outlive it. The tag's CI on 4a08b96 finished within
+  two minutes of `main`'s.
+- The tag's runs still count. A failed one refuses, as before; lingering
+  waits for them and does not judge them differently.
+
+ROADMAP_v3 §79 HD9 is amended, and AGENTS.md's hosted-demo paragraph names
+the rule beside the three it already called load-bearing.
+
+### Verified
+
+- 13 new tests in `tests/test_deploy_gate.py` (72 now): a tag's runs on
+  4a08b96's shape strand the wait, `main`'s own unfinished or unstarted
+  runs do not (alone or beside the tag's), schedules, manual runs and
+  another app's checks strand it, the tag's runs still decide refuse and
+  deploy, `--linger` asks again on a fake clock until a DEPLOY, stops at
+  its budget, does not linger on a wait `main` will end, says how to
+  finish by hand, and fits inside the gate job's timeout in the real
+  workflow file.
+- Mutations on an export copy, 7/7 killed: stranded never set, every
+  pending check counted as waking, a missing required run not waking, a
+  tag's branch counted as `main`, the linger ignored, the linger
+  unbounded, and the hand-run hint dropped.
+- Full suite: 8448 tests, 8378 passed and 70 skipped, in 1:50. ruff clean.
+- Not verifiable here: the live path. It runs on GitHub after the next
+  release tag lands on `main`.
+- **Version**, by `scripts/version.py bump`:
+  `0.2.0-b.6.installer-path.rb0705ebe789b`.
+
+## Batch 212 -- the confidence chart is SVG, and matplotlib leaves the install (2026-11-01)
+
+**The owner's question:** are the unused packages removed from
+`requirements.txt`, to make a fresh install lighter? Every package it
+names is imported by the harness; the leftovers in the owner's own
+environment (`google-ai-generativelanguage`, `grpcio-status` and the rest
+of `google-generativeai` 0.8.6) were never in it. What WAS heavy, measured
+per distribution in a venv built from the file: **367 MB of runtime
+closure, 126 MB of it matplotlib** -- matplotlib 33.6, numpy 54.0,
+fonttools 18.0, pillow 16.3 and seven small packages -- for one bar chart
+of five tier counts per research run. The owner chose to draw that chart
+as SVG with the standard library and drop matplotlib, over an optional
+extra (which would have left default installs with no chart).
+
+- `core/reasoning/output_writer.py`: `confidence_svg(tiers, counts)` is a
+  pure function returning one standalone SVG -- title, y-axis label,
+  gridlines in 1/2/5 steps (`_axis_step`, at most ten), each bar with its
+  count above and its tier below, a white background for dark viewers.
+  `confidence_chart.png` is `confidence_chart.svg` now. The #81 contract is
+  unchanged: any failure is contained and warned, never fatal. Rendered
+  with headless Edge to check it reads.
+- **A test caught a bug before it shipped.** `escape()` leaves `"`, so a
+  label with a quote ended the `data-tier` attribute and broke the XML;
+  attributes pass `{'"': "&quot;"}` now. The labels are fixed tier names
+  today, which is why nothing had noticed.
+- `requirements.txt` drops `matplotlib==3.11.2` and batch 201's
+  `pillow>=13.0.0,<14`: nothing else the harness installs reaches pillow,
+  so the floor guards nothing. The two floors that cited "pillow's reason
+  below" cite it without the "below".
+- The root `conftest.py` no longer gives each xdist worker its own
+  `MPLCONFIGDIR`, and AGENTS.md and ARCHITECTURE.md no longer charge
+  "+~5s first run" for a font cache. That cache was the cost batch 210's
+  first full run paid: the one worker left rebuilt it for ten minutes,
+  py-spy showed, the first time after batch 208's 3.11 upgrade.
+- `test_granted_calls_artifact.py` patched `write_confidence_chart` with
+  `create=True`, a name that never existed, so its stub stubbed nothing
+  and the real chart rendered. It patches `_write_confidence_chart` now.
+- `test_no_accepted_version_is_one_the_harness_can_install` guards its walk
+  with packages the harness still reaches (PyJWT, cryptography,
+  pydantic-core, linkify-it-py) and now asserts that matplotlib, pillow and
+  numpy are not among them.
+- THIRD_PARTY_NOTICES loses both rows and pillow's paragraph, with a line
+  saying where they went; the bridge still installs pillow in its own
+  environment.
+
+**What a user sees.** The npm launcher rebuilds its runtime when the
+requirements hash changes and the GitHub installers build a fresh
+environment on update, so both drop the packages on their next update. An
+existing developer venv keeps matplotlib until it is removed by hand;
+nothing imports it.
+
+### Verified
+
+- `tests/test_output_writer.py`: 27 tests (was 12). The chart is parsed
+  back with defusedxml for one bar per tier holding the run's own counts,
+  heights proportional, labels escaped, an empty run, round axis steps,
+  and a drawing failure and an unwritable path each warned and contained.
+- Full suite: 8463 tests, 8393 passed and 70 skipped, in 1:50. This
+  environment still has matplotlib installed, so the chart tests were run
+  again with `matplotlib`, `PIL` and `numpy` blocked in `sys.modules`: 32
+  passed.
+- ruff clean over the whole tree. A fresh install measured 367 MB of
+  runtime closure before and 241 MB after, from the same venv's metadata
+  with matplotlib and pillow taken out of the roots.
+- **Version**, by `scripts/version.py bump`:
+  `0.2.0-b.7.installer-path.rb0705ebe789b`.
+
+## Batch 213 -- five stability fixes from the review marathon (2026-11-01)
+
+**The owner's choice of batch**, from the open register: #203, #216, #219,
+#255 and #207 (register items 49, 62, 65, 108 and 53). Two needed a
+decision, and the owner took the recommended one each time: #219 raises
+rather than tearing down first, and #255 takes both halves.
+
+- **#203, one-shots and the console.** `_run_inert` and the container
+  one-shot in `_run_docker` pass `stdin=subprocess.DEVNULL`, as the host
+  fallback has since batch 142. A bare `cat` is INERT and auto-approved,
+  and with the console inherited it read the user's type-ahead -- §29 N1's
+  second reader -- or waited out the whole timeout. Every one-shot route
+  gives a child no console now.
+- **#216, a truncated fold.** The truncation branch recomputes `target`
+  with `original`, as the forced-chain branch eight lines up already did,
+  so the instruction's cap is the strength's fraction of the length it
+  names.
+- **#219, a second `connect_all()`.** It raises `RuntimeError` naming
+  `disconnect_all()` while a manager is live, instead of rebinding the
+  events and abandoning the first generation's children without a word.
+  `disconnect_all()` clears the clean-close record in place (`_TrackClose`
+  holds the same set), so a server clean in one cycle cannot answer for
+  itself wedged in the next.
+- **#255, an unlistable project.** The kind question's two walks turn an
+  `OSError` into an `InitError` naming it, and the CLI also catches
+  `OSError` -- never `Exception` -- so `--init` ends with a line where it
+  ended with a traceback.
+- **#207, numeric hosts.** `is_url_permitted(resolve=False)` asks the
+  resolver with `AI_NUMERICHOST` when `ipaddress` cannot read the host.
+  Measured on Windows and in WSL before writing it: `2130706433`,
+  `0x7f.0.0.1`, `0x7F000001`, `127.1`, octal and the 169.254.169.254
+  spellings all parse; names, `999.1.1.1` and a trailing-dot quad fail and
+  stay names; and the flag never looks anything up, which is
+  `resolve=False`'s reason to exist. web_search drops those results where
+  fetch_url would refuse them, and its comment says "every spelling" again.
+
+The register closes all five. AGENTS.md's "recorded, not changed" line
+for the one-shots and ROADMAP_v3 SS70 say they are closed. The GitHub
+issues stay open until the change reaches `main`.
+
+### Verified
+
+- 20 new tests. Each fix was reverted, and its tests failed without it:
+  #203 (2/2), #216 (1/1), #219 (2/2), #255 (4/4), #207 (10 of 11, the
+  eleventh being the public-address control).
+- Full suite: 8483 tests, 8413 passed and 70 skipped, in 1:54. ruff clean.
+  In WSL, the resolver this depends on on POSIX: the numeric-host,
+  no-lookup and unlistable-project tests, 18 passed.
+- **Version**, by `scripts/version.py bump`:
+  `0.2.0-b.8.installer-path.rb0705ebe789b`.
+
+## Batch 214 -- the terminal is measured in cells, not characters (2026-11-01)
+
+**#224, register item 70, the owner's choice of batch.** Three widgets
+sized rows in Python characters where the terminal draws cells. For
+single-width text the two agree, which is why nothing had failed; for
+double-width text (CJK, many emoji) they part.
+
+- `tui/diffs.py`'s `wrap_source` broke on `len(text)`: twenty wide
+  characters in twenty columns were "one row", Rich wrapped them into
+  two, and the padding that carries an added line's background landed on
+  the first -- the half-green row the pre-wrap exists to prevent. It cuts
+  at the most characters that fit the row's cells now, still at the last
+  space among them, and a glyph wider than the row goes whole so the loop
+  always advances.
+- `AgentPanel._fit`, which `SessionPanel` shares, said "Truncate to
+  `width` cells" and measured `len`: ten wide characters passed an 18-cell
+  box whole and drew 20. It keeps `width - 1` cells before the ellipsis
+  and drops a glyph that would straddle it.
+- `Transcript._write_padded` padded with `ljust(total)`; it pads by
+  `total - cell_len(text)` now.
+
+All three use `rich.cells.cell_len`, the measure `tui/markdown.py`'s wrap
+already used -- which is how the streamed transcript and these three could
+disagree about where a row ends.
+
+### Verified
+
+- `tests/test_diff_view.py`: 6 new tests in `TestCellsNotCharacters`
+  (40 now), wide text held in a variable per the cp1252 rule. Five fail
+  with the fix reverted; the sixth, a glyph wider than its row, is the
+  new loop's progress guard and passes either way.
+- Full suite: 8489 tests, 8419 passed and 70 skipped, in 1:57. ruff clean.
+- **Version**, by `scripts/version.py bump`:
+  `0.2.0-b.9.installer-path.rb0705ebe789b`.
+
+## Batch 215 -- the trust prompt says where each description goes (2026-11-01)
+
+**#259 and #260, register items 112 and 113, with the owner's wording**
+(chosen from two previews). The consent screen's catalog section said
+"these descriptions enter EVERY system prompt in this project". Two ways
+that overclaimed, both in the fail-safe direction, which is why they were
+recorded rather than fixed when found:
+
+- **#259.** A project agent's description reaches a prompt only if the
+  agent is spawnable, and the project tier's agents are not unless they
+  say so (§32 A3/A4); a skill's reaches every run offered load_skill.
+- **#260.** A project definition whose name a harness or user one already
+  has never loads -- `_discover` is first-wins, harness > user > project
+  (D29) -- yet it was shown as the text that would be used.
+
+The section is headed "what each project agent and skill would tell the
+model:" now, and under each entry a line says where it goes: "listed
+wherever load_skill is offered", "spawnable: listed wherever
+spawn_subagent is offered", "not spawnable: in no system prompt; /agent
+can still pick it", or, for a shadowed one, `shadowed by the harness's
+own "<name>"` (or "your own (user configuration)"), "which is what loads;
+this file is used only if that one goes away". A shadowed entry stays
+listed: the grant covers its bytes, and renaming the other makes it live
+with no new prompt.
+
+Shadowing is read with `_tier_dirs` and `_parse_md_file` in `_discover`'s
+own order, so the prompt and the loader cannot disagree, and a test checks
+the note against what `initialize()` actually registered. Each entry now
+takes two or three lines of the section's 60-line bound, which still
+holds and still says what it withheld.
+
+### Verified
+
+- `tests/test_catalog_text.py`: 3 new tests, all failing without the
+  change; the no-catalog control now looks for the new header, since the
+  old string would make it pass vacuously.
+- Full suite: 8492 tests, 8422 passed and 70 skipped, in 2:01. ruff clean.
+  (A first run failed `test_the_subprocess_collection_agrees_with_the_session`
+  alone, because a test was added to another file mid-run -- AGENTS.md's
+  rule against editing during a run, broken and paid for; the rerun with
+  that edit set aside was green.)
+- **Version**, by `scripts/version.py bump`:
+  `0.2.0-b.10.installer-path.rb0705ebe789b`.
+
+## Batch 216 -- four tests that could not fail, made to (2026-11-01)
+
+**#236, #235, #232 and #231, register items 84, 82, 79 and 78**, the
+review marathon's vacuity findings the owner chose. Each test was written
+to pin something, and each was measured unable to fail from its removal.
+
+- **#236, R2's grant filter.** `test_the_signoff_never_offers_a_param_gated_tool`
+  checked four names global config already denies, so they never reached
+  `grantable()`. The new test uses `gated_pair`'s param-gated tool that
+  policy ALLOWS, beside a plain sibling that must be offered. Mutating
+  the filter to `if True` fails it; the old test still passes that mutant.
+- **#235, the approval-timeout shrink.** Pinned by its value, so an
+  import-time default would have kept the fixture running and stopped it
+  working. The new test drives the real `_blocking_modal` on a bare app
+  nobody answers, with the timeout patched to 0.2 s, in a thread joined
+  at 10 s. With the park fixed at 600 s it fails at the join, not after
+  ten minutes.
+- **#232, the module tree's domain.** A typed list of sixteen
+  directories became a walk, less what `git check-ignore` reports, with
+  an empty exclusion list. The walk found the gap the entry measured as
+  absent: `deploy/hosted/`, added later, was never in the typed list, and
+  is in the tree only because its authors remembered. Two traps on the way,
+  both measured: a plain walk went red on this machine for `review/`,
+  gitignored scratch CI cannot see; and Windows' text-mode pipe turned
+  each newline into CRLF, so git was asked about `path\r` and ignored
+  nothing until the paths went NUL-separated. A probe directory with an
+  unlisted module turned the gate red.
+- **#231, the fake's two transcribed algorithms.** `pinned_through`'s
+  keep-set became the pure `storage._pinned_indices` (behaviour
+  unchanged) and the fake's copy the same shape, so they are compared like
+  `_to_neutral` and `_split_at`: six thread shapes cut at every position,
+  and `_turn_opener_index` directly. Four mutations of the fake's copy,
+  4/4 caught. **Partly closed:** the ordering claims that need real SQLite
+  to compare (`list_threads`, `child_threads`, `list_memories`,
+  `mark_turn_failed`) remain, and belong beside `test_storage_e2e.py`'s
+  module-scoped `real_storage`.
+
+### Verified
+
+- 53 new tests (50 of them the mirror's parametrised table). Every new
+  check was shown to fail on the defect it guards: #236 and #235 by
+  mutating production, #232 with a probe module, #231 by four mutations
+  of the fake (the unmutated run passing first).
+- Full suite: 8545 tests, 8475 passed and 70 skipped, in 1:56. ruff clean.
+- **Version**, by `scripts/version.py bump`:
+  `0.2.0-b.11.installer-path.rb0705ebe789b`.
+
+## Batch 217 -- what the branch-wide gates found (2026-11-01)
+
+Batches 209-216 were each verified by the full suite and ruff. Run across
+the branch as CI runs them, bandit and gitleaks each found one thing those
+had not.
+
+- **bandit B406, from batch 212.** The SVG chart imported
+  `xml.sax.saxutils.escape`, and importing `xml.sax` is B406 whatever is
+  used from it -- `bandit-count-check.py` showed
+  `core/reasoning/output_writer.py B406 0 -> 1`, which CI's bandit job
+  would have refused. It uses `html.escape` now, which escapes both quotes
+  by default, so the `{'"': "&quot;"}` special case batch 212 added for
+  attributes went with it. `test_every_label_is_escaped` passes unchanged.
+  After it: no finding outside the baseline, and the count check's 62
+  (file, test) pairs unchanged.
+- **gitleaks, from batch 213.** `.gitleaksignore` blesses the planted fake
+  secrets in `tests/test_policy_enforcement.py` by line, and batch 213's
+  new tests in that file moved all five (by 1 for the three above the
+  added import, by 45 for the two below the new tests). Run as CI runs it,
+  on an export of the tracked files: 6 leaks, every one a fixture -- each
+  flagged line was checked against the same line before the move. The
+  fingerprints are re-blessed at 58, 70, 82, 397 and 907, and the scan is
+  clean. This is #238 (register item 87) happening, not a new finding: a
+  blessing pinned by line number re-fires on any edit above it.
+
+### Verified
+
+- Full suite with `AGENT_WORKSPACE` unset, before these two fixes: 8545
+  tests, 8475 passed, 70 skipped.
+- pip-audit on `requirements.txt`: no known vulnerabilities.
+- After both: full suite 8545 tests, 8475 passed and 70 skipped, in 1:57;
+  bandit and its count check clean; gitleaks, as CI runs it on an export
+  of the tracked files, finds no leaks.
+- **Version**, by `scripts/version.py bump`: `0.2.0-b.12.installer-path.rb0705ebe789b`.

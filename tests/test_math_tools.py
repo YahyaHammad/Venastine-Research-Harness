@@ -1225,7 +1225,8 @@ class TestAMathResultIsBoundedAtTheProducer:
         # characters and 0.88s -- the same property `series order=1000`
         # would show for 10s.
         #
-        # That exact figure is a function of `sympy==1.13.3`, which
+        # That exact figure is a function of the sympy pin (1.13.3 when it
+        # was measured, and unchanged on 1.14.0 in batch 208), which
         # requirements.txt pins exactly, so it is stable by construction
         # rather than by luck. If the pin moves and this goes red, what it
         # is reporting is that the tools' output sizes moved, which is the

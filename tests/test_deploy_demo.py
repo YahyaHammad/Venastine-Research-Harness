@@ -201,22 +201,25 @@ class TestTheAudit:
 
     def test_no_accepted_version_is_one_the_harness_can_install(self):
         """Batch 201. ACCEPTED is for the BRIDGE, whose Gradio caps
-        pillow below 13 in an environment of its own. The harness reaches
+        pillow below 13 in an environment of its own. The harness reached
         pillow too, through matplotlib's uncapped `pillow>=8`: a fresh
         install got 13.0.0, and an environment built before that release
         kept 12.3.0, because pip leaves an installed package alone while
         it satisfies what requires it. So every accepted version must be
-        refused by some constraint on the harness's way to it -- for
-        pillow, requirements.txt's floor, which the next install upgrades
-        to. A package only the bridge installs is not the harness's."""
+        refused by some constraint on the harness's way to it, or be
+        somewhere the harness does not go. Since batch 212 pillow is the
+        second: matplotlib is gone, and nothing else reaches it. A package
+        only the bridge installs is not the harness's."""
         wants = _what_the_harness_installs()
-        # Guard the walk: it follows matplotlib down to pillow, it follows
-        # extras (linkify-it-py arrives only as textual's
-        # `markdown-it-py[linkify]`), and Gradio is nowhere in it. Empty, it
-        # would pass everything below.
-        assert {"matplotlib", "kiwisolver", "pillow",
+        # Guard the walk: it follows requirements down several levels (mcp
+        # to PyJWT to cryptography), it follows extras (linkify-it-py
+        # arrives only as textual's `markdown-it-py[linkify]`), and Gradio
+        # is nowhere in it. Empty, it would pass everything below.
+        assert {"pyjwt", "cryptography", "pydantic-core",
                 "linkify-it-py"} <= wants.keys()
         assert "gradio" not in wants
+        # Batch 212: the chart is SVG now, and nothing installs these.
+        assert not {"matplotlib", "pillow", "numpy"} & wants.keys()
         for entry in deploy.ACCEPTED:
             name = canonicalize_name(entry["package"])
             if name not in wants:

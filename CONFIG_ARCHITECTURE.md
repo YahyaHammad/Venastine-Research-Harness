@@ -807,6 +807,43 @@ WARNING; their child processes may outlive this session. The value
 lives with the other harness bounds and is re-exported by
 mcp_client/client.py beside its sibling timeouts.
 
+## MCP results
+
+### `mcp_max_event_bytes`
+
+16 MiB (16,777,216), the owner's number (batch 208). mcp 2.3.0 reads
+each Streamable HTTP server-sent event whole and fails the call when one
+exceeds `max_sse_event_size`; 2.2.0, on the httpx2 it installed, had no
+limit at all. A result a server STREAMS is one event, so for those this is
+the memory one result can take before the harness sees it -- a bound on
+the transport, NOT on what reaches the model, which is TECHNICAL_DEBT 48's
+other half and stays open.
+
+WHICH RESULTS IT COVERS, measured rather than read (batch 208). A server
+may answer a request as SSE or as plain JSON. mcp 2.3.0's own server,
+negotiating 2026-07-28, answered every request as `application/json`, and
+the client reads that body whole with no limit: 4 MB and 40 MB results
+both arrived, at this ceiling and at 1 MiB. So this key bounds streamed
+answers only. Through `mcp_client` against a server streaming every answer
+(an in-process mock on 2025-06-18): a 2 MB result passed at 16 MiB and
+failed at 1 MiB with "MCP call failed: SSE stream failed: Server-sent event
+exceeded the 1048576 byte limit."; 16,000,000 characters passed at 16 MiB
+and 20,000,000 failed naming 16777216.
+
+Why not the SDK's 1 MiB: a screenshot is 0.2-3 MB, base64 adds a third,
+and a tool that returns one would fail outright, text included -- this
+harness replaces an MCP image with a note and keeps the text, but only if
+the event arrives. 16 MiB fits an image at Claude's 5 MB per-image limit
+(~6.7 MB encoded) with headroom while a broken or hostile server still
+costs a bounded amount per event. Uploads are unaffected: this bounds what
+a server sends back.
+
+Read per connection by `mcp_client/client.py`, which passes it on BOTH
+Streamable HTTP branches, because a bare URL takes the SDK's default. The
+legacy "sse" transport keeps the SDK's fixed 1 MiB: `sse_client` takes no
+size. An ordinary key rather than harness authority, like
+`max_read_chars`: it is a resource bound, not a permission.
+
 ## Shell / sandbox (ROADMAP §7)
 
 ### `shell_binary`

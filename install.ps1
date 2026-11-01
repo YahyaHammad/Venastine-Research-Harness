@@ -19,8 +19,17 @@
     try {
         [Net.ServicePointManager]::SecurityProtocol = $oldProtocol -bor [Net.SecurityProtocolType]::Tls12
         Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/YahyaHammad/Venastine-Research-Harness/main/scripts/install.py' -OutFile $helper
+        $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
         & $python $helper @args
         if ($LASTEXITCODE -ne 0) { throw "Venastine installation failed (exit $LASTEXITCODE)." }
+        # The helper adds the command's directory to the user PATH for new
+        # terminals; give this window the entries it added, and only those.
+        $before = $userPath -split ';'
+        foreach ($entry in ([Environment]::GetEnvironmentVariable('Path', 'User') -split ';')) {
+            if ($entry -and $before -notcontains $entry -and ($env:Path -split ';') -notcontains $entry) {
+                $env:Path = $env:Path.TrimEnd(';') + ';' + $entry
+            }
+        }
     } finally {
         [Net.ServicePointManager]::SecurityProtocol = $oldProtocol
         if (Test-Path -LiteralPath $helper) { Remove-Item -LiteralPath $helper -Force }

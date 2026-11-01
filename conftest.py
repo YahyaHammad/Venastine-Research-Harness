@@ -43,13 +43,13 @@ appears (tool warnings vanish from output despite being emitted), check
 this first.
 
 SECOND JOB SINCE BATCH 109: this file decides how many workers `-n auto`
-spends, and gives each worker its own matplotlib cache. Both have to be
-here rather than in `tests/conftest.py` -- see the section at the bottom.
+spends, which has to be here rather than in `tests/conftest.py` -- see the
+section at the bottom. (It also gave each worker its own matplotlib cache
+until batch 212 removed matplotlib.)
 """
 
 import os
 import sys
-import tempfile
 import types
 
 # ---------------------------------------------------------------------------
@@ -858,44 +858,6 @@ def _usable_cpus() -> int:
     if hasattr(os, "sched_getaffinity"):                  # POSIX
         return len(os.sched_getaffinity(0)) or 1
     return os.cpu_count() or 1
-
-
-def _worker_id() -> str:
-    """This process's xdist worker id ("gw3"), or "" in a serial run.
-
-    The environment variable rather than `config.workerinput`, because the
-    one caller below runs at import time -- before there is a config to
-    ask.
-    """
-    return os.environ.get("PYTEST_XDIST_WORKER", "")
-
-
-def _isolate_matplotlib_cache() -> None:
-    """Give each xdist worker its own MPLCONFIGDIR.
-
-    THE ONE SHARED MUTABLE RESOURCE THE PARALLELISATION AUDIT FOUND.
-    Everything else the suite writes is already per-process or per-test:
-    xdist hands each worker its own `tmp_path_factory` basetemp
-    (`.../popen-gwN`), HOME is redirected with `monkeypatch.setenv`, the
-    askpass socket takes an ephemeral port, and `sandbox`'s known_hosts
-    file is an `mkstemp` path in a process global. The font cache is not.
-    It lives at one path for the whole machine and is BUILT ON FIRST USE
-    (~5s, which AGENTS.md already records), so on a cold cache every worker
-    would race to write the same file.
-
-    SERIAL RUNS ARE LEFT ALONE, deliberately: with no worker id there is no
-    race, and redirecting anyway would throw away the user's warm cache and
-    pay the 5s on every run.
-    """
-    worker = _worker_id()
-    if not worker or os.environ.get("MPLCONFIGDIR"):
-        return
-    path = os.path.join(tempfile.gettempdir(), f"venastine-mpl-{worker}")
-    os.makedirs(path, exist_ok=True)
-    os.environ["MPLCONFIGDIR"] = path
-
-
-_isolate_matplotlib_cache()
 
 
 try:

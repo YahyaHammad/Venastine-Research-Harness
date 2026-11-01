@@ -329,7 +329,101 @@ class TestTheTrustPromptNamesWhatEntersThePrompt:
 
         summary = config_loader.describe_project_content(str(tmp_path))
 
+        assert "would tell the model" not in summary
+
+
+def _definition(directory, name, description, extra=""):
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / f"{name}.md").write_text(
+        f"---\nname: {name}\ndescription: {description}\n{extra}---\n\n"
+        f"Body.\n", encoding="utf-8")
+
+
+def _reach(summary, entry, rows=1):
+    """The lines the trust prompt prints under `entry`, without their
+    `  |     ` prefix."""
+    lines = summary.splitlines()
+    at = next(i for i, ln in enumerate(lines) if ln.endswith(f"| {entry}"))
+    return [ln.split("|", 1)[1].strip() for ln in lines[at + 1:at + 1 + rows]]
+
+
+class TestTheTrustPromptSaysWhereEachDescriptionGoes:
+    """#259 and #260, batch 215 (register items 112 and 113), the owner's
+    wording. The section said every description entered EVERY system
+    prompt: a project agent's does only if it is spawnable, and a
+    definition whose name a harness or user one has never loads. Each is
+    still listed, since the grant covers it."""
+
+    def _summary(self, roots):
+        return config_loader.describe_project_content(str(roots["project"]))
+
+    def test_each_entry_says_where_its_description_goes(self, roots):
+        v = roots["project"] / ".venastine"
+        _definition(v / "skills", "house-style", "Our formatting rules")
+        _definition(v / "agents", "reviewer", "Reviews a diff",
+                    "spawnable: true\n")
+        _definition(v / "agents", "notes", "Keeps meeting notes")
+
+        summary = self._summary(roots)
+
         assert "EVERY system prompt" not in summary
+        assert "what each project agent and skill would tell the model:" \
+            in summary
+        assert _reach(summary, "skill house-style: Our formatting rules") \
+            == ["listed wherever load_skill is offered"]
+        assert _reach(summary, "agent reviewer: Reviews a diff") == [
+            "spawnable: listed wherever spawn_subagent is offered"]
+        assert _reach(summary, "agent notes: Keeps meeting notes") == [
+            "not spawnable: in no system prompt; /agent can still pick it"]
+
+    def test_a_shadowed_entry_is_listed_and_says_what_loads(self, roots):
+        """#260. A project `planner` beside the harness's own, and a
+        project skill beside the user's: both are shown -- renaming the
+        other would make them live with no new prompt -- and neither is
+        described as what loads."""
+        _definition(roots["harness"] / "agents" / "builtin", "planner",
+                    "The harness planner", "spawnable: true\n")
+        user = roots["harness"].parent / "home" / ".config" / "venastine"
+        _definition(user / "skills", "style", "My own style")
+        v = roots["project"] / ".venastine"
+        _definition(v / "agents", "planner", "Plans the work",
+                    "spawnable: true\n")
+        _definition(v / "skills", "style", "The project's style")
+
+        summary = self._summary(roots)
+
+        assert _reach(summary, "agent planner: Plans the work", 2) == [
+            'shadowed by the harness\'s own "planner", which is what loads;',
+            "this file is used only if that one goes away"]
+        assert _reach(summary, "skill style: The project's style", 2) == [
+            'shadowed by your own (user configuration) "style", which is '
+            'what loads;',
+            "this file is used only if that one goes away"]
+
+    def test_what_it_calls_shadowed_is_what_the_loader_ignores(self, roots):
+        """The note must name the definition that ACTUALLY loads, so it
+        is checked against the loader rather than against the rule as
+        written: trust the project, initialize, and the harness's
+        `planner` is the one registered."""
+        _definition(roots["harness"] / "agents" / "builtin", "planner",
+                    "The harness planner", "spawnable: true\n")
+        v = roots["project"] / ".venastine"
+        _definition(v / "agents", "planner", "Plans the work",
+                    "spawnable: true\n")
+        _definition(v / "agents", "drafter", "Drafts things",
+                    "spawnable: true\n")
+        summary = self._summary(roots)
+        assert _reach(summary, "agent planner: Plans the work")[0] \
+            .startswith("shadowed by the harness's own")
+        assert _reach(summary, "agent drafter: Drafts things") == [
+            "spawnable: listed wherever spawn_subagent is offered"]
+
+        workspace_trust.grant_trust(str(roots["project"]))
+        config_loader.initialize(str(roots["project"]))
+        agents = config_loader.get_agents()
+        assert agents["planner"].description == "The harness planner"
+        assert agents["drafter"].tier == "project", (
+            "the control: an unshadowed project agent does load")
 
 
 # ===========================================================================

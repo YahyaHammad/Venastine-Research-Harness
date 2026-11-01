@@ -444,14 +444,55 @@ def test_the_tree_states_a_correct_count_for_every_collected_test_file(request):
     )
 
 
-#: Directories the tree is expected to enumerate module by module. Not a
-#: walk of everything: `tests/` has its own check above, and generated or
-#: vendored trees have no business being listed by hand.
-_MAPPED_DIRS = (
-    ".", "bin", "scripts", "core", "core/reasoning", "prompts", "security",
-    "safety", "mcp_client", "agents", "skills", "memories", "project_init",
-    "tui", "tools", "tools/builtin",
-)
+#: Modules the tree deliberately does not list, as project-relative paths.
+#: Empty: everything walked is listed. It is an EXCLUSION list since batch
+#: 216 (#232), where a hand-typed list of sixteen directories used to be
+#: the gate's whole domain, so a module in a seventeenth was never looked
+#: at -- `deploy/hosted/`, added in batch 163, was such a directory, and is
+#: in the tree only because its authors remembered. Growing this list is
+#: a decision someone reads; growing the old one was one they forgot.
+_UNLISTED_MODULES: frozenset = frozenset()
+
+
+def _production_modules() -> list:
+    """Every `.py` and `.mjs` outside `tests/` (which has its own check
+    above), by WALKING the tree, less what git ignores: `review/` is local
+    scratch that never ships, and a gate red here for a file CI cannot see
+    would be the inverse of one green for a reason that does not ship."""
+    import subprocess  # nosec B404 - `git check-ignore` with a fixed argv, as the gates below run git
+
+    root = _project_root()
+    found = []
+    for dirpath, dirnames, filenames in _walk_project():
+        rel = os.path.relpath(dirpath, root).replace(os.sep, "/")
+        if rel == "tests" or rel.startswith("tests/"):
+            dirnames[:] = []
+            continue
+        for name in sorted(filenames):
+            if name.endswith((".py", ".mjs")) and name != "__init__.py":
+                found.append(name if rel == "." else f"{rel}/{name}")
+    # NUL-separated (-z): in text mode Windows writes each "\n" to the pipe
+    # as "\r\n", git then asks about "path\r", and nothing matches -- which
+    # is how a first version of this kept review/ in, measured.
+    try:
+        ignored = subprocess.run(  # nosec B603, B607 - fixed argv, paths on stdin
+            ["git", "check-ignore", "-z", "--stdin"], cwd=root,
+            input="\0".join(found), capture_output=True, text=True,
+            timeout=60).stdout.split("\0")
+    except (OSError, subprocess.SubprocessError):
+        ignored = []
+    return [path for path in found if path not in set(ignored)]
+
+
+def test_the_module_walk_reaches_what_the_typed_list_did_and_more():
+    """#232's control. Derived rather than typed, the domain must still
+    reach the root and a nested package, AND the directory the typed list
+    had missed; and ignored scratch must stay out."""
+    modules = set(_production_modules())
+    assert {"main.py", "tools/builtin/web_search.py", "tui/app.py",
+            "bin/venastine.mjs", "deploy/hosted/web.py"} <= modules
+    assert not any(path.startswith(("tests/", "review/"))
+                   for path in modules)
 
 
 def test_the_tree_names_every_production_module():
@@ -480,16 +521,9 @@ def test_the_tree_names_every_production_module():
         "block. If the tree moved or its drawing characters changed, point "
         "this at the new one rather than deleting the check.")
 
-    missing = []
-    for folder in _MAPPED_DIRS:
-        directory = os.path.join(ROOT, folder)
-        if not os.path.isdir(directory):
-            continue
-        for name in sorted(os.listdir(directory)):
-            if not name.endswith((".py", ".mjs")) or name == "__init__.py":
-                continue
-            if name not in entries:
-                missing.append(f"{folder}/{name}")
+    missing = [path for path in _production_modules()
+               if path not in _UNLISTED_MODULES
+               and path.rsplit("/", 1)[-1] not in entries]
 
     assert not missing, (
         "ARCHITECTURE.md's source tree does not name these modules:\n  "

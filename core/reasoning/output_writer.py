@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 def _tier_counts(run: PipelineRun) -> tuple[list[str], list[int]]:
     """Returns (tier_labels, counts) for the confidence chart. Extracted
     as a pure function so the counting logic can be unit-tested without
-    rendering a PNG."""
+    rendering the chart."""
     tiers = ["HIGH", "MEDIUM", "LOW", "UNVERIFIED"]
     counts = [sum(1 for c in run.claims if c.confidence_tier == t) for t in tiers]
     tiers.append("UNVERIFIED_COVERAGE")
@@ -76,7 +76,7 @@ def write_run_artifacts(run: PipelineRun) -> str:
       07_review.json          §20 review findings + decisions (only if reviewed)
       granted_calls.json      §25 audit trail (only if a grant was spent)
       pass_threads.json       §27 one entry per pass, {"pass", "thread_id"}
-      confidence_chart.png    Tier distribution bar chart (matplotlib)
+      confidence_chart.svg    Tier distribution bar chart (batch 212)
       trace.md                Full trace log
       report.md               Final synthesis report
       report.pdf              PDF rendering (only if markdown+weasyprint installed)
@@ -231,41 +231,100 @@ def _write_sources(run: PipelineRun, output_dir: str) -> None:
         logger.warning("Source texts skipped (write failed): %s", e)
 
 
+def _axis_step(top: int) -> int:
+    """A 1, 2 or 5 times a power of ten that puts at most ten gridlines
+    under `top`, so the axis reads in round numbers whatever the count."""
+    step = 1
+    while True:
+        for factor in (1, 2, 5):
+            if top <= 10 * step * factor:
+                return step * factor
+        step *= 10
+
+
+def confidence_svg(tiers: list, counts: list) -> str:
+    """The tier distribution as one standalone SVG document.
+
+    BATCH 212, THE OWNER'S CHOICE. This was matplotlib, which with numpy,
+    fonttools, pillow and seven smaller packages was 126 MB of a 367 MB
+    install, measured, for these five bars; it also rebuilt a font cache
+    for minutes in a fresh environment. Drawn by hand now: fixed geometry,
+    integer gridlines, the count over each bar, and a white background so
+    the chart reads in a dark-themed viewer too. Every label is escaped,
+    though today they are the fixed tier names.
+    """
+    # html.escape, not xml.sax.saxutils.escape (batch 217): it escapes
+    # both quotes by default, which an attribute needs, and importing
+    # xml.sax is bandit's B406 whatever is used from it.
+    from html import escape
+
+    width, height = 640, 400
+    left, right, top_pad, bottom = 64, 40, 56, 52
+    plot_w = width - left - right
+    plot_h = height - top_pad - bottom
+    peak = max(counts, default=0)
+    step = _axis_step(max(peak, 1))
+    axis_top = max(step, -(-peak // step) * step)
+    base = top_pad + plot_h
+
+    def y_of(value: int) -> float:
+        return base - plot_h * value / axis_top
+
+    out = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" '
+        f'height="{height}" viewBox="0 0 {width} {height}" '
+        f'font-family="DejaVu Sans, Arial, Helvetica, sans-serif">',
+        '<title>Confidence tier distribution</title>',
+        f'<rect width="{width}" height="{height}" fill="#ffffff"/>',
+        f'<text x="{width / 2:g}" y="32" font-size="18" '
+        f'text-anchor="middle" fill="#222222">Confidence tier distribution'
+        f'</text>',
+        f'<text x="18" y="{top_pad + plot_h / 2:g}" font-size="13" '
+        f'text-anchor="middle" fill="#222222" transform="rotate(-90 18 '
+        f'{top_pad + plot_h / 2:g})">Number of claims</text>',
+    ]
+    for value in range(0, axis_top + 1, step):
+        y = y_of(value)
+        out.append(f'<line x1="{left}" y1="{y:g}" x2="{width - right}" '
+                   f'y2="{y:g}" stroke="#dddddd" stroke-width="1"/>')
+        out.append(f'<text x="{left - 8}" y="{y + 4:g}" font-size="12" '
+                   f'text-anchor="end" fill="#444444">{value}</text>')
+    slot = plot_w / max(len(tiers), 1)
+    bar_w = slot * 0.6
+    for index, (tier, count) in enumerate(zip(tiers, counts)):
+        x = left + slot * index + (slot - bar_w) / 2
+        y = y_of(count)
+        centre = x + bar_w / 2
+        label = escape(str(tier))
+        out.append(f'<rect class="bar" data-tier="{label}" '
+                   f'data-count="{int(count)}" x="{x:g}" y="{y:g}" '
+                   f'width="{bar_w:g}" height="{base - y:g}" '
+                   f'fill="#1f77b4"/>')
+        out.append(f'<text x="{centre:g}" y="{y - 6:g}" font-size="12" '
+                   f'text-anchor="middle" fill="#222222">{int(count)}</text>')
+        out.append(f'<text x="{centre:g}" y="{base + 20:g}" font-size="11" '
+                   f'text-anchor="middle" fill="#222222">'
+                   f'{escape(str(tier).replace("_", " "))}</text>')
+    out.append(f'<line x1="{left}" y1="{base:g}" x2="{width - right}" '
+               f'y2="{base:g}" stroke="#444444" stroke-width="1"/>')
+    out.append("</svg>")
+    return "\n".join(out) + "\n"
+
+
 def _write_confidence_chart(run: PipelineRun, output_dir: str) -> None:
     """Bar chart of confidence tier distribution. Degrades loudly, never
-    fatally -- matplotlib is a project dependency (requirements.txt), but
-    any failure here (missing import, backend error, rendering error)
-    must not crash a completed pipeline run over a chart (#81). Every
-    degrade path warns naming the helper and the cause: a chart failing
-    on every run is exactly the signal worth shouting, not hiding."""
-    try:
-        import matplotlib
-        matplotlib.use("Agg")  # headless, no display needed
-        import matplotlib.pyplot as plt
-    except Exception as e:
-        logger.warning(
-            "Confidence chart skipped (matplotlib unavailable): %s", e)
-        return
-
-    # #81. `fig` is bound INSIDE the try, so a failure before the binding
-    # used to leave `finally: plt.close(fig)` raising UnboundLocalError --
-    # the containment guard inverting into exactly the crash it existed to
-    # prevent. Binding None first makes "nothing to clean up" a state
-    # instead of an exception.
-    fig = None
+    fatally: a failure here must not crash a completed pipeline run over a
+    chart (#81), and every degrade path warns naming the helper and the
+    cause, because a chart failing on every run is exactly the signal
+    worth shouting, not hiding."""
     try:
         tiers, counts = _tier_counts(run)
-        fig, ax = plt.subplots()
-        ax.bar(tiers, counts)
-        ax.set_ylabel("Number of claims")
-        ax.set_title("Confidence tier distribution")
-        fig.tight_layout()
-        fig.savefig(os.path.join(output_dir, "confidence_chart.png"))
+        svg = confidence_svg(tiers, counts)
+        with open(os.path.join(output_dir, "confidence_chart.svg"), "w",
+                  encoding="utf-8") as f:
+            f.write(svg)
     except Exception as e:
         logger.warning("Confidence chart skipped (render failed): %s", e)
-    finally:
-        if fig is not None:
-            plt.close(fig)
 
 
 def _try_write_pdf(report_markdown: str, output_dir: str) -> None:

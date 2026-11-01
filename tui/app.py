@@ -7411,8 +7411,13 @@ _REVOKE_PAGES = {
 # person owns, never a shared demo. The steps are Hugging Face's own: a
 # duplicate is private by default, its dialog takes variables, and a free
 # account must pick ZeroGPU there because CPU Basic needs a paid plan.
-_OWN_COPY = ("install the harness (npm install -g @yahyahammad/venastine), or "
-             "duplicate this Space on Hugging Face (its menu → Duplicate this "
+# The install is the README's GitHub installers, the landing page's too
+# (batch 209): they need no npm and install `main` as it is.
+_OWN_COPY = ("install the harness (curl -fsSL https://raw.githubusercontent.com"
+             "/YahyaHammad/Venastine-Research-Harness/main/install.sh | bash, "
+             "or in Windows PowerShell irm https://raw.githubusercontent.com"
+             "/YahyaHammad/Venastine-Research-Harness/main/install.ps1 | iex), "
+             "or duplicate this Space on Hugging Face (its menu → Duplicate this "
              "Space; keep it private, pick ZeroGPU on a free account) with "
              "the variable VENASTINE_SINGLE_USER=1, where /connect takes keys")
 

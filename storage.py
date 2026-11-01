@@ -910,7 +910,21 @@ def pinned_through(thread_id: UUID, message_id: Optional[UUID]) -> list[dict]:
     rows = _ordered_rows(thread_id)
     span = rows[:_split_at(rows, message_id)]
     neutral = [_to_neutral(m) for m in span]
+    return [neutral[i] for i in _pinned_indices(rows, span, neutral)]
 
+
+def _pinned_indices(rows: list, span: list, neutral: list) -> list[int]:
+    """The positions in `span` that `pinned_through` returns, in archive
+    order: the pinned rows, the tool results that make them whole, and the
+    opener of a turn a mid-turn watermark cut into.
+
+    A PURE FUNCTION SINCE BATCH 216 (#231), split out of `pinned_through`
+    so `tests/test_fake_storage_mirror.py` can compare it against
+    `FakeStorage`'s copy the way it compares `_to_neutral` and `_split_at`
+    -- the fake transcribes this algorithm, and a transcription nothing
+    compares is a convention somebody has to remember. `rows` and `span`
+    need only `role` and `pinned`; `neutral` is `span` reconstructed.
+    """
     keep = [i for i, m in enumerate(span) if m["pinned"]]
     # `have`, the set() below and the role check are all BACKSTOPS, and the
     # measurement says so: each was deleted separately against the full
@@ -944,7 +958,7 @@ def pinned_through(thread_id: UUID, message_id: Optional[UUID]) -> list[dict]:
     # already being pinned.
     keep += _turn_opener_index(rows, span)
 
-    return [neutral[i] for i in sorted(set(keep))]
+    return sorted(set(keep))
 
 
 def history_through(

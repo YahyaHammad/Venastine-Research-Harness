@@ -22,6 +22,7 @@ import webbrowser
 from dataclasses import dataclass
 
 from rich import box
+from rich.cells import cell_len
 from rich.console import Console
 from rich.measure import measure_renderables
 from rich.style import Style
@@ -1053,14 +1054,25 @@ class AgentPanel(Static):
         here are `no_wrap`, so an overlong one would be cropped invisibly
         instead. `pipeline-reviewer` is seventeen characters and reaches
         this at every depth below the root.
+
+        Cells, which the docstring always said and `len` did not measure
+        (#224, batch 214): ten double-width characters passed an 18-cell
+        box whole and drew 20 cells. A glyph that would straddle the
+        ellipsis is dropped rather than split.
         """
         if width <= 0:
             return ""
-        if len(text) <= width:
+        if cell_len(text) <= width:
             return text
         if width == 1:
             return "\u2026"
-        return text[:width - 1] + "\u2026"
+        kept, cells = [], 0
+        for char in text:
+            cells += cell_len(char)
+            if cells > width - 1:
+                break
+            kept.append(char)
+        return "".join(kept) + "\u2026"
 
     #: Shared with ThreadCrumb -- see armed_style.
     _armed = staticmethod(armed_style)
@@ -2722,7 +2734,10 @@ class Transcript(RichLog):
         if not total:
             self.write(Text(text, style))
             return
-        self.write(Text(text.ljust(total), style), width=total)
+        # Padded in cells (#224, batch 214): `ljust` counts characters,
+        # so a row of double-width text overshot `total` and wrapped.
+        self.write(Text(text + " " * max(0, total - cell_len(text)), style),
+                   width=total)
 
     def _render_blocks(self, text: str, *, line_start: bool = True) -> None:
         """The assistant body: fenced code highlighted, everything else

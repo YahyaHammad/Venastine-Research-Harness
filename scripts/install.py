@@ -5,6 +5,8 @@ Download this file completely before executing it. Dependencies are installed
 into a fresh venv at its permanent path (venvs cannot safely be relocated).
 Only after pip succeeds does the source replace the active app. Old app and
 runtime directories remain available for recovery; no user directory is purged.
+Then the command's directory goes on PATH for new terminals, unless the user
+opts out: the user PATH on Windows, the user's own shell's startup file elsewhere.
 """
 
 import argparse
@@ -27,6 +29,11 @@ REPOSITORY = "YahyaHammad/Venastine-Research-Harness"
 OWNER = "Venastine GitHub installer v1"
 MARKER = ".venastine-install.json"
 RUNTIME = ".venastine-runtime.json"
+NO_MODIFY_PATH = "VENASTINE_NO_MODIFY_PATH"
+BLOCK_START = "# >>> venastine GitHub installer >>>"
+BLOCK_END = "# <<< venastine GitHub installer <<<"
+# HKCU\Environment, where Windows keeps the user's own PATH.
+ENVIRONMENT_KEY = "Environment"
 
 
 def request(url):
@@ -114,7 +121,154 @@ def launcher_text(python, app, windows=None):
     return f"#!/bin/sh\n# {OWNER}\nexec {shlex.quote(str(python))} {shlex.quote(str(script))} \"$@\"\n"
 
 
-def install(ref, root, bin_dir):
+# Batch 206: npm's global bin is on PATH already, so `venastine` runs from
+# anywhere; ~/.local/bin is not on Windows or macOS, and on Linux often only
+# from the next login. A running shell keeps its own copy of PATH, so this
+# reaches terminals opened afterwards (install.ps1 also updates its window).
+def same_dir(entry, directory):
+    if not entry.strip():
+        return False
+    def spelled(path):
+        return os.path.normcase(os.path.realpath(os.path.expanduser(path)))
+    return spelled(entry) == spelled(str(directory))
+
+
+def on_path(directory, path):
+    return any(same_dir(entry, directory) for entry in path.split(os.pathsep))
+
+
+def shell_files(shell, home, platform, environ):
+    """The startup files of the user's own shell, named by $SHELL."""
+    name = Path(shell or "").name
+    if name == "zsh":
+        return [Path(environ.get("ZDOTDIR") or home) / ".zshrc"]
+    if name == "fish":
+        config = Path(environ.get("XDG_CONFIG_HOME") or home / ".config")
+        return [config / "fish" / "conf.d" / "venastine.fish"]
+    if name == "bash":
+        files = [home / ".bashrc"]
+        if platform == "darwin":
+            # A macOS terminal starts a LOGIN shell, which reads the first of
+            # these that exists and never .bashrc. Creating .bash_profile
+            # would hide a user's .profile, so a missing one never is.
+            files.append(next((home / name for name in (".bash_profile", ".bash_login")
+                               if (home / name).exists()), home / ".profile"))
+        return files
+    return [home / ".profile"]
+
+
+def path_block(directory, fish=False):
+    text = str(directory)
+    if "\n" in text or "\r" in text:
+        raise ValueError("The command directory must not contain a newline")
+    if fish:
+        quoted = "'" + text.replace("\\", "\\\\").replace("'", "\\'") + "'"
+        body = (f"if not contains -- {quoted} $PATH\n"
+                f"    set -gx PATH {quoted} $PATH\n"
+                "end\n")
+    else:
+        quoted = shlex.quote(text)
+        body = ('case ":${PATH}:" in\n'
+                f"    *:{quoted}:*) ;;\n"
+                f'    *) export PATH={quoted}"${{PATH:+:$PATH}}" ;;\n'
+                "esac\n")
+    return f"{BLOCK_START}\n{body}{BLOCK_END}\n"
+
+
+def add_to_shell_path(directory, files):
+    """Write the block into each file, replacing an earlier one in place, so
+    a second install adds nothing and a moved --bin-dir leaves no stale
+    entry. Returns the files it changed."""
+    changed = []
+    for file in files:
+        block = path_block(directory, fish=file.suffix == ".fish")
+        text = ""
+        if file.exists():
+            with file.open(encoding="utf-8", newline="") as handle:
+                text = handle.read()
+        start, end = text.find(BLOCK_START), text.find(BLOCK_END)
+        if start != -1 and end > start:
+            rest = text[end + len(BLOCK_END):]
+            updated = text[:start] + block + (rest[1:] if rest.startswith("\n") else rest)
+        else:
+            lead = "" if not text else ("\n" if text.endswith("\n") else "\n\n")
+            updated = text + lead + block
+        if updated != text:
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file.write_text(updated, encoding="utf-8", newline="")
+            changed.append(file)
+    return changed
+
+
+def announce_environment_change():
+    """Tell running programs the user environment changed, as setx and the
+    Settings app do, so a terminal Explorer starts next sees the new PATH."""
+    import ctypes
+    from ctypes import wintypes
+    send = ctypes.windll.user32.SendMessageTimeoutW
+    send.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPCWSTR,
+                     wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_size_t)]
+    send.restype = wintypes.LPARAM
+    # HWND_BROADCAST, WM_SETTINGCHANGE, SMTO_ABORTIFHUNG, at most 5 s a window.
+    send(0xFFFF, 0x001A, 0, "Environment", 0x0002, 5000, ctypes.byref(ctypes.c_size_t()))
+
+
+def add_to_windows_path(directory, registry=None, announce=None):
+    """Append to the user PATH, keeping the value's type, so an unexpanded
+    %VARIABLE% entry stays one. False when an entry already names it."""
+    if registry is None:
+        import winreg as registry
+    with registry.CreateKeyEx(registry.HKEY_CURRENT_USER, ENVIRONMENT_KEY, 0,
+                              registry.KEY_QUERY_VALUE | registry.KEY_SET_VALUE) as key:
+        try:
+            value, kind = registry.QueryValueEx(key, "Path")
+        except FileNotFoundError:
+            value, kind = "", registry.REG_EXPAND_SZ
+        if kind not in (registry.REG_SZ, registry.REG_EXPAND_SZ):
+            raise ValueError("The user PATH is not a text value")
+        if any(same_dir(os.path.expandvars(entry), directory) for entry in value.split(";")):
+            return False
+        value = value.rstrip(";")
+        registry.SetValueEx(key, "Path", 0, kind, f"{value};{directory}" if value else str(directory))
+    (announce or announce_environment_change)()
+    return True
+
+
+def put_on_path(bin_dir, command, modify):
+    """Put bin_dir on PATH for new terminals unless told not to. Returns
+    whether `venastine` by name will run this command, and what to say."""
+    windows = os.name == "nt"
+    path = os.environ.get("PATH", "")
+    notes = []
+    if not on_path(bin_dir, path):
+        if not modify:
+            return False, [f"Add {bin_dir} to your user PATH to run 'venastine' by name."]
+        try:
+            if windows:
+                changed = add_to_windows_path(bin_dir)
+                where = "your user PATH"
+            else:
+                files = shell_files(os.environ.get("SHELL", ""), Path.home(), sys.platform, os.environ)
+                changed = add_to_shell_path(bin_dir, files)
+                where = "PATH in " + ", ".join(map(str, files))
+        except (OSError, ValueError, UnicodeError) as error:
+            return False, [f"Could not add {bin_dir} to PATH ({error}); add it yourself "
+                           "to run 'venastine' by name."]
+        notes.append(f"{'Added' if changed else 'Already added'} {bin_dir} to {where}; "
+                     "terminals opened from now on find 'venastine'.")
+        if not windows:
+            notes.append(f"To use it in this terminal: export PATH={shlex.quote(str(bin_dir))}:\"$PATH\"")
+        # Windows reads the user PATH after the system's; a shell block prepends.
+        path = f"{path}{os.pathsep}{bin_dir}" if windows else f"{bin_dir}{os.pathsep}{path}"
+    found = shutil.which("venastine", path=path)
+    if found and not same_dir(found, command):
+        notes.append(f"Another 'venastine' comes first on PATH: {found}. Remove it, or run "
+                     f"{command} by its full path.")
+        return False, notes
+    return True, notes
+
+
+def install(ref, root, bin_dir, modify_path=False):
     root, bin_dir = root.expanduser().resolve(), bin_dir.expanduser().resolve()
     app = root / "app"
     command = bin_dir / ("venastine.cmd" if os.name == "nt" else "venastine")
@@ -187,9 +341,12 @@ def install(ref, root, bin_dir):
                     command.unlink()
                 raise
             sync_config(python, app, *(["--first-run"] if first_run else []))
-        print(f"Installed {version} ({commit[:12]}). Run from your project directory:\n  {command} --tui")
-        if str(bin_dir) not in os.environ.get("PATH", "").split(os.pathsep):
-            print(f"Add {bin_dir} to your user PATH to run 'venastine' by name.")
+        print(f"Installed {version} ({commit[:12]}).")
+        # After the swap, and never fatal: the install is complete either way.
+        by_name, notes = put_on_path(bin_dir, command, modify_path)
+        for note in notes:
+            print(note)
+        print(f"Run from your project directory:\n  {'venastine' if by_name else command} --tui")
         return commit
     finally:
         lock.unlink()
@@ -200,11 +357,14 @@ def main(argv=None):
     parser.add_argument("--ref", default=os.environ.get("VENASTINE_REF", "main"), help="GitHub branch, tag, or full commit ID (default: main)")
     parser.add_argument("--install-dir", type=Path, default=Path(os.environ.get("VENASTINE_INSTALL_DIR", Path.home() / ".local/share/venastine")))
     parser.add_argument("--bin-dir", type=Path, default=Path(os.environ.get("VENASTINE_BIN_DIR", Path.home() / ".local/bin")))
+    parser.add_argument("--no-modify-path", action="store_true",
+                        default=os.environ.get(NO_MODIFY_PATH, "") not in ("", "0"),
+                        help=f"leave PATH and shell startup files alone (or set {NO_MODIFY_PATH}=1)")
     args = parser.parse_args(argv)
     if sys.version_info < (3, 11):  # noqa: UP036 - standalone bootstrap must diagnose an older host
         parser.error("Python 3.11+ is required")
     try:
-        install(args.ref, args.install_dir, args.bin_dir)
+        install(args.ref, args.install_dir, args.bin_dir, modify_path=not args.no_modify_path)
     except (OSError, ValueError, KeyError, zipfile.BadZipFile, subprocess.CalledProcessError) as error:
         print(f"Installation failed: {error}", file=sys.stderr)
         return 1

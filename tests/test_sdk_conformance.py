@@ -52,6 +52,10 @@ import pytest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+#: The real modules each block's first import produced, keyed by its roots.
+_REAL_MODULES = {}
+
+
 @contextlib.contextmanager
 def real_package(*roots):
     """Import the REAL package for the duration of the block.
@@ -60,17 +64,53 @@ def real_package(*roots):
     the fakes on the way out, including anything the real import pulled in,
     so the rest of the session is unaffected -- this file must not be the
     reason another test sees a package it did not ask for.
+
+    IMPORTED ONCE PER ROOT SET, and reinstalled after that (batch 207). The
+    block used to import from scratch every time: 30 imports a run, and
+    `import anthropic` alone measured 6.3 s here, which made this file the
+    suite's largest scheduling group at 74 s. The modules kept are exactly
+    the set one import left in `sys.modules`, so a block still sees one
+    consistent package -- its own `httpx` included, which is why the key is
+    the whole root set and not each root. Between blocks the fakes are back,
+    as before.
     """
+    key = tuple(sorted(roots))
     saved = {name: mod for name, mod in list(sys.modules.items())
              if name.split(".")[0] in roots}
     for name in saved:
         del sys.modules[name]
+    sys.modules.update(_REAL_MODULES.get(key, {}))
     try:
         yield
     finally:
-        for name in [n for n in list(sys.modules) if n.split(".")[0] in roots]:
-            del sys.modules[name]
+        real = {name: sys.modules.pop(name) for name in list(sys.modules)
+                if name.split(".")[0] in roots}
+        _REAL_MODULES[key] = real
         sys.modules.update(saved)
+
+
+def test_a_block_restores_the_fakes_and_reuses_its_real_import():
+    """`real_package`'s two promises, pinned from both sides (batch 207).
+
+    The fakes come back after every block, or another test in this worker
+    would run against a package it did not ask for; and a second block
+    gets the SAME real modules, or the cache is not one and every block
+    pays the import again. `httpx` because it is the cheapest real import
+    and every root set here carries it."""
+    def httpx_names():
+        return {name for name in sys.modules if name.split(".")[0] == "httpx"}
+
+    fake, before = sys.modules["httpx"], httpx_names()
+    with real_package("httpx"):
+        import httpx as first
+        assert first is not fake
+    assert sys.modules["httpx"] is fake
+    assert httpx_names() == before, "a real submodule outlived the block"
+    with real_package("httpx"):
+        import httpx as second
+        assert second is first
+    assert sys.modules["httpx"] is fake
+    assert httpx_names() == before
 
 
 def _genai_kwargs():

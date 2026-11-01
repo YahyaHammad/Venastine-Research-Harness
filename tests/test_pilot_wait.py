@@ -316,6 +316,47 @@ def test_the_approval_timeout_is_shrunk_for_tests():
         "declined -- keep the shrink above settle's deadline")
 
 
+def test_the_modal_park_reads_the_timeout_when_it_parks(monkeypatch):
+    """#235, batch 216: the EFFECT the test above takes on trust.
+
+    That test asserts the fixture ran. Whether `_blocking_modal` still
+    reads the attribute at call time is what the fixture's contract rests
+    on, and it is exactly what a `timeout=config.ATTENDED_APPROVAL_TIMEOUT_S`
+    DEFAULT argument would break -- bound at import, before any fixture,
+    as ROADMAP_v2 N2 records happening once in the CLI's reader. So the
+    real park runs here, on a bare app whose modal is never answered, with
+    the attribute shrunk to a fraction of a second. In a thread with a
+    bounded join, so the regression is a failure and not a ten-minute
+    stall.
+    """
+    import threading
+
+    import config
+    from tui import meters
+    from tui.app import VenastineApp
+
+    app = VenastineApp.__new__(VenastineApp)
+    app._permission_channel = None
+    app._meter = meters.TurnMeter()
+    app.call_from_thread = lambda *a, **k: None   # the modal never answers
+    monkeypatch.setattr(config, "ATTENDED_APPROVAL_TIMEOUT_S", 0.2)
+
+    answers = []
+    started = time.monotonic()
+    worker = threading.Thread(
+        target=lambda: answers.append(app._blocking_modal(
+            object(), on_timeout=lambda screen: None)),
+        daemon=True)
+    worker.start()
+    worker.join(timeout=10)
+
+    assert not worker.is_alive(), (
+        "the modal parked past the patched timeout: the reader no longer "
+        "reads config.ATTENDED_APPROVAL_TIMEOUT_S when it parks")
+    assert answers == [None]
+    assert time.monotonic() - started < 5
+
+
 # ---------------------------------------------------------------------------
 # ---- No sixth copy --------------------------------------------------------
 # ---------------------------------------------------------------------------

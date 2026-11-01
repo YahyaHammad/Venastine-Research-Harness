@@ -1616,6 +1616,41 @@ class TestOnlyTheURLIsClickable:
                        for strip in app._transcript.lines)
 
 
+class TestNoTestReachesARealBrowser:
+    """Batch 207. `tests/conftest.py`'s autouse `browser_opens` is the only
+    thing between a test that follows a link and a real browser tab, and
+    17 real OpenAI sign-in tabs a run is what its absence cost. Pinned here,
+    beside the opener it stands in front of.
+
+    Each check reads the stand-in's marker BEFORE anything is opened, so a
+    removed fixture fails these tests instead of opening a tab from them.
+    """
+
+    def test_every_module_level_opener_is_the_stand_in(self):
+        """Requests nothing, so it is the AUTOUSE that is checked: a test
+        that asked for the fixture by name would pass without it."""
+        import webbrowser
+
+        for name in ("open", "open_new", "open_new_tab"):
+            assert getattr(getattr(webbrowser, name),
+                           "stands_in_for_the_browser", False), name
+
+    @pytest.mark.asyncio
+    async def test_the_transcripts_opener_reaches_it(self, browser_opens):
+        """The real path, thread worker included: what a ctrl+click or a
+        sign-in does, down to the `webbrowser.open` call."""
+        import webbrowser
+
+        from tui.app import VenastineApp
+
+        assert getattr(webbrowser.open, "stands_in_for_the_browser", False)
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app._transcript.open_url("https://example.com/a")
+            assert await settle(pilot, lambda: browser_opens)
+        assert browser_opens == ["https://example.com/a"]
+
+
 class TestOpenURLRefusesWhatItShould:
     """The check is re-asked at the point of ACTION rather than trusted
     from render time: a style in a RichLog outlives the text that made it,

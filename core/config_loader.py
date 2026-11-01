@@ -1420,16 +1420,29 @@ def skill_catalog_text(active: Optional[list] = None) -> str:
     return "\n".join(lines)
 
 
-def _catalog_entries(root: str, files: list) -> list:
-    """(kind, name, description) for every agent/skill in the listing.
+def _catalog_entries(root: str, files: list, shadows=None) -> list:
+    """(kind, name, description, reach) for every agent/skill in the
+    listing; `reach` is the lines saying where that description goes.
 
     ROADMAP_v2 §32 A6, #131. The trust prompt's stated criterion is
     written in describe_project_content below -- the files shown
     verbatim are "the ones whose contents change what runs". An
-    agent's and a skill's `description` meets it exactly: one `y` puts
-    both into the system prompt of every run in this project, with no
-    tool call and no further consent, and the reason they were left
-    out was that nobody had noticed they qualify.
+    agent's and a skill's `description` meets it exactly: one `y` lets
+    it into system prompts in this project, with no tool call and no
+    further consent, and the reason they were left out was that nobody
+    had noticed they qualify.
+
+    WHERE EACH ONE GOES, SINCE BATCH 215 (#259, #260, register items
+    112 and 113, the owner's wording). The section used
+    to say every description entered EVERY system prompt. A skill's is
+    listed wherever load_skill is offered; an agent's only if it is
+    spawnable, and the project tier's are not unless they say so (§32
+    A3/A4); and a definition whose name a harness or user one already
+    has never loads at all, D29's precedence being first-wins. Each is
+    still LISTED -- the grant covers its bytes, and renaming the other
+    makes it live with no new prompt -- but no longer described as
+    reaching further than it does. `shadows` is `{kind: {name: tier}}`
+    for the tiers above the project.
 
     PARSED THROUGH _parse_md_file, so what is shown is the NORMALISED
     text -- the same value A5 will put in the prompt, not the raw
@@ -1444,6 +1457,7 @@ def _catalog_entries(root: str, files: list) -> list:
     'this file is here and I cannot tell you what it says' is a fact
     the person answering the prompt needs.
     """
+    shadows = shadows or {}
     out = []
     for rel in files:
         # §44: the listing is PROJECT-relative now, so the .venastine/
@@ -1463,9 +1477,45 @@ def _catalog_entries(root: str, files: list) -> list:
                               "project")
         if defn is None:
             out.append((kind, "/".join(parts),
-                        "(could not be read -- see the log)"))
-        else:
-            out.append((kind, defn.name, defn.description))
+                        "(could not be read -- see the log)", []))
+            continue
+        out.append((kind, defn.name, defn.description,
+                    _reach(kind, defn, shadows.get(kind, {}))))
+    return out
+
+
+def _reach(kind: str, defn, shadowed_by: dict) -> list:
+    """Where a project definition's description goes, as the lines the
+    trust prompt prints under it (#259, #260)."""
+    tier = shadowed_by.get(defn.name)
+    if tier is not None:
+        owner = ("the harness's own" if tier == "harness"
+                 else "your own (user configuration)")
+        return [f'shadowed by {owner} "{defn.name}", which is what loads;',
+                "this file is used only if that one goes away"]
+    if kind == "skills":
+        return ["listed wherever load_skill is offered"]
+    if defn.spawnable:
+        return ["spawnable: listed wherever spawn_subagent is offered"]
+    return ["not spawnable: in no system prompt; /agent can still pick it"]
+
+
+def _shadowing_names(project_path: str) -> dict:
+    """`{kind: {name: tier}}` for the tiers that win over the project's,
+    harness first, in `_discover`'s own order and with its own parser, so
+    the trust prompt and the loader cannot disagree about which loads."""
+    out: dict = {}
+    for kind in ("agents", "skills"):
+        names: dict = {}
+        for tier, directory in _tier_dirs(kind, project_path, False):
+            if not os.path.isdir(directory):
+                continue
+            for path, category in _md_files(directory,
+                                            recursive=(kind == "skills")):
+                defn = _parse_md_file(path, kind, tier, category)
+                if defn is not None:
+                    names.setdefault(defn.name, tier)
+        out[kind] = names
     return out
 
 
@@ -1542,7 +1592,8 @@ def describe_project_content(project_path: str) -> str:
     """Human-readable summary shown in the trust prompt, so approving
     trust is an informed decision -- a project's settings can choose the
     provider and multiply pipeline cost via ensemble_n, and an agent's
-    or a skill's description reaches every system prompt (#131).
+    or a skill's description can reach the system prompt (#131) --
+    where, each entry says (#259, #260).
 
     EVERY SECTION IS BOUNDED, through `_bounded` above (A54, batch 155).
     Two of the four used to be pasted whole and the hub was bounded on
@@ -1616,17 +1667,19 @@ def describe_project_content(project_path: str) -> str:
     # file list, because the list answers "what is here" and this
     # answers "what would it say to the model" -- the same order the
     # two questions are asked in.
-    entries = _catalog_entries(root, files)
+    entries = _catalog_entries(root, files,
+                               _shadowing_names(project_path))
     if entries:
-        lines.append("these descriptions enter EVERY system prompt in "
-                     "this project:")
+        lines.append("what each project agent and skill would tell the "
+                     "model:")
         # A5 bounds each description at `max_catalog_text_chars` and
         # nothing bounded the NUMBER of them: 3,000 project agents were
         # 1 MB of prompt in 6,002 lines, every entry individually legal.
-        lines += _bounded(
-            [f"{kind[:-1]} {name}: {description}"
-             for kind, name, description in entries],
-            "  | ", "the agent and skill descriptions")
+        rows = []
+        for kind, name, description, reach in entries:
+            rows.append(f"{kind[:-1]} {name}: {description}")
+            rows += [f"    {line}" for line in reach]
+        lines += _bounded(rows, "  | ", "the agent and skill descriptions")
     return "\n".join(lines)
 
 

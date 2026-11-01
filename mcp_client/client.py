@@ -338,8 +338,6 @@ class MCPClient:
                 headers=dict(cfg.headers) or None,
             )
         if cfg.transport == "http":
-            if not cfg.headers:
-                return cfg.url
             # `headers` was parsed into ServerConfig and then never used:
             # a bare URL carries none of them, so a server configured with
             # an Authorization header connected UNAUTHENTICATED, with
@@ -347,10 +345,23 @@ class MCPClient:
             # live on the httpx2 client, and the SDK ships the helper that
             # applies its own MCP defaults alongside them -- so this uses
             # that rather than hand-building a client and losing the
-            # SSE-friendly timeouts.
+            # SSE-friendly timeouts. Without headers the SDK builds its own
+            # client, exactly as Client() does for a bare URL.
+            #
+            # NEVER a bare URL now, even without headers (batch 208): mcp
+            # 2.3.0 fails a call whose one server-sent event exceeds
+            # `max_sse_event_size`, and a bare URL takes the SDK's 1 MiB,
+            # which a streamed screenshot passes. config.yaml's
+            # `mcp_max_event_bytes` is the ceiling, read per connection. It
+            # bounds STREAMED answers only: one sent as plain JSON is read
+            # whole (CONFIG_ARCHITECTURE.md has the measurement). The legacy
+            # "sse" branch above keeps the SDK's fixed 1 MiB: `sse_client`
+            # takes no size.
             return streamable_http_client(
                 cfg.url,
-                http_client=create_mcp_http_client(headers=dict(cfg.headers)),
+                http_client=(create_mcp_http_client(headers=dict(cfg.headers))
+                             if cfg.headers else None),
+                max_sse_event_size=_harness_config.MCP_MAX_EVENT_BYTES,
             )
         raise ValueError(cfg.error or "unusable server configuration")
 
@@ -434,6 +445,17 @@ class MCPClient:
         ordinary startup code; the bridge does the rest."""
         if not self.server_configs:
             return
+        if self._task is not None:
+            # #219, batch 213, the owner's choice of raising over tearing
+            # down first. Every attribute below is rebound, so a second call
+            # used to abandon the first generation's manager parked on a
+            # `_shutdown` nothing could set any more -- its child processes
+            # with it, and no straggler warning. Nothing reconnects today
+            # (one call site, main.py); F7's runtime /mcp would, and it has
+            # to disconnect on purpose.
+            raise RuntimeError(
+                "connect_all() on an MCP client that is already connected; "
+                "call disconnect_all() first")
         loop = _ensure_loop()
 
         async def _start():
@@ -612,5 +634,8 @@ class MCPClient:
 
         self.clients.clear()
         self._catalogs.clear()
+        # #219. Keyed by server name, so a clean close kept from this
+        # generation would answer for the next one's straggler check.
+        self._closed.clear()
         self._task = None
         _shutdown_loop(join_timeout=max(0.5, remaining()))

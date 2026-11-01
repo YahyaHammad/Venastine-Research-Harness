@@ -193,19 +193,18 @@ def _normalize(raw: list[dict]) -> list[SearchResult]:
         # `resolve=False` on purpose. This filters results; it does not
         # fetch them, and a DNS lookup per hit is real latency for a check
         # whose only failure mode is showing the model a URL that fetch_url
-        # will refuse anyway. A DOTTED-DECIMAL OR BRACKETED IPv6 LITERAL is
-        # still checked -- a result pointing straight at 169.254.169.254 is
-        # dropped here rather than offered and then denied (#54).
+        # will refuse anyway. An IP LITERAL is still checked, in every
+        # spelling the platform's resolver reads as a number -- a result
+        # pointing straight at 169.254.169.254 is dropped here rather than
+        # offered and then denied (#54).
         #
-        # NARROWED IN BATCH 156, because the claim was wider than the code.
-        # It read "an IP LITERAL is still checked", and measured,
-        # `http://2130706433/` (decimal for 127.0.0.1), `http://0x7f.0.0.1/`
-        # and `http://0x7F000001/` are all ALLOWED here --
-        # `ipaddress.ip_address` parses none of them, so the "name is taken
-        # on trust" branch takes them. No SSRF follows (the only socket
-        # opener in this scope resolves, and refuses all three), so what is
-        # left is one wasted tool call and a confusing refusal. Register
-        # item 53 keeps the BEHAVIOUR half open; this is the comment half.
+        # "EVERY SPELLING" SINCE BATCH 213 (#207, register item 53). Batch
+        # 156 narrowed this comment to dotted and bracketed literals,
+        # because `http://2130706433/`, `http://0x7f.0.0.1/` and
+        # `http://0x7F000001/` -- all 127.0.0.1 -- passed: `ipaddress`
+        # parses none of them. is_url_permitted now asks the resolver with
+        # AI_NUMERICHOST, which reads numbers and looks nothing up, so they
+        # are dropped here as fetch_url would refuse them.
         #
         # ABOVE THE POLICY CHECK AND BELOW THE BOUND, deliberately: the
         # string checked here is the string the model is offered, so a

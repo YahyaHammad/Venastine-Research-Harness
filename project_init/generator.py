@@ -346,8 +346,19 @@ def generate(
     # than an addition to a run that always costs a model call.
     if scaffold_docs:
         if kind is None:
-            blank = manifest_mod.is_blank(root)
-            proposal, reason = (None, "") if blank else propose_kind(root)
+            # Both walk the project (#255, batch 213). An OSError here --
+            # a directory nobody may list, a path that stopped being one --
+            # left as itself, and the CLI catches InitError only, so it was
+            # a traceback there and an error line in the TUI.
+            try:
+                blank = manifest_mod.is_blank(root)
+                proposal, reason = ((None, "") if blank
+                                    else propose_kind(root))
+            except OSError as e:
+                raise InitError(
+                    f"Could not read the project directory to work out its "
+                    f"type ({e}). Re-run with --software or --research, or "
+                    f"fix the directory's permissions.") from e
             if choose_kind is None:
                 # No way to ask. Refusing beats scaffolding seven files of
                 # the wrong kind into someone's project -- V6's rule, and
